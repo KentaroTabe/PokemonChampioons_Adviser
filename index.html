@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>Capture & Send</title>
+    <!-- Socket.IO クライアントライブラリ -->
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+</head>
+<body>
+    <button id="start-btn">カメラ映像取得開始</button>
+    <br><br>
+    <video id="video" autoplay playsinline style="border: 2px solid blue; max-width: 100%;"></video>
+    
+    <!-- 画像を切り出すための隠しCanvas -->
+    <canvas id="canvas" style="display: none;"></canvas>
+
+    <script>
+        // 1. バックエンド(FastAPI)のSocket.IOサーバーに接続
+        const socket = io('http://localhost:8000');
+
+        socket.on('connect', () => {
+            console.log('バックエンドに接続しました！');
+        });
+
+        // バックエンドからの解析結果を受け取る
+        socket.on('result', (data) => {
+            console.log('バックエンドからの解析結果:', data);
+        });
+
+        document.getElementById('start-btn').addEventListener('click', async () => {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+                    audio: false
+                });
+                const videoElement = document.getElementById('video');
+                videoElement.srcObject = stream;
+
+                const canvas = document.getElementById('canvas');
+                const ctx = canvas.getContext('2d');
+
+                videoElement.onloadedmetadata = () => {
+                    // Canvasのサイズを映像の実解像度に合わせる
+                    canvas.width = videoElement.videoWidth;
+                    canvas.height = videoElement.videoHeight;
+                    
+                    // 2. 定期的にフレームを切り出して送信 (例: 1秒 = 1000ms間隔)
+                    setInterval(() => {
+                        if(videoElement.readyState === videoElement.HAVE_ENOUGH_DATA) {
+                            // Videoの現在のフレームをCanvasに描画
+                            ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
+                            
+                            // Canvasの画像をJPEG形式のBase64に変換 (画質0.8でデータ量削減)
+                            const base64Data = canvas.toDataURL('image/jpeg', 0.8);
+                            
+                            // Socket.IOでバックエンドへ送信
+                            socket.emit('send_frame', base64Data);
+                        }
+                    }, 1000);
+                };
+            } catch (err) {
+                console.error("カメラ取得エラー: ", err);
+            }
+        });
+    </script>
+</body>
+</html>
