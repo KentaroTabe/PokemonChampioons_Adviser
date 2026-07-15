@@ -5,7 +5,8 @@ import re
 import os
 import argparse
 import warnings
-import difflib
+import time
+import json
 from pathlib import Path
 
 # Mac(MPS)環境での不要な警告文をミュート
@@ -21,209 +22,272 @@ print("EasyOCR model loaded.")
 
 NAME_ALLOWLIST = 'ァアィイゥウェエォオカガキギクグケゲコゴサザシジスズセゼソゾタダチヂッツヅテデトドナニヌネノハバパヒビピフブプヘベペホボポマミムメモャヤュユョヨラリルレロヮワヰヱヲンヴー2Z' + 'oO0Qq♂♀'
 
-# 濁点・半濁点を「清音」に強制変換するマッピング
 SEION_MAPPING = str.maketrans(
     'ガギグゲゴザジズゼゾダヂヅデドバビブベボパピプペポヴ',
     'カキクケコサシスセソタチツテトハヒフヘホハヒフヘホウ'
 )
 
-# ロトム、フラエッテなどを追加
-# POKEMON_ROSTER = [
-#     "ペリッパー", "ハラバリー", "ヤバソチャ", "ブリジュラス", 
-#     "ユキメノコ", "ラグラージ", "ハバタクカミ", "オーガポン",
-#     "ロトム", "フラエッテ"
-# ]
-
+# クロプゾーン定義
 CROP_ZONES = {
     "my_hp": {"y_start": 665, "y_end": 715, "x_start": 130, "x_end": 280},
     "my_name": {"y_start": 608, "y_end": 648, "x_start": 100, "x_end": 300},
     "opponent_hp": {"y_start": 70, "y_end": 120, "x_start": 1120, "x_end": 1250},
-    "opponent_name": {"y_start": 25, "y_end": 65, "x_start": 1040, "x_end": 1220}
+    "opponent_name": {"y_start": 25, "y_end": 65, "x_start": 1040, "x_end": 1220},
+    # メッセージウィンドウの検知用領域 (画面下部の黒帯部分を想定)
+    "message_window": {"y_start": 550, "y_end": 650, "x_start": 300, "x_end": 980} 
 }
+
+# 辞書: キーワードによるイベント定義
+EVENT_DICTIONARY = {
+    "weather_events": {
+        "sandstorm_start": {
+            "keywords": ["砂あらし", "吹き始め"],
+            "action": "set_weather",
+            "value": "sandstorm",
+            "duration": 5
+        },
+        "rain_start": {
+            "keywords": ["雨", "降り出し"],
+            "action": "set_weather",
+            "value": "rain",
+            "duration": 5
+        }
+    },
+    "status_events": {
+        "substitute_on": {
+            "keywords": ["身代わり", "現れ"],
+            "action": "set_status",
+            "status_key": "substitute",
+            "value": True
+        }
+    },
+    "action_events": {
+         "attack": {
+             "keywords": ["襲う"],
+             "action": "log_attack"
+         }
+    }
+}
+
+# ==============================================================================
+# バトル状態管理クラス
+# ==============================================================================
+class BattleState:
+    def __init__(self):
+        self.field = {
+            "weather": "none",
+            "weather_turns_left": 0
+        }
+        self.player = {
+            "active_pokemon": None,
+            "hp_percent": None,
+            "hp_raw": None,
+            "substitute": False
+        }
+        self.opponent = {
+            "active_pokemon": None,
+            "hp_percent": None,
+            "substitute": False
+        }
+        self.last_message = "" # 重複排除用
+    
+    def update_basic_info(self, info):
+        if "my_pokemon" in info:
+            self.player["active_pokemon"] = info["my_pokemon"]
+        if "my_hp_percent" in info:
+            self.player["hp_percent"] = info["my_hp_percent"]
+        if "my_hp_raw" in info:
+            self.player["hp_raw"] = info["my_hp_raw"]
+            
+        if "opponent_pokemon" in info:
+            self.opponent["active_pokemon"] = info["opponent_pokemon"]
+        if "opponent_hp_percent" in info:
+            self.opponent["hp_percent"] = info["opponent_hp_percent"]
+
+    def apply_event(self, event_def, raw_text):
+        action = event_def.get("action")
+        
+        # ターゲットの推定 (テキストに「相手の」が含まれていればopponent、なければplayerと仮定)
+        target = "opponent" if "相手" in raw_text else "player"
+
+        if action == "set_weather":
+            self.field["weather"] = event_def["value"]
+            self.field["weather_turns_left"] = event_def["duration"]
+            print(f"[State Update] 天候が {event_def['value']} になりました。")
+            
+        elif action == "set_status":
+            status_key = event_def["status_key"]
+            value = event_def["value"]
+            if target == "opponent":
+                self.opponent[status_key] = value
+                print(f"[State Update] 相手の {status_key} が {value} になりました。")
+            else:
+                self.player[status_key] = value
+                print(f"[State Update] 自分の {status_key} が {value} になりました。")
+                
+        elif action == "log_attack":
+            print(f"[State Update] 攻撃アクションを検知: {raw_text}")
+
+    def print_state(self):
+        print("--- Current Battle State ---")
+        print(f"Field: {self.field}")
+        print(f"Player: {self.player}")
+        print(f"Opponent: {self.opponent}")
+        print("----------------------------")
+        
+    def to_dict(self):
+         return {
+             "field": self.field,
+             "player": self.player,
+             "opponent": self.opponent
+         }
+
+# グローバルなバトル状態
+battle_state = BattleState()
 
 # ==============================================================================
 # 画像処理・抽出関数
 # ==============================================================================
 
-def preprocess_my_hp_for_ocr(image, name, save_debug=False):
-    if image.size == 0: return None
-    resized = cv2.resize(image, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
-    lower_white = np.array([180, 180, 180], dtype=np.uint8)
-    upper_white = np.array([255, 255, 255], dtype=np.uint8)
-    mask = cv2.inRange(resized, lower_white, upper_white)
-    inverted = cv2.bitwise_not(mask)
-    padded = cv2.copyMakeBorder(inverted, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=255)
-    return padded
-
-def preprocess_opp_hp_for_ocr(image, name, save_debug=False):
-    """
-    【相手HPのみ修正】
-    1. inRangeで文字だけを抽出
-    2. Dilationでかすれを防止
-    3. Auto-cropで右寄せによる巨大な余白を消去し、文字を中央に配置
-    """
-    if image.size == 0: return None
-    resized = cv2.resize(image, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
-    
-    # UIの黒帯やカラーのHPバーを無視して白テキストのみを抽出
-    lower_white = np.array([140, 140, 140], dtype=np.uint8)
-    upper_white = np.array([255, 255, 255], dtype=np.uint8)
-    mask = cv2.inRange(resized, lower_white, upper_white)
-    
-    # 線の細り(かすれ)を防ぐため1pxだけ太らせる
-    kernel = np.ones((2, 2), np.uint8)
-    mask = cv2.dilate(mask, kernel, iterations=1)
-    
-    # テキストが存在するギリギリの範囲で自動クロップ(余白の排除)
-    coords = cv2.findNonZero(mask)
-    if coords is not None:
-        x, y, w, h = cv2.boundingRect(coords)
-        mask = mask[y:y+h, x:x+w]
-        
-    inverted = cv2.bitwise_not(mask)
-    padded = cv2.copyMakeBorder(inverted, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=255)
-    
-    if save_debug:
-        os.makedirs("debug_crops", exist_ok=True)
-        cv2.imwrite(f"debug_crops/{name}.jpg", padded)
-        
-    return padded
-
-def preprocess_name_for_ocr(image, name, save_debug=False):
-    if image.size == 0: return None
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
-    gray = cv2.resize(gray, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
-    inverted = cv2.bitwise_not(gray)
-    padded = cv2.copyMakeBorder(inverted, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=255)
-    return padded
-
-def fuzzy_match_pokemon(ocr_text):
-    text = re.sub(r'[^ァ-ンヴー2Z]', '', ocr_text)
-    text = re.sub(r'[ハヘ]$', '', text)
-    
-    # if not text:
-    #     return ""
-        
-    # matches = difflib.get_close_matches(text, POKEMON_ROSTER, n=1, cutoff=0.6)
-    # if matches:
-    #     return matches[0] 
-    return text
-
 def clean_pokemon_name(ocr_text):
-    # 1. カタカナ、伸ばし棒、2、Z 以外の文字をすべて削除
     text = re.sub(r'[^ァ-ンヴー2Z]', '', ocr_text)
-    
-    # 2. 末尾のハ・ヘ(♂♀マークの誤認)を削除
     text = re.sub(r'[ハヘ]$', '', text)
-    
-    # 3. 濁点・半濁点をすべて清音に変換
     text = text.translate(SEION_MAPPING)
-    
     return text
 
-def extract_battle_info(img_path_or_array, save_debug=False):
-    if isinstance(img_path_or_array, (str, Path)):
-        img = cv2.imread(str(img_path_or_array))
+def preprocess_for_ocr(image, invert=True):
+    if image is None or image.size == 0: return None
+    resized = cv2.resize(image, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
+    
+    if len(resized.shape) == 3:
+        gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
     else:
-        img = img_path_or_array
+        gray = resized
+        
+    # 文字を白、背景を黒にするかどうかの反転処理
+    if invert:
+        # 明るい文字を抽出する想定
+        _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
+    else:
+         _, thresh = cv2.threshold(gray, 100, 255, cv2.THRESH_BINARY_INV)
+         
+    padded = cv2.copyMakeBorder(thresh, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=0)
+    return padded
 
+# メッセージウィンドウが開いているか検知する関数
+def detect_message_window(img):
+    zone = CROP_ZONES["message_window"]
+    crop = img[zone["y_start"]:zone["y_end"], zone["x_start"]:zone["x_end"]]
+    
+    # メッセージウィンドウ特有の暗い背景色（または特定のUI要素）を検知
+    # ここでは簡易的に、暗い領域が一定割合以上あるかで判定
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray, 50, 255, cv2.THRESH_BINARY_INV) # 暗い部分を白にする
+    
+    dark_ratio = cv2.countNonZero(thresh) / (crop.shape[0] * crop.shape[1])
+    
+    # 閾値は実際の画面に合わせて調整が必要
+    if dark_ratio > 0.6: 
+        return True, crop
+    return False, None
+
+def parse_message_text(text):
+    if not text:
+        return
+        
+    # 重複排除
+    if text == battle_state.last_message:
+        return
+        
+    battle_state.last_message = text
+    print(f"[Event Parser] メッセージを解析: {text}")
+    
+    # 辞書と照合
+    event_triggered = False
+    for category, events in EVENT_DICTIONARY.items():
+        for event_name, event_def in events.items():
+            # すべてのキーワードが含まれているかチェック
+            if all(keyword in text for keyword in event_def["keywords"]):
+                print(f"  -> イベント発火: {event_name}")
+                battle_state.apply_event(event_def, text)
+                event_triggered = True
+                break # 一つのメッセージで複数の競合イベントが発火するのを防ぐ
+        if event_triggered:
+            break
+
+def process_frame(img, process_basic_info=True, process_message=True):
     original_h, original_w = img.shape[:2]
     if original_w != 1280 or original_h != 720:
         img = cv2.resize(img, (1280, 720))
 
     result_data = {}
 
-    # ----- 1. 相手のHP (パーセント) -----
-    opp_hp_zone = CROP_ZONES["opponent_hp"]
-    crop_opp_hp = img[opp_hp_zone["y_start"]:opp_hp_zone["y_end"], opp_hp_zone["x_start"]:opp_hp_zone["x_end"]]
-    processed_opp_hp = preprocess_opp_hp_for_ocr(crop_opp_hp, "opponent_hp", save_debug=save_debug)
-    
-    if processed_opp_hp is not None:
-        opp_hp_text_result = reader.readtext(processed_opp_hp, allowlist='0123456789%', detail=0)
-        if opp_hp_text_result:
-            text = "".join(opp_hp_text_result)
-            # %やゴミ記号を除去して数字だけを抽出
-            digits = re.sub(r'\D', '', text)
-            if digits:
-                hp_val = int(digits)
-                # 100以上の数値になった場合、末尾の文字を「%の誤認」として自動的に落とす強力な補正
-                if hp_val > 100:
-                    if str(hp_val).startswith('10') and len(str(hp_val)) == 3:
-                        hp_val = 100  # 例: 105 -> 100
-                    else:
-                        hp_val = int(str(hp_val)[:-1]) # 例: 879 -> 87, 150 -> 15
+    # 1. 基本情報の抽出 (HP, 名前) - 定期実行または初期待機時
+    if process_basic_info:
+        # Opponent Name
+        opp_name_zone = CROP_ZONES["opponent_name"]
+        crop_opp_name = img[opp_name_zone["y_start"]:opp_name_zone["y_end"], opp_name_zone["x_start"]:opp_name_zone["x_end"]]
+        processed_opp_name = preprocess_for_ocr(crop_opp_name, invert=False)
+        if processed_opp_name is not None:
+            opp_name_result = reader.readtext(processed_opp_name, allowlist=NAME_ALLOWLIST, detail=0)
+            if opp_name_result:
+                result_data["opponent_pokemon"] = clean_pokemon_name("".join(opp_name_result))
+
+        # My Name
+        my_name_zone = CROP_ZONES["my_name"]
+        crop_my_name = img[my_name_zone["y_start"]:my_name_zone["y_end"], my_name_zone["x_start"]:my_name_zone["x_end"]]
+        processed_my_name = preprocess_for_ocr(crop_my_name, invert=False)
+        if processed_my_name is not None:
+            my_name_result = reader.readtext(processed_my_name, allowlist=NAME_ALLOWLIST, detail=0)
+            if my_name_result:
+                result_data["my_pokemon"] = clean_pokemon_name("".join(my_name_result))
                 
-                if 0 <= hp_val <= 100:
-                    result_data["opponent_hp_percent"] = hp_val
+        # 状態の更新
+        battle_state.update_basic_info(result_data)
 
-    # ----- 2. 自分のHP (実数値) -----
-    my_hp_zone = CROP_ZONES["my_hp"]
-    crop_my_hp = img[my_hp_zone["y_start"]:my_hp_zone["y_end"], my_hp_zone["x_start"]:my_hp_zone["x_end"]]
-    processed_my_hp = preprocess_my_hp_for_ocr(crop_my_hp, "my_hp", save_debug=save_debug)
+    # 2. メッセージウィンドウの検知と処理
+    window_detected = False
+    if process_message:
+        is_open, crop_window = detect_message_window(img)
+        if is_open:
+            window_detected = True
+            # メッセージ領域のOCR処理
+            # 白文字を想定
+            processed_msg = preprocess_for_ocr(crop_window, invert=True)
+            if processed_msg is not None:
+                # 日本語の文章として読み取るため allowlist は設定しない
+                msg_result = reader.readtext(processed_msg, detail=0)
+                if msg_result:
+                    full_text = "".join(msg_result).replace(" ", "")
+                    parse_message_text(full_text)
+
+    return battle_state.to_dict(), window_detected
+
+# バッチ処理用ラッパー
+def process_batch(target_path):
+    target = Path(target_path)
     
-    if processed_my_hp is not None:
-        my_hp_text_result = reader.readtext(processed_my_hp, allowlist='0123456789/', detail=0)
-        if my_hp_text_result:
-            text = "".join(my_hp_text_result).replace(" ", "")
-            current_hp = max_hp = -1
-
-            match = re.search(r'(\d+)\D+(\d+)', text)
-            if match:
-                c_hp, m_hp = int(match.group(1)), int(match.group(2))
-                if m_hp <= 999: current_hp, max_hp = c_hp, m_hp
-
-            if current_hp == -1 or max_hp == -1:
-                digits = re.sub(r'\D', '', text)
-                if len(digits) >= 2:
-                    half = len(digits) // 2
-                    if len(digits) % 2 == 0:
-                        current_hp, max_hp = int(digits[:half]), int(digits[half:])
-                    else:
-                        current_hp, max_hp = int(digits[:half]), int(digits[half+1:])
-
-            if current_hp != -1 and max_hp != -1 and max_hp > 0:
-                current_hp = min(current_hp, max_hp)
-                result_data["my_hp_percent"] = int((current_hp / max_hp) * 100)
-                result_data["my_hp_raw"] = f"{current_hp}/{max_hp}"
-
-    # ----- 3. ポケモン名 -----
-    my_name_zone = CROP_ZONES["my_name"]
-    crop_my_name = img[my_name_zone["y_start"]:my_name_zone["y_end"], my_name_zone["x_start"]:my_name_zone["x_end"]]
-    processed_my_name = preprocess_name_for_ocr(crop_my_name, "my_name", save_debug=save_debug)
-    if processed_my_name is not None:
-        my_name_result = reader.readtext(processed_my_name, allowlist=NAME_ALLOWLIST, detail=0)
-        if my_name_result:
-            result_data["my_pokemon"] = clean_pokemon_name("".join(my_name_result))
-
-    opp_name_zone = CROP_ZONES["opponent_name"]
-    crop_opp_name = img[opp_name_zone["y_start"]:opp_name_zone["y_end"], opp_name_zone["x_start"]:opp_name_zone["x_end"]]
-    processed_opp_name = preprocess_name_for_ocr(crop_opp_name, "opponent_name", save_debug=save_debug)
-    if processed_opp_name is not None:
-        opp_name_result = reader.readtext(processed_opp_name, allowlist=NAME_ALLOWLIST, detail=0)
-        if opp_name_result:
-            result_data["opponent_pokemon"] = clean_pokemon_name("".join(opp_name_result))
-
-    return result_data
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Extract battle info from screenshots.')
-    parser.add_argument('target_path', type=str, help='Path to an image file or a directory containing images.')
-    args = parser.parse_args()
-
-    target = Path(args.target_path)
-
     if target.is_file():
-        result = extract_battle_info(target, save_debug=True)
-        print("Extraction Result:")
-        for key, value in result.items(): print(f"  {key}: {value}")
-
+        img = cv2.imread(str(target))
+        print(f"\n[->] Analyzing single image: {target.name}")
+        state, window = process_frame(img, process_basic_info=True, process_message=True)
+        battle_state.print_state()
+        
     elif target.is_dir():
         valid_extensions = ['.png', '.jpg', '.jpeg']
-        image_files = [f for f in target.iterdir() if f.suffix.lower() in valid_extensions]
-        for img_file in sorted(image_files):
-            print(f"\n[->] Analyzing: {img_file.name}")
-            try:
-                result = extract_battle_info(img_file, save_debug=False)
-                for key, value in result.items(): print(f"  {key}: {value}")
-            except Exception as e: print(f"  Failed to process {img_file.name}: {e}")
+        image_files = sorted([f for f in target.iterdir() if f.suffix.lower() in valid_extensions])
+        
+        for img_file in image_files:
+            img = cv2.imread(str(img_file))
+            print(f"\n[->] Processing frame: {img_file.name}")
+            state, window = process_frame(img, process_basic_info=True, process_message=True)
+            if window:
+                print("  [Info] メッセージウィンドウを検知")
+            battle_state.print_state()
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1:
+        process_batch(sys.argv[1])
+    else:
+        print("Usage: python advanced_extractor.py <image_or_directory_path>")
