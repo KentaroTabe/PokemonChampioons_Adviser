@@ -3,25 +3,25 @@ import numpy as np
 import easyocr
 import re
 import os
-import argparse
 import warnings
 import time
-import json
 from pathlib import Path
 
 # Mac(MPS)環境での不要な警告文をミュート
 warnings.filterwarnings("ignore", category=UserWarning, module="torch.utils.data.dataloader")
+
+# 外部ファイルから状態管理クラスと辞書を読み込む
+from battle_state import battle_state, EVENT_DICTIONARY
 
 print("Loading EasyOCR model...")
 reader = easyocr.Reader(['ja', 'en'], gpu=True)
 print("EasyOCR model loaded.")
 
 # ==============================================================================
-# 設定・定数
+# 設定・定数・テンプレート読み込み
 # ==============================================================================
 
-NAME_ALLOWLIST = 'ァアィイゥウェエォオカガキギクグケゲコゴサザシジスズセゼソゾタダチヂッツヅテデトドナニヌネノハバパヒビピフブプヘベペホボポマミムメモャヤュユョヨラリルレロヮワヰヱヲンヴー2Z' + 'oO0Qq♂♀'
-
+# 濁点・半濁点を「清音」に強制変換するマッピング (メッセージパース用)
 SEION_MAPPING = str.maketrans(
     'ガギグゲゴザジズゼゾダヂヅデドバビブベボパピプペポヴ',
     'カキクケコサシスセソタチツテトハヒフヘホハヒフヘホウ'
@@ -29,189 +29,272 @@ SEION_MAPPING = str.maketrans(
 
 # クロプゾーン定義
 CROP_ZONES = {
+    # HPバーの領域
     "my_hp": {"y_start": 665, "y_end": 715, "x_start": 130, "x_end": 280},
-    "my_name": {"y_start": 608, "y_end": 648, "x_start": 100, "x_end": 300},
     "opponent_hp": {"y_start": 70, "y_end": 120, "x_start": 1120, "x_end": 1250},
-    "opponent_name": {"y_start": 25, "y_end": 65, "x_start": 1040, "x_end": 1220},
-    # メッセージウィンドウの検知用領域 (画面下部の黒帯部分を想定)
-    "message_window": {"y_start": 550, "y_end": 650, "x_start": 300, "x_end": 980} 
-}
-
-# 辞書: キーワードによるイベント定義
-EVENT_DICTIONARY = {
-    "weather_events": {
-        "sandstorm_start": {
-            "keywords": ["砂あらし", "吹き始め"],
-            "action": "set_weather",
-            "value": "sandstorm",
-            "duration": 5
-        },
-        "rain_start": {
-            "keywords": ["雨", "降り出し"],
-            "action": "set_weather",
-            "value": "rain",
-            "duration": 5
-        }
-    },
-    "status_events": {
-        "substitute_on": {
-            "keywords": ["身代わり", "現れ"],
-            "action": "set_status",
-            "status_key": "substitute",
-            "value": True
-        }
-    },
-    "action_events": {
-         "attack": {
-             "keywords": ["襲う"],
-             "action": "log_attack"
-         }
-    }
-}
-
-# ==============================================================================
-# バトル状態管理クラス
-# ==============================================================================
-class BattleState:
-    def __init__(self):
-        self.field = {
-            "weather": "none",
-            "weather_turns_left": 0
-        }
-        self.player = {
-            "active_pokemon": None,
-            "hp_percent": None,
-            "hp_raw": None,
-            "substitute": False
-        }
-        self.opponent = {
-            "active_pokemon": None,
-            "hp_percent": None,
-            "substitute": False
-        }
-        self.last_message = "" # 重複排除用
     
-    def update_basic_info(self, info):
-        if "my_pokemon" in info:
-            self.player["active_pokemon"] = info["my_pokemon"]
-        if "my_hp_percent" in info:
-            self.player["hp_percent"] = info["my_hp_percent"]
-        if "my_hp_raw" in info:
-            self.player["hp_raw"] = info["my_hp_raw"]
-            
-        if "opponent_pokemon" in info:
-            self.opponent["active_pokemon"] = info["opponent_pokemon"]
-        if "opponent_hp_percent" in info:
-            self.opponent["hp_percent"] = info["opponent_hp_percent"]
+    # 変更: 名前ではなくアイコンの領域を指定
+    "my_icon": {"y_start": 600, "y_end": 660, "x_start": 40, "x_end": 100},
+    "opponent_icon": {"y_start": 15, "y_end": 75, "x_start": 980, "x_end": 1040},
+    
+    # ウィンドウ検知用とOCR抽出用
+    "message_window_detect": {"y_start": 600, "y_end": 640, "x_start": 400, "x_end": 800},
+    "message_window_ocr": {"y_start": 510, "y_end": 660, "x_start": 120, "x_end": 900},
+    "left_popup_detect": {"y_start": 320, "y_end": 420, "x_start": 100, "x_end": 350},
+    "left_popup_ocr": {"y_start": 300, "y_end": 440, "x_start": 100, "x_end": 400},
+    "right_popup_detect": {"y_start": 320, "y_end": 420, "x_start": 930, "x_end": 1180},
+    "right_popup_ocr": {"y_start": 300, "y_end": 440, "x_start": 850, "x_end": 1180} 
+}
 
-    def apply_event(self, event_def, raw_text):
-        action = event_def.get("action")
-        
-        # ターゲットの推定 (テキストに「相手の」が含まれていればopponent、なければplayerと仮定)
-        target = "opponent" if "相手" in raw_text else "player"
+# テンプレート画像（アイコン）の読み込み
+TEMPLATE_DIR = Path('images/templetes')
+pokemon_templates = {}
 
-        if action == "set_weather":
-            self.field["weather"] = event_def["value"]
-            self.field["weather_turns_left"] = event_def["duration"]
-            print(f"[State Update] 天候が {event_def['value']} になりました。")
-            
-        elif action == "set_status":
-            status_key = event_def["status_key"]
-            value = event_def["value"]
-            if target == "opponent":
-                self.opponent[status_key] = value
-                print(f"[State Update] 相手の {status_key} が {value} になりました。")
-            else:
-                self.player[status_key] = value
-                print(f"[State Update] 自分の {status_key} が {value} になりました。")
-                
-        elif action == "log_attack":
-            print(f"[State Update] 攻撃アクションを検知: {raw_text}")
+def load_templates():
+    if not TEMPLATE_DIR.exists():
+        print(f"[Warning] Template directory '{TEMPLATE_DIR}' not found. Matching disabled.")
+        return
+    valid_exts = ['.png', '.jpg', '.jpeg']
+    for file_path in TEMPLATE_DIR.iterdir():
+        if file_path.suffix.lower() in valid_exts:
+            tmpl = cv2.imread(str(file_path))
+            if tmpl is not None:
+                # 拡張子を除いたファイル名をポケモン名として登録
+                pokemon_templates[file_path.stem] = tmpl
+    print(f"Loaded {len(pokemon_templates)} templates for matching.")
 
-    def print_state(self):
-        print("--- Current Battle State ---")
-        print(f"Field: {self.field}")
-        print(f"Player: {self.player}")
-        print(f"Opponent: {self.opponent}")
-        print("----------------------------")
-        
-    def to_dict(self):
-         return {
-             "field": self.field,
-             "player": self.player,
-             "opponent": self.opponent
-         }
-
-# グローバルなバトル状態
-battle_state = BattleState()
+# 起動時にテンプレートをロード
+load_templates()
 
 # ==============================================================================
-# 画像処理・抽出関数
+# 画像処理・抽出・マッチング関数
 # ==============================================================================
 
-def clean_pokemon_name(ocr_text):
-    text = re.sub(r'[^ァ-ンヴー2Z]', '', ocr_text)
-    text = re.sub(r'[ハヘ]$', '', text)
-    text = text.translate(SEION_MAPPING)
-    return text
+def match_pokemon_icon(crop_img):
+    if not pokemon_templates or crop_img is None or crop_img.size == 0:
+        return None
+        
+    best_match = None
+    best_score = -1
+    
+    # 比較のためグレースケール化
+    crop_gray = cv2.cvtColor(crop_img, cv2.COLOR_BGR2GRAY)
+    
+    for name, tmpl in pokemon_templates.items():
+        tmpl_gray = cv2.cvtColor(tmpl, cv2.COLOR_BGR2GRAY)
+        
+        # テンプレートとクロップ画像のサイズが異なる場合、クロップサイズに合わせてリサイズする
+        if tmpl_gray.shape != crop_gray.shape:
+            tmpl_gray = cv2.resize(tmpl_gray, (crop_gray.shape[1], crop_gray.shape[0]))
+            
+        # テンプレートマッチング実行
+        res = cv2.matchTemplate(crop_gray, tmpl_gray, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, _ = cv2.minMaxLoc(res)
+        
+        if max_val > best_score:
+            best_score = max_val
+            best_match = name
+            
+    # 一定以上の類似度がある場合のみ名前を返す（閾値は調整可能）
+    if best_score > 0.6:
+        return best_match
+    return None
 
-def preprocess_for_ocr(image, invert=True):
+def preprocess_my_hp_for_ocr(image):
     if image is None or image.size == 0: return None
     resized = cv2.resize(image, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
-    
-    if len(resized.shape) == 3:
-        gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
-    else:
-        gray = resized
-        
-    # 文字を白、背景を黒にするかどうかの反転処理
-    if invert:
-        # 明るい文字を抽出する想定
-        _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
-    else:
-         _, thresh = cv2.threshold(gray, 100, 255, cv2.THRESH_BINARY_INV)
-         
-    padded = cv2.copyMakeBorder(thresh, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=0)
+    lower_white = np.array([180, 180, 180], dtype=np.uint8)
+    upper_white = np.array([255, 255, 255], dtype=np.uint8)
+    mask = cv2.inRange(resized, lower_white, upper_white)
+    inverted = cv2.bitwise_not(mask)
+    padded = cv2.copyMakeBorder(inverted, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=255)
     return padded
 
-# メッセージウィンドウが開いているか検知する関数
+def preprocess_opp_hp_for_ocr(image):
+    if image is None or image.size == 0: return None
+    resized = cv2.resize(image, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
+    lower_white = np.array([140, 140, 140], dtype=np.uint8)
+    upper_white = np.array([255, 255, 255], dtype=np.uint8)
+    mask = cv2.inRange(resized, lower_white, upper_white)
+    kernel = np.ones((2, 2), np.uint8)
+    mask = cv2.dilate(mask, kernel, iterations=1)
+    coords = cv2.findNonZero(mask)
+    if coords is not None:
+        x, y, w, h = cv2.boundingRect(coords)
+        mask = mask[y:y+h, x:x+w]
+    inverted = cv2.bitwise_not(mask)
+    padded = cv2.copyMakeBorder(inverted, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=255)
+    return padded
+
+def preprocess_message_window(image, save_debug=True):
+    """メッセージウィンドウ専用のグレースケール前処理"""
+    if image is None or image.size == 0: return None
+    resized = cv2.resize(image, None, fx=2.5, fy=2.5, interpolation=cv2.INTER_CUBIC)
+    gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray, 140, 255, cv2.THRESH_BINARY)
+    kernel = np.ones((2, 2), np.uint8)
+    mask = cv2.dilate(thresh, kernel, iterations=1)
+    inverted = cv2.bitwise_not(mask)
+    padded = cv2.copyMakeBorder(inverted, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=255)
+    
+    if save_debug:
+        os.makedirs("debug_crops", exist_ok=True)
+        filename = f"debug_crops/msg_{int(time.time()*1000)}.jpg"
+        cv2.imwrite(filename, padded)
+    
+    return padded
+
+class WindowDetector:
+    def __init__(self, detect_func, stable_frames_threshold=3, diff_pixel_threshold=200, reset_pixel_threshold=1000, cooldown_frames=30):
+        self.detect_func = detect_func
+        self.is_open = False
+        self.last_text_crop = None
+        self.stable_frames = 0
+        self.ocr_done = False
+        self.stable_frames_threshold = stable_frames_threshold
+        self.diff_pixel_threshold = diff_pixel_threshold
+        self.reset_pixel_threshold = reset_pixel_threshold 
+        self.cooldown_frames = cooldown_frames 
+        self.current_cooldown = 0 
+
+    def update(self, img):
+        is_now_open, crop_ocr = self.detect_func(img)
+        trigger_ocr = False
+        stable_img = None
+
+        if is_now_open:
+            curr_text_crop = preprocess_message_window(crop_ocr, save_debug=False)
+            if curr_text_crop is None:
+                return False, None
+
+            if self.current_cooldown > 0:
+                self.current_cooldown -= 1
+                self.last_text_crop = curr_text_crop
+                return False, None
+
+            if not self.is_open:
+                self.is_open = True
+                self.ocr_done = False
+                self.stable_frames = 0
+            else:
+                diff = cv2.absdiff(self.last_text_crop, curr_text_crop)
+                changed_pixels = cv2.countNonZero(diff)
+                
+                if self.ocr_done:
+                    if changed_pixels > self.reset_pixel_threshold:
+                        self.ocr_done = False
+                        self.stable_frames = 0
+                else:
+                    if changed_pixels <= self.diff_pixel_threshold:
+                        self.stable_frames += 1
+                    else:
+                        self.stable_frames = 0 
+                        
+                    if self.stable_frames >= self.stable_frames_threshold:
+                        trigger_ocr = True
+                        self.ocr_done = True
+                        stable_img = curr_text_crop
+                        self.current_cooldown = self.cooldown_frames 
+                        
+            self.last_text_crop = curr_text_crop
+        else:
+            self.is_open = False
+            self.last_text_crop = None
+            self.ocr_done = False 
+            self.current_cooldown = 0 
+            
+        return trigger_ocr, stable_img
+
+
 def detect_message_window(img):
-    zone = CROP_ZONES["message_window"]
-    crop = img[zone["y_start"]:zone["y_end"], zone["x_start"]:zone["x_end"]]
+    detect_zone = CROP_ZONES["message_window_detect"]
+    crop_detect = img[detect_zone["y_start"]:detect_zone["y_end"], detect_zone["x_start"]:detect_zone["x_end"]]
     
-    # メッセージウィンドウ特有の暗い背景色（または特定のUI要素）を検知
-    # ここでは簡易的に、暗い領域が一定割合以上あるかで判定
-    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-    _, thresh = cv2.threshold(gray, 50, 255, cv2.THRESH_BINARY_INV) # 暗い部分を白にする
+    gray = cv2.cvtColor(crop_detect, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray, 80, 255, cv2.THRESH_BINARY_INV) 
     
-    dark_ratio = cv2.countNonZero(thresh) / (crop.shape[0] * crop.shape[1])
+    dark_ratio = cv2.countNonZero(thresh) / (crop_detect.shape[0] * crop_detect.shape[1])
     
-    # 閾値は実際の画面に合わせて調整が必要
-    if dark_ratio > 0.6: 
-        return True, crop
+    if dark_ratio > 0.5: 
+        ocr_zone = CROP_ZONES["message_window_ocr"]
+        crop_ocr = img[ocr_zone["y_start"]:ocr_zone["y_end"], ocr_zone["x_start"]:ocr_zone["x_end"]]
+        return True, crop_ocr
+        
     return False, None
 
-def parse_message_text(text):
+def detect_left_popup_window(img):
+    detect_zone = CROP_ZONES["left_popup_detect"]
+    crop_detect = img[detect_zone["y_start"]:detect_zone["y_end"], detect_zone["x_start"]:detect_zone["x_end"]]
+    
+    gray = cv2.cvtColor(crop_detect, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray, 110, 255, cv2.THRESH_BINARY_INV) 
+    
+    dark_ratio = cv2.countNonZero(thresh) / (crop_detect.shape[0] * crop_detect.shape[1])
+    
+    if dark_ratio > 0.4: 
+        ocr_zone = CROP_ZONES["left_popup_ocr"]
+        crop_ocr = img[ocr_zone["y_start"]:ocr_zone["y_end"], ocr_zone["x_start"]:ocr_zone["x_end"]]
+        return True, crop_ocr
+        
+    return False, None
+
+def detect_right_popup_window(img):
+    detect_zone = CROP_ZONES["right_popup_detect"]
+    crop_detect = img[detect_zone["y_start"]:detect_zone["y_end"], detect_zone["x_start"]:detect_zone["x_end"]]
+    
+    gray = cv2.cvtColor(crop_detect, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray, 110, 255, cv2.THRESH_BINARY_INV) 
+    
+    dark_ratio = cv2.countNonZero(thresh) / (crop_detect.shape[0] * crop_detect.shape[1])
+    
+    if dark_ratio > 0.4: 
+        ocr_zone = CROP_ZONES["right_popup_ocr"]
+        crop_ocr = img[ocr_zone["y_start"]:ocr_zone["y_end"], ocr_zone["x_start"]:ocr_zone["x_end"]]
+        return True, crop_ocr
+        
+    return False, None
+
+
+# グローバルインスタンスの作成
+message_detector = WindowDetector(detect_message_window)
+left_popup_detector = WindowDetector(detect_left_popup_window, stable_frames_threshold=2, diff_pixel_threshold=150, reset_pixel_threshold=800, cooldown_frames=30)
+right_popup_detector = WindowDetector(detect_right_popup_window, stable_frames_threshold=2, diff_pixel_threshold=150, reset_pixel_threshold=800, cooldown_frames=30)
+
+def parse_text(text, source_type="message"):
     if not text:
         return
         
-    # 重複排除
-    if text == battle_state.last_message:
-        return
+    cleaned_text = re.sub(r'[^ぁ-んァ-ン一-龥ー]', '', text)
         
-    battle_state.last_message = text
-    print(f"[Event Parser] メッセージを解析: {text}")
+    # 重複排除
+    if source_type == "message":
+        if cleaned_text == battle_state.last_message:
+            return
+        battle_state.last_message = cleaned_text
+    elif source_type == "left_popup":
+        if cleaned_text == battle_state.last_left_popup:
+            return
+        battle_state.last_left_popup = cleaned_text
+    elif source_type == "right_popup":
+        if cleaned_text == battle_state.last_right_popup:
+            return
+        battle_state.last_right_popup = cleaned_text
+
+    print(f"[Event Parser] {source_type} を解析: {cleaned_text}")
+    
+    # テキストを比較用に清音化
+    text_seion = cleaned_text.translate(SEION_MAPPING)
     
     # 辞書と照合
     event_triggered = False
     for category, events in EVENT_DICTIONARY.items():
         for event_name, event_def in events.items():
-            # すべてのキーワードが含まれているかチェック
-            if all(keyword in text for keyword in event_def["keywords"]):
+            # 辞書のキーワードも清音化して照合
+            if all(keyword.translate(SEION_MAPPING) in text_seion for keyword in event_def["keywords"]):
                 print(f"  -> イベント発火: {event_name}")
-                battle_state.apply_event(event_def, text)
+                battle_state.apply_event(event_def, text, source_type=source_type)
                 event_triggered = True
-                break # 一つのメッセージで複数の競合イベントが発火するのを防ぐ
+                break
         if event_triggered:
             break
 
@@ -222,55 +305,115 @@ def process_frame(img, process_basic_info=True, process_message=True):
 
     result_data = {}
 
-    # 1. 基本情報の抽出 (HP, 名前) - 定期実行または初期待機時
+    # 1. 基本情報の抽出 (HP, ポケモンアイコン照合)
     if process_basic_info:
-        # Opponent Name
-        opp_name_zone = CROP_ZONES["opponent_name"]
-        crop_opp_name = img[opp_name_zone["y_start"]:opp_name_zone["y_end"], opp_name_zone["x_start"]:opp_name_zone["x_end"]]
-        processed_opp_name = preprocess_for_ocr(crop_opp_name, invert=False)
-        if processed_opp_name is not None:
-            opp_name_result = reader.readtext(processed_opp_name, allowlist=NAME_ALLOWLIST, detail=0)
-            if opp_name_result:
-                result_data["opponent_pokemon"] = clean_pokemon_name("".join(opp_name_result))
+        # Opponent Icon Matching
+        opp_icon_zone = CROP_ZONES["opponent_icon"]
+        crop_opp_icon = img[opp_icon_zone["y_start"]:opp_icon_zone["y_end"], opp_icon_zone["x_start"]:opp_icon_zone["x_end"]]
+        matched_opp_name = match_pokemon_icon(crop_opp_icon)
+        if matched_opp_name:
+            result_data["opponent_pokemon"] = matched_opp_name
 
-        # My Name
-        my_name_zone = CROP_ZONES["my_name"]
-        crop_my_name = img[my_name_zone["y_start"]:my_name_zone["y_end"], my_name_zone["x_start"]:my_name_zone["x_end"]]
-        processed_my_name = preprocess_for_ocr(crop_my_name, invert=False)
-        if processed_my_name is not None:
-            my_name_result = reader.readtext(processed_my_name, allowlist=NAME_ALLOWLIST, detail=0)
-            if my_name_result:
-                result_data["my_pokemon"] = clean_pokemon_name("".join(my_name_result))
+        # My Icon Matching
+        my_icon_zone = CROP_ZONES["my_icon"]
+        crop_my_icon = img[my_icon_zone["y_start"]:my_icon_zone["y_end"], my_icon_zone["x_start"]:my_icon_zone["x_end"]]
+        matched_my_name = match_pokemon_icon(crop_my_icon)
+        if matched_my_name:
+            result_data["my_pokemon"] = matched_my_name
                 
+        # Opponent HP
+        opp_hp_zone = CROP_ZONES["opponent_hp"]
+        crop_opp_hp = img[opp_hp_zone["y_start"]:opp_hp_zone["y_end"], opp_hp_zone["x_start"]:opp_hp_zone["x_end"]]
+        processed_opp_hp = preprocess_opp_hp_for_ocr(crop_opp_hp)
+        if processed_opp_hp is not None:
+            opp_hp_text_result = reader.readtext(processed_opp_hp, allowlist='0123456789%', detail=0)
+            if opp_hp_text_result:
+                text = "".join(opp_hp_text_result)
+                digits = re.sub(r'\D', '', text)
+                if digits:
+                    hp_val = int(digits)
+                    if hp_val > 100:
+                        if str(hp_val).startswith('10') and len(str(hp_val)) == 3:
+                            hp_val = 100
+                        else:
+                            hp_val = int(str(hp_val)[:-1])
+                    if 0 <= hp_val <= 100:
+                        result_data["opponent_hp_percent"] = hp_val
+                        
+        # My HP
+        my_hp_zone = CROP_ZONES["my_hp"]
+        crop_my_hp = img[my_hp_zone["y_start"]:my_hp_zone["y_end"], my_hp_zone["x_start"]:my_hp_zone["x_end"]]
+        processed_my_hp = preprocess_my_hp_for_ocr(crop_my_hp)
+        if processed_my_hp is not None:
+            my_hp_text_result = reader.readtext(processed_my_hp, allowlist='0123456789/', detail=0)
+            if my_hp_text_result:
+                text = "".join(my_hp_text_result).replace(" ", "")
+                current_hp = max_hp = -1
+                match = re.search(r'(\d+)\D+(\d+)', text)
+                if match:
+                    c_hp, m_hp = int(match.group(1)), int(match.group(2))
+                    if m_hp <= 999: current_hp, max_hp = c_hp, m_hp
+                if current_hp == -1 or max_hp == -1:
+                    digits = re.sub(r'\D', '', text)
+                    if len(digits) >= 2:
+                        half = len(digits) // 2
+                        if len(digits) % 2 == 0:
+                            current_hp, max_hp = int(digits[:half]), int(digits[half:])
+                        else:
+                            current_hp, max_hp = int(digits[:half]), int(digits[half+1:])
+                if current_hp != -1 and max_hp != -1 and max_hp > 0:
+                    current_hp = min(current_hp, max_hp)
+                    result_data["my_hp_percent"] = int((current_hp / max_hp) * 100)
+                    result_data["my_hp_raw"] = f"{current_hp}/{max_hp}"
+
         # 状態の更新
         battle_state.update_basic_info(result_data)
 
     # 2. メッセージウィンドウの検知と処理
     window_detected = False
     if process_message:
-        is_open, crop_window = detect_message_window(img)
-        if is_open:
+        trigger_ocr, stable_img = message_detector.update(img)
+        
+        if trigger_ocr and stable_img is not None:
             window_detected = True
-            # メッセージ領域のOCR処理
-            # 白文字を想定
-            processed_msg = preprocess_for_ocr(crop_window, invert=True)
-            if processed_msg is not None:
-                # 日本語の文章として読み取るため allowlist は設定しない
-                msg_result = reader.readtext(processed_msg, detail=0)
-                if msg_result:
-                    full_text = "".join(msg_result).replace(" ", "")
-                    parse_message_text(full_text)
+            msg_result = reader.readtext(stable_img, detail=0)
+            if msg_result:
+                full_text = "".join(msg_result).replace(" ", "")
+                parse_text(full_text, source_type="message")
+
+    # 3. 左ポップアップウィンドウの検知と処理
+    if process_message:
+        trigger_left_ocr, stable_left_img = left_popup_detector.update(img)
+        
+        if trigger_left_ocr and stable_left_img is not None:
+            window_detected = True
+            left_result = reader.readtext(stable_left_img, detail=0)
+            if left_result:
+                full_text = "".join(left_result).replace(" ", "")
+                parse_text(full_text, source_type="left_popup")
+
+    # 4. 右ポップアップウィンドウの検知と処理
+    if process_message:
+        trigger_right_ocr, stable_right_img = right_popup_detector.update(img)
+        
+        if trigger_right_ocr and stable_right_img is not None:
+            window_detected = True
+            right_result = reader.readtext(stable_right_img, detail=0)
+            if right_result:
+                full_text = "".join(right_result).replace(" ", "")
+                parse_text(full_text, source_type="right_popup")
+
 
     return battle_state.to_dict(), window_detected
 
-# バッチ処理用ラッパー
 def process_batch(target_path):
     target = Path(target_path)
     
     if target.is_file():
         img = cv2.imread(str(target))
         print(f"\n[->] Analyzing single image: {target.name}")
-        state, window = process_frame(img, process_basic_info=True, process_message=True)
+        for i in range(5):
+            state, window = process_frame(img, process_basic_info=(i==0), process_message=True)
         battle_state.print_state()
         
     elif target.is_dir():
@@ -280,14 +423,51 @@ def process_batch(target_path):
         for img_file in image_files:
             img = cv2.imread(str(img_file))
             print(f"\n[->] Processing frame: {img_file.name}")
-            state, window = process_frame(img, process_basic_info=True, process_message=True)
+            message_detector.is_open = False
+            left_popup_detector.is_open = False
+            right_popup_detector.is_open = False
+            for i in range(5):
+                state, window = process_frame(img, process_basic_info=(i==0), process_message=True)
             if window:
-                print("  [Info] メッセージウィンドウを検知")
+                print("  [Info] ウィンドウを検知")
             battle_state.print_state()
+
+def process_video(video_path):
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        print(f"Error: Could not open video {video_path}")
+        return
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    print(f"\n[->] Processing video at {fps} FPS: {Path(video_path).name}")
+    
+    frame_count = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+            
+        frame_count += 1
+        
+        state, triggered_ocr = process_frame(
+            frame, 
+            process_basic_info=(frame_count % 30 == 0), 
+            process_message=True
+        )
+        
+        if triggered_ocr:
+            print(f"  [Info] Frame {frame_count} ({frame_count/fps:.2f}秒): テキスト描画完了を検知、OCR実行")
+            battle_state.print_state()
+            
+    cap.release()
 
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1:
-        process_batch(sys.argv[1])
+        target = Path(sys.argv[1])
+        if target.suffix.lower() in ['.mp4', '.mov', '.avi']:
+            process_video(target)
+        else:
+            process_batch(target)
     else:
-        print("Usage: python advanced_extractor.py <image_or_directory_path>")
+        print("Usage: python advanced_extractor.py <image_or_video_or_directory_path>")

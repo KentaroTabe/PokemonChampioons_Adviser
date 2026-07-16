@@ -3,32 +3,16 @@ import base64
 import cv2
 import numpy as np
 import socketio
-import asyncio
 from fastapi import FastAPI
-import time
 
-from advanced_extractor import process_frame, battle_state, detect_message_window
+from advanced_extractor import process_frame
+from battle_state import battle_state
 
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
 app = FastAPI()
 app_asgi = socketio.ASGIApp(sio, app)
 
-# 状態管理用変数
-last_window_detection_time = 0
-WINDOW_COOLDOWN = 1.0 # メッセージ処理のクールダウン (秒)
-DELAY_BEFORE_OCR = 0.5 # ウィンドウ検知からOCR実行までの待機時間 (秒)
-
-# 非同期で遅延OCRを実行するタスク
-async def delayed_ocr_task(sid, img):
-    await asyncio.sleep(DELAY_BEFORE_OCR)
-    print(f"[{time.time():.2f}] 遅延OCRを実行します...")
-    
-    # 基本情報はスキップし、メッセージ解析のみ実行
-    current_state, _ = process_frame(img, process_basic_info=False, process_message=True)
-    
-    # 最新のステートをフロントエンドに送信
-    await sio.emit('state_update', current_state, room=sid)
-
+frame_counter = 0
 
 @sio.on('connect')
 async def connect(sid, environ):
@@ -38,7 +22,8 @@ async def connect(sid, environ):
 
 @sio.on('send_frame')
 async def handle_frame(sid, data):
-    global last_window_detection_time
+    global frame_counter
+    frame_counter += 1
     
     try:
         encoded_data = data.split(',')[1]
@@ -46,32 +31,18 @@ async def handle_frame(sid, data):
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
         if img is not None:
-            current_time = time.time()
+            # 基本情報の抽出（HPバー読込など）は重いので30フレームに1回（約1秒に1回）に間引く
+            # process_messageは毎フレームTrueで回す（内部で軽量な動的検知が行われるため）
+            current_state, triggered_ocr = process_frame(
+                img, 
+                process_basic_info=(frame_counter % 30 == 0), 
+                process_message=True
+            )
             
-            # クールダウン中かどうか
-            in_cooldown = (current_time - last_window_detection_time) < WINDOW_COOLDOWN
-
-            # 1. 基本情報の更新と、軽量なウィンドウ検知 (毎フレーム実行)
-            # 重いメッセージOCRはここではやらない (process_message=False)
-            
-            # 基本情報の抽出は数フレームに1回でも良いが、ここでは簡略化のため毎フレーム実行
-            current_state, _ = process_frame(img, process_basic_info=True, process_message=False)
-            
-            # 2. ウィンドウ検知トリガー
-            if not in_cooldown:
-                is_open, _ = detect_message_window(img)
-                if is_open:
-                    print(f"[{current_time:.2f}] 💡 メッセージウィンドウ検知！ {DELAY_BEFORE_OCR}秒後にOCRを開始します。")
-                    last_window_detection_time = current_time
-                    
-                    # 非同期タスクとして遅延OCRをスケジュール
-                    # 注意: 簡易実装として現在のフレームの参照を渡している。
-                    # 本番環境で厳密に0.5秒後の「新しい」画像を読みたい場合は、
-                    # ここでフラグを立てて、後続のhandle_frame内で処理するのがベター。
-                    sio.start_background_task(delayed_ocr_task, sid, img)
-
-            # 定期的に基本状態は送信
-            await sio.emit('state_update', current_state, room=sid)
+            # OCRが発火した（＝イベントが起きて状態が変化した）瞬間、
+            # または1秒に1回定期的にフロントエンドへ状態を同期する
+            if triggered_ocr or (frame_counter % 30 == 0):
+                await sio.emit('state_update', current_state, room=sid)
 
     except Exception as e:
         print(f"画像処理エラー: {e}")
