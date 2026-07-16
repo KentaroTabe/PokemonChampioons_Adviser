@@ -46,7 +46,8 @@ EVENT_DICTIONARY = {
     },
     "item_events": {
          "leftovers": {
-             "keywords": ["たべのこし"],
+             # 「べ/ぺ」のOCR誤認を避けるため、確実な後半部分だけをキーワードにする
+             "keywords": ["のこし"],
              "action": "log_item",
              "item_name": "leftovers"
          }
@@ -63,14 +64,16 @@ class BattleState:
             "weather_turns_left": 0
         }
         self.player = {
-            "active_pokemon": None,
+            "display_name": None, # 画面に表示されている名前(OCR)
+            "species": None,      # 画像マッチングで特定した種族ID(例: 1018)
             "hp_percent": None,
             "hp_raw": None,
             "substitute": False,
             "confusion": False
         }
         self.opponent = {
-            "active_pokemon": None,
+            "display_name": None,
+            "species": None,
             "hp_percent": None,
             "substitute": False,
             "confusion": False
@@ -80,15 +83,19 @@ class BattleState:
         self.last_right_popup = "" # 右ポップアップ重複排除用
     
     def update_basic_info(self, info):
-        if "my_pokemon" in info:
-            self.player["active_pokemon"] = info["my_pokemon"]
+        if "my_display_name" in info:
+            self.player["display_name"] = info["my_display_name"]
+        if "my_species" in info:
+            self.player["species"] = info["my_species"]
         if "my_hp_percent" in info:
             self.player["hp_percent"] = info["my_hp_percent"]
         if "my_hp_raw" in info:
             self.player["hp_raw"] = info["my_hp_raw"]
             
-        if "opponent_pokemon" in info:
-            self.opponent["active_pokemon"] = info["opponent_pokemon"]
+        if "opp_display_name" in info:
+            self.opponent["display_name"] = info["opp_display_name"]
+        if "opp_species" in info:
+            self.opponent["species"] = info["opp_species"]
         if "opponent_hp_percent" in info:
             self.opponent["hp_percent"] = info["opponent_hp_percent"]
 
@@ -101,15 +108,15 @@ class BattleState:
         elif source_type == "left_popup":
             target = "player"
         else:
-            # メッセージウィンドウの場合はテキストから推論
-            # 1. OCRの揺らぎ(帽手、間手など)を考慮した検知
-            is_opponent = any(k in raw_text for k in ["相手", "間手", "帽手", "相羊"])
-            
-            # 2. 相手のポケモン名がテキストに直接含まれているか確認
-            if self.opponent["active_pokemon"] and self.opponent["active_pokemon"] in raw_text:
-                is_opponent = True
-                
-            target = "opponent" if is_opponent else "player"
+            # メッセージウィンドウの場合は【抽出した表示名】から推論する（最強の安定度）
+            if self.opponent["display_name"] and self.opponent["display_name"] in raw_text:
+                target = "opponent"
+            elif self.player["display_name"] and self.player["display_name"] in raw_text:
+                target = "player"
+            else:
+                # 名前が読めなかった場合のフォールバック
+                is_opponent = any(k in raw_text for k in ["相手", "間手", "帽手", "相羊"])
+                target = "opponent" if is_opponent else "player"
 
         if action == "set_weather":
             self.field["weather"] = event_def["value"]

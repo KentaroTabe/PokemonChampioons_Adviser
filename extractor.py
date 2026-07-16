@@ -33,9 +33,13 @@ CROP_ZONES = {
     "my_hp": {"y_start": 665, "y_end": 715, "x_start": 130, "x_end": 280},
     "opponent_hp": {"y_start": 70, "y_end": 120, "x_start": 1120, "x_end": 1250},
     
-    # 変更: 名前ではなくアイコンの領域を指定
-    "my_icon": {"y_start": 600, "y_end": 660, "x_start": 40, "x_end": 100},
-    "opponent_icon": {"y_start": 15, "y_end": 75, "x_start": 980, "x_end": 1040},
+    # アイコンの領域 (マルチスケール探索のため、少し広めに確保)
+    "my_icon": {"y_start": 580, "y_end": 670, "x_start": 20, "x_end": 120},
+    "opponent_icon": {"y_start": 0, "y_end": 90, "x_start": 950, "x_end": 1060},
+    
+    # 名前の領域 (OCR用)
+    "my_name": {"y_start": 605, "y_end": 645, "x_start": 105, "x_end": 260},
+    "opponent_name": {"y_start": 15, "y_end": 50, "x_start": 1040, "x_end": 1210},
     
     # ウィンドウ検知用とOCR抽出用
     "message_window_detect": {"y_start": 600, "y_end": 640, "x_start": 400, "x_end": 800},
@@ -57,10 +61,18 @@ def load_templates():
     valid_exts = ['.png', '.jpg', '.jpeg']
     for file_path in TEMPLATE_DIR.iterdir():
         if file_path.suffix.lower() in valid_exts:
-            tmpl = cv2.imread(str(file_path))
-            if tmpl is not None:
-                # 拡張子を除いたファイル名をポケモン名として登録
-                pokemon_templates[file_path.stem] = tmpl
+            # 0.png（はてなマーク）などの不要なプレースホルダーを除外
+            if file_path.stem == '0':
+                continue
+                
+            # IMREAD_UNCHANGED でアルファチャンネルも含めて読み込む
+            tmpl = cv2.imread(str(file_path), cv2.IMREAD_UNCHANGED)
+            if tmpl is not None and len(tmpl.shape) == 3 and tmpl.shape[2] == 4:
+                # 透過部分の余白をトリミングして本体（バウンディングボックス）だけにする
+                alpha = tmpl[:, :, 3]
+                x, y, w, h = cv2.boundingRect(alpha)
+                if w > 0 and h > 0:
+                    pokemon_templates[file_path.stem] = tmpl[y:y+h, x:x+w]
     print(f"Loaded {len(pokemon_templates)} templates for matching.")
 
 # 起動時にテンプレートをロード
@@ -77,28 +89,58 @@ def match_pokemon_icon(crop_img):
     best_match = None
     best_score = -1
     
-    # 比較のためグレースケール化
-    crop_gray = cv2.cvtColor(crop_img, cv2.COLOR_BGR2GRAY)
+    # マルチスケール探索用のテンプレート高さ (ピクセル)
+    # 処理速度向上のため、想定されるサイズ(40, 50, 60)の3段階に絞り込み
+    target_heights = [40, 50, 60]
     
     for name, tmpl in pokemon_templates.items():
-        tmpl_gray = cv2.cvtColor(tmpl, cv2.COLOR_BGR2GRAY)
+        tmpl_h, tmpl_w = tmpl.shape[:2]
         
-        # テンプレートとクロップ画像のサイズが異なる場合、クロップサイズに合わせてリサイズする
-        if tmpl_gray.shape != crop_gray.shape:
-            tmpl_gray = cv2.resize(tmpl_gray, (crop_gray.shape[1], crop_gray.shape[0]))
+        for th in target_heights:
+            if th >= crop_img.shape[0]: 
+                continue 
+                
+            # アスペクト比を維持してテンプレートをリサイズ
+            scale = th / tmpl_h
+            tw = int(tmpl_w * scale)
+            if tw >= crop_img.shape[1] or tw == 0: 
+                continue
+                
+            resized_tmpl = cv2.resize(tmpl, (tw, th))
             
-        # テンプレートマッチング実行
-        res = cv2.matchTemplate(crop_gray, tmpl_gray, cv2.TM_CCOEFF_NORMED)
-        _, max_val, _, _ = cv2.minMaxLoc(res)
-        
-        if max_val > best_score:
-            best_score = max_val
-            best_match = name
+            tmpl_bgr = resized_tmpl[:, :, :3]
+            alpha_channel = resized_tmpl[:, :, 3]
             
-    # 一定以上の類似度がある場合のみ名前を返す（閾値は調整可能）
-    if best_score > 0.6:
+            # TM_CCORR_NORMED用の3チャンネルマスク
+            alpha_mask = cv2.merge([alpha_channel, alpha_channel, alpha_channel])
+            
+            try:
+                # BGRカラー＋アルファマスクでマッチング
+                res = cv2.matchTemplate(crop_img, tmpl_bgr, cv2.TM_CCORR_NORMED, mask=alpha_mask)
+                _, max_val, _, _ = cv2.minMaxLoc(res)
+                
+                if max_val > best_score:
+                    best_score = max_val
+                    best_match = name
+            except Exception as e:
+                continue
+                
+    # 閾値を0.6から0.90へ大幅に引き上げ。正解以外のノイズ誤爆を完全にシャットアウトする
+    if best_score > 0.90:
         return best_match
     return None
+
+def preprocess_name_for_ocr(image):
+    if image is None or image.size == 0: return None
+    resized = cv2.resize(image, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
+    # HSV変換して「白文字」だけを綺麗に抽出する
+    hsv = cv2.cvtColor(resized, cv2.COLOR_BGR2HSV)
+    lower_white = np.array([0, 0, 150], dtype=np.uint8)
+    upper_white = np.array([180, 60, 255], dtype=np.uint8)
+    mask = cv2.inRange(hsv, lower_white, upper_white)
+    inverted = cv2.bitwise_not(mask)
+    padded = cv2.copyMakeBorder(inverted, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=255)
+    return padded
 
 def preprocess_my_hp_for_ocr(image):
     if image is None or image.size == 0: return None
@@ -307,19 +349,31 @@ def process_frame(img, process_basic_info=True, process_message=True):
 
     # 1. 基本情報の抽出 (HP, ポケモンアイコン照合)
     if process_basic_info:
-        # Opponent Icon Matching
+        # Opponent Icon & Name
         opp_icon_zone = CROP_ZONES["opponent_icon"]
         crop_opp_icon = img[opp_icon_zone["y_start"]:opp_icon_zone["y_end"], opp_icon_zone["x_start"]:opp_icon_zone["x_end"]]
-        matched_opp_name = match_pokemon_icon(crop_opp_icon)
-        if matched_opp_name:
-            result_data["opponent_pokemon"] = matched_opp_name
+        result_data["opp_species"] = match_pokemon_icon(crop_opp_icon, "opp")
 
-        # My Icon Matching
+        opp_name_zone = CROP_ZONES["opponent_name"]
+        crop_opp_name = img[opp_name_zone["y_start"]:opp_name_zone["y_end"], opp_name_zone["x_start"]:opp_name_zone["x_end"]]
+        processed_opp_name = preprocess_name_for_ocr(crop_opp_name)
+        if processed_opp_name is not None:
+            name_res = reader.readtext(processed_opp_name, detail=0)
+            if name_res:
+                result_data["opp_display_name"] = "".join(name_res).replace(" ", "")
+
+        # My Icon & Name
         my_icon_zone = CROP_ZONES["my_icon"]
         crop_my_icon = img[my_icon_zone["y_start"]:my_icon_zone["y_end"], my_icon_zone["x_start"]:my_icon_zone["x_end"]]
-        matched_my_name = match_pokemon_icon(crop_my_icon)
-        if matched_my_name:
-            result_data["my_pokemon"] = matched_my_name
+        result_data["my_species"] = match_pokemon_icon(crop_my_icon, "my")
+
+        my_name_zone = CROP_ZONES["my_name"]
+        crop_my_name = img[my_name_zone["y_start"]:my_name_zone["y_end"], my_name_zone["x_start"]:my_name_zone["x_end"]]
+        processed_my_name = preprocess_name_for_ocr(crop_my_name)
+        if processed_my_name is not None:
+            name_res = reader.readtext(processed_my_name, detail=0)
+            if name_res:
+                result_data["my_display_name"] = "".join(name_res).replace(" ", "")
                 
         # Opponent HP
         opp_hp_zone = CROP_ZONES["opponent_hp"]
@@ -410,17 +464,20 @@ def process_batch(target_path):
     target = Path(target_path)
     
     if target.is_file():
+        start_time = time.time()
         img = cv2.imread(str(target))
         print(f"\n[->] Analyzing single image: {target.name}")
         for i in range(5):
             state, window = process_frame(img, process_basic_info=(i==0), process_message=True)
         battle_state.print_state()
+        print(f"  [Time] 処理時間: {time.time() - start_time:.3f}秒")
         
     elif target.is_dir():
         valid_extensions = ['.png', '.jpg', '.jpeg']
         image_files = sorted([f for f in target.iterdir() if f.suffix.lower() in valid_extensions])
         
         for img_file in image_files:
+            start_time = time.time()
             img = cv2.imread(str(img_file))
             print(f"\n[->] Processing frame: {img_file.name}")
             message_detector.is_open = False
@@ -431,6 +488,7 @@ def process_batch(target_path):
             if window:
                 print("  [Info] ウィンドウを検知")
             battle_state.print_state()
+            print(f"  [Time] 処理時間: {time.time() - start_time:.3f}秒")
 
 def process_video(video_path):
     cap = cv2.VideoCapture(str(video_path))
