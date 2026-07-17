@@ -8,4 +8,8 @@ champions_agent/data/db/*.sqlite3
 champions_agent/train/checkpoints/
 __pycache__/
 *.pyc
+pokemon-showdown/
 
+# Database
+*.sqlite3
+champions_agent/data/db/champions.sqlite3

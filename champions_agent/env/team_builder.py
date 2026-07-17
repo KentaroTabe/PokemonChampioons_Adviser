@@ -16,6 +16,8 @@ from champions_agent.config import (
     USAGE_TARGET_FORMAT, DEFAULT_REGULATION, PLAY_STYLES, DEFAULT_PLAY_STYLE,
 )
 from champions_agent.data import database as db
+from champions_agent.data.sources.name_mapping import to_showdown_name
+
 
 
 
@@ -154,8 +156,9 @@ def build_random_party(size: int = 6, fmt: str = USAGE_TARGET_FORMAT,
 
     return [
         PokemonSet(
-            species=r["pokemon_name"],
+            species=to_showdown_name(r["pokemon_name"]),
             ability=r["ability_name"],
+
             item=r["item_name"],
             tera_type=r["tera_type"],
             nature=r["nature"],

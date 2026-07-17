@@ -28,12 +28,14 @@ from __future__ import annotations
 import random
 
 import numpy as np
+from gymnasium.spaces import Box
 from poke_env.battle import AbstractBattle
 from poke_env.environment.singles_env import SinglesEnv
 from poke_env.environment.single_agent_wrapper import SingleAgentWrapper
 from poke_env.player import RandomPlayer
 from poke_env.ps_client import LocalhostServerConfiguration
 from poke_env.teambuilder import ConstantTeambuilder
+
 
 from champions_agent.agent import encoders
 from champions_agent.agent.spaces import BATTLE_OBS_DIM
@@ -49,6 +51,12 @@ class ChampionsSinglesEnv(SinglesEnv):
         super().__init__(*args, **kwargs)
         self.play_style = play_style
         self.reward_config = get_reward_config(play_style)
+        # SinglesEnv(PokeEnv)は observation_spaces を自動定義しないため、
+        # embed_battle() が返す固定長ベクトルに合わせて明示的に定義する。
+        # (SingleAgentWrapper が __init__ 時に observation_spaces を参照するため必須)
+        obs_space = Box(low=-np.inf, high=np.inf, shape=(BATTLE_OBS_DIM,), dtype=np.float32)
+        self.observation_spaces = {agent: obs_space for agent in self.possible_agents}
+
 
     def embed_battle(self, battle: AbstractBattle) -> np.ndarray:
         """現在の盤面をエージェント用の固定長ベクトルへ変換する。
@@ -141,7 +149,12 @@ def make_training_env(battle_format: str = "gen9ou", use_meta_team: bool = True,
         server_configuration=LocalhostServerConfiguration,
         team=own_teambuilder,
         play_style=own_play_style,
+        # strict=False: 学習初期はランダムに近い行動を大量に試すため、
+        # ダイマックス/テラスタル等の不正な行動指定が起きても例外を投げず
+        # デフォルト行動へフォールバックさせる(poke-env側の仕様)。
+        strict=False,
     )
+
 
     opponent = RandomPlayer(
         battle_format=battle_format,

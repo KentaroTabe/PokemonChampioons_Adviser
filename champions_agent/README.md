@@ -55,12 +55,17 @@ champions_agent/
 
 ## セットアップ
 
+以下のコマンド群は全て**リポジトリルート**(`PokemonChampioons_Adviser/`)から
+`python -m champions_agent.xxx.yyy` の形式で実行することを前提としています
+(`champions_agent`をPythonパッケージとしてインポートするため)。
+
 ```bash
-cd champions_agent
+# リポジトリルートで実行
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r champions_agent/requirements.txt
 ```
+
 
 ## データ収集(定期実行前提・現時点は手動実行)
 
