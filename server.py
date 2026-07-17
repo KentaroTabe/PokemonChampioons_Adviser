@@ -5,7 +5,7 @@ import numpy as np
 import socketio
 from fastapi import FastAPI
 
-from advanced_extractor import process_frame
+from extractor import process_frame
 from battle_state import battle_state
 
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')

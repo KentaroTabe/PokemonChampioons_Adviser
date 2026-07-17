@@ -63,14 +63,21 @@ class BattleState:
             "weather": "none",
             "weather_turns_left": 0
         }
+        self.player_party = []   # 選出画面で特定した自分の最大6匹のID
+        # 相手パーティは種族を特定せず、タイプ情報のみ保持する
+        # 例: [{"types": ["くさ", "あく"]}, {"types": ["ほのお", "ひこう"]}, ...]
+        self.opponent_party = []
+        
         self.player = {
-            "display_name": None, # 画面に表示されている名前(OCR)
-            "species": None,      # 画像マッチングで特定した種族ID(例: 1018)
+            "display_name": None,
+            "species": None,
             "hp_percent": None,
             "hp_raw": None,
             "substitute": False,
             "confusion": False
         }
+        
+        # ▼ここが抜け落ちていました！
         self.opponent = {
             "display_name": None,
             "species": None,
@@ -78,10 +85,19 @@ class BattleState:
             "substitute": False,
             "confusion": False
         }
+        
         self.last_message = "" # 重複排除用
         self.last_left_popup = "" # 左ポップアップ重複排除用
         self.last_right_popup = "" # 右ポップアップ重複排除用
     
+    def update_parties(self, player_party, opponent_party):
+        if player_party and not self.player_party:
+            self.player_party = player_party
+            print(f"[State Update] 自分のパーティを特定: {self.player_party}")
+        if opponent_party and not self.opponent_party:
+            self.opponent_party = opponent_party
+            print(f"[State Update] 相手のパーティを特定: {self.opponent_party}")
+
     def update_basic_info(self, info):
         if "my_display_name" in info:
             self.player["display_name"] = info["my_display_name"]
@@ -154,7 +170,9 @@ class BattleState:
          return {
              "field": self.field,
              "player": self.player,
-             "opponent": self.opponent
+             "opponent": self.opponent,
+             "player_party": self.player_party,
+             "opponent_party": self.opponent_party
          }
 
 # グローバルなバトル状態
