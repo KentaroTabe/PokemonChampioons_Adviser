@@ -24,6 +24,8 @@ from champions_agent.data.sources.name_mapping import (
 )
 
 SMOGON_STATS_BASE_URL = "https://www.smogon.com/stats"
+# チャンピオンズ実データが取得できない場合のフォールバック用フォーマット
+SMOGON_FALLBACK_FORMAT = "gen9ou"
 
 
 @dataclass
@@ -202,16 +204,111 @@ def fetch_dummy_usage_stats(sample_pokemon: list[str] | None = None,
     return entries
 
 
+def fetch_champions_usage(fmt: str = "Singles", season: str | None = None,
+                          season_number: int | None = None,
+                          limit: int | None = None
+                          ) -> tuple[list[PokemonUsageEntry], dict]:
+    """ポケモンチャンピオンズ実環境の使用率統計を取得する (2ソース統合)。
+
+    - championsbattledata.com API: 技/持ち物/特性/性格/能力ポイントの採用率%
+      (ゲーム内「バトルデータ」の日次収集。ポケモン自体の使用率%は提供されない)
+    - champs.pokedb.tokyo オープンデータ: 上位ランカー構築から
+      ポケモン使用率% (チーム採用頻度)・チームメイト共起率・持ち物傾向を集計
+
+    クレジット: Battle data provided by Pokémon Champions Battle Data
+    (https://championsbattledata.com) / バトルデータベース チャンピオンズ
+    (https://champs.pokedb.tokyo)
+    """
+    from champions_agent.data.sources import championsbattledata as cbd
+    from champions_agent.data.sources import pokedb_opendata as pokedb
+
+    per_pokemon, cbd_meta = cbd.fetch_all(fmt=fmt, season=season, limit=limit)
+    if not per_pokemon:
+        raise RuntimeError("championsbattledata から1件も取得できませんでした")
+
+    # pokedb は補完なので失敗しても続行する
+    agg = None
+    try:
+        payload, sn = pokedb.fetch_ranked_teams(season_number=season_number, rule="single")
+        agg = pokedb.aggregate_teams(payload)
+        print(f"  [pokedb] シーズン{sn} ({agg['season']}) の上位{agg['n_teams']}構築を集計")
+    except Exception as e:
+        print(f"  [warn] pokedb opendata 取得失敗 (補完なしで続行): {e}")
+
+    usage = agg["usage"] if agg else {}
+    teammates_all = agg["teammates"] if agg else {}
+    items_supplement = agg["items"] if agg else {}
+
+    entries: list[PokemonUsageEntry] = []
+    # 使用率が分かるもの (pokedb掲載) を上位に、それ以外は名前順で後ろに並べる
+    ordered = sorted(per_pokemon.keys(),
+                     key=lambda s: (-usage.get(s, {}).get("percent", 0.0), s))
+    for rank, sid in enumerate(ordered, start=1):
+        parsed = per_pokemon[sid]
+        u = usage.get(sid)
+        # pokedb未掲載 (上位構築に不在) はごく低い擬似使用率を与える
+        usage_percent = u["percent"] if u else 0.1
+        teammates = dict(sorted(teammates_all.get(sid, {}).items(),
+                                key=lambda kv: -kv[1])[:8])
+        items = dict(parsed["items"]) or dict(items_supplement.get(sid, {}))
+        entries.append(PokemonUsageEntry(
+            pokemon_name=sid,
+            usage_percent=usage_percent,
+            rank=rank,
+            abilities=parsed["abilities"],
+            items=items,
+            moves=parsed["moves"],
+            tera_types={},          # チャンピオンズにテラスタルは無い
+            spreads=parsed["spreads"],
+            teammates=teammates,
+        ))
+
+    meta = {
+        "month": cbd_meta.get("season"),
+        "format": f"champions-{fmt.lower()}",
+        "rating_cutoff": None,
+        "number_of_battles": agg["n_teams"] if agg else None,
+        "source": "championsbattledata+pokedb" if agg else "championsbattledata",
+        "source_url": "https://championsbattledata.com/api",
+        "note": ("usage%はpokedb上位構築の採用頻度、技/持ち物/特性/配分は"
+                 "championsbattledata (ゲーム内バトルデータ由来)。"
+                 "Credit: Battle data provided by Pokémon Champions Battle Data"),
+    }
+    return entries, meta
+
+
 def fetch_usage_stats(fmt: str = USAGE_TARGET_FORMAT, use_dummy: bool = False,
-                       rating: int = USAGE_MIN_RATING, month: str | None = None
+                       rating: int = USAGE_MIN_RATING, month: str | None = None,
+                       source: str = "auto", season_number: int | None = None,
+                       limit: int | None = None
                        ) -> tuple[list[PokemonUsageEntry], dict]:
     """使用率統計の取得エントリポイント。
 
+    source:
+      - "auto":     champions実データ -> 失敗時 Smogon gen9ou の順で試す (既定)
+      - "champions": championsbattledata + pokedb のみ
+      - "smogon":   従来の Smogon chaos JSON のみ
     use_dummy=True の場合のみダミーデータを返す(ネットワーク不要な動作確認用)。
-    既定(use_dummy=False)では Smogon chaos JSON から実データを取得する。
     """
     if use_dummy:
         return fetch_dummy_usage_stats(), {"month": "dummy", "format": fmt,
-                                            "rating_cutoff": rating, "number_of_battles": None}
+                                            "rating_cutoff": rating,
+                                            "number_of_battles": None,
+                                            "source": "dummy", "source_url": None,
+                                            "note": ""}
 
-    return fetch_smogon_chaos(fmt=fmt, rating=rating, month=month)
+    if source in ("auto", "champions"):
+        try:
+            return fetch_champions_usage(season_number=season_number, limit=limit)
+        except Exception as e:
+            if source == "champions":
+                raise
+            print(f"[warn] champions実データの取得に失敗、Smogonへフォールバック: {e}")
+
+    entries, meta = fetch_smogon_chaos(fmt=SMOGON_FALLBACK_FORMAT, rating=rating, month=month)
+    meta.setdefault("source", "smogon")
+    meta.setdefault("source_url",
+                    f"{SMOGON_STATS_BASE_URL}/{meta.get('month')}/chaos/"
+                    f"{SMOGON_FALLBACK_FORMAT}-{rating}.json")
+    meta.setdefault("note", "fallback: champions実データ取得不可のためgen9ou統計を使用")
+    return entries, meta

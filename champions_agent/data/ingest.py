@@ -89,30 +89,32 @@ def ingest_static_data(pokemon_limit: int = 30) -> None:
 
 
 def ingest_usage_stats(fmt: str = USAGE_TARGET_FORMAT, use_dummy: bool = False,
-                        rating: int = USAGE_MIN_RATING, month: str | None = None) -> None:
+                        rating: int = USAGE_MIN_RATING, month: str | None = None,
+                        source: str = "auto", season_number: int | None = None,
+                        limit: int | None = None) -> None:
     """使用率統計を取得し、新しいスナップショットとしてDBに投入する。
 
-    既定では Smogon usage stats (chaos JSON) から実データを取得する。
-    use_dummy=True の場合のみネットワーク不要のダミーデータを使う。
+    既定 (source="auto") ではチャンピオンズ実データ
+    (championsbattledata + pokedb opendata) を取得し、失敗時のみ
+    Smogon gen9ou にフォールバックする。
     """
-    print(f"[ingest] 使用率統計を取得します(format={fmt}, rating={rating}, dummy={use_dummy})")
+    print(f"[ingest] 使用率統計を取得します(source={source}, dummy={use_dummy})")
     db.init_db()
 
     entries, meta = usage_scraper.fetch_usage_stats(fmt=fmt, use_dummy=use_dummy,
-                                                      rating=rating, month=month)
-    source = "dummy" if use_dummy else "smogon"
+                                                      rating=rating, month=month,
+                                                      source=source,
+                                                      season_number=season_number,
+                                                      limit=limit)
 
     with db.get_connection() as conn:
         snapshot_id = db.create_usage_snapshot(
-            conn, source=source, fmt=fmt,
+            conn, source=meta.get("source", source), fmt=meta.get("format", fmt),
             rating_cutoff=meta.get("rating_cutoff"),
-            note="dummy data for pipeline verification" if use_dummy else "",
+            note=meta.get("note", ""),
             source_month=meta.get("month"),
             number_of_battles=meta.get("number_of_battles"),
-            source_url=(
-                f"https://www.smogon.com/stats/{meta.get('month')}/chaos/{fmt}-{rating}.json"
-                if not use_dummy else None
-            ),
+            source_url=meta.get("source_url"),
         )
 
 
@@ -167,13 +169,22 @@ def main() -> None:
                          help="使用率統計の対象月(例 2026-06)。省略時は直近の存在する月を自動検出")
     parser.add_argument("--use-dummy-usage", action="store_true", default=False,
                          help="ネットワーク不要のダミーデータを使う(動作確認用。既定は実データ)")
+    parser.add_argument("--source", type=str, default="auto",
+                         choices=["auto", "champions", "smogon"],
+                         help="使用率の取得元。auto=champions実データ優先+Smogonフォールバック")
+    parser.add_argument("--season-number", type=int, default=None,
+                         help="pokedb opendataのシーズン番号 (例 3=M-3)。省略時は最新から探索")
+    parser.add_argument("--limit-usage", type=int, default=None,
+                         help="championsbattledataの取得ポケモン数上限 (動作確認用)")
     args = parser.parse_args()
 
     if not args.skip_static:
         ingest_static_data(pokemon_limit=args.pokemon_limit)
     if not args.skip_usage:
         ingest_usage_stats(fmt=args.format, use_dummy=args.use_dummy_usage,
-                            rating=args.rating, month=args.month)
+                            rating=args.rating, month=args.month,
+                            source=args.source, season_number=args.season_number,
+                            limit=args.limit_usage)
 
 
 

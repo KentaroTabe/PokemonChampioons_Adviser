@@ -22,20 +22,29 @@ MODELS_DIR = BASE_DIR / "train" / "checkpoints"
 
 # --- 外部API設定 ---
 POKEAPI_BASE_URL = "https://pokeapi.co/api/v2"
-# 使用率統計の取得元。実際のURL/パーサはレギュ・シーズンに応じて usage_scraper.py 内で調整する。
+# 使用率統計の取得元 (優先順)。詳細は data/sources/ の各モジュール参照。
 USAGE_STATS_SOURCES = {
-    "pikalytics": {
+    # 主軸: ゲーム内「バトルデータ」の日次収集API (規約でボット利用許可・要クレジット)
+    "championsbattledata": {
         "enabled": True,
-        "base_url": "https://www.pikalytics.com",
+        "base_url": "https://championsbattledata.com",
+        "credit": "Battle data provided by Pokémon Champions Battle Data",
     },
-    "home_ranking": {
-        "enabled": False,  # 将来、公式/非公式のHOMEランキング集計元が定まったら有効化
-        "base_url": "",
+    # 補完: 上位ランカー構築の公式オープンデータ (使用率%/共起率の算出元)
+    "pokedb_opendata": {
+        "enabled": True,
+        "base_url": "https://champs.pokedb.tokyo",
+    },
+    # フォールバック: champions実データが取得不能な場合のみ (gen9ou)
+    "smogon": {
+        "enabled": True,
+        "base_url": "https://www.smogon.com/stats",
     },
 }
 
-# 収集対象のレーティング帯・フォーマット(仮値。要調整)
-USAGE_TARGET_FORMAT = "gen9ou"  # poke-env/Showdown上のフォーマットID相当の仮置き
+# 収集対象フォーマット (チャンピオンズ ランクバトル シングル)
+USAGE_TARGET_FORMAT = "champions-singles"
+# Smogonフォールバック時のレーティング下限
 USAGE_MIN_RATING = 1500
 
 

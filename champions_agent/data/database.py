@@ -169,14 +169,24 @@ def bulk_insert(conn: sqlite3.Connection, table: str, columns: Sequence[str],
     )
 
 
-def latest_snapshot_id(conn: sqlite3.Connection, source: str, fmt: str) -> int | None:
+def latest_snapshot_id(conn: sqlite3.Connection, source: str | None = None,
+                        fmt: str | None = None) -> int | None:
+    """最新のスナップショットIDを返す。source/fmt は指定時のみ絞り込む。"""
+    conditions, params = [], []
+    if source:
+        conditions.append("source = ?")
+        params.append(source)
+    if fmt:
+        conditions.append("format = ?")
+        params.append(fmt)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     row = conn.execute(
-        """
+        f"""
         SELECT id FROM usage_snapshot
-        WHERE source = ? AND format = ?
+        {where}
         ORDER BY fetched_at DESC, id DESC
         LIMIT 1
         """,
-        (source, fmt),
+        params,
     ).fetchone()
     return row["id"] if row else None

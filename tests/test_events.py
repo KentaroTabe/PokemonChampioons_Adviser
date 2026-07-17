@@ -1,0 +1,134 @@
+"""イベント辞書 (メッセージ解析) のテスト。
+
+実際のゲームメッセージ (スクリーンショット由来の表記 + OCR誤読例) を使う。
+
+    python -m tests.test_events
+"""
+from __future__ import annotations
+
+from vision.state import BattleStateV2
+from vision.events import EventParser
+from vision.normalize import NameResolver
+
+resolver = NameResolver()
+
+
+def new_parser():
+    state = BattleStateV2()
+    # 選出画面相当の初期情報
+    from vision.state import PokemonState
+    state.player.party = [
+        PokemonState(species_ja="ブリジュラス", species_id="duraludon"),
+        PokemonState(species_ja="ライチュウ", species_id="raichu"),
+        PokemonState(species_ja="ミミッキュ", species_id="mimikyu"),
+    ]
+    state.opponent.party = [
+        PokemonState(types=["ほのお", "ひこう"]),
+        PokemonState(types=["ドラゴン", "じめん"]),
+    ]
+    return state, EventParser(state, resolver)
+
+
+def test_weather_and_terrain():
+    state, p = new_parser()
+    assert "sand_start" in p.parse("砂あらしが 吹き始めた!")
+    assert state.field.weather == "sandstorm"
+    assert "rain_start" in p.parse("雨が 降り始めた!")
+    assert state.field.weather == "rain"
+    assert "sun_start" in p.parse("日差しが 強くなった!")
+    assert state.field.weather == "sun"
+    assert "rain_end" not in p.parse("日差しが 強くなった!")  # 重複は無視
+    print("test_weather_and_terrain OK")
+
+
+def test_switch_and_mega():
+    state, p = new_parser()
+    fired = p.parse("아나이뚜は リザードンを 繰り出した!")
+    assert "switch_opponent" in fired, fired
+    # リザードン(ほのお/ひこう)は選出画面のタイプ枠[0]に紐付くはず
+    assert state.opponent.active().species_ja == "リザードン"
+    assert state.opponent.active_index == 0, state.opponent.active_index
+    assert len(state.opponent.party) == 2
+
+    fired = p.parse("相手の リザードンは メガリザードンに メガシンカした!")
+    assert "mega_evolve" in fired
+    assert state.opponent.active().is_mega
+    assert state.mega_used["opponent"]
+
+    # OCR誤読でもメガシンカを検知できる
+    state2, p2 = new_parser()
+    fired = p2.parse("相手のリ逆ードンはメカリサートンにメガシンカした")
+    assert "mega_evolve" in fired
+    print("test_switch_and_mega OK")
+
+
+def test_rank_change():
+    state, p = new_parser()
+    p.parse("아나이뚜は リザードンを 繰り出した!")
+    fired = p.parse("相手の リザードンの 特攻が がくっと下がった!")
+    assert any(f.startswith("boost_opponent_spa") for f in fired), fired
+    assert state.opponent.active().boosts["spa"] == -2
+
+    fired = p.parse("ブリジュラスの 防御が ぐーんと上がった!")
+    assert any(f.startswith("boost_player_def_+2") for f in fired), fired
+    assert state.player.party[0].boosts["def"] == 2
+    print("test_rank_change OK")
+
+
+def test_hazards_and_screens():
+    state, p = new_parser()
+    fired = p.parse("相手の 鋁鋼maxの ステルスロック!")
+    # 相手が使用 -> 自分の場に設置
+    assert any("stealthrock" in f for f in fired), fired
+    assert state.player.stealth_rock
+
+    fired = p.parse("ブリジュラスの リフレクター!")
+    assert state.player.reflect
+    print("test_hazards_and_screens OK")
+
+
+def test_status_and_volatile():
+    state, p = new_parser()
+    p.parse("아나이뚜は リザードンを 繰り出した!")
+    p.parse("相手の リザードンは やけどを 負った!")
+    assert state.opponent.active().status == "burn"
+    p.parse("ブリジュラスは 混乱した!")
+    assert "confusion" in state.player.party[0].volatiles
+    p.parse("相手の リザードンは 倒れた!")
+    assert state.opponent.active().status == "fainted"
+    print("test_status_and_volatile OK")
+
+
+def test_ability_popup():
+    state, p = new_parser()
+    fired = p.parse("リザードンの ひでり", source="right_popup")
+    assert any(f.startswith("ability_opponent_drought") for f in fired), fired
+    assert state.field.weather == "sun"
+
+    state2, p2 = new_parser()
+    fired = p2.parse("ペリッパーの あめふらし", source="left_popup")
+    assert state2.field.weather == "rain"
+    print("test_ability_popup OK")
+
+
+def test_move_reveal():
+    state, p = new_parser()
+    p.parse("아나이뚜は リザードンを 繰り出した!")
+    fired = p.parse("相手の リザードンの フレアドライブ!")
+    assert any(f.startswith("move_opponent_flareblitz") for f in fired), fired
+    assert "フレアドライブ" in state.opponent.active().revealed_moves
+    # 「りゅうのはどう」のように技名に「の」を含むケース
+    fired = p.parse("ブリジュラスの りゅうのはどう!")
+    assert any(f.startswith("move_player_dragonpulse") for f in fired), fired
+    print("test_move_reveal OK")
+
+
+if __name__ == "__main__":
+    test_weather_and_terrain()
+    test_switch_and_mega()
+    test_rank_change()
+    test_hazards_and_screens()
+    test_status_and_volatile()
+    test_ability_popup()
+    test_move_reveal()
+    print("\nALL OK")

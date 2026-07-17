@@ -13,3 +13,6 @@ pokemon-showdown/
 # Database
 *.sqlite3
 champions_agent/data/db/champions.sqlite3
+
+# 使用率データの生アーカイブ (日次更新で生成)
+champions_agent/data/archive/

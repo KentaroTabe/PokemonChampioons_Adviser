@@ -128,7 +128,7 @@ def _fetch_pokemon_static_map(conn) -> dict[str, dict]:
     return {r["name"]: dict(r) for r in rows}
 
 
-def build_role_tags(fmt: str = USAGE_TARGET_FORMAT, source: str = "smogon") -> int:
+def build_role_tags(fmt: str = USAGE_TARGET_FORMAT, source: str | None = None) -> int:
     """最新スナップショットのmeta_setsから役割タグを再構築する。戻り値: 生成した行数。"""
     with db.get_connection() as conn:
         snapshot_id = db.latest_snapshot_id(conn, source=source, fmt=fmt)

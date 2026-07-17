@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  使用率DBを毎日 06:30 に更新する launchd 設定。
+
+  インストール (REPO_ROOT を実際のパスに書き換えてから):
+    cp champions_agent/scripts/com.championsadviser.usage-update.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.championsadviser.usage-update.plist
+
+  アンインストール:
+    launchctl unload ~/Library/LaunchAgents/com.championsadviser.usage-update.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.championsadviser.usage-update</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/kenta/GitHub/PokemonChampioons_Adviser/champions_agent/scripts/update_usage_db.sh</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>6</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+    <key>StandardErrorPath</key>
+    <string>/tmp/championsadviser-usage-update.err</string>
+</dict>
+</plist>

@@ -30,7 +30,7 @@ def _top1(conn, table: str, col: str, snapshot_id: int, pokemon_name: str) -> st
     return names[0] if names else None
 
 
-def build_meta_sets(fmt: str = USAGE_TARGET_FORMAT, source: str = "smogon") -> int:
+def build_meta_sets(fmt: str = USAGE_TARGET_FORMAT, source: str | None = None) -> int:
 
     """最新スナップショットからmeta_setsを再構築する。戻り値: 生成した行数。"""
     with db.get_connection() as conn:
