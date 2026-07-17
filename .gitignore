@@ -2,3 +2,10 @@ images/
 .venv
 debug_crops/
 .clinerules
+
+# champions_agent
+champions_agent/data/db/*.sqlite3
+champions_agent/train/checkpoints/
+__pycache__/
+*.pyc
+

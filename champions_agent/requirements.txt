@@ -1,0 +1,16 @@
+# --- データ収集 ---
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
+# --- RL / バトル環境 ---
+poke-env>=0.8.3
+gymnasium>=0.29.0
+stable-baselines3>=2.3.0
+torch>=2.2.0
+numpy>=1.26.0
+
+# --- ユーティリティ ---
+pydantic>=2.6.0
+tqdm>=4.66.0
+python-dotenv>=1.0.0
