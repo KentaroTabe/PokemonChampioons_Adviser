@@ -34,7 +34,6 @@ from poke_env.environment.singles_env import SinglesEnv
 from poke_env.environment.single_agent_wrapper import SingleAgentWrapper
 from poke_env.player import RandomPlayer
 from poke_env.ps_client import ServerConfiguration
-from poke_env.teambuilder import ConstantTeambuilder
 
 
 from champions_agent.agent import encoders
@@ -44,13 +43,17 @@ from champions_agent.config import (
     TRAINING_BATTLE_FORMAT, TRAINING_TEAM_SIZE,
 )
 from champions_agent.env.reward import get_reward_config
-from champions_agent.env.team_builder import build_random_team_text
+from champions_agent.env.team_builder import ChampionsTeambuilder
 
 # アドバイザーのバックエンド (8000) と併用するため、学習用Showdownは別ポートで動かす
 TrainingServerConfiguration = ServerConfiguration(
     f"ws://localhost:{SHOWDOWN_PORT}/showdown/websocket",
     "https://play.pokemonshowdown.com/action.php?",
 )
+
+# poke-envの静的データへチャンピオンズの新フォーム/リバランス技を注入する
+from champions_agent.env import champions_dex_patch
+champions_dex_patch.apply()
 
 
 class ChampionsSinglesEnv(SinglesEnv):
@@ -119,6 +122,7 @@ def make_training_env(battle_format: str = TRAINING_BATTLE_FORMAT,
                        own_play_style: str = DEFAULT_PLAY_STYLE,
                        opp_play_style_pool: list[str] | None = None,
                        team_size: int = TRAINING_TEAM_SIZE,
+                       opponent_mode: str = "auto",
                        seed: int | None = None):
     """自己対戦(1体のRLエージェント vs ランダム/メタチームプレイヤー)用の環境を構築する。
 
@@ -134,13 +138,12 @@ def make_training_env(battle_format: str = TRAINING_BATTLE_FORMAT,
     """
     rng = random.Random(seed)
 
-    own_team_text = build_random_team_text(size=team_size, play_style=own_play_style) if use_meta_team else None
-
-    opp_style = _pick_opponent_play_style(opp_play_style_pool, rng)
-    opp_team_text = build_random_team_text(size=team_size, play_style=opp_style) if use_meta_team else None
-
-    own_teambuilder = ConstantTeambuilder(own_team_text) if own_team_text else None
-    opp_teambuilder = ConstantTeambuilder(opp_team_text) if opp_team_text else None
+    # バトルごとに使用率メタから新チームを生成する (過学習防止)
+    own_teambuilder = ChampionsTeambuilder(size=team_size, play_style=own_play_style,
+                                            rng=rng) if use_meta_team else None
+    opp_teambuilder = ChampionsTeambuilder(size=team_size,
+                                            style_pool=opp_play_style_pool,
+                                            rng=rng) if use_meta_team else None
 
     env = ChampionsSinglesEnv(
         battle_format=battle_format,
@@ -153,12 +156,32 @@ def make_training_env(battle_format: str = TRAINING_BATTLE_FORMAT,
         strict=False,
     )
 
+    # --- 対戦相手の決定 (population-based selfplay) ---
+    # プールに「vs Random勝率ゲートを超えた過去チェックポイント」があれば
+    # 自動でselfplay相手に切り替える。無ければRandomPlayer。
+    from champions_agent.train.opponent_pool import OpponentPool, make_pool_opponent
 
-    opponent = RandomPlayer(
-        battle_format=battle_format,
-        server_configuration=TrainingServerConfiguration,
-        team=opp_teambuilder,
-    )
+    pool = OpponentPool()
+    use_selfplay = opponent_mode == "selfplay" or \
+        (opponent_mode == "auto" and pool.has_entries())
+    if use_selfplay and pool.has_entries():
+        opponent = make_pool_opponent(
+            pool,
+            battle_format=battle_format,
+            server_configuration=TrainingServerConfiguration,
+            team=opp_teambuilder,
+        )
+        print(f"[showdown_env] 対戦相手: selfplayプール {len(pool.entries())}件 "
+              f"(+εランダム混合)")
+    else:
+        opponent = RandomPlayer(
+            battle_format=battle_format,
+            server_configuration=TrainingServerConfiguration,
+            team=opp_teambuilder,
+        )
+        if opponent_mode != "random":
+            print("[showdown_env] 対戦相手: RandomPlayer (プールが空。"
+                  "勝率ゲート通過後に自動でselfplayへ移行)")
 
     return SingleAgentWrapper(env, opponent)
 

@@ -101,6 +101,15 @@ def main() -> None:
     ))
     print(f"[evaluate] {result}")
 
+    # vs Random の結果は opponent_pool の勝率ゲート判定に使うため保存する
+    if not args.opponent_play_style:
+        import json
+        from pathlib import Path
+        log_dir = Path(__file__).resolve().parent / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / f"last_eval_{args.play_style}.json").write_text(
+            json.dumps(result, ensure_ascii=False))
+
 
 if __name__ == "__main__":
     main()

@@ -62,6 +62,9 @@ trap cleanup EXIT
     caffeinate -i python -m champions_agent.train.evaluate \
       --play-style "$style" --battles "$EVAL_BATTLES" || \
       echo "[nightly] [$style] 評価が失敗しました"
+
+    # 勝率ゲートを超えたらselfplay相手プールへスナップショット
+    python -m champions_agent.train.opponent_pool --update-from-eval "$style" || true
   done
 
   echo "===== done: $(date) ====="

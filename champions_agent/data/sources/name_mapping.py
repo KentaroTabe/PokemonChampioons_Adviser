@@ -80,6 +80,13 @@ POKEAPI_TO_SHOWDOWN_OVERRIDES: dict[str, str] = {
     for smogon_key, slug in SMOGON_TO_POKEAPI_OVERRIDES.items()
 }
 
+# チャンピオンズ固有の対応: championsbattledata のIDと
+# Showdown champions mod の合法種族表記の差分
+POKEAPI_TO_SHOWDOWN_OVERRIDES.update({
+    # チャンピオンズにはエターナルフラワーのみ登場 (素のフローエットはIllegal)
+    "floette": "Floette-Eternal",
+})
+
 
 def to_showdown_name(slug: str) -> str:
     """PokeAPI slug(DBのpokemon_name等)をPokemon Showdownの正式な種族名表記へ変換する。

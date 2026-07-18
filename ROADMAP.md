@@ -179,16 +179,35 @@
 - (旧12/13) **夜間バッチ整備** — `scripts/train_nightly.sh` (caffeinate/Showdown自動起動停止/
   `--resume`継続学習/観測空間非互換チェックポイントの自動退避/評価/ログ)
 
-**残る障壁 (忠実度 — シミュレーションと実環境の乖離)**:
+**2026-07-19 追加解消分 その2 (メガ/リバランス再現 + selfplay移行)**:
 
-5. **メガシンカが再現できない** (最重要)。本命対処はShowdownの `data/mods/champions/` 作成:
-   新フォーム種族値は championsbattledata の metadata CSV から転記可能、メガ発動処理は
-   gen7のscripts流用。当面はメガ抜き近似で学習し、乖離として認識しておく
-6. リバランス未反映 (まひ12.5% / PP固定 / ねむけ / 技威力変更) — 同modに含める
-10. 報酬が勝敗+HP差のみ (性格プリセットの意義が薄い)
-14. selfplay.py / train_selection.py は未スモークテスト (同種の修正が必要な可能性)
-15. 相手が RandomPlayer のみ (自己対戦の相手として弱すぎる)。学習が進んだら
-    過去チェックポイント同士の対戦 (population-based selfplay) へ移行する
+- (旧5/6) **メガシンカ・リバランスの再現を達成**。アップストリームShowdownに
+  公式のchampions mod (`data/mods/champions/`) が存在することを発見し、
+  学習フォーマットを **`gen9championsbssregmb`** ([Gen 9 Champions] BSS Reg M-B) へ変更。
+  - メガシンカ (交代後も継続するチャンピオンズ仕様)・新メガストーン (dragoninite等)・
+    まひ1/8・ねむり2-3T・こおり1/4+確定解除・championsの技プール/リバランスすべて再現
+  - Flat Rules = 6体構築→3体選出・Lv50・種族/アイテムクロース
+  - チーム生成をchampionsネイティブに適合 (**EV欄は能力ポイント0-32/合計66として
+    そのまま渡す**・アイテム重複解消・floette→Floette-Eternal等)。検証器30/30合格
+  - poke-envが新フォームを知らず落ちる問題は `champions_dex_patch` で解消
+    (Showdownから種族1517/技938をエクスポートして実行時注入。
+    再生成: `node tools/export_champions_dex.js > champions_agent/data/champions_dex.json`)
+- (旧15) **population-based selfplayへの自動移行を実装** (`train/opponent_pool.py`):
+  - vs Random勝率が**ゲート0.75**を超えたチェックポイントをプールへスナップショット
+    (性格ごと最大5世代)
+  - プールに1件でもあれば、学習の対戦相手が自動でRandom→「過去チェックポイントの方策
+    (バトルごとに新しい世代を優先して抽選、ε=25%でRandom混合)」へ切り替わる
+  - チームは両陣営とも**バトルごとに使用率メタから再生成** (ChampionsTeambuilder)
+  - 夜間バッチに組み込み済み: 学習→評価→ゲート判定→プール更新が毎晩自動で回る
+  - 検証ツール: `python -m tools.smoke_selfplay` / `python -m tools.validate_teams`
+
+**残る障壁**:
+
+10. 報酬が勝敗+HP差のみ (性格プリセットの意義が薄い) — 学習データが溜まってから着手予定
+14. train_selection.py (選出方策) は未スモークテスト
+16. レギュレーション更新時: Showdown側のchampions modはupstream追従が必要
+    (`cd pokemon-showdown && git pull` + `node tools/export_champions_dex.js` 再実行)。
+    M-A形式は `championsregma` mod として併存
 
 
 - **RLの位置づけはアドバイザーの補完** (探索ベース > RL が2025-26の実証結果)。

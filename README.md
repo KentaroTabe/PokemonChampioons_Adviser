@@ -129,8 +129,12 @@ python3 -m http.server 3000
 
 アドバイスの主軸は探索ベース (`advisor/`) ですが、セルフプレイ評価・将来の
 ハイブリッド化のためRL基盤 (`champions_agent/`) を維持しています。
-シミュレーションは **3体・Lv50 (チャンピオンズ近似)** の `gen9customgame` で行い、
-チームは実環境の使用率DB (championsbattledata由来) から生成されます。
+シミュレーションはShowdownの**チャンピオンズ公式mod**
+(`gen9championsbssregmb` = BSS Reg M-B: メガシンカ継続仕様・まひ1/8等の
+リバランス・6体→3体選出・Lv50) で行い、チームは実環境の使用率DB
+(championsbattledata由来、能力ポイント0-32スケールのまま) からバトルごとに生成されます。
+対戦相手は最初はRandom、**vs Random勝率75%を超えると自動で過去チェックポイントとの
+selfplay (population-based) に移行**します。
 
 ### 2-1. ローカルShowdownサーバー (ポート8100)
 

@@ -40,16 +40,19 @@ class PokemonSet:
             lines.append(f"Ability: {self.ability}")
         if self.evs:
             # evs文字列 "HP/Atk/Def/SpA/SpD/Spe" を Showdown形式へ変換。
-            # チャンピオンズの能力ポイント (0-32スケール、32≒努力値252) は8倍換算する
+            # champions mod はEV欄を「能力ポイント (各0-32・合計66)」として
+            # ネイティブ解釈するため、CBD由来の生の値をそのまま渡す。
+            # 安全のため 各32/合計66 を超えた分だけ削る
             labels = ["HP", "Atk", "Def", "SpA", "SpD", "Spe"]
             values = []
             for v in self.evs.split("/"):
                 try:
-                    values.append(int(v))
+                    values.append(max(0, min(32, int(v))))
                 except ValueError:
                     values.append(0)
-            if values and max(values) <= 32:
-                values = [min(252, v * 8) for v in values]
+            while sum(values) > 66:
+                i = values.index(max(values))
+                values[i] -= sum(values) - 66 if values[i] >= sum(values) - 66 else 1
             ev_parts = [f"{v} {l}" for l, v in zip(labels, values) if v]
             if ev_parts:
                 lines.append("EVs: " + " / ".join(ev_parts))
@@ -69,11 +72,24 @@ def _fetch_meta_pool(conn, snapshot_id: int) -> list[dict]:
         SELECT pokemon_name, ability_name, item_name, tera_type,
                nature, evs, move1, move2, move3, move4, weight
         FROM meta_sets
-        WHERE snapshot_id = ?
+        WHERE snapshot_id = ? AND move1 IS NOT NULL
         """,
         (snapshot_id,),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def _fetch_fallback_items(conn, snapshot_id: int) -> list[str]:
+    """アイテム重複解消用の代替候補を、実使用率DB (=champions実在確定) から取る"""
+    rows = conn.execute(
+        """
+        SELECT item_name, SUM(usage_percent) AS total
+        FROM item_usage WHERE snapshot_id = ?
+        GROUP BY item_name ORDER BY total DESC LIMIT 30
+        """,
+        (snapshot_id,),
+    ).fetchall()
+    return [r["item_name"] for r in rows]
 
 
 def _fetch_role_scores(conn, snapshot_id: int) -> dict[str, dict[str, float]]:
@@ -137,6 +153,7 @@ def build_random_party(size: int = 6, fmt: str = USAGE_TARGET_FORMAT,
             )
         pool = _fetch_meta_pool(conn, snapshot_id)
         role_scores = _fetch_role_scores(conn, snapshot_id)
+        fallback_items = _fetch_fallback_items(conn, snapshot_id)
 
     if len(pool) < size:
         raise RuntimeError(
@@ -164,7 +181,7 @@ def build_random_party(size: int = 6, fmt: str = USAGE_TARGET_FORMAT,
             seen.add(candidate["pokemon_name"])
             result.append(candidate)
 
-    return [
+    sets = [
         PokemonSet(
             species=to_showdown_name(_sanitize_species(r["pokemon_name"])),
             ability=r["ability_name"],
@@ -176,25 +193,42 @@ def build_random_party(size: int = 6, fmt: str = USAGE_TARGET_FORMAT,
         )
         for r in result
     ]
+    _enforce_item_clause(sets, fallback_items)
+    return sets
 
 
 
-# --- gen9互換サニタイズ -------------------------------------------------------
-# チャンピオンズ専用要素 (新規メガ種/メガストーン) はShowdown gen9に存在しないため、
-# シミュレーションではベース種/実在アイテムへ丸める (忠実度は落ちるが対戦は成立する)。
+# --- champions形式向けサニタイズ ---------------------------------------------
+# - メガ形態の種族エントリ (CBDはメガを独立ページで集計) はベース種+メガストーンで表現
+# - アイテムはchampions modの実在IDのみ許可 (新メガストーン dragoninite 等は実在)
+# - Flat Rules の Item Clause 用にチーム内アイテム重複を解消する
 _LEGAL_ITEM_IDS = None
+
+# アイテム重複時の代替候補 (使用率DBから動的に取得。これは最終フォールバック)
+_FALLBACK_ITEMS = ["leftovers", "sitrusberry", "focussash", "lumberry"]
 
 
 def _legal_item_ids() -> set:
+    """championsのmod items.ts + 本体items.ts + jp_names からアイテムIDを収集する"""
     global _LEGAL_ITEM_IDS
     if _LEGAL_ITEM_IDS is None:
         import json
+        import re as _re
         from pathlib import Path
-        jp = Path(__file__).resolve().parents[2] / "vision" / "data" / "jp_names.json"
+        ids: set = set()
+        repo = Path(__file__).resolve().parents[2]
+        for ts in (repo / "pokemon-showdown" / "data" / "mods" / "champions" / "items.ts",
+                   repo / "pokemon-showdown" / "data" / "items.ts"):
+            try:
+                ids |= set(_re.findall(r"^\t(\w+): \{", ts.read_text(), _re.M))
+            except Exception:
+                pass
         try:
-            _LEGAL_ITEM_IDS = set(json.loads(jp.read_text()).get("items", {}).values())
+            jp = repo / "vision" / "data" / "jp_names.json"
+            ids |= set(json.loads(jp.read_text()).get("items", {}).values())
         except Exception:
-            _LEGAL_ITEM_IDS = set()
+            pass
+        _LEGAL_ITEM_IDS = ids
     return _LEGAL_ITEM_IDS
 
 
@@ -214,10 +248,53 @@ def _sanitize_item(item: str | None) -> str | None:
     return item
 
 
+def _enforce_item_clause(sets: list[PokemonSet], fallback_items: list[str] | None = None) -> None:
+    """Flat Rules (Item Clause = 1) のためチーム内のアイテム重複を解消する"""
+    candidates = (fallback_items or []) + _FALLBACK_ITEMS
+    used: set = set()
+    for s in sets:
+        if s.item and s.item in used:
+            s.item = next((f for f in candidates if f not in used), None)
+        if s.item:
+            used.add(s.item)
+
+
 def build_random_team_text(size: int = 6, **kwargs) -> str:
     """poke-env の Teambuilder(ShowdownTeam)にそのまま渡せるテキスト形式で返す。"""
     party = build_random_party(size=size, **kwargs)
     return "\n\n".join(p.to_showdown_text() for p in party)
+
+
+try:
+    from poke_env.teambuilder import Teambuilder as _PokeEnvTeambuilder
+except Exception:  # poke-env未導入環境 (データ収集のみ) でもimport可能にする
+    _PokeEnvTeambuilder = object
+
+
+class ChampionsTeambuilder(_PokeEnvTeambuilder):
+    """毎バトル新しいメタチームを生成する poke-env Teambuilder。
+
+    ConstantTeambuilder と違い、バトルごとに使用率メタから確率生成するため、
+    学習が特定チームに過学習しない。style_pool を渡すとバトルごとに
+    性格 (プレイスタイル) もランダムに切り替わる。
+    """
+
+    def __init__(self, size: int = 6, play_style: str | None = None,
+                 style_pool: list[str] | None = None,
+                 rng: random.Random | None = None):
+        self.size = size
+        self.play_style = play_style
+        self.style_pool = style_pool
+        self.rng = rng or random.Random()
+
+    def yield_team(self) -> str:
+        style = self.play_style
+        if style is None:
+            pool = self.style_pool or list(PLAY_STYLES.keys())
+            style = self.rng.choice(pool)
+        text = build_random_team_text(size=self.size, play_style=style)
+        mons = self.parse_showdown_team(text)
+        return self.join_team(mons)
 
 
 if __name__ == "__main__":
