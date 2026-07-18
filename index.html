@@ -27,6 +27,7 @@
     <div>
         <button id="start-btn">カメラ映像取得開始</button>
         <button id="reset-btn">状態リセット</button>
+        <span id="conn-label" class="tag" style="background:#a33">バックエンド: 未接続</span>
         <span id="scene-label" class="tag">scene: -</span>
         <span id="field-label" class="tag"></span>
     </div>
@@ -49,7 +50,20 @@
     </footer>
     <script>
         const socket = io('http://localhost:8000');
-        socket.on('connect', () => console.log('バックエンドに接続しました'));
+        const connLabel = document.getElementById('conn-label');
+        socket.on('connect', () => {
+            console.log('バックエンドに接続しました');
+            connLabel.textContent = 'バックエンド: 接続中';
+            connLabel.style.background = '#284';
+        });
+        socket.on('disconnect', () => {
+            connLabel.textContent = 'バックエンド: 切断';
+            connLabel.style.background = '#a33';
+        });
+        socket.on('connect_error', (e) => {
+            connLabel.textContent = 'バックエンド: 接続失敗 (uvicornをポート8000で起動してください)';
+            connLabel.style.background = '#a33';
+        });
 
         const WEATHER_JA = {sun: '晴れ', rain: '雨', sandstorm: '砂あらし', snow: '雪'};
         const TERRAIN_JA = {electric: 'エレキF', grassy: 'グラスF', psychic: 'サイコF', misty: 'ミストF'};
@@ -109,8 +123,9 @@
 
         document.getElementById('start-btn').addEventListener('click', async () => {
             try {
+                // 名前・技名など小さいUI文字のOCRには1080pが必要 (720pでは文字が潰れる)
                 const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+                    video: { width: { ideal: 1920 }, height: { ideal: 1080 } },
                     audio: false
                 });
                 const videoElement = document.getElementById('video');

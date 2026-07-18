@@ -28,16 +28,59 @@ class Advisor:
 
     def advise(self, state_dict: dict) -> dict:
         try:
-            return evaluate(state_dict, self.resolver)
+            result = evaluate(state_dict, self.resolver)
         except Exception as e:  # アドバイス失敗で本体を落とさない
             import traceback
             traceback.print_exc()
-            return {"ok": False, "reason": f"評価エラー: {e}"}
+            result = {"ok": False, "reason": f"評価エラー: {e}"}
+        suggestion = self.suggest_check(state_dict)
+        if suggestion:
+            result["suggestion"] = suggestion
+        return result
+
+    @staticmethod
+    def suggest_check(state: dict) -> str:
+        """不足している情報に応じて、ユーザーに開いてほしい画面を提案する。
+
+        スマホ版にも「場の状況」確認画面があるため、ランク変化などが起きた後は
+        表示してもらうことで確定情報を取り込める (画面が表示されれば
+        フレームとして解析対象になる)。
+        """
+        try:
+            player = state.get("player", {})
+            opp = state.get("opponent", {})
+            idx = player.get("active_index")
+            me = player["party"][idx] if idx is not None and idx < len(player.get("party", [])) else {}
+            oidx = opp.get("active_index")
+            om = opp["party"][oidx] if oidx is not None and oidx < len(opp.get("party", [])) else {}
+
+            # 1. 自分の技が未取得 -> 技選択画面
+            if not me.get("moves"):
+                return "技選択画面を一度開いてください (技とPPを読み取ります)"
+
+            # 2. 直近でランク変化イベントがある -> 場の状況画面
+            recent = state.get("events", [])[-12:]
+            has_boost = any((e.get("event") or "").startswith("boost_") for e in recent)
+            any_boosts = any(v for v in (me.get("boosts") or {}).values()) or \
+                         any(v for v in (om.get("boosts") or {}).values())
+            if has_boost or any_boosts:
+                return ("「場の状況」確認画面を開くとランク補正・場の効果を確定できます "
+                        "(数秒表示すれば読み取ります)")
+
+            # 3. 相手のHPが不明 -> 様子を見る画面
+            if om and om.get("hp_percent") is None:
+                return "「様子を見る」を開くと相手パーティのHP%を取得できます"
+        except Exception:
+            pass
+        return ""
 
     def format_advice(self, advice: dict) -> str:
         """人間向けのテキスト整形"""
         if not advice.get("ok"):
-            return f"[アドバイス不可] {advice.get('reason')}"
+            text = f"[アドバイス不可] {advice.get('reason')}"
+            if advice.get("suggestion"):
+                text += f"\n  📱 {advice['suggestion']}"
+            return text
         lines = []
         if advice.get("best"):
             b = advice["best"]
@@ -55,4 +98,6 @@ class Advisor:
             mark = "(判明済)" if t.get("revealed") else "(予測)"
             lines.append(f"  ⚠ 最大脅威: {t['move_id']} {mark} "
                          f"被ダメ {t['dmg_min']:.0f}〜{t['dmg_max']:.0f}%")
+        if advice.get("suggestion"):
+            lines.append(f"  📱 {advice['suggestion']}")
         return "\n".join(lines)

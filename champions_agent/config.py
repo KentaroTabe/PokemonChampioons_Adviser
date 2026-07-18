@@ -20,6 +20,15 @@ SCHEMA_PATH = DB_DIR / "schema.sql"
 
 MODELS_DIR = BASE_DIR / "train" / "checkpoints"
 
+# --- ローカルShowdownサーバー (学習用) ---
+# アドバイザーのバックエンド (ポート8000) と常時併用できるよう別ポートで運用する。
+SHOWDOWN_PORT = int(os.environ.get("SHOWDOWN_PORT", "8100"))
+# チャンピオンズ近似のシミュレーション形式:
+# gen9customgame = 検証が緩く、チャンピオンズ由来のチーム (専用メガ等をサニタイズ済み)
+# を受け付ける。チームは3体・Lv50で生成し3v3を再現する (ROADMAP.md 参照)
+TRAINING_BATTLE_FORMAT = "gen9customgame"
+TRAINING_TEAM_SIZE = 3
+
 # --- 外部API設定 ---
 POKEAPI_BASE_URL = "https://pokeapi.co/api/v2"
 # 使用率統計の取得元 (優先順)。詳細は data/sources/ の各モジュール参照。

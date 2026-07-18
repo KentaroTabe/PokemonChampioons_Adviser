@@ -7,15 +7,22 @@
 # を配信する。
 #
 # 起動: uvicorn server:app_asgi --host 0.0.0.0 --port 8000
+#
+# デバッグ: 環境変数 DEBUG_DUMP_FRAMES=1 で受信フレームを約10秒ごとに
+# debug_frames/ に保存する (実映像でのゾーン調整用)。
+import asyncio
 import base64
 import json
+import os
 import time
+from pathlib import Path
 
 import cv2
 import numpy as np
 import socketio
 from fastapi import FastAPI
 
+from vision import ocr
 from vision.pipeline import VisionPipeline
 from advisor.service import Advisor
 
@@ -26,10 +33,25 @@ app_asgi = socketio.ASGIApp(sio, app)
 pipeline = VisionPipeline()
 advisor = Advisor(resolver=pipeline.resolver)
 
+# バトル中の初回OCRで初期化が走ると数十秒フレームが詰まるため、
+# サーバー起動時に先にウォームアップしておく (Apple Vision優先)
+print("[server] OCRバックエンドを初期化します...")
+ocr.preload()
+print("[server] 準備完了。フロントエンドからの接続を待っています。")
+
+DUMP_FRAMES = os.environ.get("DEBUG_DUMP_FRAMES") == "1"
+DUMP_DIR = Path("debug_frames")
+
 frame_counter = 0
+processed_counter = 0
+dropped_counter = 0
+_busy = False
 _last_state_json = ""
 _last_advice_time = 0.0
 _last_advice_key = ""
+_last_dump_time = 0.0
+_last_scene_log = 0.0
+_last_scene = "unknown"
 
 
 def _advice_key(state: dict) -> str:
@@ -50,15 +72,23 @@ def _advice_key(state: dict) -> str:
 
 @sio.on('connect')
 async def connect(sid, environ):
-    print(f"フロントエンドが接続しました: {sid}")
+    print(f"[server] フロントエンドが接続しました: {sid}")
     await sio.emit('state_update', pipeline.state.to_dict(), room=sid)
 
 
 @sio.on('send_frame')
 async def handle_frame(sid, data):
-    global frame_counter, _last_state_json, _last_advice_time, _last_advice_key
+    global frame_counter, processed_counter, dropped_counter, _busy
+    global _last_state_json, _last_advice_time, _last_advice_key
+    global _last_dump_time, _last_scene_log
     frame_counter += 1
 
+    # 処理が追いつかない場合は古いフレームを捨てる (最新優先)。
+    # OCRは重いので、これが無いとキューが伸び続けて表示が遅延し続ける
+    if _busy:
+        dropped_counter += 1
+        return
+    _busy = True
     try:
         encoded_data = data.split(',')[1]
         nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
@@ -66,11 +96,39 @@ async def handle_frame(sid, data):
         if img is None:
             return
 
-        state, fired = pipeline.process(img)
+        if DUMP_FRAMES and time.time() - _last_dump_time > 10:
+            _last_dump_time = time.time()
+            DUMP_DIR.mkdir(exist_ok=True)
+            cv2.imwrite(str(DUMP_DIR / f"frame_{int(time.time())}.png"), img)
 
-        # 状態変化時 or 2秒ごとに同期
+        # CPU重処理はexecutorで実行し、イベントループ (受信/送信) を塞がない
+        loop = asyncio.get_event_loop()
+        state, fired = await loop.run_in_executor(None, pipeline.process, img)
+        processed_counter += 1
+
+        # 場の状況画面は貴重な検証データなので、検出したら間隔に関係なく保存する
+        if DUMP_FRAMES and state["scene"] == "field_check" and \
+                time.time() - _last_dump_time > 2:
+            _last_dump_time = time.time()
+            DUMP_DIR.mkdir(exist_ok=True)
+            cv2.imwrite(str(DUMP_DIR / f"fc_{int(time.time())}.png"), img)
+
+        # 動作確認用: シーンが変わった瞬間 + 5秒ごとに状況をログ
+        global _last_scene
+        if state["scene"] != _last_scene:
+            print(f"[server] シーン変化: {_last_scene} -> {state['scene']}")
+            _last_scene = state["scene"]
+        if time.time() - _last_scene_log > 5:
+            _last_scene_log = time.time()
+            print(f"[server] scene={state['scene']} 受信={frame_counter} "
+                  f"処理={processed_counter} 破棄={dropped_counter} events={len(state['events'])}")
+
+        if fired:
+            for f in fired:
+                print(f"[server] イベント検知: {f}")
+
         state_json = json.dumps(state, ensure_ascii=False, sort_keys=True)
-        if fired or state_json != _last_state_json or frame_counter % 60 == 0:
+        if fired or state_json != _last_state_json or processed_counter % 20 == 0:
             _last_state_json = state_json
             await sio.emit('state_update', state, room=sid)
 
@@ -81,15 +139,19 @@ async def handle_frame(sid, data):
             if key and (key != _last_advice_key or now - _last_advice_time > 10.0):
                 _last_advice_key = key
                 _last_advice_time = now
-                advice = advisor.advise(state)
+                advice = await loop.run_in_executor(None, advisor.advise, state)
                 advice["text"] = advisor.format_advice(advice)
                 await sio.emit('advice_update', advice, room=sid)
                 if advice.get("ok"):
                     print("--- アドバイス ---")
                     print(advice["text"])
+                else:
+                    print(f"[server] アドバイス保留: {advice.get('reason')}")
 
     except Exception as e:
-        print(f"画像処理エラー: {e}")
+        print(f"[server] 画像処理エラー: {e}")
+    finally:
+        _busy = False
 
 
 @sio.on('reset_state')
@@ -97,4 +159,4 @@ async def reset_state(sid, data=None):
     """フロントエンドから状態リセット要求 (新しい対戦の開始など)"""
     pipeline.reset()
     await sio.emit('state_update', pipeline.state.to_dict(), room=sid)
-    print("状態をリセットしました")
+    print("[server] 状態をリセットしました")

@@ -43,7 +43,7 @@ class BattlePolicy:
         obs = ChampionsSinglesEnv.embed_battle(self, battle)  # type: ignore[arg-type]
         action, _ = self.model.predict(obs, deterministic=True)
         try:
-            return SinglesEnv.action_to_order(action, battle, strict=False)
+            return ChampionsSinglesEnv.action_to_order(action, battle, strict=False)
         except Exception:
             return self._choose_random_legal(battle)
 

@@ -20,8 +20,10 @@ start_server() {
     exit 1
   fi
   cd "${SHOWDOWN_DIR}"
-  echo "[setup_showdown] Pokemon Showdown サーバーを起動します(localhost:8000, --no-security)"
-  node pokemon-showdown start --no-security
+  PORT="${SHOWDOWN_PORT:-8100}"
+  echo "[setup_showdown] Pokemon Showdown サーバーを起動します(localhost:${PORT}, --no-security)"
+  # アドバイザーのバックエンド(8000)と常時併用するため既定は8100
+  node pokemon-showdown start "${PORT}" --no-security
 }
 
 if [ "${1:-}" = "--start" ]; then

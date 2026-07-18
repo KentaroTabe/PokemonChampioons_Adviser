@@ -1,10 +1,12 @@
 """OCRユーティリティ。
 
-EasyOCR (日本語+英語) を遅延ロードし、UIの文字種別ごとに前処理を変えて読む。
+バックエンドは2系統:
+- Apple Vision (macOS内蔵, pyobjc-framework-Vision): 主体。低解像度・低コントラストの
+  小さい日本語UI文字に圧倒的に強く高速 (OBS実映像で実証済み)。前処理不要で生画像を読む。
+- EasyOCR (日本語+英語): Apple Visionが使えない環境のフォールバック。
+  白文字マスク等の前処理を併用する。
 
-- 白文字+黒縁取り (メッセージ/ポップアップ): 縁取り検証つき白マスク
-- パネル上の白文字 (名前/技名など): 白マスク
-- 数字 (HP/PP/COMMAND): allowlist付き
+縁取り文字の「存在検知・描画完了検知」には引き続きマスク (outlined_text_mask) を使う。
 """
 from __future__ import annotations
 
@@ -17,6 +19,114 @@ import numpy as np
 warnings.filterwarnings("ignore", category=UserWarning, module="torch.utils.data.dataloader")
 
 _reader = None
+_apple_vision = None   # None=未判定, False=利用不可, それ以外=Visionモジュール
+
+
+def _get_apple_vision():
+    """Apple Visionフレームワークを遅延ロードする (macOSのみ)"""
+    global _apple_vision
+    if _apple_vision is None:
+        try:
+            import Vision  # noqa
+            from Foundation import NSData  # noqa
+            _apple_vision = Vision
+            print("[vision.ocr] Apple Vision OCR を使用します")
+        except Exception:
+            _apple_vision = False
+            print("[vision.ocr] Apple Vision が使えないため EasyOCR を使用します")
+    return _apple_vision
+
+
+def apple_ocr_text(bgr, scale: float = 2.0, langs=("ja-JP", "en-US")) -> str:
+    """Apple VisionでOCRする。失敗時は空文字。
+
+    数字ゾーンは langs=("en-US",) を使うと精度が上がる
+    (日本語モードは斜体の「197/197」を「197mg7」等に誤読する)。
+    """
+    Vision = _get_apple_vision()
+    if not Vision or bgr is None or bgr.size == 0:
+        return ""
+    from Foundation import NSData
+    if scale != 1.0:
+        bgr = cv2.resize(bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    ok, buf = cv2.imencode(".png", bgr)
+    if not ok:
+        return ""
+    data = NSData.dataWithBytes_length_(buf.tobytes(), len(buf))
+    handler = Vision.VNImageRequestHandler.alloc().initWithData_options_(data, None)
+    req = Vision.VNRecognizeTextRequest.alloc().init()
+    req.setRecognitionLevel_(0)  # accurate
+    req.setRecognitionLanguages_(list(langs))
+    req.setUsesLanguageCorrection_(False)
+    handler.performRequests_error_([req], None)
+    results = req.results() or []
+    return "".join(str(o.topCandidates_(1)[0].string()) for o in results).replace(" ", "")
+
+
+def _is_ascii_allowlist(allowlist: Optional[str]) -> bool:
+    return bool(allowlist) and all(ord(c) < 128 for c in allowlist)
+
+
+def apple_ocr_lines(bgr, scale: float = 1.5, langs=("ja-JP", "en-US")) -> list:
+    """Apple Visionで行ごとのOCR結果と位置を返す。
+
+    戻り値: [(text, (x0, y0, x1, y1))] 座標は入力画像に対する相対値 (左上原点)。
+    「場の状況」画面のように行位置が可変なレイアウトのアンカー検出に使う。
+    """
+    Vision = _get_apple_vision()
+    if not Vision or bgr is None or bgr.size == 0:
+        return []
+    from Foundation import NSData
+    if scale != 1.0:
+        bgr = cv2.resize(bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    ok, buf = cv2.imencode(".png", bgr)
+    if not ok:
+        return []
+    data = NSData.dataWithBytes_length_(buf.tobytes(), len(buf))
+    handler = Vision.VNImageRequestHandler.alloc().initWithData_options_(data, None)
+    req = Vision.VNRecognizeTextRequest.alloc().init()
+    req.setRecognitionLevel_(0)
+    req.setRecognitionLanguages_(list(langs))
+    req.setUsesLanguageCorrection_(False)
+    handler.performRequests_error_([req], None)
+    out = []
+    for obs in (req.results() or []):
+        cand = obs.topCandidates_(1)[0]
+        bb = obs.boundingBox()  # Vision座標系: 左下原点・正規化済み
+        x0 = float(bb.origin.x)
+        y1v = float(bb.origin.y)
+        w = float(bb.size.width)
+        h = float(bb.size.height)
+        # 左上原点に変換
+        out.append((str(cand.string()).replace(" ", ""),
+                    (x0, 1.0 - y1v - h, x0 + w, 1.0 - y1v)))
+    return out
+
+
+def _apply_ascii_allowlist(text: str, allowlist: Optional[str]) -> str:
+    """数字系allowlist (ASCIIのみ) はVision出力にも文字フィルタとして適用する。
+
+    カタカナ等の日本語allowlistはEasyOCR専用 (Visionはフィルタ不要の精度) なので適用しない。
+    """
+    if not allowlist or not text:
+        return text
+    if not all(ord(c) < 128 for c in allowlist):
+        return text
+    return "".join(c for c in text if c in allowlist)
+
+
+def preload():
+    """サーバー起動時のウォームアップ (使用するバックエンドを初期化)"""
+    if _get_apple_vision():
+        # 小さいダミー画像で初回呼び出しのオーバーヘッドを消化
+        apple_ocr_text(np.full((32, 96, 3), 255, dtype=np.uint8))
+    else:
+        get_reader()
+
+# 自分側のポケモン名はカタカナ表記前提 (ニックネーム含む日本語UI)。
+# OCRのallowlistに使うと「ワワ】・ア」のような記号混じりの誤読を防げる。
+# 末尾の数字/英字はポリゴン2・ポリゴンZ等のため
+KATAKANA_ALLOWLIST = "".join(chr(c) for c in range(0x30A1, 0x30F7)) + "ー・2Z"
 
 
 def get_reader():
@@ -81,12 +191,13 @@ def outlined_text_mask(img, scale=2.5):
 
 
 def read_crop_direct(crop_img, scale=2.0, allowlist: Optional[str] = None) -> str:
-    """マスク処理をせず、拡大した生画像を直接OCRする。
-
-    縁取り文字はEasyOCRが直接読む方が精度が高い (マスクは検知/安定化用)。
-    """
+    """マスク処理をせず、拡大した生画像を直接OCRする (Vision優先)"""
     if crop_img is None or crop_img.size == 0:
         return ""
+    if _get_apple_vision():
+        langs = ("en-US",) if _is_ascii_allowlist(allowlist) else ("ja-JP", "en-US")
+        return _apply_ascii_allowlist(apple_ocr_text(crop_img, scale=scale, langs=langs),
+                                      allowlist)
     resized = cv2.resize(crop_img, None, fx=scale, fy=scale,
                          interpolation=cv2.INTER_CUBIC)
     reader = get_reader()
@@ -111,11 +222,15 @@ def read_text(processed, allowlist: Optional[str] = None) -> str:
 
 def read_zone_text(img, zone, mode="panel", allowlist: Optional[str] = None,
                    val_min=170) -> str:
-    """ゾーンを切り出してOCR。mode: 'panel' | 'outline'"""
+    """ゾーンを切り出してOCR。Vision利用時は前処理なしで生画像を読む"""
     from vision.zones import crop
     c = crop(img, zone)
     if c is None:
         return ""
+    if _get_apple_vision():
+        langs = ("en-US",) if _is_ascii_allowlist(allowlist) else ("ja-JP", "en-US")
+        return _apply_ascii_allowlist(apple_ocr_text(c, scale=2.0, langs=langs),
+                                      allowlist)
     if mode == "outline":
         processed = outlined_text_mask(c)
     else:
@@ -134,11 +249,18 @@ def parse_fraction(text: str):
         if 0 < mx <= 999 and cur <= mx * 2:
             return (min(cur, mx), mx)
     digits = re.sub(r"\D", "", text)
-    if len(digits) >= 2 and len(digits) % 2 == 0:
-        half = len(digits) // 2
-        cur, mx = int(digits[:half]), int(digits[half:])
-        if 0 < mx <= 999 and cur <= mx:
-            return (cur, mx)
+    # 2桁のみ ("18") は「1/8」か「8/8の誤読」か判別不能なので採用しない
+    if len(digits) >= 3:
+        if len(digits) % 2 == 0:
+            half = len(digits) // 2
+            cur, mx = int(digits[:half]), int(digits[half:])
+            if 0 < mx <= 999 and cur <= mx:
+                return (cur, mx)
+        else:
+            half = len(digits) // 2
+            cur, mx = int(digits[:half]), int(digits[half + 1:])
+            if 0 < mx <= 999 and cur <= mx:
+                return (cur, mx)
     return None
 
 

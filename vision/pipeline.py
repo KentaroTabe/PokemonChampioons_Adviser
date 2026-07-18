@@ -26,16 +26,20 @@ from vision.state import BattleStateV2
 
 
 class RegionStabilizer:
-    """テキスト描画アニメーション完了 (数フレーム変化なし) を検知する"""
+    """テキスト描画アニメーション完了 (数フレーム変化なし) を検知する。
 
-    def __init__(self, stable_frames=3, diff_threshold=200, cooldown=25):
+    トリガー後は done フラグが立ち、内容が大きく変わる (次のメッセージへの
+    切り替わり) までは再トリガーしない。固定クールダウンは使わない
+    (以前の25フレーム≒5秒のクールダウンは、連続で流れるメッセージを
+    軒並み取りこぼす原因になっていた)。
+    """
+
+    def __init__(self, stable_frames=3, diff_threshold=200):
         self.prev = None
         self.stable_count = 0
         self.done = False
         self.stable_frames = stable_frames
         self.diff_threshold = diff_threshold
-        self.cooldown = cooldown
-        self.cooldown_left = 0
 
     def update(self, mask) -> bool:
         """処理済みマスクを受け取り、OCRすべきタイミングなら True"""
@@ -43,18 +47,13 @@ class RegionStabilizer:
             self.prev = None
             self.stable_count = 0
             self.done = False
-            self.cooldown_left = 0
-            return False
-
-        if self.cooldown_left > 0:
-            self.cooldown_left -= 1
-            self.prev = mask
             return False
 
         trigger = False
         if self.prev is not None and self.prev.shape == mask.shape:
             changed = cv2.countNonZero(cv2.absdiff(self.prev, mask))
             if self.done:
+                # 表示内容が切り替わったら次のメッセージの検知を再開
                 if changed > self.diff_threshold * 4:
                     self.done = False
                     self.stable_count = 0
@@ -63,7 +62,6 @@ class RegionStabilizer:
                 if self.stable_count >= self.stable_frames:
                     trigger = True
                     self.done = True
-                    self.cooldown_left = self.cooldown
             else:
                 self.stable_count = 0
         self.prev = mask
@@ -77,15 +75,17 @@ class VisionPipeline:
         self.parser = EventParser(self.state, self.resolver)
         self._stabilizers = {
             "message": RegionStabilizer(),
-            "left_popup": RegionStabilizer(stable_frames=2, cooldown=20),
-            "right_popup": RegionStabilizer(stable_frames=2, cooldown=20),
+            "left_popup": RegionStabilizer(stable_frames=2),
+            "right_popup": RegionStabilizer(stable_frames=2),
         }
         self._last_heavy = {}       # scene -> last heavy extraction time
+        self._selection_streak = 0  # 選出画面が連続何フレーム続いているか
         self._heavy_interval = {
             "selection": 2.0,
             "command": 1.5,
             "move_select": 1.5,
             "watch": 1.5,
+            "field_check": 1.5,
             "battle_hud": 2.5,
         }
 
@@ -119,15 +119,23 @@ class VisionPipeline:
         self.state.scene = scene
         fired: list = []
 
+        # 選出画面のデバウンス: 対戦中の1フレーム誤分類で状態を壊さないよう、
+        # 連続して選出画面と判定された場合のみ「選出画面にいる」とみなす
+        if scene == "selection":
+            self._selection_streak += 1
+        else:
+            self._selection_streak = 0
+        selection_confirmed = single_shot or self._selection_streak >= 3
+
         # 新しい対戦の開始検知: バトル終了後に選出画面へ戻ったらリセット
-        if scene == "selection" and prev_scene not in ("selection", "standby", "unknown"):
-            if self.state.battle_active:
-                self.reset()
-                self.state.scene = scene
+        if scene == "selection" and selection_confirmed and self.state.battle_active:
+            self.reset()
+            self._selection_streak = 3
+            self.state.scene = scene
 
         heavy = self._should_run_heavy(scene, force=single_shot)
 
-        if scene == "selection" and heavy:
+        if scene == "selection" and heavy and selection_confirmed:
             extractors.extract_selection(img, self.state, self.resolver)
         elif scene in ("command", "move_select", "battle_hud") and heavy:
             extractors.extract_battle_hud(img, self.state, self.resolver)
@@ -135,6 +143,8 @@ class VisionPipeline:
                 extractors.extract_move_select(img, self.state, self.resolver)
         elif scene == "watch" and heavy:
             extractors.extract_watch(img, self.state, self.resolver)
+        elif scene == "field_check" and heavy:
+            extractors.extract_field_check(img, self.state, self.resolver)
 
         # --- メッセージ / ポップアップ (HUDが消えるフィールドシーンのみ。
         #     HUD表示中はタイマー等の誤OCRを防ぐため読まない) ---

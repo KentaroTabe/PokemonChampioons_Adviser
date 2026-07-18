@@ -33,15 +33,24 @@ from poke_env.battle import AbstractBattle
 from poke_env.environment.singles_env import SinglesEnv
 from poke_env.environment.single_agent_wrapper import SingleAgentWrapper
 from poke_env.player import RandomPlayer
-from poke_env.ps_client import LocalhostServerConfiguration
+from poke_env.ps_client import ServerConfiguration
 from poke_env.teambuilder import ConstantTeambuilder
 
 
 from champions_agent.agent import encoders
 from champions_agent.agent.spaces import BATTLE_OBS_DIM
-from champions_agent.config import DEFAULT_PLAY_STYLE, PLAY_STYLES
+from champions_agent.config import (
+    DEFAULT_PLAY_STYLE, PLAY_STYLES, SHOWDOWN_PORT,
+    TRAINING_BATTLE_FORMAT, TRAINING_TEAM_SIZE,
+)
 from champions_agent.env.reward import get_reward_config
 from champions_agent.env.team_builder import build_random_team_text
+
+# アドバイザーのバックエンド (8000) と併用するため、学習用Showdownは別ポートで動かす
+TrainingServerConfiguration = ServerConfiguration(
+    f"ws://localhost:{SHOWDOWN_PORT}/showdown/websocket",
+    "https://play.pokemonshowdown.com/action.php?",
+)
 
 
 class ChampionsSinglesEnv(SinglesEnv):
@@ -61,38 +70,25 @@ class ChampionsSinglesEnv(SinglesEnv):
     def embed_battle(self, battle: AbstractBattle) -> np.ndarray:
         """現在の盤面をエージェント用の固定長ベクトルへ変換する。
 
-        現時点ではプロトタイプとして、自分の場のポケモン(最大3体想定だが
-        シングルは1体ずつ場に出る)と相手の見えている情報を使う簡易版。
+        技 (威力/相性/PP/STAB)・ランク・控え・設置技/壁・天候/フィールド・
+        素早さ比較まで含む観測 (agent/encoders.py の encode_battle)。
         """
-        own_active = battle.active_pokemon
-        opp_active = battle.opponent_active_pokemon
+        try:
+            return encoders.encode_battle(battle)
+        except Exception:
+            return np.zeros(BATTLE_OBS_DIM, dtype=np.float32)
 
-        own_vec = encoders.encode_own_pokemon(
-            own_active.species if own_active else "",
-            hp_percent=(own_active.current_hp_fraction if own_active else 0.0),
-            status=(own_active.status.name.lower() if own_active and own_active.status else "none"),
-        ) if own_active else np.zeros(encoders.POKEMON_FEATURE_DIM if hasattr(encoders, "POKEMON_FEATURE_DIM") else 64, dtype=np.float32)
-
-        opp_vec = encoders.encode_opponent_pokemon(
-            opp_active.species if opp_active else None,
-            hp_percent=(opp_active.current_hp_fraction if opp_active else 1.0),
-            status=(opp_active.status.name.lower() if opp_active and opp_active.status else "none"),
-        )
-
-        field_vec = encoders.encode_field(
-            weather=(battle.weather and list(battle.weather.keys())[0].name.lower()) or "none",
-            turn=battle.turn,
-        )
-
-        vec = np.concatenate([own_vec, opp_vec, field_vec]).astype(np.float32)
-        # BATTLE_OBS_DIM に満たない/超える場合はゼロ埋め/切り詰めして固定長を保証する
-        if len(vec) < BATTLE_OBS_DIM:
-            padded = np.zeros(BATTLE_OBS_DIM, dtype=np.float32)
-            padded[:len(vec)] = vec
-            vec = padded
-        elif len(vec) > BATTLE_OBS_DIM:
-            vec = vec[:BATTLE_OBS_DIM]
-        return vec
+    @staticmethod
+    def action_to_order(action, battle, fake: bool = False, strict: bool = True):
+        """poke-env 0.10 の SinglesEnv は6体チーム前提で、3体チームだと
+        交代アクション (インデックス3-5) が IndexError になる。
+        範囲外・不正アクションはランダムな合法手へフォールバックする。
+        """
+        from poke_env.player.player import Player
+        try:
+            return SinglesEnv.action_to_order(action, battle, fake=fake, strict=strict)
+        except (IndexError, ValueError, AssertionError):
+            return Player.choose_random_move(battle)
 
     def calc_reward(self, battle: AbstractBattle) -> float:
         """poke-envの reward_computing_helper を利用したシンプルな報酬計算。
@@ -118,9 +114,11 @@ def _pick_opponent_play_style(opp_play_style_pool: list[str] | None,
     return rng.choice(pool)
 
 
-def make_training_env(battle_format: str = "gen9ou", use_meta_team: bool = True,
+def make_training_env(battle_format: str = TRAINING_BATTLE_FORMAT,
+                       use_meta_team: bool = True,
                        own_play_style: str = DEFAULT_PLAY_STYLE,
                        opp_play_style_pool: list[str] | None = None,
+                       team_size: int = TRAINING_TEAM_SIZE,
                        seed: int | None = None):
     """自己対戦(1体のRLエージェント vs ランダム/メタチームプレイヤー)用の環境を構築する。
 
@@ -136,17 +134,17 @@ def make_training_env(battle_format: str = "gen9ou", use_meta_team: bool = True,
     """
     rng = random.Random(seed)
 
-    own_team_text = build_random_team_text(size=6, play_style=own_play_style) if use_meta_team else None
+    own_team_text = build_random_team_text(size=team_size, play_style=own_play_style) if use_meta_team else None
 
     opp_style = _pick_opponent_play_style(opp_play_style_pool, rng)
-    opp_team_text = build_random_team_text(size=6, play_style=opp_style) if use_meta_team else None
+    opp_team_text = build_random_team_text(size=team_size, play_style=opp_style) if use_meta_team else None
 
     own_teambuilder = ConstantTeambuilder(own_team_text) if own_team_text else None
     opp_teambuilder = ConstantTeambuilder(opp_team_text) if opp_team_text else None
 
     env = ChampionsSinglesEnv(
         battle_format=battle_format,
-        server_configuration=LocalhostServerConfiguration,
+        server_configuration=TrainingServerConfiguration,
         team=own_teambuilder,
         play_style=own_play_style,
         # strict=False: 学習初期はランダムに近い行動を大量に試すため、
@@ -158,7 +156,7 @@ def make_training_env(battle_format: str = "gen9ou", use_meta_team: bool = True,
 
     opponent = RandomPlayer(
         battle_format=battle_format,
-        server_configuration=LocalhostServerConfiguration,
+        server_configuration=TrainingServerConfiguration,
         team=opp_teambuilder,
     )
 

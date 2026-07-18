@@ -67,23 +67,32 @@ pip install -r champions_agent/requirements.txt
 ```
 
 
-## データ収集(定期実行前提・現時点は手動実行)
+## データ収集(チャンピオンズ実環境データ)
+
+使用率統計は**ポケモンチャンピオンズの実データ**を取得します(2026-07差し替え済み):
+
+1. 主軸: [championsbattledata.com](https://championsbattledata.com) API
+   — ゲーム内「バトルデータ」の日次収集(技/持ち物/特性/性格/能力ポイントの採用率%)。
+   要クレジット表記: *Battle data provided by Pokémon Champions Battle Data*
+2. 補完: [champs.pokedb.tokyo](https://champs.pokedb.tokyo) 公式オープンデータ
+   — 上位ランカー構築からポケモン使用率%・チームメイト共起率・持ち物傾向を集計
+3. フォールバック: Smogon gen9ou(上記が取得不能な場合のみ自動)
 
 ```bash
-# 静的データ(PokeAPI)+ 使用率統計(Smogon実データ)をまとめて取得
-python -m champions_agent.data.ingest --pokemon-limit 30 --format gen9ou --rating 1500
+# まとめて更新(ingest -> build_meta -> role_tagger。日次実行を想定)
+bash champions_agent/scripts/update_usage_db.sh
 
-# 使用率統計から代表的な型(meta_sets)を構築
-python -m champions_agent.data.build_meta
-
-# meta_setsから役割タグ(sweeper/wall/pivot等)を自動付与
-python -m champions_agent.data.role_tagger
+# 個別に実行する場合
+python -m champions_agent.data.ingest --skip-static --source auto
+python -m champions_agent.data.build_meta      # 代表的な型(meta_sets)を構築
+python -m champions_agent.data.role_tagger     # 役割タグ(sweeper/wall等)を付与
 ```
 
-`data/db/champions.sqlite3` にPokeAPIの静的データと使用率統計(Smogon chaos JSON由来)が
-格納されます。本番運用時は cron / launchd 等で上記3コマンドを定期実行してください(未設定)。
-
-ネットワーク不要のダミーデータで動作確認したい場合は `--use-dummy-usage` を付与してください。
+- launchdによる毎日06:30の自動実行: `scripts/com.championsadviser.usage-update.plist` 参照
+- 取得した生JSONは `data/archive/` にgzip保全(配信元停止時の保険)
+- 能力ポイントは **0〜32スケール**(32 ≒ 従来の努力値252相当)で格納
+- `--source smogon` で旧来のSmogonのみ、`--use-dummy-usage` でネットワーク不要のダミー
+- `--limit-usage 5` で少数ポケモンだけ取得する動作確認モード
 
 ## 性格(PlayStyle)
 
@@ -103,6 +112,9 @@ python -m champions_agent.data.role_tagger
 bash champions_agent/scripts/setup_showdown.sh          # 初回: clone + npm install
 bash champions_agent/scripts/setup_showdown.sh --start  # サーバー起動 (localhost:8000)
 ```
+
+※アドバイザーサーバー(`uvicorn server:app_asgi --port 8000`)とポートが競合するため、
+実運用(ライブアドバイス)と学習を同時に動かさないこと。
 
 性格ごとに戦闘方策を学習します(モデルは `train/checkpoints/battle_policy_{style}.zip` に保存):
 

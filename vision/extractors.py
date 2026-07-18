@@ -24,9 +24,11 @@ EFFECTIVENESS_MAP = [
     ("はつぐん", "super"),                # ばつぐん (2倍)
     ("かなりいまひとつ", "resist_heavy"),  # 0.25倍
     ("いまひとつ", "resist"),
+    ("いまひと", "resist"),
     ("こうかなし", "immune"),
     ("なさそう", "immune"),
     ("こうかあり", "neutral"),
+    ("かあり", "neutral"),
 ]
 
 
@@ -44,11 +46,8 @@ def _normalize_hint(text: str) -> Optional[str]:
 
 def _read_pp(img, zone) -> Optional[tuple]:
     """PP表示 '12/12' (大きい現在値 + 小さい最大値) を読む"""
-    c = crop(img, zone)
-    if c is None:
-        return None
-    processed = ocr.white_text_mask(c, val_min=160)
-    text = ocr.read_text(processed, allowlist="0123456789/")
+    text = ocr.read_zone_text(img, zone, mode="panel", allowlist="0123456789/",
+                              val_min=160)
     frac = ocr.parse_fraction(text)
     if frac:
         return frac
@@ -70,7 +69,8 @@ def extract_selection(img, state: BattleStateV2, resolver) -> None:
     for i, z in enumerate(zones.SELECTION_MY):
         if i < len(state.player.party) and state.player.party[i].species_ja:
             continue
-        name_text = ocr.read_zone_text(img, z["name"], mode="panel")
+        name_text = ocr.read_zone_text(img, z["name"], mode="panel",
+                                       allowlist=ocr.KATAKANA_ALLOWLIST)
         if not name_text:
             continue
         sp = resolver.resolve_species(name_text, cutoff=0.72)
@@ -229,7 +229,8 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
 
     # --- 自分: 表示名 + HP実数 ---
     me = state.player.ensure_active()
-    my_name = ocr.read_zone_text(img, zones.BATTLE["my_name"], mode="panel")
+    my_name = ocr.read_zone_text(img, zones.BATTLE["my_name"], mode="panel",
+                                 allowlist=ocr.KATAKANA_ALLOWLIST)
     if my_name:
         me.display_name = my_name
         sp = resolver.resolve_species(my_name, cutoff=0.8)
@@ -264,10 +265,28 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
 # ==============================================================================
 # 技選択画面
 # ==============================================================================
+def detect_move_rows(img) -> list:
+    """技リストの各行を動的検出し、名前/PP/ヒントのゾーンを導出する。
+
+    選択中の行は拡大され、相性ヒントの有無で行位置がずれるため、
+    固定ゾーンではなく毎回ピル (白い縁取り線ペア) を検出する。
+    戻り値: [{"name": zone, "pp": zone, "hint": zone}] (相対座標)
+    """
+    from vision.scenes import detect_move_pills
+    rows = []
+    for (top, bot) in detect_move_pills(img)[:5]:
+        rows.append({
+            "name": {"x0": 0.765, "y0": top, "x1": 0.920, "y1": bot},
+            "pp": {"x0": 0.905, "y0": top - 0.010, "x1": 0.990, "y1": bot + 0.005},
+            "hint": {"x0": 0.735, "y0": bot, "x1": 0.910, "y1": min(0.99, bot + 0.042)},
+        })
+    return rows
+
+
 def extract_move_select(img, state: BattleStateV2, resolver) -> None:
     me = state.player.ensure_active()
     new_moves = []
-    for i, row in enumerate(zones.MOVE_ROWS):
+    for i, row in enumerate(detect_move_rows(img)):
         name_text = ocr.read_zone_text(img, row["name"], mode="panel")
         if not name_text:
             continue
@@ -275,6 +294,8 @@ def extract_move_select(img, state: BattleStateV2, resolver) -> None:
         mv = resolver.resolve(name_text, "moves", cutoff=0.7)
         if mv:
             slot.name_ja, slot.move_id = mv[0], mv[1]
+        else:
+            continue  # 技名として解決できない行 (誤検出) はスキップ
         pp = _read_pp(img, row["pp"])
         if pp:
             slot.pp, slot.max_pp = pp[0], pp[1]
@@ -298,6 +319,256 @@ def extract_move_select(img, state: BattleStateV2, resolver) -> None:
             else:
                 merged.append(slot)
         me.moves = merged
+
+
+# ==============================================================================
+# 場の状況確認画面 (ランク倍率・場の効果のオーバーレイ)
+# ==============================================================================
+# 倍率表記 -> ランク段階 (通常ステータス)
+_MULT_TO_STAGE = [(4.0, 6), (3.5, 5), (3.0, 4), (2.5, 3), (2.0, 2), (1.5, 1),
+                  (1.0, 0), (0.67, -1), (0.5, -2), (0.4, -3), (0.33, -4),
+                  (0.29, -5), (0.25, -6)]
+# めいちゅう/かいひ用
+_MULT_TO_STAGE_ACC = [(3.0, 6), (2.67, 5), (2.33, 4), (2.0, 3), (1.67, 2),
+                      (1.33, 1), (1.0, 0), (0.75, -1), (0.6, -2), (0.5, -3),
+                      (0.43, -4), (0.38, -5), (0.33, -6)]
+
+_FC_STAT_LABELS = {
+    "こうけき": "atk", "ほうきよ": "def", "とくこう": "spa", "とくほう": "spd",
+    "すはやさ": "spe", "めいちゆう": "acc", "かいひ": "eva",
+}
+
+# 「〜状態」の効果名 -> 状態への反映
+_FC_EFFECTS = [
+    (("すなあらし",), ("weather", "sandstorm")),
+    (("にほんはれ", "ひてり", "日差し"), ("weather", "sun")),
+    (("あめ", "雨"), ("weather", "rain")),
+    (("ゆき", "雪"), ("weather", "snow")),
+    (("えれきふいると",), ("terrain", "electric")),
+    (("くらすふいると",), ("terrain", "grassy")),
+    (("さいこふいると",), ("terrain", "psychic")),
+    (("みすとふいると",), ("terrain", "misty")),
+    (("とりつくるむ", "ゆかんたしくう"), ("trickroom", None)),
+    (("りふれくた",), ("side_flag", "reflect")),
+    (("ひかりのかへ",), ("side_flag", "light_screen")),
+    (("おろらへる",), ("side_flag", "aurora_veil")),
+    (("おいかせ",), ("side_flag", "tailwind")),
+    (("すてるすろつく",), ("hazard", "stealth_rock")),
+    (("まきひし",), ("hazard_count", "spikes")),
+    (("とくひし",), ("hazard_count", "toxic_spikes")),
+    (("ねはねはねつと",), ("hazard", "sticky_web")),
+    (("もうとく",), ("status", "toxic")),
+    (("とく",), ("status", "poison")),
+    (("やけと", "火傷"), ("status", "burn")),
+    (("まひ",), ("status", "paralysis")),
+    (("ねむり",), ("status", "sleep")),
+    (("こおり",), ("status", "freeze")),
+    (("こんらん",), ("volatile", "confusion")),
+    (("みかわり",), ("volatile", "substitute")),
+    (("やとりき",), ("volatile", "leechseed")),
+]
+
+
+def _nearest_stage(mult: float, table) -> int:
+    return min(table, key=lambda mv: abs(mv[0] - mult))[1]
+
+
+def extract_field_check(img, state: BattleStateV2, resolver) -> None:
+    """「場の状況」画面からランク倍率・場の効果・状態異常を確定値として取り込む。
+
+    レイアウトは表示中の陣営 (自分=藍紫/相手=深紅パネル) や特性行の有無で
+    ずれるため、行OCR (座標付き) のラベル位置をアンカーにする。
+    """
+    from vision.normalize import loose_key
+
+    lines = ocr.apple_ocr_lines(img, scale=1.0)
+    if not lines:
+        return
+
+    def find(pred):
+        return [(t, bb) for t, bb in lines if pred(t, bb)]
+
+    # アンカー確認
+    if not any("効果と場の状" in t or "こうかとはのしよ" in loose_key(t)
+               for t, _ in lines):
+        return
+
+    # --- 表示中の陣営: 名前パネル付近の色 (深紅=相手 / 藍紫=自分) ---
+    name_area = crop(img, {"x0": 0.19, "y0": 0.21, "x1": 0.43, "y1": 0.27})
+    side_name = "player"
+    if name_area is not None:
+        hsv = cv2.cvtColor(name_area, cv2.COLOR_BGR2HSV)
+        crimson = cv2.inRange(hsv, np.array([160, 60, 60]), np.array([180, 255, 255]))
+        crimson2 = cv2.inRange(hsv, np.array([0, 60, 60]), np.array([8, 255, 255]))
+        purple = cv2.inRange(hsv, np.array([105, 40, 40]), np.array([160, 255, 255]))
+        c = cv2.countNonZero(crimson) + cv2.countNonZero(crimson2)
+        p = cv2.countNonZero(purple)
+        side_name = "opponent" if c > p else "player"
+    side = state.side(side_name)
+
+    # --- 種族名 (左上、x<0.45 y<0.30 の日本語行) ---
+    mon = None
+    for t, (x0, y0, x1, y1) in lines:
+        if x0 < 0.45 and y0 < 0.30 and len(t) >= 3:
+            sp = resolver.resolve_species(t, cutoff=0.75)
+            if sp:
+                idx = side.find_by_species(sp[0])
+                if idx is not None:
+                    mon = side.party[idx]
+                else:
+                    mon = side.switch_to_species(sp[0], sp[1])
+                    link_active_to_party(state, side_name)
+                    mon = side.ensure_active()
+                break
+    if mon is None:
+        mon = side.ensure_active()
+
+    # --- HP ---
+    # 斜体数字は日本語モードで崩れるため、行の領域をen-USで再OCRする。
+    # Visionの読みはスケールで揺れるため複数スケールを試し、妥当な結果のみ採用する
+    h_img, w_img = img.shape[:2]
+    for t, (x0, y0, x1, y1) in lines:
+        if not (x0 < 0.48 and 0.26 < y0 < 0.36
+                and any(c.isdigit() or c in "%％/" for c in t)):
+            continue
+        pad_y, pad_x = 0.012, 0.02
+        box = img[max(0, int((y0 - pad_y) * h_img)):int((y1 + pad_y) * h_img),
+                  max(0, int((x0 - pad_x) * w_img)):int((x1 + pad_x) * w_img)]
+        want_pct = "%" in t or "％" in t
+        done = False
+        for s in (2.0, 1.5, 3.0, 1.0):
+            t2 = ocr.apple_ocr_text(box, scale=s, langs=("en-US",))
+            if not t2:
+                continue
+            digits = re.sub(r"\D", "", t2)
+            if want_pct:
+                # '%'が読めているか、数字が2桁以上ある場合のみ%として信用する
+                if ("%" in t2 or len(digits) >= 2):
+                    pct = ocr.parse_percent(t2)
+                    if pct is not None:
+                        mon.hp_percent = float(pct)
+                        done = True
+                        break
+            frac = ocr.parse_fraction(t2)
+            if frac and frac[1]:
+                mon.hp_current, mon.hp_max = frac
+                mon.hp_percent = round(frac[0] / frac[1] * 100, 1)
+                done = True
+                break
+        if done:
+            break
+
+    # --- タイプバッジ (x<0.45, y 0.30-0.42) ---
+    types_found = []
+    for t, (x0, y0, x1, y1) in lines:
+        if x0 < 0.45 and 0.30 < y0 < 0.42:
+            for jp in ("ノーマル", "ほのお", "みず", "でんき", "くさ", "こおり",
+                        "かくとう", "どく", "じめん", "ひこう", "エスパー", "むし",
+                        "いわ", "ゴースト", "ドラゴン", "あく", "はがね", "フェアリー"):
+                if loose_key(jp) in loose_key(t) and jp not in types_found:
+                    types_found.append(jp)
+    if types_found:
+        mon.types = types_found
+
+    # --- 特性 / 持ち物 (自分側ページのみ表示。x<0.48, y 0.36-0.52) ---
+    for t, (x0, y0, x1, y1) in lines:
+        if not (x0 < 0.48 and 0.36 < y0 < 0.52 and len(t) >= 3):
+            continue
+        body = t.replace("特性", "").replace("持ち物", "")
+        if len(body) < 3:
+            continue
+        if not mon.ability_id:
+            ab = resolver.resolve(body, "abilities", cutoff=0.8)
+            if ab:
+                mon.ability_ja, mon.ability_id = ab[0], ab[1]
+                continue
+        if not mon.item_id:
+            it = resolver.resolve(body, "items", cutoff=0.8)
+            if it:
+                mon.item_ja, mon.item_id = it[0], it[1]
+
+    # --- ランク倍率: ステータスラベル行と同じ高さの「×n.n」を対応付ける ---
+    import re as _re
+    mult_lines = []
+    for t, (x0, y0, x1, y1) in lines:
+        m = _re.search(r"[xX×¥*]?([0-9]+[.,][0-9]+)", t)
+        if m and 0.28 < x0 < 0.50:
+            try:
+                mult_lines.append((float(m.group(1).replace(",", ".")), (y0 + y1) / 2))
+            except ValueError:
+                pass
+    for t, (x0, y0, x1, y1) in lines:
+        if x0 > 0.30:
+            continue
+        lk = loose_key(t)
+        stat = None
+        for label, key in _FC_STAT_LABELS.items():
+            if label in lk:
+                stat = key
+                break
+        if stat is None:
+            continue
+        cy = (y0 + y1) / 2
+        near = [mv for mv in mult_lines if abs(mv[1] - cy) < 0.022]
+        if not near:
+            continue
+        table = _MULT_TO_STAGE_ACC if stat in ("acc", "eva") else _MULT_TO_STAGE
+        mon.boosts[stat] = _nearest_stage(near[0][0], table)
+
+    # --- 場の効果リスト (右カラム x>0.45, y 0.28-0.60) ---
+    effect_lines = find(lambda t, bb: bb[0] > 0.45 and 0.28 < bb[1] < 0.60)
+    turn_re = _re.compile(r"([0-9])\s*/\s*([0-9])")
+    for t, (x0, y0, x1, y1) in effect_lines:
+        lk = loose_key(t)
+        if "状態" not in t and "状感" not in t and not turn_re.search(t):
+            continue
+        # 同じ行 or 近い行のターン表記 n/m
+        turns_left = None
+        m = turn_re.search(t)
+        if not m:
+            cy = (y0 + y1) / 2
+            for t2, (a0, b0, a1, b1) in effect_lines:
+                if abs((b0 + b1) / 2 - cy) < 0.02:
+                    m = turn_re.search(t2)
+                    if m:
+                        break
+        if m:
+            elapsed, total = int(m.group(1)), int(m.group(2))
+            if 0 < total <= 8 and elapsed <= total:
+                turns_left = total - elapsed
+
+        for keywords, (action, value) in _FC_EFFECTS:
+            if not any(loose_key(k) in lk for k in keywords):
+                continue
+            f = state.field
+            if action == "weather":
+                f.weather = value
+                if turns_left is not None:
+                    f.weather_turns = turns_left
+            elif action == "terrain":
+                f.terrain = value
+                if turns_left is not None:
+                    f.terrain_turns = turns_left
+            elif action == "trickroom":
+                f.trick_room = True
+                if turns_left is not None:
+                    f.trick_room_turns = turns_left
+            elif action == "side_flag":
+                setattr(side, value, True)
+            elif action == "hazard":
+                setattr(side, value, True)
+            elif action == "hazard_count":
+                if getattr(side, value) == 0:
+                    setattr(side, value, 1)
+            elif action == "status":
+                mon.status = value
+            elif action == "volatile":
+                if value not in mon.volatiles:
+                    mon.volatiles.append(value)
+            break
+
+    state.log_event("field_check", f"{side_name}:{mon.species_ja or '?'} 場の状況を取得",
+                    event_id="field_check")
 
 
 # ==============================================================================
@@ -349,7 +620,8 @@ def extract_watch(img, state: BattleStateV2, resolver) -> None:
 
     # 左列: 自分の選出パーティのHP実数値
     for i, z in enumerate(zones.WATCH_MY[:3]):
-        name_text = ocr.read_zone_text(img, z["name"], mode="panel")
+        name_text = ocr.read_zone_text(img, z["name"], mode="panel",
+                                       allowlist=ocr.KATAKANA_ALLOWLIST)
         hp_text = ocr.read_zone_text(img, z["hp"], mode="panel",
                                      allowlist="0123456789/")
         frac = ocr.parse_fraction(hp_text)

@@ -34,13 +34,23 @@ class PokemonSet:
     def to_showdown_text(self) -> str:
         """poke-env / Showdown のteambuilder importable format(簡易版)へ変換する。"""
         lines = [f"{self.species} @ {self.item or ''}".strip()]
+        # チャンピオンズのランクバトルはLv50固定
+        lines.append("Level: 50")
         if self.ability:
             lines.append(f"Ability: {self.ability}")
         if self.evs:
-            # evs文字列 "HP/Atk/Def/SpA/SpD/Spe" を Showdown形式へ変換
+            # evs文字列 "HP/Atk/Def/SpA/SpD/Spe" を Showdown形式へ変換。
+            # チャンピオンズの能力ポイント (0-32スケール、32≒努力値252) は8倍換算する
             labels = ["HP", "Atk", "Def", "SpA", "SpD", "Spe"]
-            values = self.evs.split("/")
-            ev_parts = [f"{v} {l}" for l, v in zip(labels, values) if v and v != "0"]
+            values = []
+            for v in self.evs.split("/"):
+                try:
+                    values.append(int(v))
+                except ValueError:
+                    values.append(0)
+            if values and max(values) <= 32:
+                values = [min(252, v * 8) for v in values]
+            ev_parts = [f"{v} {l}" for l, v in zip(labels, values) if v]
             if ev_parts:
                 lines.append("EVs: " + " / ".join(ev_parts))
         if self.nature:
@@ -105,7 +115,7 @@ def _apply_play_style_bias(pool: list[dict], role_scores: dict[str, dict[str, fl
 
 
 def build_random_party(size: int = 6, fmt: str = USAGE_TARGET_FORMAT,
-                        source: str = "smogon", rng: random.Random | None = None,
+                        source: str | None = None, rng: random.Random | None = None,
                         play_style: str = DEFAULT_PLAY_STYLE,
                         ) -> list[PokemonSet]:
 
@@ -156,10 +166,9 @@ def build_random_party(size: int = 6, fmt: str = USAGE_TARGET_FORMAT,
 
     return [
         PokemonSet(
-            species=to_showdown_name(r["pokemon_name"]),
+            species=to_showdown_name(_sanitize_species(r["pokemon_name"])),
             ability=r["ability_name"],
-
-            item=r["item_name"],
+            item=_sanitize_item(r["item_name"]),
             tera_type=r["tera_type"],
             nature=r["nature"],
             evs=r["evs"],
@@ -167,6 +176,42 @@ def build_random_party(size: int = 6, fmt: str = USAGE_TARGET_FORMAT,
         )
         for r in result
     ]
+
+
+
+# --- gen9互換サニタイズ -------------------------------------------------------
+# チャンピオンズ専用要素 (新規メガ種/メガストーン) はShowdown gen9に存在しないため、
+# シミュレーションではベース種/実在アイテムへ丸める (忠実度は落ちるが対戦は成立する)。
+_LEGAL_ITEM_IDS = None
+
+
+def _legal_item_ids() -> set:
+    global _LEGAL_ITEM_IDS
+    if _LEGAL_ITEM_IDS is None:
+        import json
+        from pathlib import Path
+        jp = Path(__file__).resolve().parents[2] / "vision" / "data" / "jp_names.json"
+        try:
+            _LEGAL_ITEM_IDS = set(json.loads(jp.read_text()).get("items", {}).values())
+        except Exception:
+            _LEGAL_ITEM_IDS = set()
+    return _LEGAL_ITEM_IDS
+
+
+def _sanitize_species(name: str) -> str:
+    for suf in ("megax", "megay", "mega"):
+        if name.endswith(suf) and len(name) > len(suf) + 2:
+            return name[: -len(suf)]
+    return name
+
+
+def _sanitize_item(item: str | None) -> str | None:
+    if not item:
+        return item
+    legal = _legal_item_ids()
+    if legal and item not in legal:
+        return "leftovers"
+    return item
 
 
 def build_random_team_text(size: int = 6, **kwargs) -> str:

@@ -15,10 +15,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 
-from champions_agent.config import DEFAULT_PLAY_STYLE, PLAY_STYLES, MODELS_DIR
+from champions_agent.config import (
+    DEFAULT_PLAY_STYLE, PLAY_STYLES, MODELS_DIR,
+    TRAINING_BATTLE_FORMAT, TRAINING_TEAM_SIZE,
+)
 from champions_agent.env.team_builder import build_random_team_text
+from champions_agent.env.showdown_env import TrainingServerConfiguration
 from poke_env.player import RandomPlayer
-from poke_env.ps_client import LocalhostServerConfiguration
 from poke_env.teambuilder import ConstantTeambuilder
 
 
@@ -37,33 +40,33 @@ class ModelPlayer(RandomPlayer):
 async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
                           opponent_play_style: str | None = None,
                           n_battles: int = 50,
-                          battle_format: str = "gen9ou") -> dict:
+                          battle_format: str = TRAINING_BATTLE_FORMAT) -> dict:
     """play_styleモデル vs (opponent_play_styleモデル or RandomPlayer) をn_battles戦させる。"""
-    own_team = build_random_team_text(size=6, play_style=play_style)
+    own_team = build_random_team_text(size=TRAINING_TEAM_SIZE, play_style=play_style)
     own_teambuilder = ConstantTeambuilder(own_team)
 
     player1 = ModelPlayer(
         battle_format=battle_format,
-        server_configuration=LocalhostServerConfiguration,
+        server_configuration=TrainingServerConfiguration,
         team=own_teambuilder,
         play_style=play_style,
     )
 
     if opponent_play_style:
-        opp_team = build_random_team_text(size=6, play_style=opponent_play_style)
+        opp_team = build_random_team_text(size=TRAINING_TEAM_SIZE, play_style=opponent_play_style)
         opp_teambuilder = ConstantTeambuilder(opp_team)
         player2 = ModelPlayer(
             battle_format=battle_format,
-            server_configuration=LocalhostServerConfiguration,
+            server_configuration=TrainingServerConfiguration,
             team=opp_teambuilder,
             play_style=opponent_play_style,
         )
     else:
-        opp_team = build_random_team_text(size=6, play_style="balance")
+        opp_team = build_random_team_text(size=TRAINING_TEAM_SIZE, play_style="balance")
         opp_teambuilder = ConstantTeambuilder(opp_team)
         player2 = RandomPlayer(
             battle_format=battle_format,
-            server_configuration=LocalhostServerConfiguration,
+            server_configuration=TrainingServerConfiguration,
             team=opp_teambuilder,
         )
 
@@ -87,7 +90,7 @@ def main() -> None:
                          choices=list(PLAY_STYLES.keys()) + [None],
                          help="省略時はRandomPlayerと対戦")
     parser.add_argument("--battles", type=int, default=50)
-    parser.add_argument("--format", type=str, default="gen9ou")
+    parser.add_argument("--format", type=str, default=TRAINING_BATTLE_FORMAT)
     args = parser.parse_args()
 
     result = asyncio.run(run_evaluation(

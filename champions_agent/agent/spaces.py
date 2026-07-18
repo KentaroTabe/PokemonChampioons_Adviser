@@ -13,19 +13,25 @@ N_BATTLE_ACTIONS = 6
 MOVE_ACTION_OFFSET = 0
 SWITCH_ACTION_OFFSET = 4
 
-# --- 観測空間の次元(暫定値。encoders.py の実装に合わせて調整する) ---
-# 1体分のポケモン特徴量: 種族値6 + タイプone-hot(自分18*2) + HP割合1 + 状態異常one-hot(6)
-#                        + 技4つ分の特徴(威力/命中/優先度/タイプone-hot 簡略化) ...
-# プロトタイプとして「ざっくり固定長」にし、後で精緻化する。
-POKEMON_FEATURE_DIM = 64          # 1体あたりの特徴量次元(自分側・詳細情報あり)
-OPPONENT_POKEMON_FEATURE_DIM = 48  # 相手側(情報が一部欠落するため次元を減らす、不明分はメタ事前分布で埋める)
-FIELD_FEATURE_DIM = 16             # 天候/場の状態などの特徴量次元
+# --- 戦闘観測空間 (encoders.encode_battle が生成。内訳は下記コメント) ---
+N_MOVE_SLOTS = 4
+MOVE_FEAT_DIM = 9   # 威力/命中/優先度/物理/特殊/変化/STAB/相性倍率/PP残
 
-BATTLE_OBS_DIM = (
-    POKEMON_FEATURE_DIM * 3       # 自分の場に出せる3体(選出済み)
-    + OPPONENT_POKEMON_FEATURE_DIM * 3
-    + FIELD_FEATURE_DIM
-)
+# 自分の場のポケモン: タイプ18 + 種族値6 + ランク7 + HP1 + 状態異常7 + 技4x9 = 75
+_OWN_ACTIVE_DIM = 18 + 6 + 7 + 1 + 7 + N_MOVE_SLOTS * MOVE_FEAT_DIM
+# 相手の場のポケモン: タイプ18 + 種族値6 + ランク7 + HP1 + 状態異常7 + 判明技情報2 = 41
+_OPP_ACTIVE_DIM = 18 + 6 + 7 + 1 + 7 + 2
+# 控え: 自分2体x(タイプ18+HP+ひんし)=40 / 相手2体x(+視認フラグ)=42 + 残数1 = 43
+_BENCH_DIM = 2 * 20 + 2 * 21 + 1
+# 陣営の場 (設置技/壁/おいかぜ) 8x2 + 天候/フィールド/TR/ターン10 + 素早さ比較2 = 28
+_FIELD_SIDE_DIM = 8 * 2 + 10 + 2
+
+BATTLE_OBS_DIM = _OWN_ACTIVE_DIM + _OPP_ACTIVE_DIM + _BENCH_DIM + _FIELD_SIDE_DIM  # = 227
+
+# --- 選出方策用の旧エンコーダ次元 (encoders.encode_own_pokemon 等) ---
+POKEMON_FEATURE_DIM = 64
+OPPONENT_POKEMON_FEATURE_DIM = 48
+FIELD_FEATURE_DIM = 16
 
 # --- 選出フェーズの行動空間 ---
 # 6体から3体を選び順序を決める = 6P3 = 120通りの組み合わせを列挙し、インデックスで表現する

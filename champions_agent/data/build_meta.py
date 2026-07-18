@@ -41,6 +41,9 @@ def build_meta_sets(fmt: str = USAGE_TARGET_FORMAT, source: str | None = None) -
                 "先に data.ingest でingest_usage_statsを実行してください。"
             )
 
+        # 再実行時に同一スナップショットへ行が重複しないよう作り直す
+        conn.execute("DELETE FROM meta_sets WHERE snapshot_id = ?", (snapshot_id,))
+
         pokemon_rows = conn.execute(
             """
             SELECT DISTINCT pokemon_name FROM pokemon_usage WHERE snapshot_id = ?
@@ -59,16 +62,27 @@ def build_meta_sets(fmt: str = USAGE_TARGET_FORMAT, source: str | None = None) -
             while len(moves) < 4:
                 moves.append(None)
 
-            spread_row = conn.execute(
+            # 性格とEV配分は別行に分かれて格納されることがある
+            # (championsbattledata由来: stat_alignment行=natureのみ / stat_points行=evsのみ)
+            # ため、それぞれ「値が入っている行の中の最上位」を独立に取得して合成する
+            nature_row = conn.execute(
                 """
-                SELECT nature, evs, usage_percent FROM spread_usage
-                WHERE snapshot_id = ? AND pokemon_name = ?
+                SELECT nature FROM spread_usage
+                WHERE snapshot_id = ? AND pokemon_name = ? AND nature IS NOT NULL
                 ORDER BY usage_percent DESC LIMIT 1
                 """,
                 (snapshot_id, name),
             ).fetchone()
-            nature = spread_row["nature"] if spread_row else None
-            evs = spread_row["evs"] if spread_row else None
+            evs_row = conn.execute(
+                """
+                SELECT evs FROM spread_usage
+                WHERE snapshot_id = ? AND pokemon_name = ? AND evs IS NOT NULL
+                ORDER BY usage_percent DESC LIMIT 1
+                """,
+                (snapshot_id, name),
+            ).fetchone()
+            nature = nature_row["nature"] if nature_row else None
+            evs = evs_row["evs"] if evs_row else None
 
             usage_row = conn.execute(
                 """
