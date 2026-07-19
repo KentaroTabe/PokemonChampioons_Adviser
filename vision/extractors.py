@@ -149,7 +149,13 @@ def extract_selection(img, state: BattleStateV2, resolver) -> None:
 
 def _set_hp(state: BattleStateV2, side_name: str, mon,
             pct=None, cur=None, mx=None) -> None:
-    """HPを更新し、有意な減少(3%以上)をイベントログに記録する (ダメージ帰属用)"""
+    """HPを更新し、有意な変化をイベントログに記録する (ダメージ帰属用)。
+
+    状態のhp_percent自体は常に最新読取で更新するが、イベント化は
+    同じ値が2回連続で観測されたときのみ行う (単発の誤読でイベントが
+    フラップした実績: 7%↔0%の往復など)。また回復技の上限を超える
+    +60%超の増加は交代/別個体の出現とみなし、イベント化せず基準だけ移す。
+    """
     old = mon.hp_percent
     if cur is not None and mx:
         mon.hp_current, mon.hp_max = cur, mx
@@ -157,13 +163,28 @@ def _set_hp(state: BattleStateV2, side_name: str, mon,
     elif pct is not None:
         mon.hp_percent = float(pct)
     new = mon.hp_percent
-    if old is not None and new is not None and abs(new - old) > 2.5:
-        sign = "-" if new < old else "+"
-        state.log_event(
-            "hp", f"{mon.species_ja or mon.display_name or '?'} "
-                  f"{old:.0f}%→{new:.0f}% ({sign}{abs(new - old):.0f}%)",
-            event_id=f"hp_{side_name}",
-            detail={"side": side_name, "from": old, "to": new})
+    if new is None:
+        return
+    last_read = getattr(mon, "_hp_last_read", None)
+    mon._hp_last_read = new
+    if old is None:
+        mon._hp_event_base = new
+        return
+    if last_read is None or abs(new - last_read) > 2.0:
+        return   # まだ1回しか観測していない値 (次の読取で確定させる)
+    base = getattr(mon, "_hp_event_base", old)
+    delta = new - base
+    if abs(delta) <= 2.5:
+        return
+    mon._hp_event_base = new
+    if delta > 60:
+        return
+    sign = "-" if delta < 0 else "+"
+    state.log_event(
+        "hp", f"{mon.species_ja or mon.display_name or '?'} "
+              f"{base:.0f}%→{new:.0f}% ({sign}{abs(delta):.0f}%)",
+        event_id=f"hp_{side_name}",
+        detail={"side": side_name, "from": base, "to": new})
 
 
 def extract_field_hp(img, state: BattleStateV2) -> None:

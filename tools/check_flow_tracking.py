@@ -38,13 +38,25 @@ def check_set_hp_events():
     mon = state.opponent.ensure_active()
     mon.species_ja = "テストポケモン"
     _set_hp(state, "opponent", mon, pct=100.0)   # 初回: イベントなし
-    _set_hp(state, "opponent", mon, pct=64.0)    # -36%: 発火
+    _set_hp(state, "opponent", mon, pct=64.0)    # 1回目の観測: 未確定
+    _set_hp(state, "opponent", mon, pct=64.0)    # 2回連続 -> -36%発火
     _set_hp(state, "opponent", mon, pct=63.0)    # -1%: ノイズ無視
-    _set_hp(state, "opponent", mon, pct=88.0)    # +25%: 回復発火
+    _set_hp(state, "opponent", mon, pct=88.0)    # 1回目: 未確定
+    _set_hp(state, "opponent", mon, pct=88.0)    # 2回連続 -> +24%発火 (基準64から)
+    # 単発誤読のフラップ (7% <-> 0%) はイベント化されない
+    for v in (7.0, 0.0, 7.0, 0.0):
+        _set_hp(state, "opponent", mon, pct=v)
+    # 値が安定したら確定 (-81%)
+    _set_hp(state, "opponent", mon, pct=7.0)
+    _set_hp(state, "opponent", mon, pct=7.0)
+    # 交代由来の大幅増 (+60%超) はイベント化されない
+    _set_hp(state, "opponent", mon, pct=100.0)
+    _set_hp(state, "opponent", mon, pct=100.0)
     hp_events = [e for e in state.events if e["source"] == "hp"]
-    assert len(hp_events) == 2, f"hpイベント{len(hp_events)}件 (期待2)"
-    assert "-36%" in hp_events[0]["text"] and "+25%" in hp_events[1]["text"], hp_events
-    print(f"HP変化イベント OK: {[e['text'] for e in hp_events]}")
+    texts = [e["text"] for e in hp_events]
+    assert len(hp_events) == 3, f"hpイベント{len(hp_events)}件 (期待3): {texts}"
+    assert "-36%" in texts[0] and "+24%" in texts[1] and "-81%" in texts[2], texts
+    print(f"HP変化イベント OK: {texts}")
 
 
 def check_field_hp_on_frames(frame_dir: str, limit: int = 200):
