@@ -82,6 +82,15 @@ def build_mon_view(p: dict, resolver=None) -> Optional[MonView]:
     elif p.get("hp_current") is not None and p.get("hp_max"):
         hp_frac = p["hp_current"] / p["hp_max"]
 
+    # 特性が一意な場合 (単一特性/メガ後の固定特性) は確定値を使う。
+    # メガ前に判明していた特性が状態に残っていてもメガ後は固定値が正
+    from vision.abilities import fixed_ability
+    ability = p.get("ability_id")
+    fa = fixed_ability(sid, is_mega=bool(p.get("is_mega")),
+                       item_id=p.get("item_id"))
+    if fa and (p.get("is_mega") or not ability):
+        ability = fa
+
     return MonView(
         species_id=sid,
         name_ja=p.get("species_ja") or p.get("display_name") or sid,
@@ -90,7 +99,7 @@ def build_mon_view(p: dict, resolver=None) -> Optional[MonView]:
         hp_frac=hp_frac,
         status=p.get("status"),
         boosts=p.get("boosts") or {},
-        ability=p.get("ability_id"),
+        ability=ability,
         item=p.get("item_id"),
         ev=dict(OFFENSIVE_EV),
     )

@@ -202,6 +202,13 @@ def test_fixed_ability():
     mon = state.opponent.active()
     assert mon is not None and mon.ability_id == "swiftswim", \
         (mon and mon.ability_id)
+    # メガ前に判明していた特性 (しめりけ) はメガ後に固定特性で上書きされる
+    state2, p2 = new_parser()
+    p2.parse("相手は ラグラージを 繰り出した!")
+    mon2 = state2.opponent.party[state2.opponent.find_by_species("ラグラージ")]
+    mon2.ability_id, mon2.ability_ja = "damp", "しめりけ"
+    p2.parse("相手の ラグラージは メガラグラージに メガシンカした!")
+    assert mon2.ability_id == "swiftswim", mon2.ability_id
     print("test_fixed_ability OK")
 
 
