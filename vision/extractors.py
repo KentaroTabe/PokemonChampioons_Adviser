@@ -147,6 +147,26 @@ def extract_selection(img, state: BattleStateV2, resolver) -> None:
                 pass
 
 
+def _expected_my_max(mon):
+    """型登録 (config/my_team.json) から自分側の理論最大HPを計算する。
+
+    OCRの一貫した桁落ち ("178"→"78") は多数決でも防げないため、
+    登録された能力ポイントから計算した理論値を読取検証の基準にする。
+    """
+    try:
+        from advisor.my_team import get_my_build
+        from advisor.dex import get_dex, calc_hp
+        build = get_my_build(mon.species_ja)
+        if not build:
+            return None
+        sp = get_dex().species(mon.species_id)
+        if not sp:
+            return None
+        return calc_hp(sp["baseStats"]["hp"], build["ev"].get("hp", 0), 50)
+    except Exception:
+        return None
+
+
 def _resolve_ability_validated(resolver, text: str, mon):
     """特性を解決し、種族が判明していれば合法特性 (最大3択) に限定する。
 
@@ -262,9 +282,11 @@ def extract_field_hp(img, state: BattleStateV2) -> None:
         frac = ocr.parse_fraction(my_hp)
         if frac and frac[1] and frac[1] >= 50:
             cur, mx = frac
-            if me.hp_max and me.hp_max >= 50 and mx != me.hp_max:
-                mx = me.hp_max
-            if cur <= mx:
+            known = _expected_my_max(me) or \
+                (me.hp_max if me.hp_max and me.hp_max >= 50 else None)
+            if known and mx != known:
+                pass   # 基準と食い違う読みは捨てる (桁落ちは現在値も壊れている)
+            elif cur <= mx:
                 _set_hp(state, "player", me, cur=cur, mx=mx)
 
 
@@ -439,19 +461,26 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
     # 選出画面の「0/3」進捗がこのゾーンに重なって読まれる事故も弾く)
     if frac and frac[1] and frac[1] >= 50:
         cur, mx = frac
-        # 最大HPは対戦中に変化しない (メガシンカでも不変)。既知の最大HPと
-        # 食い違う読み取りは誤OCRとみなし、既知値を優先して現在値だけ更新する。
-        # ただし既知値自体が50未満なら過去の誤読なので新しい読みで置き換える
-        if me.hp_max and me.hp_max < 50:
-            me.hp_max = None
-        if me.hp_max and mx != me.hp_max:
+        # 最大HPは対戦中に変化しない (メガシンカでも不変)。基準値は
+        # 型登録 (config/my_team.json) から計算した理論値を最優先し、
+        # なければ過去の読取値を使う。基準と食い違う読みは誤OCRとみなし、
+        # 桁補正できれば現在値だけ更新、できなければ読み捨てる
+        # (「135/178」→「35/78」のような一貫した桁落ちは多数決でも防げない)
+        known = _expected_my_max(me) or \
+            (me.hp_max if me.hp_max and me.hp_max >= 50 else None)
+        ok = True
+        if known and mx != known:
             digits = re.sub(r"\D", "", my_hp)
-            known = str(me.hp_max)
-            if digits.endswith(known) and digits[:-len(known)].isdigit():
-                cand = int(digits[:-len(known)])
-                cur = cand if cand <= me.hp_max else cur
-            mx = me.hp_max
-        if cur <= mx:
+            ks = str(known)
+            if digits.endswith(ks) and digits[:-len(ks)].isdigit() \
+                    and int(digits[:-len(ks)]) <= known:
+                cur = int(digits[:-len(ks)])
+            else:
+                # 桁落ちは現在値側も壊れていることが多い ("135/167"→"35/78")。
+                # 補正できない読みは捨て、基準と一致する読みだけを採用する
+                ok = False
+            mx = known
+        if ok and cur <= mx:
             _set_hp(state, "player", me, cur=cur, mx=mx)
 
     # --- 特性が一意な種族 (単一特性/メガ) は確定値として自動設定 ---
