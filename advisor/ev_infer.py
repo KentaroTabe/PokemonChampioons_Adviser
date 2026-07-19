@@ -207,10 +207,12 @@ class SpreadEstimator:
         ranked = sorted(self.hyps, key=lambda h: -h["logw"])
         top = ranked[0]
         prob = math.exp(top["logw"] - mx) / total
+        # 表示は努力値 (252) 表記のまま。0-32の能力ポイントに換算すると
+        # 端数の4が「1」になり振り切っていないように見えて紛らわしい
         abbr = {"hp": "H", "atk": "A", "def": "B",
                 "spa": "C", "spd": "D", "spe": "S"}
-        ev_txt = "".join(f"{abbr[k]}{round(v * 32 / 252)}"
-                         for k, v in top["evs"].items() if v)
+        ev_txt = " ".join(f"{abbr[k]}{v}"
+                          for k, v in top["evs"].items() if v)
         return {
             "nature": top["nature"],
             "nature_ja": _NATURE_JA.get(top["nature"], top["nature"]),
