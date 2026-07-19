@@ -34,6 +34,8 @@ app_asgi = socketio.ASGIApp(sio, app)
 pipeline = VisionPipeline()
 advisor = Advisor(resolver=pipeline.resolver)
 battle_log = BattleLogger()
+from advisor.ev_infer import get_tracker as _get_spread_tracker
+spread_tracker = _get_spread_tracker()
 
 # 起動 (更新反映) のタイミングで不要ログを掃除する
 # (断片対戦ログ / 古いデバッグフレーム。失敗してもサーバーは起動する)
@@ -116,6 +118,7 @@ async def handle_frame(sid, data):
         state, fired = await loop.run_in_executor(None, pipeline.process, img)
         processed_counter += 1
         battle_log.on_frame(state, fired)
+        spread_tracker.on_frame(state, fired)   # 相手の型推定 (先後/ダメージ観測)
 
         # 場の状況画面は貴重な検証データなので、検出したら間隔に関係なく保存する
         if DUMP_FRAMES and state["scene"] == "field_check" and \
@@ -226,5 +229,6 @@ async def set_species(sid, data):
 async def reset_state(sid, data=None):
     """フロントエンドから状態リセット要求 (新しい対戦の開始など)"""
     pipeline.reset()
+    spread_tracker.reset()
     await sio.emit('state_update', pipeline.state.to_dict(), room=sid)
     print("[server] 状態をリセットしました")

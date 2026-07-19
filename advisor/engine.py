@@ -246,6 +246,22 @@ def evaluate(state: dict, resolver=None) -> dict:
                         note += f", 次点: {cands[1][2]}{int(round(cands[1][1] * 100))}%"
                     opp_inference_note = note + ")"
 
+    # 型推定 (先後・ダメージ観測の尤度スコアリング) が確度を持っていれば、
+    # 相手のEV/性格/持ち物の仮定を推定値に差し替える
+    opp_spread_note = ""
+    if opp_view is not None:
+        try:
+            from advisor.ev_infer import get_tracker, _nature_mult
+            guess = get_tracker().best_for(opp_view.species_id)
+            if guess and guess["n_obs"] >= 1 and guess["prob"] >= 0.25:
+                opp_view.ev = dict(guess["evs"])
+                opp_view.nature = _nature_mult(guess["nature"])
+                if not opp_view.item and guess["item"]:
+                    opp_view.item = guess["item"]
+                opp_spread_note = f"相手の型推定: {guess['summary']}"
+        except Exception:
+            pass
+
     my_field = build_field_view(state, "player")
     opp_field = build_field_view(state, "opponent")
 
@@ -467,5 +483,6 @@ def evaluate(state: dict, resolver=None) -> dict:
         "mega_note": mega_note,
         "opp_inference": opp_inference_note,
         "opp_moves_note": opp_moves_note,
+        "opp_spread_note": opp_spread_note,
         "best": actions[0] if actions else None,
     }

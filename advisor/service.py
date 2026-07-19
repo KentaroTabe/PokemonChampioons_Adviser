@@ -114,6 +114,8 @@ class Advisor:
             lines.append(f"  🔍 {advice['opp_inference']}")
         if advice.get("opp_moves_note"):
             lines.append(f"  📋 {advice['opp_moves_note']}")
+        if advice.get("opp_spread_note"):
+            lines.append(f"  🧬 {advice['opp_spread_note']}")
         if advice.get("speed_note"):
             lines.append(f"  {advice['speed_note']}")
         if advice.get("mega_note"):
