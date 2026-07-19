@@ -204,6 +204,86 @@ def _attach_candidates(state: dict) -> None:
         pass
 
 
+_MANUAL_FIELDS = {"hp_percent", "hp_current", "status", "item", "ability",
+                  "boost", "is_mega", "clear_status"}
+
+
+@sio.on('set_state')
+async def set_state(sid, data):
+    """フロントエンドからの手動修正 (誤認識のユーザー訂正)。
+
+    data: {"target": "mon", "side": "player|opponent", "index": int,
+           "field": "hp_percent|status|item|ability|boost:atk|is_mega", "value": ...}
+          {"target": "field", "field": "weather|terrain|trick_room", "value": ...}
+          {"target": "hazards", "side": ..., "field": "stealth_rock|spikes", "value": ...}
+    修正は manual_fix イベントとして対戦ログに記録される (誤認識分析用)。
+    """
+    try:
+        target = data.get("target")
+        field_name = str(data.get("field", ""))
+        value = data.get("value")
+        before = None
+        label = ""
+        if target == "mon":
+            side = pipeline.state.side(data["side"])
+            mon = side.party[int(data["index"])]
+            label = f"{data['side']}:{mon.species_ja or '?'}:{field_name}"
+            if field_name == "hp_percent":
+                before = mon.hp_percent
+                mon.hp_percent = float(value)
+                if mon.hp_max:
+                    mon.hp_current = round(float(value) / 100 * mon.hp_max)
+                mon._hp_last_read = float(value)
+                mon._hp_event_base = float(value)
+            elif field_name == "status":
+                before = mon.status
+                mon.status = value or None
+            elif field_name == "item":
+                before = mon.item_ja
+                r = pipeline.resolver.resolve(value, "items", cutoff=0.7) if value else None
+                mon.item_ja, mon.item_id = (r[0], r[1]) if r else (value or None, None)
+            elif field_name == "ability":
+                before = mon.ability_ja
+                r = pipeline.resolver.resolve(value, "abilities", cutoff=0.7) if value else None
+                mon.ability_ja, mon.ability_id = (r[0], r[1]) if r else (value or None, None)
+            elif field_name.startswith("boost:"):
+                stat = field_name.split(":", 1)[1]
+                before = mon.boosts.get(stat)
+                mon.boosts[stat] = max(-6, min(6, int(value)))
+            elif field_name == "is_mega":
+                before = mon.is_mega
+                mon.is_mega = bool(value)
+        elif target == "field":
+            f = pipeline.state.field
+            label = f"field:{field_name}"
+            before = getattr(f, field_name, None)
+            if field_name in ("weather", "terrain"):
+                setattr(f, field_name, value or None)
+            elif field_name == "trick_room":
+                f.trick_room = bool(value)
+        elif target == "hazards":
+            side = pipeline.state.side(data["side"])
+            label = f"{data['side']}:hazards:{field_name}"
+            before = getattr(side, field_name, None)
+            if field_name in ("stealth_rock",):
+                side.stealth_rock = bool(value)
+            elif field_name == "spikes":
+                side.spikes = max(0, min(3, int(value)))
+            elif field_name == "toxic_spikes":
+                side.toxic_spikes = max(0, min(2, int(value)))
+        pipeline.state.log_event(
+            "manual", f"手動修正 {label}: {before} -> {value}",
+            event_id="manual_fix",
+            detail={"target": target, "field": field_name,
+                    "label": label, "before": before, "after": value})
+        print(f"[server] 手動修正: {label} {before} -> {value}")
+        st = pipeline.state.to_dict()
+        _attach_candidates(st)
+        await sio.emit('state_update', st, room=sid)
+    except Exception as e:
+        print(f"[server] set_stateエラー: {e}")
+
+
 @sio.on('set_species')
 async def set_species(sid, data):
     """フロントエンドのプルダウンから相手ポケモンの種族を確定する"""

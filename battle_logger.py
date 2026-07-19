@@ -126,11 +126,19 @@ class BattleLogger:
                          "texts": [e["text"] for e in state.get("events", [])[-len(fired):]]})
 
         # HP変化 (extractorsの_set_hpがsource="hp"でstate.eventsに積む) を
-        # 専用レコードで記録し、技イベントとのダメージ対応付けを可能にする
+        # 専用レコードで記録し、技イベントとのダメージ対応付けを可能にする。
+        # 手動修正 (source="manual") も誤認識分析用に専用レコードで残す
         for e in state.get("events", []):
-            if e.get("source") == "hp" and e.get("ts", 0) > self._hp_seen_ts:
+            if e.get("ts", 0) <= self._hp_seen_ts:
+                continue
+            if e.get("source") == "hp":
                 self._hp_seen_ts = e["ts"]
                 self._write({"type": "hp", "turn": state.get("turn"),
+                             "text": e["text"], "detail": e.get("detail")})
+            elif e.get("source") == "manual":
+                self._hp_seen_ts = e["ts"]
+                self._write({"type": "manual_fix", "turn": state.get("turn"),
+                             "scene": scene,
                              "text": e["text"], "detail": e.get("detail")})
 
         if scene != self._prev_scene:

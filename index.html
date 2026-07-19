@@ -29,7 +29,7 @@
         <button id="reset-btn">状態リセット</button>
         <span id="conn-label" class="tag" style="background:#a33">バックエンド: 未接続</span>
         <span id="scene-label" class="tag">scene: -</span>
-        <span id="field-label" class="tag"></span>
+        <span id="field-label" class="tag" style="cursor:pointer" title="クリックで場の状態を手動修正" onclick="fixField()"></span>
     </div>
     <div id="layout">
         <div id="left">
@@ -76,6 +76,45 @@
             socket.emit('set_species', {index: i, species_id: id, species_ja: ja});
         }
 
+        // --- 手動修正 (誤認識のユーザー訂正。修正はログに記録され分析に使う) ---
+        function fixMon(side, i) {
+            const menu = prompt(
+                '修正する項目を番号で選択:\n1=HP%  2=状態異常  3=持ち物  4=特性\n' +
+                '5=攻撃ランク  6=特攻ランク  7=素早さランク  8=メガ済み切替');
+            if (!menu) return;
+            const send = (field, value) =>
+                socket.emit('set_state', {target: 'mon', side, index: i, field, value});
+            switch (menu.trim()) {
+                case '1': { const v = prompt('残りHP% (0-100):'); if (v !== null) send('hp_percent', +v); break; }
+                case '2': { const v = prompt('状態異常 (poison/toxic/burn/paralysis/sleep/freeze、空欄=なし):');
+                            if (v !== null) send('status', v.trim() || null); break; }
+                case '3': { const v = prompt('持ち物 (日本語名、空欄=不明):'); if (v !== null) send('item', v.trim() || null); break; }
+                case '4': { const v = prompt('特性 (日本語名、空欄=不明):'); if (v !== null) send('ability', v.trim() || null); break; }
+                case '5': { const v = prompt('攻撃ランク (-6〜+6):'); if (v !== null) send('boost:atk', +v); break; }
+                case '6': { const v = prompt('特攻ランク (-6〜+6):'); if (v !== null) send('boost:spa', +v); break; }
+                case '7': { const v = prompt('素早さランク (-6〜+6):'); if (v !== null) send('boost:spe', +v); break; }
+                case '8': { send('is_mega', !confirm('現在メガ済み表示ですか? OK=メガ解除 / キャンセル=メガ設定') ? true : false); break; }
+            }
+        }
+        function fixField() {
+            const menu = prompt(
+                '場の修正:\n1=天候 (sun/rain/sandstorm/snow/空欄)\n2=フィールド (electric/grassy/psychic/misty/空欄)\n' +
+                '3=トリックルーム切替\n4=自陣ステロ切替  5=敵陣ステロ切替');
+            if (!menu) return;
+            switch (menu.trim()) {
+                case '1': { const v = prompt('天候:'); if (v !== null)
+                    socket.emit('set_state', {target: 'field', field: 'weather', value: v.trim() || null}); break; }
+                case '2': { const v = prompt('フィールド:'); if (v !== null)
+                    socket.emit('set_state', {target: 'field', field: 'terrain', value: v.trim() || null}); break; }
+                case '3': socket.emit('set_state', {target: 'field', field: 'trick_room',
+                    value: !confirm('現在トリックルーム中ですか? OK=解除 / キャンセル=設定')}); break;
+                case '4': socket.emit('set_state', {target: 'hazards', side: 'player', field: 'stealth_rock',
+                    value: confirm('自陣にステルスロックあり? OK=あり / キャンセル=なし')}); break;
+                case '5': socket.emit('set_state', {target: 'hazards', side: 'opponent', field: 'stealth_rock',
+                    value: confirm('敵陣にステルスロックあり? OK=あり / キャンセル=なし')}); break;
+            }
+        }
+
         function renderMon(p, i, activeIdx, side) {
             const cls = ['mon'];
             if (i === activeIdx) cls.push('active');
@@ -108,7 +147,9 @@
                     style="margin-left:6px;font-size:11px;background:#223;color:#cde;border:1px solid #446;border-radius:4px">
                     <option value="">候補から確定…</option>${opts}</select>`;
             }
-            return `<div class="${cls.join(' ')}">${i===activeIdx?'▶ ':''}${p.species_ja || p.display_name || '???'}${picker}${hp}${tags}${moves}</div>`;
+            const fixBtn = `<span style="cursor:pointer;opacity:.55;margin-left:6px" title="手動修正"
+                onclick="fixMon('${side === 'opp' ? 'opponent' : 'player'}', ${i})">✏️</span>`;
+            return `<div class="${cls.join(' ')}">${i===activeIdx?'▶ ':''}${p.species_ja || p.display_name || '???'}${picker}${hp}${tags}${fixBtn}${moves}</div>`;
         }
 
         socket.on('state_update', (s) => {
