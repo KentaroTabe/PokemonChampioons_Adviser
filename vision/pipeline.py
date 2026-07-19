@@ -78,6 +78,8 @@ class VisionPipeline:
             "left_popup": RegionStabilizer(stable_frames=2),
             "right_popup": RegionStabilizer(stable_frames=2),
         }
+        self._last_masks: dict = {}     # source -> 前回OCR時のマスク
+        self._last_ocr_ts: dict = {}    # source -> 前回OCR時刻
         self._last_heavy = {}       # scene -> last heavy extraction time
         self._selection_streak = 0  # 選出画面が連続何フレーム続いているか
         self._heavy_interval = {
@@ -165,7 +167,7 @@ class VisionPipeline:
             return []
         mask = ocr.outlined_text_mask(crop_img)
 
-        # マスクは「縁取り文字が存在するか」の検知と安定化判定に使い、
+        # マスクは「縁取り文字が存在するか / 内容が変わったか」の検知に使い、
         # OCR自体は生のクロップに対して行う (精度が大きく向上する)
         if single_shot:
             if mask is None:
@@ -175,9 +177,22 @@ class VisionPipeline:
                 return []
             return self.parser.parse(text, source=source)
 
-        stab = self._stabilizers[source]
-        if stab.update(mask):
+        # ストリーム: 技使用メッセージは表示時間が短く「安定待ち」では
+        # 取りこぼすため、内容が変わったら即OCRする (同一テキストは
+        # EventParser側の重複排除で二重処理されない)
+        if mask is None:
+            self._last_masks[source] = None
+            return []
+        now = time.time()
+        prev = self._last_masks.get(source)
+        changed = (prev is None or prev.shape != mask.shape
+                   or cv2.countNonZero(cv2.absdiff(prev, mask)) > 250)
+        if changed and now - self._last_ocr_ts.get(source, 0.0) >= 0.3:
+            self._last_masks[source] = mask
+            self._last_ocr_ts[source] = now
             text = ocr.read_crop_direct(crop_img)
             if text:
                 return self.parser.parse(text, source=source)
+        elif changed:
+            self._last_masks[source] = mask
         return []
