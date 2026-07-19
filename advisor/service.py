@@ -71,6 +71,14 @@ class Advisor:
             if not me.get("moves"):
                 return "技選択画面を一度開いてください (技とPPを読み取ります)"
 
+            # 1.5 自分の型 (能力ポイント/性格) が未登録 -> 登録を依頼
+            # (画面からは読み取れないため、登録がなければ攻撃系252振りを仮定)
+            from advisor.my_team import has_build
+            if me.get("species_ja") and not has_build(me.get("species_ja")):
+                return (f"{me['species_ja']}の型が未登録です。config/my_team.json に"
+                        "能力ポイント・性格を書くと計算精度が上がります "
+                        "(現在は攻撃系252振り仮定)")
+
             # 2. 直近でランク変化イベントがある -> 場の状況画面
             recent = state.get("events", [])[-12:]
             has_boost = any((e.get("event") or "").startswith("boost_") for e in recent)

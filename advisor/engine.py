@@ -64,7 +64,7 @@ def type_ja2en() -> dict:
 OFFENSIVE_EV = {"atk": 252, "spa": 252, "spe": 252}
 
 
-def build_mon_view(p: dict, resolver=None) -> Optional[MonView]:
+def build_mon_view(p: dict, resolver=None, side: str = "opponent") -> Optional[MonView]:
     """PokemonState辞書 -> MonView。種族不明なら None"""
     dex = get_dex()
     sid = p.get("species_id")
@@ -91,6 +91,25 @@ def build_mon_view(p: dict, resolver=None) -> Optional[MonView]:
     if fa and (p.get("is_mega") or not ability):
         ability = fa
 
+    # 自分側: config/my_team.json に登録された型があれば実際の
+    # 能力ポイント/性格/持ち物で計算する (未登録は攻撃系252仮定)
+    ev, nature, item = dict(OFFENSIVE_EV), {}, p.get("item_id")
+    if side == "player":
+        from advisor.my_team import get_my_build
+        build = get_my_build(p.get("species_ja"))
+        if build:
+            if build["ev"]:
+                ev = build["ev"]
+            nature = build["nature"]
+            if not item and build["item_ja"] and resolver:
+                r = resolver.resolve(build["item_ja"], "items", cutoff=0.85)
+                if r:
+                    item = r[1]
+            if not ability and build["ability_ja"] and resolver:
+                r = resolver.resolve(build["ability_ja"], "abilities", cutoff=0.85)
+                if r:
+                    ability = r[1]
+
     return MonView(
         species_id=sid,
         name_ja=p.get("species_ja") or p.get("display_name") or sid,
@@ -100,8 +119,9 @@ def build_mon_view(p: dict, resolver=None) -> Optional[MonView]:
         status=p.get("status"),
         boosts=p.get("boosts") or {},
         ability=ability,
-        item=p.get("item_id"),
-        ev=dict(OFFENSIVE_EV),
+        item=item,
+        ev=ev,
+        nature=nature,
     )
 
 
@@ -197,7 +217,7 @@ def evaluate(state: dict, resolver=None) -> dict:
     if my_active_idx is None or my_active_idx >= len(my_state["party"]):
         return {"ok": False, "reason": "自分の場のポケモンが未特定です"}
     my_p = my_state["party"][my_active_idx]
-    my_view = build_mon_view(my_p, resolver)
+    my_view = build_mon_view(my_p, resolver, side="player")
     if my_view is None:
         return {"ok": False, "reason": f"自分のポケモン ({my_p.get('display_name')}) の種族を特定できません"}
 
@@ -377,7 +397,7 @@ def evaluate(state: dict, resolver=None) -> dict:
     for i, p in enumerate(my_state["party"]):
         if i == my_active_idx or p.get("status") == "fainted":
             continue
-        cand = build_mon_view(p, resolver)
+        cand = build_mon_view(p, resolver, side="player")
         if cand is None or opp_view is None:
             continue
 
