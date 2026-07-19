@@ -115,6 +115,10 @@ class SpreadEstimator:
         for nature, evs_str, ws in spreads:
             try:
                 vals = [int(x) for x in evs_str.split("/")]
+                # DBには努力値表記 (0-252) とチャンピオンズの能力ポイント表記
+                # (0-32) が混在する。最大32以下なら能力ポイントとみなし換算
+                if vals and max(vals) <= 32:
+                    vals = [min(252, v * 8) for v in vals]
                 evs = dict(zip(_STATS, vals))
             except Exception:
                 continue
@@ -213,14 +217,15 @@ class SpreadEstimator:
                 "spa": "C", "spd": "D", "spe": "S"}
         ev_txt = " ".join(f"{abbr[k]}{v}"
                           for k, v in top["evs"].items() if v)
+        nature_ja = _NATURE_JA.get(top["nature"], top["nature"]) or "性格不明"
         return {
             "nature": top["nature"],
-            "nature_ja": _NATURE_JA.get(top["nature"], top["nature"]),
+            "nature_ja": nature_ja,
             "evs": top["evs"],
             "item": top["item"],
             "prob": round(prob, 3),
             "n_obs": self.n_obs,
-            "summary": f"{_NATURE_JA.get(top['nature'], top['nature'])}"
+            "summary": f"{nature_ja}"
                        f" {ev_txt}"
                        + (f" @{top['item']}" if top["item"] else "")
                        + f" ({prob:.0%}, 観測{self.n_obs}件)",
