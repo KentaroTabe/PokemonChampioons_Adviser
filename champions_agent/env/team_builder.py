@@ -167,18 +167,23 @@ def build_random_party(size: int = 6, fmt: str = USAGE_TARGET_FORMAT,
     weights = _apply_play_style_bias(pool, role_scores, play_style)
     chosen = rng.choices(pool, weights=weights, k=size)
 
-    # 重複を避けるための簡易リトライ(完全ユニークにはならない場合もあるがプロトタイプとして許容)
+    # Species Clause対応: ベース種族単位で重複を排除する
+    # (rotomheat/rotomwash や gengar/gengarmega は同一種族としてカウントされる)
     seen = set()
     result = []
     for c in chosen:
-        if c["pokemon_name"] in seen:
+        key = _base_species_key(c["pokemon_name"])
+        if key in seen:
             continue
-        seen.add(c["pokemon_name"])
+        seen.add(key)
         result.append(c)
-    while len(result) < size:
+    attempts = 0
+    while len(result) < size and attempts < 200:
+        attempts += 1
         candidate = rng.choices(pool, weights=weights, k=1)[0]
-        if candidate["pokemon_name"] not in seen:
-            seen.add(candidate["pokemon_name"])
+        key = _base_species_key(candidate["pokemon_name"])
+        if key not in seen:
+            seen.add(key)
             result.append(candidate)
 
     sets = [
@@ -237,6 +242,29 @@ def _sanitize_species(name: str) -> str:
         if name.endswith(suf) and len(name) > len(suf) + 2:
             return name[: -len(suf)]
     return name
+
+
+_BASE_SPECIES_MAP = None
+
+
+def _base_species_key(name: str) -> str:
+    """Species Clause判定用のベース種族キー (ロトムフォーム違い・メガ等を同一視)"""
+    global _BASE_SPECIES_MAP
+    if _BASE_SPECIES_MAP is None:
+        import json
+        import re as _re
+        from pathlib import Path
+        _BASE_SPECIES_MAP = {}
+        dex_path = Path(__file__).resolve().parents[1] / "data" / "champions_dex.json"
+        try:
+            species = json.loads(dex_path.read_text()).get("species", {})
+            for sid, entry in species.items():
+                base = entry.get("baseSpecies") or entry.get("name") or sid
+                _BASE_SPECIES_MAP[sid] = _re.sub(r"[^a-z0-9]", "", base.lower())
+        except Exception:
+            pass
+    key = _sanitize_species(name)
+    return _BASE_SPECIES_MAP.get(key, key)
 
 
 def _sanitize_item(item: str | None) -> str | None:

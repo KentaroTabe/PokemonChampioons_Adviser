@@ -63,6 +63,7 @@ class ChampionsSinglesEnv(SinglesEnv):
         super().__init__(*args, **kwargs)
         self.play_style = play_style
         self.reward_config = get_reward_config(play_style)
+        self._reward_state: dict = {}   # battle_tag -> 前ステップの盤面価値
         # SinglesEnv(PokeEnv)は observation_spaces を自動定義しないため、
         # embed_battle() が返す固定長ベクトルに合わせて明示的に定義する。
         # (SingleAgentWrapper が __init__ 時に observation_spaces を参照するため必須)
@@ -94,16 +95,44 @@ class ChampionsSinglesEnv(SinglesEnv):
             return Player.choose_random_move(battle)
 
     def calc_reward(self, battle: AbstractBattle) -> float:
-        """poke-envの reward_computing_helper を利用したシンプルな報酬計算。
+        """RewardConfig (性格別プリセット) を完全に反映したステップ報酬。
 
-        性格(play_style)ごとの RewardConfig(env/reward.py の REWARD_PRESETS)を反映する。
+        以前は poke-env の reward_computing_helper に委譲しており、
+        step_penalty / 非対称きぜつペナルティ / 状態異常シェイピングが
+        すべて未使用だった (=性格間で報酬がほぼ同一だった) ため、
+        盤面価値の差分を自前で計算する方式に変更した。
         """
-        return self.reward_computing_helper(
-            battle,
-            fainted_value=self.reward_config.faint_bonus,
-            hp_value=self.reward_config.hp_diff_weight,
-            victory_value=self.reward_config.win_bonus,
-        )
+        cfg = self.reward_config
+
+        # --- 現在の盤面価値 ---
+        my_hp = sum(p.current_hp_fraction for p in battle.team.values())
+        opp_hp = sum(p.current_hp_fraction for p in battle.opponent_team.values())
+        # 未視認の相手は満タン扱い (視認時にHPが判明して差分が入る)
+        opp_hp += max(0, 3 - len(battle.opponent_team))
+        my_fainted = sum(1 for p in battle.team.values() if p.fainted)
+        opp_fainted = sum(1 for p in battle.opponent_team.values() if p.fainted)
+        my_status = sum(1 for p in battle.team.values()
+                        if p.status is not None and not p.fainted)
+        opp_status = sum(1 for p in battle.opponent_team.values()
+                         if p.status is not None and not p.fainted)
+
+        value = (cfg.hp_diff_weight * (my_hp - opp_hp)
+                 + cfg.faint_bonus * opp_fainted
+                 - cfg.fainted_penalty * my_fainted
+                 + 0.3 * (opp_status - my_status))
+        if battle.won is True:
+            value += cfg.win_bonus
+        elif battle.won is False:
+            value -= cfg.lose_penalty
+
+        # --- 前ステップとの差分 + 毎ターンの微小ペナルティ ---
+        tag = battle.battle_tag
+        prev = self._reward_state.get(tag, 0.0)
+        self._reward_state[tag] = value
+        if len(self._reward_state) > 60:
+            for k in list(self._reward_state.keys())[:-30]:
+                del self._reward_state[k]
+        return (value - prev) - cfg.step_penalty
 
 
 def _pick_opponent_play_style(opp_play_style_pool: list[str] | None,

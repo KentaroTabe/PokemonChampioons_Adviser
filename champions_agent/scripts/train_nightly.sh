@@ -53,15 +53,18 @@ trap cleanup EXIT
     if [ -f "$ckpt" ]; then
       cp "$ckpt" "$ckpt.prev" 2>/dev/null || true
     fi
-    # スリープ抑止つきで学習 (失敗しても次の性格へ進む)
-    caffeinate -i python -m champions_agent.train.train_battle \
-      --play-style "$style" --timesteps "$TIMESTEPS" --resume || {
-        echo "[nightly] [$style] 学習が失敗しました"; continue; }
+    # スリープ抑止 + タイムアウト付きで学習 (ハングしても次の性格へ進む)
+    # タイムアウト: 想定処理速度50step/s基準 + 余裕15分
+    TRAIN_TIMEOUT=$((TIMESTEPS / 50 + 900))
+    caffeinate -i python -m tools.smoke_train \
+      --play-style "$style" --timesteps "$TIMESTEPS" --resume \
+      --timeout "$TRAIN_TIMEOUT" || {
+        echo "[nightly] [$style] 学習が失敗/タイムアウトしました"; continue; }
 
     echo "--- [$style] 評価 (vs Random, $EVAL_BATTLES 戦) ---"
     caffeinate -i python -m champions_agent.train.evaluate \
-      --play-style "$style" --battles "$EVAL_BATTLES" || \
-      echo "[nightly] [$style] 評価が失敗しました"
+      --play-style "$style" --battles "$EVAL_BATTLES" --timeout 900 || \
+      echo "[nightly] [$style] 評価が失敗/タイムアウトしました"
 
     # 勝率ゲートを超えたらselfplay相手プールへスナップショット
     python -m champions_agent.train.opponent_pool --update-from-eval "$style" || true

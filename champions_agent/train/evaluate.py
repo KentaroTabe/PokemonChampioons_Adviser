@@ -90,8 +90,21 @@ def main() -> None:
                          choices=list(PLAY_STYLES.keys()) + [None],
                          help="省略時はRandomPlayerと対戦")
     parser.add_argument("--battles", type=int, default=50)
+    parser.add_argument("--timeout", type=int, default=0,
+                         help="秒数を指定すると評価全体にタイムアウトをかける (ハング対策)")
     parser.add_argument("--format", type=str, default=TRAINING_BATTLE_FORMAT)
     args = parser.parse_args()
+
+    if args.timeout > 0:
+        import signal
+        import sys
+
+        def _timeout_handler(sig, frame):
+            print(f"[evaluate] TIMEOUT: {args.timeout}秒で打ち切り")
+            sys.exit(1)
+
+        signal.signal(signal.SIGALRM, _timeout_handler)
+        signal.alarm(args.timeout)
 
     result = asyncio.run(run_evaluation(
         play_style=args.play_style,
