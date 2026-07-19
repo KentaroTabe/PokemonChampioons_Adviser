@@ -169,7 +169,7 @@ SIMPLE_EVENTS = [
     {"id": "not_very_effective", "keywords": [["効果", "こうか"], ["いまひとつ", "今ひとつ"]], "action": "noop"},
     {"id": "no_effect", "keywords": [["効果", "こうか"], ["ないようだ", "無いようだ"]], "action": "noop"},
     {"id": "missed", "keywords": [["攻撃", "こうけき"], ["当たらな", "あたらな"]], "action": "noop"},
-    {"id": "critical", "keywords": [["急所", "きゆうしよ"], ["当たっ", "あたつ"]], "action": "noop"},
+    {"id": "critical", "keywords": [["急所", "きゆうしよ", "キュウショ"]], "action": "noop"},
 ]
 
 # ランク変化: (loose_keyパターン, 変化量)。長いパターンから順に判定する
@@ -269,12 +269,12 @@ class EventParser:
         # 1. 交代 (繰り出した / ゆけっ)
         self._parse_switch(cleaned, norm, fired)
 
-        # 2. キーワードイベント
+        # 2. キーワードイベント (連結メッセージ「急所に当たった!効果は〜」等の
+        #    ため、最初の1件で打ち切らず合致した全イベントを発火する)
         for ev in SIMPLE_EVENTS:
             if _match_keywords(norm, ev["keywords"]):
                 self._apply(ev, cleaned, source)
                 fired.append(ev["id"])
-                break
 
         # 3. ランク変化
         if not any(not f.startswith("switch") for f in fired):
@@ -372,26 +372,59 @@ class EventParser:
             self._apply_move_side_effect(r[1], side_name)
         return f"move_{side_name}_{r[1]}"
 
+    def _popup_mon(self, name_part: str, default_side: str):
+        """ポップアップの名前部分から帰属先の個体を決める。
+
+        名前が照合できないのにアクティブ個体へフォールバックすると、発動して
+        いないポケモンに他個体の特性が付く誤帰属が起きる (実戦で観測)。
+        名前で確認できた場合のみ帰属し、できなければ None (帰属なし) を返す。
+        """
+        name_key = loose_key(re.sub(r"^(相手の|あいての)", "", name_part))
+        if len(name_key) < 3:
+            return None, None
+        # 1. 両サイドのパーティから名前一致 (逆サイド誤りにも耐える)
+        for side_name in (default_side,
+                          "opponent" if default_side == "player" else "player"):
+            for mon in self.state.side(side_name).party:
+                for cand in (mon.species_ja, mon.display_name):
+                    ck = loose_key(cand) if cand else ""
+                    if ck and len(ck) >= 3 and (ck in name_key or name_key in ck):
+                        return side_name, mon
+        # 2. 種族名として解決できるなら、未特定のアクティブ個体の特定に使う
+        sp = self.resolver.resolve_species(name_part, cutoff=0.8)
+        if sp:
+            active = self.state.side(default_side).ensure_active()
+            if active.species_ja is None:
+                active.merge_species(sp[0], sp[1])
+                return default_side, active
+        return None, None
+
     def _parse_popup(self, cleaned: str, source: str) -> Optional[str]:
         """ポップアップ「{名前}の {特性 or 持ち物}」: 特性優先、次に持ち物"""
         body = re.sub(r"[!!]+$", "", cleaned)
         positions = [m.start() for m in re.finditer("の", body)]
         if not positions:
             return None
-        side_name, side, mon = self._target_mon(cleaned, source)
+        default_side = self._target_side(cleaned, source)
         for pos in reversed(positions):
             tail = body[pos + 1:]
             if len(normalize(tail)) < 2:
                 continue
             ab = self.resolver.resolve(tail, "abilities", cutoff=0.72)
+            it = None if ab else self.resolver.resolve(tail, "items", cutoff=0.75)
+            if not ab and not it:
+                continue
+            side_name, mon = self._popup_mon(body[:pos], default_side)
+            if mon is None:
+                # 帰属先が確認できない発動情報は捨てる (誤帰属より安全)
+                self.state.log_event(source, cleaned, event_id=None)
+                return None
             if ab:
                 mon.ability_ja, mon.ability_id = ab[0], ab[1]
                 self._apply_ability_effect(ab[1], side_name)
                 return f"ability_{side_name}_{ab[1]}"
-            it = self.resolver.resolve(tail, "items", cutoff=0.75)
-            if it:
-                mon.item_ja, mon.item_id = it[0], it[1]
-                return f"item_{side_name}_{it[1]}"
+            mon.item_ja, mon.item_id = it[0], it[1]
+            return f"item_{side_name}_{it[1]}"
         return None
 
     # --------------------------------------------------------------

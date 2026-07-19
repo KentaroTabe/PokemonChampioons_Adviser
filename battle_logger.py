@@ -65,6 +65,7 @@ class BattleLogger:
         self._file: Optional[Path] = None
         self._prev_scene: Optional[str] = None
         self._outcome_logged = False
+        self._hp_seen_ts = 0.0   # 記録済みHP変化イベントの最終時刻
 
     # ------------------------------------------------------------------
     def _open_new(self) -> None:
@@ -87,6 +88,7 @@ class BattleLogger:
             self._outcome_logged = True
         self._file = None
         self._prev_scene = None
+        self._hp_seen_ts = 0.0
 
     # ------------------------------------------------------------------
     def on_frame(self, state: dict, fired: list) -> None:
@@ -98,11 +100,20 @@ class BattleLogger:
             self._finalize(state.get("outcome"))
 
         if fired:
-            self._write({"type": "events", "scene": scene, "fired": fired,
+            self._write({"type": "events", "scene": scene, "turn": state.get("turn"),
+                         "fired": fired,
                          "texts": [e["text"] for e in state.get("events", [])[-len(fired):]]})
 
+        # HP変化 (extractorsの_set_hpがsource="hp"でstate.eventsに積む) を
+        # 専用レコードで記録し、技イベントとのダメージ対応付けを可能にする
+        for e in state.get("events", []):
+            if e.get("source") == "hp" and e.get("ts", 0) > self._hp_seen_ts:
+                self._hp_seen_ts = e["ts"]
+                self._write({"type": "hp", "turn": state.get("turn"),
+                             "text": e["text"], "detail": e.get("detail")})
+
         if scene != self._prev_scene:
-            self._write({"type": "scene", "scene": scene,
+            self._write({"type": "scene", "scene": scene, "turn": state.get("turn"),
                          "state": _compact_state(state)})
             self._prev_scene = scene
 

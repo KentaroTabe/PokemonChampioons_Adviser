@@ -113,6 +113,7 @@ def classify_type_icon(crop_img, hash_accept: int = _HASH_ACCEPT,
 
     templates = _load_templates()
     scored = []
+    color_ranked = []
     for name, entries in templates.items():
         best_h = min(int(np.count_nonzero(qhash != e["hash"])) for e in entries)
         best_c = min(float(np.linalg.norm(qlab - e["lab"])) for e in entries)
@@ -120,6 +121,7 @@ def classify_type_icon(crop_img, hash_accept: int = _HASH_ACCEPT,
         # 形状が似たタイプ同士 (はがね/エスパー等) は色で分離できる
         total = best_h / 256.0 + 0.7 * (best_c / 100.0)
         scored.append((total, best_h, name))
+        color_ranked.append((best_c, name))
 
     if scored:
         scored.sort()
@@ -129,10 +131,16 @@ def classify_type_icon(crop_img, hash_accept: int = _HASH_ACCEPT,
         if h0 <= 60 or total0 <= 0.45:
             return n0
 
-    # 形状で決まらない場合: 色のみのフォールバック (テンプレ未整備タイプ含む)
-    ranked = sorted((float(np.linalg.norm(qlab - tl)), name)
-                    for name, tl in _TYPE_LABS.items())
-    dist, name = ranked[0]
-    if dist <= color_cutoff:
-        return name
+    # 形状で決まらない場合: 色のみのフォールバック。
+    # OBS経由は色味がシフトするため、静的な代表色より実キャプチャ由来の
+    # テンプレート色を優先する (静的色だと でんき→かくとう 等の混同が起きる)。
+    # 静的代表色はテンプレート未整備タイプ (どく/いわ) の補完にのみ使う
+    for name, tl in _TYPE_LABS.items():
+        if name not in templates:
+            color_ranked.append((float(np.linalg.norm(qlab - tl)), name))
+    color_ranked.sort()
+    if color_ranked:
+        dist, name = color_ranked[0]
+        if dist <= color_cutoff:
+            return name
     return None

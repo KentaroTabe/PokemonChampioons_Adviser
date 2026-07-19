@@ -111,6 +111,33 @@ def test_ability_popup():
     print("test_ability_popup OK")
 
 
+def test_popup_attribution_guard():
+    # 名前が照合できないポップアップは誰にも帰属させない
+    # (発動していないポケモンへ他個体の特性が付く誤帰属の再発防止)
+    state, p = new_parser()
+    p.parse("아나이뚜は ブリジュラスを 繰り出した!".replace("아나이뚜", "こちら"))
+    me = state.player.active()
+    me.species_ja = "ブリジュラス"
+    fired = p.parse("ワワゾケの てんねん", source="left_popup")
+    assert me.ability_id is None, f"誤帰属: {me.ability_ja}"
+    assert not any(f.startswith("ability_") for f in fired), fired
+
+    # 名前がベンチの個体と一致するなら、アクティブではなくその個体に帰属する
+    state2, p2 = new_parser()
+    p2.parse("相手は リザードンを 繰り出した!")
+    from vision.state import PokemonState
+    bench = state2.opponent.party[0]
+    active = state2.opponent.active()
+    if bench is active:
+        state2.opponent.party.append(PokemonState())
+        bench = state2.opponent.party[-1]
+    bench.species_ja = "ペリッパー"
+    fired = p2.parse("ペリッパーの あめふらし", source="right_popup")
+    assert bench.ability_id == "drizzle", (bench.ability_id, fired)
+    assert active.ability_id is None or active is bench
+    print("test_popup_attribution_guard OK")
+
+
 def test_move_reveal():
     state, p = new_parser()
     p.parse("아나이뚜は リザードンを 繰り出した!")
@@ -130,5 +157,6 @@ if __name__ == "__main__":
     test_hazards_and_screens()
     test_status_and_volatile()
     test_ability_popup()
+    test_popup_attribution_guard()
     test_move_reveal()
     print("\nALL OK")

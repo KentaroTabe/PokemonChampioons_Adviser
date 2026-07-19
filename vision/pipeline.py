@@ -89,6 +89,7 @@ class VisionPipeline:
             "watch": 1.5,
             "field_check": 1.5,
             "battle_hud": 2.5,
+            "field_hp": 1.0,   # フィールドシーン中の軽量HP追跡 (疑似シーンキー)
         }
 
     # ------------------------------------------------------------------
@@ -135,6 +136,14 @@ class VisionPipeline:
             self._selection_streak = 3
             self.state.scene = scene
 
+        # ターンカウント: 行動解決 (field/standby) から意思決定 (command) に
+        # 戻ったタイミングを新ターンとみなす。command<->move_select<->watch の
+        # 往復は同一ターン内の画面遷移なので数えない
+        if (scene == "command"
+                and prev_scene not in ("command", "move_select", "watch",
+                                       "field_check")):
+            self.state.turn += 1
+
         heavy = self._should_run_heavy(scene, force=single_shot)
 
         if scene == "selection" and heavy and selection_confirmed:
@@ -151,6 +160,13 @@ class VisionPipeline:
         # --- メッセージ / ポップアップ (HUDが消えるフィールドシーンのみ。
         #     HUD表示中はタイマー等の誤OCRを防ぐため読まない) ---
         if scene == "field":
+            # 技アニメーション中のHP変化を追い、直前の技イベントとダメージを
+            # 対応付けられるようにする (HUDバナー表示中のみ内部でOCRする)
+            if self._should_run_heavy("field_hp", force=single_shot):
+                try:
+                    extractors.extract_field_hp(img, self.state)
+                except Exception:
+                    pass
             fired += self._process_text_region(img, "message", zones.MESSAGE["text"],
                                                single_shot)
             fired += self._process_text_region(img, "left_popup",

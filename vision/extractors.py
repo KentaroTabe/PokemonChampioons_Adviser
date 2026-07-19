@@ -147,6 +147,63 @@ def extract_selection(img, state: BattleStateV2, resolver) -> None:
                 pass
 
 
+def _set_hp(state: BattleStateV2, side_name: str, mon,
+            pct=None, cur=None, mx=None) -> None:
+    """HPを更新し、有意な減少(3%以上)をイベントログに記録する (ダメージ帰属用)"""
+    old = mon.hp_percent
+    if cur is not None and mx:
+        mon.hp_current, mon.hp_max = cur, mx
+        mon.hp_percent = round(cur / mx * 100, 1)
+    elif pct is not None:
+        mon.hp_percent = float(pct)
+    new = mon.hp_percent
+    if old is not None and new is not None and abs(new - old) > 2.5:
+        sign = "-" if new < old else "+"
+        state.log_event(
+            "hp", f"{mon.species_ja or mon.display_name or '?'} "
+                  f"{old:.0f}%→{new:.0f}% ({sign}{abs(new - old):.0f}%)",
+            event_id=f"hp_{side_name}",
+            detail={"side": side_name, "from": old, "to": new})
+
+
+def extract_field_hp(img, state: BattleStateV2) -> None:
+    """フィールドシーン (技アニメーション/メッセージ中) の軽量HP読取。
+
+    ダメージはフィールドシーン中にHPバーへ反映されるため、コマンド画面待ちでは
+    「どの技で何%減ったか」の対応付けができない。HUDバナーが見えている間だけ
+    HPを読み続けることで、技イベントとHP変化イベントを時系列で対応付ける。
+    """
+    from vision.scenes import _crimson_ratio, _hp_bar_pixels
+    # HUDが表示されているかの軽量ゲート
+    if _crimson_ratio(crop(img, zones.BATTLE["opp_banner"])) < 0.15:
+        return
+
+    opp = state.opponent.active()
+    if opp is not None:
+        hp_text = ocr.read_zone_text(img, zones.BATTLE["opp_hp_text"], mode="panel",
+                                     allowlist="0123456789%")
+        pct = ocr.parse_percent(hp_text)
+        bar = ocr.hp_bar_ratio(crop(img, zones.BATTLE["opp_hp_bar"]))
+        if pct is not None and bar is not None and abs(pct - bar * 100) > 15:
+            pct = round(bar * 100, 1)
+        elif pct is None and bar is not None:
+            pct = round(bar * 100, 1)
+        if pct is not None:
+            _set_hp(state, "opponent", opp, pct=pct)
+
+    me = state.player.active()
+    if me is not None and _hp_bar_pixels(crop(img, zones.BATTLE["my_hp_bar"])) > 30:
+        my_hp = ocr.read_zone_text(img, zones.BATTLE["my_hp_text"], mode="panel",
+                                   allowlist="0123456789/")
+        frac = ocr.parse_fraction(my_hp)
+        if frac and frac[1]:
+            cur, mx = frac
+            if me.hp_max and mx != me.hp_max:
+                mx = me.hp_max
+            if cur <= mx:
+                _set_hp(state, "player", me, cur=cur, mx=mx)
+
+
 _TYPE_EN2JA = None
 
 
@@ -288,11 +345,11 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
     if pct is not None:
         # OCRとバー残量が大きく食い違う場合 (「1%」->「19」等の誤読) はバーを信用する
         if bar is not None and abs(pct - bar * 100) > 15:
-            opp.hp_percent = round(bar * 100, 1)
+            _set_hp(state, "opponent", opp, pct=round(bar * 100, 1))
         else:
-            opp.hp_percent = float(pct)
+            _set_hp(state, "opponent", opp, pct=float(pct))
     elif bar is not None:
-        opp.hp_percent = round(bar * 100, 1)
+        _set_hp(state, "opponent", opp, pct=round(bar * 100, 1))
 
     # --- 自分: 表示名 + HP実数 ---
     me = state.player.ensure_active()
@@ -326,8 +383,7 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
                 cur = cand if cand <= me.hp_max else cur
             mx = me.hp_max
         if cur <= mx:
-            me.hp_current, me.hp_max = cur, mx
-            me.hp_percent = round(cur / mx * 100, 1)
+            _set_hp(state, "player", me, cur=cur, mx=mx)
 
     # --- 残数ボール (緑=残り。単調減少で更新しノイズに耐える) ---
     for side_obj, zone_key in ((state.opponent, "opp_balls"),
