@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import re
 import time
 from typing import Optional
 
@@ -85,6 +86,7 @@ class VisionPipeline:
         self._pending_scene = None  # シーン遷移の確定待ち (2フレーム連続で確定)
         self._pending_count = 0
         self._in_selection = False  # 選出画面に確定滞在中か (離脱は5フレーム要求)
+        self._sel_anchor: dict = {"ok": None, "ts": 0.0}  # 対戦中の選出アンカー確認
         self._resolution_seen = True  # 前回command以降にfield/standbyを見たか
         self._heavy_interval = {
             "selection": 2.0,
@@ -142,6 +144,29 @@ class VisionPipeline:
         return scene
 
     # ------------------------------------------------------------------
+    def _selection_anchor_ok(self, img) -> bool:
+        """選出画面のアンカー (「選出完了」バーのN/3表記) が読めるか。
+
+        1秒スロットルでOCRし、結果をキャッシュする。対戦が本当に終わって
+        次の選出画面に入った場合はアンカーが読めるため、そこで通過する。
+        """
+        now = time.time()
+        if now - self._sel_anchor["ts"] < 1.0 and self._sel_anchor["ok"] is not None:
+            return self._sel_anchor["ok"]
+        self._sel_anchor["ts"] = now
+        try:
+            txt = ocr.read_zone_text(img, zones.SELECTION["complete_bar"],
+                                     mode="panel") or ""
+        except Exception:
+            txt = ""
+        # OCR崩れに耐える判定 (「0/3 選出完了」が 'DJ3運出買了' 等になる)
+        ok = ("選出" in txt or "完了" in txt
+              or bool(re.search(r"\d\s*/\s*3", txt))
+              or ("了" in txt and ("出" in txt or "3" in txt)))
+        self._sel_anchor["ok"] = ok
+        return ok
+
+    # ------------------------------------------------------------------
     def process(self, img, single_shot: bool = False):
         """1フレーム処理。戻り値: (state_dict, fired_events)"""
         if img is None:
@@ -156,6 +181,13 @@ class VisionPipeline:
         # HUD抽出による状態汚染・ログ分割につながった (実運用で観測)
         if not single_shot:
             scene = self._smooth_scene(scene, prev_scene)
+
+            # 対戦中の「選出画面」検知は交代画面等の誤検知であることがある
+            # (実戦でT3中にリセット+ログ分割が発生)。対戦中に選出画面と
+            # 認めるのは「選出完了/N/3」アンカーが実際に読めた場合のみ
+            if scene == "selection" and self.state.battle_active:
+                if not self._selection_anchor_ok(img):
+                    scene = prev_scene if prev_scene != "selection" else "field"
 
         self.state.scene = scene
         fired: list = []
