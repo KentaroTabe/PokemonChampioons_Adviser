@@ -36,7 +36,7 @@ def main() -> None:
     from champions_agent.agent.policy_battle import BattlePolicy
 
     stats = {"decisions": 0, "atk": 0, "se_avail": 0, "se_chosen": 0,
-             "best_avail": 0, "best_chosen": 0, "switch": 0,
+             "best_avail": 0, "best_chosen": 0, "switch": 0, "default": 0,
              "rand_se": 0.0, "rand_best": 0.0}
 
     def move_score(mon, move, opp):
@@ -72,8 +72,11 @@ def main() -> None:
             chosen = getattr(order, "order", None)
             from poke_env.battle import Move, Pokemon
             is_move = isinstance(chosen, Move)
-            if not is_move:
+            if isinstance(chosen, Pokemon):
                 stats["switch"] += 1
+            elif not is_move:
+                # DefaultBattleOrder等 (無効アクションの丸め込み)
+                stats["default"] += 1
 
             n_actions = len(moves) + len(battle.available_switches)
             se_moves = []
@@ -125,7 +128,8 @@ def main() -> None:
         "pathlib").Path(f"champions_agent/train/checkpoints/battle_policy_{args.play_style}.zip").exists() else "なし"
     print(f"\n=== probe_policy [{args.play_style}] (チェックポイント: {model_loaded}) ===")
     print(f"勝率 vs Random: {wins}/{args.battles} = {wins / args.battles:.2f}")
-    print(f"意思決定数: {stats['decisions']} (交代率 {stats['switch'] / d:.2f})")
+    print(f"意思決定数: {stats['decisions']} "
+          f"(交代率 {stats['switch'] / d:.2f} / デフォルト丸め率 {stats['default'] / d:.2f})")
     print(f"攻撃技選択率: {stats['atk'] / d:.2f}")
     print(f"抜群技の選択率: {stats['se_chosen'] / se_a:.2f} "
           f"(利用可能場面 {stats['se_avail']}回 / ランダム基準 {stats['rand_se'] / se_a:.2f})")

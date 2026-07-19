@@ -52,8 +52,25 @@ def test_basic_recommendation():
     # 相手にほのお/ひこう・じめんがいる -> みず打点(ペリッパー/ラグラージ)の
     # どちらかは選出に入るはず
     assert any(n in names for n in ("ペリッパー", "ラグラージ")), names
+    # メガストーン持ち(ラグラージ/ライチュウ)が2体同時に選出されないこと
+    mega_count = sum(1 for r in rec if r["mega_holder"])
+    assert mega_count <= 1, rec
+    # 種族推測が表示されること (タイプのみの相手が6枠)
+    assert advice["inference"], advice
     print("test_basic_recommendation OK")
     print(format_selection_advice(advice))
+
+
+def test_type_inference():
+    """ユーザー例: ほのお/ゴースト -> ラウドボーン or ソウブレイズ を使用率から推測"""
+    from advisor.infer import get_inference
+    cands = get_inference().candidates(["ほのお", "ゴースト"])
+    assert cands, "候補が空"
+    names = [ja for _sid, _p, ja in cands[:2]]
+    assert "ラウドボーン" in names or "ソウブレイズ" in names, names
+    total = sum(p for _s, p, _j in cands)
+    assert abs(total - 1.0) < 0.01
+    print(f"test_type_inference OK: {[(ja, round(p, 2)) for _s, p, ja in cands[:3]]}")
 
 
 def test_done_detection():
@@ -77,6 +94,7 @@ def test_insufficient_info():
 
 if __name__ == "__main__":
     test_basic_recommendation()
+    test_type_inference()
     test_done_detection()
     test_insufficient_info()
     print("\nALL OK")

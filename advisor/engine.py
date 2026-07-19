@@ -179,9 +179,28 @@ def evaluate(state: dict, resolver=None) -> dict:
 
     opp_p = None
     opp_view = None
+    opp_inference_note = ""
     if opp_active_idx is not None and opp_active_idx < len(opp_state["party"]):
         opp_p = opp_state["party"][opp_active_idx]
         opp_view = build_mon_view(opp_p, resolver)
+        if opp_view is None and (opp_p.get("types") or []):
+            # 種族未判明: タイプから使用率ベースで最有力種族を推測して評価する
+            try:
+                from advisor.infer import get_inference
+                cands = get_inference().candidates(opp_p["types"])
+            except Exception:
+                cands = []
+            if cands:
+                sid, prob, ja = cands[0]
+                assumed = dict(opp_p)
+                assumed["species_id"] = sid
+                opp_view = build_mon_view(assumed, resolver)
+                if opp_view is not None:
+                    opp_view.name_ja = f"{ja}(推測)"
+                    note = f"相手は {ja} と推測して評価 (確率{int(round(prob * 100))}%"
+                    if len(cands) >= 2:
+                        note += f", 次点: {cands[1][2]}{int(round(cands[1][1] * 100))}%"
+                    opp_inference_note = note + ")"
 
     my_field = build_field_view(state, "player")
     opp_field = build_field_view(state, "opponent")
@@ -391,5 +410,6 @@ def evaluate(state: dict, resolver=None) -> dict:
         "threats": threats[:5],
         "speed_note": speed_note,
         "mega_note": mega_note,
+        "opp_inference": opp_inference_note,
         "best": actions[0] if actions else None,
     }

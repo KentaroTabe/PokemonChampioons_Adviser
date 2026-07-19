@@ -102,6 +102,8 @@ class Advisor:
         for a in advice["actions"][:6]:
             kind = "技" if a["kind"] == "move" else "交代"
             lines.append(f"  - [{kind}] {a['name']}: {a['score']}  {a['reason']}")
+        if advice.get("opp_inference"):
+            lines.append(f"  🔍 {advice['opp_inference']}")
         if advice.get("speed_note"):
             lines.append(f"  {advice['speed_note']}")
         if advice.get("mega_note"):
