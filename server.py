@@ -138,6 +138,7 @@ async def handle_frame(sid, data):
             for f in fired:
                 print(f"[server] イベント検知: {f}")
 
+        _attach_candidates(state)
         state_json = json.dumps(state, ensure_ascii=False, sort_keys=True)
         if fired or state_json != _last_state_json or processed_counter % 20 == 0:
             _last_state_json = state_json
@@ -182,6 +183,43 @@ async def handle_frame(sid, data):
         print(f"[server] 画像処理エラー: {e}")
     finally:
         _busy = False
+
+
+def _attach_candidates(state: dict) -> None:
+    """相手の未確定ポケモンにタイプ推論の候補リストを付与する (プルダウン用)"""
+    try:
+        from advisor.infer import get_inference
+        for i, p in enumerate(state["opponent"]["party"]):
+            if p.get("species_ja") or not p.get("types"):
+                continue
+            cands = get_inference().candidates(p["types"], top_k=8)
+            if cands:
+                p["candidates"] = [
+                    {"id": sid_, "ja": ja, "pct": round(prob * 100, 1)}
+                    for sid_, prob, ja in cands]
+    except Exception:
+        pass
+
+
+@sio.on('set_species')
+async def set_species(sid, data):
+    """フロントエンドのプルダウンから相手ポケモンの種族を確定する"""
+    try:
+        idx = int(data["index"])
+        species_id = data["species_id"]
+        species_ja = data.get("species_ja") or species_id
+        party = pipeline.state.opponent.party
+        if 0 <= idx < len(party):
+            party[idx].merge_species(species_ja, species_id)
+            pipeline.state.log_event(
+                "manual", f"相手の{species_ja}を手動確定 (候補から選択)",
+                event_id="species_manual")
+            print(f"[server] 手動確定: 相手slot{idx} = {species_ja}")
+            state = pipeline.state.to_dict()
+            _attach_candidates(state)
+            await sio.emit('state_update', state, room=sid)
+    except Exception as e:
+        print(f"[server] set_speciesエラー: {e}")
 
 
 @sio.on('reset_state')

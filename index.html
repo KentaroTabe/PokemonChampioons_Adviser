@@ -70,7 +70,13 @@
         const STATUS_JA = {poison: 'どく', toxic: 'もうどく', burn: 'やけど', paralysis: 'まひ',
                            sleep: 'ねむり', freeze: 'こおり', drowsy: 'ねむけ', fainted: 'ひんし'};
 
-        function renderMon(p, i, activeIdx) {
+        function setSpecies(i, val) {
+            if (!val) return;
+            const [id, ja] = val.split('|');
+            socket.emit('set_species', {index: i, species_id: id, species_ja: ja});
+        }
+
+        function renderMon(p, i, activeIdx, side) {
             const cls = ['mon'];
             if (i === activeIdx) cls.push('active');
             if (p.status === 'fainted') cls.push('fainted');
@@ -91,7 +97,16 @@
                     p.moves.map(m => `${m.name_ja}${m.pp!=null?`(${m.pp})`:''}`).join(' / ') + '</div>';
             if (p.revealed_moves && p.revealed_moves.length)
                 moves += `<div style="font-size:11px;color:#c98">判明技: ${p.revealed_moves.join(' / ')}</div>`;
-            return `<div class="${cls.join(' ')}">${i===activeIdx?'▶ ':''}${p.species_ja || p.display_name || '???'}${hp}${tags}${moves}</div>`;
+            // 相手の未確定ポケモン: タイプ推論の候補から手動で確定できる
+            let picker = '';
+            if (side === 'opp' && !p.species_ja && p.candidates && p.candidates.length) {
+                const opts = p.candidates.map(c =>
+                    `<option value="${c.id}|${c.ja}">${c.ja} (${c.pct}%)</option>`).join('');
+                picker = `<select onchange="setSpecies(${i}, this.value)"
+                    style="margin-left:6px;font-size:11px;background:#223;color:#cde;border:1px solid #446;border-radius:4px">
+                    <option value="">候補から確定…</option>${opts}</select>`;
+            }
+            return `<div class="${cls.join(' ')}">${i===activeIdx?'▶ ':''}${p.species_ja || p.display_name || '???'}${picker}${hp}${tags}${moves}</div>`;
         }
 
         socket.on('state_update', (s) => {
@@ -107,9 +122,9 @@
             document.getElementById('field-label').textContent = parts.join(' / ') || '場: 通常';
 
             document.getElementById('my-party').innerHTML =
-                (s.player.party || []).map((p, i) => renderMon(p, i, s.player.active_index)).join('');
+                (s.player.party || []).map((p, i) => renderMon(p, i, s.player.active_index, 'my')).join('');
             document.getElementById('opp-party').innerHTML =
-                (s.opponent.party || []).map((p, i) => renderMon(p, i, s.opponent.active_index)).join('');
+                (s.opponent.party || []).map((p, i) => renderMon(p, i, s.opponent.active_index, 'opp')).join('');
 
             document.getElementById('events').innerHTML = (s.events || []).slice().reverse()
                 .map(e => `<div>[${e.source}] ${e.text} ${e.event ? '→ <b>' + e.event + '</b>' : ''}</div>`).join('');
