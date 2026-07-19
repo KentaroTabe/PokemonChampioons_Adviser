@@ -85,6 +85,9 @@ class SpreadEstimator:
         self.species_id = species_id
         self.hyps: list = self._build_hypotheses(species_id)
         self.n_obs = 0
+        self.spe_lower: Optional[float] = None   # 実効素早さの下限 (観測由来)
+        self.spe_upper: Optional[float] = None
+        self._choice_locked = False
 
     # ------------------------------------------------------------------
     @staticmethod
@@ -174,6 +177,11 @@ class SpreadEstimator:
         if not self.hyps:
             return
         self.n_obs += 1
+        # 実効素早さの範囲を狭める (表示・素早さ実数の把握用)
+        if opp_first:
+            self.spe_lower = max(self.spe_lower or 0, my_effective_speed)
+        else:
+            self.spe_upper = min(self.spe_upper or 9999, my_effective_speed)
         for h in self.hyps:
             v = self._view(h, opp_state)
             if v is None:
@@ -189,6 +197,20 @@ class SpreadEstimator:
                 else (spe < my_effective_speed)
             # 先後は追い風/こだわり等の未観測要因もあるためソフトに更新
             h["logw"] += math.log(1.0 if consistent else 0.2)
+
+    def observe_choice_lock(self) -> None:
+        """同一技の3連続使用を観測 -> こだわり系持ち物の仮説を強める"""
+        if self._choice_locked or not self.hyps:
+            return
+        self._choice_locked = True
+        self.n_obs += 1
+        # 3連続同一技はこだわり系のほぼ確定的な証拠 (変化技サイクル等の
+        # 例外はあるが稀) なので強く更新する
+        for h in self.hyps:
+            if h["item"] and h["item"].startswith("choice"):
+                h["logw"] += math.log(4.0)
+            else:
+                h["logw"] += math.log(0.1)
 
     def observe_damage(self, attacker: MonView, defender_is_hyp: bool,
                        move_id: str, observed_pct: float,
@@ -234,6 +256,11 @@ class SpreadEstimator:
         pts = _ev_to_points(top["evs"])
         ev_txt = " ".join(f"{abbr[k]}{v}" for k, v in pts.items() if v)
         nature_ja = _NATURE_JA.get(top["nature"], top["nature"]) or "性格不明"
+        spe_note = ""
+        if self.spe_lower or self.spe_upper:
+            lo = f"{self.spe_lower:.0f}<" if self.spe_lower else ""
+            hi = f"<{self.spe_upper:.0f}" if self.spe_upper else ""
+            spe_note = f" 実効S{lo}S{hi}" if (lo or hi) else ""
         return {
             "nature": top["nature"],
             "nature_ja": nature_ja,
@@ -241,10 +268,13 @@ class SpreadEstimator:
             "item": top["item"],
             "prob": round(prob, 3),
             "n_obs": self.n_obs,
+            "spe_lower": self.spe_lower,
+            "spe_upper": self.spe_upper,
             "summary": f"{nature_ja}"
                        f" {ev_txt}"
                        + (f" @{top['item']}" if top["item"] else "")
-                       + f" ({prob:.0%}, 観測{self.n_obs}件)",
+                       + f" ({prob:.0%}, 観測{self.n_obs}件)"
+                       + spe_note,
         }
 
 
@@ -264,6 +294,7 @@ class SpreadTracker:
         self._hp_seen_ts = 0.0
         self._order_turn = None       # 先後を判定済みのターン
         self._prev_scene = None
+        self._opp_streak = {}         # species_id -> (move_id, 連続回数)
 
     def estimator(self, species_id: str) -> SpreadEstimator:
         if species_id not in self._est:
@@ -295,12 +326,34 @@ class SpreadTracker:
             self.reset()
         self._prev_scene = state.get("scene")
 
+        # 選出画面: 相手6体の仮説を事前構築しておく (対戦開始直後から
+        # 事前分布ベースの型表示ができる)
+        if state.get("scene") == "selection":
+            for p in state["opponent"].get("party", []):
+                if p.get("species_id"):
+                    self.estimator(p["species_id"])
+
         now = time.time()
         turn = state.get("turn")
         for f in fired:
             for side in ("player", "opponent"):
                 if f.startswith(f"move_{side}_"):
                     self._last_move[side] = (now, f.split("_", 2)[2], turn)
+
+        # こだわりロック検知: 同一ポケモンが同一技を3連続 (交代で解除)
+        for f in fired:
+            if f.startswith("move_opponent_"):
+                opp = self._active(state, "opponent")
+                if opp and opp.get("species_id"):
+                    sid = opp["species_id"]
+                    mid = f.split("_", 2)[2]
+                    prev_mid, streak = self._opp_streak.get(sid, (None, 0))
+                    streak = streak + 1 if mid == prev_mid else 1
+                    self._opp_streak[sid] = (mid, streak)
+                    if streak >= 3:
+                        self.estimator(sid).observe_choice_lock()
+            elif f == "switch_opponent":
+                self._opp_streak.clear()
 
         # --- 先後観測: 同一ターンに両者の技が揃ったら1回だけ判定 ---
         pm, om = self._last_move["player"], self._last_move["opponent"]

@@ -88,8 +88,49 @@ def test_ev_points_display():
     print("test_ev_points_display OK")
 
 
+def test_choice_lock_and_speed_bounds():
+    est = SpreadEstimator("garchomp")
+    # 同一技3連続 -> こだわり系仮説が浮上
+    est.observe_choice_lock()
+    b = est.best()
+    assert b["item"] and b["item"].startswith("choice"), b["summary"]
+    # 先後観測で実効Sの範囲が絞られ、summaryに表示される
+    est.observe_speed(True, 140, {"boosts": {}, "status": None})
+    est.observe_speed(False, 200, {"boosts": {}, "status": None})
+    b2 = est.best()
+    assert b2["spe_lower"] == 140 and b2["spe_upper"] == 200, b2
+    assert "実効S" in b2["summary"], b2["summary"]
+    print(f"test_choice_lock_and_speed_bounds OK: {b2['summary']}")
+
+
+def test_tracker_choice_lock_flow():
+    import time
+    tr = SpreadTracker()
+    state = {
+        "scene": "field", "turn": 1, "field": {},
+        "player": {"active_index": 0, "party": [
+            {"species_id": "mimikyu", "species_ja": "ミミッキュ", "types": [],
+             "hp_percent": 100.0, "boosts": {}, "status": None}]},
+        "opponent": {"active_index": 0, "party": [
+            {"species_id": "garchomp", "species_ja": "ガブリアス", "types": [],
+             "hp_percent": 100.0, "boosts": {}, "status": None}]},
+        "events": [],
+    }
+    for turn in (1, 2, 3):
+        state["turn"] = turn
+        tr.on_frame(state, ["move_opponent_earthquake"])
+    b = tr.best_for("garchomp")
+    assert b["item"] and b["item"].startswith("choice"), b["summary"]
+    # 交代でストリークが切れる
+    tr.on_frame(state, ["switch_opponent"])
+    assert not tr._opp_streak
+    print(f"test_tracker_choice_lock_flow OK: {b['summary']}")
+
+
 if __name__ == "__main__":
     test_ev_points_display()
+    test_choice_lock_and_speed_bounds()
+    test_tracker_choice_lock_flow()
     test_hypotheses_loaded()
     test_speed_observation()
     test_damage_observation()
