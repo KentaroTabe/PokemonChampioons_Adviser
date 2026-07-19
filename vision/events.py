@@ -149,6 +149,12 @@ SIMPLE_EVENTS = [
     # --- メガシンカ ---
     {"id": "mega_evolve", "keywords": [["メガシンカ", "めかしんか"]], "action": "mega"},
 
+    # --- 勝敗 (「〜との勝負に勝った!」) ---
+    {"id": "battle_win", "keywords": [["勝負", "しようふ"], ["勝った", "かつた"]],
+     "action": "battle_end", "value": "win"},
+    {"id": "battle_lose", "keywords": [["勝負", "しようふ"], ["負けた", "まけた"]],
+     "action": "battle_end", "value": "loss"},
+
     # --- 持ち物 ---
     {"id": "leftovers_heal", "keywords": [["たべのこし", "食べ残し"], ["回復", "かいふく"]],
      "action": "item", "value": "たべのこし"},
@@ -426,6 +432,9 @@ class EventParser:
         f = self.state.field
 
         if action == "noop":
+            return
+        if action == "battle_end":
+            self.state.outcome = ev["value"]
             return
         if action == "weather":
             f.weather = ev["value"]

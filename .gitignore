@@ -28,3 +28,6 @@ champions_agent/train/logs/
 
 # --- その他 ---
 .clinerules
+
+# 対戦ログ (自動記録)
+logs/

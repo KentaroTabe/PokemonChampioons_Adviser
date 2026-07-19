@@ -25,6 +25,7 @@ from fastapi import FastAPI
 from vision import ocr
 from vision.pipeline import VisionPipeline
 from advisor.service import Advisor
+from battle_logger import BattleLogger
 
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
 app = FastAPI()
@@ -32,6 +33,7 @@ app_asgi = socketio.ASGIApp(sio, app)
 
 pipeline = VisionPipeline()
 advisor = Advisor(resolver=pipeline.resolver)
+battle_log = BattleLogger()
 
 # バトル中の初回OCRで初期化が走ると数十秒フレームが詰まるため、
 # サーバー起動時に先にウォームアップしておく (Apple Vision優先)
@@ -105,6 +107,7 @@ async def handle_frame(sid, data):
         loop = asyncio.get_event_loop()
         state, fired = await loop.run_in_executor(None, pipeline.process, img)
         processed_counter += 1
+        battle_log.on_frame(state, fired)
 
         # 場の状況画面は貴重な検証データなので、検出したら間隔に関係なく保存する
         if DUMP_FRAMES and state["scene"] == "field_check" and \
@@ -145,6 +148,7 @@ async def handle_frame(sid, data):
                 _last_advice_key = sel_key
                 _last_advice_time = now
                 advice = await loop.run_in_executor(None, advisor.advise_selection, state)
+                battle_log.on_advice(advice, "selection")
                 await sio.emit('advice_update', advice, room=sid)
                 print("--- 選出アドバイス ---")
                 print(advice["text"])
@@ -158,6 +162,7 @@ async def handle_frame(sid, data):
                 _last_advice_time = now
                 advice = await loop.run_in_executor(None, advisor.advise, state)
                 advice["text"] = advisor.format_advice(advice)
+                battle_log.on_advice(advice, "battle")
                 await sio.emit('advice_update', advice, room=sid)
                 if advice.get("ok"):
                     print("--- アドバイス ---")

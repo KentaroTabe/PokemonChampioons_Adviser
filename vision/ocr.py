@@ -281,6 +281,33 @@ def parse_percent(text: str):
     return val if 0 <= val <= 100 else None
 
 
+def count_pokeballs(img) -> Optional[int]:
+    """残数インジケータの緑のボール個数を数える (0-3)。
+
+    ボールが検出できない (アニメーション中/ゾーン外) 場合は None。
+    """
+    if img is None or img.size == 0:
+        return None
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    green = cv2.inRange(hsv, np.array([35, 70, 90]), np.array([80, 255, 255]))
+    green = cv2.morphologyEx(green, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(green, 8)
+    h, w = green.shape
+    min_area = h * w * 0.02   # ボール1個はゾーンの数%を占める
+    count = 0
+    for i in range(1, n):
+        area = stats[i, cv2.CC_STAT_AREA]
+        bw, bh = stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
+        if area < min_area:
+            continue
+        # 隣接するボールは1ブロブに結合するため、幅/高さ比から個数を推定する
+        est = max(1, round(bw / max(1, bh) * 0.9))
+        count += est
+    if count == 0:
+        return None
+    return min(count, 3)
+
+
 def hp_bar_ratio(img) -> Optional[float]:
     """HPバー領域から残量比率 (0..1) を色で推定する。
 

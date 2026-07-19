@@ -227,6 +227,7 @@ class BattleStateV2:
         self.turn: int = 0
         self.mega_used = {"player": False, "opponent": False}
         self.battle_active: bool = False
+        self.outcome: Optional[str] = None    # win / loss (勝敗メッセージから)
         self.events: list = []          # [{ts, source, text, event, target}]
         self.last_texts = {"message": "", "left_popup": "", "right_popup": ""}
 
@@ -260,6 +261,7 @@ class BattleStateV2:
             "turn": self.turn,
             "command_no": self.command_no,
             "battle_active": self.battle_active,
+            "outcome": self.outcome,
             "field": self.field.to_dict(),
             "player": self.player.to_dict(),
             "opponent": self.opponent.to_dict(),

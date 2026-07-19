@@ -289,6 +289,14 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
             me.hp_current, me.hp_max = cur, mx
             me.hp_percent = round(cur / mx * 100, 1)
 
+    # --- 残数ボール (緑=残り。単調減少で更新しノイズに耐える) ---
+    for side_obj, zone_key in ((state.opponent, "opp_balls"),
+                                (state.player, "my_balls")):
+        count = ocr.count_pokeballs(crop(img, zones.BATTLE[zone_key]))
+        if count is not None and 1 <= count <= 3:
+            if side_obj.remaining is None or count <= side_obj.remaining:
+                side_obj.remaining = count
+
     # --- COMMAND 残り秒数 ---
     cmd = ocr.read_zone_text(img, zones.BATTLE["command_no"], mode="panel",
                              allowlist="0123456789")
