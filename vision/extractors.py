@@ -433,6 +433,17 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
         if cur <= mx:
             _set_hp(state, "player", me, cur=cur, mx=mx)
 
+    # --- 特性が一意な種族 (単一特性/メガ) は確定値として自動設定 ---
+    from vision.abilities import fixed_ability
+    for side_name in ("player", "opponent"):
+        mon = state.side(side_name).active()
+        if mon is not None and mon.species_id and not mon.ability_id:
+            fa = fixed_ability(mon.species_id, is_mega=mon.is_mega,
+                               item_id=mon.item_id)
+            if fa:
+                mon.ability_id = fa
+                mon.ability_ja = resolver.ja_of("abilities", fa) or fa
+
     # --- 残数ボール (緑=残り。単調減少で更新しノイズに耐える) ---
     for side_obj, zone_key in ((state.opponent, "opp_balls"),
                                 (state.player, "my_balls")):

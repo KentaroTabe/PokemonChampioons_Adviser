@@ -574,6 +574,12 @@ class EventParser:
             sp = self.resolver.find_species_in_text(cleaned, cutoff=0.7)
             if sp and sp[0].startswith("メガ"):
                 mon.merge_species(sp[0], sp[1])
+            # メガフォルムの特性は固定なので確定値として設定する
+            from vision.abilities import fixed_ability
+            fa = fixed_ability(mon.species_id, is_mega=True, item_id=mon.item_id)
+            if fa:
+                mon.ability_id = fa
+                mon.ability_ja = self.resolver.ja_of("abilities", fa) or fa
         elif action == "item":
             _, _, mon = self._target_mon(cleaned, source)
             mon.item_ja = ev["value"]

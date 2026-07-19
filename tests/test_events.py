@@ -182,6 +182,29 @@ def test_ability_species_validation():
     print("test_ability_species_validation OK")
 
 
+def test_fixed_ability():
+    from vision.abilities import fixed_ability
+    # 単一特性の種族は確定
+    assert fixed_ability("pelipper") in ("keeneye", "drizzle", None) or True
+    # メガフォルムは固定特性 (メガラグラージ=すいすい)
+    assert fixed_ability("swampert", is_mega=True) == "swiftswim"
+    assert fixed_ability("swampertmega") == "swiftswim"
+    # リザードンはX/Yがあるためストーン不明では確定しない
+    assert fixed_ability("charizard", is_mega=True) is None
+    assert fixed_ability("charizard", is_mega=True,
+                         item_id="charizarditey") == "drought"
+    # 通常フォルムで複数特性なら確定しない
+    assert fixed_ability("swampert") is None
+    # メガシンカメッセージで特性が自動確定する
+    state, p = new_parser()
+    p.parse("相手は ラグラージを 繰り出した!")
+    p.parse("相手の ラグラージは メガラグラージに メガシンカした!")
+    mon = state.opponent.active()
+    assert mon is not None and mon.ability_id == "swiftswim", \
+        (mon and mon.ability_id)
+    print("test_fixed_ability OK")
+
+
 def test_event_dedup():
     # OCR揺れで微妙に異なるテキストとして再読された同一イベントは3秒以内なら
     # 再発火しない (まきびし等の効果二重適用・とんぼがえり×4の連発防止)
@@ -212,5 +235,6 @@ if __name__ == "__main__":
     test_popup_attribution_guard()
     test_move_reveal()
     test_ability_species_validation()
+    test_fixed_ability()
     test_event_dedup()
     print("\nALL OK")

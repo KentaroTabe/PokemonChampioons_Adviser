@@ -112,6 +112,13 @@ class NameResolver:
             return best
         return None
 
+    def ja_of(self, category: str, value) -> Optional[str]:
+        """英語ID -> 日本語名の逆引き"""
+        for jp, val, _nk, _lk in self._entries.get(category, []):
+            if val == value:
+                return jp
+        return None
+
     def resolve_restricted(self, text: str, category: str, allowed_ids,
                            cutoff: float = 0.6) -> Optional[tuple]:
         """許可されたID集合の中からのみ解決する (特性の種族別3択など)。

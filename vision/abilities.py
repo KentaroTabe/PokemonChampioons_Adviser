@@ -16,6 +16,7 @@ DEX_PATH = (Path(__file__).resolve().parent.parent
             / "champions_agent" / "data" / "champions_dex.json")
 
 _LEGAL: Optional[dict] = None
+_FORMS: Optional[dict] = None   # フォルムkey -> そのフォルム自身の特性IDセット
 
 
 def _to_id(name: str) -> str:
@@ -47,3 +48,47 @@ def legal_abilities(species_id: Optional[str]):
     if not species_id:
         return None
     return _load().get(_to_id(species_id))
+
+
+def _load_forms() -> dict:
+    global _FORMS
+    if _FORMS is not None:
+        return _FORMS
+    _FORMS = {}
+    try:
+        species = json.loads(DEX_PATH.read_text(encoding="utf-8"))["species"]
+    except Exception:
+        return _FORMS
+    for key, ent in species.items():
+        _FORMS[_to_id(key)] = {_to_id(a)
+                               for a in (ent.get("abilities") or {}).values()}
+    return _FORMS
+
+
+def fixed_ability(species_id: Optional[str], is_mega: bool = False,
+                  item_id: Optional[str] = None) -> Optional[str]:
+    """特性が一意に確定する場合はそのIDを返す。
+
+    - 特性が1つしかない種族 (例: カイリュー=せいしんりょく)
+    - メガシンカ後 (メガフォルムの特性は固定。リザードンのようにX/Yがある
+      場合はメガストーンのIDで判別し、判別できなければ確定しない)
+    """
+    forms = _load_forms()
+    key = _to_id(species_id or "")
+    if not key:
+        return None
+    if is_mega and not key.endswith("mega"):
+        cands = [k for k in forms
+                 if k.startswith(key) and "mega" in k[len(key):]]
+        if len(cands) > 1 and item_id:
+            suffix = item_id[-1] if item_id[-1] in ("x", "y") else None
+            narrowed = [c for c in cands if suffix and c.endswith("mega" + suffix)]
+            cands = narrowed or cands
+        if len(cands) != 1:
+            return None
+        abset = forms.get(cands[0])
+    else:
+        abset = forms.get(key)
+    if abset and len(abset) == 1:
+        return next(iter(abset))
+    return None
