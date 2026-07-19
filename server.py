@@ -35,6 +35,14 @@ pipeline = VisionPipeline()
 advisor = Advisor(resolver=pipeline.resolver)
 battle_log = BattleLogger()
 
+# 起動 (更新反映) のタイミングで不要ログを掃除する
+# (断片対戦ログ / 古いデバッグフレーム。失敗してもサーバーは起動する)
+try:
+    from tools.cleanup_logs import cleanup
+    cleanup()
+except Exception as e:
+    print(f"[server] ログ掃除をスキップ: {e}")
+
 # バトル中の初回OCRで初期化が走ると数十秒フレームが詰まるため、
 # サーバー起動時に先にウォームアップしておく (Apple Vision優先)
 print("[server] OCRバックエンドを初期化します...")
