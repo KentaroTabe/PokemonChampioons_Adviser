@@ -218,7 +218,9 @@ def _set_hp(state: BattleStateV2, side_name: str, mon,
     if abs(delta) <= 2.5:
         return
     mon._hp_event_base = new
-    if delta > 60:
+    # 交代由来の誤帰属: 回復技上限を超える増加、または全快への大幅ジャンプ
+    # (対戦中に全快まで回復する手段はない) はイベント化しない
+    if delta > 60 or (delta > 30 and new >= 99.5):
         return
     sign = "-" if delta < 0 else "+"
     state.log_event(
@@ -676,8 +678,7 @@ def extract_field_check(img, state: BattleStateV2, resolver) -> None:
                         break
             frac = ocr.parse_fraction(t2)
             if frac and frac[1] and frac[1] >= 50:
-                mon.hp_current, mon.hp_max = frac
-                mon.hp_percent = round(frac[0] / frac[1] * 100, 1)
+                _set_hp(state, side_name, mon, cur=frac[0], mx=frac[1])
                 done = True
                 break
         if done:
@@ -877,9 +878,8 @@ def extract_watch(img, state: BattleStateV2, resolver) -> None:
             state.player.party.append(mon)
             idx = len(state.player.party) - 1
         mon = state.player.party[idx]
-        mon.hp_current, mon.hp_max = frac
-        mon.hp_percent = round(frac[0] / frac[1] * 100, 1)
-        if frac[0] == 0:
+        _set_hp(state, "player", mon, cur=frac[0], mx=frac[1])
+        if frac[0] == 0 and mon.hp_current == 0:
             mon.status = "fainted"
 
     # 右列: 相手パーティのHP% (視認済みのポケモンのみ表示される)
