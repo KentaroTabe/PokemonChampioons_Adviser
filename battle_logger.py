@@ -66,12 +66,15 @@ class BattleLogger:
         self._prev_scene: Optional[str] = None
         self._outcome_logged = False
         self._hp_seen_ts = 0.0   # 記録済みHP変化イベントの最終時刻
+        self._selection_streak = 0  # 選出画面が連続何フレーム続いているか
+        self._opened_ts = 0.0       # 現在のログファイルを開いた時刻
 
     # ------------------------------------------------------------------
     def _open_new(self) -> None:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         name = time.strftime("battle_%Y%m%d_%H%M%S.jsonl")
         self._file = self.log_dir / name
+        self._opened_ts = time.time()
         self._outcome_logged = False
         print(f"[battle_log] 新しい対戦ログ: {self._file.name}")
 
@@ -95,8 +98,17 @@ class BattleLogger:
         """毎フレーム呼び出し。シーン変化・イベント・勝敗を記録する"""
         scene = state.get("scene")
 
-        # 新しい対戦の開始検知: 選出画面に入った時点でファイルを切り替える
-        if scene == "selection" and self._prev_scene not in ("selection", None):
+        # 新しい対戦の開始検知: 選出画面に入った時点でファイルを切り替える。
+        # シーン分類は数フレーム揺れることがあるため、連続3フレーム選出画面が
+        # 続いた場合のみ回転する (揺れのたびにログが数秒単位で分割されていた)
+        if scene == "selection":
+            self._selection_streak += 1
+        else:
+            self._selection_streak = 0
+        # 30秒未満のファイルは回転しない (選出中に他画面と往復しても分割しない。
+        # 対戦は最短でも1分以上かかるため、30秒以内の再回転は誤検知)
+        if (self._selection_streak == 3 and self._file is not None
+                and time.time() - self._opened_ts >= 30.0):
             self._finalize(state.get("outcome"))
 
         if fired:
