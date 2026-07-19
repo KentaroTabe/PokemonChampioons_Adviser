@@ -276,6 +276,7 @@ def evaluate(state: dict, resolver=None) -> dict:
     opp_best_move = None
     i_am_faster = None
     opp_moves_note = ""
+    pool = []
     if opp_view is not None:
         pool = opponent_move_pool(opp_p, opp_view, resolver)
         for mid, weight in pool:
@@ -475,6 +476,16 @@ def evaluate(state: dict, resolver=None) -> dict:
                  or (my_p.get("item_ja") or "").endswith(("ナイトX", "ナイトY", "ナイト")))):
         mega_note = "メガシンカが可能です (種族値+100)。攻撃するターンにメガシンカを推奨。"
 
+    # 同時手番探索 (択の利得行列 + 2手読み)。失敗しても本体は返す
+    gtheory = None
+    try:
+        gtheory = _run_search(state, my_state, my_view, my_p,
+                              opp_state, opp_view, resolver,
+                              pool, my_field, opp_field)
+    except Exception:
+        import traceback
+        traceback.print_exc()
+
     return {
         "ok": True,
         "actions": actions,
@@ -484,5 +495,56 @@ def evaluate(state: dict, resolver=None) -> dict:
         "opp_inference": opp_inference_note,
         "opp_moves_note": opp_moves_note,
         "opp_spread_note": opp_spread_note,
+        "gtheory": gtheory,
         "best": actions[0] if actions else None,
     }
+
+
+def _hp_frac_of(p: dict) -> float:
+    if p.get("hp_percent") is not None:
+        return max(0.0, min(1.0, p["hp_percent"] / 100.0))
+    if p.get("hp_current") is not None and p.get("hp_max"):
+        return max(0.0, p["hp_current"] / p["hp_max"])
+    return 1.0
+
+
+def _run_search(state, my_state, my_view, my_p, opp_state, opp_view,
+                resolver, pool, my_field, opp_field):
+    """状態辞書 -> SimSide を組み立てて同時手番探索を実行する"""
+    from advisor.search import SimSide, search
+    if my_view is None or opp_view is None:
+        return None
+
+    my_moves = [m.get("move_id") for m in (my_p.get("moves") or [])
+                if m.get("move_id")]
+    if not my_moves:
+        return None
+
+    def bench_of(side_state, side):
+        bench = []
+        active_idx = side_state.get("active_index")
+        for i, p in enumerate(side_state.get("party", [])):
+            if i == active_idx or p.get("status") == "fainted":
+                continue
+            v = build_mon_view(p, resolver, side=side)
+            if v is not None:
+                bench.append((v, _hp_frac_of(p)))
+        return bench[:4]
+
+    me = SimSide(active=my_view, active_hp=_hp_frac_of(my_p),
+                 bench=bench_of(my_state, "player"),
+                 stealth_rock=bool(my_state.get("hazards", {}).get("stealth_rock")))
+    opp = SimSide(active=opp_view, active_hp=_hp_frac_of(
+                      opp_state["party"][opp_state["active_index"]]),
+                  bench=bench_of(opp_state, "opponent"),
+                  stealth_rock=bool(opp_state.get("hazards", {}).get("stealth_rock")))
+    result = search(me, opp, my_moves, pool,
+                    my_field=my_field, opp_field=opp_field)
+    # 表示用の要約 (上位3行動)
+    lines = []
+    for a in result["actions"][:3]:
+        mark = " ⚠択リスク" if a["risky"] else ""
+        lines.append(f"{a['label']}: 期待{a['expected']:+.2f} "
+                     f"保証{a['worst']:+.2f} (最悪応手: {a['worst_reply']}){mark}")
+    result["summary_lines"] = lines
+    return result

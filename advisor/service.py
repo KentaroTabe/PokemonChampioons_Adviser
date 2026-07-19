@@ -116,6 +116,11 @@ class Advisor:
             lines.append(f"  📋 {advice['opp_moves_note']}")
         if advice.get("opp_spread_note"):
             lines.append(f"  🧬 {advice['opp_spread_note']}")
+        gt = advice.get("gtheory")
+        if gt and gt.get("summary_lines"):
+            lines.append("  🎲 択評価 (期待値/最悪ケース保証値):")
+            for sl in gt["summary_lines"]:
+                lines.append(f"     {sl}")
         if advice.get("speed_note"):
             lines.append(f"  {advice['speed_note']}")
         if advice.get("mega_note"):
