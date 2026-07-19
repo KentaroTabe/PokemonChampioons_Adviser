@@ -47,17 +47,20 @@ def check_scene_smoothing():
 
 
 def check_turn_counter():
+    # 行動解決 (field/standby) を見た後のcommand復帰のみ+1。
+    # command<->move_select<->watch<->battle_hudの往復では加算しない
     transitions = ["standby", "command", "move_select", "command", "watch",
-                   "command", "field", "field", "command", "field",
-                   "battle_hud", "command"]
+                   "command", "battle_hud", "command", "field", "field",
+                   "battle_hud", "command", "field", "battle_hud", "command"]
     turn = 0
-    prev = "unknown"
+    resolution_seen = True
     for sc in transitions:
-        if sc == "command" and prev not in ("command", "move_select", "watch",
-                                            "field_check"):
+        if sc in ("field", "standby"):
+            resolution_seen = True
+        elif sc == "command" and resolution_seen:
+            resolution_seen = False
             turn += 1
-        prev = sc
-    assert turn == 3, f"turn={turn} (期待3: 開始/field後/battle_hud後)"
+    assert turn == 3, f"turn={turn} (期待3: 開始/field後/field後)"
     print(f"ターンカウンター OK (遷移{len(transitions)}回 -> {turn}ターン)")
 
 
@@ -77,13 +80,21 @@ def check_set_hp_events():
     # 値が安定したら確定 (-81%)
     _set_hp(state, "opponent", mon, pct=7.0)
     _set_hp(state, "opponent", mon, pct=7.0)
+    # 0%への低下は2回連続でもまだ確定しない (交代アニメの空バー誤読対策)
+    _set_hp(state, "opponent", mon, pct=0.0)
+    _set_hp(state, "opponent", mon, pct=0.0)
+    n_before = len([e for e in state.events if e["source"] == "hp"])
+    # 3回目で確定 (-7%)
+    _set_hp(state, "opponent", mon, pct=0.0)
     # 交代由来の大幅増 (+60%超) はイベント化されない
     _set_hp(state, "opponent", mon, pct=100.0)
     _set_hp(state, "opponent", mon, pct=100.0)
     hp_events = [e for e in state.events if e["source"] == "hp"]
     texts = [e["text"] for e in hp_events]
-    assert len(hp_events) == 3, f"hpイベント{len(hp_events)}件 (期待3): {texts}"
-    assert "-36%" in texts[0] and "+24%" in texts[1] and "-81%" in texts[2], texts
+    assert n_before == 3, f"0%が2回連続で確定してしまった: {texts}"
+    assert len(hp_events) == 4, f"hpイベント{len(hp_events)}件 (期待4): {texts}"
+    assert "-36%" in texts[0] and "+24%" in texts[1] and "-81%" in texts[2] \
+        and "-7%" in texts[3], texts
     print(f"HP変化イベント OK: {texts}")
 
 

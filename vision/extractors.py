@@ -171,7 +171,13 @@ def _set_hp(state: BattleStateV2, side_name: str, mon,
         mon._hp_event_base = new
         return
     if last_read is None or abs(new - last_read) > 2.0:
+        mon._hp_stable_count = 1
         return   # まだ1回しか観測していない値 (次の読取で確定させる)
+    mon._hp_stable_count = getattr(mon, "_hp_stable_count", 1) + 1
+    # 0%は交代アニメーション中の空バー誤読が多いため、3回連続観測を要求する
+    # (本物のひんしなら0%表示が続くので3回目で確定する)
+    if new <= 1.0 and mon._hp_stable_count < 3:
+        return
     base = getattr(mon, "_hp_event_base", old)
     delta = new - base
     if abs(delta) <= 2.5:

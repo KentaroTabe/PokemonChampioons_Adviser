@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import re
+import time
 from typing import Optional
 
 from vision.normalize import loose_key, normalize
@@ -207,6 +208,20 @@ class EventParser:
     def __init__(self, state: BattleStateV2, resolver):
         self.state = state
         self.resolver = resolver
+        self._recent_fired: dict = {}   # event_id -> 最終発火時刻
+
+    def _dedup(self, event_id: str) -> bool:
+        """同一イベントIDの3秒以内の再発火を抑止する。
+
+        同じメッセージがOCR揺れで微妙に異なるテキストとして複数回読まれると、
+        テキスト単位のデデュープを通過して同じイベントが連発する
+        (とんぼがえり×4等)。まきびし等は効果が二重適用されるため実害がある。
+        再観測時は時刻を更新し、メッセージ表示が続く限り窓を延長する。
+        """
+        now = time.time()
+        last = self._recent_fired.get(event_id)
+        self._recent_fired[event_id] = now
+        return last is not None and now - last < 3.0
 
     # --------------------------------------------------------------
     def _is_opponent_text(self, cleaned: str) -> Optional[bool]:
@@ -272,7 +287,7 @@ class EventParser:
         # 2. キーワードイベント (連結メッセージ「急所に当たった!効果は〜」等の
         #    ため、最初の1件で打ち切らず合致した全イベントを発火する)
         for ev in SIMPLE_EVENTS:
-            if _match_keywords(norm, ev["keywords"]):
+            if _match_keywords(norm, ev["keywords"]) and not self._dedup(ev["id"]):
                 self._apply(ev, cleaned, source)
                 fired.append(ev["id"])
 
@@ -296,7 +311,8 @@ class EventParser:
                 found = self.resolver.find_in_text(cleaned, "moves", min_len=5)
                 if found:
                     side_name, _side, mon = self._target_mon(cleaned, source)
-                    if side_name == "opponent" and found[0] not in mon.revealed_moves:
+                    if (side_name == "opponent" and found[0] not in mon.revealed_moves
+                            and not self._dedup(f"move_{side_name}_{found[1]}")):
                         mon.revealed_moves.append(found[0])
                         fired.append(f"move_{side_name}_{found[1]}")
 
@@ -315,6 +331,8 @@ class EventParser:
             side, side_name = self.state.player, "player"
         else:
             side, side_name = self.state.opponent, "opponent"
+        if self._dedup(f"switch_{side_name}_{sid}"):
+            return True
         side.switch_to_species(jp, sid)
         from vision.extractors import link_active_to_party
         link_active_to_party(self.state, side_name)
@@ -333,8 +351,11 @@ class EventParser:
         for pat, delta in RANK_CHANGES:
             if loose_key(pat) in norm:
                 side_name, side, mon = self._target_mon(cleaned, source)
+                event_id = f"boost_{side_name}_{stat}_{delta:+d}"
+                if self._dedup(event_id):
+                    return None   # OCR揺れの再読でランクを二重適用しない
                 mon.set_boost(stat, delta)
-                return f"boost_{side_name}_{stat}_{delta:+d}"
+                return event_id
         return None
 
     # --------------------------------------------------------------
@@ -365,12 +386,15 @@ class EventParser:
             return None
         r, _ = best
 
+        event_id = f"move_{side_name}_{r[1]}"
+        if self._dedup(event_id):
+            return None   # OCR揺れの再読 (まきびし等の効果二重適用を防ぐ)
         if side_name == "opponent" and r[0] not in mon.revealed_moves:
             mon.revealed_moves.append(r[0])
         if apply_effects:
             # 他イベントが既に発火している場合は場への効果を二重適用しない
             self._apply_move_side_effect(r[1], side_name)
-        return f"move_{side_name}_{r[1]}"
+        return event_id
 
     def _popup_mon(self, name_part: str, default_side: str):
         """ポップアップの名前部分から帰属先の個体を決める。
@@ -426,12 +450,16 @@ class EventParser:
                 # 帰属先が確認できない発動情報は捨てる (誤帰属より安全)
                 self.state.log_event(source, cleaned, event_id=None)
                 return None
+            event_id = (f"ability_{side_name}_{ab[1]}" if ab
+                        else f"item_{side_name}_{it[1]}")
+            if self._dedup(event_id):
+                return None
             if ab:
                 mon.ability_ja, mon.ability_id = ab[0], ab[1]
                 self._apply_ability_effect(ab[1], side_name)
-                return f"ability_{side_name}_{ab[1]}"
-            mon.item_ja, mon.item_id = it[0], it[1]
-            return f"item_{side_name}_{it[1]}"
+            else:
+                mon.item_ja, mon.item_id = it[0], it[1]
+            return event_id
         return None
 
     # --------------------------------------------------------------

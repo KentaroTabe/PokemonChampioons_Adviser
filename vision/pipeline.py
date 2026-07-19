@@ -84,6 +84,7 @@ class VisionPipeline:
         self._selection_streak = 0  # 選出画面が連続何フレーム続いているか
         self._pending_scene = None  # シーン遷移の確定待ち (2フレーム連続で確定)
         self._pending_count = 0
+        self._resolution_seen = True  # 前回command以降にfield/standbyを見たか
         self._heavy_interval = {
             "selection": 2.0,
             "command": 1.5,
@@ -98,6 +99,7 @@ class VisionPipeline:
     def reset(self):
         self.state.reset_battle()
         self.parser = EventParser(self.state, self.resolver)
+        self._resolution_seen = True
 
     # ------------------------------------------------------------------
     def _should_run_heavy(self, scene: str, force: bool) -> bool:
@@ -152,12 +154,14 @@ class VisionPipeline:
             self._selection_streak = 3
             self.state.scene = scene
 
-        # ターンカウント: 行動解決 (field/standby) から意思決定 (command) に
-        # 戻ったタイミングを新ターンとみなす。command<->move_select<->watch の
-        # 往復は同一ターン内の画面遷移なので数えない
-        if (scene == "command"
-                and prev_scene not in ("command", "move_select", "watch",
-                                       "field_check")):
+        # ターンカウント: 「前回のコマンド画面以降に行動解決 (field/standby) を
+        # 観測した」場合のみ、コマンド画面復帰を新ターンとみなす。
+        # command<->move_select<->watch<->battle_hud間の分類揺れや画面往復では
+        # 加算しない (遷移元シーンでの判定は揺れの経路に依存して過剰加算した)
+        if scene in ("field", "standby"):
+            self._resolution_seen = True
+        elif scene == "command" and self._resolution_seen:
+            self._resolution_seen = False
             self.state.turn += 1
 
         heavy = self._should_run_heavy(scene, force=single_shot)

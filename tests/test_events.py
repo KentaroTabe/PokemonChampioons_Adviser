@@ -160,6 +160,26 @@ def test_move_reveal():
     print("test_move_reveal OK")
 
 
+def test_event_dedup():
+    # OCR揺れで微妙に異なるテキストとして再読された同一イベントは3秒以内なら
+    # 再発火しない (まきびし等の効果二重適用・とんぼがえり×4の連発防止)
+    state, p = new_parser()
+    f1 = p.parse("相手の リザードンの まきびし!")
+    f2 = p.parse("ま相手の リザードンの まきびし!")   # ノイズ混じりの再読
+    f3 = p.parse("相手の リザードンの まきびじ!")
+    assert any(f.startswith("move_opponent_spikes") for f in f1), f1
+    assert not any(f.startswith("move_") for f in f2 + f3), (f2, f3)
+    assert state.player.spikes == 1, f"まきびし二重適用: {state.player.spikes}"
+
+    state2, p2 = new_parser()
+    f1 = p2.parse("ブリジュラスの 防御が 上がった!")
+    f2 = p2.parse("プリジュラスの 防御が 上がった!")   # ブ/プ混同の再読
+    idx = state2.player.find_by_species("ブリジュラス")
+    me = state2.player.party[idx]
+    assert me.boosts.get("def") == 1, f"ランク二重適用: {me.boosts}"
+    print("test_event_dedup OK")
+
+
 if __name__ == "__main__":
     test_weather_and_terrain()
     test_switch_and_mega()
@@ -169,4 +189,5 @@ if __name__ == "__main__":
     test_ability_popup()
     test_popup_attribution_guard()
     test_move_reveal()
+    test_event_dedup()
     print("\nALL OK")
