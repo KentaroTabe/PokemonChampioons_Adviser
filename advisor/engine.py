@@ -469,12 +469,17 @@ def evaluate(state: dict, resolver=None) -> dict:
 
     actions.sort(key=lambda a: -a["score"])
 
-    # メガシンカ可能なら注記
+    # メガシンカ可能なら、切った場合の打点/耐久差を定量評価して提案する
     mega_note = ""
     if (not state.get("mega_used", {}).get("player")
             and (my_p.get("item_id") == "megastone"
                  or (my_p.get("item_ja") or "").endswith(("ナイトX", "ナイトY", "ナイト")))):
         mega_note = "メガシンカが可能です (種族値+100)。攻撃するターンにメガシンカを推奨。"
+        try:
+            mega_note = _mega_timing_note(my_p, my_view, opp_view, my_field,
+                                          resolver) or mega_note
+        except Exception:
+            pass
 
     # 同時手番探索 (択の利得行列 + 2手読み)。失敗しても本体は返す
     gtheory = None
@@ -506,6 +511,47 @@ def evaluate(state: dict, resolver=None) -> dict:
         "endgame_note": endgame,
         "best": actions[0] if actions else None,
     }
+
+
+def _mega_timing_note(my_p, my_view, opp_view, my_field, resolver):
+    """メガフォルムでの最大打点/被ダメを比較し、切るタイミングを定量提案"""
+    if opp_view is None:
+        return None
+    dex = get_dex()
+    base_id = my_view.species_id
+    # メガフォルムの解決 (X/Yはメガストーン名で判別)
+    item_ja = (my_p.get("item_ja") or "")
+    suffix = "x" if item_ja.endswith("X") else ("y" if item_ja.endswith("Y") else "")
+    mega_sp = dex.species(base_id + "mega" + suffix) or dex.species(base_id + "mega")
+    if mega_sp is None:
+        return None
+    from dataclasses import replace as _replace
+    mega_view = _replace(my_view, base=mega_sp["baseStats"],
+                         types=mega_sp["types"])
+    moves = [m.get("move_id") for m in (my_p.get("moves") or []) if m.get("move_id")]
+    if not moves:
+        return None
+
+    def best(v):
+        b = 0.0
+        for mid in moves:
+            try:
+                b = max(b, calc_damage(v, opp_view, mid, my_field)["avg"])
+            except Exception:
+                pass
+        return b
+
+    d_base, d_mega = best(my_view), best(mega_view)
+    gain = d_mega - d_base
+    opp_hp = opp_view.hp_frac * 100
+    if d_base < opp_hp <= d_mega:
+        return (f"★今ターンにメガシンカ推奨: メガ後の打点{d_mega:.0f}%で"
+                f"倒せる圏内に入る (通常{d_base:.0f}%では届かない)")
+    if gain >= 12:
+        return (f"メガシンカで最大打点 {d_base:.0f}%→{d_mega:.0f}%。"
+                "攻撃するタイミングで切る価値が高い")
+    return (f"メガシンカの打点上昇は+{gain:.0f}%と小さめ。"
+            "耐久/素早さ目的か、後続のために温存も選択肢")
 
 
 def _run_endgame(my_state, opp_state, resolver) -> str:
