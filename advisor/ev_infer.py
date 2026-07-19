@@ -54,6 +54,23 @@ def _dashify(species_id: str) -> str:
     return species_id
 
 
+def _ev_to_points(evs: dict) -> dict:
+    """努力値 (0-252) をチャンピオンズの能力ポイント (0-32, 合計66) に換算。
+
+    Showdown系スプレッドの端数 (252/252/4の4など) は切り上げた上で、
+    合計が66に2以内で届かない場合は端数枠 (4ポイント未満) に寄せる
+    (252/252/4 -> 32/32/2 という自然な表記になる)。
+    """
+    pts = {k: min(32, (v + 7) // 8) for k, v in evs.items() if v}
+    total = sum(pts.values())
+    diff = 66 - total
+    if 0 < diff <= 2:
+        small = [k for k, v in pts.items() if v < 4]
+        if len(small) == 1:
+            pts[small[0]] += diff
+    return pts
+
+
 def _nature_mult(nature: str) -> dict:
     pair = _NATURE_MODS.get(nature)
     if not pair:
@@ -211,12 +228,11 @@ class SpreadEstimator:
         ranked = sorted(self.hyps, key=lambda h: -h["logw"])
         top = ranked[0]
         prob = math.exp(top["logw"] - mx) / total
-        # 表示は努力値 (252) 表記のまま。0-32の能力ポイントに換算すると
-        # 端数の4が「1」になり振り切っていないように見えて紛らわしい
+        # 表示はチャンピオンズの能力ポイント (0-32, 合計66) 表記
         abbr = {"hp": "H", "atk": "A", "def": "B",
                 "spa": "C", "spd": "D", "spe": "S"}
-        ev_txt = " ".join(f"{abbr[k]}{v}"
-                          for k, v in top["evs"].items() if v)
+        pts = _ev_to_points(top["evs"])
+        ev_txt = " ".join(f"{abbr[k]}{v}" for k, v in pts.items() if v)
         nature_ja = _NATURE_JA.get(top["nature"], top["nature"]) or "性格不明"
         return {
             "nature": top["nature"],

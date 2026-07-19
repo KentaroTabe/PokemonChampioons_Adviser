@@ -77,7 +77,19 @@ def test_tracker_flow():
     print(f"test_tracker_flow OK: {b['summary']}")
 
 
+def test_ev_points_display():
+    from advisor.ev_infer import _ev_to_points
+    # 標準的なAS252振りは 32/32/2 と表示される
+    pts = _ev_to_points({"hp": 4, "atk": 252, "spe": 252})
+    assert pts == {"hp": 2, "atk": 32, "spe": 32}, pts
+    # 端数が特定できない配分はそのまま切り上げ表示
+    pts2 = _ev_to_points({"hp": 248, "def": 216, "spe": 44})
+    assert pts2 == {"hp": 31, "def": 27, "spe": 6}, pts2
+    print("test_ev_points_display OK")
+
+
 if __name__ == "__main__":
+    test_ev_points_display()
     test_hypotheses_loaded()
     test_speed_observation()
     test_damage_observation()
