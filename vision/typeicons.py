@@ -105,8 +105,10 @@ def classify_type_icon(crop_img, hash_accept: int = _HASH_ACCEPT,
 
     # 空スロット (単タイプのポケモンはtype2側にのみアイコンが出る) の棄却。
     # アイコンは白い模様との高コントラストで分散が大きい (実測: 空≒5, アイコン≒70)
+    # 空スロットに加え、画面遷移中の薄暗いフレームも棄却する
+    # (実測: 空≒5, 遷移中≒23-30, 通常アイコン≒60-80)
     gray_std = float(cv2.cvtColor(core, cv2.COLOR_BGR2GRAY).std())
-    if gray_std < 20.0:
+    if gray_std < 40.0:
         return None
     qhash = _dhash(core)
     qlab = _mean_lab(core)
@@ -141,6 +143,9 @@ def classify_type_icon(crop_img, hash_accept: int = _HASH_ACCEPT,
     color_ranked.sort()
     if color_ranked:
         dist, name = color_ranked[0]
-        if dist <= color_cutoff:
+        # 2位との距離差が小さい場合は判定しない (みず/ドラゴン等の青系同士を
+        # 色だけで当てずっぽうに選ばない。次フレームのグリフ照合に委ねる)
+        margin = color_ranked[1][0] - dist if len(color_ranked) > 1 else 99.0
+        if dist <= color_cutoff and margin >= 5.0:
             return name
     return None
