@@ -147,6 +147,51 @@ def extract_selection(img, state: BattleStateV2, resolver) -> None:
                 pass
 
 
+_MY_LEGAL_MAXES = None
+
+
+def _my_legal_maxes():
+    """自分チーム全員の理論最大HP集合 (種族特定前の読取検証に使う)。
+
+    型登録がなければ None (検証しない)。my_team.json更新時は再計算。
+    """
+    global _MY_LEGAL_MAXES
+    try:
+        from advisor.my_team import _load, get_my_build
+        from advisor.dex import get_dex, calc_hp
+        team = _load()
+        if not team:
+            return None
+        key = tuple(sorted(team.keys()))
+        if _MY_LEGAL_MAXES and _MY_LEGAL_MAXES[0] == key:
+            return _MY_LEGAL_MAXES[1]
+        from vision.normalize import NameResolver
+        maxes = set()
+        for ja in team:
+            b = get_my_build(ja)
+            r = _resolver_singleton().resolve_species(ja, cutoff=0.9)
+            if not (b and r):
+                continue
+            sp = get_dex().species(r[1])
+            if sp:
+                maxes.add(calc_hp(sp["baseStats"]["hp"], b["ev"].get("hp", 0), 50))
+        _MY_LEGAL_MAXES = (key, maxes or None)
+        return _MY_LEGAL_MAXES[1]
+    except Exception:
+        return None
+
+
+_RESOLVER = None
+
+
+def _resolver_singleton():
+    global _RESOLVER
+    if _RESOLVER is None:
+        from vision.normalize import NameResolver
+        _RESOLVER = NameResolver()
+    return _RESOLVER
+
+
 def _expected_my_max(mon):
     """型登録 (config/my_team.json) から自分側の理論最大HPを計算する。
 
@@ -284,8 +329,11 @@ def extract_field_hp(img, state: BattleStateV2) -> None:
             cur, mx = frac
             known = _expected_my_max(me) or \
                 (me.hp_max if me.hp_max and me.hp_max >= 50 else None)
+            legal = _my_legal_maxes()
             if known and mx != known:
                 pass   # 基準と食い違う読みは捨てる (桁落ちは現在値も壊れている)
+            elif known is None and legal and mx not in legal:
+                pass   # チームの理論最大HP集合に無い読みも捨てる
             elif cur <= mx:
                 _set_hp(state, "player", me, cur=cur, mx=mx)
 
@@ -468,6 +516,7 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
         # (「135/178」→「35/78」のような一貫した桁落ちは多数決でも防げない)
         known = _expected_my_max(me) or \
             (me.hp_max if me.hp_max and me.hp_max >= 50 else None)
+        legal = _my_legal_maxes()
         ok = True
         if known and mx != known:
             digits = re.sub(r"\D", "", my_hp)
@@ -480,8 +529,15 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
                 # 補正できない読みは捨て、基準と一致する読みだけを採用する
                 ok = False
             mx = known
+        elif known is None and legal and mx not in legal:
+            # 種族特定前でも、チーム全員の理論最大HP集合に無い読みは誤読
+            # (「16/67」が特定前に素通りして定着する事故の防止)
+            ok = False
         if ok and cur <= mx:
             _set_hp(state, "player", me, cur=cur, mx=mx)
+        # 過去に定着した誤った最大HPの掃除 (理論値と食い違えば読み直しに戻す)
+        if known and me.hp_max and me.hp_max != known:
+            me.hp_current, me.hp_max, me.hp_percent = None, None, None
 
     # --- 特性が一意な種族 (単一特性/メガ) は確定値として自動設定 ---
     # メガシンカ後は特性が変わるため、メガ前に判明していた特性
