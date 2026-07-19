@@ -160,6 +160,28 @@ def test_move_reveal():
     print("test_move_reveal OK")
 
 
+def test_ability_species_validation():
+    # 特性は種族の合法セット (最大3択) に限定する。
+    # メガラグラージに「ばけのかわ」が付く誤帰属の再発防止
+    state, p = new_parser()
+    p.parse("相手は ラグラージを 繰り出した!")
+    mon = state.opponent.party[state.opponent.find_by_species("ラグラージ")]
+    assert mon.species_id == "swampert", mon.species_id
+    fired = p.parse("ラグラージの ばけのかわ", source="right_popup")
+    assert mon.ability_id is None, f"合法外特性が付与された: {mon.ability_ja}"
+    assert not any(f.startswith("ability_") for f in fired), fired
+    # 合法特性は通る (げきりゅう=torrent)
+    fired = p.parse("ラグラージの げきりゅう", source="right_popup")
+    assert mon.ability_id == "torrent", (mon.ability_id, fired)
+    # メガフォルムの特性 (すいすい) も同系としてOK
+    state2, p2 = new_parser()
+    p2.parse("相手は ラグラージを 繰り出した!")
+    mon2 = state2.opponent.party[state2.opponent.find_by_species("ラグラージ")]
+    p2.parse("ラグラージの すいすい", source="right_popup")
+    assert mon2.ability_id == "swiftswim", mon2.ability_id
+    print("test_ability_species_validation OK")
+
+
 def test_event_dedup():
     # OCR揺れで微妙に異なるテキストとして再読された同一イベントは3秒以内なら
     # 再発火しない (まきびし等の効果二重適用・とんぼがえり×4の連発防止)
@@ -189,5 +211,6 @@ if __name__ == "__main__":
     test_ability_popup()
     test_popup_attribution_guard()
     test_move_reveal()
+    test_ability_species_validation()
     test_event_dedup()
     print("\nALL OK")

@@ -112,6 +112,27 @@ class NameResolver:
             return best
         return None
 
+    def resolve_restricted(self, text: str, category: str, allowed_ids,
+                           cutoff: float = 0.6) -> Optional[tuple]:
+        """許可されたID集合の中からのみ解決する (特性の種族別3択など)。
+
+        候補が数件に絞られている前提なので、通常より低いcutoffでも安全。
+        """
+        if not text or not allowed_ids:
+            return None
+        key, lkey = normalize(text), loose_key(text)
+        best, best_score = None, 0.0
+        for jp, val, nk, lk in self._entries.get(category, []):
+            if val not in allowed_ids:
+                continue
+            s = SequenceMatcher(None, key, nk).ratio()
+            if lk and lkey:
+                s = max(s, SequenceMatcher(None, lkey, lk).ratio())
+            if s > best_score:
+                best_score = s
+                best = (jp, val, s)
+        return best if best and best_score >= cutoff else None
+
     def resolve_species(self, text: str, cutoff: float = 0.8) -> Optional[tuple]:
         """種族名解決。メガ表記 (メガXXX) にも対応。戻り値: (日本語名, showdown_id, スコア)"""
         r = self.resolve(text, "species", cutoff)

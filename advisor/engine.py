@@ -142,8 +142,9 @@ def opponent_move_pool(opp_state: dict, opp_view: MonView, resolver) -> list:
             revealed_set.add(r[1])
 
     remaining_slots = max(0, 4 - len(revealed_set))
+    # 4技判明 (フルスカウト) でも特性/持ち物予測には使うため常に取得する
+    pred = get_predictor().predict(opp_view.species_id)
     if remaining_slots > 0:
-        pred = get_predictor().predict(opp_view.species_id)
         unrevealed = [(mid, pct) for mid, pct in pred["moves"]
                       if mid not in revealed_set]
         # 残り枠数+2個まで候補として保持 (重みは採用率を残り枠比率で減衰)

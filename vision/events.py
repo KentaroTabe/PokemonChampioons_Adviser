@@ -450,6 +450,18 @@ class EventParser:
                 # 帰属先が確認できない発動情報は捨てる (誤帰属より安全)
                 self.state.log_event(source, cleaned, event_id=None)
                 return None
+            if ab:
+                # 種族が判明しているなら合法特性 (最大3択) に限定して検証。
+                # 合法外なら候補内で再解決し、それでも合わなければ捨てる
+                from vision.abilities import legal_abilities
+                legal = legal_abilities(mon.species_id)
+                if legal is not None and ab[1] not in legal:
+                    ab = self.resolver.resolve_restricted(tail, "abilities", legal)
+                    if not ab:
+                        it = self.resolver.resolve(tail, "items", cutoff=0.75)
+                        if not it:
+                            self.state.log_event(source, cleaned, event_id=None)
+                            return None
             event_id = (f"ability_{side_name}_{ab[1]}" if ab
                         else f"item_{side_name}_{it[1]}")
             if self._dedup(event_id):

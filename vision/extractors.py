@@ -147,6 +147,22 @@ def extract_selection(img, state: BattleStateV2, resolver) -> None:
                 pass
 
 
+def _resolve_ability_validated(resolver, text: str, mon):
+    """特性を解決し、種族が判明していれば合法特性 (最大3択) に限定する。
+
+    合法外の解決結果は候補内での再解決を試み、それでも合わなければ None
+    (メガラグラージに「ばけのかわ」が付くような誤読・誤帰属を弾く)。
+    """
+    from vision.abilities import legal_abilities
+    ab = resolver.resolve(text, "abilities", cutoff=0.72)
+    legal = legal_abilities(mon.species_id)
+    if legal is None:
+        return ab
+    if ab and ab[1] in legal:
+        return ab
+    return resolver.resolve_restricted(text, "abilities", legal)
+
+
 def _set_hp(state: BattleStateV2, side_name: str, mon,
             pct=None, cur=None, mx=None) -> None:
     """HPを更新し、有意な変化をイベントログに記録する (ダメージ帰属用)。
@@ -647,7 +663,7 @@ def extract_field_check(img, state: BattleStateV2, resolver) -> None:
         if len(body) < 3:
             continue
         if not mon.ability_id:
-            ab = resolver.resolve(body, "abilities", cutoff=0.8)
+            ab = _resolve_ability_validated(resolver, body, mon)
             if ab:
                 mon.ability_ja, mon.ability_id = ab[0], ab[1]
                 continue
@@ -762,7 +778,7 @@ def extract_watch(img, state: BattleStateV2, resolver) -> None:
     # 特性 / 持ち物
     ability_text = ocr.read_zone_text(img, zones.WATCH["ability_value"], mode="panel")
     if ability_text:
-        ab = resolver.resolve(ability_text, "abilities", cutoff=0.72)
+        ab = _resolve_ability_validated(resolver, ability_text, me)
         if ab:
             me.ability_ja, me.ability_id = ab[0], ab[1]
     item_text = ocr.read_zone_text(img, zones.WATCH["item_value"], mode="panel")
