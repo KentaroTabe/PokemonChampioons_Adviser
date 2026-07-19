@@ -82,6 +82,8 @@ class VisionPipeline:
         self._last_ocr_ts: dict = {}    # source -> 前回OCR時刻
         self._last_heavy = {}       # scene -> last heavy extraction time
         self._selection_streak = 0  # 選出画面が連続何フレーム続いているか
+        self._pending_scene = None  # シーン遷移の確定待ち (2フレーム連続で確定)
+        self._pending_count = 0
         self._heavy_interval = {
             "selection": 2.0,
             "command": 1.5,
@@ -119,6 +121,20 @@ class VisionPipeline:
         result = scenes.classify(img)
         scene = result["scene"]
         prev_scene = self.state.scene
+
+        # シーン遷移は2フレーム連続で確定する。選出画面中の背景演出 (炎・
+        # レーザー等) で単発のbattle_hud/command誤分類が起き、ターン誤加算・
+        # HUD抽出による状態汚染・ログ分割につながった (実運用で観測)
+        if not single_shot:
+            if scene != self._pending_scene:
+                self._pending_scene = scene
+                self._pending_count = 1
+            else:
+                self._pending_count += 1
+            if (scene != prev_scene and self._pending_count < 2
+                    and prev_scene not in (None, "unknown")):
+                scene = prev_scene   # 未確定の単発フレームは前のシーン扱い
+
         self.state.scene = scene
         fired: list = []
 

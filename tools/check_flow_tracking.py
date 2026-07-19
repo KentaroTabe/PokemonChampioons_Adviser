@@ -18,6 +18,34 @@ from vision.extractors import _set_hp, extract_field_hp
 from vision.state import BattleStateV2
 
 
+def check_scene_smoothing():
+    """単発の誤分類フレームが状態のシーンに反映されないことを確認"""
+    from vision.pipeline import VisionPipeline
+    pipe = VisionPipeline()
+    pipe.state.scene = "selection"
+
+    def feed(raw):
+        # process()のスムージング部だけを再現 (画像なしテスト)
+        prev = pipe.state.scene
+        scene = raw
+        if scene != pipe._pending_scene:
+            pipe._pending_scene = scene
+            pipe._pending_count = 1
+        else:
+            pipe._pending_count += 1
+        if scene != prev and pipe._pending_count < 2 and prev not in (None, "unknown"):
+            scene = prev
+        pipe.state.scene = scene
+        return scene
+
+    seq = ["selection", "battle_hud", "selection", "command", "selection",
+           "selection", "command", "command", "command"]
+    out = [feed(s) for s in seq]
+    assert out[:6] == ["selection"] * 6, out
+    assert out[6] == "selection" and out[7] == "command", out
+    print(f"シーンスムージング OK: {seq} -> {out}")
+
+
 def check_turn_counter():
     transitions = ["standby", "command", "move_select", "command", "watch",
                    "command", "field", "field", "command", "field",
@@ -87,6 +115,7 @@ def check_field_hp_on_frames(frame_dir: str, limit: int = 200):
 
 
 if __name__ == "__main__":
+    check_scene_smoothing()
     check_turn_counter()
     check_set_hp_events()
     frame_dir = sys.argv[1] if len(sys.argv) > 1 else "debug_frames"
