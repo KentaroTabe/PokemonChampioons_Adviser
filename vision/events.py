@@ -177,14 +177,15 @@ RANK_CHANGES = [
     ("さかつ", -1), ("下かつ", -1),
 ]
 
+# 注意: 「特防」「特攻」を先に判定する (「防」「攻」単体の誤マッチ防止)
 STAT_NAMES = {
-    "攻撃": "atk", "こうけき": "atk",
-    "防御": "def", "ほうきよ": "def",
-    "特攻": "spa", "とくこう": "spa",
+    "特攻": "spa", "とくこう": "spa", "特効": "spa", "特功": "spa",
     "特防": "spd", "とくほう": "spd",
+    "攻撃": "atk", "こうけき": "atk", "攻繋": "atk",
+    "防御": "def", "ほうきよ": "def", "防櫓": "def", "防禦": "def", "防衛": "def",
     "素早さ": "spe", "すはやさ": "spe", "素早": "spe",
-    "命中率": "acc", "めいちゆうりつ": "acc",
-    "回避率": "eva", "かいひりつ": "eva",
+    "命中率": "acc", "めいちゆうりつ": "acc", "命中": "acc",
+    "回避率": "eva", "かいひりつ": "eva", "回避": "eva",
 }
 
 
@@ -253,6 +254,11 @@ class EventParser:
 
         fired = []
         norm = loose_key(cleaned)
+
+        # リザルト/ランク表示 (「ランクIV レート1602」等) はバトルイベントではないので無視
+        if re.search(r"(ランク|らんく).{0,4}(レート|れーと)|レート\d{3,}|ボール級", cleaned):
+            self.state.log_event(source, cleaned, event_id=None)
+            return []
 
         # 1. 交代 (繰り出した / ゆけっ)
         self._parse_switch(cleaned, norm, fired)

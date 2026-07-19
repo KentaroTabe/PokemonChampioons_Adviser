@@ -275,8 +275,19 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
                                allowlist="0123456789/")
     frac = ocr.parse_fraction(my_hp)
     if frac and frac[1]:
-        me.hp_current, me.hp_max = frac
-        me.hp_percent = round(frac[0] / frac[1] * 100, 1)
+        cur, mx = frac
+        # 最大HPは対戦中に変化しない (メガシンカでも不変)。既知の最大HPと
+        # 食い違う読み取りは誤OCRとみなし、既知値を優先して現在値だけ更新する
+        if me.hp_max and mx != me.hp_max:
+            digits = re.sub(r"\D", "", my_hp)
+            known = str(me.hp_max)
+            if digits.endswith(known) and digits[:-len(known)].isdigit():
+                cand = int(digits[:-len(known)])
+                cur = cand if cand <= me.hp_max else cur
+            mx = me.hp_max
+        if cur <= mx:
+            me.hp_current, me.hp_max = cur, mx
+            me.hp_percent = round(cur / mx * 100, 1)
 
     # --- COMMAND 残り秒数 ---
     cmd = ocr.read_zone_text(img, zones.BATTLE["command_no"], mode="panel",
