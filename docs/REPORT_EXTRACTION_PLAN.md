@@ -75,13 +75,21 @@ champions-damage-adviser/
 - [ ] git author/メールアドレスを提出用に確認 (アカウント特定回避が必要なら
       課題用GitHubアカウントを別途作成)
 
-## 作業手順 (戻られたら着手可能)
+## 作業状況 (2026-07-19 実施済み)
 
-1. 新ディレクトリにクリーンコピー+依存除去 (Claude Codeで実施)
-2. Dockerfile/compose作成、`docker compose up` で動作確認
-3. README執筆 (スクリーンショット撮影)
-4. GitHub Publicリポジトリ作成・push・URL確認
-5. レポート本文: リポジトリURL + 生成AI利用の体験 (本文に詳細は書かない)
-
-**所要見込み**: 切り出し〜動作確認まで1セッションで完了可能。
-公開前チェックリストの最終確認のみ人の目で行うことを推奨。
+1. ✅ `~/GitHub/champions-damage-adviser/` にクリーンコピー+依存除去済み
+   (damage/dex/データのみ移植、vision・使用率DB・my_team依存なし)
+2. ✅ Dockerfile/compose作成、`docker compose up --build` で動作確認済み
+   (http://localhost:8080 で稼働中。API応答・ダメージ計算の正しさ確認済み:
+   じしん→リザードン無効、晴れソーラービーム4倍致死などの検算OK)
+3. ✅ README執筆済み (課題指定の項目+生成AI利用の記録を網羅)。
+   **スクリーンショットのみ未撮影** (ブラウザで開いて差し替えてください)
+4. ✅ ローカル `git init` + 初回コミット済み
+5. ⬜ **GitHub Publicリポジトリの作成とpushは未実施** (アカウント選択が
+   必要なため)。実行コマンド:
+   ```bash
+   cd ~/GitHub/champions-damage-adviser
+   gh repo create champions-damage-adviser --public --source=. --push
+   ```
+   アカウント特定を避ける場合は課題用アカウントで作成してからpush
+6. ⬜ レポート本文: リポジトリURL + 生成AI利用の体験 (詳細はREADMEへ)
