@@ -7,13 +7,14 @@
 config/my_team.json の形式 (config/my_team.example.json 参照):
 {
   "ペリッパー": {
-    "能力ポイント": {"hp": 32, "spa": 32, "spe": 2},   # ゲーム内の0-32スケール
+    "能力ポイント": {"h": 32, "c": 32, "s": 2},   # ゲーム内の0-32スケール
     "性格": "ひかえめ",
     "持ち物": "こだわりメガネ",   # 任意 (画面から読めた値が優先)
     "特性": "あめふらし"          # 任意
   }
 }
-努力値 (0-252) で書いても良い: 33以上の値はそのまま努力値として扱う。
+ステータスキーはHABCDS表記 (h/a/b/c/d/s) と英語名 (hp/atk/def/spa/spd/spe) の
+両方を受け付ける。努力値 (0-252) で書いても良い: 33以上はそのまま努力値扱い。
 """
 from __future__ import annotations
 
@@ -50,6 +51,12 @@ _NATURES = {
     "naive": ("spe", "spd"), "jolly": ("spe", "spa"),
 }
 
+# HABCDS表記 (h=HP, a=攻撃, b=防御, c=特攻, d=特防, s=素早さ) を受け付ける
+_STAT_ALIASES = {"h": "hp", "a": "atk", "b": "def", "c": "spa",
+                 "d": "spd", "s": "spe",
+                 "hp": "hp", "atk": "atk", "def": "def", "spa": "spa",
+                 "spd": "spd", "spe": "spe"}
+
 _CACHE: Optional[dict] = None
 _CACHE_MTIME: float = -1.0
 
@@ -85,9 +92,13 @@ def get_my_build(species_ja: Optional[str]) -> Optional[dict]:
         return None
     ev = {}
     for stat, v in (entry.get("能力ポイント") or entry.get("evs") or {}).items():
+        key = _STAT_ALIASES.get(str(stat).lower())
+        if key is None:
+            print(f"[my_team] 未知のステータスキー: {stat} ({species_ja})")
+            continue
         v = int(v)
         # 32以下はゲーム内の能力ポイント (32≒努力値252) とみなし換算する
-        ev[stat] = min(252, v * 8) if v <= 32 else min(252, v)
+        ev[key] = min(252, v * 8) if v <= 32 else min(252, v)
     nature = {}
     nat = entry.get("性格") or entry.get("nature")
     if nat is not None:

@@ -86,8 +86,10 @@
             let tags = (p.types || []).map(t => `<span class="tag">${t}</span>`).join('');
             if (p.status && STATUS_JA[p.status]) tags += `<span class="tag" style="background:#833">${STATUS_JA[p.status]}</span>`;
             if (p.is_mega) tags += '<span class="tag" style="background:#a3a">メガ</span>';
+            const STAT_ABBR = {hp:'H', atk:'A', def:'B', spa:'C', spd:'D', spe:'S',
+                               acc:'命中', eva:'回避'};
             const boosts = Object.entries(p.boosts || {}).filter(([k,v]) => v)
-                .map(([k,v]) => `${k}${v>0?'+':''}${v}`).join(' ');
+                .map(([k,v]) => `${STAT_ABBR[k]||k}${v>0?'+':''}${v}`).join(' ');
             if (boosts) tags += `<span class="tag" style="background:#573">${boosts}</span>`;
             if (p.ability_ja) tags += `<span class="tag">${p.ability_ja}</span>`;
             if (p.item_ja) tags += `<span class="tag">@${p.item_ja}</span>`;
