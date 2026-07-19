@@ -173,27 +173,46 @@ def _set_hp(state: BattleStateV2, side_name: str, mon,
     +60%超の増加は交代/別個体の出現とみなし、イベント化せず基準だけ移す。
     """
     old = mon.hp_percent
+    raw = None
     if cur is not None and mx:
-        mon.hp_current, mon.hp_max = cur, mx
-        mon.hp_percent = round(cur / mx * 100, 1)
+        # 最大HPは種族ごとの多数決で確定する (「28/167」→「28/67」のような
+        # 桁落ち誤読が50以上のガードを通過して定着するのを防ぐ)
+        votes = state.hp_max_votes.setdefault((side_name, mon.species_ja), {})
+        votes[mx] = votes.get(mx, 0) + 1
+        best_mx, n = max(votes.items(), key=lambda kv: kv[1])
+        if n >= 2 and mx != best_mx:
+            if cur <= best_mx:
+                mx = best_mx
+            else:
+                return
+        new = round(cur / mx * 100, 1)
+        raw = (cur, mx)
     elif pct is not None:
-        mon.hp_percent = float(pct)
-    new = mon.hp_percent
-    if new is None:
+        new = float(pct)
+    else:
         return
+
+    def commit():
+        mon.hp_percent = new
+        if raw:
+            mon.hp_current, mon.hp_max = raw
+
     last_read = getattr(mon, "_hp_last_read", None)
     mon._hp_last_read = new
     if old is None:
+        # 初回は即反映 (アドバイスが値なしで止まらないように)
+        commit()
         mon._hp_event_base = new
         return
     if last_read is None or abs(new - last_read) > 2.0:
         mon._hp_stable_count = 1
-        return   # まだ1回しか観測していない値 (次の読取で確定させる)
+        return   # 1回だけの観測は状態にも反映しない (誤読の混入防止)
     mon._hp_stable_count = getattr(mon, "_hp_stable_count", 1) + 1
     # 0%は交代アニメーション中の空バー誤読が多いため、3回連続観測を要求する
     # (本物のひんしなら0%表示が続くので3回目で確定する)
     if new <= 1.0 and mon._hp_stable_count < 3:
         return
+    commit()
     base = getattr(mon, "_hp_event_base", old)
     delta = new - base
     if abs(delta) <= 2.5:

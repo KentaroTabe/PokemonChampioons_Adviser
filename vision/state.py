@@ -229,6 +229,7 @@ class BattleStateV2:
         self.battle_active: bool = False
         self.outcome: Optional[str] = None    # win / loss (勝敗メッセージから)
         self.events: list = []          # [{ts, source, text, event, target}]
+        self.hp_max_votes: dict = {}    # (side, species) -> {最大HP読取値: 票数}
         self.last_texts = {"message": "", "left_popup": "", "right_popup": ""}
 
     # --- イベントログ ---

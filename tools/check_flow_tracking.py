@@ -108,6 +108,24 @@ def check_set_hp_events():
     print(f"HP変化イベント OK: {texts}")
 
 
+def check_hp_max_votes():
+    """最大HPの桁落ち誤読 (167->67) が多数決で矯正されることを確認"""
+    state = BattleStateV2()
+    me = state.player.ensure_active()
+    me.species_ja = "ペリッパー"
+    _set_hp(state, "player", me, cur=167, mx=167)
+    _set_hp(state, "player", me, cur=150, mx=167)
+    _set_hp(state, "player", me, cur=150, mx=167)
+    _set_hp(state, "player", me, cur=150, mx=67)   # 桁落ち誤読
+    assert me.hp_max == 167, me.hp_max
+    # 未確定の単発読取は状態に反映されない
+    _set_hp(state, "player", me, cur=20, mx=167)
+    assert me.hp_current == 150, me.hp_current
+    _set_hp(state, "player", me, cur=20, mx=167)
+    assert me.hp_current == 20, me.hp_current
+    print("最大HP多数決/確定反映 OK")
+
+
 def check_field_hp_on_frames(frame_dir: str, limit: int = 200):
     frames = sorted(glob.glob(f"{frame_dir}/frame_*.png"))[-limit:]
     field_n = read_n = 0
@@ -138,6 +156,7 @@ def check_field_hp_on_frames(frame_dir: str, limit: int = 200):
 if __name__ == "__main__":
     check_scene_smoothing()
     check_turn_counter()
+    check_hp_max_votes()
     check_set_hp_events()
     frame_dir = sys.argv[1] if len(sys.argv) > 1 else "debug_frames"
     check_field_hp_on_frames(frame_dir)
