@@ -84,6 +84,7 @@ class VisionPipeline:
         self._selection_streak = 0  # 選出画面が連続何フレーム続いているか
         self._pending_scene = None  # シーン遷移の確定待ち (2フレーム連続で確定)
         self._pending_count = 0
+        self._in_selection = False  # 選出画面に確定滞在中か (離脱は5フレーム要求)
         self._resolution_seen = True  # 前回command以降にfield/standbyを見たか
         self._heavy_interval = {
             "selection": 2.0,
@@ -115,6 +116,32 @@ class VisionPipeline:
         return False
 
     # ------------------------------------------------------------------
+    def _smooth_scene(self, scene: str, prev_scene: str) -> str:
+        """シーン遷移のスムージング。
+
+        - 通常の遷移は2フレーム連続で確定 (単発の誤分類を無視)
+        - 選出画面に確定滞在中 (3フレーム連続で突入) は、離脱に5フレーム
+          連続を要求する。選出中の炎・レーザー演出で選出シグナルが落ちつつ
+          HUD条件が偶発成立し、commandが2フレーム通過する事象が残ったため。
+          実際の対戦開始は連続フレームで来るので約1秒の遅延で済む
+        """
+        if scene != self._pending_scene:
+            self._pending_scene = scene
+            self._pending_count = 1
+        else:
+            self._pending_count += 1
+        need = 5 if (self._in_selection and scene != "selection") else 2
+        if (scene != prev_scene and self._pending_count < need
+                and prev_scene not in (None, "unknown")):
+            scene = prev_scene   # 未確定フレームは前のシーン扱い
+        if scene == "selection":
+            if self._selection_streak >= 2:   # このフレームで3連続目
+                self._in_selection = True
+        elif self._in_selection and self._pending_count >= need:
+            self._in_selection = False
+        return scene
+
+    # ------------------------------------------------------------------
     def process(self, img, single_shot: bool = False):
         """1フレーム処理。戻り値: (state_dict, fired_events)"""
         if img is None:
@@ -128,14 +155,7 @@ class VisionPipeline:
         # レーザー等) で単発のbattle_hud/command誤分類が起き、ターン誤加算・
         # HUD抽出による状態汚染・ログ分割につながった (実運用で観測)
         if not single_shot:
-            if scene != self._pending_scene:
-                self._pending_scene = scene
-                self._pending_count = 1
-            else:
-                self._pending_count += 1
-            if (scene != prev_scene and self._pending_count < 2
-                    and prev_scene not in (None, "unknown")):
-                scene = prev_scene   # 未確定の単発フレームは前のシーン扱い
+            scene = self._smooth_scene(scene, prev_scene)
 
         self.state.scene = scene
         fired: list = []

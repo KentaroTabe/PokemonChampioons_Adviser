@@ -19,31 +19,41 @@ from vision.state import BattleStateV2
 
 
 def check_scene_smoothing():
-    """単発の誤分類フレームが状態のシーンに反映されないことを確認"""
+    """単発誤分類の無視と、選出滞在中の離脱ヒステリシスを確認"""
     from vision.pipeline import VisionPipeline
     pipe = VisionPipeline()
-    pipe.state.scene = "selection"
 
     def feed(raw):
-        # process()のスムージング部だけを再現 (画像なしテスト)
-        prev = pipe.state.scene
-        scene = raw
-        if scene != pipe._pending_scene:
-            pipe._pending_scene = scene
-            pipe._pending_count = 1
-        else:
-            pipe._pending_count += 1
-        if scene != prev and pipe._pending_count < 2 and prev not in (None, "unknown"):
-            scene = prev
+        scene = pipe._smooth_scene(raw, pipe.state.scene)
         pipe.state.scene = scene
+        if scene == "selection":
+            pipe._selection_streak += 1
+        else:
+            pipe._selection_streak = 0
         return scene
 
-    seq = ["selection", "battle_hud", "selection", "command", "selection",
-           "selection", "command", "command", "command"]
+    # 対戦中: 単発誤分類は無視、2フレーム連続で確定
+    pipe.state.scene = "field"
+    seq = ["field", "command", "field", "field", "command", "command"]
     out = [feed(s) for s in seq]
-    assert out[:6] == ["selection"] * 6, out
-    assert out[6] == "selection" and out[7] == "command", out
-    print(f"シーンスムージング OK: {seq} -> {out}")
+    assert out == ["field", "field", "field", "field", "field", "command"], out
+
+    # 選出滞在中: command/fieldが2-4フレーム続いても離脱しない (5フレームで離脱)
+    seq2 = ["command", "command", "field", "selection",   # 4連続未満で復帰
+            "field", "field", "field", "field", "field"]  # 5連続 -> 離脱
+    pipe3 = VisionPipeline()
+    pipe3.state.scene = "selection"
+    pipe3._selection_streak = 3
+    pipe3._in_selection = True
+    out3 = []
+    for s in seq2:
+        sc = pipe3._smooth_scene(s, pipe3.state.scene)
+        pipe3.state.scene = sc
+        pipe3._selection_streak = pipe3._selection_streak + 1 if sc == "selection" else 0
+        out3.append(sc)
+    assert out3[:4] == ["selection"] * 4, out3
+    assert out3[-1] == "field" and out3[-2] == "selection", out3
+    print(f"シーンスムージング OK: 対戦中={out} / 選出滞在={out3}")
 
 
 def check_turn_counter():
