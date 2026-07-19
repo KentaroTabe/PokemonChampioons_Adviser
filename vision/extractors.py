@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import re
+import time
 from typing import Optional
 
 import cv2
@@ -240,6 +241,12 @@ def _set_hp(state: BattleStateV2, side_name: str, mon,
     old = mon.hp_percent
     raw = None
     if cur is not None and mx:
+        # 自分側: チーム全員の理論最大HP集合に無い最大値は誤読として棄却
+        # (watch/場の状況画面など全ての読取経路に適用する)
+        if side_name == "player":
+            legal = _my_legal_maxes()
+            if legal and mx not in legal:
+                return
         # 最大HPは種族ごとの多数決で確定する (「28/167」→「28/67」のような
         # 桁落ち誤読が50以上のガードを通過して定着するのを防ぐ)
         votes = state.hp_max_votes.setdefault((side_name, mon.species_ja), {})
@@ -278,6 +285,14 @@ def _set_hp(state: BattleStateV2, side_name: str, mon,
     if new <= 1.0 and mon._hp_stable_count < 3:
         return
     commit()
+    # 0%への低下イベントは、ひんしメッセージの裏付けがある場合のみ発火する
+    # (交代アニメの空バーが3秒以上続くと3回連続確認をすり抜けた実績。
+    #  状態値の更新自体は行い、誤りなら次の確定読取で戻る)
+    if new <= 1.0:
+        last_faint = getattr(state, "last_faint", None)
+        if not (last_faint and last_faint.get("side") == side_name
+                and time.time() - last_faint.get("ts", 0) < 20.0):
+            return
     base = getattr(mon, "_hp_event_base", old)
     delta = new - base
     if abs(delta) <= 2.5:

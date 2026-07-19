@@ -94,7 +94,15 @@ def check_set_hp_events():
     _set_hp(state, "opponent", mon, pct=0.0)
     _set_hp(state, "opponent", mon, pct=0.0)
     n_before = len([e for e in state.events if e["source"] == "hp"])
-    # 3回目で確定 (-7%)
+    # 3回目でもひんしメッセージの裏付けがなければイベント化しない
+    _set_hp(state, "opponent", mon, pct=0.0)
+    assert len([e for e in state.events if e["source"] == "hp"]) == n_before
+    # ひんし裏付けありなら確定 (-7%)
+    import time as _t
+    state.last_faint = {"side": "opponent", "ts": _t.time()}
+    mon._hp_last_read = None
+    _set_hp(state, "opponent", mon, pct=0.0)
+    _set_hp(state, "opponent", mon, pct=0.0)
     _set_hp(state, "opponent", mon, pct=0.0)
     # 交代由来の大幅増 (+60%超) はイベント化されない
     _set_hp(state, "opponent", mon, pct=100.0)

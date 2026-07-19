@@ -559,6 +559,8 @@ class EventParser:
             mon.status = "fainted"
             mon.hp_percent = 0.0
             mon.hp_current = 0
+            # HP0%イベントの裏付けに使う (交代アニメの空バー誤読と区別)
+            self.state.last_faint = {"side": side_name, "ts": time.time()}
             if side.remaining:
                 side.remaining = max(0, side.remaining - 1)
         elif action == "volatile":
