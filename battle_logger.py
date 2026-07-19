@@ -68,6 +68,7 @@ class BattleLogger:
         self._hp_seen_ts = 0.0   # 記録済みHP変化イベントの最終時刻
         self._selection_streak = 0  # 選出画面が連続何フレーム続いているか
         self._opened_ts = 0.0       # 現在のログファイルを開いた時刻
+        self._battle_seen = False   # 現在のファイルに対戦シーンが含まれるか
 
     # ------------------------------------------------------------------
     def _open_new(self) -> None:
@@ -92,6 +93,7 @@ class BattleLogger:
         self._file = None
         self._prev_scene = None
         self._hp_seen_ts = 0.0
+        self._battle_seen = False
 
     # ------------------------------------------------------------------
     def on_frame(self, state: dict, fired: list) -> None:
@@ -105,9 +107,14 @@ class BattleLogger:
             self._selection_streak += 1
         else:
             self._selection_streak = 0
-        # 30秒未満のファイルは回転しない (選出中に他画面と往復しても分割しない。
-        # 対戦は最短でも1分以上かかるため、30秒以内の再回転は誤検知)
+        if scene in ("command", "move_select", "field", "watch", "battle_hud"):
+            self._battle_seen = True
+
+        # 回転条件: 選出3フレーム連続 + 現ファイルが30秒以上経過 + 実際に
+        # 対戦シーンを含む。長い選出画面中の分類揺れによる再突入では、まだ
+        # 対戦が始まっていないので回転しない (実運用で30秒超の分割を観測)
         if (self._selection_streak == 3 and self._file is not None
+                and self._battle_seen
                 and time.time() - self._opened_ts >= 30.0):
             self._finalize(state.get("outcome"))
 

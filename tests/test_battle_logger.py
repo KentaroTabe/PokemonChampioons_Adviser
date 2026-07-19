@@ -52,7 +52,19 @@ def test_rotation_debounce():
         lg.on_frame(_state("selection"), [])
         assert lg._file is None or lg._file != first
         lg.on_frame(_state("command"), ["move_player_surf"])
-        assert lg._file != first, "新しい対戦でファイルが切り替わらない"
+        second = lg._file
+        assert second != first, "新しい対戦でファイルが切り替わらない"
+
+        # 長い選出画面: 対戦シーンをまだ含まないファイルは30秒超でも回転しない
+        lg._finalize(None)
+        for _ in range(5):
+            lg.on_frame(_state("selection"), [])
+        third = lg._file
+        lg._opened_ts = time.time() - 31.0
+        lg._selection_streak = 0
+        for _ in range(4):
+            lg.on_frame(_state("selection"), [])
+        assert lg._file == third, "選出画面のみのファイルが回転した"
         print("test_rotation_debounce OK")
     finally:
         shutil.rmtree(tmp)

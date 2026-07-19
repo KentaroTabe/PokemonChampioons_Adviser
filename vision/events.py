@@ -414,6 +414,13 @@ class EventParser:
             it = None if ab else self.resolver.resolve(tail, "items", cutoff=0.75)
             if not ab and not it:
                 continue
+            # 技名としての一致が上回る場合は特性/持ち物ではない
+            # (「どくびし」が特性どくしゅ/持ち物どくけしに曖昧マッチする等)。
+            # 技の効果適用はメッセージ側の解析に任せ、ここでは何もしない
+            mv = self.resolver.resolve(tail, "moves", cutoff=0.72)
+            if mv and mv[2] > (ab or it)[2]:
+                self.state.log_event(source, cleaned, event_id=None)
+                return None
             side_name, mon = self._popup_mon(body[:pos], default_side)
             if mon is None:
                 # 帰属先が確認できない発動情報は捨てる (誤帰属より安全)

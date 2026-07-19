@@ -122,6 +122,16 @@ def test_popup_attribution_guard():
     assert me.ability_id is None, f"誤帰属: {me.ability_ja}"
     assert not any(f.startswith("ability_") for f in fired), fired
 
+    # 設置技名は特性/持ち物に曖昧マッチしても割り当てない
+    # (どくびし -> 特性どくしゅ/持ち物どくけしの誤認識の再発防止)
+    state3, p3 = new_parser()
+    p3.parse("相手は リザードンを 繰り出した!")
+    act = state3.opponent.active()
+    fired = p3.parse("リザードンの どくびし", source="right_popup")
+    assert act.ability_id is None and act.item_id is None, \
+        (act.ability_id, act.item_id)
+    assert not any(f.startswith(("ability_", "item_")) for f in fired), fired
+
     # 名前がベンチの個体と一致するなら、アクティブではなくその個体に帰属する
     state2, p2 = new_parser()
     p2.parse("相手は リザードンを 繰り出した!")
