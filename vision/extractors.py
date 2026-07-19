@@ -239,9 +239,9 @@ def extract_field_hp(img, state: BattleStateV2) -> None:
         my_hp = ocr.read_zone_text(img, zones.BATTLE["my_hp_text"], mode="panel",
                                    allowlist="0123456789/")
         frac = ocr.parse_fraction(my_hp)
-        if frac and frac[1]:
+        if frac and frac[1] and frac[1] >= 50:
             cur, mx = frac
-            if me.hp_max and mx != me.hp_max:
+            if me.hp_max and me.hp_max >= 50 and mx != me.hp_max:
                 mx = me.hp_max
             if cur <= mx:
                 _set_hp(state, "player", me, cur=cur, mx=mx)
@@ -414,10 +414,15 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
     my_hp = ocr.read_zone_text(img, zones.BATTLE["my_hp_text"], mode="panel",
                                allowlist="0123456789/")
     frac = ocr.parse_fraction(my_hp)
-    if frac and frac[1]:
+    # 最大HPが50未満の読みは誤読とみなす (Lv50の最大HPは実質50以上。
+    # 選出画面の「0/3」進捗がこのゾーンに重なって読まれる事故も弾く)
+    if frac and frac[1] and frac[1] >= 50:
         cur, mx = frac
         # 最大HPは対戦中に変化しない (メガシンカでも不変)。既知の最大HPと
-        # 食い違う読み取りは誤OCRとみなし、既知値を優先して現在値だけ更新する
+        # 食い違う読み取りは誤OCRとみなし、既知値を優先して現在値だけ更新する。
+        # ただし既知値自体が50未満なら過去の誤読なので新しい読みで置き換える
+        if me.hp_max and me.hp_max < 50:
+            me.hp_max = None
         if me.hp_max and mx != me.hp_max:
             digits = re.sub(r"\D", "", my_hp)
             known = str(me.hp_max)
@@ -635,7 +640,7 @@ def extract_field_check(img, state: BattleStateV2, resolver) -> None:
                         done = True
                         break
             frac = ocr.parse_fraction(t2)
-            if frac and frac[1]:
+            if frac and frac[1] and frac[1] >= 50:
                 mon.hp_current, mon.hp_max = frac
                 mon.hp_percent = round(frac[0] / frac[1] * 100, 1)
                 done = True
@@ -820,7 +825,7 @@ def extract_watch(img, state: BattleStateV2, resolver) -> None:
         hp_text = ocr.read_zone_text(img, z["hp"], mode="panel",
                                      allowlist="0123456789/")
         frac = ocr.parse_fraction(hp_text)
-        if not name_text or not frac or not frac[1]:
+        if not name_text or not frac or not frac[1] or frac[1] < 50:
             continue
         sp = resolver.resolve_species(name_text, cutoff=0.72)
         idx = None

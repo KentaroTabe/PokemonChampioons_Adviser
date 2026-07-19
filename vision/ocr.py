@@ -243,24 +243,28 @@ def parse_fraction(text: str):
     import re
     if not text:
         return None
-    m = re.search(r"(\d+)\s*[/1lI|]\s*(\d+)", text)
-    if m:
-        cur, mx = int(m.group(1)), int(m.group(2))
-        if 0 < mx <= 999 and cur <= mx * 2:
-            return (min(cur, mx), mx)
+    # 明示的なスラッシュを最優先。スラッシュの誤読 (1/l/I/|) をセパレータと
+    # みなすのは両側2桁以上のときのみ (「715」を7/5と解釈する誤りを防ぐ)
+    for pat in (r"(\d+)\s*/\s*(\d+)", r"(\d{2,})\s*[1lI|]\s*(\d{2,})"):
+        m = re.search(pat, text)
+        if m:
+            cur, mx = int(m.group(1)), int(m.group(2))
+            if 0 < mx <= 999 and cur <= mx * 2:
+                return (min(cur, mx), mx)
     digits = re.sub(r"\D", "", text)
-    # 2桁のみ ("18") は「1/8」か「8/8の誤読」か判別不能なので採用しない
-    if len(digits) >= 3:
+    # スラッシュ取りこぼし時の桁分割は、両側が2桁以上になる場合のみ試す。
+    # 「167」(=現在値のみ読めてスラッシュと最大値を取りこぼしたケース) を
+    # 1/7に分割する誤りが実運用で起きたため、3桁以下は採用しない。
+    # 最大HPはLv50では実質50以上なので下限も要求する
+    if len(digits) >= 4:
         if len(digits) % 2 == 0:
             half = len(digits) // 2
             cur, mx = int(digits[:half]), int(digits[half:])
-            if 0 < mx <= 999 and cur <= mx:
-                return (cur, mx)
         else:
             half = len(digits) // 2
             cur, mx = int(digits[:half]), int(digits[half + 1:])
-            if 0 < mx <= 999 and cur <= mx:
-                return (cur, mx)
+        if 50 <= mx <= 999 and cur <= mx:
+            return (cur, mx)
     return None
 
 
