@@ -26,6 +26,19 @@ class Advisor:
             self._resolver = NameResolver()
         return self._resolver
 
+    def advise_selection(self, state_dict: dict) -> dict:
+        """選出画面用: 選出進捗の判定と最適選出の提案"""
+        from advisor.selection import advise_selection, format_selection_advice
+        try:
+            result = advise_selection(state_dict, self.resolver)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            result = {"ok": False, "reason": f"選出評価エラー: {e}"}
+        result["kind"] = "selection"
+        result["text"] = format_selection_advice(result)
+        return result
+
     def advise(self, state_dict: dict) -> dict:
         try:
             result = evaluate(state_dict, self.resolver)

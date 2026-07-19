@@ -63,8 +63,35 @@ def _read_pp(img, zone) -> Optional[tuple]:
 # ==============================================================================
 # 選出画面
 # ==============================================================================
+def _is_picked_panel(panel_img) -> bool:
+    """選出済みパネル (黄緑/ライムのハイライト) かどうか"""
+    if panel_img is None or panel_img.size == 0:
+        return False
+    hsv = cv2.cvtColor(panel_img, cv2.COLOR_BGR2HSV)
+    lime = cv2.inRange(hsv, np.array([30, 90, 120]), np.array([55, 255, 255]))
+    return cv2.countNonZero(lime) / lime.size > 0.20
+
+
 def extract_selection(img, state: BattleStateV2, resolver) -> None:
-    """選出画面から両パーティを取得する (未確定の枠だけ処理)"""
+    """選出画面から両パーティ・選出進捗を取得する (未確定の枠だけ処理)"""
+    # --- 選出進捗「N/3」 ---
+    prog_text = ocr.read_zone_text(img, zones.SELECTION["progress"],
+                                   allowlist="0123/")
+    m = re.search(r"([0-3])\s*/\s*3", prog_text or "")
+    if m:
+        state.selection_picked = int(m.group(1))
+
+    # --- 選出済みパネルのハイライト検出 ---
+    picked_count = 0
+    for i, z in enumerate(zones.SELECTION_MY):
+        picked = _is_picked_panel(crop(img, z["panel"]))
+        picked_count += int(picked)
+        if i < len(state.player.party):
+            state.player.party[i].is_picked = picked
+    # OCRが読めなかった場合はハイライト数で補完
+    if m is None and picked_count > 0:
+        state.selection_picked = picked_count
+
     # 自分側: 種族名 + 持ち物 (テキスト)
     for i, z in enumerate(zones.SELECTION_MY):
         if i < len(state.player.party) and state.player.party[i].species_ja:

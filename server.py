@@ -132,6 +132,23 @@ async def handle_frame(sid, data):
             _last_state_json = state_json
             await sio.emit('state_update', state, room=sid)
 
+        # 選出画面: 選出進捗の判定と選出提案 (パーティ情報が変わった時だけ)
+        if state["scene"] in ("selection", "standby"):
+            sel_key = json.dumps([
+                state.get("selection_picked"),
+                [p.get("species_id") for p in state["player"]["party"]],
+                [p.get("types") for p in state["opponent"]["party"]],
+                [p.get("is_picked") for p in state["player"]["party"]],
+            ], ensure_ascii=False)
+            now = time.time()
+            if sel_key != _last_advice_key or now - _last_advice_time > 15.0:
+                _last_advice_key = sel_key
+                _last_advice_time = now
+                advice = await loop.run_in_executor(None, advisor.advise_selection, state)
+                await sio.emit('advice_update', advice, room=sid)
+                print("--- 選出アドバイス ---")
+                print(advice["text"])
+
         # コマンド選択中のみアドバイスを計算 (状態が変わった時だけ)
         if state["scene"] in ("command", "move_select", "watch"):
             key = _advice_key(state)

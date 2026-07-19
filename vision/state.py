@@ -64,6 +64,7 @@ class PokemonState:
 
     is_mega: bool = False
     is_active: bool = False
+    is_picked: bool = False          # 選出画面で選出済み (パネルハイライト)
     last_seen_ts: float = 0.0
 
     def merge_species(self, species_ja: str, species_id: Optional[str]):
@@ -221,6 +222,7 @@ class BattleStateV2:
         self.player = SideState()
         self.opponent = SideState()
         self.scene: str = "unknown"
+        self.selection_picked: Optional[int] = None   # 選出画面の「N/3」のN
         self.command_no: Optional[int] = None     # 画面右上のCOMMAND番号 (残り時間秒)
         self.turn: int = 0
         self.mega_used = {"player": False, "opponent": False}
@@ -254,6 +256,7 @@ class BattleStateV2:
     def to_dict(self):
         return {
             "scene": self.scene,
+            "selection_picked": self.selection_picked,
             "turn": self.turn,
             "command_no": self.command_no,
             "battle_active": self.battle_active,
