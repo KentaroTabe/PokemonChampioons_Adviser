@@ -177,9 +177,14 @@ def classify(img) -> dict:
     scores["sel_complete"] = round(complete_bar, 3)
     scores["sel_my_panel"] = round(my_sel_panel, 3)
 
+    # 選出3シグナル (相手赤パネル+自分紫パネル+選出完了バー) が揃う場合は
+    # HUD判定より優先する。選出画面の背景演出 (炎・レーザー) がHUD条件を
+    # 偶発的に満たし、選出中にcommand/battle_hud誤分類が出ていた。
+    # 対戦画面でこの3ゾーンが同時に条件を満たすことはない
+    if opp_panel > 0.30 and my_sel_panel > 0.25 and complete_bar > 0.20:
+        return {"scene": "selection", "scores": scores}
+
     if not hud and opp_panel > 0.30 and my_sel_panel > 0.25:
-        if complete_bar > 0.20:
-            return {"scene": "selection", "scores": scores}
         return {"scene": "standby", "scores": scores}
 
     if hud:
