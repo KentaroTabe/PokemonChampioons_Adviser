@@ -121,6 +121,8 @@ class Advisor:
             lines.append("  🎲 択評価 (期待値/最悪ケース保証値):")
             for sl in gt["summary_lines"]:
                 lines.append(f"     {sl}")
+        if advice.get("endgame_note"):
+            lines.append(f"  🏁 {advice['endgame_note']}")
         if advice.get("speed_note"):
             lines.append(f"  {advice['speed_note']}")
         if advice.get("mega_note"):

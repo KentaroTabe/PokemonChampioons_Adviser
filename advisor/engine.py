@@ -486,6 +486,13 @@ def evaluate(state: dict, resolver=None) -> dict:
         import traceback
         traceback.print_exc()
 
+    # 詰み筋・勝ち筋判定 (残存メンバーの1v1マッチアップ行列)
+    endgame = ""
+    try:
+        endgame = _run_endgame(my_state, opp_state, resolver)
+    except Exception:
+        pass
+
     return {
         "ok": True,
         "actions": actions,
@@ -496,8 +503,43 @@ def evaluate(state: dict, resolver=None) -> dict:
         "opp_moves_note": opp_moves_note,
         "opp_spread_note": opp_spread_note,
         "gtheory": gtheory,
+        "endgame_note": endgame,
         "best": actions[0] if actions else None,
     }
+
+
+def _run_endgame(my_state, opp_state, resolver) -> str:
+    """残存メンバーの1v1行列から勝ち筋/負け筋ノートを作る"""
+    from advisor.endgame import matchup_matrix, endgame_note
+
+    def mons_of(side_state, side):
+        out = []
+        for p in side_state.get("party", []):
+            if p.get("status") == "fainted":
+                continue
+            v = build_mon_view(p, resolver, side=side)
+            if v is None:
+                continue
+            if side == "player":
+                moves = [m.get("move_id") for m in (p.get("moves") or [])
+                         if m.get("move_id")]
+            else:
+                moves = [mid for mid, _ in
+                         opponent_move_pool(p, v, resolver)][:6]
+            if not moves:
+                continue
+            hp = p.get("hp_percent")
+            hp = (hp / 100.0) if hp is not None else 1.0
+            out.append((v.name_ja or v.species_id, v, hp, moves))
+        return out
+
+    my_mons = mons_of(my_state, "player")
+    opp_mons = mons_of(opp_state, "opponent")
+    if not my_mons or not opp_mons:
+        return ""
+    n_unknown = max(0, (opp_state.get("remaining") or len(opp_mons))
+                    - len(opp_mons))
+    return endgame_note(matchup_matrix(my_mons, opp_mons), n_unknown)
 
 
 def _hp_frac_of(p: dict) -> float:
