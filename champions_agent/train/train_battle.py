@@ -33,7 +33,10 @@ def train(total_timesteps: int = 10_000, battle_format: str = TRAINING_BATTLE_FO
     保存先: checkpoints/battle_policy_{play_style}.zip (性格ごとに別ファイル)
     """
     # Stable-Baselines3 はインポートコストが高いため関数内で遅延importする
-    from stable_baselines3 import PPO
+    # MaskablePPO: 無効アクション (テラスタル等) をサンプリングさせない。
+    # 無効アクションはサーバーのデフォルト行動に丸められて
+    # クレジット割当が壊れるため、マスク学習が必須 (ROADMAP 9b)
+    from sb3_contrib import MaskablePPO
     from stable_baselines3.common.monitor import Monitor
 
     env = make_training_env(battle_format=battle_format, own_play_style=play_style,
@@ -45,16 +48,17 @@ def train(total_timesteps: int = 10_000, battle_format: str = TRAINING_BATTLE_FO
     if resume and save_path.exists():
         # 夜間バッチ等での継続学習: 既存チェックポイントから再開する
         try:
-            model = PPO.load(str(save_path), env=env)
+            model = MaskablePPO.load(str(save_path), env=env)
             print(f"[train_battle] チェックポイントから再開: {save_path}")
-        except ValueError as e:
-            # 観測空間の変更等で互換性が無い場合は退避して新規学習する
+        except Exception as e:
+            # 観測空間の変更・アルゴリズム変更 (PPO->MaskablePPO) 等で
+            # 互換性が無い場合は退避して新規学習する
             backup = save_path.with_suffix(".zip.incompatible")
             save_path.rename(backup)
-            print(f"[train_battle] チェックポイントが現在の観測空間と非互換のため "
-                  f"退避して新規学習します ({backup.name}): {e}")
+            print(f"[train_battle] チェックポイントが非互換のため退避して"
+                  f"新規学習します ({backup.name}): {e}")
     if model is None:
-        model = PPO(
+        model = MaskablePPO(
             "MlpPolicy",
             env,
             verbose=1,

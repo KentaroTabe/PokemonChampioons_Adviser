@@ -56,6 +56,53 @@ from champions_agent.env import champions_dex_patch
 champions_dex_patch.apply()
 
 
+def compute_action_mask(battle) -> np.ndarray:
+    """現在のバトル状態から合法アクションのマスク (26次元bool) を作る。
+
+    poke-env 0.10 SinglesEnv のアクション対応:
+      0-5:   交代 (battle.team の並び順)
+      6-9:   技 (active.moves の並び順)
+      10-13: 技+メガシンカ
+      14-25: Zワザ/ダイマックス/テラスタル (チャンピオンズには存在しない -> 常に無効)
+    無効アクションはサーバーのデフォルト行動に丸められ、学習のクレジット割当を
+    壊すため、MaskablePPO にこのマスクを与えて合法手のみをサンプリングさせる。
+    """
+    mask = np.zeros(26, dtype=bool)
+    try:
+        if battle is None or battle.finished:
+            mask[:] = True
+            return mask
+
+        active = battle.active_pokemon
+        if active is not None:
+            move_list = list(active.moves.values())
+            available_ids = {m.id for m in battle.available_moves}
+            for i, mv in enumerate(move_list[:4]):
+                if mv.id in available_ids:
+                    mask[6 + i] = True
+                    if battle.can_mega_evolve:
+                        mask[10 + i] = True
+
+        switchable = {p.species for p in battle.available_switches}
+        for i, p in enumerate(list(battle.team.values())[:6]):
+            if p.species in switchable:
+                mask[i] = True
+
+        if not mask.any():
+            mask[:] = True
+    except Exception:
+        mask[:] = True
+    return mask
+
+
+class MaskedSingleAgentWrapper(SingleAgentWrapper):
+    """SingleAgentWrapper + MaskablePPO用の action_masks() 提供"""
+
+    def action_masks(self) -> np.ndarray:
+        battle = getattr(self.env, "battle1", None)
+        return compute_action_mask(battle)
+
+
 class ChampionsSinglesEnv(SinglesEnv):
     """シングルバトル専用の観測/報酬をカスタマイズしたpoke-env環境。"""
 
@@ -212,7 +259,7 @@ def make_training_env(battle_format: str = TRAINING_BATTLE_FORMAT,
             print("[showdown_env] 対戦相手: RandomPlayer (プールが空。"
                   "勝率ゲート通過後に自動でselfplayへ移行)")
 
-    return SingleAgentWrapper(env, opponent)
+    return MaskedSingleAgentWrapper(env, opponent)
 
 
 if __name__ == "__main__":

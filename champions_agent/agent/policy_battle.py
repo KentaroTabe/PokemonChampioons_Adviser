@@ -32,8 +32,16 @@ class BattlePolicy:
         self.play_style = play_style
         path = model_path or (MODELS_DIR / f"battle_policy_{play_style}.zip")
         if path.exists():
-            from stable_baselines3 import PPO
-            self.model = PPO.load(str(path))
+            # MaskablePPO (現行) -> PPO (旧チェックポイント) の順で試す
+            try:
+                from sb3_contrib import MaskablePPO
+                self.model = MaskablePPO.load(str(path))
+            except Exception:
+                try:
+                    from stable_baselines3 import PPO
+                    self.model = PPO.load(str(path))
+                except Exception:
+                    self.model = None
 
 
     def choose_order(self, battle: AbstractBattle) -> BattleOrder:

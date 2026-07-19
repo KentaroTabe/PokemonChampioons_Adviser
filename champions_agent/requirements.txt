@@ -7,6 +7,7 @@ lxml>=4.9.0
 poke-env>=0.8.3
 gymnasium>=0.29.0
 stable-baselines3>=2.3.0
+sb3-contrib>=2.3.0
 torch>=2.2.0
 numpy>=1.26.0
 
