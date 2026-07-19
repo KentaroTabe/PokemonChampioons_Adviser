@@ -107,7 +107,9 @@ class BattleLogger:
             self._selection_streak += 1
         else:
             self._selection_streak = 0
-        if scene in ("command", "move_select", "field", "watch", "battle_hud"):
+        # field/watch/battle_hudは選出画面の背景演出でも誤分類され得るため、
+        # 明確なUIを要求するコマンド系画面のみを「対戦があった」証拠とする
+        if scene in ("command", "move_select"):
             self._battle_seen = True
 
         # 回転条件: 選出3フレーム連続 + 現ファイルが30秒以上経過 + 実際に
