@@ -120,6 +120,26 @@ class NameResolver:
             return (jp, val["id"], score)
         return None
 
+    def find_in_text(self, text: str, category: str, min_len: int = 5) -> Optional[tuple]:
+        """文中に含まれる名前 (技等) を部分一致で探す。
+
+        複合メッセージ (「相手のXのシャドーボール!効果は〜」) から技名を拾う用途。
+        誤検出を避けるため正規化後 min_len 文字以上の名前のみ対象。
+        戻り値: (日本語名, 値) or None (最長一致を優先)
+        """
+        key = normalize(text)
+        lkey = loose_key(text)
+        if not key:
+            return None
+        best = None
+        for jp, val, nk, lk in self._entries.get(category, []):
+            if len(nk) < min_len:
+                continue
+            if nk in key or (lk and len(lk) >= min_len and lk in lkey):
+                if best is None or len(nk) > len(normalize(best[0])):
+                    best = (jp, val)
+        return best
+
     def find_species_in_text(self, text: str, candidates: Optional[list] = None,
                              cutoff: float = 0.75) -> Optional[tuple]:
         """メッセージ文中に含まれる種族名を探す (「相手の リザードンは〜」等)。

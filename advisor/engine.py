@@ -126,16 +126,30 @@ def effective_speed(mon: MonView, side: dict, field: dict) -> float:
 # 相手の技候補
 # ==============================================================================
 def opponent_move_pool(opp_state: dict, opp_view: MonView, resolver) -> list:
-    """[(move_id, weight)] 判明技 + 使用率予測"""
+    """相手の技候補 [(move_id, weight, revealed)] を4枠モデルで作る。
+
+    ポケモンは技を4つしか覚えられないため:
+    - 判明済みの技 k 個は確定枠 (weight=100)
+    - 残り 4-k 枠は使用率データから「判明技を除いた採用率上位」で推定
+    - 4 つ判明済みなら推定は行わない (完全スカウト状態)
+    """
     pool = {}
+    revealed_set = set()
     for ja in opp_state.get("revealed_moves") or []:
         r = resolver.resolve(ja, "moves", cutoff=0.8) if resolver else None
         if r:
             pool[r[1]] = 100.0
-    pred = get_predictor().predict(opp_view.species_id)
-    for mid, pct in pred["moves"]:
-        if mid not in pool and len(pool) < 6:
-            pool[mid] = pct
+            revealed_set.add(r[1])
+
+    remaining_slots = max(0, 4 - len(revealed_set))
+    if remaining_slots > 0:
+        pred = get_predictor().predict(opp_view.species_id)
+        unrevealed = [(mid, pct) for mid, pct in pred["moves"]
+                      if mid not in revealed_set]
+        # 残り枠数+2個まで候補として保持 (重みは採用率を残り枠比率で減衰)
+        scale = remaining_slots / 4.0
+        for mid, pct in unrevealed[:remaining_slots + 2]:
+            pool[mid] = pct * (0.5 + 0.5 * scale)
     if not pool:
         # フォールバック: タイプ一致の代表技を仮定
         dex = get_dex()
@@ -215,6 +229,7 @@ def evaluate(state: dict, resolver=None) -> dict:
     opp_best_dmg = 0.0
     opp_best_move = None
     i_am_faster = None
+    opp_moves_note = ""
     if opp_view is not None:
         pool = opponent_move_pool(opp_p, opp_view, resolver)
         for mid, weight in pool:
@@ -234,6 +249,16 @@ def evaluate(state: dict, resolver=None) -> dict:
                     opp_best_dmg = exp
                     opp_best_move = mid
         threats.sort(key=lambda t: -t["dmg_avg"])
+
+        # 4枠モデルの説明文 (判明 k/4 + 残り枠の推定)
+        revealed_ja = opp_p.get("revealed_moves") or []
+        k = min(len(revealed_ja), 4)
+        if k >= 4:
+            opp_moves_note = f"相手の技: 4/4判明 ({'、'.join(revealed_ja[:4])}) — 完全スカウト済み"
+        elif k > 0:
+            est = [mid for mid, w in pool if w < 100.0][:4 - k]
+            opp_moves_note = (f"相手の技: 判明{k}/4 ({'、'.join(revealed_ja)}) / "
+                              f"残り{4 - k}枠は使用率から推定: {'、'.join(est)}")
 
         my_spe = effective_speed(my_view, my_state, state["field"])
         opp_spe = effective_speed(opp_view, opp_state, state["field"])
@@ -411,5 +436,6 @@ def evaluate(state: dict, resolver=None) -> dict:
         "speed_note": speed_note,
         "mega_note": mega_note,
         "opp_inference": opp_inference_note,
+        "opp_moves_note": opp_moves_note,
         "best": actions[0] if actions else None,
     }

@@ -283,10 +283,22 @@ class EventParser:
                 fired.append(rc)
 
         # 4. 技使用 / 特性発動 ("{名前}の {技/特性}")
-        if not fired:
-            mu = self._parse_move_or_ability(cleaned, norm, source)
-            if mu:
+        # 相手の判明技の収集が重要なため、他イベントと複合したメッセージ
+        # (「相手のXのわざ! 効果は〜」等) でも技解析は常に試みる。
+        # 交代 (「〜を繰り出した」) は種族名が技に誤マッチしやすいので除外
+        if not any(f.startswith("switch") for f in fired):
+            mu = self._parse_move_or_ability(cleaned, norm, source,
+                                             apply_effects=not fired)
+            if mu and mu not in fired:
                 fired.append(mu)
+            elif mu is None and source == "message":
+                # 「の」区切りで解決できない複合文: 文中の技名を部分一致で探す
+                found = self.resolver.find_in_text(cleaned, "moves", min_len=5)
+                if found:
+                    side_name, _side, mon = self._target_mon(cleaned, source)
+                    if side_name == "opponent" and found[0] not in mon.revealed_moves:
+                        mon.revealed_moves.append(found[0])
+                        fired.append(f"move_{side_name}_{found[1]}")
 
         self.state.log_event(source, cleaned, event_id=",".join(fired) or None)
         return fired
@@ -326,7 +338,8 @@ class EventParser:
         return None
 
     # --------------------------------------------------------------
-    def _parse_move_or_ability(self, cleaned: str, norm: str, source: str) -> Optional[str]:
+    def _parse_move_or_ability(self, cleaned: str, norm: str, source: str,
+                               apply_effects: bool = True) -> Optional[str]:
         """「{名前}の {技 or 特性}!」形式。「の」区切り候補を右から試す"""
         body = re.sub(r"[!!]+$", "", cleaned)
         positions = [m.start() for m in re.finditer("の", body)]
@@ -354,7 +367,9 @@ class EventParser:
 
         if side_name == "opponent" and r[0] not in mon.revealed_moves:
             mon.revealed_moves.append(r[0])
-        self._apply_move_side_effect(r[1], side_name)
+        if apply_effects:
+            # 他イベントが既に発火している場合は場への効果を二重適用しない
+            self._apply_move_side_effect(r[1], side_name)
         return f"move_{side_name}_{r[1]}"
 
     def _parse_popup(self, cleaned: str, source: str) -> Optional[str]:

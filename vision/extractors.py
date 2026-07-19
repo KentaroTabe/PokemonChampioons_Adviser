@@ -119,17 +119,32 @@ def extract_selection(img, state: BattleStateV2, resolver) -> None:
         if mon.species_ja or mon.display_name:
             state.player.party[i] = mon
 
-    # 相手側: タイプアイコン (1〜2個)
+    # 相手側: タイプアイコン (1〜2個) -> 使用率候補 -> スプライト照合で種族特定
     for i, z in enumerate(zones.SELECTION_OPP):
-        if i < len(state.opponent.party) and state.opponent.party[i].types:
-            continue
-        t1 = classify_type_icon(crop(img, z["type1"]))
-        t2 = classify_type_icon(crop(img, z["type2"]))
-        types = [t for t in (t1, t2) if t]
         while len(state.opponent.party) <= i:
             state.opponent.party.append(PokemonState())
-        if types:
-            state.opponent.party[i].types = types
+        slot = state.opponent.party[i]
+
+        if not slot.types:
+            t1 = classify_type_icon(crop(img, z["type1"]))
+            t2 = classify_type_icon(crop(img, z["type2"]))
+            types = [t for t in (t1, t2) if t]
+            if types:
+                slot.types = types
+
+        # 種族特定: タイプから候補を絞り、パネルのアイコンで視覚照合
+        if slot.types and not slot.species_ja:
+            try:
+                from advisor.infer import get_inference
+                from vision.spriteid import identify_species
+                cands = get_inference().candidates(slot.types)
+                hit = identify_species(crop(img, z["icon"]), cands)
+                if hit:
+                    slot.merge_species(hit[1], hit[0])
+                    state.log_event("selection", f"相手枠{i + 1}を{hit[1]}と特定 "
+                                    f"(視覚照合{hit[2]})", event_id="species_identified")
+            except Exception:
+                pass
 
 
 _TYPE_EN2JA = None
@@ -240,6 +255,31 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
         opp = state.opponent.ensure_active()
     link_active_to_party(state, "opponent")
     opp = state.opponent.ensure_active()
+
+    # 種族未特定なら、HUDのフルカラーアイコンを候補スプライトと照合して特定する
+    # (候補 = タイプ判明済みで種族未特定の相手枠から使用率推測した種族の合算)
+    if not opp.species_ja:
+        try:
+            from advisor.infer import get_inference
+            from vision.spriteid import identify_species_color
+            inference = get_inference()
+            cand_map: dict = {}
+            for p in state.opponent.party[:6]:
+                if p.species_ja or not p.types:
+                    continue
+                for sid, prob, ja in inference.candidates(p.types):
+                    if sid not in cand_map or prob > cand_map[sid][0]:
+                        cand_map[sid] = (prob, ja)
+            cands = [(sid, prob, ja) for sid, (prob, ja) in cand_map.items()]
+            hit = identify_species_color(crop(img, zones.BATTLE["opp_icon"]), cands)
+            if hit:
+                state.opponent.switch_to_species(hit[1], hit[0])
+                link_active_to_party(state, "opponent")
+                opp = state.opponent.ensure_active()
+                state.log_event("battle_hud", f"相手を{hit[1]}と特定 (アイコン照合{hit[2]})",
+                                event_id="species_identified")
+        except Exception:
+            pass
 
     hp_text = ocr.read_zone_text(img, zones.BATTLE["opp_hp_text"], mode="panel",
                                  allowlist="0123456789%")
@@ -648,21 +688,31 @@ def extract_watch(img, state: BattleStateV2, resolver) -> None:
         if it:
             me.item_ja, me.item_id = it[0], it[1]
 
-    # 技 + PP
+    # 技 + PP: この画面は「場に出ているポケモンの4技」を必ず表示するため、
+    # 追記ではなく置き換える (交代をまたいで技リストが合成されるのを防ぐ)
+    new_moves = []
     for i, row in enumerate(zones.WATCH_MOVES):
         name_text = ocr.read_zone_text(img, row["name"], mode="panel")
         if not name_text:
             continue
         mv = resolver.resolve(name_text, "moves", cutoff=0.7)
+        if mv is None:
+            continue
         pp = _read_pp(img, row["pp"])
-        key_ja = mv[0] if mv else name_text
-        slot = next((m for m in me.moves if m.name_ja == key_ja), None)
-        if slot is None:
-            slot = MoveSlot(name_ja=key_ja, move_id=mv[1] if mv else None)
-            me.moves.append(slot)
+        slot = MoveSlot(name_ja=mv[0], move_id=mv[1])
         if pp:
-            slot.pp = pp[0]
-            slot.max_pp = pp[1] or slot.max_pp
+            slot.pp, slot.max_pp = pp[0], pp[1]
+        new_moves.append(slot)
+    if len(new_moves) >= 3:
+        # 既存エントリのPP情報は引き継ぐ
+        old = {m.move_id or m.name_ja: m for m in me.moves}
+        for slot in new_moves:
+            prev = old.get(slot.move_id or slot.name_ja)
+            if prev:
+                slot.pp = slot.pp if slot.pp is not None else prev.pp
+                slot.max_pp = slot.max_pp or prev.max_pp
+                slot.effectiveness = prev.effectiveness
+        me.moves = new_moves
 
     # 左列: 自分の選出パーティのHP実数値
     for i, z in enumerate(zones.WATCH_MY[:3]):
