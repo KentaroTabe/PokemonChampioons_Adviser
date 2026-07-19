@@ -27,7 +27,9 @@ EVAL_DIR = Path(__file__).resolve().parent / "logs"
 
 WIN_RATE_GATE = 0.75      # vs Random 勝率がこれ以上でプール入り
 MAX_ENTRIES_PER_STYLE = 5  # 性格ごとの保持世代数
-EPSILON_RANDOM = 0.25      # selfplay時もこの確率でランダム相手を混ぜる
+EPSILON_RANDOM = 0.15      # ランダム相手を混ぜる確率 (基礎相手の忘却防止)
+EPSILON_HEURISTIC = 0.25  # 上位構築ヒューリスティクス相手を混ぜる確率 (常設の強敵)
+RANKED_TEAM_PROB = 0.30   # 相手チームを上位構築の実物にする確率
 
 
 class OpponentPool:
@@ -92,40 +94,46 @@ class PoolOpponentPlayer:
 
 
 def make_pool_opponent(pool: OpponentPool, epsilon_random: float = EPSILON_RANDOM,
+                       epsilon_heuristic: float = EPSILON_HEURISTIC,
                        **player_kwargs):
-    """PoolOpponentPlayer のインスタンスを生成する。
+    """混合対戦相手を生成する。バトルごとに以下から抽選:
 
-    epsilon_random: この確率でそのバトルはランダム行動になる。
+    - "heuristic": SimpleHeuristicsPlayer (ダメージ計算+交代判断の固定強敵)
+    - "random":    ランダム行動 (基礎相手の忘却防止)
+    - それ以外:    selfplayプールの過去チェックポイント方策
+    プールが空の場合は heuristic / random のみで構成される (カリキュラム初期)。
     """
-    from poke_env.player import Player
+    from poke_env.player import SimpleHeuristicsPlayer
     from champions_agent.agent.policy_battle import BattlePolicy
 
-    class _PoolOpponent(Player):
+    class _PoolOpponent(SimpleHeuristicsPlayer):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self._pool = pool
-            self._eps = epsilon_random
-            self._assign: dict = {}      # battle_tag -> BattlePolicy | None(=random)
+            self._assign: dict = {}      # battle_tag -> "random"|"heuristic"|BattlePolicy
             self._policy_cache: dict = {}
 
         def _policy_for(self, battle):
             tag = battle.battle_tag
             if tag not in self._assign:
-                if random.random() < self._eps:
-                    self._assign[tag] = None
+                r = random.random()
+                if r < epsilon_heuristic:
+                    self._assign[tag] = "heuristic"
+                elif r < epsilon_heuristic + epsilon_random or not self._pool.has_entries():
+                    self._assign[tag] = "random"
                 else:
                     path = self._pool.sample()
-                    if path is None:
-                        self._assign[tag] = None
-                    else:
+                    policy = None
+                    if path is not None:
                         key = str(path)
                         if key not in self._policy_cache:
                             try:
                                 self._policy_cache[key] = BattlePolicy(model_path=path)
                             except Exception:
                                 self._policy_cache[key] = None
-                        self._assign[tag] = self._policy_cache[key]
-                # 古いバトルの割り当てを掃除
+                        policy = self._policy_cache[key]
+                    self._assign[tag] = policy if (
+                        policy is not None and policy.model is not None) else "heuristic"
                 if len(self._assign) > 50:
                     for k in list(self._assign.keys())[:-25]:
                         del self._assign[k]
@@ -133,12 +141,14 @@ def make_pool_opponent(pool: OpponentPool, epsilon_random: float = EPSILON_RANDO
 
         def choose_move(self, battle):
             policy = self._policy_for(battle)
-            if policy is not None and policy.model is not None:
-                try:
-                    return policy.choose_order(battle)
-                except Exception:
-                    pass
-            return self.choose_random_move(battle)
+            if policy == "heuristic":
+                return super().choose_move(battle)
+            if policy == "random":
+                return self.choose_random_move(battle)
+            try:
+                return policy.choose_order(battle)
+            except Exception:
+                return self.choose_random_move(battle)
 
     return _PoolOpponent(**player_kwargs)
 

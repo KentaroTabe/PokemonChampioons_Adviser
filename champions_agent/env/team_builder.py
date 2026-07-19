@@ -33,7 +33,8 @@ class PokemonSet:
 
     def to_showdown_text(self) -> str:
         """poke-env / Showdown のteambuilder importable format(簡易版)へ変換する。"""
-        lines = [f"{self.species} @ {self.item or ''}".strip()]
+        # 持ち物なしの場合は「@」自体を書かない (「Species @」はパース不能)
+        lines = [f"{self.species} @ {self.item}" if self.item else self.species]
         # チャンピオンズのランクバトルはLv50固定
         lines.append("Level: 50")
         if self.ability:

@@ -68,6 +68,12 @@ trap cleanup EXIT
 
     # 勝率ゲートを超えたらselfplay相手プールへスナップショット
     python -m champions_agent.train.opponent_pool --update-from-eval "$style" || true
+
+    # 進歩の物差し: 上位構築xヒューリスティクスの固定強敵に対する勝率
+    echo "--- [$style] ベンチマーク評価 (vs 上位構築ヒューリスティクス) ---"
+    caffeinate -i python -m champions_agent.train.evaluate \
+      --play-style "$style" --battles "$EVAL_BATTLES" --opponent benchmark \
+      --timeout 900 || echo "[nightly] [$style] ベンチマーク評価が失敗しました"
   done
 
   echo "===== done: $(date) ====="

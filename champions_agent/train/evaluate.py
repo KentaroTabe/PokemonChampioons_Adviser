@@ -40,7 +40,8 @@ class ModelPlayer(RandomPlayer):
 async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
                           opponent_play_style: str | None = None,
                           n_battles: int = 50,
-                          battle_format: str = TRAINING_BATTLE_FORMAT) -> dict:
+                          battle_format: str = TRAINING_BATTLE_FORMAT,
+                          opponent_kind: str = "random") -> dict:
     """play_styleモデル vs (opponent_play_styleモデル or RandomPlayer) をn_battles戦させる。"""
     own_team = build_random_team_text(size=TRAINING_TEAM_SIZE, play_style=play_style)
     own_teambuilder = ConstantTeambuilder(own_team)
@@ -52,7 +53,10 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
         play_style=play_style,
     )
 
-    if opponent_play_style:
+    if opponent_kind == "benchmark":
+        from champions_agent.env.showdown_env import make_benchmark_player
+        player2 = make_benchmark_player(battle_format=battle_format)
+    elif opponent_play_style:
         opp_team = build_random_team_text(size=TRAINING_TEAM_SIZE, play_style=opponent_play_style)
         opp_teambuilder = ConstantTeambuilder(opp_team)
         player2 = ModelPlayer(
@@ -74,7 +78,7 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
 
     result = {
         "play_style": play_style,
-        "opponent": opponent_play_style or "random",
+        "opponent": opponent_play_style or opponent_kind,
         "n_battles": n_battles,
         "wins": player1.n_won_battles,
         "win_rate": player1.n_won_battles / n_battles if n_battles else 0.0,
@@ -90,6 +94,9 @@ def main() -> None:
                          choices=list(PLAY_STYLES.keys()) + [None],
                          help="省略時はRandomPlayerと対戦")
     parser.add_argument("--battles", type=int, default=50)
+    parser.add_argument("--opponent", type=str, default="random",
+                         choices=["random", "benchmark"],
+                         help="benchmark=上位構築xヒューリスティクスの固定強敵")
     parser.add_argument("--timeout", type=int, default=0,
                          help="秒数を指定すると評価全体にタイムアウトをかける (ハング対策)")
     parser.add_argument("--format", type=str, default=TRAINING_BATTLE_FORMAT)
@@ -111,11 +118,12 @@ def main() -> None:
         opponent_play_style=args.opponent_play_style,
         n_battles=args.battles,
         battle_format=args.format,
+        opponent_kind=args.opponent,
     ))
     print(f"[evaluate] {result}")
 
     # vs Random の結果は opponent_pool の勝率ゲート判定に使うため保存する
-    if not args.opponent_play_style:
+    if not args.opponent_play_style and args.opponent == "random":
         import json
         from pathlib import Path
         log_dir = Path(__file__).resolve().parent / "logs"

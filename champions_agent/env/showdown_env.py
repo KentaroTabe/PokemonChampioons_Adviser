@@ -232,34 +232,62 @@ def make_training_env(battle_format: str = TRAINING_BATTLE_FORMAT,
         strict=False,
     )
 
-    # --- 対戦相手の決定 (population-based selfplay) ---
-    # プールに「vs Random勝率ゲートを超えた過去チェックポイント」があれば
-    # 自動でselfplay相手に切り替える。無ければRandomPlayer。
-    from champions_agent.train.opponent_pool import OpponentPool, make_pool_opponent
+    # --- 対戦相手の決定 ---
+    # 混合相手: selfplayプールの過去世代 + 上位構築ヒューリスティクス (常設の強敵)
+    # + ランダム (忘却防止)。チームも30%の確率でラダー上位の実構築になる。
+    from champions_agent.train.opponent_pool import (
+        OpponentPool, make_pool_opponent, RANKED_TEAM_PROB,
+    )
 
-    pool = OpponentPool()
-    use_selfplay = opponent_mode == "selfplay" or \
-        (opponent_mode == "auto" and pool.has_entries())
-    if use_selfplay and pool.has_entries():
-        opponent = make_pool_opponent(
-            pool,
-            battle_format=battle_format,
-            server_configuration=TrainingServerConfiguration,
-            team=opp_teambuilder,
-        )
-        print(f"[showdown_env] 対戦相手: selfplayプール {len(pool.entries())}件 "
-              f"(+εランダム混合)")
-    else:
+    if opponent_mode == "random":
         opponent = RandomPlayer(
             battle_format=battle_format,
             server_configuration=TrainingServerConfiguration,
             team=opp_teambuilder,
         )
-        if opponent_mode != "random":
-            print("[showdown_env] 対戦相手: RandomPlayer (プールが空。"
-                  "勝率ゲート通過後に自動でselfplayへ移行)")
+        return MaskedSingleAgentWrapper(env, opponent)
+
+    opp_team = opp_teambuilder
+    try:
+        from champions_agent.env.ranked_teams import RankedTeambuilder
+        ranked_tb = RankedTeambuilder(rng=rng)
+
+        class _MixedTeambuilder(ChampionsTeambuilder):
+            def yield_team(self) -> str:
+                if self.rng.random() < RANKED_TEAM_PROB:
+                    return ranked_tb.yield_team()
+                return super().yield_team()
+
+        opp_team = _MixedTeambuilder(size=team_size,
+                                      style_pool=opp_play_style_pool, rng=rng)
+    except Exception as e:
+        print(f"[showdown_env] 上位構築チームは無効 (メタ生成のみ): {e}")
+
+    pool = OpponentPool()
+    opponent = make_pool_opponent(
+        pool,
+        battle_format=battle_format,
+        server_configuration=TrainingServerConfiguration,
+        team=opp_team,
+    )
+    print(f"[showdown_env] 対戦相手: selfplayプール{len(pool.entries())}件 + "
+          f"ヒューリスティクス強敵 + ランダム (混合)")
 
     return MaskedSingleAgentWrapper(env, opponent)
+
+
+def make_benchmark_player(battle_format: str = TRAINING_BATTLE_FORMAT,
+                          top_n: int = 60, **kwargs):
+    """評価用の固定ベンチマーク相手: 上位構築 x SimpleHeuristicsPlayer"""
+    from poke_env.player import SimpleHeuristicsPlayer
+    from champions_agent.env.ranked_teams import RankedTeambuilder
+
+    return SimpleHeuristicsPlayer(
+        battle_format=battle_format,
+        server_configuration=TrainingServerConfiguration,
+        team=RankedTeambuilder(top_n=top_n),
+        **kwargs,
+    )
 
 
 if __name__ == "__main__":
