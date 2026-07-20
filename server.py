@@ -120,12 +120,15 @@ async def handle_frame(sid, data):
         battle_log.on_frame(state, fired)
         spread_tracker.on_frame(state, fired)   # 相手の型推定 (先後/ダメージ観測)
 
-        # 場の状況画面は貴重な検証データなので、検出したら間隔に関係なく保存する
-        if DUMP_FRAMES and state["scene"] == "field_check" and \
+        # 場の状況/選出画面は貴重な検証データなので、2秒間隔で保存する
+        # (選出は自選出ハイライトの検証用: 選出操作の短い時間を捉える)
+        if DUMP_FRAMES and state["scene"] in ("field_check", "selection",
+                                              "standby") and \
                 time.time() - _last_dump_time > 2:
             _last_dump_time = time.time()
             DUMP_DIR.mkdir(exist_ok=True)
-            cv2.imwrite(str(DUMP_DIR / f"fc_{int(time.time())}.png"), img)
+            prefix = "fc" if state["scene"] == "field_check" else "sel"
+            cv2.imwrite(str(DUMP_DIR / f"{prefix}_{int(time.time())}.png"), img)
 
         # 動作確認用: シーンが変わった瞬間 + 5秒ごとに状況をログ
         global _last_scene

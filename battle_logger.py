@@ -37,6 +37,7 @@ def _compact_state(state: dict) -> dict:
             "ability": p.get("ability_id"),
             "moves": [[m.get("move_id"), m.get("pp")] for m in (p.get("moves") or [])],
             "revealed": p.get("revealed_moves"),
+            "picked": p.get("is_picked"),
         }
 
     return {
