@@ -25,6 +25,7 @@ from advisor.endgame import duel
 from advisor.infer import species_ja_name
 from vision.normalize import NameResolver
 from tools.team_report import build_meta_view, meta_top
+from advisor.team_advice import champions_usable
 
 DB_PATH = (Path(__file__).resolve().parent.parent
            / "champions_agent" / "data" / "db" / "champions.sqlite3")
@@ -36,26 +37,50 @@ def _to_id(name: str) -> str:
 
 def cooccurrence(sid: str) -> dict:
     db = sqlite3.connect(str(DB_PATH))
+    # チャンピオンズ実データに限定 (Smogon SVの共起を混ぜない)。
+    # champions_usableでchampionsに存在する種族だけを候補にする
+    from advisor.team_advice import _champions_filter
+    flt = _champions_filter(db)
     out = {}
     for name, w in db.execute(
-            "SELECT teammate_name, SUM(usage_percent) FROM teammate_usage "
-            "WHERE REPLACE(REPLACE(pokemon_name,'-',''),' ','') = ? "
-            "GROUP BY teammate_name", (sid,)):
+            f"SELECT teammate_name, SUM(usage_percent) FROM teammate_usage "
+            f"WHERE REPLACE(REPLACE(pokemon_name,'-',''),' ','') = ? AND {flt} "
+            f"GROUP BY teammate_name", (sid,)):
         cand = _to_id(name)
-        if get_dex().species(cand):
+        if get_dex().species(cand) and champions_usable(cand):
             out[cand] = out.get(cand, 0) + (w or 0)
     db.close()
     return out
 
 
 def team_score(team: list, meta_views: list) -> float:
-    """静的スコア: メタ上位への1v1カバレッジ (穴1つにつき大減点)"""
+    """構築スコア: メタ上位への1v1カバレッジ (主) + 多様性/対面優位 (タイブレーク)。
+
+    カバレッジが飽和 (100%) すると6体目だけ変わる縮退が起きるため、
+    タイプ多様性と平均対面スコアを微小重みで加えて候補を多様化する。
+    """
+    from advisor.endgame import duel_score
     covered = 0
+    margin_sum = 0.0
     for _sid, _u, ov, omoves in meta_views:
-        if any(duel(v, 1.0, moves, ov, 1.0, omoves)
-               for _s, v, moves in team):
-            covered += 1
-    return covered / max(1, len(meta_views))
+        best = None
+        for _s, v, moves in team:
+            sc = duel_score(v, 1.0, moves, ov, 1.0, omoves)
+            if sc is not None and (best is None or sc > best):
+                best = sc
+        if best is not None:
+            if best > 0:
+                covered += 1
+            margin_sum += best   # 各メタへの最良対面 (勝ちの余裕)
+    coverage = covered / max(1, len(meta_views))
+    # 防御タイプ多様性 (受けの範囲) + 攻撃余裕。カバレッジを主軸に微小加算
+    def_types = set()
+    for _s, v, _m in team:
+        for t in v.types:
+            def_types.add(t)
+    diversity = len(def_types) / 18.0
+    avg_margin = margin_sum / max(1, len(meta_views))
+    return coverage + 0.02 * diversity + 0.03 * avg_margin
 
 
 def generate_candidates(core_ja: str, beam: int = 6, n_out: int = 5,
@@ -127,9 +152,21 @@ def generate_report(core_ja: str, n_eval: int = 3, n_battles: int = 12,
     results = generate_candidates(core_ja)
     if not results:
         return {"ok": False, "reason": f"{core_ja} の候補を生成できません"}
+    # 表示用にカバレッジ (整数%) と多様性込みスコアを分離
+    from tools.team_report import meta_top as _mt
+    from tools.team_report import build_meta_view as _bmv
+    metas = [(s, u, *(_bmv(s))) for s, u in _mt(15)]
+    metas = [(s, u, v, m) for s, u, v, m in metas if v is not None]
+
+    def _coverage(team):
+        from advisor.endgame import duel
+        c = sum(1 for _s, _u, ov, om in metas
+                if any(duel(v, 1.0, mv, ov, 1.0, om) for _, v, mv in team))
+        return round(c / max(1, len(metas)), 3)
+
     candidates = [{"names": [species_ja_name(s) for s, _, _ in team],
-                   "coverage": round(cov, 3)} for team, cov in results]
-    _p(f"候補{len(candidates)}件を生成。カバレッジ上位を確認中…")
+                   "coverage": _coverage(team)} for team, cov in results]
+    _p(f"候補{len(candidates)}件を生成。実対戦で選抜します…")
 
     out = {"ok": True, "core": core_ja, "candidates": candidates, "best": None}
     if not evaluate:
@@ -166,10 +203,18 @@ def generate(core_ja: str, beam: int = 6, n_out: int = 5,
     if not results:
         print(f"種族を解決できません/候補生成不可: {core_ja}")
         return []
-    print(f"# {core_ja}軸の候補構築 (メタ上位15体への1v1カバレッジ順)\n")
+    metas = [(s, u, *(build_meta_view(s))) for s, u in meta_top(15)]
+    metas = [(s, u, v, m) for s, u, v, m in metas if v is not None]
+
+    def _cov(team):
+        c = sum(1 for _s, _u, ov, om in metas
+                if any(duel(v, 1.0, mv, ov, 1.0, om) for _, v, mv in team))
+        return c / max(1, len(metas))
+
+    print(f"# {core_ja}軸の候補構築 (メタ上位{len(metas)}体への1v1カバレッジ+多様性順)\n")
     for i, (team, score) in enumerate(results, 1):
         names = "・".join(species_ja_name(s) for s, _, _ in team)
-        print(f"{i}. カバレッジ{score:.0%}: {names}")
+        print(f"{i}. カバレッジ{_cov(team):.0%} (総合{score:.2f}): {names}")
 
     if "--evaluate" in sys.argv:
         # 上位候補を実対戦で選抜 (Phase 6.4の結線)

@@ -42,6 +42,33 @@ def _champions_filter(db) -> str:
     return f"snapshot_id IN ({','.join(ids)})"
 
 
+_CHAMPIONS_IDS = None
+
+
+def champions_usable(species_id: str) -> bool:
+    """championsの使用率データに存在する種族か (SV専用ポケモンを除外)。
+
+    championsのpokemon_usage/teammate_usageに一度でも現れた種族IDの集合で判定。
+    """
+    global _CHAMPIONS_IDS
+    if _CHAMPIONS_IDS is None:
+        db = sqlite3.connect(str(DB_PATH))
+        flt = _champions_filter(db)
+        ids = set()
+        for table in ("pokemon_usage", "teammate_usage"):
+            col = "pokemon_name"
+            for (name,) in db.execute(
+                    f"SELECT DISTINCT {col} FROM {table} WHERE {flt}"):
+                ids.add(_to_id(name))
+            if table == "teammate_usage":
+                for (name,) in db.execute(
+                        f"SELECT DISTINCT teammate_name FROM {table} WHERE {flt}"):
+                    ids.add(_to_id(name))
+        db.close()
+        _CHAMPIONS_IDS = ids
+    return _to_id(species_id) in _CHAMPIONS_IDS
+
+
 def meta_top(n: int = 20) -> list:
     db = sqlite3.connect(str(DB_PATH))
     flt = _champions_filter(db)
