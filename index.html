@@ -187,6 +187,13 @@
             html += '</ol>';
             if (r.best) {
                 html += `<div class="best" style="margin-top:6px">◎ 最有力 (実戦勝率${Math.round(r.best.win_rate*100)}%): <b>${r.best.names.join('・')}</b></div>`;
+                const w = r.best.weakness;
+                if (w && w.weak_mons && w.weak_mons.length) {
+                    html += '<div style="font-size:12px;color:#e99;margin-top:6px">⚠ 苦手なポケモン (対面が不利な順): '
+                        + w.weak_mons.map(m => `${m.name}(${m.margin>=0?'+':''}${m.margin})`).join(' / ') + '</div>';
+                    if (w.weak_teammates && w.weak_teammates.length)
+                        html += `<div style="font-size:12px;color:#e99">⚠ 苦手な構築の傾向: ${w.weak_teammates.join('・')} 軸</div>`;
+                }
                 if (r.best.team_text)
                     html += `<pre style="font-size:11px;background:#121826;padding:8px;border-radius:6px;overflow-x:auto">${r.best.team_text}</pre>`;
             }

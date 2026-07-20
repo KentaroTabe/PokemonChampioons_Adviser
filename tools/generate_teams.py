@@ -80,7 +80,15 @@ def team_score(team: list, meta_views: list) -> float:
             def_types.add(t)
     diversity = len(def_types) / 18.0
     avg_margin = margin_sum / max(1, len(meta_views))
-    return coverage + 0.02 * diversity + 0.03 * avg_margin
+    # メガ枠は1試合1回。メガストーン持ちが複数いると枠を食い合うので減点
+    n_mega = sum(1 for _s, v, _m in team if _is_mega_holder(v))
+    mega_penalty = 0.15 * max(0, n_mega - 1)
+    return coverage + 0.02 * diversity + 0.03 * avg_margin - mega_penalty
+
+
+def _is_mega_holder(view) -> bool:
+    item = (getattr(view, "item", None) or "").lower()
+    return item.endswith("ite") and item != "eviolite"
 
 
 def generate_candidates(core_ja: str, beam: int = 6, n_out: int = 5,
@@ -190,10 +198,58 @@ def generate_report(core_ja: str, n_eval: int = 3, n_battles: int = 12,
             team_text = build_team_text(best_names)
         except Exception:
             pass
+        weakness = analyze_weakness(best_names)
         out["best"] = {"names": best_names, "win_rate": round(best_rate, 3),
-                       "team_text": team_text}
+                       "team_text": team_text, "weakness": weakness}
         _p(f"完了。最有力: {'・'.join(best_names)} (勝率{best_rate:.0%})")
     return out
+
+
+def analyze_weakness(team_names: list, top_n: int = 20) -> dict:
+    """構築の苦手ポケモン (対面が不利な相手) と苦手構築傾向を返す。
+
+    - weak_mons: メタ上位でチームの最良対面スコアが低い順のポケモン
+    - weak_teammates: 苦手ポケモンとよく組まれる相方 (=苦手な構築の軸)
+    """
+    from advisor.endgame import duel_score
+    resolver = NameResolver()
+    team = []
+    for ja in team_names:
+        r = resolver.resolve_species(ja, cutoff=0.85)
+        if not r:
+            continue
+        v, m = build_meta_view(r[1])
+        if v is not None:
+            team.append((r[1], v, m))
+    metas = [(s, u, *(build_meta_view(s))) for s, u in meta_top(top_n)]
+    metas = [(s, u, v, m) for s, u, v, m in metas if v is not None]
+
+    team_ids = {t[0] for t in team}
+    scored = []
+    for sid, usage, ov, om in metas:
+        if sid in team_ids:
+            continue   # 自チームと同種 (ミラー) は構築の弱点ではないので除外
+        best = None
+        for _s, v, mv in team:
+            sc = duel_score(v, 1.0, mv, ov, 1.0, om)
+            if sc is not None and (best is None or sc > best):
+                best = sc
+        if best is not None:
+            scored.append((best, species_ja_name(sid), sid, usage))
+    scored.sort()   # 最良対面スコアが低い=苦手な順
+    weak_mons = [{"name": n, "margin": round(b, 2), "usage": round(u, 1)}
+                 for b, n, s, u in scored[:5]]
+
+    # 苦手ポケモンの共起相方 = 苦手な構築傾向
+    weak_ids = [s for _b, _n, s, _u in scored[:3]]
+    teammate_score = {}
+    for wid in weak_ids:
+        for cand, w in cooccurrence(wid).items():
+            if cand not in {t[0] for t in team}:
+                teammate_score[cand] = teammate_score.get(cand, 0) + w
+    weak_teammates = [species_ja_name(s) for s, _w in
+                      sorted(teammate_score.items(), key=lambda kv: -kv[1])[:4]]
+    return {"weak_mons": weak_mons, "weak_teammates": weak_teammates}
 
 
 def generate(core_ja: str, beam: int = 6, n_out: int = 5,
@@ -235,6 +291,12 @@ def generate(core_ja: str, beam: int = 6, n_out: int = 5,
         if ranked:
             best = max(ranked)
             print(f"\n◎ 最有力: {'・'.join(best[1])} (勝率{best[0]:.0%})")
+            w = analyze_weakness(best[1])
+            if w["weak_mons"]:
+                print("⚠ 苦手なポケモン (対面が薄い順): " + " / ".join(
+                    f"{m['name']}({m['margin']:+.2f})" for m in w["weak_mons"]))
+            if w["weak_teammates"]:
+                print(f"⚠ 苦手な構築の傾向: {'・'.join(w['weak_teammates'])} 軸")
             # 型 (特性/持ち物/性格/能力ポイント/技) つきで出力
             try:
                 from tools.evaluate_team import build_team_text
