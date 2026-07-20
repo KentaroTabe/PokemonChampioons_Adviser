@@ -156,12 +156,15 @@
         // --- 手動修正 (誤認識のユーザー訂正。修正はログに記録され分析に使う) ---
         function fixMon(side, i) {
             const menu = prompt(
-                '修正する項目を番号で選択:\n1=HP%  2=状態異常  3=持ち物  4=特性\n' +
+                '修正する項目を番号で選択:\n0=タイプ (選出画面の誤認識向け)\n' +
+                '1=HP%  2=状態異常  3=持ち物  4=特性\n' +
                 '5=攻撃ランク  6=特攻ランク  7=素早さランク  8=メガ済み切替');
             if (!menu) return;
             const send = (field, value) =>
                 socket.emit('set_state', {target: 'mon', side, index: i, field, value});
             switch (menu.trim()) {
+                case '0': { const v = prompt('タイプ (例: みず/ひこう。単タイプは1つだけ):');
+                            if (v) send('types', v.trim()); break; }
                 case '1': { const v = prompt('残りHP% (0-100):'); if (v !== null) send('hp_percent', +v); break; }
                 case '2': { const v = prompt('状態異常 (poison/toxic/burn/paralysis/sleep/freeze、空欄=なし):');
                             if (v !== null) send('status', v.trim() || null); break; }

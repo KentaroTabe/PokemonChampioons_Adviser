@@ -64,7 +64,8 @@ class PokemonState:
 
     is_mega: bool = False
     is_active: bool = False
-    is_picked: bool = False          # 選出画面で選出済み (パネルハイライト)
+    is_picked: bool = False          # 選出画面で選出済み (左端の白リボン)
+    pick_order: Optional[int] = None  # 選出順 (1=先発。リボン出現順で推定)
     last_seen_ts: float = 0.0
 
     def merge_species(self, species_ja: str, species_id: Optional[str]):

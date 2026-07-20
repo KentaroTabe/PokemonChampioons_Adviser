@@ -64,13 +64,23 @@ def _read_pp(img, zone) -> Optional[tuple]:
 # ==============================================================================
 # 選出画面
 # ==============================================================================
-def _is_picked_panel(panel_img) -> bool:
-    """選出済みパネル (黄緑/ライムのハイライト) かどうか"""
-    if panel_img is None or panel_img.size == 0:
+def _is_picked_panel(img, panel_zone) -> bool:
+    """選出済みパネルかどうか。
+
+    実画面の選出済み表示は「パネル左端の白いリボン+番号バッジ」
+    (ライム色ハイライトはカーソル位置であって選出済みの印ではない —
+    実フレーム検証 2026-07-20)。左端ストリップの白画素率で判定する。
+    """
+    strip = {"x0": max(0.0, panel_zone["x0"] - 0.004),
+             "y0": panel_zone["y0"] + 0.005,
+             "x1": panel_zone["x0"] + 0.017,
+             "y1": panel_zone["y1"] - 0.01}
+    c = crop(img, strip)
+    if c is None or c.size == 0:
         return False
-    hsv = cv2.cvtColor(panel_img, cv2.COLOR_BGR2HSV)
-    lime = cv2.inRange(hsv, np.array([30, 90, 120]), np.array([55, 255, 255]))
-    return cv2.countNonZero(lime) / lime.size > 0.20
+    hsv = cv2.cvtColor(c, cv2.COLOR_BGR2HSV)
+    white = cv2.inRange(hsv, np.array([0, 0, 180]), np.array([180, 60, 255]))
+    return cv2.countNonZero(white) / white.size > 0.25
 
 
 def extract_selection(img, state: BattleStateV2, resolver) -> None:
@@ -82,13 +92,20 @@ def extract_selection(img, state: BattleStateV2, resolver) -> None:
     if m:
         state.selection_picked = int(m.group(1))
 
-    # --- 選出済みパネルのハイライト検出 ---
+    # --- 選出済みパネルの検出 (左端の白リボン)。
+    #     リボンの出現順を選出順 (先発=1) として追跡する ---
     picked_count = 0
     for i, z in enumerate(zones.SELECTION_MY):
-        picked = _is_picked_panel(crop(img, z["panel"]))
+        picked = _is_picked_panel(img, z["panel"])
         picked_count += int(picked)
         if i < len(state.player.party):
-            state.player.party[i].is_picked = picked
+            mon = state.player.party[i]
+            if picked and not mon.is_picked:
+                mon.pick_order = 1 + sum(
+                    1 for p in state.player.party if p.is_picked)
+            elif not picked:
+                mon.pick_order = None
+            mon.is_picked = picked
     # OCRが読めなかった場合はハイライト数で補完
     if m is None and picked_count > 0:
         state.selection_picked = picked_count

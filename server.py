@@ -326,6 +326,18 @@ async def set_state(sid, data):
             elif field_name == "is_mega":
                 before = mon.is_mega
                 mon.is_mega = bool(value)
+            elif field_name == "types":
+                before = list(mon.types or [])
+                valid = {"ノーマル", "ほのお", "みず", "でんき", "くさ", "こおり",
+                         "かくとう", "どく", "じめん", "ひこう", "エスパー", "むし",
+                         "いわ", "ゴースト", "ドラゴン", "あく", "はがね", "フェアリー"}
+                types = [t.strip() for t in str(value).replace("・", "/").split("/")
+                         if t.strip() in valid][:2]
+                if types:
+                    mon.types = types
+                    # タイプ修正で種族の再推測が可能になる (species未確定なら再計算)
+                    if not mon.species_ja:
+                        mon.species_id = None
         elif target == "field":
             f = pipeline.state.field
             label = f"field:{field_name}"
