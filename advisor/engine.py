@@ -141,13 +141,13 @@ def build_field_view(state: dict, attacker_side: str) -> FieldView:
 
 
 def effective_speed(mon: MonView, side: dict, field: dict) -> float:
-    spe = mon.stat("spe")
-    if mon.item == "choicescarf":
-        spe *= 1.5
+    """実効素早さ。すいすい/ようりょくそ等の特性は damage.effective_speed に集約"""
+    from advisor.damage import effective_speed as _es
+    fv = FieldView(weather=(field or {}).get("weather"),
+                   terrain=(field or {}).get("terrain"))
+    spe = _es(mon, fv)
     if side.get("tailwind"):
         spe *= 2
-    if mon.status == "paralysis":
-        spe *= 0.5
     return spe
 
 

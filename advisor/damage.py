@@ -61,6 +61,43 @@ def _is_grounded(mon: MonView) -> bool:
     return True
 
 
+def effective_speed(mon: MonView, fieldv: Optional["FieldView"] = None) -> int:
+    """特性・持ち物・状態異常・天候/フィールドを考慮した実効素早さ。
+
+    すいすい/ようりょくそ等の天候特性を必ず考慮する (先手判定の要)。
+    """
+    fv = fieldv or FieldView()
+    spe = mon.stat("spe")
+    ab = mon.ability or ""
+    if (ab == "swiftswim" and fv.weather == "rain") or \
+       (ab == "chlorophyll" and fv.weather == "sun") or \
+       (ab == "sandrush" and fv.weather == "sandstorm") or \
+       (ab == "slushrush" and fv.weather == "snow") or \
+       (ab == "surgesurfer" and fv.terrain == "electric"):
+        spe *= 2
+    if ab == "quickfeet" and mon.status:
+        spe = int(spe * 1.5)
+    if mon.item == "choicescarf":
+        spe = int(spe * 1.5)
+    if mon.status == "paralysis" and ab != "quickfeet":
+        spe = int(spe * 0.5)
+    return int(spe)
+
+
+# タイプ強化特性: ability -> (タイプ, 倍率)
+TYPE_BOOST_ABILITIES = {
+    "transistor": ("Electric", 1.3),
+    "dragonsmaw": ("Dragon", 1.5),
+    "rockypayload": ("Rock", 1.5),
+    "steelworker": ("Steel", 1.5),
+    "steelyspirit": ("Steel", 1.5),
+    "waterbubble": ("Water", 2.0),
+}
+
+# ピンチ特性 (HP1/3以下で該当タイプ1.5倍)
+PINCH_ABILITIES = {"blaze": "Fire", "torrent": "Water",
+                   "overgrow": "Grass", "swarm": "Bug"}
+
 # 攻撃を無効化する特性
 IMMUNITY_ABILITIES = {
     "levitate": ("Ground",),
@@ -126,19 +163,50 @@ def calc_damage(attacker: MonView, defender: MonView, move_id: str,
     dfn = defender.stat(def_key)
 
     # --- 攻撃側の補正 ---
-    if attacker.ability == "hugepower" and atk_key == "atk":
+    a_ab = attacker.ability or ""
+    if a_ab in ("hugepower", "purepower") and atk_key == "atk":
         atk *= 2
-    if attacker.ability == "guts" and attacker.status and atk_key == "atk":
+    if a_ab == "guts" and attacker.status and atk_key == "atk":
         atk = int(atk * 1.5)
         notes.append("こんじょう補正")
+    if a_ab in ("gorillatactics", "hustle") and atk_key == "atk":
+        atk = int(atk * 1.5)
+    if a_ab == "solarpower" and fv.weather == "sun" and atk_key == "spa":
+        atk = int(atk * 1.5)
+        notes.append("サンパワー補正")
 
+    # --- 防御側の実数補正 ---
+    d_ab = defender.ability or ""
     # 砂嵐時の岩タイプ特防1.5倍
     if fv.weather == "sandstorm" and "Rock" in defender.types and def_key == "spd":
         dfn = int(dfn * 1.5)
+    if d_ab == "furcoat" and def_key == "def":
+        dfn *= 2
+    if d_ab == "marvelscale" and defender.status and def_key == "def":
+        dfn = int(dfn * 1.5)
+    if d_ab == "grasspelt" and fv.terrain == "grassy" and def_key == "def":
+        dfn = int(dfn * 1.5)
 
     # --- 威力補正 ---
-    if attacker.ability == "technician" and power <= 60:
+    if a_ab == "technician" and power <= 60:
         power *= 1.5
+    tb = TYPE_BOOST_ABILITIES.get(a_ab)
+    if tb and mtype == tb[0]:
+        power *= tb[1]
+        notes.append(f"特性{a_ab}で強化")
+    if PINCH_ABILITIES.get(a_ab) == mtype and attacker.hp_frac <= 1 / 3:
+        power *= 1.5
+        notes.append("ピンチ特性発動圏")
+    if a_ab == "sandforce" and fv.weather == "sandstorm" and \
+            mtype in ("Rock", "Ground", "Steel"):
+        power *= 1.3
+    if a_ab == "flareboost" and attacker.status == "burn" and category == "Special":
+        power *= 1.5
+    if a_ab == "toxicboost" and attacker.status in ("poison", "toxic") and \
+            category == "Physical":
+        power *= 1.5
+    if a_ab == "analytic":
+        pass   # 行動順依存のため探索側では未適用 (保守的に無視)
     if fv.terrain == "electric" and mtype == "Electric" and _is_grounded(attacker):
         power *= 1.3
     if fv.terrain == "grassy" and mtype == "Grass" and _is_grounded(attacker):
@@ -198,11 +266,28 @@ def calc_damage(attacker: MonView, defender: MonView, move_id: str,
     if defender.item == "assaultvest" and category == "Special":
         mult *= 1 / 1.5
 
-    # 厚い脂肪等
-    if defender.ability == "thickfat" and mtype in ("Fire", "Ice"):
+    # 防御側の軽減/攻撃側の相性補正特性
+    if d_ab == "thickfat" and mtype in ("Fire", "Ice"):
         mult *= 0.5
-    if defender.ability in ("multiscale", "shadowshield") and defender.hp_frac >= 0.999:
+    if d_ab in ("multiscale", "shadowshield") and defender.hp_frac >= 0.999:
         mult *= 0.5
+    if d_ab == "heatproof" and mtype == "Fire":
+        mult *= 0.5
+    if d_ab == "waterbubble" and mtype == "Fire":
+        mult *= 0.5
+    if d_ab == "purifyingsalt" and mtype == "Ghost":
+        mult *= 0.5
+    if d_ab == "fluffy" and mtype == "Fire":
+        mult *= 2.0
+    if d_ab == "icescales" and category == "Special":
+        mult *= 0.5
+    if d_ab in ("filter", "solidrock", "prismarmor") and type_mult > 1.0:
+        mult *= 0.75
+        notes.append(f"特性{d_ab}で抜群軽減")
+    if a_ab == "tintedlens" and type_mult < 1.0:
+        mult *= 2.0
+    if a_ab == "neuroforce" and type_mult > 1.0:
+        mult *= 1.25
 
     dmg_max = base * mult
     dmg_min = dmg_max * 0.85

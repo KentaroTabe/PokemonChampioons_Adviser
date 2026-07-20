@@ -31,8 +31,44 @@ def _ja2en() -> dict:
     return _TYPE_JA2EN
 
 
+# リージョン/フォルムのID接尾辞 -> 日本語表示 (base日本語名を{}に埋める)
+_FORM_SUFFIXES = [
+    ("hisui", "ヒスイ{}"),
+    ("galar", "ガラル{}"),
+    ("alola", "アローラ{}"),
+    ("paldeacombatbreed", "パルデア{}(コンバット)"),
+    ("paldeablazebreed", "パルデア{}(ブレイズ)"),
+    ("paldeaaquabreed", "パルデア{}(ウォーター)"),
+    ("paldea", "パルデア{}"),
+    ("therian", "{}(れいじゅう)"),
+    ("incarnate", "{}(けしん)"),
+    ("wellspringmask", "{}(いどのめん)"),
+    ("hearthflamemask", "{}(かまどのめん)"),
+    ("cornerstonemask", "{}(いしずえのめん)"),
+    ("singlestrike", "{}(いちげき)"),
+    ("rapidstrike", "{}(れんげき)"),
+    ("male", "{}(オス)"),
+    ("female", "{}(メス)"),
+]
+
+# 個別フォルムの明示マッピング
+_FORM_EXPLICIT = {
+    "rotomwash": "ウォッシュロトム",
+    "rotomheat": "ヒートロトム",
+    "rotomfrost": "フロストロトム",
+    "rotomfan": "スピンロトム",
+    "rotommow": "カットロトム",
+    "urshifusinglestrikegmax": "ウーラオス(いちげき)",
+    "urshifurapidstrikegmax": "ウーラオス(れんげき)",
+}
+
+
 def species_ja_name(species_id: str) -> str:
-    """showdown ID -> 日本語種族名 (無ければIDのまま)"""
+    """showdown ID -> 日本語種族名。
+
+    ヒスイ/ガラル/ロトム等のフォルムIDは jp_names に無いことが多いため、
+    接尾辞を解析してベース種の日本語名から組み立てる (無ければIDのまま)。
+    """
     global _ID2JA
     if _ID2JA is None:
         from vision.normalize import JP_NAMES_PATH
@@ -40,6 +76,21 @@ def species_ja_name(species_id: str) -> str:
         _ID2JA = {}
         for ja, v in raw.get("species", {}).items():
             _ID2JA.setdefault(v["id"], ja)
+    if species_id in _ID2JA:
+        return _ID2JA[species_id]
+    if species_id in _FORM_EXPLICIT:
+        return _FORM_EXPLICIT[species_id]
+    for suf, fmt in _FORM_SUFFIXES:
+        if species_id.endswith(suf):
+            base = species_id[: -len(suf)]
+            if base in _ID2JA:
+                return fmt.format(_ID2JA[base])
+    # メガフォルム: swampertmega -> メガラグラージ
+    base = _base_species_id(species_id)
+    if base != species_id and base in _ID2JA:
+        suffix = species_id[len(base):]
+        xy = {"megax": "X", "megay": "Y"}.get(suffix, "")
+        return f"メガ{_ID2JA[base]}{xy}"
     return _ID2JA.get(species_id, species_id)
 
 

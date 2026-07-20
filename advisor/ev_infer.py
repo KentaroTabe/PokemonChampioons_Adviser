@@ -204,17 +204,14 @@ class SpreadEstimator:
             self.spe_lower = max(self.spe_lower or 0, my_effective_speed)
         else:
             self.spe_upper = min(self.spe_upper or 9999, my_effective_speed)
+        from advisor.damage import FieldView, effective_speed
+        fv = FieldView(weather="rain" if rain else None)
         for h in self.hyps:
             v = self._view(h, opp_state)
             if v is None:
                 continue
-            spe = v.stat("spe")
-            if h["item"] == "choicescarf":
-                spe = int(spe * 1.5)
-            if opp_state.get("status") == "paralysis":
-                spe = int(spe * 0.5)
-            if rain and (opp_state.get("ability_id") == "swiftswim"):
-                spe = int(spe * 2)
+            v.status = opp_state.get("status")
+            spe = effective_speed(v, fv)
             consistent = (spe > my_effective_speed) if opp_first \
                 else (spe < my_effective_speed)
             # 先後は追い風/こだわり等の未観測要因もあるためソフトに更新
@@ -416,12 +413,11 @@ class SpreadTracker:
         my_view, me = self._my_view(state)
         if not opp or not opp.get("species_id") or my_view is None:
             return
-        my_spe = my_view.stat("spe")
-        if me.get("item_id") == "choicescarf":
-            my_spe = int(my_spe * 1.5)
-        if me.get("status") == "paralysis":
-            my_spe = int(my_spe * 0.5)
-        rain = state.get("field", {}).get("weather") == "rain"
+        from advisor.damage import FieldView, effective_speed
+        f = state.get("field", {})
+        my_spe = effective_speed(my_view, FieldView(
+            weather=f.get("weather"), terrain=f.get("terrain")))
+        rain = f.get("weather") == "rain"
         opp_first = om[0] < pm[0]
         self.estimator(opp["species_id"]).observe_speed(
             opp_first, my_spe, opp, rain=rain)

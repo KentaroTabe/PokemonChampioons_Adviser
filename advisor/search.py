@@ -59,13 +59,10 @@ def _priority(move_id: Optional[str]) -> int:
     return mv.get("priority", 0) if mv else 0
 
 
-def _speed(view: MonView) -> float:
-    spe = view.stat("spe")
-    if view.item == "choicescarf":
-        spe *= 1.5
-    if view.status == "paralysis":
-        spe *= 0.5
-    return spe
+def _speed(view: MonView, fieldv: Optional[FieldView] = None) -> float:
+    """実効素早さ (すいすい/ようりょくそ等の特性込み)"""
+    from advisor.damage import effective_speed
+    return effective_speed(view, fieldv)
 
 
 def static_eval(me: SimSide, opp: SimSide) -> float:
@@ -133,10 +130,10 @@ def simulate_turn(me: SimSide, opp: SimSide, my_act: Action, opp_act: Action,
     movers = []
     if my_act.kind == "move" and me.active_hp > 0:
         movers.append(("me", my_act.move_id,
-                       _priority(my_act.move_id), _speed(me.active)))
+                       _priority(my_act.move_id), _speed(me.active, my_field)))
     if opp_act.kind == "move" and opp.active_hp > 0:
         movers.append(("opp", opp_act.move_id,
-                       _priority(opp_act.move_id), _speed(opp.active)))
+                       _priority(opp_act.move_id), _speed(opp.active, my_field)))
     trick_room = bool(my_field and my_field.trick_room)
     movers.sort(key=lambda m: (-m[2], m[3] if trick_room else -m[3]))
 
