@@ -47,6 +47,20 @@ nohup bash champions_agent/scripts/train_forever.sh \
   > champions_agent/train/logs/train_forever_nohup.log 2>&1 & disown
 ```
 
+## 更新の反映 (コード修正・最新学習チェックポイント)
+
+```bash
+bash scripts/deploy.sh          # 手動反映 (対戦中なら自動で中止する)
+bash scripts/deploy.sh --force  # 強制反映
+```
+
+- 再起動で反映されるもの: コード修正、最新の学習チェックポイント
+  (起動時読み込み)。`config/my_team.json` はホットリロードなので不要
+- **毎朝5:00に自動反映** (launchd `com.championsadviser.daily-deploy`、
+  ログ: logs/daily_deploy.log)。解除:
+  `launchctl unload ~/Library/LaunchAgents/com.championsadviser.daily-deploy.plist`
+- 反映後はブラウザ (http://localhost:3000) を再接続する
+
 ## 生存確認
 
 ```bash
