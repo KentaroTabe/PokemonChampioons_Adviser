@@ -225,7 +225,7 @@ def search(me: SimSide, opp: SimSide, my_moves: list, opp_move_pool: list,
         return {"actions": [], "matrix": None}
 
     results = []
-    matrix = {}
+    matrix = []   # JSON化のためタプルキー辞書ではなく行のリストで持つ
     for ma in my_acts:
         expected, worst, worst_reply = 0.0, 9.9, None
         for oa in opp_acts:
@@ -240,7 +240,7 @@ def search(me: SimSide, opp: SimSide, my_moves: list, opp_move_pool: list,
                     v += w * (0.5 * static_eval(m2, o2) + 0.5 * leaf)
                 else:
                     v += w * static_eval(m2, o2)
-            matrix[(ma.label, oa.label)] = round(v, 3)
+            matrix.append({"my": ma.label, "opp": oa.label, "v": round(v, 3)})
             expected += oa.prob * v
             if v < worst:
                 worst, worst_reply = v, oa.label

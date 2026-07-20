@@ -39,8 +39,24 @@
         </div>
         <div id="right">
             <div class="panel" id="advice"><h3>アドバイス</h3><pre id="advice-text">(コマンド選択画面になると表示されます)</pre></div>
-            <div class="panel"><h3>自分のパーティ</h3><div id="my-party"></div></div>
+            <div class="panel"><h3>自分のパーティ
+                <button onclick="openTeamEditor()" style="float:right;font-size:11px;background:#356;color:#cde;border:1px solid #467;border-radius:4px;cursor:pointer">パーティ編集</button>
+            </h3><div id="my-party"></div></div>
             <div class="panel"><h3>相手のパーティ</h3><div id="opp-party"></div></div>
+            <div class="panel" id="team-advice-panel" style="display:none">
+                <h3>📊 パーティ診断 (試合終了時に自動更新)</h3>
+                <pre id="team-advice-text" style="white-space:pre-wrap;font-size:12px"></pre>
+            </div>
+            <div class="panel" id="team-editor" style="display:none">
+                <h3>パーティ編集 (保存で即反映)</h3>
+                <div id="team-editor-rows"></div>
+                <button onclick="saveTeam()" style="margin-top:8px;background:#3567c9;color:#fff;border:none;border-radius:6px;padding:8px 16px;cursor:pointer">保存</button>
+                <button onclick="document.getElementById('team-editor').style.display='none'" style="margin-left:8px;background:#444;color:#ccc;border:none;border-radius:6px;padding:8px 12px;cursor:pointer">閉じる</button>
+                <span id="team-save-status" style="margin-left:10px;font-size:12px"></span>
+                <datalist id="tl-species"></datalist><datalist id="tl-natures"></datalist>
+                <datalist id="tl-items"></datalist><datalist id="tl-abilities"></datalist>
+                <datalist id="tl-moves"></datalist>
+            </div>
         </div>
     </div>
 
@@ -75,6 +91,67 @@
             const [id, ja] = val.split('|');
             socket.emit('set_species', {index: i, species_id: id, species_ja: ja});
         }
+
+        // --- パーティ編集 (config/my_team.json をフロントエンドから登録) ---
+        const PT_STATS = [["h","HP"],["a","攻"],["b","防"],["c","特攻"],["d","特防"],["s","素早"]];
+        function openTeamEditor() {
+            socket.emit('get_my_team');
+            document.getElementById('team-editor').style.display = 'block';
+        }
+        socket.on('my_team_data', (d) => {
+            for (const [cat, id] of [["species","tl-species"],["natures","tl-natures"],
+                                     ["items","tl-items"],["abilities","tl-abilities"],["moves","tl-moves"]])
+                document.getElementById(id).innerHTML =
+                    (d.names[cat] || []).map(x => `<option value="${x}">`).join('');
+            const entries = Object.entries(d.team || {});
+            const rows = [];
+            for (let i = 0; i < 6; i++) {
+                const [ja, e] = entries[i] || ["", {}];
+                const pts = e["能力ポイント"] || {};
+                const moves = (e["技"] || []).join("、");
+                rows.push(`<div style="border:1px solid #345;border-radius:6px;padding:6px;margin:6px 0;font-size:12px">
+                    <input list="tl-species" class="te-sp" value="${ja}" placeholder="ポケモン${i+1}" style="width:110px">
+                    <input list="tl-natures" class="te-nat" value="${e["性格"]||""}" placeholder="性格" style="width:90px">
+                    <input list="tl-items" class="te-item" value="${e["持ち物"]||""}" placeholder="持ち物" style="width:120px">
+                    <input list="tl-abilities" class="te-ab" value="${e["特性"]||""}" placeholder="特性" style="width:110px">
+                    <div style="margin-top:4px">` +
+                    PT_STATS.map(([k, la]) => `${la}<input class="te-pt-${k}" type="number" min="0" max="32"
+                        value="${pts[k] ?? pts[{h:'hp',a:'atk',b:'def',c:'spa',d:'spd',s:'spe'}[k]] ?? ''}" style="width:44px;margin:0 6px 0 2px">`).join('') +
+                    `</div><input list="tl-moves" class="te-moves" value="${moves}" placeholder="技 (、区切りで最大4つ)" style="width:96%;margin-top:4px"></div>`);
+            }
+            document.getElementById('team-editor-rows').innerHTML = rows.join('');
+        });
+        function saveTeam() {
+            const rows = document.querySelectorAll('#team-editor-rows > div');
+            const team = {};
+            rows.forEach(row => {
+                const ja = row.querySelector('.te-sp').value.trim();
+                if (!ja) return;
+                const entry = {};
+                const pts = {};
+                for (const [k] of PT_STATS) {
+                    const v = row.querySelector(`.te-pt-${k}`).value;
+                    if (v !== '' && +v > 0) pts[k] = +v;
+                }
+                if (Object.keys(pts).length) entry["能力ポイント"] = pts;
+                const nat = row.querySelector('.te-nat').value.trim(); if (nat) entry["性格"] = nat;
+                const item = row.querySelector('.te-item').value.trim(); if (item) entry["持ち物"] = item;
+                const ab = row.querySelector('.te-ab').value.trim(); if (ab) entry["特性"] = ab;
+                const mv = row.querySelector('.te-moves').value.split(/[、,]/).map(s=>s.trim()).filter(Boolean).slice(0,4);
+                if (mv.length) entry["技"] = mv;
+                team[ja] = entry;
+            });
+            socket.emit('save_my_team', {team});
+        }
+        socket.on('my_team_saved', (r) => {
+            const el = document.getElementById('team-save-status');
+            el.textContent = r.ok ? `✅ ${r.count}体保存しました (即反映)` : `⚠ 保存失敗: ${r.reason}`;
+            el.style.color = r.ok ? '#6c6' : '#c66';
+        });
+        socket.on('team_advice', (a) => {
+            document.getElementById('team-advice-panel').style.display = 'block';
+            document.getElementById('team-advice-text').textContent = a.text;
+        });
 
         // --- 手動修正 (誤認識のユーザー訂正。修正はログに記録され分析に使う) ---
         function fixMon(side, i) {

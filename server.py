@@ -147,6 +147,24 @@ async def handle_frame(sid, data):
             _last_state_json = state_json
             await sio.emit('state_update', state, room=sid)
 
+        # 試合終了: パーティ診断・改善案を1回だけ配信する
+        global _team_advice_done
+        if state.get("outcome") in ("win", "loss") and not _team_advice_done:
+            _team_advice_done = True
+            try:
+                from advisor.team_advice import team_advice, format_team_advice
+                data = await loop.run_in_executor(
+                    None, team_advice, pipeline.resolver)
+                text = format_team_advice(data)
+                await sio.emit('team_advice', {"text": text, "data": data},
+                               room=sid)
+                print("--- パーティ診断 ---")
+                print(text)
+            except Exception as e:
+                print(f"[server] パーティ診断エラー: {e}")
+        elif state.get("scene") == "selection":
+            _team_advice_done = False
+
         # 選出画面: 選出進捗の判定と選出提案 (パーティ情報が変わった時だけ)
         if state["scene"] in ("selection", "standby"):
             sel_key = json.dumps([
@@ -206,6 +224,47 @@ def _attach_candidates(state: dict) -> None:
 
 _MANUAL_FIELDS = {"hp_percent", "hp_current", "status", "item", "ability",
                   "boost", "is_mega", "clear_status"}
+_team_advice_done = False
+MY_TEAM_PATH = Path(__file__).resolve().parent / "config" / "my_team.json"
+
+
+@sio.on('get_my_team')
+async def get_my_team(sid, data=None):
+    """登録済みパーティと入力サジェスト用の名前一覧を返す"""
+    try:
+        team = {}
+        if MY_TEAM_PATH.exists():
+            team = json.loads(MY_TEAM_PATH.read_text(encoding="utf-8"))
+        names = {cat: sorted(j for j, *_ in pipeline.resolver._entries.get(cat, []))
+                 for cat in ("species", "moves", "items", "abilities")}
+        from advisor.my_team import _NATURES
+        names["natures"] = [n for n in _NATURES if not n.isascii()]
+        await sio.emit('my_team_data', {"team": team, "names": names}, room=sid)
+    except Exception as e:
+        print(f"[server] get_my_teamエラー: {e}")
+
+
+@sio.on('save_my_team')
+async def save_my_team(sid, data):
+    """フロントエンドのパーティ編集フォームから config/my_team.json を保存"""
+    try:
+        team = data.get("team") or {}
+        # 最低限の妥当性チェック (種族名が解決できるエントリのみ保存)
+        cleaned = {}
+        for ja, entry in team.items():
+            if not ja or not pipeline.resolver.resolve_species(ja, cutoff=0.85):
+                print(f"[server] my_team: 種族を解決できずスキップ: {ja}")
+                continue
+            cleaned[ja] = entry
+        MY_TEAM_PATH.parent.mkdir(exist_ok=True)
+        MY_TEAM_PATH.write_text(
+            json.dumps(cleaned, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[server] my_team.json 保存: {len(cleaned)}体 ({list(cleaned)})")
+        await sio.emit('my_team_saved', {"ok": True, "count": len(cleaned)},
+                       room=sid)
+    except Exception as e:
+        print(f"[server] save_my_teamエラー: {e}")
+        await sio.emit('my_team_saved', {"ok": False, "reason": str(e)}, room=sid)
 
 
 @sio.on('set_state')
