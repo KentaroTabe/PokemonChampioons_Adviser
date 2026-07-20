@@ -7,10 +7,10 @@ from advisor.dex import get_dex
 from advisor.endgame import duel, endgame_note, matchup_matrix
 
 
-def _view(sid, ev=None, nature=None):
+def _view(sid, ev=None, nature=None, ability=None):
     sp = get_dex().species(sid)
     return MonView(species_id=sid, name_ja=sid, types=sp["types"],
-                   base=sp["baseStats"],
+                   base=sp["baseStats"], ability=ability,
                    ev=ev or {"atk": 252, "spa": 252, "spe": 252},
                    nature=nature or {})
 
@@ -60,8 +60,30 @@ def test_lose_threat_detection():
     print(f"test_lose_threat_detection OK: {note}")
 
 
+def test_duel_score_speed_matters():
+    from advisor.endgame import duel_score
+    # 同程度の打ち合いなら素早い側が有利に傾く
+    fast = _view("gengar")             # S110族 AS252
+    slow = _view("metagross", ev={"atk": 252, "hp": 252})
+    s = duel_score(fast, 1.0, ["shadowball"], slow, 1.0, ["zenheadbutt"])
+    s_rev = duel_score(slow, 1.0, ["zenheadbutt"], fast, 1.0, ["shadowball"])
+    assert s is not None and s_rev is not None
+    assert abs(s + s_rev) < 0.01, (s, s_rev)   # 対称性
+    # すいすい: 雨下では素早さ判定が逆転し得る (effective_speed経由)
+    from advisor.damage import FieldView, effective_speed
+    swampert = _view("swampertmega", ability="swiftswim")
+    assert effective_speed(swampert, FieldView(weather="rain")) > \
+        effective_speed(fast)
+    print(f"test_duel_score_speed_matters OK (s={s:+.2f})")
+
+
+def _view2(sid, **kw):
+    return _view(sid, **kw)
+
+
 if __name__ == "__main__":
     test_duel_type_advantage()
+    test_duel_score_speed_matters()
     test_win_condition_detection()
     test_lose_threat_detection()
     print("ALL OK")

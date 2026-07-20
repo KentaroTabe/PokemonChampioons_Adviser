@@ -20,35 +20,52 @@ from advisor.search import _speed
 
 
 def _best_dmg(attacker: MonView, defender: MonView, moves: list) -> float:
-    """最大打点 (平均乱数, 防御側最大HP%) を返す"""
+    """最大打点 (平均乱数×命中率, 防御側最大HP%) を返す"""
+    from advisor.dex import get_dex as _gd
     best = 0.0
     for mid in moves:
         try:
             d = calc_damage(attacker, defender, mid, None)
         except Exception:
             continue
-        best = max(best, d["avg"])
+        mv = _gd().move(mid)
+        acc = ((mv.get("accuracy") or 100) / 100.0) if mv else 1.0
+        best = max(best, d["avg"] * acc)
     return best
 
 
-def duel(a: MonView, a_hp: float, a_moves: list,
-         b: MonView, b_hp: float, b_moves: list) -> Optional[bool]:
-    """a対bの1v1。aが勝つならTrue、負けるならFalse、判定不能はNone"""
+def duel_score(a: MonView, a_hp: float, a_moves: list,
+               b: MonView, b_hp: float, b_moves: list,
+               fieldv=None) -> Optional[float]:
+    """a対bの対面スコア [-1, 1]。正=aが有利。
+
+    タイプ相性だけでなく「実際に対面で戦った場合の勝敗」を表す:
+    最大打点 (命中込み) での撃破ターン数の差 + 先手権 (特性込みの
+    実効素早さ) で連続値にする。判定不能 (双方打点なし) は None。
+    """
     dmg_a = _best_dmg(a, b, a_moves)
     dmg_b = _best_dmg(b, a, b_moves)
     if dmg_a <= 0 and dmg_b <= 0:
         return None
     if dmg_a <= 0:
-        return False
+        return -1.0
     if dmg_b <= 0:
-        return True
+        return 1.0
     turns_a = math.ceil((b_hp * 100) / dmg_a)   # aがbを倒すのに必要なターン
     turns_b = math.ceil((a_hp * 100) / dmg_b)
-    if turns_a < turns_b:
-        return True
-    if turns_a > turns_b:
-        return False
-    return _speed(a) >= _speed(b)   # 同数なら先手側の勝ち
+    from advisor.damage import effective_speed
+    a_first = effective_speed(a, fieldv) >= effective_speed(b, fieldv)
+    margin = (turns_b - turns_a) + (0.5 if a_first else -0.5)
+    return math.tanh(margin * 0.8)
+
+
+def duel(a: MonView, a_hp: float, a_moves: list,
+         b: MonView, b_hp: float, b_moves: list) -> Optional[bool]:
+    """a対bの1v1。aが勝つならTrue、負けるならFalse、判定不能はNone"""
+    s = duel_score(a, a_hp, a_moves, b, b_hp, b_moves)
+    if s is None:
+        return None
+    return s > 0
 
 
 def matchup_matrix(my_mons: list, opp_mons: list) -> dict:

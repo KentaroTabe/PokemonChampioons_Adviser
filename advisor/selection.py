@@ -140,7 +140,18 @@ def _best_damage_pct(attacker: MonView, atk_moves: list, defender: MonView) -> f
 
 def _species_matchup_score(my_view: MonView, my_moves: list,
                            cand_view: MonView, cand_moves: list) -> float:
-    """自分1体 vs 推測種族1体のダメージ計算ベーススコア"""
+    """自分1体 vs 推測種族1体の対面スコア。
+
+    タイプ相性やダメージ差ではなく「対面で戦った場合の勝敗」
+    (撃破ターン数の差+実効素早さの先手権、特性込み) を使う。
+    duel_scoreは[-1,1]なので従来スコアと同レンジ。
+    """
+    from advisor.endgame import duel_score
+    s = duel_score(my_view, 1.0, [m for m, _ in my_moves],
+                   cand_view, 1.0, [m for m, _ in cand_moves])
+    if s is not None:
+        return s
+    # 双方打点なし (変化技のみ等): ダメージ差フォールバック
     offense = _best_damage_pct(my_view, my_moves, cand_view)
     threat = _best_damage_pct(cand_view, cand_moves, my_view)
     return offense / 100.0 - 0.8 * (threat / 100.0)
