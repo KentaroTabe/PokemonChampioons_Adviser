@@ -72,25 +72,10 @@ def build_team_text(species_list: list) -> str:
 
 async def evaluate_team(species_list: list, n_battles: int = 20) -> dict:
     """チームをベンチマークと対戦させ勝率を返す"""
-    from poke_env.player import SimpleHeuristicsPlayer
-    from poke_env.teambuilder import ConstantTeambuilder
-    from champions_agent.env.showdown_env import (
-        TrainingServerConfiguration, make_benchmark_player,
-        TRAINING_BATTLE_FORMAT)
-
     team_text = build_team_text(species_list)
-    me = SimpleHeuristicsPlayer(
-        battle_format=TRAINING_BATTLE_FORMAT,
-        server_configuration=TrainingServerConfiguration,
-        team=ConstantTeambuilder(team_text),
-        max_concurrent_battles=1,
-    )
-    opp = make_benchmark_player(max_concurrent_battles=1)
-    await asyncio.wait_for(me.battle_against(opp, n_battles=n_battles),
-                           timeout=120 * n_battles)
-    return {"team": species_list, "n_battles": n_battles,
-            "wins": me.n_won_battles,
-            "win_rate": me.n_won_battles / n_battles if n_battles else 0.0}
+    result = await evaluate_team_text(team_text, n_battles=n_battles)
+    result["team"] = species_list
+    return result
 
 
 def build_myteam_text() -> str:
@@ -161,20 +146,27 @@ def build_myteam_text() -> str:
 
 
 async def evaluate_team_text(team_text: str, n_battles: int = 20) -> dict:
+    import random
+    from poke_env import AccountConfiguration
     from poke_env.player import SimpleHeuristicsPlayer
     from poke_env.teambuilder import ConstantTeambuilder
     from champions_agent.env.showdown_env import (
         TrainingServerConfiguration, make_benchmark_player,
         TRAINING_BATTLE_FORMAT)
+    # 学習ループと同一サーバーを共有するため、ユーザー名衝突を避ける
+    tag = random.randint(1000, 9999)
     me = SimpleHeuristicsPlayer(
+        account_configuration=AccountConfiguration(f"TeamEval{tag}", None),
         battle_format=TRAINING_BATTLE_FORMAT,
         server_configuration=TrainingServerConfiguration,
         team=ConstantTeambuilder(team_text),
         max_concurrent_battles=1,
     )
-    opp = make_benchmark_player(max_concurrent_battles=1)
+    opp = make_benchmark_player(
+        account_configuration=AccountConfiguration(f"TeamEvalOpp{tag}", None),
+        max_concurrent_battles=1)
     await asyncio.wait_for(me.battle_against(opp, n_battles=n_battles),
-                           timeout=120 * n_battles)
+                           timeout=90 * n_battles)
     return {"n_battles": n_battles, "wins": me.n_won_battles,
             "win_rate": me.n_won_battles / n_battles if n_battles else 0.0}
 
