@@ -1,4 +1,33 @@
-images/
+# --- OS / エディタ ---
+.DS_Store
+__pycache__/
+*.pyc
 .venv
+
+# --- 外部リポジトリ (別git管理) ---
+pokemon-showdown/
+
+# --- 画像資産 ---
+# 大容量のスクリーンショット/テンプレート集は除外するが、
+# タイプ判定の教師テンプレート (実フレーム由来・軽量) はコミットする
+images/*
+!images/type_templates_real/
 debug_crops/
+debug_frames/
+debug_frames_720_old/
+
+# --- データベース / 生成データ ---
+*.sqlite3
+champions_agent/data/db/*.sqlite3
+# 使用率データの生アーカイブとログ (日次更新で生成)
+champions_agent/data/archive/
+
+# --- 学習成果物 ---
+champions_agent/train/checkpoints/
+champions_agent/train/logs/
+
+# --- その他 ---
 .clinerules
+
+# 対戦ログ (自動記録)
+logs/

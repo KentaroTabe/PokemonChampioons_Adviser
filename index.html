@@ -2,64 +2,287 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <title>Capture & Send</title>
-    <!-- Socket.IO クライアントライブラリ -->
+    <title>Pokemon Champions Adviser</title>
     <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <style>
+        body { font-family: "Hiragino Sans", sans-serif; background: #14142a; color: #eee; margin: 0; padding: 12px; }
+        h3 { margin: 6px 0; color: #9fd; }
+        #layout { display: flex; gap: 12px; flex-wrap: wrap; }
+        #left { flex: 1 1 640px; min-width: 480px; }
+        #right { flex: 1 1 420px; min-width: 380px; }
+        video { border: 2px solid #46f; max-width: 100%; border-radius: 6px; }
+        .panel { background: #1e1e3e; border-radius: 8px; padding: 10px 14px; margin-bottom: 10px; font-size: 13px; }
+        .panel pre { white-space: pre-wrap; margin: 4px 0; font-family: inherit; }
+        #advice { border-left: 4px solid #4f8; }
+        #advice .best { color: #7fa; font-weight: bold; font-size: 15px; }
+        .mon { padding: 2px 0; border-bottom: 1px solid #333; }
+        .active { color: #ff8; font-weight: bold; }
+        .fainted { color: #866; text-decoration: line-through; }
+        .tag { background: #345; border-radius: 4px; padding: 0 5px; margin-left: 4px; font-size: 11px; }
+        button { background: #46f; color: #fff; border: 0; padding: 8px 16px; border-radius: 6px; cursor: pointer; margin-right: 8px; }
+        #events { max-height: 180px; overflow-y: auto; font-size: 12px; color: #aac; }
+    </style>
 </head>
 <body>
-    <button id="start-btn">カメラ映像取得開始</button>
-    <br><br>
-    <video id="video" autoplay playsinline style="border: 2px solid blue; max-width: 100%;"></video>
-    
-    <!-- 画像を切り出すための隠しCanvas -->
-    <canvas id="canvas" style="display: none;"></canvas>
+    <div>
+        <button id="start-btn">カメラ映像取得開始</button>
+        <button id="reset-btn">状態リセット</button>
+        <span id="conn-label" class="tag" style="background:#a33">バックエンド: 未接続</span>
+        <span id="scene-label" class="tag">scene: -</span>
+        <span id="field-label" class="tag" style="cursor:pointer" title="クリックで場の状態を手動修正" onclick="fixField()"></span>
+    </div>
+    <div id="layout">
+        <div id="left">
+            <video id="video" autoplay playsinline></video>
+            <canvas id="canvas" style="display:none"></canvas>
+            <div class="panel"><h3>イベントログ</h3><div id="events"></div></div>
+        </div>
+        <div id="right">
+            <div class="panel" id="advice"><h3>アドバイス</h3><pre id="advice-text">(コマンド選択画面になると表示されます)</pre></div>
+            <div class="panel"><h3>自分のパーティ
+                <button onclick="openTeamEditor()" style="float:right;font-size:11px;background:#356;color:#cde;border:1px solid #467;border-radius:4px;cursor:pointer">パーティ編集</button>
+            </h3><div id="my-party"></div></div>
+            <div class="panel"><h3>相手のパーティ</h3><div id="opp-party"></div></div>
+            <div class="panel" id="team-advice-panel" style="display:none">
+                <h3>📊 パーティ診断 (試合終了時に自動更新)</h3>
+                <pre id="team-advice-text" style="white-space:pre-wrap;font-size:12px"></pre>
+            </div>
+            <div class="panel" id="team-editor" style="display:none">
+                <h3>パーティ編集 (保存で即反映)</h3>
+                <div id="team-editor-rows"></div>
+                <button onclick="saveTeam()" style="margin-top:8px;background:#3567c9;color:#fff;border:none;border-radius:6px;padding:8px 16px;cursor:pointer">保存</button>
+                <button onclick="document.getElementById('team-editor').style.display='none'" style="margin-left:8px;background:#444;color:#ccc;border:none;border-radius:6px;padding:8px 12px;cursor:pointer">閉じる</button>
+                <span id="team-save-status" style="margin-left:10px;font-size:12px"></span>
+                <datalist id="tl-species"></datalist><datalist id="tl-natures"></datalist>
+                <datalist id="tl-items"></datalist><datalist id="tl-abilities"></datalist>
+                <datalist id="tl-moves"></datalist>
+            </div>
+        </div>
+    </div>
 
+    <footer style="margin-top:10px;font-size:11px;color:#889">
+        Battle data provided by <a href="https://championsbattledata.com" style="color:#aab">Pokémon Champions Battle Data</a>
+        / <a href="https://champs.pokedb.tokyo" style="color:#aab">バトルデータベース チャンピオンズ</a>
+    </footer>
     <script>
-        // 1. バックエンド(FastAPI)のSocket.IOサーバーに接続
         const socket = io('http://localhost:8000');
-
+        const connLabel = document.getElementById('conn-label');
         socket.on('connect', () => {
-            console.log('バックエンドに接続しました！');
+            console.log('バックエンドに接続しました');
+            connLabel.textContent = 'バックエンド: 接続中';
+            connLabel.style.background = '#284';
+        });
+        socket.on('disconnect', () => {
+            connLabel.textContent = 'バックエンド: 切断';
+            connLabel.style.background = '#a33';
+        });
+        socket.on('connect_error', (e) => {
+            connLabel.textContent = 'バックエンド: 接続失敗 (uvicornをポート8000で起動してください)';
+            connLabel.style.background = '#a33';
         });
 
-        // バックエンドからの解析結果を受け取る
-        socket.on('result', (data) => {
-            console.log('バックエンドからの解析結果:', data);
+        const WEATHER_JA = {sun: '晴れ', rain: '雨', sandstorm: '砂あらし', snow: '雪'};
+        const TERRAIN_JA = {electric: 'エレキF', grassy: 'グラスF', psychic: 'サイコF', misty: 'ミストF'};
+        const STATUS_JA = {poison: 'どく', toxic: 'もうどく', burn: 'やけど', paralysis: 'まひ',
+                           sleep: 'ねむり', freeze: 'こおり', drowsy: 'ねむけ', fainted: 'ひんし'};
+
+        function setSpecies(i, val) {
+            if (!val) return;
+            const [id, ja] = val.split('|');
+            socket.emit('set_species', {index: i, species_id: id, species_ja: ja});
+        }
+
+        // --- パーティ編集 (config/my_team.json をフロントエンドから登録) ---
+        const PT_STATS = [["h","HP"],["a","攻"],["b","防"],["c","特攻"],["d","特防"],["s","素早"]];
+        function openTeamEditor() {
+            socket.emit('get_my_team');
+            document.getElementById('team-editor').style.display = 'block';
+        }
+        socket.on('my_team_data', (d) => {
+            for (const [cat, id] of [["species","tl-species"],["natures","tl-natures"],
+                                     ["items","tl-items"],["abilities","tl-abilities"],["moves","tl-moves"]])
+                document.getElementById(id).innerHTML =
+                    (d.names[cat] || []).map(x => `<option value="${x}">`).join('');
+            const entries = Object.entries(d.team || {});
+            const rows = [];
+            for (let i = 0; i < 6; i++) {
+                const [ja, e] = entries[i] || ["", {}];
+                const pts = e["能力ポイント"] || {};
+                const moves = (e["技"] || []).join("、");
+                rows.push(`<div style="border:1px solid #345;border-radius:6px;padding:6px;margin:6px 0;font-size:12px">
+                    <input list="tl-species" class="te-sp" value="${ja}" placeholder="ポケモン${i+1}" style="width:110px">
+                    <input list="tl-natures" class="te-nat" value="${e["性格"]||""}" placeholder="性格" style="width:90px">
+                    <input list="tl-items" class="te-item" value="${e["持ち物"]||""}" placeholder="持ち物" style="width:120px">
+                    <input list="tl-abilities" class="te-ab" value="${e["特性"]||""}" placeholder="特性" style="width:110px">
+                    <div style="margin-top:4px">` +
+                    PT_STATS.map(([k, la]) => `${la}<input class="te-pt-${k}" type="number" min="0" max="32"
+                        value="${pts[k] ?? pts[{h:'hp',a:'atk',b:'def',c:'spa',d:'spd',s:'spe'}[k]] ?? ''}" style="width:44px;margin:0 6px 0 2px">`).join('') +
+                    `</div><input list="tl-moves" class="te-moves" value="${moves}" placeholder="技 (、区切りで最大4つ)" style="width:96%;margin-top:4px"></div>`);
+            }
+            document.getElementById('team-editor-rows').innerHTML = rows.join('');
         });
+        function saveTeam() {
+            const rows = document.querySelectorAll('#team-editor-rows > div');
+            const team = {};
+            rows.forEach(row => {
+                const ja = row.querySelector('.te-sp').value.trim();
+                if (!ja) return;
+                const entry = {};
+                const pts = {};
+                for (const [k] of PT_STATS) {
+                    const v = row.querySelector(`.te-pt-${k}`).value;
+                    if (v !== '' && +v > 0) pts[k] = +v;
+                }
+                if (Object.keys(pts).length) entry["能力ポイント"] = pts;
+                const nat = row.querySelector('.te-nat').value.trim(); if (nat) entry["性格"] = nat;
+                const item = row.querySelector('.te-item').value.trim(); if (item) entry["持ち物"] = item;
+                const ab = row.querySelector('.te-ab').value.trim(); if (ab) entry["特性"] = ab;
+                const mv = row.querySelector('.te-moves').value.split(/[、,]/).map(s=>s.trim()).filter(Boolean).slice(0,4);
+                if (mv.length) entry["技"] = mv;
+                team[ja] = entry;
+            });
+            socket.emit('save_my_team', {team});
+        }
+        socket.on('my_team_saved', (r) => {
+            const el = document.getElementById('team-save-status');
+            el.textContent = r.ok ? `✅ ${r.count}体保存しました (即反映)` : `⚠ 保存失敗: ${r.reason}`;
+            el.style.color = r.ok ? '#6c6' : '#c66';
+        });
+        socket.on('team_advice', (a) => {
+            document.getElementById('team-advice-panel').style.display = 'block';
+            document.getElementById('team-advice-text').textContent = a.text;
+        });
+
+        // --- 手動修正 (誤認識のユーザー訂正。修正はログに記録され分析に使う) ---
+        function fixMon(side, i) {
+            const menu = prompt(
+                '修正する項目を番号で選択:\n0=タイプ (選出画面の誤認識向け)\n' +
+                '1=HP%  2=状態異常  3=持ち物  4=特性\n' +
+                '5=攻撃ランク  6=特攻ランク  7=素早さランク  8=メガ済み切替');
+            if (!menu) return;
+            const send = (field, value) =>
+                socket.emit('set_state', {target: 'mon', side, index: i, field, value});
+            switch (menu.trim()) {
+                case '0': { const v = prompt('タイプ (例: みず/ひこう。単タイプは1つだけ):');
+                            if (v) send('types', v.trim()); break; }
+                case '1': { const v = prompt('残りHP% (0-100):'); if (v !== null) send('hp_percent', +v); break; }
+                case '2': { const v = prompt('状態異常 (poison/toxic/burn/paralysis/sleep/freeze、空欄=なし):');
+                            if (v !== null) send('status', v.trim() || null); break; }
+                case '3': { const v = prompt('持ち物 (日本語名、空欄=不明):'); if (v !== null) send('item', v.trim() || null); break; }
+                case '4': { const v = prompt('特性 (日本語名、空欄=不明):'); if (v !== null) send('ability', v.trim() || null); break; }
+                case '5': { const v = prompt('攻撃ランク (-6〜+6):'); if (v !== null) send('boost:atk', +v); break; }
+                case '6': { const v = prompt('特攻ランク (-6〜+6):'); if (v !== null) send('boost:spa', +v); break; }
+                case '7': { const v = prompt('素早さランク (-6〜+6):'); if (v !== null) send('boost:spe', +v); break; }
+                case '8': { send('is_mega', !confirm('現在メガ済み表示ですか? OK=メガ解除 / キャンセル=メガ設定') ? true : false); break; }
+            }
+        }
+        function fixField() {
+            const menu = prompt(
+                '場の修正:\n1=天候 (sun/rain/sandstorm/snow/空欄)\n2=フィールド (electric/grassy/psychic/misty/空欄)\n' +
+                '3=トリックルーム切替\n4=自陣ステロ切替  5=敵陣ステロ切替');
+            if (!menu) return;
+            switch (menu.trim()) {
+                case '1': { const v = prompt('天候:'); if (v !== null)
+                    socket.emit('set_state', {target: 'field', field: 'weather', value: v.trim() || null}); break; }
+                case '2': { const v = prompt('フィールド:'); if (v !== null)
+                    socket.emit('set_state', {target: 'field', field: 'terrain', value: v.trim() || null}); break; }
+                case '3': socket.emit('set_state', {target: 'field', field: 'trick_room',
+                    value: !confirm('現在トリックルーム中ですか? OK=解除 / キャンセル=設定')}); break;
+                case '4': socket.emit('set_state', {target: 'hazards', side: 'player', field: 'stealth_rock',
+                    value: confirm('自陣にステルスロックあり? OK=あり / キャンセル=なし')}); break;
+                case '5': socket.emit('set_state', {target: 'hazards', side: 'opponent', field: 'stealth_rock',
+                    value: confirm('敵陣にステルスロックあり? OK=あり / キャンセル=なし')}); break;
+            }
+        }
+
+        function renderMon(p, i, activeIdx, side) {
+            const cls = ['mon'];
+            if (i === activeIdx) cls.push('active');
+            if (p.status === 'fainted') cls.push('fainted');
+            let hp = '';
+            if (p.hp_current != null) hp = ` ${p.hp_current}/${p.hp_max}`;
+            else if (p.hp_percent != null) hp = ` ${p.hp_percent}%`;
+            let tags = (p.types || []).map(t => `<span class="tag">${t}</span>`).join('');
+            if (p.status && STATUS_JA[p.status]) tags += `<span class="tag" style="background:#833">${STATUS_JA[p.status]}</span>`;
+            if (p.is_mega) tags += '<span class="tag" style="background:#a3a">メガ</span>';
+            const STAT_ABBR = {hp:'H', atk:'A', def:'B', spa:'C', spd:'D', spe:'S',
+                               acc:'命中', eva:'回避'};
+            const boosts = Object.entries(p.boosts || {}).filter(([k,v]) => v)
+                .map(([k,v]) => `${STAT_ABBR[k]||k}${v>0?'+':''}${v}`).join(' ');
+            if (boosts) tags += `<span class="tag" style="background:#573">${boosts}</span>`;
+            if (p.ability_ja) tags += `<span class="tag">${p.ability_ja}</span>`;
+            if (p.item_ja) tags += `<span class="tag">@${p.item_ja}</span>`;
+            let moves = '';
+            if (p.moves && p.moves.length)
+                moves = '<div style="font-size:11px;color:#8ac">' +
+                    p.moves.map(m => `${m.name_ja}${m.pp!=null?`(${m.pp})`:''}`).join(' / ') + '</div>';
+            if (p.revealed_moves && p.revealed_moves.length)
+                moves += `<div style="font-size:11px;color:#c98">判明技: ${p.revealed_moves.join(' / ')}</div>`;
+            // 相手の未確定ポケモン: タイプ推論の候補から手動で確定できる
+            let picker = '';
+            if (side === 'opp' && !p.species_ja && p.candidates && p.candidates.length) {
+                const opts = p.candidates.map(c =>
+                    `<option value="${c.id}|${c.ja}">${c.ja} (${c.pct}%)</option>`).join('');
+                picker = `<select onchange="setSpecies(${i}, this.value)"
+                    style="margin-left:6px;font-size:11px;background:#223;color:#cde;border:1px solid #446;border-radius:4px">
+                    <option value="">候補から確定…</option>${opts}</select>`;
+            }
+            const fixBtn = `<span style="cursor:pointer;opacity:.55;margin-left:6px" title="手動修正"
+                onclick="fixMon('${side === 'opp' ? 'opponent' : 'player'}', ${i})">✏️</span>`;
+            return `<div class="${cls.join(' ')}">${i===activeIdx?'▶ ':''}${p.species_ja || p.display_name || '???'}${picker}${hp}${tags}${fixBtn}${moves}</div>`;
+        }
+
+        socket.on('state_update', (s) => {
+            document.getElementById('scene-label').textContent = 'scene: ' + s.scene;
+            const f = s.field || {};
+            const parts = [];
+            if (f.weather) parts.push(WEATHER_JA[f.weather] || f.weather);
+            if (f.terrain) parts.push(TERRAIN_JA[f.terrain] || f.terrain);
+            if (f.trick_room) parts.push('トリックルーム');
+            const hz = s.player && s.player.hazards;
+            if (hz && hz.stealth_rock) parts.push('自陣ステロ');
+            if (s.opponent && s.opponent.hazards && s.opponent.hazards.stealth_rock) parts.push('敵陣ステロ');
+            document.getElementById('field-label').textContent = parts.join(' / ') || '場: 通常';
+
+            document.getElementById('my-party').innerHTML =
+                (s.player.party || []).map((p, i) => renderMon(p, i, s.player.active_index, 'my')).join('');
+            document.getElementById('opp-party').innerHTML =
+                (s.opponent.party || []).map((p, i) => renderMon(p, i, s.opponent.active_index, 'opp')).join('');
+
+            document.getElementById('events').innerHTML = (s.events || []).slice().reverse()
+                .map(e => `<div>[${e.source}] ${e.text} ${e.event ? '→ <b>' + e.event + '</b>' : ''}</div>`).join('');
+        });
+
+        socket.on('advice_update', (a) => {
+            document.getElementById('advice-text').textContent = a.text || a.reason || '';
+        });
+
+        document.getElementById('reset-btn').addEventListener('click', () => socket.emit('reset_state'));
 
         document.getElementById('start-btn').addEventListener('click', async () => {
             try {
+                // 名前・技名など小さいUI文字のOCRには1080pが必要 (720pでは文字が潰れる)
                 const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+                    video: { width: { ideal: 1920 }, height: { ideal: 1080 } },
                     audio: false
                 });
                 const videoElement = document.getElementById('video');
                 videoElement.srcObject = stream;
-
                 const canvas = document.getElementById('canvas');
                 const ctx = canvas.getContext('2d');
-
                 videoElement.onloadedmetadata = () => {
-                    // Canvasのサイズを映像の実解像度に合わせる
                     canvas.width = videoElement.videoWidth;
                     canvas.height = videoElement.videoHeight;
-                    
-                    // 2. 定期的にフレームを切り出して送信 (例: 1秒 = 1000ms間隔)
+                    // 5fps: メッセージ描画完了の安定化検知に十分なレート
                     setInterval(() => {
-                        if(videoElement.readyState === videoElement.HAVE_ENOUGH_DATA) {
-                            // Videoの現在のフレームをCanvasに描画
+                        if (videoElement.readyState === videoElement.HAVE_ENOUGH_DATA) {
                             ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
-                            
-                            // Canvasの画像をJPEG形式のBase64に変換 (画質0.8でデータ量削減)
-                            const base64Data = canvas.toDataURL('image/jpeg', 0.8);
-                            
-                            // Socket.IOでバックエンドへ送信
-                            socket.emit('send_frame', base64Data);
+                            socket.emit('send_frame', canvas.toDataURL('image/jpeg', 0.8));
                         }
-                    }, 1000);
+                    }, 200);
                 };
             } catch (err) {
-                console.error("カメラ取得エラー: ", err);
+                console.error('カメラ取得エラー: ', err);
             }
         });
     </script>
