@@ -74,10 +74,12 @@ def build_team_text(species_list: list) -> str:
     return "\n\n".join(s.to_showdown_text() for s in sets)
 
 
-async def evaluate_team(species_list: list, n_battles: int = 20) -> dict:
+async def evaluate_team(species_list: list, n_battles: int = 20,
+                        evaluator: str = "rl") -> dict:
     """チームをベンチマークと対戦させ勝率を返す"""
     team_text = build_team_text(species_list)
-    result = await evaluate_team_text(team_text, n_battles=n_battles)
+    result = await evaluate_team_text(team_text, n_battles=n_battles,
+                                      evaluator=evaluator)
     result["team"] = species_list
     return result
 
@@ -154,48 +156,98 @@ def build_myteam_text() -> str:
     return "\n\n".join(blocks)
 
 
-async def evaluate_team_text(team_text: str, n_battles: int = 20) -> dict:
+def _make_player(team_text, tag_suffix, evaluator="rl"):
+    """評価用プレイヤーを作る。
+
+    evaluator="rl": 学習済みRL方策 (雨/すいすい・積み・メガのタイミングを
+      SimpleHeuristicsより活用でき、プレイング前提構築も測れる)。
+      モデルが無ければ自動でヒューリスティクスにフォールバック。
+    evaluator="heuristic": SimpleHeuristicsPlayer (定跡AI・固定基準)。
+    両サイド同一の評価者にすることで「構築の強さだけ」を分離評価する。
+    """
     import random
     from poke_env import AccountConfiguration
     from poke_env.player import SimpleHeuristicsPlayer
     from poke_env.teambuilder import ConstantTeambuilder
     from champions_agent.env.showdown_env import (
-        TrainingServerConfiguration, make_benchmark_player,
-        TRAINING_BATTLE_FORMAT)
-    # 学習ループと同一サーバーを共有するため、ユーザー名衝突を避ける
-    tag = random.randint(1000, 9999)
-    me = SimpleHeuristicsPlayer(
-        account_configuration=AccountConfiguration(f"TeamEval{tag}", None),
-        battle_format=TRAINING_BATTLE_FORMAT,
-        server_configuration=TrainingServerConfiguration,
-        team=ConstantTeambuilder(team_text),
-        max_concurrent_battles=1,
-    )
-    opp = make_benchmark_player(
-        account_configuration=AccountConfiguration(f"TeamEvalOpp{tag}", None),
-        max_concurrent_battles=1)
+        TrainingServerConfiguration, TRAINING_BATTLE_FORMAT)
+    acc = AccountConfiguration(
+        f"TE{tag_suffix}{random.randint(1000, 9999)}", None)
+    kw = dict(account_configuration=acc,
+              battle_format=TRAINING_BATTLE_FORMAT,
+              server_configuration=TrainingServerConfiguration,
+              team=ConstantTeambuilder(team_text),
+              max_concurrent_battles=1)
+    if evaluator == "rl":
+        from champions_agent.train.evaluate import ModelPlayer
+        from champions_agent.config import DEFAULT_PLAY_STYLE
+        import os
+        style = os.environ.get("RL_ADVICE_STYLE", "balance")
+        p = ModelPlayer(play_style=style, **kw)
+        if getattr(p, "policy", None) is None or p.policy.model is None:
+            return SimpleHeuristicsPlayer(**kw), "heuristic"
+        return p, "rl"
+    return SimpleHeuristicsPlayer(**kw), "heuristic"
+
+
+async def evaluate_team_text(team_text: str, n_battles: int = 20,
+                             opp_text: str = None,
+                             evaluator: str = "rl") -> dict:
+    """team_text を評価する。opp_text 未指定ならベンチマーク構築群と対戦。
+
+    両サイドを同じ評価者 (RL方策 or ヒューリスティクス) で回し、
+    構築の強さだけを比較する。
+    """
+    me, ev_used = _make_player(team_text, "A", evaluator)
+    if opp_text is not None:
+        opp, _ = _make_player(opp_text, "B", ev_used)
+    else:
+        # ベンチマーク: ランクマ上位構築群 (相手も同じ評価者)
+        import random
+        from poke_env import AccountConfiguration
+        from champions_agent.env.ranked_teams import RankedTeambuilder
+        from champions_agent.env.showdown_env import (
+            TrainingServerConfiguration, TRAINING_BATTLE_FORMAT)
+        acc = AccountConfiguration(f"TEB{random.randint(1000, 9999)}", None)
+        kw = dict(account_configuration=acc,
+                  battle_format=TRAINING_BATTLE_FORMAT,
+                  server_configuration=TrainingServerConfiguration,
+                  team=RankedTeambuilder(), max_concurrent_battles=1)
+        if ev_used == "rl":
+            from champions_agent.train.evaluate import ModelPlayer
+            import os
+            opp = ModelPlayer(
+                play_style=os.environ.get("RL_ADVICE_STYLE", "balance"), **kw)
+        else:
+            from poke_env.player import SimpleHeuristicsPlayer
+            opp = SimpleHeuristicsPlayer(**kw)
     await asyncio.wait_for(me.battle_against(opp, n_battles=n_battles),
-                           timeout=90 * n_battles)
+                           timeout=120 * n_battles)
     return {"n_battles": n_battles, "wins": me.n_won_battles,
-            "win_rate": me.n_won_battles / n_battles if n_battles else 0.0}
+            "win_rate": me.n_won_battles / n_battles if n_battles else 0.0,
+            "evaluator": ev_used}
 
 
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     n = int(sys.argv[sys.argv.index("--battles") + 1]) \
         if "--battles" in sys.argv else 20
+    evaluator = "heuristic" if "--heuristic" in sys.argv else "rl"
     if "--myteam" in sys.argv:
         text = build_myteam_text()
-        print(f"現在のパーティ (登録型) を{n}戦で評価:")
-        result = asyncio.run(evaluate_team_text(text, n_battles=n))
+        print(f"現在のパーティ (登録型) を{n}戦で評価 (評価者={evaluator}):")
+        result = asyncio.run(evaluate_team_text(text, n_battles=n,
+                                                evaluator=evaluator))
     elif args:
         species = [s for s in re.split(r"[、,]", args[0]) if s.strip()]
-        print(f"評価対象: {species} ({n}戦)")
-        result = asyncio.run(evaluate_team(species, n_battles=n))
+        print(f"評価対象: {species} ({n}戦, 評価者={evaluator})")
+        result = asyncio.run(evaluate_team(species, n_battles=n,
+                                           evaluator=evaluator))
     else:
         print(__doc__)
         return
-    print(f"勝率: {result['win_rate']:.0%} ({result['wins']}/{result['n_battles']})")
+    print(f"勝率: {result['win_rate']:.0%} ({result['wins']}/{result['n_battles']}) "
+          f"[評価者={result['evaluator']}]")
 
 
 if __name__ == "__main__":
