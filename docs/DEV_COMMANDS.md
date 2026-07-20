@@ -12,6 +12,43 @@
 | `bash scripts/start_servers.sh` | 開発用フォアグラウンド起動 (Ctrl+Cで停止) |
 | `python -m tools.cleanup_logs --dry-run` | 不要ログ掃除の対象確認 (実行は引数なし) |
 
+## launchd 常駐 (再起動後も自動復帰)
+
+学習ループは launchd で常駐管理している。`RunAtLoad` でログイン時に自動起動し
+(OSアップデートの再起動後も復帰)、`KeepAlive` でクラッシュ時に自動再起動する。
+`train_nightly.sh` の `--resume` により、落ちても直前チェックポイントから継続する。
+※ LaunchAgent はユーザーがログインして初めて起動する (完全無人化には自動ログイン設定が必要)。
+
+| コマンド | 用途 |
+|---|---|
+| `launchctl list \| grep champion` | 常駐状態の確認 (PID / 最終終了コード / ラベル) |
+| `tail -f logs/train_forever.log` | 学習の進捗ログを追う |
+| `launchctl unload ~/Library/LaunchAgents/com.championsadviser.train.plist` | 学習の一時停止 |
+| `launchctl load -w ~/Library/LaunchAgents/com.championsadviser.train.plist` | 学習の再開 |
+| `cp scripts/com.championsadviser.train.plist ~/Library/LaunchAgents/` | plist更新の反映 (unload→cp→load の順) |
+
+plist本体は `scripts/com.championsadviser.train.plist` (repo管理)。編集後は
+`~/Library/LaunchAgents/` へコピーし、`unload` → `load -w` で再読込する。
+既存の `com.championsadviser.daily-deploy` (毎朝5時のdeploy.sh) も同じ仕組み。
+
+### アドバイザー/フロントエンドの常駐化 (未適用・参考)
+
+現状これらは手動運用 (対戦中の再起動を避けるため)。再起動後も自動復帰させたい場合は
+学習と同様に LaunchAgent 化できる。`scripts/com.championsadviser.train.plist` を雛形に、
+`ProgramArguments` を各起動コマンドへ差し替えて `~/Library/LaunchAgents/` へ置き `load -w` する。
+
+```bash
+# 例: アドバイザー(8000) を常駐化する場合の ProgramArguments 差し替え先
+#   /bin/bash -lc 'cd <repo> && source .venv/bin/activate && \
+#     PYTHONUNBUFFERED=1 uvicorn server:app_asgi --host 0.0.0.0 --port 8000'
+# 例: フロントエンド(3000)
+#   /bin/bash -lc 'cd <repo> && python3 -m http.server 3000'
+# 例: Showdown(8100)
+#   /bin/bash -lc 'cd <repo> && node pokemon-showdown/pokemon-showdown start 8100 --no-security'
+# ラベル(Label)とログ出力先(Standard*Path)は plist ごとに一意にすること。
+# WorkingDirectory と PATH(/opt/homebrew/bin を含める) を明示すると確実。
+```
+
 ## テスト (すべて `python -m tests.<名前>`)
 
 | モジュール | 対象 |
