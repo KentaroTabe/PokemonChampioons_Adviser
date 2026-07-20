@@ -10,6 +10,10 @@
     python -m tools.evaluate_team <6体> --battles 30
 
 前提: bash champions_agent/scripts/setup_showdown.sh 済みで8100が稼働中。
+注意: 評価者は SimpleHeuristicsPlayer (定跡AI) のため、雨/すいすい・積み・
+メガシンカのタイミング等「プレイング前提の構築」は実力より低く出る。
+スタンダードな素の構築の相対比較・generate_teams候補の選抜に向く。
+
 """
 from __future__ import annotations
 
@@ -112,6 +116,11 @@ def build_myteam_text() -> str:
         if entry.get("特性"):
             ra = resolver.resolve(entry["特性"], "abilities", cutoff=0.8)
             ability = ra[1] if ra else None
+        if not ability:
+            # 特性未登録は種族の代表特性で補完 (poke-envはability=None不可)
+            from vision.abilities import _load_forms
+            legal = _load_forms().get(_to_id(r[1]))
+            ability = next(iter(sorted(legal))) if legal else "noability"
         moves = []
         for mj in (entry.get("技") or []):
             rm = resolver.resolve(mj, "moves", cutoff=0.8)
@@ -123,8 +132,8 @@ def build_myteam_text() -> str:
                 from advisor.sets import get_predictor
                 moves = [m for m, _ in
                          get_predictor().predict(_to_id(r[1]))["moves"][:4]]
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"  ! {ja}: 技補完失敗 ({e})")
         pts = entry.get("能力ポイント") or {}
         evs = " / ".join(f"{v} {ev_keys[str(k).lower()]}"
                          for k, v in pts.items()
