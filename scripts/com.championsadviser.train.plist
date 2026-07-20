@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.championsadviser.train</string>
+
+    <!-- 常時学習ランナー (train_forever.sh) を launchd で常駐管理する。
+         train_nightly.sh が --resume するため、落ちても直前チェックポイントから継続。 -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/kenta/GitHub/PokemonChampioons_Adviser/champions_agent/scripts/train_forever.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/kenta/GitHub/PokemonChampioons_Adviser</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>N_ENVS</key>
+        <string>4</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <!-- ログイン時に自動起動 (OSアップデートの再起動後も復帰) -->
+    <key>RunAtLoad</key>
+    <true/>
+    <!-- クラッシュ・異常終了しても自動で再起動 -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- 再起動の暴走防止: 最低10秒は間隔をあける -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/kenta/GitHub/PokemonChampioons_Adviser/logs/train_forever.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/kenta/GitHub/PokemonChampioons_Adviser/logs/train_forever.log</string>
+</dict>
+</plist>
