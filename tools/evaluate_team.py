@@ -31,6 +31,20 @@ def _to_id(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(name).lower())
 
 
+def _uniq_name(prefix: str) -> str:
+    """Showdownで衝突しない一意なアカウント名 (PID+時刻下位+乱数、18文字以内)。
+
+    学習ループや同時実行の評価とサーバーを共有するため、乱数だけでは
+    衝突する (実運用でnametaken観測)。PIDと時刻を混ぜて確実に一意化する。
+    """
+    import os
+    import random
+    import time
+    base = f"{prefix}{os.getpid() % 100000}{int(time.time() * 10) % 10000}" \
+           f"{random.randint(10, 99)}"
+    return base[:18]
+
+
 def build_team_text(species_list: list) -> str:
     """種族名リスト (日本語/英語/showdown id) -> Showdownチームテキスト。
 
@@ -165,14 +179,12 @@ def _make_player(team_text, tag_suffix, evaluator="rl"):
     evaluator="heuristic": SimpleHeuristicsPlayer (定跡AI・固定基準)。
     両サイド同一の評価者にすることで「構築の強さだけ」を分離評価する。
     """
-    import random
     from poke_env import AccountConfiguration
     from poke_env.player import SimpleHeuristicsPlayer
     from poke_env.teambuilder import ConstantTeambuilder
     from champions_agent.env.showdown_env import (
         TrainingServerConfiguration, TRAINING_BATTLE_FORMAT)
-    acc = AccountConfiguration(
-        f"TE{tag_suffix}{random.randint(1000, 9999)}", None)
+    acc = AccountConfiguration(_uniq_name(f"TE{tag_suffix}"), None)
     kw = dict(account_configuration=acc,
               battle_format=TRAINING_BATTLE_FORMAT,
               server_configuration=TrainingServerConfiguration,
@@ -203,12 +215,11 @@ async def evaluate_team_text(team_text: str, n_battles: int = 20,
         opp, _ = _make_player(opp_text, "B", ev_used)
     else:
         # ベンチマーク: ランクマ上位構築群 (相手も同じ評価者)
-        import random
         from poke_env import AccountConfiguration
         from champions_agent.env.ranked_teams import RankedTeambuilder
         from champions_agent.env.showdown_env import (
             TrainingServerConfiguration, TRAINING_BATTLE_FORMAT)
-        acc = AccountConfiguration(f"TEB{random.randint(1000, 9999)}", None)
+        acc = AccountConfiguration(_uniq_name("TEB"), None)
         kw = dict(account_configuration=acc,
                   battle_format=TRAINING_BATTLE_FORMAT,
                   server_configuration=TrainingServerConfiguration,
