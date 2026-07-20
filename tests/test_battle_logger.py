@@ -43,6 +43,10 @@ def test_rotation_debounce():
             lg.on_frame(_state("selection"), [])
         assert lg._file == first, "30秒以内に回転した"
 
+        # 対戦済み証拠 (command/move_select 累計5フレーム以上) を満たす
+        for _ in range(5):
+            lg.on_frame(_state("command"), [])
+
         # 30秒経過後の選出画面3連続で次の対戦として回転する
         lg._opened_ts = time.time() - 31.0
         lg._selection_streak = 0
@@ -55,10 +59,13 @@ def test_rotation_debounce():
         second = lg._file
         assert second != first, "新しい対戦でファイルが切り替わらない"
 
-        # 長い選出画面: 対戦シーンをまだ含まないファイルは30秒超でも回転しない
+        # 長い選出画面: 対戦フレームが5未満のファイルは30秒超でも回転しない
+        # (選出中の演出でcommandが2フレーム誤分類されるケースを含む)
         lg._finalize(None)
         for _ in range(5):
             lg.on_frame(_state("selection"), [])
+        lg.on_frame(_state("command"), [])   # 誤分類2フレーム相当
+        lg.on_frame(_state("command"), [])
         third = lg._file
         lg._opened_ts = time.time() - 31.0
         lg._selection_streak = 0
