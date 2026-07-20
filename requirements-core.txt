@@ -1,0 +1,14 @@
+# 実運用 (画面認識+アドバイザー+サーバー) の必須依存。
+# 強化学習 (champions_agent) を使う場合は別途: poke-env, stable-baselines3,
+# sb3-contrib, gymnasium
+fastapi>=0.110
+uvicorn>=0.29
+python-socketio>=5.11
+opencv-python>=4.9
+numpy>=1.26
+pillow>=10
+# OCR: macOSではpyobjc (Apple Vision) を推奨。それ以外はEasyOCR
+easyocr>=1.7 ; sys_platform != "darwin"
+torch>=2.2 ; sys_platform != "darwin"
+pyobjc-framework-Vision>=10 ; sys_platform == "darwin"
+pyobjc-framework-Quartz>=10 ; sys_platform == "darwin"
