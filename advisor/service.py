@@ -123,6 +123,12 @@ class Advisor:
                 lines.append(f"     {sl}")
         if advice.get("endgame_note"):
             lines.append(f"  🏁 {advice['endgame_note']}")
+        rl = advice.get("rl_hint")
+        if rl and rl.get("top"):
+            picks = " / ".join(f"{t['label']} {t['prob']:.0%}"
+                               for t in rl["top"][:3])
+            lines.append(f"  🤖 RL方策({rl['style']}): {picks}"
+                         f" (局面評価 {rl['value']:+.2f})")
         if advice.get("speed_note"):
             lines.append(f"  {advice['speed_note']}")
         if advice.get("mega_note"):

@@ -10,6 +10,7 @@ PokéAgent Challenge 2025 で強化学習を上回った foul-play 系の簡易�
 from __future__ import annotations
 
 import json
+import os
 from typing import Optional
 
 from advisor.dex import get_dex, BOOST_MULT
@@ -498,6 +499,31 @@ def evaluate(state: dict, resolver=None) -> dict:
     except Exception:
         pass
 
+    # RL学習済み方策 (行動分布+局面価値)。表示に加えて、
+    # 行動スコアへ確率をブレンドし推奨順位にも反映する
+    rl_hint = None
+    try:
+        from advisor.rl_bridge import policy_hint
+        from advisor.damage import effective_speed as _es2
+        rl_hint = policy_hint(state, my_spe_actual=_es2(my_view, my_field))
+        if rl_hint and rl_hint.get("top"):
+            probs = {}
+            for t in rl_hint["top"]:
+                # 「技名+メガ」は技名側にも最大値で寄せる
+                base_label = t["label"].replace("+メガ", "")
+                probs[base_label] = max(probs.get(base_label, 0.0), t["prob"])
+                probs[t["label"]] = t["prob"]
+            RL_BLEND = float(os.environ.get("RL_BLEND_WEIGHT", "25"))
+            for a in actions:
+                key = a["name"] if a["kind"] == "move" else f"交代:{a['name']}"
+                p = probs.get(key)
+                if p:
+                    a["score"] = round(a["score"] + RL_BLEND * p, 1)
+                    a["reason"] = (a.get("reason") or "") + f" / RL{p:.0%}"
+            actions.sort(key=lambda a: -a["score"])
+    except Exception:
+        pass
+
     return {
         "ok": True,
         "actions": actions,
@@ -509,6 +535,7 @@ def evaluate(state: dict, resolver=None) -> dict:
         "opp_spread_note": opp_spread_note,
         "gtheory": gtheory,
         "endgame_note": endgame,
+        "rl_hint": rl_hint,
         "best": actions[0] if actions else None,
     }
 
@@ -626,8 +653,21 @@ def _run_search(state, my_state, my_view, my_p, opp_state, opp_view,
                       opp_state["party"][opp_state["active_index"]]),
                   bench=bench_of(opp_state, "opponent"),
                   stealth_rock=bool(opp_state.get("hazards", {}).get("stealth_rock")))
+    # RL価値関数を葉評価にブレンド (学習結果の反映)。使えない環境ではNone
+    leaf_fn = None
+    try:
+        from advisor.rl_bridge import value_of_sim, _load_model
+        if _load_model() is not None:
+            turn = state.get("turn") or 5
+
+            def leaf_fn(m2, o2):
+                return value_of_sim(m2, o2, my_moves, my_field, turn=turn)
+    except Exception:
+        leaf_fn = None
+
     result = search(me, opp, my_moves, pool,
-                    my_field=my_field, opp_field=opp_field)
+                    my_field=my_field, opp_field=opp_field,
+                    leaf_value_fn=leaf_fn)
     # 表示用の要約 (上位3行動)
     lines = []
     for a in result["actions"][:3]:

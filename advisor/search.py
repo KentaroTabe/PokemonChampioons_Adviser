@@ -209,7 +209,8 @@ def _position_value(me: SimSide, opp: SimSide, my_moves: list,
 def search(me: SimSide, opp: SimSide, my_moves: list, opp_move_pool: list,
            my_field: Optional[FieldView] = None,
            opp_field: Optional[FieldView] = None,
-           depth: int = 2) -> dict:
+           depth: int = 2,
+           leaf_value_fn=None) -> dict:
     """利得行列を構築し、行動ごとの期待値/保証値/択リスクを返す。
 
     my_moves: 自分の技ID列。opp_move_pool: [(move_id, weight)]。
@@ -233,8 +234,14 @@ def search(me: SimSide, opp: SimSide, my_moves: list, opp_move_pool: list,
                 if depth >= 2:
                     leaf = _position_value(m2, o2, my_moves, opp_move_pool,
                                            my_field, opp_field)
-                    # 現盤面の静的評価と次手読みの平均 (読み違いに頑健)
-                    v += w * (0.5 * static_eval(m2, o2) + 0.5 * leaf)
+                    # 現盤面の静的評価と次手読みの平均 (読み違いに頑健)。
+                    # RL価値関数があれば葉評価にブレンドする (学習結果の反映)
+                    base = 0.5 * static_eval(m2, o2) + 0.5 * leaf
+                    if leaf_value_fn is not None:
+                        rv = leaf_value_fn(m2, o2)
+                        if rv is not None:
+                            base = 0.7 * base + 0.3 * rv
+                    v += w * base
                 else:
                     v += w * static_eval(m2, o2)
             matrix.append({"my": ma.label, "opp": oa.label, "v": round(v, 3)})
