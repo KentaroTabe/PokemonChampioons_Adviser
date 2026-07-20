@@ -262,6 +262,17 @@ async def save_my_team(sid, data):
         print(f"[server] my_team.json 保存: {len(cleaned)}体 ({list(cleaned)})")
         await sio.emit('my_team_saved', {"ok": True, "count": len(cleaned)},
                        room=sid)
+        # 保存直後にパーティ診断を実行して表示する (登録の即時フィードバック)
+        try:
+            from advisor.team_advice import team_advice, format_team_advice
+            loop = asyncio.get_event_loop()
+            data = await loop.run_in_executor(None, team_advice, pipeline.resolver)
+            await sio.emit('team_advice',
+                           {"text": format_team_advice(data), "data": data},
+                           room=sid)
+            print("--- パーティ診断 (登録時) ---")
+        except Exception as e:
+            print(f"[server] 登録時診断エラー: {e}")
     except Exception as e:
         print(f"[server] save_my_teamエラー: {e}")
         await sio.emit('my_team_saved', {"ok": False, "reason": str(e)}, room=sid)
