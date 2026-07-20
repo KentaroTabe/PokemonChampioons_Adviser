@@ -94,30 +94,39 @@ class SpreadEstimator:
     def _query_spreads(species_id: str) -> list:
         try:
             db = sqlite3.connect(str(DB_PATH))
-            names = {species_id}
-            # DBはダッシュ入り名 (great-tusk) のことがある
-            rows = []
-            for name_expr in (
-                "pokemon_name = ?",
-                "REPLACE(REPLACE(pokemon_name,'-',''),' ','') = ?",
-            ):
-                rows = list(db.execute(
-                    f"SELECT nature, evs, SUM(usage_percent) w FROM spread_usage "
-                    f"WHERE {name_expr} GROUP BY nature, evs "
-                    f"ORDER BY w DESC LIMIT 8", (species_id,)))
-                if rows:
-                    break
-            items = []
-            for name_expr in (
-                "pokemon_name = ?",
-                "REPLACE(REPLACE(pokemon_name,'-',''),' ','') = ?",
-            ):
-                items = list(db.execute(
-                    f"SELECT item_name, SUM(usage_percent) w FROM item_usage "
-                    f"WHERE {name_expr} GROUP BY item_name "
-                    f"ORDER BY w DESC LIMIT 4", (species_id,)))
-                if items:
-                    break
+            # チャンピオンズ実データを優先し、無い場合のみ全ソース (Smogon
+            # フォールバック含む) を使う。SVデータの型を混ぜない
+            from advisor.team_advice import _champions_filter
+            filters = [_champions_filter(db), "1=1"]
+
+            def q(table, cols, flt, limit):
+                for name_expr in (
+                    "pokemon_name = ?",
+                    "REPLACE(REPLACE(pokemon_name,'-',''),' ','') = ?",
+                ):
+                    got = list(db.execute(
+                        f"SELECT {cols}, SUM(usage_percent) w FROM {table} "
+                        f"WHERE {name_expr} AND {flt} GROUP BY {cols} "
+                        f"ORDER BY w DESC LIMIT {limit}", (species_id,)))
+                    if got:
+                        return got
+                return []
+
+            rows = q("spread_usage", "nature, evs", filters[0], 8)
+            if not rows:
+                rows = q("spread_usage", "nature, evs", filters[1], 8)
+            elif all(r[0] is None for r in rows):
+                # チャンピオンズ実データ (pokedb) は性格を持たないため、
+                # 性格つきのフォールバック行を低重みで補完する
+                extra = q("spread_usage", "nature, evs", filters[1], 6)
+                seen = {(r[0], r[1]) for r in rows}
+                total = sum(r[2] for r in rows) or 1.0
+                for nat, evs, w in extra:
+                    if nat is not None and (nat, evs) not in seen:
+                        rows.append((nat, evs, w * 0.3 * total /
+                                     (sum(x[2] for x in extra) or 1.0)))
+            items = q("item_usage", "item_name", filters[0], 4) or \
+                q("item_usage", "item_name", filters[1], 4)
             db.close()
             return [rows, items]
         except Exception:
@@ -129,6 +138,19 @@ class SpreadEstimator:
             return []
         if not items:
             items = [(None, 1.0)]
+        # pokedb由来データは性格行 (evs=None) とEV行 (nature=None) が独立
+        # なので、両方があればクロス結合して仮説にする
+        complete = [(n, e, w) for n, e, w in spreads if n and e]
+        ev_only = [(e, w) for n, e, w in spreads if e and not n]
+        nat_only = [(n, w) for n, e, w in spreads if n and not e]
+        if ev_only and nat_only:
+            tot_n = sum(w for _, w in nat_only) or 1.0
+            for e, we in ev_only[:4]:
+                for n, wn in nat_only[:4]:
+                    complete.append((n, e, we * wn / tot_n))
+        elif ev_only:
+            complete += [(None, e, w) for e, w in ev_only]
+        spreads = complete or spreads
         total_s = sum(w for _, _, w in spreads) or 1.0
         total_i = sum(w for _, w in items) or 1.0
         hyps = []

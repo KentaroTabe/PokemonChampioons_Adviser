@@ -25,6 +25,7 @@ from advisor.endgame import duel, _best_dmg
 from advisor.ev_infer import SpreadEstimator, _nature_mult
 from advisor.infer import species_ja_name
 from advisor.my_team import _load as load_my_team, get_my_build
+from advisor.team_advice import meta_top, build_meta_view
 from advisor.sets import get_predictor
 from vision.normalize import NameResolver
 
@@ -34,42 +35,6 @@ DB_PATH = (Path(__file__).resolve().parent.parent
 
 def _to_id(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", name.lower())
-
-
-def meta_top(n: int = 20) -> list:
-    """使用率上位の (species_id, usage%) を返す"""
-    db = sqlite3.connect(str(DB_PATH))
-    rows = db.execute(
-        "SELECT pokemon_name, MAX(usage_percent) u FROM pokemon_usage "
-        "GROUP BY pokemon_name ORDER BY u DESC LIMIT ?", (n * 2,)).fetchall()
-    db.close()
-    dex = get_dex()
-    out = []
-    for name, u in rows:
-        sid = _to_id(name)
-        if dex.species(sid):
-            out.append((sid, u))
-        if len(out) >= n:
-            break
-    return out
-
-
-def build_meta_view(sid: str) -> tuple:
-    """メタポケモンの (MonView, moves) を最有力型で作る"""
-    est = SpreadEstimator(sid)
-    dex = get_dex()
-    sp = dex.species(sid)
-    if sp is None:
-        return None, []
-    b = est.best()
-    ev, nature, item = {"atk": 252, "spa": 252, "spe": 252}, {}, None
-    if b:
-        ev, nature, item = b["evs"], _nature_mult(b["nature"]), b["item"]
-    view = MonView(species_id=sid, name_ja=species_ja_name(sid),
-                   types=sp["types"], base=sp["baseStats"],
-                   ev=ev, nature=nature, item=item)
-    moves = [m for m, _ in get_predictor().predict(sid)["moves"][:4]]
-    return view, moves
 
 
 def build_my_views(resolver) -> list:

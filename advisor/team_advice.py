@@ -28,11 +28,27 @@ def _to_id(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", name.lower())
 
 
+def _champions_filter(db) -> str:
+    """チャンピオンズ実データのスナップショットに限定するWHERE句。
+
+    SmogonのSV (gen9ou) データはフォールバック用で、チャンピオンズに
+    存在しないポケモンを含むため、診断/推定では混ぜない。
+    チャンピオンズのスナップショットが無い場合のみ全データを使う。
+    """
+    ids = [str(r[0]) for r in db.execute(
+        "SELECT id FROM usage_snapshot WHERE format LIKE 'champions%'")]
+    if not ids:
+        return "1=1"
+    return f"snapshot_id IN ({','.join(ids)})"
+
+
 def meta_top(n: int = 20) -> list:
     db = sqlite3.connect(str(DB_PATH))
+    flt = _champions_filter(db)
     rows = db.execute(
-        "SELECT pokemon_name, MAX(usage_percent) u FROM pokemon_usage "
-        "GROUP BY pokemon_name ORDER BY u DESC LIMIT ?", (n * 2,)).fetchall()
+        f"SELECT pokemon_name, MAX(usage_percent) u FROM pokemon_usage "
+        f"WHERE {flt} GROUP BY pokemon_name ORDER BY u DESC LIMIT ?",
+        (n * 2,)).fetchall()
     db.close()
     dex = get_dex()
     out = []
@@ -127,13 +143,14 @@ def team_advice(resolver, top_n: int = 15, n_suggest: int = 5) -> Optional[dict]
     suggestions = []
     try:
         db = sqlite3.connect(str(DB_PATH))
+        flt = _champions_filter(db)
         my_ids = {mv.species_id for _j, mv, _m in mine}
         cooc = {}
         for _j, mv, _m in mine:
             for name, w in db.execute(
-                    "SELECT teammate_name, SUM(usage_percent) FROM teammate_usage "
-                    "WHERE REPLACE(REPLACE(pokemon_name,'-',''),' ','') = ? "
-                    "GROUP BY teammate_name", (mv.species_id,)):
+                    f"SELECT teammate_name, SUM(usage_percent) FROM teammate_usage "
+                    f"WHERE REPLACE(REPLACE(pokemon_name,'-',''),' ','') = ? "
+                    f"AND {flt} GROUP BY teammate_name", (mv.species_id,)):
                 cooc[_to_id(name)] = cooc.get(_to_id(name), 0) + (w or 0)
         db.close()
         cands = []
