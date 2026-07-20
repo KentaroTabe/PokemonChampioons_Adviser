@@ -193,14 +193,17 @@ def generate_report(core_ja: str, n_eval: int = 3, n_battles: int = 12,
             _p(f"  評価失敗: {e}")
     if ranked:
         best_rate, best_names = max(ranked)
-        team_text = ""
+        team_text = team_text_ja = ""
         try:
+            from tools.evaluate_team import team_text_to_ja
             team_text = build_team_text(best_names)
+            team_text_ja = team_text_to_ja(team_text)
         except Exception:
             pass
         weakness = analyze_weakness(best_names)
         out["best"] = {"names": best_names, "win_rate": round(best_rate, 3),
-                       "team_text": team_text, "weakness": weakness}
+                       "team_text": team_text, "team_text_ja": team_text_ja,
+                       "weakness": weakness}
         _p(f"完了。最有力: {'・'.join(best_names)} (勝率{best_rate:.0%})")
     return out
 
@@ -297,11 +300,11 @@ def generate(core_ja: str, beam: int = 6, n_out: int = 5,
                     f"{m['name']}({m['margin']:+.2f})" for m in w["weak_mons"]))
             if w["weak_teammates"]:
                 print(f"⚠ 苦手な構築の傾向: {'・'.join(w['weak_teammates'])} 軸")
-            # 型 (特性/持ち物/性格/能力ポイント/技) つきで出力
+            # 型 (特性/持ち物/性格/能力ポイント/技) つきで出力 (日本語)
             try:
-                from tools.evaluate_team import build_team_text
+                from tools.evaluate_team import build_team_text, team_text_to_ja
                 print("\n# 最有力構築の型 (meta_sets最有力セット):\n")
-                print(build_team_text(best[1]))
+                print(team_text_to_ja(build_team_text(best[1])))
             except Exception as e:
                 print(f"(型出力失敗: {e})")
     else:

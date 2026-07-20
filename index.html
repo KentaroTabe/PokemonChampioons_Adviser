@@ -194,8 +194,9 @@
                     if (w.weak_teammates && w.weak_teammates.length)
                         html += `<div style="font-size:12px;color:#e99">⚠ 苦手な構築の傾向: ${w.weak_teammates.join('・')} 軸</div>`;
                 }
-                if (r.best.team_text)
-                    html += `<pre style="font-size:11px;background:#121826;padding:8px;border-radius:6px;overflow-x:auto">${r.best.team_text}</pre>`;
+                const tt = r.best.team_text_ja || r.best.team_text;
+                if (tt)
+                    html += `<pre style="font-size:11px;background:#121826;padding:8px;border-radius:6px;overflow-x:auto">${tt}</pre>`;
             }
             el.innerHTML = html;
         });

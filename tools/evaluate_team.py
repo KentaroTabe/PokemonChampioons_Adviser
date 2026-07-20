@@ -98,6 +98,80 @@ async def evaluate_team(species_list: list, n_battles: int = 20,
     return result
 
 
+_NATURE_EN2JA = {
+    "adamant": "いじっぱり", "jolly": "ようき", "modest": "ひかえめ",
+    "timid": "おくびょう", "bold": "ずぶとい", "impish": "わんぱく",
+    "calm": "おだやか", "careful": "しんちょう", "relaxed": "のんき",
+    "sassy": "なまいき", "brave": "ゆうかん", "quiet": "れいせい",
+    "naughty": "やんちゃ", "lonely": "さみしがり", "lax": "のうてんき",
+    "rash": "うっかりや", "mild": "おっとり", "gentle": "おとなしい",
+    "hasty": "せっかち", "naive": "むじゃき", "hardy": "がんばりや",
+    "docile": "すなお", "serious": "まじめ", "bashful": "てれや",
+    "quirky": "きまぐれ",
+}
+_EV_EN2JA = {"HP": "H", "Atk": "A", "Def": "B", "SpA": "C", "SpD": "D",
+             "Spe": "S"}
+
+
+def team_text_to_ja(team_text: str) -> str:
+    """Showdownチームテキスト (英語) を日本語表示に変換する。
+
+    種族/特性/持ち物/技/性格/能力ポイント表記を日本語化。メガストーンなど
+    逆引きに無いアイテムは「{種族}ナイト」で補完する。
+    """
+    from vision.normalize import NameResolver
+    from advisor.infer import species_ja_name
+    resolver = NameResolver()
+
+    def _ja(cat, val):
+        return resolver.ja_of(cat, val) or None
+
+    out_blocks = []
+    for block in team_text.strip().split("\n\n"):
+        lines = block.strip().split("\n")
+        if not lines:
+            continue
+        # 1行目: "Species @ item" または "Species"
+        head = lines[0]
+        item_ja = None
+        if " @ " in head:
+            sp_en, item_en = head.split(" @ ", 1)
+            item_id = _to_id(item_en)
+            item_ja = _ja("items", item_id)
+            if not item_ja:
+                # メガストーン等: 種族名+ナイト で補完
+                base = species_ja_name(re.sub(r"(mega[xy]?|primal)$", "",
+                                              _to_id(sp_en)))
+                item_ja = f"{base}ナイト" if item_id.endswith("ite") else item_en
+        else:
+            sp_en = head
+        sp_ja = species_ja_name(_to_id(sp_en))
+        new = [f"{sp_ja}" + (f" @ {item_ja}" if item_ja else "")]
+        for ln in lines[1:]:
+            if ln.startswith("Ability:"):
+                ab = _to_id(ln.split(":", 1)[1])
+                new.append(f"特性: {_ja('abilities', ab) or ab}")
+            elif ln.startswith("EVs:"):
+                parts = ln.split(":", 1)[1].split("/")
+                conv = []
+                for p in parts:
+                    p = p.strip()
+                    m = re.match(r"(\d+)\s+(\w+)", p)
+                    if m:
+                        conv.append(f"{_EV_EN2JA.get(m.group(2), m.group(2))}{m.group(1)}")
+                new.append("努力: " + " ".join(conv))
+            elif ln.endswith("Nature"):
+                nat = ln.replace("Nature", "").strip().lower()
+                new.append(f"性格: {_NATURE_EN2JA.get(nat, nat)}")
+            elif ln.startswith("- "):
+                mv = _to_id(ln[2:])
+                new.append(f"- {_ja('moves', mv) or ln[2:].strip()}")
+            elif ln.startswith("Level:"):
+                new.append("Lv" + ln.split(":", 1)[1].strip())
+        out_blocks.append("\n".join(new))
+    return "\n\n".join(out_blocks)
+
+
 def build_myteam_text() -> str:
     """config/my_team.json の登録型 (性格/能力ポイント/持ち物/技/特性) で
     チームテキストを作る (meta_setsではなく実際の自分の型で評価する)"""
