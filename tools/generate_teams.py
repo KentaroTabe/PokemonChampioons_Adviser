@@ -126,6 +126,13 @@ def generate(core_ja: str, beam: int = 6, n_out: int = 5,
         if ranked:
             best = max(ranked)
             print(f"\n◎ 最有力: {'・'.join(best[1])} (勝率{best[0]:.0%})")
+            # 型 (特性/持ち物/性格/能力ポイント/技) つきで出力
+            try:
+                from tools.evaluate_team import build_team_text
+                print("\n# 最有力構築の型 (meta_sets最有力セット):\n")
+                print(build_team_text(best[1]))
+            except Exception as e:
+                print(f"(型出力失敗: {e})")
     else:
         print("\n実対戦で選抜するには: --evaluate [--battles N] を付ける")
     return results

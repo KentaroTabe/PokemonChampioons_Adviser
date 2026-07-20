@@ -184,9 +184,66 @@ def team_advice(resolver, top_n: int = 15, n_suggest: int = 5) -> Optional[dict]
                 speed_tips.append(f"{ja}: +2ポイントで{ov.name_ja} (S{target}) 抜き")
                 break
 
+    # 入れ替え提案: 「誰を抜いて誰を入れるか」のカバレッジ差分評価
+    swaps = []
+    try:
+        swaps = _swap_suggestions(mine, meta_views, suggestions)
+    except Exception:
+        pass
+
     return {"matchups": matchups, "holes": holes, "ohko_risks": ohko_risks,
             "suggestions": suggestions, "speed_tips": speed_tips,
-            "meta_n": len(meta_views)}
+            "swaps": swaps, "meta_n": len(meta_views)}
+
+
+def _swap_suggestions(mine: list, meta_views: list,
+                      suggestions: list, top_k: int = 3) -> list:
+    """各メンバー×補完候補の入れ替えで、メタカバレッジが最も改善する組を返す。
+
+    事前に「各ポケモン vs メタ各体」の勝敗ベクトルを計算しておき、
+    集合演算でカバレッジ差分を高速に評価する。
+    """
+    def win_vec(view, moves):
+        return [bool(duel(view, 1.0, moves, ov, 1.0, om))
+                for _s, _u, ov, om in meta_views]
+
+    mine_vecs = [(ja, win_vec(v, m)) for ja, v, m in mine]
+    cand_views = []
+    for s in suggestions:
+        # suggestionsは日本語名なのでID逆引き
+        for sid, _u in meta_top(40):
+            if species_ja_name(sid) == s["name"]:
+                cv, cm = build_meta_view(sid)
+                if cv is not None:
+                    cand_views.append((s["name"], win_vec(cv, cm)))
+                break
+
+    n = len(meta_views)
+    base_cov = sum(1 for i in range(n) if any(vec[i] for _, vec in mine_vecs))
+    results = []
+    for out_i, (out_ja, _out_vec) in enumerate(mine_vecs):
+        rest = [vec for j, (_, vec) in enumerate(mine_vecs) if j != out_i]
+        for in_ja, in_vec in cand_views:
+            cov = sum(1 for i in range(n)
+                      if any(vec[i] for vec in rest) or in_vec[i])
+            delta = cov - base_cov
+            if delta > 0:
+                newly = [meta_views[i][2].name_ja for i in range(n)
+                         if in_vec[i] and not any(vec[i] for vec in rest)
+                         and not any(vec[i] for _, vec in mine_vecs)]
+                results.append({"out": out_ja, "in": in_ja,
+                                "delta": delta, "covers": newly[:3]})
+    results.sort(key=lambda r: -r["delta"])
+    # 同じin/outの重複を除いて上位を返す
+    seen, out = set(), []
+    for r in results:
+        key = (r["out"], r["in"])
+        if key not in seen:
+            seen.add(key)
+            out.append(r)
+        if len(out) >= top_k:
+            break
+    return out
 
 
 def format_team_advice(a: Optional[dict]) -> str:
@@ -205,9 +262,14 @@ def format_team_advice(a: Optional[dict]) -> str:
         lines.append(f"⚠ {r['name']}は一撃圏が多い: {', '.join(r['hits'])}")
     for tip in a["speed_tips"][:3]:
         lines.append(f"💨 {tip}")
-    if a["suggestions"]:
+    if a.get("swaps"):
+        for sw in a["swaps"][:2]:
+            covers = f" (新規カバー: {'・'.join(sw['covers'])})" if sw["covers"] else ""
+            lines.append(f"🔁 {sw['out']} → {sw['in']} で"
+                         f"メタカバレッジ+{sw['delta']}{covers}")
+    elif a["suggestions"]:
         sug = " / ".join(
             s["name"] + (f" (穴{len(s['covers'])}体に解答)" if s["covers"] else "")
             for s in a["suggestions"])
-        lines.append(f"💡 入れ替え候補: {sug}")
+        lines.append(f"💡 追加候補: {sug}")
     return "\n".join(lines)
