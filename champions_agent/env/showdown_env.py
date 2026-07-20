@@ -238,9 +238,19 @@ def make_training_env(battle_format: str = TRAINING_BATTLE_FORMAT,
     from champions_agent.train.opponent_pool import (
         OpponentPool, make_pool_opponent, RANKED_TEAM_PROB,
     )
+    from poke_env import AccountConfiguration
+
+    # 並列環境 (SubprocVecEnv) では各プロセスの対戦相手が同じサーバーに接続する。
+    # poke-envの自動生成はエージェント側だけなので、相手のアカウント名を
+    # プロセスPID+seedで一意化してユーザー名衝突 (nametaken) を防ぐ。
+    # PID併用でプロセス再起動をまたいだ残存接続との衝突も避ける
+    import os as _os
+    _uid = (seed if seed is not None else rng.randint(0, 9999)) % 10000
+    opp_account = AccountConfiguration(f"CO{_os.getpid() % 100000}x{_uid}", None)
 
     if opponent_mode == "random":
         opponent = RandomPlayer(
+            account_configuration=opp_account,
             battle_format=battle_format,
             server_configuration=TrainingServerConfiguration,
             team=opp_teambuilder,
@@ -266,6 +276,7 @@ def make_training_env(battle_format: str = TRAINING_BATTLE_FORMAT,
     pool = OpponentPool()
     opponent = make_pool_opponent(
         pool,
+        account_configuration=opp_account,
         battle_format=battle_format,
         server_configuration=TrainingServerConfiguration,
         team=opp_team,

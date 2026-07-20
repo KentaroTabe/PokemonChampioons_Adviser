@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 
 from champions_agent.config import (
     MODELS_DIR, RANDOM_SEED, DEFAULT_PLAY_STYLE, PLAY_STYLES,
@@ -18,10 +19,27 @@ from champions_agent.config import (
 from champions_agent.env.showdown_env import make_training_env
 
 
+def _make_env_fn(idx: int, battle_format: str, play_style: str,
+                 opp_play_style_pool):
+    """SubprocVecEnv用のenv生成関数 (spawnでpickle可能なトップレベル定義)。
+
+    idxごとにseedをずらし、各サブプロセスが独立にShowdownへ接続する
+    (poke-envのアカウント名は自動生成なので衝突しない)。
+    """
+    def _init():
+        from stable_baselines3.common.monitor import Monitor
+        env = make_training_env(battle_format=battle_format,
+                                own_play_style=play_style,
+                                opp_play_style_pool=opp_play_style_pool,
+                                seed=RANDOM_SEED + idx * 1000)
+        return Monitor(env)
+    return _init
+
+
 def train(total_timesteps: int = 10_000, battle_format: str = TRAINING_BATTLE_FORMAT,
           play_style: str = DEFAULT_PLAY_STYLE,
           opp_play_style_pool: list[str] | None = None,
-          resume: bool = False) -> None:
+          resume: bool = False, n_envs: int = 1) -> None:
     """戦闘方策を性格(play_style)ごとに学習する。
 
     play_style: このモデル自身の性格('offense'/'cycle'/'stall'/'balance')。
@@ -39,9 +57,26 @@ def train(total_timesteps: int = 10_000, battle_format: str = TRAINING_BATTLE_FO
     from sb3_contrib import MaskablePPO
     from stable_baselines3.common.monitor import Monitor
 
-    env = make_training_env(battle_format=battle_format, own_play_style=play_style,
-                             opp_play_style_pool=opp_play_style_pool, seed=RANDOM_SEED)
-    env = Monitor(env)
+    # 並列環境: Showdown通信レイテンシが律速 (単一env≒140fps) なので、
+    # 複数バトルを別プロセスで同時進行させて収集スループットを上げる。
+    # 各サブプロセスがローカルShowdown(8100)に独立接続する。
+    ppo_kwargs = {}
+    if n_envs > 1:
+        from stable_baselines3.common.vec_env import SubprocVecEnv
+        env = SubprocVecEnv(
+            [_make_env_fn(i, battle_format, play_style, opp_play_style_pool)
+             for i in range(n_envs)],
+            start_method="spawn")
+        # rollout長をenv数で割り、更新1回あたりの総サンプル数を単一env時と揃える
+        ppo_kwargs["n_steps"] = max(256, 2048 // n_envs)
+        print(f"[train_battle] 並列環境 {n_envs} で学習 "
+              f"(n_steps={ppo_kwargs['n_steps']}/env)")
+    else:
+        env = make_training_env(battle_format=battle_format,
+                                own_play_style=play_style,
+                                opp_play_style_pool=opp_play_style_pool,
+                                seed=RANDOM_SEED)
+        env = Monitor(env)
 
     save_path = MODELS_DIR / f"battle_policy_{play_style}.zip"
     model = None
@@ -63,6 +98,7 @@ def train(total_timesteps: int = 10_000, battle_format: str = TRAINING_BATTLE_FO
             env,
             verbose=1,
             seed=RANDOM_SEED,
+            **ppo_kwargs,
         )
     model.learn(total_timesteps=total_timesteps, reset_num_timesteps=not resume)
 
@@ -85,11 +121,14 @@ def main() -> None:
                          help="学習するエージェントの性格")
     parser.add_argument("--opp-play-styles", type=str, nargs="*", default=None,
                          help="対戦相手チーム生成に使う性格候補(省略時は全性格からランダム)")
+    parser.add_argument("--n-envs", type=int,
+                         default=int(os.environ.get("N_ENVS", "1")),
+                         help="並列環境数 (Showdown通信律速の高速化。8コアで6程度)")
     args = parser.parse_args()
 
     train(total_timesteps=args.timesteps, battle_format=args.format,
           play_style=args.play_style, opp_play_style_pool=args.opp_play_styles,
-          resume=args.resume)
+          resume=args.resume, n_envs=args.n_envs)
 
 
 

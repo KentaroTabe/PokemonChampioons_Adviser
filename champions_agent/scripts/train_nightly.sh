@@ -54,11 +54,13 @@ trap cleanup EXIT
       cp "$ckpt" "$ckpt.prev" 2>/dev/null || true
     fi
     # スリープ抑止 + タイムアウト付きで学習 (ハングしても次の性格へ進む)
-    # タイムアウト: 想定処理速度50step/s基準 + 余裕15分
-    TRAIN_TIMEOUT=$((TIMESTEPS / 50 + 900))
+    # タイムアウト: 想定処理速度 (並列で概ね N_ENVS*100 step/s) + 余裕15分
+    N_ENVS="${N_ENVS:-1}"
+    RATE=$((N_ENVS * 80 + 40))
+    TRAIN_TIMEOUT=$((TIMESTEPS / RATE + 900))
     caffeinate -i python -m tools.smoke_train \
       --play-style "$style" --timesteps "$TIMESTEPS" --resume \
-      --timeout "$TRAIN_TIMEOUT" || {
+      --n-envs "$N_ENVS" --timeout "$TRAIN_TIMEOUT" || {
         echo "[nightly] [$style] 学習が失敗/タイムアウトしました"; continue; }
 
     echo "--- [$style] 評価 (vs Random, $EVAL_BATTLES 戦) ---"
