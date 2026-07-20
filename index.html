@@ -47,6 +47,15 @@
                 <h3>📊 パーティ診断 (試合終了時に自動更新)</h3>
                 <pre id="team-advice-text" style="white-space:pre-wrap;font-size:12px"></pre>
             </div>
+            <div class="panel" id="team-gen-panel">
+                <h3>🧪 1からのパーティ提案</h3>
+                <div style="font-size:11px;color:#89a;margin-bottom:6px">軸にするポケモンを入れて生成。共起データで6体を組み、実対戦で選抜します(数分)。</div>
+                <input list="tl-species" id="gen-core" placeholder="軸ポケモン (例: ガブリアス)" style="width:60%">
+                <label style="display:inline;font-size:11px;margin-left:8px"><input type="checkbox" id="gen-eval" checked style="width:auto"> 実対戦で選抜</label>
+                <button onclick="generateTeam()" id="gen-btn" style="margin-left:8px;background:#3567c9;color:#fff;border:none;border-radius:6px;padding:6px 14px;cursor:pointer">生成</button>
+                <div id="gen-progress" style="font-size:12px;color:#8ac;margin-top:8px;white-space:pre-wrap"></div>
+                <div id="gen-result" style="margin-top:8px"></div>
+            </div>
             <div class="panel" id="team-editor" style="display:none">
                 <h3>パーティ編集 (保存で即反映)</h3>
                 <div id="team-editor-rows"></div>
@@ -151,6 +160,37 @@
         socket.on('team_advice', (a) => {
             document.getElementById('team-advice-panel').style.display = 'block';
             document.getElementById('team-advice-text').textContent = a.text;
+        });
+
+        // --- 1からのパーティ提案 (バックグラウンド生成+進捗) ---
+        function generateTeam() {
+            const core = document.getElementById('gen-core').value.trim();
+            if (!core) { alert('軸ポケモンを入力してください'); return; }
+            const evaluate = document.getElementById('gen-eval').checked;
+            document.getElementById('gen-btn').disabled = true;
+            document.getElementById('gen-progress').textContent = '⏳ 生成を開始しています…';
+            document.getElementById('gen-result').innerHTML = '';
+            socket.emit('generate_team', {core, evaluate});
+        }
+        socket.on('team_gen_progress', (p) => {
+            document.getElementById('gen-progress').textContent = '⏳ ' + p.msg;
+        });
+        socket.on('team_gen_result', (r) => {
+            document.getElementById('gen-btn').disabled = false;
+            const prog = document.getElementById('gen-progress');
+            const el = document.getElementById('gen-result');
+            if (!r.ok) { prog.textContent = '⚠ ' + (r.reason || '生成失敗'); return; }
+            prog.textContent = '✅ 生成完了';
+            let html = '<div style="font-size:12px;color:#89a">候補構築 (メタカバレッジ順):</div><ol style="font-size:12px;margin:4px 0">';
+            for (const c of r.candidates)
+                html += `<li>カバレッジ${Math.round(c.coverage*100)}%: ${c.names.join('・')}</li>`;
+            html += '</ol>';
+            if (r.best) {
+                html += `<div class="best" style="margin-top:6px">◎ 最有力 (実戦勝率${Math.round(r.best.win_rate*100)}%): <b>${r.best.names.join('・')}</b></div>`;
+                if (r.best.team_text)
+                    html += `<pre style="font-size:11px;background:#121826;padding:8px;border-radius:6px;overflow-x:auto">${r.best.team_text}</pre>`;
+            }
+            el.innerHTML = html;
         });
 
         // --- 手動修正 (誤認識のユーザー訂正。修正はログに記録され分析に使う) ---

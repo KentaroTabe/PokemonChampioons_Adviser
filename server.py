@@ -247,6 +247,54 @@ async def get_my_team(sid, data=None):
         print(f"[server] get_my_teamエラー: {e}")
 
 
+_generating = False
+
+
+@sio.on('generate_team')
+async def generate_team(sid, data):
+    """コア軸から1からの構築を生成 (バックグラウンド、進捗を逐次配信)。
+
+    重い処理 (共起探索+実対戦評価で数分) のため、進捗を team_gen_progress で
+    流し、完了時に team_gen_result を配信する。多重起動は防止。
+    """
+    global _generating
+    if _generating:
+        await sio.emit('team_gen_progress',
+                       {"msg": "別の生成が実行中です"}, room=sid)
+        return
+    core = (data or {}).get("core", "").strip()
+    evaluate = bool((data or {}).get("evaluate", True))
+    if not core:
+        await sio.emit('team_gen_result',
+                       {"ok": False, "reason": "軸ポケモンを入力してください"},
+                       room=sid)
+        return
+    _generating = True
+    loop = asyncio.get_event_loop()
+
+    def _progress(msg):
+        # executorスレッドからemitするためcall_soon_threadsafeで戻す
+        loop.call_soon_threadsafe(
+            lambda: asyncio.ensure_future(
+                sio.emit('team_gen_progress', {"msg": msg}, room=sid)))
+
+    try:
+        from tools.generate_teams import generate_report
+        print(f"[server] 構築生成開始: {core} (evaluate={evaluate})")
+        result = await loop.run_in_executor(
+            None, lambda: generate_report(core, evaluate=evaluate,
+                                          progress=_progress))
+        await sio.emit('team_gen_result', result, room=sid)
+        print(f"[server] 構築生成完了: {core}")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        await sio.emit('team_gen_result',
+                       {"ok": False, "reason": f"生成エラー: {e}"}, room=sid)
+    finally:
+        _generating = False
+
+
 @sio.on('save_my_team')
 async def save_my_team(sid, data):
     """フロントエンドのパーティ編集フォームから config/my_team.json を保存"""

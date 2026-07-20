@@ -58,12 +58,15 @@ def team_score(team: list, meta_views: list) -> float:
     return covered / max(1, len(meta_views))
 
 
-def generate(core_ja: str, beam: int = 6, n_out: int = 5,
-             team_size: int = 6):
+def generate_candidates(core_ja: str, beam: int = 6, n_out: int = 5,
+                        team_size: int = 6) -> list:
+    """コア軸の候補構築を [(team, coverage)] で返す (表示なし・純粋関数)。
+
+    team は [(species_id, MonView, moves)]。サーバー配信・CLI双方で使う。
+    """
     resolver = NameResolver()
     r = resolver.resolve_species(core_ja, cutoff=0.8)
     if not r:
-        print(f"種族を解決できません: {core_ja}")
         return []
     core = r[1]
     meta_views = []
@@ -73,6 +76,8 @@ def generate(core_ja: str, beam: int = 6, n_out: int = 5,
             meta_views.append((sid, usage, v, moves))
 
     core_view, core_moves = build_meta_view(core)
+    if core_view is None:
+        return []
     beams = [([(core, core_view, core_moves)], 0.0)]
     while len(beams[0][0]) < team_size:
         nxt = []
@@ -89,9 +94,7 @@ def generate(core_ja: str, beam: int = 6, n_out: int = 5,
                     continue
                 new_team = team + [(cand, cv, cmoves)]
                 nxt.append((new_team, team_score(new_team, meta_views)))
-        # スコア上位でビームを絞る (重複チームは除去)
-        seen = set()
-        uniq = []
+        seen, uniq = set(), []
         for team, score in sorted(nxt, key=lambda x: -x[1]):
             key = frozenset(s for s, _, _ in team)
             if key not in seen:
@@ -100,8 +103,69 @@ def generate(core_ja: str, beam: int = 6, n_out: int = 5,
         beams = uniq[:beam]
         if not beams:
             break
+    return beams[:n_out]
 
-    results = beams[:n_out]
+
+def generate_report(core_ja: str, n_eval: int = 3, n_battles: int = 12,
+                    evaluate: bool = True, progress=None) -> dict:
+    """フロントエンド用の構造化レポート。
+
+    progress: 進捗コールバック (message:str) -> None。
+    戻り値 {"ok", "core", "candidates":[{names,coverage}],
+            "best":{names,win_rate,team_text}, "reason"}
+    """
+    import asyncio
+
+    def _p(msg):
+        if progress:
+            try:
+                progress(msg)
+            except Exception:
+                pass
+
+    _p(f"{core_ja}軸の候補を共起データから探索中…")
+    results = generate_candidates(core_ja)
+    if not results:
+        return {"ok": False, "reason": f"{core_ja} の候補を生成できません"}
+    candidates = [{"names": [species_ja_name(s) for s, _, _ in team],
+                   "coverage": round(cov, 3)} for team, cov in results]
+    _p(f"候補{len(candidates)}件を生成。カバレッジ上位を確認中…")
+
+    out = {"ok": True, "core": core_ja, "candidates": candidates, "best": None}
+    if not evaluate:
+        return out
+
+    from tools.evaluate_team import evaluate_team, build_team_text
+    ranked = []
+    for i, (team, cov) in enumerate(results[:n_eval], 1):
+        names = [species_ja_name(s) for s, _, _ in team]
+        _p(f"実対戦評価 {i}/{min(n_eval, len(results))}: "
+           f"{'・'.join(names)} を{n_battles}戦…")
+        try:
+            r = asyncio.run(evaluate_team(names, n_battles=n_battles))
+            ranked.append((r["win_rate"], names))
+        except Exception as e:
+            _p(f"  評価失敗: {e}")
+    if ranked:
+        best_rate, best_names = max(ranked)
+        team_text = ""
+        try:
+            team_text = build_team_text(best_names)
+        except Exception:
+            pass
+        out["best"] = {"names": best_names, "win_rate": round(best_rate, 3),
+                       "team_text": team_text}
+        _p(f"完了。最有力: {'・'.join(best_names)} (勝率{best_rate:.0%})")
+    return out
+
+
+def generate(core_ja: str, beam: int = 6, n_out: int = 5,
+             team_size: int = 6):
+    results = generate_candidates(core_ja, beam=beam, n_out=n_out,
+                                  team_size=team_size)
+    if not results:
+        print(f"種族を解決できません/候補生成不可: {core_ja}")
+        return []
     print(f"# {core_ja}軸の候補構築 (メタ上位15体への1v1カバレッジ順)\n")
     for i, (team, score) in enumerate(results, 1):
         names = "・".join(species_ja_name(s) for s, _, _ in team)
