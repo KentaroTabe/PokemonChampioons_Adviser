@@ -65,6 +65,7 @@ class BattleLogger:
         self.log_dir = log_dir
         self._file: Optional[Path] = None
         self._prev_scene: Optional[str] = None
+        self._prev_pick_key = None
         self._outcome_logged = False
         self._hp_seen_ts = 0.0   # 記録済みHP変化イベントの最終時刻
         self._selection_streak = 0  # 選出画面が連続何フレーム続いているか
@@ -142,10 +143,19 @@ class BattleLogger:
                              "scene": scene,
                              "text": e["text"], "detail": e.get("detail")})
 
-        if scene != self._prev_scene:
+        # 選出中は進捗/選出セットの変化でも記録する (シーン遷移だけだと
+        # 選出済み状態がログに残らず、選出認識の検証ができない)
+        pick_key = None
+        if scene in ("selection", "standby"):
+            pick_key = (state.get("selection_picked"),
+                        tuple(p.get("is_picked") for p in
+                              state.get("player", {}).get("party", [])))
+        if scene != self._prev_scene or \
+                (pick_key is not None and pick_key != self._prev_pick_key):
             self._write({"type": "scene", "scene": scene, "turn": state.get("turn"),
                          "state": _compact_state(state)})
             self._prev_scene = scene
+            self._prev_pick_key = pick_key
 
         # 勝敗が確定したら記録して閉じる
         if state.get("outcome") and not self._outcome_logged:
