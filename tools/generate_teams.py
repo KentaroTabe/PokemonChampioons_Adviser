@@ -106,8 +106,28 @@ def generate(core_ja: str, beam: int = 6, n_out: int = 5,
     for i, (team, score) in enumerate(results, 1):
         names = "・".join(species_ja_name(s) for s, _, _ in team)
         print(f"{i}. カバレッジ{score:.0%}: {names}")
-    print("\n次ステップ: 上位候補を tools/team_report の形式で診断するか、")
-    print("champions_agentのセルフプレイで実対戦評価してください")
+
+    if "--evaluate" in sys.argv:
+        # 上位候補を実対戦で選抜 (Phase 6.4の結線)
+        import asyncio
+        from tools.evaluate_team import evaluate_team
+        n_b = int(sys.argv[sys.argv.index("--battles") + 1]) \
+            if "--battles" in sys.argv else 12
+        print(f"\n# 実対戦評価 (各{n_b}戦 vs ベンチマーク構築群)")
+        ranked = []
+        for team, cov in results[:3]:
+            names = [species_ja_name(s) for s, _, _ in team]
+            try:
+                r = asyncio.run(evaluate_team(names, n_battles=n_b))
+                ranked.append((r["win_rate"], names))
+                print(f"  {'・'.join(names)}: 勝率{r['win_rate']:.0%}")
+            except Exception as e:
+                print(f"  {'・'.join(names)}: 評価失敗 ({e})")
+        if ranked:
+            best = max(ranked)
+            print(f"\n◎ 最有力: {'・'.join(best[1])} (勝率{best[0]:.0%})")
+    else:
+        print("\n実対戦で選抜するには: --evaluate [--battles N] を付ける")
     return results
 
 

@@ -69,6 +69,54 @@ def test_simulate_turn_faint_and_switch():
     print("test_simulate_turn_faint_and_switch OK")
 
 
+def test_status_move_effects():
+    from advisor.search import simulate_turn
+    me = SimSide(active=_view("archaludon", ja="ブリジュラス",
+                              ev={"hp": 252, "def": 160}), active_hp=0.4)
+    opp = SimSide(active=_view("garchomp", ja="ガブリアス"), active_hp=1.0)
+    # まもる: 相手の攻撃を無効化
+    m2, o2 = simulate_turn(me, opp, Action("move", move_id="protect"),
+                           Action("move", move_id="earthquake"),
+                           None, None, "avg")
+    assert m2.active_hp == 0.4, m2.active_hp
+    # 積み技: ランクが上がる
+    m3, o3 = simulate_turn(me, opp, Action("move", move_id="irondefense"),
+                           Action("move", move_id="stealthrock"),
+                           None, None, "avg")
+    assert m3.active.boosts.get("def") == 2, m3.active.boosts
+    assert m3.stealth_rock, "相手のステロが自陣に付いていない"
+    # 回復技
+    m4, _ = simulate_turn(me, opp, Action("move", move_id="recover"),
+                          Action("move", move_id="stealthrock"),
+                          None, None, "avg")
+    assert m4.active_hp > 0.85, m4.active_hp
+    # 状態異常技
+    m5, o5 = simulate_turn(me, opp, Action("move", move_id="thunderwave"),
+                           Action("move", move_id="swordsdance"),
+                           None, None, "avg")
+    assert o5.active.status == "paralysis", o5.active.status
+    assert o5.active.boosts.get("atk") == 2, o5.active.boosts
+    print("test_status_move_effects OK")
+
+
+def test_protect_scores_in_search():
+    # 瀕死状態でまもるが「即死撃ちより保証値が高い」選択肢として現れる
+    me = SimSide(active=_view("archaludon", ja="ブリジュラス",
+                              ev={"hp": 252, "def": 160}), active_hp=0.15,
+                 bench=[(_view("pelipper", ja="ペリッパー"), 1.0)])
+    opp = SimSide(active=_view("garchomp", ja="ガブリアス"), active_hp=0.9)
+    res = search(me, opp, ["dragonpulse", "protect"],
+                 [("earthquake", 60), ("outrage", 30)])
+    prot = next(a for a in res["actions"] if a["move_id"] == "protect")
+    atk = next(a for a in res["actions"] if a["move_id"] == "dragonpulse")
+    # まもるが「被弾して落ちる」扱いになっていない (最悪ケースでも盤面維持)
+    assert prot["worst"] > -0.3, prot
+    # 攻撃も正しく評価されている (このケースは打ち逃げ優位でも良い)
+    assert atk["expected"] > -1.0
+    print(f"test_protect_scores_in_search OK "
+          f"(まもる保証{prot['worst']} / 攻撃期待{atk['expected']})")
+
+
 def test_performance():
     me = SimSide(active=_view("swampert"), active_hp=1.0,
                  bench=[(_view("archaludon"), 1.0), (_view("pelipper"), 0.8)])
@@ -88,5 +136,7 @@ if __name__ == "__main__":
     test_simulate_turn_faint_and_switch()
     test_clean_kill_preferred()
     test_lethal_dodge()
+    test_status_move_effects()
+    test_protect_scores_in_search()
     test_performance()
     print("ALL OK")

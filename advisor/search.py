@@ -24,6 +24,28 @@ from advisor.dex import get_dex
 ROLL_GROUPS = ((0.25, "min"), (0.5, "avg"), (0.25, "max"))
 RISK_WEIGHT = 0.4   # 推奨値 = (1-w)*期待値 + w*保証値
 
+# --- 補助技の効果モデル (探索で「効果ゼロの技」にしないため) ---
+PROTECT_MOVES = {"protect", "detect", "banefulbunker", "spikyshield",
+                 "burningbulwark", "silktrap"}
+HEAL_MOVES = {"recover": 0.5, "roost": 0.5, "slackoff": 0.5,
+              "softboiled": 0.5, "milkdrink": 0.5, "shoreup": 0.5,
+              "moonlight": 0.5, "morningsun": 0.5, "synthesis": 0.5,
+              "strengthsap": 0.4, "junglehealing": 0.25, "lifedew": 0.25}
+SETUP_MOVES = {
+    "swordsdance": {"atk": 2}, "nastyplot": {"spa": 2},
+    "dragondance": {"atk": 1, "spe": 1}, "calmmind": {"spa": 1, "spd": 1},
+    "bulkup": {"atk": 1, "def": 1}, "irondefense": {"def": 2},
+    "quiverdance": {"spa": 1, "spd": 1, "spe": 1},
+    "shellsmash": {"atk": 2, "spa": 2, "spe": 2, "def": -1, "spd": -1},
+    "agility": {"spe": 2}, "howl": {"atk": 1}, "curse": {"atk": 1, "def": 1},
+    "victorydance": {"atk": 1, "def": 1, "spe": 1},
+}
+STATUS_MOVES = {"willowisp": "burn", "thunderwave": "paralysis",
+                "toxic": "toxic", "spore": "sleep", "sleeppowder": "sleep",
+                "hypnosis": "sleep", "darkvoid": "sleep", "glare": "paralysis",
+                "nuzzle": "paralysis", "yawn": "sleep"}
+HAZARD_MOVES = {"stealthrock"}
+
 
 @dataclass
 class SimSide:
@@ -137,27 +159,45 @@ def simulate_turn(me: SimSide, opp: SimSide, my_act: Action, opp_act: Action,
     trick_room = bool(my_field and my_field.trick_room)
     movers.sort(key=lambda m: (-m[2], m[3] if trick_room else -m[3]))
 
+    protected = {"me": False, "opp": False}
     for who, move_id, _pri, _spe in movers:
-        if who == "me":
-            if me.active_hp <= 0:
-                continue
-            dmg = _dmg_frac(replace(me.active, hp_frac=me.active_hp),
-                            opp.active, opp.active_hp, move_id, my_field, roll)
-            opp = replace(opp, active_hp=max(0.0, opp.active_hp - dmg))
-            if opp.active_hp <= 0:
-                nxt = _best_bench(opp, me)
-                if nxt is not None:
-                    opp = _apply_switch(opp, nxt)
+        atk_side, def_side = ("me", "opp") if who == "me" else ("opp", "me")
+        atk = me if who == "me" else opp
+        dfn = opp if who == "me" else me
+        if atk.active_hp <= 0:
+            continue
+
+        # --- 補助技の効果 ---
+        if move_id in PROTECT_MOVES:
+            protected[atk_side] = True
+            continue
+        if move_id in HEAL_MOVES:
+            healed = min(1.0, atk.active_hp + HEAL_MOVES[move_id])
+            atk = replace(atk, active_hp=healed)
+        elif move_id in SETUP_MOVES:
+            boosts = dict(atk.active.boosts or {})
+            for k, d in SETUP_MOVES[move_id].items():
+                boosts[k] = max(-6, min(6, (boosts.get(k) or 0) + d))
+            atk = replace(atk, active=replace(atk.active, boosts=boosts))
+        elif move_id in HAZARD_MOVES:
+            dfn = replace(dfn, stealth_rock=True)
+        elif move_id in STATUS_MOVES:
+            if dfn.active.status is None and not protected[def_side]:
+                dfn = replace(dfn,
+                              active=replace(dfn.active,
+                                             status=STATUS_MOVES[move_id]))
         else:
-            if opp.active_hp <= 0:
-                continue
-            dmg = _dmg_frac(replace(opp.active, hp_frac=opp.active_hp),
-                            me.active, me.active_hp, move_id, opp_field, roll)
-            me = replace(me, active_hp=max(0.0, me.active_hp - dmg))
-            if me.active_hp <= 0:
-                nxt = _best_bench(me, opp)
-                if nxt is not None:
-                    me = _apply_switch(me, nxt)
+            # --- 攻撃技 ---
+            if not protected[def_side]:
+                dmg = _dmg_frac(replace(atk.active, hp_frac=atk.active_hp),
+                                dfn.active, dfn.active_hp, move_id,
+                                my_field if who == "me" else opp_field, roll)
+                dfn = replace(dfn, active_hp=max(0.0, dfn.active_hp - dmg))
+                if dfn.active_hp <= 0:
+                    nxt = _best_bench(dfn, atk)
+                    if nxt is not None:
+                        dfn = _apply_switch(dfn, nxt)
+        me, opp = (atk, dfn) if who == "me" else (dfn, atk)
     return me, opp
 
 
