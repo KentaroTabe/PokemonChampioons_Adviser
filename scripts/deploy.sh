@@ -12,7 +12,7 @@ cd "$(dirname "$0")/.." || exit 1
 if [ "$1" != "--force" ]; then
   # mtimeではなくログ内容で判定する (対戦の合間もメニュー誤分類の
   # シーンレコードが書き込まれ続け、mtimeでは静かにならないため)
-  if python3 -m tools.check_battle_active 3 >/dev/null 2>&1; then
+  if python3 -m tools.check_battle_active 1 >/dev/null 2>&1; then
     echo "対戦中のシグナル (events/hp/コマンド画面) を検知したため中止しました"
     echo "強制する場合: bash scripts/deploy.sh --force"
     exit 1
