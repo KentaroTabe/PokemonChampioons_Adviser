@@ -297,15 +297,17 @@ def _set_hp(state: BattleStateV2, side_name: str, mon,
         mon._hp_stable_count = 1
         return   # 1回だけの観測は状態にも反映しない (誤読の混入防止)
     mon._hp_stable_count = getattr(mon, "_hp_stable_count", 1) + 1
-    # 0%は交代アニメーション中の空バー誤読が多いため、3回連続観測を要求する
-    # (本物のひんしなら0%表示が続くので3回目で確定する)
-    if new <= 1.0 and mon._hp_stable_count < 3:
+    # ほぼ0%は交代/メガシンカ演出中の空バー誤読が多いため、3回連続観測を
+    # 要求する (本物のひんし・瀕死残りなら低%表示が続くので3回目で確定する)。
+    # バー由来の読取は1.4%等の端数になるため、閾値は0%だけでなく3%まで広げる
+    # (実戦: メガメタグロス100%→1.x%→59%のフラップがイベント化した)
+    if new <= 3.0 and mon._hp_stable_count < 3:
         return
     commit()
-    # 0%への低下イベントは、ひんしメッセージの裏付けがある場合のみ発火する
+    # ほぼ0%への低下イベントは、ひんしメッセージの裏付けがある場合のみ発火する
     # (交代アニメの空バーが3秒以上続くと3回連続確認をすり抜けた実績。
     #  状態値の更新自体は行い、誤りなら次の確定読取で戻る)
-    if new <= 1.0:
+    if new <= 3.0:
         last_faint = getattr(state, "last_faint", None)
         if not (last_faint and last_faint.get("side") == side_name
                 and time.time() - last_faint.get("ts", 0) < 20.0):

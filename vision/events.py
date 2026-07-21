@@ -319,8 +319,10 @@ class EventParser:
         # 4. 技使用 / 特性発動 ("{名前}の {技/特性}")
         # 相手の判明技の収集が重要なため、他イベントと複合したメッセージ
         # (「相手のXのわざ! 効果は〜」等) でも技解析は常に試みる。
-        # 交代 (「〜を繰り出した」) は種族名が技に誤マッチしやすいので除外
-        if not any(f.startswith("switch") for f in fired):
+        # 交代 (「〜を繰り出した」) は種族名が技に誤マッチしやすいので除外。
+        # 効果切れ (「リフレクターがなくなった」等の *_end) は技の使用では
+        # ないため除外 (壁切れメッセージが move_opponent_reflect を誤発火した)
+        if not any(f.startswith("switch") or f.endswith("_end") for f in fired):
             mu = self._parse_move_or_ability(cleaned, norm, source,
                                              apply_effects=not fired)
             if mu and mu not in fired:
@@ -357,6 +359,12 @@ class EventParser:
         side.switch_to_species(jp, sid)
         from vision.extractors import link_active_to_party
         link_active_to_party(self.state, side_name)
+        # 交代後の新しい個体に前の個体のひんし裏付けを誤適用しない
+        # (実戦: マスカーニャひんし→メタグロス登場直後の空バー誤読1%が
+        #  「ひんし裏付けあり」としてHPイベント化した)
+        last_faint = getattr(self.state, "last_faint", None)
+        if last_faint and last_faint.get("side") == side_name:
+            self.state.last_faint = None
         fired.append(f"switch_{side_name}")
         return True
 
