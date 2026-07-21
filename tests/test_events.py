@@ -294,6 +294,15 @@ def test_rate_extraction():
     print("test_rate_extraction OK")
 
 
+def test_forfeit_win():
+    # 相手の降参による勝ち (実戦 2026-07-22: 降参終了が辞書に無く取り逃した)
+    state, p = new_parser()
+    fired = p.parse("相手が 降参した!")
+    assert "battle_win" in fired, fired
+    assert state.outcome == "win", state.outcome
+    print("test_forfeit_win OK")
+
+
 if __name__ == "__main__":
     test_weather_and_terrain()
     test_switch_and_mega()
@@ -309,4 +318,5 @@ if __name__ == "__main__":
     test_side_attribution_ocr_garble()
     test_charge_vs_electromorphosis()
     test_rate_extraction()
+    test_forfeit_win()
     print("\nALL OK")

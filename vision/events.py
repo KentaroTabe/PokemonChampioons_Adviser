@@ -155,6 +155,9 @@ SIMPLE_EVENTS = [
      "action": "battle_end", "value": "win"},
     {"id": "battle_lose", "keywords": [["勝負", "しようふ"], ["負けた", "まけた"]],
      "action": "battle_end", "value": "loss"},
+    # 相手の降参による勝ち (実戦: 降参終了は勝負メッセージ辞書に無く取り逃した)
+    {"id": "battle_win", "keywords": [["相手", "あいて"], ["降参", "こうさん", "投了"]],
+     "action": "battle_end", "value": "win"},
 
     # --- 持ち物 ---
     {"id": "leftovers_heal", "keywords": [["たべのこし", "食べ残し"], ["回復", "かいふく"]],
