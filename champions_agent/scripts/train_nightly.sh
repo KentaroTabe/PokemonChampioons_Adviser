@@ -40,7 +40,11 @@ trap cleanup EXIT
   # Showdownが起動していなければ起動する
   if ! lsof -nP -iTCP:"$SHOWDOWN_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
     echo "[nightly] Showdownをポート$SHOWDOWN_PORT で起動します"
-    (cd pokemon-showdown && node pokemon-showdown start "$SHOWDOWN_PORT" --no-security) &
+    # 出力を tee パイプへ流し込まないよう別ログへリダイレクトする。
+    # (nodeがパイプ書き込み側を握り続けると tee が EOF を得られず、
+    #  本体が done を出してもスクリプトが終了できずデッドロックする)
+    (cd pokemon-showdown && node pokemon-showdown start "$SHOWDOWN_PORT" --no-security) \
+      >>"$LOG_DIR/showdown_train.log" 2>&1 &
     SHOWDOWN_PID=$!
     STARTED_SHOWDOWN=1
     sleep 10
