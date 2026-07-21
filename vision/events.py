@@ -223,19 +223,38 @@ class EventParser:
         self._recent_fired[event_id] = now
         return last is not None and now - last < 3.0
 
+    def _recently(self, event_id: str, window: float = 6.0) -> bool:
+        """直近windowで発火済みか (タイムスタンプを更新しない参照専用)"""
+        last = self._recent_fired.get(event_id)
+        return last is not None and time.time() - last < window
+
     # --------------------------------------------------------------
     def _is_opponent_text(self, cleaned: str) -> Optional[bool]:
         norm = loose_key(cleaned)
         head = norm[:10]
         if "相手の" in head or "あいての" in head:
             return True
+        # OCR誤読対策: 「相手の」の1文字目が化けた「狙手の/柤手の」等。
+        # 自陣メッセージは種族名 (カタカナ) 始まりで文頭付近に「手の」は
+        # 現れないため、文頭6文字以内の「手の」は「相手の」とみなす
+        # (実戦: 「狙手のハラバリーのみすびたし」が自分の技に誤帰属した)
+        if "手の" in head[:6]:
+            return True
+        # パーティ名の照合: 文頭一致に限らず先頭14文字から両陣営を探す。
+        # 片方の陣営にだけ見つかった場合のみその陣営と判定する
+        # (ミラー・両陣営同種は判定しない = プレフィックス判定に委ねる)
+        scan = norm[:14]
+        found = set()
         for side_name, is_opp in (("player", False), ("opponent", True)):
             side = self.state.side(side_name)
             for mon in side.party:
                 for cand in (mon.species_ja, mon.display_name):
                     ck = loose_key(cand) if cand else ""
-                    if ck and len(ck) >= 3 and norm.startswith(ck[:3]):
-                        return is_opp
+                    if ck and len(ck) >= 3 and (norm.startswith(ck[:3])
+                                                or ck in scan):
+                        found.add(is_opp)
+        if len(found) == 1:
+            return found.pop()
         return None
 
     def _target_side(self, cleaned: str, source: str) -> str:
@@ -312,6 +331,8 @@ class EventParser:
                 if found:
                     side_name, _side, mon = self._target_mon(cleaned, source)
                     if (side_name == "opponent" and found[0] not in mon.revealed_moves
+                            and not (found[1] == "charge" and self._recently(
+                                f"ability_{side_name}_electromorphosis"))
                             and not self._dedup(f"move_{side_name}_{found[1]}")):
                         mon.revealed_moves.append(found[0])
                         fired.append(f"move_{side_name}_{found[1]}")
@@ -385,6 +406,13 @@ class EventParser:
         if not best:
             return None
         r, _ = best
+
+        # でんきにかえる(特性)の「じゅうでん状態になった」表示を技じゅうでんと
+        # 誤認しない: 直近で同陣営のでんきにかえるが発動していたらその状態表示
+        # とみなす (実戦: ハラバリー被弾時に move_charge が誤発火した)
+        if r[1] == "charge" and self._recently(
+                f"ability_{side_name}_electromorphosis"):
+            return None
 
         event_id = f"move_{side_name}_{r[1]}"
         if self._dedup(event_id):

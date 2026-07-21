@@ -165,11 +165,15 @@ async def handle_frame(sid, data):
                 print(text)
             except Exception as e:
                 print(f"[server] パーティ診断エラー: {e}")
-        elif state.get("scene") == "selection":
+        elif state.get("scene") == "selection" and not state.get("outcome"):
+            # 次戦の選出でリセット。outcomeが残っている間は解除しない
+            # (パイプラインの対戦リセット前に解除すると診断が二重発火する)
             _team_advice_done = False
 
-        # 選出画面: 選出進捗の判定と選出提案 (パーティ情報が変わった時だけ)
-        if state["scene"] in ("selection", "standby"):
+        # 選出画面: 選出進捗の判定と選出提案 (パーティ情報が変わった時だけ)。
+        # outcomeが残っている間は前試合の相手パーティを参照してしまうため、
+        # パイプラインの対戦リセット (選出3フレーム連続) を待つ
+        if state["scene"] in ("selection", "standby") and not state.get("outcome"):
             sel_key = json.dumps([
                 state.get("selection_picked"),
                 [p.get("species_id") for p in state["player"]["party"]],

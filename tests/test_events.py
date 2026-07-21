@@ -232,6 +232,50 @@ def test_event_dedup():
     print("test_event_dedup OK")
 
 
+def test_side_attribution_ocr_garble():
+    # 実戦 (2026-07-22): 「相手の」が「狙手の」に化け、相手ハラバリーの
+    # みずびたしが自分の技 move_player_soak として二重帰属した
+    from vision.state import PokemonState
+    state, p = new_parser()
+    state.opponent.party.append(
+        PokemonState(species_ja="ハラバリー", species_id="bellibolt"))
+    f1 = p.parse("4V4相手のハラバリーのみすびたし")
+    assert any(f.startswith("move_opponent_soak") for f in f1), f1
+    # 化けた再読: 相手側として解決され、デデュープで再発火しない
+    f2 = p.parse("狙手のハラバリーのみすびたし")
+    assert not any(f.startswith("move_player_") for f in f2), f2
+    assert not any(f.startswith("move_opponent_soak") for f in f2), f2
+
+    # プレフィックスが完全に化けても、相手パーティの名前照合で相手側になる
+    state2, p2 = new_parser()
+    state2.opponent.party.append(
+        PokemonState(species_ja="ハラバリー", species_id="bellibolt"))
+    f3 = p2.parse("ニVAハラバリーのみすびたし")
+    assert not any(f.startswith("move_player_") for f in f3), f3
+    print("test_side_attribution_ocr_garble OK")
+
+
+def test_charge_vs_electromorphosis():
+    # 実戦 (2026-07-22): でんきにかえる発動時の「じゅうでん状態になった」を
+    # 技じゅうでん (move_charge) と誤検知した。特性発動直後は抑止する
+    from vision.state import PokemonState
+    state, p = new_parser()
+    state.opponent.party.append(
+        PokemonState(species_ja="ハラバリー", species_id="bellibolt"))
+    p.parse("아相手の ハラバリーを 繰り出した!")
+    f1 = p.parse("ハラバリーの でんきにかえる", source="right_popup")
+    assert any("electromorphosis" in f for f in f1), f1
+    f2 = p.parse("4V4相手のハラバリーはじゅうでん充地を始めた")
+    assert not any("charge" in f for f in f2), f2
+    # 特性発動を伴わない「じゅうでんを始めた」は技として通常どおり検知する
+    state2, p2 = new_parser()
+    state2.opponent.party.append(
+        PokemonState(species_ja="ハラバリー", species_id="bellibolt"))
+    f3 = p2.parse("相手の ハラバリーは じゅうでんを 始めた!")
+    assert any("charge" in f for f in f3), f3
+    print("test_charge_vs_electromorphosis OK")
+
+
 if __name__ == "__main__":
     test_weather_and_terrain()
     test_switch_and_mega()
@@ -244,4 +288,6 @@ if __name__ == "__main__":
     test_ability_species_validation()
     test_fixed_ability()
     test_event_dedup()
+    test_side_attribution_ocr_garble()
+    test_charge_vs_electromorphosis()
     print("\nALL OK")
