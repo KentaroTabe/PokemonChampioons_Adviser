@@ -77,6 +77,65 @@ def test_rotation_debounce():
         shutil.rmtree(tmp)
 
 
+def test_outcome_inference():
+    # 実戦 (2026-07-22 3試合目): 勝敗メッセージをOCRが取り逃して
+    # outcome=unknown でローテーションした。最後にHP0%になった側が
+    # その後交代していなければ、その側の負けと推定する
+    import json
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        lg = BattleLogger(log_dir=tmp)
+        lg.on_frame(_state("command"), ["move_player_surf"])
+        first = lg._file
+        # 自分側がHP0%に (hpイベントとしてstate.eventsに載る)
+        st = _state("field")
+        st["events"] = [{"source": "hp", "ts": time.time(),
+                         "text": "ブリジュラス 6%→0% (-6%)",
+                         "detail": {"side": "player", "from": 6.0, "to": 0.0}}]
+        lg.on_frame(st, [])
+        # 勝敗メッセージなしでローテーション
+        lg._finalize(None)
+        records = [json.loads(l) for l in first.read_text().splitlines()]
+        oc = [r for r in records if r["type"] == "outcome"][0]
+        assert oc["outcome"] == "loss", oc
+        assert oc.get("inferred") is True, oc
+
+        # 0%の後に交代があれば推定しない (対戦は続いていた)
+        lg2 = BattleLogger(log_dir=tmp)
+        time.sleep(1.1)
+        lg2.on_frame(_state("command"), ["move_player_surf"])
+        f2 = lg2._file
+        st = _state("field")
+        st["events"] = [{"source": "hp", "ts": time.time(),
+                         "text": "x 6%→0%",
+                         "detail": {"side": "player", "from": 6.0, "to": 0.0}}]
+        lg2.on_frame(st, [])
+        lg2.on_frame(_state("field"), ["switch_player"])
+        lg2._finalize(None)
+        records = [json.loads(l) for l in f2.read_text().splitlines()]
+        oc = [r for r in records if r["type"] == "outcome"][0]
+        assert oc["outcome"] == "unknown", oc
+
+        # 相手側が最後に0%なら勝ちと推定
+        lg3 = BattleLogger(log_dir=tmp)
+        time.sleep(1.1)
+        lg3.on_frame(_state("command"), ["move_player_surf"])
+        f3 = lg3._file
+        st = _state("field")
+        st["events"] = [{"source": "hp", "ts": time.time(),
+                         "text": "x 10%→0%",
+                         "detail": {"side": "opponent", "from": 10.0, "to": 0.0}}]
+        lg3.on_frame(st, [])
+        lg3._finalize(None)
+        records = [json.loads(l) for l in f3.read_text().splitlines()]
+        oc = [r for r in records if r["type"] == "outcome"][0]
+        assert oc["outcome"] == "win", oc
+        print("test_outcome_inference OK")
+    finally:
+        shutil.rmtree(tmp)
+
+
 if __name__ == "__main__":
     test_rotation_debounce()
+    test_outcome_inference()
     print("ALL OK")

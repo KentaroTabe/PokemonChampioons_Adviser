@@ -7,7 +7,8 @@
   {"t": ..., "type": "scene",   "scene": ..., "state": {...簡約状態...}}
   {"t": ..., "type": "events",  "fired": [...], "scene": ...}
   {"t": ..., "type": "advice",  "kind": "battle"|"selection", "advice": {...}}
-  {"t": ..., "type": "outcome", "outcome": "win"|"loss"|"unknown"}
+  {"t": ..., "type": "outcome", "outcome": "win"|"loss"|"unknown",
+   ("inferred": true — 勝敗メッセージ取り逃し時のHP文脈からの推定)}
 
 プレイヤーが実際に選んだ行動は events の move_player_* / switch_player として
 記録される (アドバイスとの突き合わせで採用率・成績を後段で分析できる)。
@@ -71,6 +72,8 @@ class BattleLogger:
         self._selection_streak = 0  # 選出画面が連続何フレーム続いているか
         self._opened_ts = 0.0       # 現在のログファイルを開いた時刻
         self._battle_frames = 0     # command/move_selectの累計フレーム数
+        self._last_zero = None      # 最後にHP0%を観測した側 (side, ts)
+        self._last_switch = {}      # 各側の最後の交代時刻 {side: ts}
 
     # ------------------------------------------------------------------
     def _open_new(self) -> None:
@@ -88,14 +91,39 @@ class BattleLogger:
         with self._file.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
+    def _infer_outcome(self) -> Optional[str]:
+        """勝敗メッセージを取り逃した場合のフォールバック推定。
+
+        最後にHP0%を観測した側が、その後交代せずに対戦が終わっていれば
+        その側の負けとみなす (実戦: 勝敗表示が数秒で流れてOCRが取り逃し、
+        outcome=unknown でローテーションした)。推定は直近3分の観測に限る。
+        """
+        if not self._last_zero:
+            return None
+        side, ts = self._last_zero
+        if time.time() - ts > 180.0:
+            return None
+        if self._last_switch.get(side, 0.0) > ts:
+            return None   # 倒れた後に交代している = 対戦は続いていた
+        return "loss" if side == "player" else "win"
+
     def _finalize(self, outcome: Optional[str]) -> None:
         if self._file is not None and not self._outcome_logged:
-            self._write({"type": "outcome", "outcome": outcome or "unknown"})
+            if outcome:
+                self._write({"type": "outcome", "outcome": outcome})
+            else:
+                inferred = self._infer_outcome()
+                rec = {"type": "outcome", "outcome": inferred or "unknown"}
+                if inferred:
+                    rec["inferred"] = True
+                self._write(rec)
             self._outcome_logged = True
         self._file = None
         self._prev_scene = None
         self._hp_seen_ts = 0.0
         self._battle_frames = 0
+        self._last_zero = None
+        self._last_switch = {}
 
     # ------------------------------------------------------------------
     def on_frame(self, state: dict, fired: list) -> None:
@@ -128,6 +156,10 @@ class BattleLogger:
             self._write({"type": "events", "scene": scene, "turn": state.get("turn"),
                          "fired": fired,
                          "texts": [e["text"] for e in state.get("events", [])[-len(fired):]]})
+            # 勝敗推定用: 各側の最後の交代時刻
+            for f in fired:
+                if f.startswith("switch_"):
+                    self._last_switch[f.split("_")[1]] = time.time()
 
         # HP変化 (extractorsの_set_hpがsource="hp"でstate.eventsに積む) を
         # 専用レコードで記録し、技イベントとのダメージ対応付けを可能にする。
@@ -139,6 +171,11 @@ class BattleLogger:
                 self._hp_seen_ts = e["ts"]
                 self._write({"type": "hp", "turn": state.get("turn"),
                              "text": e["text"], "detail": e.get("detail")})
+                # 勝敗推定用: HP0%到達の側を覚えておく
+                det = e.get("detail") or {}
+                if det.get("to") is not None and det["to"] <= 3.0 \
+                        and det.get("side"):
+                    self._last_zero = (det["side"], e["ts"])
             elif e.get("source") == "manual":
                 self._hp_seen_ts = e["ts"]
                 self._write({"type": "manual_fix", "turn": state.get("turn"),
