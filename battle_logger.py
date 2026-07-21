@@ -74,6 +74,8 @@ class BattleLogger:
         self._battle_frames = 0     # command/move_selectの累計フレーム数
         self._last_zero = None      # 最後にHP0%を観測した側 (side, ts)
         self._last_switch = {}      # 各側の最後の交代時刻 {side: ts}
+        self._rate_open = None      # この対戦に入る前のレート {"value","ts"}
+        self._rate_last = None      # 直近観測レート (ファイルを跨いで保持)
 
     # ------------------------------------------------------------------
     def _open_new(self) -> None:
@@ -82,6 +84,7 @@ class BattleLogger:
         self._file = self.log_dir / name
         self._opened_ts = time.time()
         self._outcome_logged = False
+        self._rate_open = self._rate_last   # この対戦に入る時点のレート
         print(f"[battle_log] 新しい対戦ログ: {self._file.name}")
 
     def _write(self, record: dict) -> None:
@@ -98,6 +101,14 @@ class BattleLogger:
         その側の負けとみなす (実戦: 勝敗表示が数秒で流れてOCRが取り逃し、
         outcome=unknown でローテーションした)。推定は直近3分の観測に限る。
         """
+        # 1. レートの増減 (結果画面に必ず表示され、増=勝ち/減=負けが確実)
+        ro, rl = self._rate_open, self._rate_last
+        if ro and rl and rl["ts"] > self._opened_ts \
+                and rl["value"] != ro["value"]:
+            delta = rl["value"] - ro["value"]
+            if abs(delta) <= 60:   # 1戦の変動として妥当な範囲のみ (誤読対策)
+                return "win" if delta > 0 else "loss"
+        # 2. 最後にHP0%を観測した側の負け (その後交代していない場合)
         if not self._last_zero:
             return None
         side, ts = self._last_zero
@@ -160,6 +171,15 @@ class BattleLogger:
             for f in fired:
                 if f.startswith("switch_"):
                     self._last_switch[f.split("_")[1]] = time.time()
+
+        # レート観測 (結果画面の表示から)。値が変わった時のみ記録する
+        lr = state.get("last_rate")
+        if lr and (self._rate_last is None
+                   or lr["value"] != self._rate_last["value"]):
+            self._write({"type": "rate", "value": lr["value"]})
+            self._rate_last = dict(lr)
+        elif lr and self._rate_last and lr["ts"] > self._rate_last["ts"]:
+            self._rate_last = dict(lr)   # 同値の再観測でも時刻は進める
 
         # HP変化 (extractorsの_set_hpがsource="hp"でstate.eventsに積む) を
         # 専用レコードで記録し、技イベントとのダメージ対応付けを可能にする。

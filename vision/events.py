@@ -295,8 +295,17 @@ class EventParser:
         fired = []
         norm = loose_key(cleaned)
 
-        # リザルト/ランク表示 (「ランクIV レート1602」等) はバトルイベントではないので無視
+        # リザルト/ランク表示 (「ランクIV レート1602」等) はバトルイベントではないので無視。
+        # ただしレート数値は勝敗推定に使えるため抽出して保持する
+        # (勝敗メッセージのOCR取り逃しが6戦中2戦で発生。レートの増減は
+        #  結果画面に必ず表示されるので、増=勝ち/減=負けの裏付けになる)
         if re.search(r"(ランク|らんく).{0,4}(レート|れーと)|レート\d{3,}|ボール級", cleaned):
+            rm = re.search(r"レート\s*(\d{3,5})", cleaned)
+            if rm:
+                val = int(rm.group(1))
+                if 500 <= val <= 4000:   # ありえない値 (誤読) は捨てる
+                    self.state.last_rate = {"value": val,
+                                            "ts": round(time.time(), 2)}
             self.state.log_event(source, cleaned, event_id=None)
             return []
 

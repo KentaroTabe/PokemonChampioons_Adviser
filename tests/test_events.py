@@ -276,6 +276,24 @@ def test_charge_vs_electromorphosis():
     print("test_charge_vs_electromorphosis OK")
 
 
+def test_rate_extraction():
+    # 結果画面のレート表示からレート数値を抽出して保持する (勝敗推定用)。
+    # ランク/レート表示はイベントとしては発火しない (従来どおり無視)
+    state, p = new_parser()
+    assert p.parse("ランクIV レート1602") == []
+    assert state.last_rate and state.last_rate["value"] == 1602, state.last_rate
+    # OCRノイズ混じり
+    assert p.parse("うノランク レート1618ボール級") == []
+    assert state.last_rate["value"] == 1618
+    # ありえない値は捨てる (直前の値を保持)
+    assert p.parse("ランク レート99999") == []
+    assert state.last_rate["value"] == 1618
+    # 対戦リセットを跨いで保持される
+    state.reset_battle()
+    assert state.last_rate and state.last_rate["value"] == 1618
+    print("test_rate_extraction OK")
+
+
 if __name__ == "__main__":
     test_weather_and_terrain()
     test_switch_and_mega()
@@ -290,4 +308,5 @@ if __name__ == "__main__":
     test_event_dedup()
     test_side_attribution_ocr_garble()
     test_charge_vs_electromorphosis()
+    test_rate_extraction()
     print("\nALL OK")

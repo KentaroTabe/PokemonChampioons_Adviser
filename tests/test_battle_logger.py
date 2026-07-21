@@ -135,7 +135,64 @@ def test_outcome_inference():
         shutil.rmtree(tmp)
 
 
+def test_outcome_inference_by_rate():
+    # 実戦 (5試合目): 最終ひんしも勝敗メッセージも取り逃し、HP0%由来の
+    # 推定も効かなかった。結果画面のレート増減から勝敗を推定する
+    import json
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        lg = BattleLogger(log_dir=tmp)
+        # 前の対戦の結果画面でレート1602を観測済み (ファイルを跨いで保持)
+        st = _state("field")
+        st["last_rate"] = {"value": 1602, "ts": time.time()}
+        lg.on_frame(st, [])
+        lg._finalize("win")
+        time.sleep(1.1)
+        # 新しい対戦 (rate_open=1602)
+        lg.on_frame(_state("command"), ["move_player_surf"])
+        f = lg._file
+        # 対戦後の結果画面でレート1618を観測 (増=勝ち)。勝敗メッセージは欠落
+        st = _state("field")
+        st["last_rate"] = {"value": 1618, "ts": time.time()}
+        lg.on_frame(st, [])
+        lg._finalize(None)
+        records = [json.loads(l) for l in f.read_text().splitlines()]
+        oc = [r for r in records if r["type"] == "outcome"][0]
+        assert oc["outcome"] == "win", oc
+        assert oc.get("inferred") is True, oc
+        rates = [r for r in records if r["type"] == "rate"]
+        assert rates and rates[-1]["value"] == 1618, rates
+
+        # レート減=負け
+        time.sleep(1.1)
+        lg.on_frame(_state("command"), ["move_player_surf"])
+        f2 = lg._file
+        st = _state("field")
+        st["last_rate"] = {"value": 1601, "ts": time.time()}
+        lg.on_frame(st, [])
+        lg._finalize(None)
+        records = [json.loads(l) for l in f2.read_text().splitlines()]
+        oc = [r for r in records if r["type"] == "outcome"][0]
+        assert oc["outcome"] == "loss", oc
+
+        # 変動が大きすぎる場合 (誤読疑い) は推定しない
+        time.sleep(1.1)
+        lg.on_frame(_state("command"), ["move_player_surf"])
+        f3 = lg._file
+        st = _state("field")
+        st["last_rate"] = {"value": 2500, "ts": time.time()}
+        lg.on_frame(st, [])
+        lg._finalize(None)
+        records = [json.loads(l) for l in f3.read_text().splitlines()]
+        oc = [r for r in records if r["type"] == "outcome"][0]
+        assert oc["outcome"] == "unknown", oc
+        print("test_outcome_inference_by_rate OK")
+    finally:
+        shutil.rmtree(tmp)
+
+
 if __name__ == "__main__":
     test_rotation_debounce()
     test_outcome_inference()
+    test_outcome_inference_by_rate()
     print("ALL OK")
