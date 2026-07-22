@@ -214,9 +214,28 @@ def make_training_env(battle_format: str = TRAINING_BATTLE_FORMAT,
     """
     rng = random.Random(seed)
 
-    # バトルごとに使用率メタから新チームを生成する (過学習防止)
+    # バトルごとに使用率メタから新チームを生成する (過学習防止)。
+    # 自分チームも一定確率で上位構築の実物にする: 生成チームだけでは
+    # 「上位構築を操縦する」経験が積めず、アドバイザーの実用途
+    # (ユーザーの実チームでの助言) やベンチマーク評価と分布がズレる
     own_teambuilder = ChampionsTeambuilder(size=team_size, play_style=own_play_style,
                                             rng=rng) if use_meta_team else None
+    if own_teambuilder is not None:
+        try:
+            from champions_agent.env.ranked_teams import RankedTeambuilder
+            from champions_agent.train.opponent_pool import OWN_RANKED_TEAM_PROB
+            _own_ranked = RankedTeambuilder(rng=rng)
+
+            class _OwnMixedTeambuilder(ChampionsTeambuilder):
+                def yield_team(self) -> str:
+                    if self.rng.random() < OWN_RANKED_TEAM_PROB:
+                        return _own_ranked.yield_team()
+                    return super().yield_team()
+
+            own_teambuilder = _OwnMixedTeambuilder(
+                size=team_size, play_style=own_play_style, rng=rng)
+        except Exception as e:
+            print(f"[showdown_env] 自分側の上位構築チームは無効 (メタ生成のみ): {e}")
     opp_teambuilder = ChampionsTeambuilder(size=team_size,
                                             style_pool=opp_play_style_pool,
                                             rng=rng) if use_meta_team else None

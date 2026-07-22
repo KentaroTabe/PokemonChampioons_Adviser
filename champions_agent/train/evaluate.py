@@ -43,8 +43,18 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
                           battle_format: str = TRAINING_BATTLE_FORMAT,
                           opponent_kind: str = "random") -> dict:
     """play_styleモデル vs (opponent_play_styleモデル or RandomPlayer) をn_battles戦させる。"""
-    own_team = build_random_team_text(size=TRAINING_TEAM_SIZE, play_style=play_style)
-    own_teambuilder = ConstantTeambuilder(own_team)
+    # 自分チーム: 以前は「生成チーム1個を全戦使い回し」(ConstantTeambuilder)
+    # だったため、勝率がチームドローの当たり外れで±0.2以上振動し、方策の
+    # 進歩が読めなかった。ベンチマーク評価では相手と同じ上位構築を毎戦
+    # 引き直して等条件にする (方策の強さだけを測る。アドバイザーの実用途
+    # =ユーザーの実チームを操縦する、とも整合)
+    if opponent_kind == "benchmark":
+        from champions_agent.env.ranked_teams import RankedTeambuilder
+        own_teambuilder = RankedTeambuilder()
+    else:
+        own_team = build_random_team_text(size=TRAINING_TEAM_SIZE,
+                                          play_style=play_style)
+        own_teambuilder = ConstantTeambuilder(own_team)
 
     player1 = ModelPlayer(
         battle_format=battle_format,
