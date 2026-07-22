@@ -381,6 +381,20 @@ class EventParser:
                             mon.revealed_moves.append(found[0])
                         fired.append(f"move_{side_name}_{found[1]}")
 
+        # 連続まもるの追跡 (成功率減衰の観測用): まもる系の使用で+1、
+        # 同じ側が他の技を使ったら0にリセット
+        _PROTECT_IDS = ("protect", "detect", "banefulbunker", "spikyshield",
+                        "kingsshield", "silktrap", "burningbulwark", "obstruct")
+        for side in ("player", "opponent"):
+            moves_fired = [f for f in fired if f.startswith(f"move_{side}_")]
+            if not moves_fired:
+                continue
+            if any(f.split("_", 2)[2] in _PROTECT_IDS for f in moves_fired):
+                self.state.protect_streak[side] = \
+                    self.state.protect_streak.get(side, 0) + 1
+            else:
+                self.state.protect_streak[side] = 0
+
         self.state.log_event(source, cleaned, event_id=",".join(fired) or None)
         return fired
 

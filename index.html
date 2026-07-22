@@ -261,6 +261,12 @@
                 .map(([k,v]) => `${STAT_ABBR[k]||k}${v>0?'+':''}${v}`).join(' ');
             if (boosts) tags += `<span class="tag" style="background:#573">${boosts}</span>`;
             if (p.ability_ja) tags += `<span class="tag">${p.ability_ja}</span>`;
+            if (p.spe_est != null) {
+                // 先後観測で更新される推定実効素早さ (範囲があれば併記)
+                const r = p.spe_range || [];
+                const rng = (r[0] || r[1]) ? ` (${r[0] ? '>' + Math.round(r[0]) : ''}${r[0] && r[1] ? '·' : ''}${r[1] ? '<' + Math.round(r[1]) : ''})` : '';
+                tags += `<span class="tag" style="background:#357">S~${p.spe_est}${rng}</span>`;
+            }
             if (p.item_ja) tags += `<span class="tag">@${p.item_ja}</span>`;
             let moves = '';
             if (p.moves && p.moves.length)

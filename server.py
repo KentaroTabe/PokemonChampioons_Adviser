@@ -214,7 +214,11 @@ async def handle_frame(sid, data):
 
 
 def _attach_candidates(state: dict) -> None:
-    """相手の未確定ポケモンにタイプ推論の候補リストを付与する (プルダウン用)"""
+    """相手の未確定ポケモンにタイプ推論の候補リストを付与する (プルダウン用)。
+
+    あわせて型推定トラッカーの実効素早さ推定 (観測で更新される) を
+    相手ポケモンへ添付する (フロント表示 + RLの素早さ比較用)
+    """
     try:
         from advisor.infer import get_inference
         for i, p in enumerate(state["opponent"]["party"]):
@@ -225,6 +229,20 @@ def _attach_candidates(state: dict) -> None:
                 p["candidates"] = [
                     {"id": sid_, "ja": ja, "pct": round(prob * 100, 1)}
                     for sid_, prob, ja in cands]
+    except Exception:
+        pass
+    try:
+        from advisor.ev_infer import get_tracker
+        tracker = get_tracker()
+        for p in state["opponent"]["party"]:
+            sid_ = p.get("species_id")
+            est = tracker._est.get(sid_) if sid_ else None
+            if est is None:
+                continue
+            se = est.speed_estimate(p)
+            if se and (se["n_obs"] > 0 or se["lo"] or se["hi"]):
+                p["spe_est"] = se["est"]
+                p["spe_range"] = [se["lo"], se["hi"]]
     except Exception:
         pass
 

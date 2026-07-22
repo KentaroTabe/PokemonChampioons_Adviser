@@ -31,7 +31,7 @@ STATUS_MAP = {"burn": "brn", "paralysis": "par", "sleep": "slp",
               "freeze": "frz", "poison": "psn", "toxic": "tox"}
 BOOST_KEYS = ["atk", "def", "spa", "spd", "spe", "acc", "eva"]
 BASE_KEYS = ["hp", "atk", "def", "spa", "spd", "spe"]
-N_MOVE_SLOTS, MOVE_FEAT_DIM, OBS_DIM = 4, 9, 382  # v3拡張 (v1=227/v2=298の末尾追記)
+N_MOVE_SLOTS, MOVE_FEAT_DIM, OBS_DIM = 4, 9, 384  # v5拡張 (v1=227の末尾追記)
 MOVE_EFFECT_DIM = 8
 VOLATILE_EFFECTS = ["confusion", "leech_seed", "substitute", "taunt",
                     "encore", "yawn"]
@@ -531,7 +531,17 @@ def encode_state(state: dict, my_spe_actual: Optional[float] = None) -> Optional
     speed = np.zeros(2, dtype=np.float32)
     sp_opp = get_dex().species((opp or {}).get("species_id"))
     opp_base_spe = float((sp_opp["baseStats"].get("spe") if sp_opp else 0) or 0)
-    if opp_base_spe > 0 and opp is not None:
+    if opp is not None and opp.get("spe_est"):
+        # 先後観測で更新された推定実効素早さ (server が添付)。
+        # スカーフ/まひ/仮説EVは推定に織り込み済みなので天候補正のみ後段で適用
+        opp_base_spe = float(opp["spe_est"])
+        from champions_agent.agent.encoders import WEATHER_SPEED_ABILITIES
+        ab = _known_ability_dict(opp)
+        wmap = {"rain": "rain", "sun": "sun", "sandstorm": "sand", "snow": "snow"}
+        wnow = wmap.get((state.get("field") or {}).get("weather"))
+        if ab in WEATHER_SPEED_ABILITIES and WEATHER_SPEED_ABILITIES[ab] == wnow:
+            opp_base_spe *= 2.0
+    elif opp_base_spe > 0 and opp is not None:
         # 相手側の実効素早さ補正 (自分側は effective_speed 済みの my_spe_actual)
         from champions_agent.agent.encoders import WEATHER_SPEED_ABILITIES
         ab = _known_ability_dict(opp)
@@ -658,6 +668,11 @@ def encode_state(state: dict, my_spe_actual: Optional[float] = None) -> Optional
                 return 1.0
         return 0.0
 
+    ps = state.get("protect_streak") or {}
+    protect_vec = np.array([min(ps.get("player", 0), 3) / 3.0,
+                            min(ps.get("opponent", 0), 3) / 3.0],
+                           dtype=np.float32)
+
     special_vec = np.array([
         _guard_flag_dict(own),
         _guard_flag_dict(opp),
@@ -677,7 +692,7 @@ def encode_state(state: dict, my_spe_actual: Optional[float] = None) -> Optional
                           *own_move_effects, *opp_move_effects,
                           profile_vec, utility_vec,
                           field_remaining, bench_matchup,
-                          special_vec]).astype(np.float32)
+                          special_vec, protect_vec]).astype(np.float32)
     if len(vec) < OBS_DIM:
         vec = np.concatenate([vec, np.zeros(OBS_DIM - len(vec), dtype=np.float32)])
     return vec[:OBS_DIM]

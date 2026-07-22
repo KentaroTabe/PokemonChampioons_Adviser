@@ -297,6 +297,29 @@ class SpreadEstimator:
         }
 
 
+    def speed_estimate(self, opp_state: Optional[dict] = None) -> Optional[dict]:
+        """最良仮説の実効素早さを観測レンジでクランプした推定値。
+
+        戻り値: {"est": int, "lo": float|None, "hi": float|None, "n_obs": int}
+        (フロントエンド表示とRLの素早さ比較に使う)
+        """
+        if not self.hyps:
+            return None
+        top = max(self.hyps, key=lambda h: h["logw"])
+        v = self._view(top, opp_state or {})
+        if v is None:
+            return None
+        v.status = (opp_state or {}).get("status")
+        from advisor.damage import effective_speed
+        est = effective_speed(v)
+        if self.spe_lower:
+            est = max(est, int(self.spe_lower) + 1)
+        if self.spe_upper:
+            est = min(est, max(1, int(self.spe_upper) - 1))
+        return {"est": int(est), "lo": self.spe_lower, "hi": self.spe_upper,
+                "n_obs": self.n_obs}
+
+
 class SpreadTracker:
     """フレームストリームから観測を抽出し、種族ごとの推定器を更新する。
 

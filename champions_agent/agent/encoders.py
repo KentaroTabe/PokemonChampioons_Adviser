@@ -777,6 +777,16 @@ def encode_battle(battle) -> np.ndarray:
             pass
         return 0.0
 
+    # 連続まもるカウンタ (成功率減衰の学習用。poke-envが追跡)
+    def _protect_count(pokemon) -> float:
+        try:
+            return min(int(getattr(pokemon, "protect_counter", 0) or 0), 3) / 3.0
+        except Exception:
+            return 0.0
+
+    protect_vec = np.array([_protect_count(own), _protect_count(opp)],
+                           dtype=np.float32)
+
     special_vec = np.array([
         _guard_flag(own),
         _guard_flag(opp),
@@ -795,7 +805,7 @@ def encode_battle(battle) -> np.ndarray:
                           *own_move_effects, *opp_move_effects,
                           profile_vec, utility_vec,
                           field_remaining, bench_matchup,
-                          special_vec]).astype(np.float32)
+                          special_vec, protect_vec]).astype(np.float32)
 
     # 固定長を保証
     if len(vec) < BATTLE_OBS_DIM:

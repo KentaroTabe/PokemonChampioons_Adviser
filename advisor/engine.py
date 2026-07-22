@@ -260,6 +260,11 @@ def evaluate(state: dict, resolver=None) -> dict:
                 if not opp_view.item and guess["item"]:
                     opp_view.item = guess["item"]
                 opp_spread_note = f"相手の型推定: {guess['summary']}"
+            # 先後観測の実効素早さ範囲は確度に関係なく反映する
+            # (探索/詰み筋/RLの先手判定が観測と矛盾しないように)
+            if guess and (guess.get("spe_lower") or guess.get("spe_upper")):
+                opp_view.spe_bounds = (guess.get("spe_lower"),
+                                       guess.get("spe_upper"))
         except Exception:
             pass
 

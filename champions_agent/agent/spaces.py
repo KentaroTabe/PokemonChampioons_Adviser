@@ -63,7 +63,12 @@ _EXTRA_DIM_V3 = 2 * N_MOVE_SLOTS * MOVE_EFFECT_DIM + 4 + N_MOVE_SLOTS + 2 + 4  #
 #   素早さ比較にすいすい等の天候補正+こだわりスカーフを反映
 _EXTRA_DIM_V4 = 6
 
-BATTLE_OBS_DIM = _OBS_DIM_V1 + _EXTRA_DIM_V2 + _EXTRA_DIM_V3 + _EXTRA_DIM_V4  # = 382
+# --- v5拡張: 連続まもるカウンタ (自分/相手, /3)。連続使用で成功率が
+#     減衰するため「まもるで1ターン稼ぐ」戦術の学習に必須 ---
+_EXTRA_DIM_V5 = 2
+
+BATTLE_OBS_DIM = (_OBS_DIM_V1 + _EXTRA_DIM_V2 + _EXTRA_DIM_V3
+                  + _EXTRA_DIM_V4 + _EXTRA_DIM_V5)  # = 384
 
 # --- 選出方策用の旧エンコーダ次元 (encoders.encode_own_pokemon 等) ---
 POKEMON_FEATURE_DIM = 64

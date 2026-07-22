@@ -119,3 +119,14 @@ def get_my_build(species_ja: Optional[str]) -> Optional[dict]:
 
 def has_build(species_ja: Optional[str]) -> bool:
     return get_my_build(species_ja) is not None
+
+
+def get_my_moves(species_ja: Optional[str]) -> list:
+    """登録済みの技名リスト (日本語)。未登録なら空リスト。
+
+    技画面の所有者照合 (どのポケモンの技画面か) に使う
+    """
+    if not species_ja:
+        return []
+    entry = _load().get(species_ja) or {}
+    return list(entry.get("技") or entry.get("moves") or [])

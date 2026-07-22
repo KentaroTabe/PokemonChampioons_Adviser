@@ -15,6 +15,7 @@ from advisor.rl_bridge import (_legal_actions, encode_state, policy_hint,
 def _state():
     return {
         "scene": "command", "turn": 4,
+        "protect_streak": {"player": 1, "opponent": 0},
         "field": {"weather": "rain", "weather_turns": 5, "terrain": None,
                   "trick_room": False},
         "mega_used": {"player": False, "opponent": False},
@@ -80,7 +81,38 @@ def test_encode():
     assert abs(obs[364] - 1.0) < 1e-5, f"自分物理シェア位置ずれ: {obs[364]}"
     # 天候残りターン: weather_turns=5 -> 5/8
     assert abs(obs[370] - 5.0 / 8.0) < 1e-5, f"天候残り位置ずれ: {obs[370]}"
-    print(f"test_encode OK ({OBS_DIM}dim, 値域正常, v1/v2/v3位置検証OK)")
+    # v5: 連続まもる (自分1回 -> 1/3) at 382
+    assert abs(obs[382] - 1.0 / 3.0) < 1e-5, f"まもるカウンタ位置ずれ: {obs[382]}"
+    assert obs[383] == 0.0
+    print(f"test_encode OK ({OBS_DIM}dim, 値域正常, v1-v5位置検証OK)")
+
+
+def test_speed_estimate_integration():
+    # 先後観測の推定素早さ: spe_est添付でRLの素早さ比較が変わり、
+    # spe_boundsで探索の実効素早さがクランプされる
+    from advisor.damage import MonView, effective_speed
+    from advisor.dex import get_dex
+    sp = get_dex().species("garchomp")
+    v = MonView(species_id="garchomp", types=sp["types"], base=sp["baseStats"])
+    base_spe = effective_speed(v)
+    # 「自分の150より速かった」観測 -> 下限151にクランプ
+    v.spe_bounds = (150.0, None)
+    assert effective_speed(v) >= 151, effective_speed(v)
+    # 「自分の90より遅かった」観測 -> 上限89にクランプ
+    v.spe_bounds = (None, 90.0)
+    assert effective_speed(v) <= 89, effective_speed(v)
+    v.spe_bounds = None
+    assert effective_speed(v) == base_spe
+
+    # rl_bridge: spe_est 添付で「自分が速いか」フラグが反転する
+    st = _state()
+    st["opponent"]["party"][0]["spe_est"] = 200   # 実効200と推定
+    obs_fast_opp = encode_state(st, my_spe_actual=112)
+    st["opponent"]["party"][0]["spe_est"] = 50
+    obs_slow_opp = encode_state(st, my_spe_actual=112)
+    assert obs_fast_opp[226] == 0.0 and obs_slow_opp[226] == 1.0, \
+        (obs_fast_opp[226], obs_slow_opp[226])
+    print("test_speed_estimate_integration OK")
 
 
 def test_boost_utility_context():
@@ -251,6 +283,7 @@ if __name__ == "__main__":
     test_boost_utility_context()
     test_contrary()
     test_meta_specials()
+    test_speed_estimate_integration()
     test_legal_actions()
     test_policy_hint()
     test_value_of_sim()

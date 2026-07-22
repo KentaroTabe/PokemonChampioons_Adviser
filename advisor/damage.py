@@ -28,6 +28,9 @@ class MonView:
     # EV仮定 (不明時は攻撃系/耐久系に252振り想定)
     ev: dict = field(default_factory=dict)
     nature: dict = field(default_factory=dict)     # stat -> 0.9/1.0/1.1
+    # 先後観測から狭めた実効素早さの範囲 (lower, upper)。
+    # effective_speed がこの範囲へクランプする (ev_infer.observe_speed 由来)
+    spe_bounds: Optional[tuple] = None
 
     def stat(self, key: str, ignore_boost: bool = False) -> int:
         b = self.base.get(key, 80)
@@ -81,6 +84,14 @@ def effective_speed(mon: MonView, fieldv: Optional["FieldView"] = None) -> int:
         spe = int(spe * 1.5)
     if mon.status == "paralysis" and ab != "quickfeet":
         spe = int(spe * 0.5)
+    # 先後観測から狭めた範囲へクランプ (最良仮説が観測と矛盾する場合の補正。
+    # 例: 仮説S=105でも「自分の112より速かった」観測があれば113以上とする)
+    if mon.spe_bounds:
+        lo, hi = mon.spe_bounds
+        if lo:
+            spe = max(spe, int(lo) + 1)
+        if hi:
+            spe = min(spe, max(1, int(hi) - 1))
     return int(spe)
 
 

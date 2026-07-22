@@ -235,6 +235,8 @@ class BattleStateV2:
         # 直近のレート表示 {"value": int, "ts": float}。結果画面のレート増減
         # から勝敗を推定するため、対戦リセットを跨いで保持する
         self.last_rate: Optional[dict] = None
+        # 連続まもる使用回数 (成功率減衰の追跡。他の技で0にリセット)
+        self.protect_streak = {"player": 0, "opponent": 0}
 
     # --- イベントログ ---
     def log_event(self, source: str, text: str, event_id: Optional[str] = None,
@@ -275,4 +277,5 @@ class BattleStateV2:
             "mega_used": dict(self.mega_used),
             "events": self.events[-30:],
             "last_rate": self.last_rate,
+            "protect_streak": dict(self.protect_streak),
         }
