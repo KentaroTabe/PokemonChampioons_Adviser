@@ -62,6 +62,10 @@ class PokemonState:
     moves: list = field(default_factory=list)      # list[MoveSlot] 自分側: 画面から確定
     revealed_moves: list = field(default_factory=list)  # 相手側: 使用を目撃した技 (日本語)
 
+    # この試合中に観測されたこの個体の別名 (OCR揺れの表示名キャッシュ)。
+    # 手動確定や類似照合の際に蓄積し、以後のイベント帰属に使う
+    aliases: list = field(default_factory=list)
+
     is_mega: bool = False
     is_active: bool = False
     is_picked: bool = False          # 選出画面で選出済み (左端の白リボン)
@@ -117,12 +121,21 @@ class SideState:
         return None
 
     def ensure_active(self) -> PokemonState:
-        """場に出ているポケモンを返す。未確定ならプレースホルダを作る。"""
+        """場に出ているポケモンを返す。未確定ならプレースホルダを作る。
+
+        パーティが満枠 (6) の場合は新枠を作らず、帰属不明の観測を吸収する
+        使い捨て枠 (UI非表示) を返す — ロスターは試合中に増えない
+        """
         mon = self.active()
         if mon is None:
-            mon = PokemonState(is_active=True)
-            self.party.append(mon)
-            self.active_index = len(self.party) - 1
+            if len(self.party) < 6:
+                mon = PokemonState(is_active=True)
+                self.party.append(mon)
+                self.active_index = len(self.party) - 1
+            else:
+                if getattr(self, "_limbo", None) is None:
+                    self._limbo = PokemonState()
+                return self._limbo
         return mon
 
     def find_by_species(self, species_ja: str) -> Optional[int]:
@@ -134,6 +147,8 @@ class SideState:
     def find_by_display_name(self, name: str) -> Optional[int]:
         for i, p in enumerate(self.party):
             if p.display_name and p.display_name == name:
+                return i
+            if name in (p.aliases or []):
                 return i
         return None
 

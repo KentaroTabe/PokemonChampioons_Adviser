@@ -129,6 +129,49 @@ def test_prankster_speed_observation_skipped():
     print("test_prankster_speed_observation_skipped OK")
 
 
+def test_alias_cache():
+    # 個体名キャッシュ: 手動確定で紐づいた別名が以後のイベント帰属に効く
+    from vision.state import BattleStateV2, PokemonState
+    from vision.events import EventParser
+
+    state = BattleStateV2()
+    state.opponent.party = [
+        PokemonState(species_ja="ハラバリー", species_id="bellibolt"),
+        PokemonState(species_ja="ヤミラミ", species_id="sableye"),
+    ]
+    state.opponent.switch_to(1)   # activeはヤミラミ
+    p = EventParser(state, extractors_resolver())
+
+    # 別名なし: 崩れた名前の技は誰の判明技にもならない (イベントのみ)
+    fired = p.parse("相手のタメルテンキのパラボラチャージ")
+    assert any("paraboliccharge" in f for f in fired), fired
+    assert not state.opponent.party[0].revealed_moves
+    assert not state.opponent.party[1].revealed_moves
+
+    # 手動確定相当: 「タメルテンキ」をハラバリーの別名として登録
+    state.opponent.party[0].aliases.append("タメルテンキ")
+    fired = p.parse("相手のタメルテンキのみずびたし")
+    assert any("soak" in f for f in fired), fired
+    assert "みずびたし" in state.opponent.party[0].revealed_moves, \
+        state.opponent.party[0].revealed_moves
+    assert not state.opponent.party[1].revealed_moves
+    # find_by_display_name も別名で引ける (HUD追跡の復帰用)
+    assert state.opponent.find_by_display_name("タメルテンキ") == 0
+    print("test_alias_cache OK")
+
+
+def test_roster_lock():
+    # 満枠 (6) のロスターは試合中に増えない (帰属不明は使い捨て枠が吸収)
+    from vision.state import SideState, PokemonState
+    side = SideState()
+    side.party = [PokemonState(species_ja=f"モン{i}") for i in range(6)]
+    side.active_index = None
+    mon = side.ensure_active()
+    assert len(side.party) == 6, len(side.party)   # 7枠目が生えない
+    assert mon not in side.party
+    print("test_roster_lock OK")
+
+
 def test_prankster_search_priority():
     from advisor.search import _priority
     from advisor.damage import MonView
@@ -146,5 +189,7 @@ if __name__ == "__main__":
     test_hud_name_mismatch_guard()
     test_watch_screen_attribution()
     test_prankster_speed_observation_skipped()
+    test_alias_cache()
+    test_roster_lock()
     test_prankster_search_priority()
     print("\nALL OK")

@@ -449,6 +449,22 @@ async def set_species(sid, data):
         party = pipeline.state.opponent.party
         if 0 <= idx < len(party):
             party[idx].merge_species(species_ja, species_id)
+            # 直近の「HUD名不一致」で観測された別名をこの個体に紐づける
+            # (試合中の個体名キャッシュ: 以後その名前のイベントが正しく帰属する)
+            import re as _re
+            now_ts = time.time()
+            for e in pipeline.state.events[-40:]:
+                if e.get("event") != "hud_name_mismatch":
+                    continue
+                if now_ts - e.get("ts", 0) > 120:
+                    continue
+                m = _re.search(r"\(([^≠)]+)≠", e.get("text") or "")
+                if m:
+                    alias = m.group(1).strip()
+                    if alias and alias not in party[idx].aliases:
+                        party[idx].aliases.append(alias)
+                        print(f"[server] 別名を紐づけ: {species_ja} <- {alias}")
+            party[idx].aliases = party[idx].aliases[-6:]
             pipeline.state.log_event(
                 "manual", f"相手の{species_ja}を手動確定 (候補から選択)",
                 event_id="species_manual")

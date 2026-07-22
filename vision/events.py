@@ -251,7 +251,8 @@ class EventParser:
         for side_name, is_opp in (("player", False), ("opponent", True)):
             side = self.state.side(side_name)
             for mon in side.party:
-                for cand in (mon.species_ja, mon.display_name):
+                for cand in (mon.species_ja, mon.display_name,
+                             *(mon.aliases or [])):
                     ck = loose_key(cand) if cand else ""
                     if ck and len(ck) >= 3 and (norm.startswith(ck[:3])
                                                 or ck in scan):
@@ -285,7 +286,8 @@ class EventParser:
         norm = loose_key(cleaned)
         head = norm[:14]
         for mon in side.party:
-            for cand in (mon.species_ja, mon.display_name):
+            for cand in (mon.species_ja, mon.display_name,
+                         *(mon.aliases or [])):
                 ck = loose_key(cand) if cand else ""
                 if ck and len(ck) >= 3 and ck in head:
                     return side_name, side, mon, True
@@ -295,7 +297,8 @@ class EventParser:
             import difflib
             names = {}
             for mon in side.party:
-                for cand in (mon.species_ja, mon.display_name):
+                for cand in (mon.species_ja, mon.display_name,
+                             *(mon.aliases or [])):
                     ck = loose_key(cand) if cand else ""
                     if ck and len(ck) >= 3:
                         names[ck] = mon
@@ -506,7 +509,8 @@ class EventParser:
         for side_name in (default_side,
                           "opponent" if default_side == "player" else "player"):
             for mon in self.state.side(side_name).party:
-                for cand in (mon.species_ja, mon.display_name):
+                for cand in (mon.species_ja, mon.display_name,
+                             *(mon.aliases or [])):
                     ck = loose_key(cand) if cand else ""
                     if ck and len(ck) >= 3 and (ck in name_key or name_key in ck):
                         return side_name, mon

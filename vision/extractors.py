@@ -488,6 +488,11 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
                    or _dl.SequenceMatcher(None, key_new, k).ratio() >= 0.5)
             for k in cur)
         if similar:
+            # OCR揺れの別表記をエイリアスとして蓄積 (以後の帰属照合に使う)
+            if opp.display_name and opp.display_name != name_text \
+                    and opp.display_name not in (opp.aliases or []):
+                opp.aliases.append(opp.display_name)
+                opp.aliases = opp.aliases[-6:]
             opp.display_name = name_text
         elif opp.species_ja:
             # 見逃した交代の兆候: 表示名の合う既存枠があればそちらへ切替

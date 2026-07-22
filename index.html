@@ -35,10 +35,15 @@
         <div id="left">
             <video id="video" autoplay playsinline></video>
             <canvas id="canvas" style="display:none"></canvas>
-            <div class="panel"><h3>イベントログ</h3><div id="events"></div></div>
+            <div class="panel"><details id="events-details"><summary style="cursor:pointer"><b>イベントログ</b> <span id="events-count" style="font-size:11px;color:#89a"></span></summary><div id="events"></div></details></div>
         </div>
         <div id="right">
-            <div class="panel" id="advice"><h3>アドバイス</h3><pre id="advice-text">(選出画面・コマンド選択画面で表示されます)</pre></div>
+            <div class="panel" id="advice"><h3>アドバイス</h3>
+                <div id="advice-headline" style="color:#7fa;font-weight:bold;font-size:15px;white-space:pre-wrap">(選出画面・コマンド選択画面で表示されます)</div>
+                <details id="advice-details" style="margin-top:6px">
+                    <summary style="cursor:pointer;font-size:12px;color:#89a">詳細を表示</summary>
+                    <pre id="advice-text" style="white-space:pre-wrap"></pre>
+                </details></div>
             <div class="panel"><h3>自分のパーティ
                 <button onclick="openTeamEditor()" style="float:right;font-size:11px;background:#356;color:#cde;border:1px solid #467;border-radius:4px;cursor:pointer">パーティ編集</button>
             </h3><div id="my-party"></div></div>
@@ -304,15 +309,38 @@
 
             document.getElementById('my-party').innerHTML =
                 (s.player.party || []).map((p, i) => renderMon(p, i, s.player.active_index, 'my')).join('');
-            document.getElementById('opp-party').innerHTML =
-                (s.opponent.party || []).map((p, i) => renderMon(p, i, s.opponent.active_index, 'opp')).join('');
+            // 誤表示削減: 種族もタイプも不明な枠は描画しない (件数だけ表示)
+            const oppParty = s.opponent.party || [];
+            const shown = [];
+            let unknownCount = 0;
+            oppParty.forEach((p, i) => {
+                if (p.species_ja || (p.types && p.types.length) || p.display_name)
+                    shown.push(renderMon(p, i, s.opponent.active_index, 'opp'));
+                else unknownCount++;
+            });
+            if (unknownCount > 0)
+                shown.push(`<div class="mon" style="opacity:.5">未確認 ${unknownCount}枠</div>`);
+            // 帰属不明の観測 (交代見逃しの疑い) があれば修正を促す
+            const mism = (s.events || []).filter(e => e.event === 'hud_name_mismatch').slice(-1);
+            if (mism.length)
+                shown.push(`<div style="font-size:11px;color:#fa6">⚠ ${mism[0].text} — ✏️で種族を確定すると以後正しく帰属されます</div>`);
+            document.getElementById('opp-party').innerHTML = shown.join('');
 
-            document.getElementById('events').innerHTML = (s.events || []).slice().reverse()
-                .map(e => `<div>[${e.source}] ${e.text} ${e.event ? '→ <b>' + e.event + '</b>' : ''}</div>`).join('');
+            // 誤表示削減: イベント化された行のみ表示 (OCRノイズの生ログは出さない)
+            const evs = (s.events || []).filter(e => e.event);
+            document.getElementById('events-count').textContent = `(${evs.length}件)`;
+            document.getElementById('events').innerHTML = evs.slice().reverse().slice(0, 30)
+                .map(e => `<div>[${e.source}] ${e.text} → <b>${e.event}</b></div>`).join('');
         });
 
         socket.on('advice_update', (a) => {
-            document.getElementById('advice-text').textContent = a.text || a.reason || '';
+            const full = a.text || a.reason || '';
+            const lines = full.split('\n');
+            // 推奨行 (◎で始まる行 or 先頭行) をヘッドラインに
+            const headIdx = lines.findIndex(l => l.startsWith('◎'));
+            const head = headIdx >= 0 ? lines[headIdx] : (lines[0] || '');
+            document.getElementById('advice-headline').textContent = head;
+            document.getElementById('advice-text').textContent = full;
         });
 
         document.getElementById('reset-btn').addEventListener('click', () => socket.emit('reset_state'));
