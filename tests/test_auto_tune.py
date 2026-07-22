@@ -4,7 +4,14 @@
 """
 from __future__ import annotations
 
-from champions_agent.train.auto_tune import (LADDER, MIN_CYCLES, decide)
+import tempfile
+from pathlib import Path
+
+from champions_agent.train import auto_tune
+from champions_agent.train.auto_tune import LADDER, MIN_CYCLES, decide
+
+# テストの判定ログを実ログ (logs/auto_tune.log) に混入させない
+auto_tune.LOG_PATH = Path(tempfile.mkdtemp()) / "auto_tune_test.log"
 
 
 def _fresh():

@@ -36,9 +36,12 @@ REWARD_PRESETS: dict[str, RewardConfig] = {
         hp_diff_weight=1.3, faint_bonus=2.0, fainted_penalty=2.0,
         win_bonus=30.0, lose_penalty=30.0, step_penalty=0.015,
     ),
+    # stall: 旧設定 (hp_diff 1.5 / faint 1.5 / step 0.002) は「殴らず耐える」
+    # 局所解に崩壊した (vsRandom 0.27まで劣化)。耐久寄りは保ちつつ
+    # 削り (faint_bonus) と決着 (step_penalty) の圧を残す
     "stall": RewardConfig(
-        hp_diff_weight=1.5, faint_bonus=1.5, fainted_penalty=2.5,
-        win_bonus=30.0, lose_penalty=30.0, step_penalty=0.002,
+        hp_diff_weight=1.2, faint_bonus=2.0, fainted_penalty=2.2,
+        win_bonus=30.0, lose_penalty=30.0, step_penalty=0.008,
     ),
     "balance": DEFAULT_REWARD_CONFIG,
 }
