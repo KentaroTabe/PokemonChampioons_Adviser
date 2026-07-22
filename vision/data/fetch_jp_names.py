@@ -120,6 +120,33 @@ def build() -> dict:
         if ja:
             out["items"][ja] = _to_showdown_id(row["identifier"])
 
+    # --- チャンピオンズ新規メガストーンの補完 ---
+    # 標準データソースには存在しないため、ローカルShowdownのメガ種一覧から
+    # 「{日本語種族名}ナイト(X/Y)」を生成して追加する (既存の正規ID登録は優先)
+    try:
+        import subprocess
+        node_out = subprocess.run(
+            ["node", "-e",
+             "const dex=require('./pokemon-showdown/dist/sim/dex.js').Dex;"
+             "const m=[];for(const sp of dex.species.all()){"
+             "if(sp.forme&&sp.forme.startsWith('Mega'))"
+             "m.push({base:dex.species.get(sp.baseSpecies).id,forme:sp.forme});}"
+             "console.log(JSON.stringify(m));"],
+            capture_output=True, text=True, timeout=60)
+        megas = json.loads(node_out.stdout.strip())
+        ja_by_id = {v: k for k, v in out["species"].items()}
+        for m in megas:
+            suffix = "x" if m["forme"] == "Mega-X" else \
+                ("y" if m["forme"] == "Mega-Y" else "")
+            base_ja = ja_by_id.get(m["base"])
+            if not base_ja:
+                continue
+            stone_ja = base_ja + "ナイト" + suffix.upper()
+            if stone_ja not in out["items"]:
+                out["items"][stone_ja] = m["base"] + "ite" + suffix
+    except Exception as e:
+        print(f"[fetch_jp_names] メガストーン補完をスキップ: {e}")
+
     # --- タイプ ---
     for row in types_rows:
         tid = int(row["id"])
