@@ -52,11 +52,21 @@ def test_encode():
     assert obs is not None and len(obs) == OBS_DIM, len(obs)
     assert np.all(np.isfinite(obs))
     assert 0 <= obs.min() and obs.max() <= 4.0, (obs.min(), obs.max())
-    # レイアウト: own75 + opp39 + extra2 + own_bench40 + opp_bench42 +
-    #             count1 = 199; my_side8 -> 207; opp_side8 -> 215; field10
+    # v1レイアウト: own75 + opp39 + extra2 + own_bench40 + opp_bench42 +
+    #               count1 = 199; my_side8 -> 207; opp_side8 -> 215; field10
     assert obs[199] == 1.0, "自陣SRフラグ位置ずれ (199)"
     assert obs[215 + 1] == 1.0, "雨フラグ位置ずれ (216)"
-    print("test_encode OK (227dim, 値域正常, 位置検証OK)")
+    # v2拡張 (227以降): 判明技4x9 -> 263; volatiles12 -> 275; mega3 -> 278;
+    #                   items12 -> 290; misc2 -> 292; bench_tactics6 -> 298
+    # 相手の判明技スロット0 = じしん (威力100 -> 100/150, 物理フラグ)
+    assert abs(obs[227] - 100.0 / 150.0) < 1e-5, f"判明技威力位置ずれ: {obs[227]}"
+    assert obs[227 + 3] == 1.0, "判明技の物理フラグ位置ずれ"
+    # メガ: 自分はラグラージナイト持ち・未使用 -> can_mega=1, used=0
+    assert obs[275] == 1.0, f"メガ可能フラグ位置ずれ: {obs[275]}"
+    assert obs[276] == 0.0 and obs[277] == 0.0
+    # 自分の残数: 3体中ミミッキュひんし -> 2/3
+    assert abs(obs[290] - 2.0 / 3.0) < 1e-5, f"残数位置ずれ: {obs[290]}"
+    print(f"test_encode OK ({OBS_DIM}dim, 値域正常, v1/v2位置検証OK)")
 
 
 def test_legal_actions():

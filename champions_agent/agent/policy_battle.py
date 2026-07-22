@@ -49,11 +49,31 @@ class BattlePolicy:
                     self.model = None
 
 
+    def _adapt_obs(self, obs):
+        """観測をモデルの期待次元へ合わせる (旧227次元チェックポイント互換)。
+
+        v2拡張はv1の227次元プレフィックスを変えずに末尾追記しているため、
+        スライスで意味が保たれる (プール相手・_bestの旧世代を使い続けられる)
+        """
+        try:
+            want = int(self.model.observation_space.shape[0])
+        except Exception:
+            return obs
+        if len(obs) == want:
+            return obs
+        if len(obs) > want:
+            return obs[:want]
+        import numpy as np
+        padded = np.zeros(want, dtype=obs.dtype)
+        padded[:len(obs)] = obs
+        return padded
+
     def choose_order(self, battle: AbstractBattle) -> BattleOrder:
         if self.model is None:
             return self._choose_random_legal(battle)
 
         obs = ChampionsSinglesEnv.embed_battle(self, battle)  # type: ignore[arg-type]
+        obs = self._adapt_obs(obs)
         try:
             order = self._choose_masked(battle, obs)
             if order is not None:

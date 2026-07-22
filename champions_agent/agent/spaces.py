@@ -26,7 +26,21 @@ _BENCH_DIM = 2 * 20 + 2 * 21 + 1
 # 陣営の場 (設置技/壁/おいかぜ) 8x2 + 天候/フィールド/TR/ターン10 + 素早さ比較2 = 28
 _FIELD_SIDE_DIM = 8 * 2 + 10 + 2
 
-BATTLE_OBS_DIM = _OWN_ACTIVE_DIM + _OPP_ACTIVE_DIM + _BENCH_DIM + _FIELD_SIDE_DIM  # = 227
+_OBS_DIM_V1 = _OWN_ACTIVE_DIM + _OPP_ACTIVE_DIM + _BENCH_DIM + _FIELD_SIDE_DIM  # = 227
+
+# --- v2拡張観測 (頭打ち対策の観測拡充。v1の227次元プレフィックスは不変で
+#     末尾に追記する: 旧チェックポイントは観測スライスで引き続き動く) ---
+# 相手の判明技4スロット (自分を防御側とした技特徴) 4x9 = 36
+# 揮発状態 (混乱/やどりぎ/身代わり/ちょうはつ/アンコール/ねむけ) 自分6+相手6 = 12
+# メガ進化 (自分可能/自分側使用済み/相手側使用済み) = 3
+# 持ち物カテゴリ (スカーフ/ハチマキ/メガネ/珠/残飯/その他判明) 自分6+相手6 = 12
+# 自分の残数1 + 相手判明技の最大優先度1 = 2
+# 控えの戦術情報: 自分控え2x(打点相性+被STAB相性) + 相手控え2x(打点相性) = 6
+N_VOLATILE_SLOTS = 6
+N_ITEM_CATS = 6
+_EXTRA_DIM_V2 = N_MOVE_SLOTS * MOVE_FEAT_DIM + 12 + 3 + 12 + 2 + 6  # = 71
+
+BATTLE_OBS_DIM = _OBS_DIM_V1 + _EXTRA_DIM_V2  # = 298
 
 # --- 選出方策用の旧エンコーダ次元 (encoders.encode_own_pokemon 等) ---
 POKEMON_FEATURE_DIM = 64

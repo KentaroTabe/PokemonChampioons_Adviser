@@ -31,7 +31,11 @@ STATUS_MAP = {"burn": "brn", "paralysis": "par", "sleep": "slp",
               "freeze": "frz", "poison": "psn", "toxic": "tox"}
 BOOST_KEYS = ["atk", "def", "spa", "spd", "spe", "acc", "eva"]
 BASE_KEYS = ["hp", "atk", "def", "spa", "spd", "spe"]
-N_MOVE_SLOTS, MOVE_FEAT_DIM, OBS_DIM = 4, 9, 227
+N_MOVE_SLOTS, MOVE_FEAT_DIM, OBS_DIM = 4, 9, 298  # v2拡張 (v1=227の末尾追記)
+VOLATILE_EFFECTS = ["confusion", "leech_seed", "substitute", "taunt",
+                    "encore", "yawn"]
+ITEM_CATEGORIES = ["choicescarf", "choiceband", "choicespecs",
+                   "lifeorb", "leftovers"]
 
 _JA2EN_TYPES = {"ノーマル": "normal", "ほのお": "fire", "みず": "water",
                 "でんき": "electric", "くさ": "grass", "こおり": "ice",
@@ -194,8 +198,150 @@ def _field_vec(state: dict) -> np.ndarray:
     return v
 
 
+_MOVE_RESOLVER = None
+_MOVE_JA_CACHE: dict = {}
+
+
+def _move_from_ja(name) -> Optional[dict]:
+    """技名 (日本語/ID混在) からdexの技データを引く。
+
+    dex.move はIDのみ受け付けるため、日本語名は NameResolver で解決する
+    (v1の判明技相性がこの未解決で常に0だった潜在バグの修正を兼ねる)
+    """
+    global _MOVE_RESOLVER
+    key = str(name)
+    if key in _MOVE_JA_CACHE:
+        return _MOVE_JA_CACHE[key]
+    dex = get_dex()
+    mv = dex.move(key)
+    if mv is None:
+        try:
+            if _MOVE_RESOLVER is None:
+                from vision.normalize import NameResolver
+                _MOVE_RESOLVER = NameResolver()
+            r = _MOVE_RESOLVER.resolve(key, "moves", cutoff=0.8)
+            if r:
+                mv = dex.move(r[1])
+        except Exception:
+            mv = None
+    _MOVE_JA_CACHE[key] = mv
+    return mv
+
+
+def _adapt_obs(model, obs: np.ndarray) -> np.ndarray:
+    """観測をモデルの期待次元へ合わせる (旧227次元チェックポイント互換)。
+
+    v2拡張はv1プレフィックスを変えない末尾追記のため、スライスで意味が保たれる
+    """
+    try:
+        want = int(model.observation_space.shape[0])
+    except Exception:
+        return obs
+    if len(obs) == want:
+        return obs
+    if len(obs) > want:
+        return obs[:want]
+    padded = np.zeros(want, dtype=obs.dtype)
+    padded[:len(obs)] = obs
+    return padded
+
+
+def _volatiles_vec_dict(p: Optional[dict]) -> np.ndarray:
+    """揮発状態6フラグ (encoders.VOLATILE_EFFECTS と同順)。
+
+    画面認識の volatiles リスト (例: "confusion") + ねむけは status "drowsy"
+    からマップする
+    """
+    v = np.zeros(len(VOLATILE_EFFECTS), dtype=np.float32)
+    if not p:
+        return v
+    vols = {str(x).lower() for x in (p.get("volatiles") or [])}
+    alias = {"leechseed": "leech_seed"}
+    for name in vols:
+        name = alias.get(name, name)
+        if name in VOLATILE_EFFECTS:
+            v[VOLATILE_EFFECTS.index(name)] = 1.0
+    if p.get("status") == "drowsy":
+        v[VOLATILE_EFFECTS.index("yawn")] = 1.0
+    return v
+
+
+def _item_vec_dict(p: Optional[dict]) -> np.ndarray:
+    v = np.zeros(6, dtype=np.float32)
+    if not p:
+        return v
+    iid = (p.get("item_id") or "").lower().replace(" ", "")
+    if iid:
+        if iid in ITEM_CATEGORIES:
+            v[ITEM_CATEGORIES.index(iid)] = 1.0
+        else:
+            v[5] = 1.0
+    return v
+
+
+def _revealed_move_vec(ja: str, owner: dict, defender: Optional[dict]) -> np.ndarray:
+    """相手の判明技1つ分 (自分を防御側とした技特徴)"""
+    v = np.zeros(MOVE_FEAT_DIM, dtype=np.float32)
+    mv = _move_from_ja(ja)
+    if not mv:
+        return v
+    power = float(mv.get("power") or 0)
+    acc = mv.get("accuracy")
+    acc = 1.0 if acc in (None, True) else (acc / 100.0 if acc > 1 else float(acc))
+    cat = (mv.get("category") or "Status").lower()
+    mtype = (mv.get("type") or "Normal").lower()
+    v[0] = min(power, 150.0) / 150.0
+    v[1] = acc
+    v[2] = (float(mv.get("priority") or 0) + 5.0) / 10.0
+    v[3] = 1.0 if cat == "physical" else 0.0
+    v[4] = 1.0 if cat == "special" else 0.0
+    v[5] = 1.0 if cat == "status" else 0.0
+    v[6] = 1.0 if mtype in _en_types(owner) else 0.0
+    v[7] = (_eff(mtype, defender) / 4.0) if (defender is not None and power > 0) else 0.25
+    v[8] = 1.0   # PP残は不明のため満タン扱い
+    return v
+
+
+def _best_move_eff_dict(attacker: Optional[dict], defender: Optional[dict],
+                        use_revealed: bool = False) -> float:
+    """attackerの技のうちdefenderへ最も通る相性倍率 (攻撃技のみ)"""
+    if not attacker or not defender:
+        return 0.0
+    best = 0.0
+    dex = get_dex()
+    if use_revealed:
+        moves = [_move_from_ja(ja) for ja in (attacker.get("revealed_moves") or [])]
+    else:
+        moves = [dex.move(m.get("move_id")) for m in (attacker.get("moves") or [])]
+    for mv in moves:
+        if mv and (mv.get("power") or 0) > 0:
+            best = max(best, _eff((mv.get("type") or "normal").lower(), defender))
+    return best
+
+
+def _stab_threat_eff_dict(attacker: Optional[dict],
+                          defender: Optional[dict]) -> float:
+    if not attacker or not defender:
+        return 0.0
+    best = 0.0
+    for t in _en_types(attacker):
+        best = max(best, _eff(t, defender))
+    return best
+
+
+def _is_mega_stone(p: Optional[dict]) -> bool:
+    if not p:
+        return False
+    if p.get("item_id") == "megastone":
+        return True
+    if "ナイト" in (p.get("item_ja") or ""):
+        return True
+    iid = p.get("item_id") or ""
+    return iid.endswith(("ite", "itex", "itey")) and iid != "eviolite"
+
+
 def encode_state(state: dict, my_spe_actual: Optional[float] = None) -> Optional[np.ndarray]:
-    """状態辞書 -> encode_battle と同義・同並びの227次元観測"""
+    """状態辞書 -> encode_battle と同義・同並びの観測 (OBS_DIM次元)"""
     my = state.get("player") or {}
     op = state.get("opponent") or {}
     mi, oi = my.get("active_index"), op.get("active_index")
@@ -222,7 +368,7 @@ def encode_state(state: dict, my_spe_actual: Optional[float] = None) -> Optional
         # 判明技の最大相性 (打点タイプのみ)。名前解決はresolver無しでも動くよう
         # dexのID直照合を先に試す
         for ja in revealed[:4]:
-            mv = get_dex().move(str(ja))
+            mv = _move_from_ja(ja)
             if mv and (mv.get("power") or 0) > 0:
                 max_eff = max(max_eff, _eff((mv.get("type") or "normal").lower(), own))
         opp_extra = np.array([min(len(revealed), 4) / 4.0, max_eff / 4.0],
@@ -253,10 +399,56 @@ def encode_state(state: dict, my_spe_actual: Optional[float] = None) -> Optional
         speed[0] = min(ratio, 2.0) / 2.0
         speed[1] = 1.0 if ratio >= 1.0 else 0.0
 
+    # ============ v2拡張 (encoders.encode_battle と同義・同並び) ============
+    revealed_ja = (opp.get("revealed_moves") or []) if opp else []
+    opp_move_vecs = [
+        _revealed_move_vec(revealed_ja[i], opp, own) if (opp and i < len(revealed_ja))
+        else np.zeros(MOVE_FEAT_DIM, dtype=np.float32)
+        for i in range(N_MOVE_SLOTS)]
+
+    own_vol = _volatiles_vec_dict(own)
+    opp_vol = _volatiles_vec_dict(opp)
+
+    mega_used = state.get("mega_used") or {}
+    mega_vec = np.array([
+        1.0 if (_is_mega_stone(own) and not mega_used.get("player")) else 0.0,
+        1.0 if mega_used.get("player") else 0.0,
+        1.0 if mega_used.get("opponent") else 0.0], dtype=np.float32)
+
+    own_item = _item_vec_dict(own)
+    opp_item = _item_vec_dict(opp)
+
+    # encode_battle (battle.teamの非ひんし数) と同義: パーティから直接数える
+    # (state側のremainingはひんし反映が遅れることがあるため使わない)
+    picked = [p for p in my.get("party", []) if p.get("is_picked")] or \
+        my.get("party", [])[:3]
+    my_remaining = max(1, sum(1 for p in picked if p.get("status") != "fainted"))
+    max_pri = 0.0
+    for ja in revealed_ja[:4]:
+        mv = _move_from_ja(ja)
+        if mv:
+            max_pri = max(max_pri, float(mv.get("priority") or 0))
+    misc = np.array([min(my_remaining, 3) / 3.0, (max_pri + 5.0) / 10.0],
+                    dtype=np.float32)
+
+    bench_tactics = np.zeros(6, dtype=np.float32)
+    for i in range(2):
+        b = own_bench[i] if i < len(own_bench) else None
+        if b is not None and opp is not None:
+            bench_tactics[i * 2] = _best_move_eff_dict(b, opp) / 4.0
+            bench_tactics[i * 2 + 1] = _stab_threat_eff_dict(opp, b) / 4.0
+    for i in range(2):
+        b = opp_bench[i] if i < len(opp_bench) else None
+        if b is not None and own is not None:
+            bench_tactics[4 + i] = _best_move_eff_dict(own, b) / 4.0
+
     vec = np.concatenate([own_vec, opp_vec, opp_extra,
                           *own_bench_vecs, *opp_bench_vecs, opp_count,
                           _side_vec(my), _side_vec(op),
-                          _field_vec(state), speed]).astype(np.float32)
+                          _field_vec(state), speed,
+                          *opp_move_vecs, own_vol, opp_vol, mega_vec,
+                          own_item, opp_item, misc,
+                          bench_tactics]).astype(np.float32)
     if len(vec) < OBS_DIM:
         vec = np.concatenate([vec, np.zeros(OBS_DIM - len(vec), dtype=np.float32)])
     return vec[:OBS_DIM]
@@ -334,6 +526,7 @@ def value_of_sim(me, opp, my_moves: list, fieldv=None,
     obs = encode_state(state, my_spe_actual=effective_speed(me.active, fieldv))
     if obs is None:
         return None
+    obs = _adapt_obs(model, obs)
     import math
     import torch
     obs_t, _ = model.policy.obs_to_tensor(obs[None, :])
@@ -350,6 +543,7 @@ def policy_hint(state: dict, my_spe_actual: Optional[float] = None) -> Optional[
     obs = encode_state(state, my_spe_actual)
     if obs is None:
         return None
+    obs = _adapt_obs(model, obs)
     legal = _legal_actions(state)
     if not legal:
         return None

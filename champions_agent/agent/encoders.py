@@ -240,6 +240,73 @@ def _field_vec(battle) -> np.ndarray:
     return vec
 
 
+# v2拡張観測用の定義
+VOLATILE_EFFECTS = ["confusion", "leech_seed", "substitute", "taunt",
+                    "encore", "yawn"]
+ITEM_CATEGORIES = ["choicescarf", "choiceband", "choicespecs",
+                   "lifeorb", "leftovers"]  # 6枠目=その他判明
+
+
+def _volatiles_vec(pokemon) -> np.ndarray:
+    """揮発状態6フラグ (VOLATILE_EFFECTS 順)"""
+    vec = np.zeros(len(VOLATILE_EFFECTS), dtype=np.float32)
+    try:
+        for eff in (pokemon.effects or {}):
+            name = eff.name.lower()
+            if name in VOLATILE_EFFECTS:
+                vec[VOLATILE_EFFECTS.index(name)] = 1.0
+    except Exception:
+        pass
+    return vec
+
+
+def _item_vec(pokemon) -> np.ndarray:
+    """持ち物カテゴリ6: こだわり3種/珠/残飯/その他判明 (不明は全0)"""
+    vec = np.zeros(6, dtype=np.float32)
+    try:
+        item = pokemon.item
+        if item and item not in ("unknown_item",):
+            iid = str(item).lower().replace(" ", "")
+            if iid in ITEM_CATEGORIES:
+                vec[ITEM_CATEGORIES.index(iid)] = 1.0
+            else:
+                vec[5] = 1.0
+    except Exception:
+        pass
+    return vec
+
+
+def _best_move_eff(attacker, defender) -> float:
+    """attackerの判明技のうちdefenderに最も通る相性倍率 (攻撃技のみ)"""
+    best = 0.0
+    try:
+        for mv in attacker.moves.values():
+            if (mv.base_power or 0) > 0:
+                best = max(best, _eff_mult(defender, mv))
+    except Exception:
+        pass
+    return best
+
+
+def _stab_threat_eff(attacker, defender) -> float:
+    """attackerのタイプ一致打点がdefenderへ通る最大倍率 (技非依存の脅威推定)"""
+    best = 0.0
+    try:
+        for t in (attacker.types or []):
+            if t is not None:
+                best = max(best, _eff_mult(defender, t))
+    except Exception:
+        pass
+    return best
+
+
+def _mega_in_team(team) -> bool:
+    try:
+        return any("mega" in (p.species or "") for p in team.values())
+    except Exception:
+        return False
+
+
 def encode_battle(battle) -> np.ndarray:
     """AbstractBattle -> 固定長観測ベクトル (BATTLE_OBS_DIM)"""
     own = battle.active_pokemon
@@ -311,9 +378,76 @@ def encode_battle(battle) -> np.ndarray:
     except Exception:
         pass
 
+    # ================= v2拡張観測 (末尾追記。v1プレフィックスは不変) =========
+    # 相手の判明技4スロット (自分を防御側とした技特徴 + 相手視点STAB)
+    opp_move_vecs = []
+    opp_revealed = []
+    if opp is not None:
+        try:
+            opp_revealed = list(opp.moves.values())
+        except Exception:
+            pass
+    for i in range(N_MOVE_SLOTS):
+        mv = opp_revealed[i] if i < len(opp_revealed) else None
+        mvec = _encode_move(mv, own)
+        try:
+            if mv is not None and mv.type is not None and opp is not None and opp.types:
+                if any(t is not None and t.name == mv.type.name for t in opp.types):
+                    mvec[6] = 1.0
+        except Exception:
+            pass
+        opp_move_vecs.append(mvec)
+
+    # 揮発状態 (自分/相手)
+    own_vol = _volatiles_vec(own) if own is not None else np.zeros(6, dtype=np.float32)
+    opp_vol = _volatiles_vec(opp) if opp is not None else np.zeros(6, dtype=np.float32)
+
+    # メガ進化 (1試合1回の権利の管理)
+    mega_vec = np.zeros(3, dtype=np.float32)
+    try:
+        mega_vec[0] = 1.0 if getattr(battle, "can_mega_evolve", False) else 0.0
+    except Exception:
+        pass
+    mega_vec[1] = 1.0 if _mega_in_team(getattr(battle, "team", {}) or {}) else 0.0
+    mega_vec[2] = 1.0 if _mega_in_team(
+        getattr(battle, "opponent_team", {}) or {}) else 0.0
+
+    # 持ち物カテゴリ (自分/相手判明分)
+    own_item = _item_vec(own) if own is not None else np.zeros(6, dtype=np.float32)
+    opp_item = _item_vec(opp) if opp is not None else np.zeros(6, dtype=np.float32)
+
+    # 自分の残数 + 相手判明技の最大優先度
+    misc = np.zeros(2, dtype=np.float32)
+    try:
+        misc[0] = sum(1 for p in battle.team.values() if not p.fainted) / 3.0
+    except Exception:
+        misc[0] = 1.0
+    try:
+        pri = max((float(mv.priority or 0) for mv in opp_revealed), default=0.0)
+        misc[1] = (pri + 5.0) / 10.0
+    except Exception:
+        misc[1] = 0.5
+
+    # 控えの戦術情報 (交代判断用):
+    # 自分控え: その子の打点が相手アクティブへ通るか / 相手STABをどれだけ受けるか
+    bench_tactics = np.zeros(6, dtype=np.float32)
+    for i in range(2):
+        b = own_bench[i] if i < len(own_bench) else None
+        if b is not None and opp is not None:
+            bench_tactics[i * 2] = _best_move_eff(b, opp) / 4.0
+            bench_tactics[i * 2 + 1] = _stab_threat_eff(opp, b) / 4.0
+    # 相手控え: 自分アクティブの打点がその子へ通るか
+    for i in range(2):
+        b = opp_bench[i] if i < len(opp_bench) else None
+        if b is not None and own is not None:
+            bench_tactics[4 + i] = _best_move_eff(own, b) / 4.0
+
     vec = np.concatenate([own_vec, opp_vec, opp_extra,
                           *own_bench_vecs, *opp_bench_vecs, opp_count_vec,
-                          my_side, opp_side, field, speed_vec]).astype(np.float32)
+                          my_side, opp_side, field, speed_vec,
+                          *opp_move_vecs, own_vol, opp_vol, mega_vec,
+                          own_item, opp_item, misc,
+                          bench_tactics]).astype(np.float32)
 
     # 固定長を保証
     if len(vec) < BATTLE_OBS_DIM:
