@@ -25,7 +25,12 @@ poke-env (0.10系) の SinglesEnv を利用した、シングルバトル専用�
 """
 from __future__ import annotations
 
+import os
 import random
+
+# 盤面シェイピングの縮小係数 (REWARD_SHAPE_SCALE で調整可)。
+# 1.0=従来。勝敗ボーナスは縮小しない
+_SHAPE_SCALE = float(os.environ.get("REWARD_SHAPE_SCALE", "0.3"))
 
 import numpy as np
 from gymnasium.spaces import Box
@@ -167,6 +172,11 @@ class ChampionsSinglesEnv(SinglesEnv):
                  + cfg.faint_bonus * opp_fainted
                  - cfg.fainted_penalty * my_fainted
                  + 0.3 * (opp_status - my_status))
+        # シェイピング縮小: HP差分報酬が支配的だと「貪欲なダメージ交換」に
+        # 収束し、ヒューリスティクス相手に0.55前後で頭打ちした (観測拡張・
+        # ネット容量拡大でも天井が変わらないことから報酬設計が原因と特定)。
+        # 盤面シェイピングを縮小し、勝敗ボーナスへ信用を寄せる
+        value *= _SHAPE_SCALE
         if battle.won is True:
             value += cfg.win_bonus
         elif battle.won is False:
