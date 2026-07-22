@@ -114,7 +114,10 @@ def train(total_timesteps: int = 10_000, battle_format: str = TRAINING_BATTLE_FO
                   f"(lr={lr}, ent_coef={ent_coef}, net={actual})")
         except Exception as e:
             # 観測空間の変更・アルゴリズム変更 (PPO->MaskablePPO) 等で
-            # 互換性が無い場合は退避して新規学習する
+            # 互換性が無い場合は退避して新規学習する。
+            # ロード成功後の検証 (net_arch不一致) で来た場合に備えて
+            # modelを必ずNoneへ戻す (残すと旧モデルの学習を続けてしまう)
+            model = None
             backup = save_path.with_suffix(".zip.incompatible")
             save_path.rename(backup)
             print(f"[train_battle] チェックポイントが非互換のため退避して"
