@@ -15,9 +15,13 @@ import cv2
 import numpy as np
 
 TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "images" / "templetes"
+# 実キャプチャ由来のテンプレート (手動確定時に自動収穫。OBS色シフトに強い)
+REAL_DIR = Path(__file__).resolve().parent.parent / "images" / "species_icons"
 
 NORM = 48
+MAX_REAL_PER_SPECIES = 4
 _sprite_cache: dict = {}
+_real_cache: Optional[dict] = None
 
 
 def _load_sprite(num: int):
@@ -150,6 +154,88 @@ def _mask_dhash(mask) -> np.ndarray:
     return (r[:, 1:] > r[:, :-1]).flatten()
 
 
+def _load_real_templates() -> dict:
+    """実キャプチャテンプレート {species_id: [(bgr, mask), ...]}。
+
+    保存は生のアイコン切り出し。読み込み時にクエリと同じ前景抽出を
+    通すことで、同一ドメイン (OBSキャプチャ同士) の比較になる
+    """
+    global _real_cache
+    if _real_cache is not None:
+        return _real_cache
+    out: dict = {}
+    if REAL_DIR.exists():
+        for p in sorted(REAL_DIR.glob("*.png")):
+            sid = p.stem.rsplit("_", 1)[0]
+            img = cv2.imread(str(p))
+            fg = _extract_foreground(img) if img is not None else None
+            if fg is not None:
+                out.setdefault(sid, []).append(fg)
+    _real_cache = out
+    return out
+
+
+def harvest_species_icon(species_id: str, icon_crop) -> bool:
+    """手動確定されたアイコン切り出しを実キャプチャテンプレートとして保存する。
+
+    - 前景抽出できない切り出し (背景のみ等) は保存しない
+    - 既存テンプレートと酷似 (マスクdHash距離<8) なら重複として保存しない
+    - 種族ごとに MAX_REAL_PER_SPECIES 枚まで
+    戻り値: 保存したか
+    """
+    global _real_cache
+    fg = _extract_foreground(icon_crop)
+    if fg is None:
+        return False
+    q_hash = _mask_dhash(fg[1])
+    existing = _load_real_templates().get(species_id, [])
+    if len(existing) >= MAX_REAL_PER_SPECIES:
+        return False
+    for _bgr, mask in existing:
+        if int(np.count_nonzero(q_hash != _mask_dhash(mask))) < 8:
+            return False   # ほぼ同一の既存テンプレートあり
+    REAL_DIR.mkdir(parents=True, exist_ok=True)
+    n = 0
+    while (REAL_DIR / f"{species_id}_{n}.png").exists():
+        n += 1
+    cv2.imwrite(str(REAL_DIR / f"{species_id}_{n}.png"), icon_crop)
+    _real_cache = None   # 次回照合から反映
+    return True
+
+
+def harvest_from_frame(frame_path, opp_index: int, species_id: str) -> bool:
+    """選出フレームから相手枠のアイコンを収穫する (手動確定フック用)。
+
+    保存前にそのフレームの同じ枠のタイプアイコンを分類し、確定種族の
+    タイプと矛盾しないことを検証する (対戦準備中などレイアウトが違う
+    フレームからの誤収穫を防ぐ)
+    """
+    from vision import zones
+    from vision.zones import crop as zcrop
+    from vision.typeicons import classify_type_icon
+    img = cv2.imread(str(frame_path))
+    if img is None or not (0 <= opp_index < len(zones.SELECTION_OPP)):
+        return False
+    z = zones.SELECTION_OPP[opp_index]
+    # タイプ検証: 読めたタイプが確定種族のタイプ集合に含まれること
+    try:
+        from advisor.dex import get_dex
+        from advisor.rl_bridge import _JA2EN_TYPES
+        sp = get_dex().species(species_id)
+        if sp is None:
+            return False
+        sp_types_ja = {ja for ja, en in _JA2EN_TYPES.items()
+                       if en.capitalize() in sp["types"]}
+        read = [classify_type_icon(zcrop(img, z["type1"])),
+                classify_type_icon(zcrop(img, z["type2"]))]
+        read = [t for t in read if t]
+        if not read or not set(read).issubset(sp_types_ja):
+            return False
+    except Exception:
+        return False
+    return harvest_species_icon(species_id, zcrop(img, z["icon"]))
+
+
 PRIOR_AUTO_ACCEPT = 0.85   # 使用率がこの確率以上なら視覚照合なしで確定
 
 
@@ -176,22 +262,37 @@ def identify_species(icon_crop, candidates: list,
     fg = _extract_foreground(icon_crop)
     if fg is None:
         return None
-    _q_bgr, q_mask = fg
+    q_bgr, q_mask = fg
     q_hash = _mask_dhash(q_mask)
+    q_hist = _hist(q_bgr, q_mask)
+    real_templates = _load_real_templates()
 
     scored = []
     for sid, prior, ja in candidates:
         sp = dex.species(sid)
         if sp is None:
             continue
-        sprite = _load_sprite(sp["num"])
-        if sprite is None:
-            continue
-        _t_bgr, t_mask = sprite
-        iou = _silhouette_score(q_mask, t_mask)
-        hamming = int(np.count_nonzero(q_hash != _mask_dhash(t_mask)))
-        dhash_sim = 1.0 - hamming / q_hash.size
-        visual = 0.6 * iou + 0.4 * dhash_sim
+        visual = None
+        # 実キャプチャテンプレート優先: 同一ドメイン比較なので色も使える
+        # (手動確定のたびに収穫され、OBSの色シフトにも追従する)
+        for t_bgr, t_mask in real_templates.get(sid, []):
+            iou = _silhouette_score(q_mask, t_mask)
+            hamming = int(np.count_nonzero(q_hash != _mask_dhash(t_mask)))
+            dhash_sim = 1.0 - hamming / q_hash.size
+            hist_corr = max(0.0, float(cv2.compareHist(
+                q_hist, _hist(t_bgr, t_mask), cv2.HISTCMP_CORREL)))
+            v = 0.4 * iou + 0.3 * dhash_sim + 0.3 * hist_corr
+            visual = max(visual or 0.0, v)
+        if visual is None:
+            # 図鑑スプライトへフォールバック (シルエット形状のみ)
+            sprite = _load_sprite(sp["num"])
+            if sprite is None:
+                continue
+            _t_bgr, t_mask = sprite
+            iou = _silhouette_score(q_mask, t_mask)
+            hamming = int(np.count_nonzero(q_hash != _mask_dhash(t_mask)))
+            dhash_sim = 1.0 - hamming / q_hash.size
+            visual = 0.6 * iou + 0.4 * dhash_sim
         total = visual * (0.7 + 0.3 * min(prior * 2, 1.0))
         scored.append((total, visual, sid, ja))
 

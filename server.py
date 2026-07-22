@@ -453,6 +453,24 @@ async def set_species(sid, data):
                 "manual", f"相手の{species_ja}を手動確定 (候補から選択)",
                 event_id="species_manual")
             print(f"[server] 手動確定: 相手slot{idx} = {species_ja}")
+            # 自己改善ループ: 確定した種族のアイコンを直近の選出フレームから
+            # 収穫し、実キャプチャテンプレートとして保存する (次回から
+            # 同タイプ複数候補でも視覚照合で自動確定できるようになる)
+            try:
+                from vision.spriteid import harvest_from_frame
+                import glob as _glob
+                frames = sorted(_glob.glob(str(DUMP_DIR / "sel_*.png")),
+                                reverse=True)
+                for fp in frames[:5]:   # 直近5枚から最初に検証を通ったもの
+                    ts = int(Path(fp).stem.split("_")[-1])
+                    if time.time() - ts > 300:
+                        break
+                    if harvest_from_frame(fp, idx, species_id):
+                        print(f"[server] 種族アイコン収穫: {species_ja} <- "
+                              f"{Path(fp).name}")
+                        break
+            except Exception as e:
+                print(f"[server] アイコン収穫スキップ: {e}")
             state = pipeline.state.to_dict()
             _attach_candidates(state)
             await sio.emit('state_update', state, room=sid)
