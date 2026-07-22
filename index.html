@@ -38,7 +38,7 @@
             <div class="panel"><h3>イベントログ</h3><div id="events"></div></div>
         </div>
         <div id="right">
-            <div class="panel" id="advice"><h3>アドバイス</h3><pre id="advice-text">(コマンド選択画面になると表示されます)</pre></div>
+            <div class="panel" id="advice"><h3>アドバイス</h3><pre id="advice-text">(選出画面・コマンド選択画面で表示されます)</pre></div>
             <div class="panel"><h3>自分のパーティ
                 <button onclick="openTeamEditor()" style="float:right;font-size:11px;background:#356;color:#cde;border:1px solid #467;border-radius:4px;cursor:pointer">パーティ編集</button>
             </h3><div id="my-party"></div></div>
@@ -74,7 +74,9 @@
         / <a href="https://champs.pokedb.tokyo" style="color:#aab">バトルデータベース チャンピオンズ</a>
     </footer>
     <script>
-        const socket = io('http://localhost:8000');
+        // バックエンドはフロントエンドと同じホストの8000番 (localhost固定だと
+        // LAN内の別端末 (Windows等) から開いたときに接続できない)
+        const socket = io('http://' + location.hostname + ':8000');
         const connLabel = document.getElementById('conn-label');
         socket.on('connect', () => {
             console.log('バックエンドに接続しました');
@@ -281,7 +283,9 @@
         }
 
         socket.on('state_update', (s) => {
-            document.getElementById('scene-label').textContent = 'scene: ' + s.scene;
+            // レートは結果画面のOCRから取得 (勝敗推定にも使用)
+            const rate = s.last_rate && s.last_rate.value ? ` | レート${s.last_rate.value}` : '';
+            document.getElementById('scene-label').textContent = 'scene: ' + s.scene + rate;
             const f = s.field || {};
             const parts = [];
             if (f.weather) parts.push(WEATHER_JA[f.weather] || f.weather);
