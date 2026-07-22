@@ -99,8 +99,19 @@ def train(total_timesteps: int = 10_000, battle_format: str = TRAINING_BATTLE_FO
             model = MaskablePPO.load(
                 str(save_path), env=env,
                 custom_objects={"learning_rate": lr, "ent_coef": ent_coef})
+            # ネット幅が希望と違う場合は新規学習へ (SB3のloadは保存時の
+            # アーキテクチャを復元し、policy_kwargs指定を無視するため、
+            # 観測次元が同じだと旧64x64のまま再開してしまう)
+            try:
+                actual = model.policy.mlp_extractor.policy_net[0].out_features
+            except Exception:
+                actual = None
+            width = ppo_kwargs["policy_kwargs"]["net_arch"][0]
+            if actual is not None and actual != width:
+                raise ValueError(
+                    f"net_arch mismatch: checkpoint={actual} != 希望={width}")
             print(f"[train_battle] チェックポイントから再開: {save_path} "
-                  f"(lr={lr}, ent_coef={ent_coef})")
+                  f"(lr={lr}, ent_coef={ent_coef}, net={actual})")
         except Exception as e:
             # 観測空間の変更・アルゴリズム変更 (PPO->MaskablePPO) 等で
             # 互換性が無い場合は退避して新規学習する
