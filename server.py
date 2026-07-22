@@ -54,6 +54,23 @@ print("[server] 準備完了。フロントエンドからの接続を待って�
 DUMP_FRAMES = os.environ.get("DEBUG_DUMP_FRAMES") == "1"
 DUMP_DIR = Path("debug_frames")
 
+# 対戦状態スナップショット: 対戦中のデプロイ/再起動でも選出画面由来の
+# 相手ロスター等を失わないよう、定期保存して起動時に復元する
+SNAPSHOT_PATH = Path("logs") / "state_snapshot.json"
+_last_snapshot_time = 0.0
+try:
+    if SNAPSHOT_PATH.exists() and \
+            time.time() - SNAPSHOT_PATH.stat().st_mtime < 300:
+        _snap = json.loads(SNAPSHOT_PATH.read_text())
+        if _snap.get("battle_active") or _snap.get("scene") in (
+                "command", "move_select", "field", "watch", "battle_hud"):
+            pipeline.state.restore_from_dict(_snap)
+            print("[server] 対戦状態を復元しました "
+                  f"(相手ロスター{len(pipeline.state.opponent.party)}枠, "
+                  f"ターン{pipeline.state.turn})")
+except Exception as e:
+    print(f"[server] 状態復元をスキップ: {e}")
+
 frame_counter = 0
 processed_counter = 0
 dropped_counter = 0
@@ -143,6 +160,17 @@ async def handle_frame(sid, data):
         if fired:
             for f in fired:
                 print(f"[server] イベント検知: {f}")
+
+        # 対戦状態スナップショット (5秒毎。再起動時の対戦中リカバリ用)
+        global _last_snapshot_time
+        if time.time() - _last_snapshot_time > 5:
+            _last_snapshot_time = time.time()
+            try:
+                SNAPSHOT_PATH.parent.mkdir(exist_ok=True)
+                SNAPSHOT_PATH.write_text(
+                    json.dumps(state, ensure_ascii=False))
+            except OSError:
+                pass
 
         _attach_candidates(state)
         state_json = json.dumps(state, ensure_ascii=False, sort_keys=True)

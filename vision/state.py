@@ -278,6 +278,57 @@ class BattleStateV2:
         self.__init__()
         self.last_rate = keep_rate
 
+    def restore_from_dict(self, d: dict) -> None:
+        """スナップショットからの復元 (サーバー再起動の対戦中リカバリ用)。
+
+        選出画面でしか取れない情報 (相手ロスター/選出フラグ) を含む
+        主要フィールドを書き戻す。イベントログ等は復元しない
+        """
+        def load_mon(md: dict) -> PokemonState:
+            mon = PokemonState()
+            for k in ("species_ja", "species_id", "display_name", "gender",
+                      "types", "hp_percent", "hp_current", "hp_max",
+                      "status", "volatiles", "boosts", "ability_ja",
+                      "ability_id", "item_ja", "item_id", "item_consumed",
+                      "revealed_moves", "aliases", "is_mega", "is_active",
+                      "is_picked", "pick_order"):
+                if k in md and md[k] is not None:
+                    setattr(mon, k, md[k])
+            mon.moves = [MoveSlot(**{kk: m.get(kk) for kk in
+                                     ("name_ja", "move_id", "pp", "max_pp",
+                                      "effectiveness")})
+                         for m in (md.get("moves") or [])]
+            return mon
+
+        for side_name in ("player", "opponent"):
+            sd = d.get(side_name) or {}
+            side = self.side(side_name)
+            side.party = [load_mon(m) for m in (sd.get("party") or [])[:6]]
+            side.active_index = sd.get("active_index")
+            hz = sd.get("hazards") or {}
+            side.stealth_rock = bool(hz.get("stealth_rock"))
+            side.spikes = int(hz.get("spikes") or 0)
+            side.toxic_spikes = int(hz.get("toxic_spikes") or 0)
+            side.sticky_web = bool(hz.get("sticky_web"))
+            sc = sd.get("screens") or {}
+            side.reflect = bool(sc.get("reflect"))
+            side.light_screen = bool(sc.get("light_screen"))
+            side.aurora_veil = bool(sc.get("aurora_veil"))
+            side.tailwind = bool(sd.get("tailwind"))
+        f = d.get("field") or {}
+        self.field.weather = f.get("weather")
+        self.field.weather_turns = f.get("weather_turns")
+        self.field.terrain = f.get("terrain")
+        self.field.terrain_turns = f.get("terrain_turns")
+        self.field.trick_room = bool(f.get("trick_room"))
+        self.turn = int(d.get("turn") or 0)
+        self.mega_used = dict(d.get("mega_used") or
+                              {"player": False, "opponent": False})
+        self.protect_streak = dict(d.get("protect_streak") or
+                                   {"player": 0, "opponent": 0})
+        self.battle_active = bool(d.get("battle_active"))
+        self.selection_picked = d.get("selection_picked")
+
     def to_dict(self):
         return {
             "scene": self.scene,
