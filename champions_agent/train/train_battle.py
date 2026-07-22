@@ -62,19 +62,24 @@ def train(total_timesteps: int = 10_000, battle_format: str = TRAINING_BATTLE_FO
     # 各サブプロセスがローカルShowdown(8100)に独立接続する。
     # 頭打ち対策のハイパーパラメータ (環境変数で調整可能):
     # - ent_coef: SB3既定0.0では探索が縮退しプラトーで振動する。0.01で探索維持
-    # - learning_rate: 400万step超の微調整段階では既定3e-4が大きすぎて
-    #   ベンチ勝率0.3-0.7の振動を生んだ。1e-4へ引き下げ
-    lr = float(os.environ.get("TRAIN_LR", "1e-4"))
+    # - learning_rate: 新規学習フェーズは標準の3e-4 (1e-4は旧400万step
+    #   モデルの微調整用だった。観測v6の新規学習では立ち上がりを遅くする)
+    # - net_arch: SB3既定の64x64は388次元観測に対して過小で、20万stepで
+    #   0.55前後に頭打ちした。256x256へ拡大 (Showdown律速のため計算コスト増は僅少)
+    lr = float(os.environ.get("TRAIN_LR", "3e-4"))
     ent_coef = float(os.environ.get("TRAIN_ENT_COEF", "0.01"))
-    ppo_kwargs = {"learning_rate": lr, "ent_coef": ent_coef}
+    width = int(os.environ.get("TRAIN_NET_WIDTH", "256"))
+    ppo_kwargs = {"learning_rate": lr, "ent_coef": ent_coef,
+                  "policy_kwargs": {"net_arch": [width, width]}}
     if n_envs > 1:
         from stable_baselines3.common.vec_env import SubprocVecEnv
         env = SubprocVecEnv(
             [_make_env_fn(i, battle_format, play_style, opp_play_style_pool)
              for i in range(n_envs)],
             start_method="spawn")
-        # rollout長をenv数で割り、更新1回あたりの総サンプル数を単一env時と揃える
-        ppo_kwargs["n_steps"] = max(256, 2048 // n_envs)
+        # rollout長: 価値推定の安定化のため総サンプル4096/更新に拡大
+        # (勝敗という遅延報酬の伝播には長めのロールアウトが効く)
+        ppo_kwargs["n_steps"] = max(512, 4096 // n_envs)
         print(f"[train_battle] 並列環境 {n_envs} で学習 "
               f"(n_steps={ppo_kwargs['n_steps']}/env)")
     else:
