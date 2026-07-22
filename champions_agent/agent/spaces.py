@@ -55,7 +55,15 @@ MOVE_EFFECT_DIM = 8
 BOOST_STAT_KEYS = ("atk", "def", "spa", "spd", "spe")
 _EXTRA_DIM_V3 = 2 * N_MOVE_SLOTS * MOVE_EFFECT_DIM + 4 + N_MOVE_SLOTS + 2 + 4  # = 78
 
-BATTLE_OBS_DIM = _OBS_DIM_V1 + _EXTRA_DIM_V2 + _EXTRA_DIM_V3  # = 376
+# --- v4拡張: 環境使用率上位の特殊要素 (フラグ6) ---
+# 確定耐え (きあいのタスキ3285/がんじょう630: 満タン+タスキ/がんじょう) 自分+相手 = 2
+# いかく (特性使用率1位1323: 陣営内に持ちがいるか) 自分+相手 = 2
+# いたずらごころ (4位584: アクティブが持ちか) 自分+相手 = 2
+# ※あわせて次元不変の正確化: タイプ相性にふゆう/もらいび等の無効特性を反映、
+#   素早さ比較にすいすい等の天候補正+こだわりスカーフを反映
+_EXTRA_DIM_V4 = 6
+
+BATTLE_OBS_DIM = _OBS_DIM_V1 + _EXTRA_DIM_V2 + _EXTRA_DIM_V3 + _EXTRA_DIM_V4  # = 382
 
 # --- 選出方策用の旧エンコーダ次元 (encoders.encode_own_pokemon 等) ---
 POKEMON_FEATURE_DIM = 64

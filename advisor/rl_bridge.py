@@ -31,7 +31,7 @@ STATUS_MAP = {"burn": "brn", "paralysis": "par", "sleep": "slp",
               "freeze": "frz", "poison": "psn", "toxic": "tox"}
 BOOST_KEYS = ["atk", "def", "spa", "spd", "spe", "acc", "eva"]
 BASE_KEYS = ["hp", "atk", "def", "spa", "spd", "spe"]
-N_MOVE_SLOTS, MOVE_FEAT_DIM, OBS_DIM = 4, 9, 376  # v3拡張 (v1=227/v2=298の末尾追記)
+N_MOVE_SLOTS, MOVE_FEAT_DIM, OBS_DIM = 4, 9, 382  # v3拡張 (v1=227/v2=298の末尾追記)
 MOVE_EFFECT_DIM = 8
 VOLATILE_EFFECTS = ["confusion", "leech_seed", "substitute", "taunt",
                     "encore", "yawn"]
@@ -123,7 +123,39 @@ def _hp_frac(p: dict) -> float:
     return 1.0
 
 
+def _known_ability_dict(p: Optional[dict]) -> Optional[str]:
+    """確定している特性ID (判明済み or 固定特性)"""
+    if not p:
+        return None
+    if p.get("ability_id"):
+        return p["ability_id"]
+    try:
+        from vision.abilities import fixed_ability
+        return fixed_ability(p.get("species_id"),
+                             is_mega=bool(p.get("is_mega")),
+                             item_id=p.get("item_id") or "")
+    except Exception:
+        return None
+
+
+def _possible_abilities_dict(p: Optional[dict]) -> set:
+    if not p:
+        return set()
+    if p.get("ability_id"):
+        return {p["ability_id"]}
+    try:
+        from vision.abilities import legal_abilities
+        return set(legal_abilities(p.get("species_id")) or [])
+    except Exception:
+        return set()
+
+
 def _eff(mtype_en: str, defender: dict) -> float:
+    # 防御側の確定特性による無効化 (ふゆう=じめん無効等) を反映
+    from champions_agent.agent.encoders import IMMUNITY_ABILITIES
+    ab = _known_ability_dict(defender)
+    if ab and IMMUNITY_ABILITIES.get(ab) == mtype_en.lower():
+        return 0.0
     dex = get_dex()
     dtypes = [t.capitalize() for t in _en_types(defender)]
     return dex.effectiveness(mtype_en.capitalize(), dtypes) if dtypes else 1.0
@@ -498,7 +530,19 @@ def encode_state(state: dict, my_spe_actual: Optional[float] = None) -> Optional
 
     speed = np.zeros(2, dtype=np.float32)
     sp_opp = get_dex().species((opp or {}).get("species_id"))
-    opp_base_spe = (sp_opp["baseStats"].get("spe") if sp_opp else 0) or 0
+    opp_base_spe = float((sp_opp["baseStats"].get("spe") if sp_opp else 0) or 0)
+    if opp_base_spe > 0 and opp is not None:
+        # 相手側の実効素早さ補正 (自分側は effective_speed 済みの my_spe_actual)
+        from champions_agent.agent.encoders import WEATHER_SPEED_ABILITIES
+        ab = _known_ability_dict(opp)
+        wmap = {"rain": "rain", "sun": "sun", "sandstorm": "sand", "snow": "snow"}
+        wnow = wmap.get((state.get("field") or {}).get("weather"))
+        if ab in WEATHER_SPEED_ABILITIES and WEATHER_SPEED_ABILITIES[ab] == wnow:
+            opp_base_spe *= 2.0
+        if (opp.get("item_id") or "") == "choicescarf":
+            opp_base_spe *= 1.5
+        if opp.get("status") == "paralysis":
+            opp_base_spe *= 0.5
     if my_spe_actual and opp_base_spe > 0:
         ratio = my_spe_actual / opp_base_spe
         speed[0] = min(ratio, 2.0) / 2.0
@@ -591,6 +635,38 @@ def encode_state(state: dict, my_spe_actual: Optional[float] = None) -> Optional
             if mb is not None and ob is not None:
                 bench_matchup[i * 2 + j] = _best_move_eff_dict(mb, ob) / 4.0
 
+    # v4: 環境使用率上位の特殊要素フラグ (encoders と同義・同並び)
+    def _guard_flag_dict(p: Optional[dict]) -> float:
+        """ばけのかわ未破壊 / 満タン+タスキ / 満タン+がんじょう"""
+        if not p or p.get("status") == "fainted":
+            return 0.0
+        sid = p.get("species_id") or ""
+        if "mimikyu" in sid and "busted" not in sid:
+            # 破壊で最大HP1/8減のため、87.5%以上なら未破壊とみなす近似
+            if _hp_frac(p) >= 0.875:
+                return 1.0
+        if _hp_frac(p) < 0.999:
+            return 0.0
+        if (p.get("item_id") or "") == "focussash":
+            return 1.0
+        return 1.0 if "sturdy" in _possible_abilities_dict(p) else 0.0
+
+    def _side_has_ability_dict(party: list, ability: str) -> float:
+        for p in party or []:
+            if p.get("status") != "fainted" and \
+                    ability in _possible_abilities_dict(p):
+                return 1.0
+        return 0.0
+
+    special_vec = np.array([
+        _guard_flag_dict(own),
+        _guard_flag_dict(opp),
+        _side_has_ability_dict(my.get("party", []), "intimidate"),
+        _side_has_ability_dict(op.get("party", []), "intimidate"),
+        1.0 if "prankster" in _possible_abilities_dict(own) else 0.0,
+        1.0 if "prankster" in _possible_abilities_dict(opp) else 0.0,
+    ], dtype=np.float32)
+
     vec = np.concatenate([own_vec, opp_vec, opp_extra,
                           *own_bench_vecs, *opp_bench_vecs, opp_count,
                           _side_vec(my), _side_vec(op),
@@ -600,7 +676,8 @@ def encode_state(state: dict, my_spe_actual: Optional[float] = None) -> Optional
                           bench_tactics,
                           *own_move_effects, *opp_move_effects,
                           profile_vec, utility_vec,
-                          field_remaining, bench_matchup]).astype(np.float32)
+                          field_remaining, bench_matchup,
+                          special_vec]).astype(np.float32)
     if len(vec) < OBS_DIM:
         vec = np.concatenate([vec, np.zeros(OBS_DIM - len(vec), dtype=np.float32)])
     return vec[:OBS_DIM]

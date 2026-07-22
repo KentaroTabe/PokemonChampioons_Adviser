@@ -136,6 +136,50 @@ def test_contrary():
     print(f"test_contrary OK: インファイト反転 {normal[:4]} -> {inverted[:4]}")
 
 
+def test_meta_specials():
+    # 環境使用率上位の特殊要素: ばけのかわ/タスキ/がんじょう/無効特性/天候素早さ
+    from advisor.rl_bridge import _eff, encode_state
+    # ふゆう固定のロトムにじめん技は無効
+    rotom = {"species_id": "rotomwash", "types": ["でんき", "みず"]}
+    assert _eff("ground", rotom) == 0.0, _eff("ground", rotom)
+    # ガブリアス (ふゆう無し) には等倍以上
+    garchomp = {"species_id": "garchomp", "types": ["ドラゴン", "じめん"]}
+    assert _eff("ground", garchomp) > 0, _eff("ground", garchomp)
+
+    # ばけのかわ: 満タンミミッキュ=guard 1 / 50% (破壊済み近似)=0
+    st = _state()
+    st["opponent"]["party"][0] = {
+        "species_id": "mimikyu", "species_ja": "ミミッキュ",
+        "types": ["ゴースト", "フェアリー"], "hp_percent": 100.0}
+    obs = encode_state(st, my_spe_actual=112)
+    assert obs[377] == 1.0, f"ばけのかわguard位置ずれ: {obs[376:382]}"
+    st["opponent"]["party"][0]["hp_percent"] = 50.0
+    obs = encode_state(st, my_spe_actual=112)
+    assert obs[377] == 0.0, obs[376:382]
+    # タスキ持ち満タン
+    st["opponent"]["party"][0] = {
+        "species_id": "garchomp", "species_ja": "ガブリアス",
+        "types": ["ドラゴン", "じめん"], "hp_percent": 100.0,
+        "item_id": "focussash"}
+    obs = encode_state(st, my_spe_actual=112)
+    assert obs[377] == 1.0, obs[376:382]
+
+    # すいすい×雨: 相手ペリッパー(すいすい判明)の実効素早さが倍
+    # -> 素早さ比 (speed[1]=自分が速いか) が反転する
+    st2 = _state()
+    st2["opponent"]["party"][0] = {
+        "species_id": "swampert", "species_ja": "ラグラージ",
+        "types": ["みず", "じめん"], "hp_percent": 100.0,
+        "ability_id": "swiftswim"}
+    obs_rain = encode_state(st2, my_spe_actual=112)   # 雨: 60*2=120 > 112
+    st2["field"]["weather"] = None
+    obs_dry = encode_state(st2, my_spe_actual=112)    # 無天候: 60 < 112
+    # v1レイアウトのspeed[1]は index 226
+    assert obs_dry[226] == 1.0 and obs_rain[226] == 0.0, \
+        (obs_dry[226], obs_rain[226])
+    print("test_meta_specials OK (ふゆう無効/ばけのかわ/タスキ/すいすい×雨)")
+
+
 def test_legal_actions():
     acts = _legal_actions(_state())
     labels = {a[1] for a in acts}
@@ -206,6 +250,7 @@ if __name__ == "__main__":
     test_encode()
     test_boost_utility_context()
     test_contrary()
+    test_meta_specials()
     test_legal_actions()
     test_policy_hint()
     test_value_of_sim()

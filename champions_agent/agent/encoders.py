@@ -9,6 +9,8 @@
 """
 from __future__ import annotations
 
+from typing import Optional
+
 import numpy as np
 
 from champions_agent.agent.spaces import (
@@ -88,10 +90,68 @@ def _hp_frac(pokemon) -> float:
         return 0.0
 
 
-def _eff_mult(defender, move_or_type) -> float:
-    """タイプ相性倍率 (0/0.25/0.5/1/2/4)。取得失敗時は1.0"""
+# タイプ無効化特性 (使用率上位: ふゆう900/もらいび358等)。
+# 特性が確定している場合のみ相性を0にする
+IMMUNITY_ABILITIES = {
+    "levitate": "ground", "eartheater": "ground",
+    "flashfire": "fire", "wellbakedbody": "fire",
+    "waterabsorb": "water", "stormdrain": "water", "dryskin": "water",
+    "voltabsorb": "electric", "lightningrod": "electric",
+    "motordrive": "electric",
+    "sapsipper": "grass", "windrider": "flying",
+}
+
+# 天候で素早さが倍になる特性
+WEATHER_SPEED_ABILITIES = {
+    "swiftswim": "rain", "chlorophyll": "sun",
+    "sandrush": "sand", "slushrush": "snow",
+}
+
+
+def _known_ability(pokemon) -> Optional[str]:
+    """確定している特性ID (判明済み or 種族の可能特性が1つのみ)"""
     try:
-        return float(defender.damage_multiplier(move_or_type))
+        ab = getattr(pokemon, "ability", None)
+        if ab:
+            return str(ab).lower().replace(" ", "")
+        poss = getattr(pokemon, "possible_abilities", None) or {}
+        vals = list({str(v).lower().replace(" ", "")
+                     for v in (poss.values() if isinstance(poss, dict) else poss)})
+        if len(vals) == 1:
+            return vals[0]
+    except Exception:
+        pass
+    return None
+
+
+def _possible_abilities(pokemon) -> set:
+    try:
+        ab = getattr(pokemon, "ability", None)
+        if ab:
+            return {str(ab).lower().replace(" ", "")}
+        poss = getattr(pokemon, "possible_abilities", None) or {}
+        return {str(v).lower().replace(" ", "")
+                for v in (poss.values() if isinstance(poss, dict) else poss)}
+    except Exception:
+        return set()
+
+
+def _eff_mult(defender, move_or_type) -> float:
+    """タイプ相性倍率 (0/0.25/0.5/1/2/4)。取得失敗時は1.0。
+
+    防御側の確定特性による無効化 (ふゆう=じめん無効等) を反映する
+    """
+    try:
+        mult = float(defender.damage_multiplier(move_or_type))
+        if mult > 0:
+            tname = None
+            t = getattr(move_or_type, "type", move_or_type)
+            tname = getattr(t, "name", None)
+            if tname:
+                ab = _known_ability(defender)
+                if ab and IMMUNITY_ABILITIES.get(ab) == tname.lower():
+                    return 0.0
+        return mult
     except Exception:
         return 1.0
 
@@ -536,11 +596,38 @@ def encode_battle(battle) -> np.ndarray:
     opp_side = _side_conditions_vec(getattr(battle, "opponent_side_conditions", None))
     field = _field_vec(battle)
 
-    # --- 素早さ比較 ---
+    # --- 素早さ比較 (天候特性すいすい等 + こだわりスカーフを反映) ---
+    def _speed_mult(pokemon) -> float:
+        mult = 1.0
+        try:
+            ab = _known_ability(pokemon)
+            if ab in WEATHER_SPEED_ABILITIES:
+                need = WEATHER_SPEED_ABILITIES[ab]
+                for w in (battle.weather or {}):
+                    wn = w.name.lower()
+                    if (need == "rain" and "rain" in wn) or \
+                       (need == "sun" and "sun" in wn) or \
+                       (need == "sand" and "sand" in wn) or \
+                       (need == "snow" and ("snow" in wn or "hail" in wn)):
+                        mult *= 2.0
+            item = getattr(pokemon, "item", None)
+            if item and "choicescarf" in str(item).lower().replace(" ", ""):
+                mult *= 1.5
+            try:
+                if pokemon.status is not None and \
+                        pokemon.status.name.lower() == "par":
+                    mult *= 0.5
+            except Exception:
+                pass
+        except Exception:
+            pass
+        return mult
+
     speed_vec = np.zeros(2, dtype=np.float32)
     try:
-        my_spe = (own.stats or {}).get("spe") or (own.base_stats or {}).get("spe") or 0
-        opp_spe = (opp.base_stats or {}).get("spe") or 0
+        my_spe = ((own.stats or {}).get("spe")
+                  or (own.base_stats or {}).get("spe") or 0) * _speed_mult(own)
+        opp_spe = ((opp.base_stats or {}).get("spe") or 0) * _speed_mult(opp)
         if opp_spe > 0:
             ratio = my_spe / opp_spe
             speed_vec[0] = min(ratio, 2.0) / 2.0
@@ -656,6 +743,49 @@ def encode_battle(battle) -> np.ndarray:
             if mb is not None and ob is not None:
                 bench_matchup[i * 2 + j] = _best_move_eff(mb, ob) / 4.0
 
+    # ========== v4拡張: 環境使用率上位の特殊要素フラグ ======================
+    def _guard_flag(pokemon) -> float:
+        """次の一撃を無効/確定耐えする可能性:
+        ばけのかわ未破壊 (HP不問) / 満タン+きあいのタスキ / 満タン+がんじょう
+        """
+        if pokemon is None:
+            return 0.0
+        try:
+            # ミミッキュのばけのかわ: 破壊されるとフォルムが mimikyubusted になる
+            species = str(getattr(pokemon, "species", "") or "").lower()
+            if "mimikyu" in species and "busted" not in species \
+                    and not pokemon.fainted:
+                return 1.0
+        except Exception:
+            pass
+        if _hp_frac(pokemon) < 0.999:
+            return 0.0
+        try:
+            item = str(getattr(pokemon, "item", "") or "").lower().replace(" ", "")
+            if "focussash" in item:
+                return 1.0
+        except Exception:
+            pass
+        return 1.0 if "sturdy" in _possible_abilities(pokemon) else 0.0
+
+    def _side_has_ability(team, ability: str) -> float:
+        try:
+            for p in (team or {}).values():
+                if not p.fainted and ability in _possible_abilities(p):
+                    return 1.0
+        except Exception:
+            pass
+        return 0.0
+
+    special_vec = np.array([
+        _guard_flag(own),
+        _guard_flag(opp),
+        _side_has_ability(getattr(battle, "team", {}), "intimidate"),
+        _side_has_ability(getattr(battle, "opponent_team", {}), "intimidate"),
+        1.0 if own is not None and "prankster" in _possible_abilities(own) else 0.0,
+        1.0 if opp is not None and "prankster" in _possible_abilities(opp) else 0.0,
+    ], dtype=np.float32)
+
     vec = np.concatenate([own_vec, opp_vec, opp_extra,
                           *own_bench_vecs, *opp_bench_vecs, opp_count_vec,
                           my_side, opp_side, field, speed_vec,
@@ -664,7 +794,8 @@ def encode_battle(battle) -> np.ndarray:
                           bench_tactics,
                           *own_move_effects, *opp_move_effects,
                           profile_vec, utility_vec,
-                          field_remaining, bench_matchup]).astype(np.float32)
+                          field_remaining, bench_matchup,
+                          special_vec]).astype(np.float32)
 
     # 固定長を保証
     if len(vec) < BATTLE_OBS_DIM:
