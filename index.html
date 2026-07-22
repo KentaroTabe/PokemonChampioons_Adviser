@@ -329,8 +329,11 @@
                 if (isConfirmed) {
                     confirmed.push([i, p]);
                 } else if ((p.types && p.types.length) || p.display_name) {
-                    const prob = (p.candidates && p.candidates[0]) ? p.candidates[0].pct : 0;
-                    predicted.push([prob, i, p]);
+                    // 並び順: 「次に出してきそう度」(自分の場に有利な候補ほど高い)。
+                    // 対戦前 (スコア無し) は最有力候補の確率順にフォールバック
+                    const key = (p.next_score != null) ? p.next_score * 100
+                        : ((p.candidates && p.candidates[0]) ? p.candidates[0].pct / 1000 : 0);
+                    predicted.push([key, i, p]);
                 } else {
                     unknownCount++;
                 }
@@ -338,7 +341,7 @@
             const shown = confirmed.map(([i, p]) => renderMon(p, i, s.opponent.active_index, 'opp'));
             if (predicted.length) {
                 predicted.sort((a, b) => b[0] - a[0]);   // 最有力候補の確率順
-                shown.push('<div style="font-size:11px;color:#89a;margin-top:6px">裏の予測 (あり得る順):</div>');
+                shown.push('<div style="font-size:11px;color:#89a;margin-top:6px">裏の予測 (次に出してきそうな順):</div>');
                 predicted.forEach(([prob, i, p], rank) => {
                     const cands = (p.candidates || []).slice(0, 3)
                         .map(c => `${c.ja} ${c.pct}%`).join(' / ');

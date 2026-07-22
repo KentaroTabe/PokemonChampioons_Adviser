@@ -245,6 +245,43 @@ def _attach_candidates(state: dict) -> None:
                 p["spe_range"] = [se["lo"], se["hi"]]
     except Exception:
         pass
+    # 未確定枠に「次に出してきそう度」を付与 (相手視点のマッチアップ:
+    # 自分の場のポケモンに有利な候補ほど次に出やすい、を候補確率で加重)
+    try:
+        from advisor.dex import get_dex
+        from advisor.rl_bridge import _JA2EN_TYPES
+        dex = get_dex()
+        mi = state["player"].get("active_index")
+        me = state["player"]["party"][mi] if mi is not None and \
+            mi < len(state["player"].get("party", [])) else None
+        my_types = []
+        if me:
+            my_types = [_JA2EN_TYPES.get(t, t).capitalize()
+                        for t in (me.get("types") or [])]
+            if not my_types and me.get("species_id"):
+                sp_me = dex.species(me["species_id"])
+                my_types = sp_me["types"] if sp_me else []
+        if my_types:
+            for p in state["opponent"]["party"]:
+                if p.get("species_ja") or not p.get("candidates"):
+                    continue
+                acc = tot = 0.0
+                for c in p["candidates"]:
+                    sp = dex.species(c["id"])
+                    if sp is None:
+                        continue
+                    # 候補のSTABが自分にどれだけ通るか - 自分のSTABの通り
+                    offense = max((dex.effectiveness(t, my_types)
+                                   for t in sp["types"]), default=1.0)
+                    incoming = max((dex.effectiveness(t, sp["types"])
+                                    for t in my_types), default=1.0)
+                    w = c["pct"] / 100.0
+                    acc += w * (offense - 0.8 * incoming)
+                    tot += w
+                if tot > 0:
+                    p["next_score"] = round(acc / tot, 3)
+    except Exception:
+        pass
 
 
 _MANUAL_FIELDS = {"hp_percent", "hp_current", "status", "item", "ability",
