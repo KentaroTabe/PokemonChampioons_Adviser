@@ -27,6 +27,9 @@ while true; do
   echo "[forever] ===== サイクル $CYCLE 開始: $(date) ====="
   bash champions_agent/scripts/train_nightly.sh || \
     echo "[forever] サイクル$CYCLE が異常終了しました (続行)"
+  # 自律チューニング: 評価履歴を確認し、停滞なら次の報酬設定へ切替
+  source .venv/bin/activate 2>/dev/null
+  python -m champions_agent.train.auto_tune --step || true
   echo "[forever] サイクル $CYCLE 完了。${SLEEP_BETWEEN}秒休止"
   sleep "$SLEEP_BETWEEN"
 done

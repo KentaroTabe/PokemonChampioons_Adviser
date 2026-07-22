@@ -51,6 +51,10 @@ trap cleanup EXIT
   fi
 
   for style in $STYLES; do
+    # 自律チューナーが管理する学習設定 (報酬シェイピング等) を反映
+    if [ -f "$REPO_ROOT/champions_agent/train/auto_env.sh" ]; then
+      source "$REPO_ROOT/champions_agent/train/auto_env.sh"
+    fi
     echo "--- [$style] 学習開始: $(date) ---"
     # チェックポイントの世代バックアップ (直近3世代)
     ckpt="$CKPT_DIR/battle_policy_${style}.zip"
