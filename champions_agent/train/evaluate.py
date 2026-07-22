@@ -122,13 +122,15 @@ def main() -> None:
     ))
     print(f"[evaluate] {result}")
 
-    # vs Random の結果は opponent_pool の勝率ゲート判定に使うため保存する
-    if not args.opponent_play_style and args.opponent == "random":
+    # 評価結果の保存: vs Random は opponent_pool の勝率ゲート判定、
+    # vs benchmark は最良チェックポイント保持とプール抽選の重み付けに使う
+    if not args.opponent_play_style:
         import json
         from pathlib import Path
         log_dir = Path(__file__).resolve().parent / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
-        (log_dir / f"last_eval_{args.play_style}.json").write_text(
+        suffix = "_benchmark" if args.opponent == "benchmark" else ""
+        (log_dir / f"last_eval_{args.play_style}{suffix}.json").write_text(
             json.dumps(result, ensure_ascii=False))
 
 

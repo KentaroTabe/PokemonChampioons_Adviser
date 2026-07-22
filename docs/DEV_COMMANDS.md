@@ -104,6 +104,8 @@ plist本体は `scripts/com.championsadviser.train.plist` (repo管理)。編集�
 | `bash champions_agent/scripts/train_forever.sh` | 連続学習ループ (nohup推奨) |
 | `bash champions_agent/scripts/train_nightly.sh` | 夜間バッチ1サイクル |
 | `python -m champions_agent.train.evaluate --opponent benchmark` | ベンチマーク評価 |
+| `python -m champions_agent.train.best_checkpoint --list` | 最良チェックポイント (_best) の記録確認 |
+| `python -m champions_agent.train.opponent_pool --list` | selfplay相手プールの一覧 |
 | `python -m tools.probe_policy` | 方策の健全性プローブ (攻撃率/抜群率) |
 | `python -m tools.smoke_train` / `smoke_selfplay` | 短時間の学習/セルフプレイ疎通 |
 | `python -m tools.validate_teams` | 生成チームのShowdownバリデーション |

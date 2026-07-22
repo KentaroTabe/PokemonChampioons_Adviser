@@ -72,14 +72,21 @@ trap cleanup EXIT
       --play-style "$style" --battles "$EVAL_BATTLES" --timeout 900 || \
       echo "[nightly] [$style] 評価が失敗/タイムアウトしました"
 
+    # 進歩の物差し: 上位構築xヒューリスティクスの固定強敵に対する勝率。
+    # 昇格判定に使うため対戦数を多めにしてノイズを抑える (30戦だと±0.09)
+    BENCH_BATTLES="${BENCH_BATTLES:-50}"
+    echo "--- [$style] ベンチマーク評価 (vs 上位構築ヒューリスティクス, $BENCH_BATTLES 戦) ---"
+    caffeinate -i python -m champions_agent.train.evaluate \
+      --play-style "$style" --battles "$BENCH_BATTLES" --opponent benchmark \
+      --timeout 900 || echo "[nightly] [$style] ベンチマーク評価が失敗しました"
+
     # 勝率ゲートを超えたらselfplay相手プールへスナップショット
+    # (ベンチマーク評価の後に実行し、ベンチ勝率を抽選重みに記録する)
     python -m champions_agent.train.opponent_pool --update-from-eval "$style" || true
 
-    # 進歩の物差し: 上位構築xヒューリスティクスの固定強敵に対する勝率
-    echo "--- [$style] ベンチマーク評価 (vs 上位構築ヒューリスティクス) ---"
-    caffeinate -i python -m champions_agent.train.evaluate \
-      --play-style "$style" --battles "$EVAL_BATTLES" --opponent benchmark \
-      --timeout 900 || echo "[nightly] [$style] ベンチマーク評価が失敗しました"
+    # ベンチ勝率が過去最良を上回ったら _best スナップショットを更新
+    # (学習は振動するため、アドバイザーには最良世代を配布する)
+    python -m champions_agent.train.best_checkpoint --update-from-eval "$style" || true
   done
 
   echo "===== done: $(date) ====="

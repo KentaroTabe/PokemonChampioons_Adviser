@@ -50,7 +50,10 @@ def _load_model():
         return _model
     _model_tried = True
     style = os.environ.get("RL_ADVICE_STYLE", "balance")
-    path = CKPT_DIR / f"battle_policy_{style}.zip"
+    # 最良スナップショット (_best) を優先 (best_checkpoint.py が管理。
+    # 最新チェックポイントは学習の振動で過去最良より弱いことがある)
+    best = CKPT_DIR / f"battle_policy_{style}_best.zip"
+    path = best if best.exists() else CKPT_DIR / f"battle_policy_{style}.zip"
     try:
         from sb3_contrib import MaskablePPO
         _model = MaskablePPO.load(str(path), device="cpu")

@@ -60,7 +60,13 @@ def train(total_timesteps: int = 10_000, battle_format: str = TRAINING_BATTLE_FO
     # 並列環境: Showdown通信レイテンシが律速 (単一env≒140fps) なので、
     # 複数バトルを別プロセスで同時進行させて収集スループットを上げる。
     # 各サブプロセスがローカルShowdown(8100)に独立接続する。
-    ppo_kwargs = {}
+    # 頭打ち対策のハイパーパラメータ (環境変数で調整可能):
+    # - ent_coef: SB3既定0.0では探索が縮退しプラトーで振動する。0.01で探索維持
+    # - learning_rate: 400万step超の微調整段階では既定3e-4が大きすぎて
+    #   ベンチ勝率0.3-0.7の振動を生んだ。1e-4へ引き下げ
+    lr = float(os.environ.get("TRAIN_LR", "1e-4"))
+    ent_coef = float(os.environ.get("TRAIN_ENT_COEF", "0.01"))
+    ppo_kwargs = {"learning_rate": lr, "ent_coef": ent_coef}
     if n_envs > 1:
         from stable_baselines3.common.vec_env import SubprocVecEnv
         env = SubprocVecEnv(
@@ -81,10 +87,15 @@ def train(total_timesteps: int = 10_000, battle_format: str = TRAINING_BATTLE_FO
     save_path = MODELS_DIR / f"battle_policy_{play_style}.zip"
     model = None
     if resume and save_path.exists():
-        # 夜間バッチ等での継続学習: 既存チェックポイントから再開する
+        # 夜間バッチ等での継続学習: 既存チェックポイントから再開する。
+        # custom_objectsでLR/entropyを上書きしないと保存時の値を引き継いで
+        # しまい、ハイパーパラメータ変更が再開時に反映されない
         try:
-            model = MaskablePPO.load(str(save_path), env=env)
-            print(f"[train_battle] チェックポイントから再開: {save_path}")
+            model = MaskablePPO.load(
+                str(save_path), env=env,
+                custom_objects={"learning_rate": lr, "ent_coef": ent_coef})
+            print(f"[train_battle] チェックポイントから再開: {save_path} "
+                  f"(lr={lr}, ent_coef={ent_coef})")
         except Exception as e:
             # 観測空間の変更・アルゴリズム変更 (PPO->MaskablePPO) 等で
             # 互換性が無い場合は退避して新規学習する
