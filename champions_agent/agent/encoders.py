@@ -307,42 +307,87 @@ def _mega_in_team(team) -> bool:
         return False
 
 
-def _move_effect_vec(move) -> np.ndarray:
-    """技の付随効果5次元: [自分ランク上昇, 自分ランク低下, 相手ランク低下,
-    状態異常付与率, 回復率]。りゅうのまい/でんじは等の変化技の区別に必須"""
+def _move_self_boosts(move) -> dict:
+    """技が自分に与えるランク変化 {stat: 段数} (副次効果は確率加重)"""
+    out: dict = {}
+    if move is None:
+        return out
+    try:
+        boosts = getattr(move, "boosts", None) or {}
+        target = str(getattr(move, "target", "") or "").lower()
+        if "self" in target:
+            for k, v in boosts.items():
+                out[k] = out.get(k, 0.0) + v
+        sb = getattr(move, "self_boost", None) or {}
+        items = (sb.get("boosts") or {}).items() if "boosts" in sb else sb.items()
+        for k, v in items:
+            out[k] = out.get(k, 0.0) + v
+        sec_raw = getattr(move, "secondary", None)
+        secs = sec_raw if isinstance(sec_raw, list) else ([sec_raw] if sec_raw else [])
+        for sec in secs:
+            chance = float(sec.get("chance") or 100) / 100.0
+            for k, v in ((sec.get("self") or {}).get("boosts") or {}).items():
+                out[k] = out.get(k, 0.0) + v * chance
+    except Exception:
+        pass
+    return out
+
+
+def _has_contrary(pokemon) -> bool:
+    """あまのじゃく (ランク変化反転) 持ちか。
+
+    特性が判明していればそれを、未判明でも種族の可能特性が
+    あまのじゃくのみ (メガムクホーク等) なら真とみなす
+    """
+    if pokemon is None:
+        return False
+    try:
+        ab = getattr(pokemon, "ability", None)
+        if ab:
+            return str(ab).lower().replace(" ", "") == "contrary"
+        poss = getattr(pokemon, "possible_abilities", None) or {}
+        vals = [str(v).lower().replace(" ", "")
+                for v in (poss.values() if isinstance(poss, dict) else poss)]
+        return bool(vals) and all(v == "contrary" for v in vals)
+    except Exception:
+        return False
+
+
+def _move_effect_vec(move, contrary: bool = False,
+                     target_contrary: bool = False) -> np.ndarray:
+    """技の付随効果8次元:
+    [A/B/C/D/S別の符号付き自己ブースト(各/2), 相手ランク低下, 状態異常率, 回復率]
+
+    合計スカラーではなくステータス別に分解する: りゅうのまい[A+S]と
+    てっぺき[B]は価値の文脈 (自分の型・相手の攻撃プロファイル) が異なる。
+    contrary=使用者があまのじゃくなら自己ブーストの符号を反転
+    (メガムクホークのインファイト=B/D上昇)。target_contrary=対象が
+    あまのじゃくなら相手ランク低下は逆に強化になるため0にする
+    """
+    from champions_agent.agent.spaces import BOOST_STAT_KEYS
     vec = np.zeros(MOVE_EFFECT_DIM, dtype=np.float32)
     if move is None:
         return vec
     try:
-        self_up = self_down = targ_down = 0.0
-        # 主効果boosts: target=selfなら自分、そうでなければ相手に適用
-        # (poke-envのtargetはTarget列挙型のため文字列包含で判定)
+        self_boosts = _move_self_boosts(move)
+        sign = -1.0 if contrary else 1.0
+        for i, k in enumerate(BOOST_STAT_KEYS):
+            vec[i] = max(-1.0, min(1.0, sign * self_boosts.get(k, 0.0) / 2.0))
+        targ_down = 0.0
         boosts = getattr(move, "boosts", None) or {}
         target = str(getattr(move, "target", "") or "").lower()
-        for v in boosts.values():
-            if "self" in target:
-                self_up += max(v, 0)
-                self_down += max(-v, 0)
-            else:
+        if "self" not in target:
+            for v in boosts.values():
                 targ_down += max(-v, 0)
-        sb = getattr(move, "self_boost", None) or {}
-        for v in (sb.get("boosts") or {}).values() if "boosts" in sb else sb.values():
-            self_up += max(v, 0)
-            self_down += max(-v, 0)
-        # 副次効果 (確率つき): 相手デバフ/状態異常
         status_chance = 1.0 if getattr(move, "status", None) else 0.0
-        for sec in (getattr(move, "secondary", None) or []) if \
-                isinstance(getattr(move, "secondary", None), list) else \
-                ([move.secondary] if getattr(move, "secondary", None) else []):
+        sec_raw = getattr(move, "secondary", None)
+        secs = sec_raw if isinstance(sec_raw, list) else ([sec_raw] if sec_raw else [])
+        for sec in secs:
             chance = float(sec.get("chance") or 100) / 100.0
             for v in (sec.get("boosts") or {}).values():
                 targ_down += max(-v, 0) * chance
             if sec.get("status"):
                 status_chance = max(status_chance, chance)
-            sself = sec.get("self") or {}
-            for v in (sself.get("boosts") or {}).values():
-                self_up += max(v, 0) * chance
-        # 回復 (heal/drain)
         heal = 0.0
         h = getattr(move, "heal", None)
         if h:
@@ -352,14 +397,64 @@ def _move_effect_vec(move) -> np.ndarray:
         if d:
             heal = max(heal, (float(d[0]) / float(d[1]) if
                               isinstance(d, (list, tuple)) else float(d)) * 0.75)
-        vec[0] = min(self_up, 4.0) / 4.0
-        vec[1] = min(self_down, 4.0) / 4.0
-        vec[2] = min(targ_down, 4.0) / 4.0
-        vec[3] = min(status_chance, 1.0)
-        vec[4] = min(heal, 1.0)
+        if target_contrary:
+            targ_down = 0.0   # あまのじゃく相手にはデバフが強化になる
+        vec[5] = min(targ_down, 4.0) / 4.0
+        vec[6] = min(status_chance, 1.0)
+        vec[7] = min(heal, 1.0)
     except Exception:
         pass
     return vec
+
+
+def _attack_profile(pokemon, fallback_stats: bool = True) -> tuple:
+    """(物理シェア, 特殊シェア)。判明技の威力加重、なければ種族値A/C比"""
+    phys = spec = 0.0
+    try:
+        for mv in pokemon.moves.values():
+            p = float(mv.base_power or 0)
+            if p <= 0:
+                continue
+            cat = mv.category.name.lower() if mv.category else ""
+            if cat == "physical":
+                phys += p
+            elif cat == "special":
+                spec += p
+    except Exception:
+        pass
+    if phys + spec <= 0 and fallback_stats:
+        try:
+            bs = pokemon.base_stats or {}
+            phys = float(bs.get("atk") or 0)
+            spec = float(bs.get("spa") or 0)
+        except Exception:
+            pass
+    total = phys + spec
+    if total <= 0:
+        return 0.5, 0.5
+    return phys / total, spec / total
+
+
+def _boost_utility(move, own_phys: float, own_spec: float,
+                   opp_phys: float, opp_spec: float,
+                   is_slower: bool, contrary: bool = False) -> float:
+    """ランク技の文脈つき効用。
+
+    B上げは相手の物理脅威シェア、D上げは特殊脅威シェアで重み付け
+    (相手が特殊型ならB上げの効用は0に近づく)。A/C上げは自分の攻撃
+    プロファイル、S上げは「相手より遅い」ときに高価値。
+    contrary=あまのじゃくなら反転後のブーストで評価する
+    (インファイトのB/D上昇が効用として観測される)
+    """
+    sb = _move_self_boosts(move)
+    if not sb:
+        return 0.0
+    sign = -1.0 if contrary else 1.0
+    w = {"atk": own_phys, "spa": own_spec,
+         "def": opp_phys, "spd": opp_spec,
+         "spe": 0.9 if is_slower else 0.2}
+    util = sum(max(sign * v, 0.0) * w.get(k, 0.3) for k, v in sb.items())
+    return min(util, 4.0) / 4.0
 
 
 def _field_remaining_vec(battle) -> np.ndarray:
@@ -517,19 +612,38 @@ def encode_battle(battle) -> np.ndarray:
         if b is not None and own is not None:
             bench_tactics[4 + i] = _best_move_eff(own, b) / 4.0
 
-    # ================= v3拡張 (技効果/天候残り/控え同士) ====================
+    # ========== v3拡張 (技効果/脅威プロファイル/効用/天候残り/控え同士) ======
     own_moves_list = []
     if own is not None:
         try:
             own_moves_list = list(own.moves.values())
         except Exception:
             pass
+    # あまのじゃく (ランク反転) は技効果の意味を根本的に変えるため反映する
+    own_contrary = _has_contrary(own)
+    opp_contrary = _has_contrary(opp)
     own_move_effects = [
-        _move_effect_vec(own_moves_list[i] if i < len(own_moves_list) else None)
+        _move_effect_vec(own_moves_list[i] if i < len(own_moves_list) else None,
+                         contrary=own_contrary, target_contrary=opp_contrary)
         for i in range(N_MOVE_SLOTS)]
     opp_move_effects = [
-        _move_effect_vec(opp_revealed[i] if i < len(opp_revealed) else None)
+        _move_effect_vec(opp_revealed[i] if i < len(opp_revealed) else None,
+                         contrary=opp_contrary, target_contrary=own_contrary)
         for i in range(N_MOVE_SLOTS)]
+
+    # 攻撃プロファイル: 相手の物理/特殊脅威シェア + 自分の物理/特殊シェア
+    opp_phys, opp_spec = _attack_profile(opp) if opp is not None else (0.5, 0.5)
+    own_phys, own_spec = _attack_profile(own) if own is not None else (0.5, 0.5)
+    profile_vec = np.array([opp_phys, opp_spec, own_phys, own_spec],
+                           dtype=np.float32)
+
+    # 自分の各技のランク技効用 (文脈重み付き。speed_vec[1]=1なら自分が速い)
+    is_slower = speed_vec[1] < 0.5
+    utility_vec = np.array([
+        _boost_utility(own_moves_list[i] if i < len(own_moves_list) else None,
+                       own_phys, own_spec, opp_phys, opp_spec, is_slower,
+                       contrary=own_contrary)
+        for i in range(N_MOVE_SLOTS)], dtype=np.float32)
 
     field_remaining = _field_remaining_vec(battle)
 
@@ -549,6 +663,7 @@ def encode_battle(battle) -> np.ndarray:
                           own_item, opp_item, misc,
                           bench_tactics,
                           *own_move_effects, *opp_move_effects,
+                          profile_vec, utility_vec,
                           field_remaining, bench_matchup]).astype(np.float32)
 
     # 固定長を保証

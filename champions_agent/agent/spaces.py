@@ -40,16 +40,22 @@ N_VOLATILE_SLOTS = 6
 N_ITEM_CATS = 6
 _EXTRA_DIM_V2 = N_MOVE_SLOTS * MOVE_FEAT_DIM + 12 + 3 + 12 + 2 + 6  # = 71
 
-# --- v3拡張: 技の付随効果 + 天候残り + 控え同士のマッチアップ ---
-# 技効果5次元 (自分ランク上昇/自分ランク低下/相手ランク低下/状態異常率/回復率)
-# を自分の技4 + 相手の判明技4 に付与 = 40
-# (りゅうのまい・でんじは・みがわり等の変化技が観測上区別できなかった)
+# --- v3拡張: 技の付随効果 + 脅威プロファイル + 天候残り + 控え同士 ---
+# 技効果8次元 = ステータス別の符号付き自己ブースト (A/B/C/D/S) 5
+#             + 相手ランク低下 + 状態異常付与率 + 回復率
+#   自分の技4 + 相手の判明技4 に付与 = 64
+#   (りゅうのまい[A+S]とてっぺき[B]を別物として観測する。合計スカラーでは
+#    「B上げは相手が特殊型だと活きない」という文脈依存が学習できない)
+# 攻撃プロファイル4 = 相手の物理/特殊脅威シェア + 自分の物理/特殊シェア
+# ブースト効用4 = 自分の各技のランク技効用 (ステータス別ブースト x 文脈重み。
+#   例: B上げの効用は相手の物理脅威シェアで重み付け -> 相手が特殊型なら0)
 # 天候/フィールドの残りターン (概算/8) = 2
 # 自分控え2 x 相手控え2 の打点相性 (突破後の詰め筋評価) = 4
-MOVE_EFFECT_DIM = 5
-_EXTRA_DIM_V3 = 2 * N_MOVE_SLOTS * MOVE_EFFECT_DIM + 2 + 4  # = 46
+MOVE_EFFECT_DIM = 8
+BOOST_STAT_KEYS = ("atk", "def", "spa", "spd", "spe")
+_EXTRA_DIM_V3 = 2 * N_MOVE_SLOTS * MOVE_EFFECT_DIM + 4 + N_MOVE_SLOTS + 2 + 4  # = 78
 
-BATTLE_OBS_DIM = _OBS_DIM_V1 + _EXTRA_DIM_V2 + _EXTRA_DIM_V3  # = 344
+BATTLE_OBS_DIM = _OBS_DIM_V1 + _EXTRA_DIM_V2 + _EXTRA_DIM_V3  # = 376
 
 # --- 選出方策用の旧エンコーダ次元 (encoders.encode_own_pokemon 等) ---
 POKEMON_FEATURE_DIM = 64

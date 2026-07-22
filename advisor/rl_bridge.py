@@ -31,8 +31,8 @@ STATUS_MAP = {"burn": "brn", "paralysis": "par", "sleep": "slp",
               "freeze": "frz", "poison": "psn", "toxic": "tox"}
 BOOST_KEYS = ["atk", "def", "spa", "spd", "spe", "acc", "eva"]
 BASE_KEYS = ["hp", "atk", "def", "spa", "spd", "spe"]
-N_MOVE_SLOTS, MOVE_FEAT_DIM, OBS_DIM = 4, 9, 344  # v3拡張 (v1=227/v2=298の末尾追記)
-MOVE_EFFECT_DIM = 5
+N_MOVE_SLOTS, MOVE_FEAT_DIM, OBS_DIM = 4, 9, 376  # v3拡張 (v1=227/v2=298の末尾追記)
+MOVE_EFFECT_DIM = 8
 VOLATILE_EFFECTS = ["confusion", "leech_seed", "substitute", "taunt",
                     "encore", "yawn"]
 ITEM_CATEGORIES = ["choicescarf", "choiceband", "choicespecs",
@@ -256,25 +256,81 @@ def _move_id_from_any(name) -> Optional[str]:
     return mid
 
 
-def _move_effect_vec_from_id(name) -> np.ndarray:
-    """技の付随効果5次元 (encoders._move_effect_vec と同義)。
+_PMOVE_CACHE: dict = {}
 
-    advisor側dexには効果フィールドが無いため poke-env の技データを使う
-    """
+
+def _poke_move(name):
+    """技名 (ID/日本語) から poke-env の Move オブジェクトを得る (キャッシュ付き)"""
     key = str(name) if name else ""
-    if key in _EFFECT_CACHE:
-        return _EFFECT_CACHE[key]
-    v = np.zeros(MOVE_EFFECT_DIM, dtype=np.float32)
+    if key in _PMOVE_CACHE:
+        return _PMOVE_CACHE[key]
+    mv = None
     mid = _move_id_from_any(key) if key else None
     if mid:
         try:
             from poke_env.battle import Move
-            from champions_agent.agent.encoders import _move_effect_vec
-            v = _move_effect_vec(Move(mid, gen=9))
+            mv = Move(mid, gen=9)
         except Exception:
-            pass
+            mv = None
+    _PMOVE_CACHE[key] = mv
+    return mv
+
+
+def _has_contrary_dict(p: Optional[dict]) -> bool:
+    """あまのじゃく持ちか (判明特性 or 固定特性: メガムクホーク等)"""
+    if not p:
+        return False
+    if (p.get("ability_id") or "") == "contrary":
+        return True
+    try:
+        from vision.abilities import fixed_ability
+        return fixed_ability(p.get("species_id"),
+                             is_mega=bool(p.get("is_mega")),
+                             item_id=p.get("item_id") or "") == "contrary"
+    except Exception:
+        return False
+
+
+def _move_effect_vec_from_id(name, contrary: bool = False,
+                             target_contrary: bool = False) -> np.ndarray:
+    """技の付随効果8次元 (encoders._move_effect_vec と同義・共用)。
+
+    advisor側dexには効果フィールドが無いため poke-env の技データを使う
+    """
+    key = (str(name) if name else "", contrary, target_contrary)
+    if key in _EFFECT_CACHE:
+        return _EFFECT_CACHE[key]
+    from champions_agent.agent.encoders import _move_effect_vec
+    v = _move_effect_vec(_poke_move(key[0]), contrary=contrary,
+                         target_contrary=target_contrary)
     _EFFECT_CACHE[key] = v
     return v
+
+
+def _attack_profile_dict(p: Optional[dict], revealed: bool) -> tuple:
+    """(物理シェア, 特殊シェア)。技の威力加重、なければ種族値A/C比"""
+    phys = spec = 0.0
+    if p:
+        names = (p.get("revealed_moves") or []) if revealed else \
+            [m.get("move_id") for m in (p.get("moves") or [])]
+        for name in names:
+            mv = _poke_move(name)
+            if mv is None or (mv.base_power or 0) <= 0:
+                continue
+            cat = mv.category.name.lower() if mv.category else ""
+            if cat == "physical":
+                phys += float(mv.base_power)
+            elif cat == "special":
+                spec += float(mv.base_power)
+        if phys + spec <= 0:
+            sp = get_dex().species(p.get("species_id"))
+            if sp:
+                phys = float(sp["baseStats"].get("atk") or 0)
+                spec = float(sp["baseStats"].get("spa") or 0)
+    total = phys + spec
+    if total <= 0:
+        return 0.5, 0.5
+    return phys / total, spec / total
 
 
 def _adapt_obs(model, obs: np.ndarray) -> np.ndarray:
@@ -492,14 +548,35 @@ def encode_state(state: dict, my_spe_actual: Optional[float] = None) -> Optional
             bench_tactics[4 + i] = _best_move_eff_dict(own, b) / 4.0
 
     # ============ v3拡張 (技効果/天候残り/控え同士。encoders と同並び) =======
+    own_contrary = _has_contrary_dict(own)
+    opp_contrary = _has_contrary_dict(opp)
     own_move_effects = [
-        _move_effect_vec_from_id(moves[i].get("move_id")) if i < len(moves)
+        _move_effect_vec_from_id(moves[i].get("move_id"),
+                                 contrary=own_contrary,
+                                 target_contrary=opp_contrary)
+        if i < len(moves)
         else np.zeros(MOVE_EFFECT_DIM, dtype=np.float32)
         for i in range(N_MOVE_SLOTS)]
     opp_move_effects = [
-        _move_effect_vec_from_id(revealed_ja[i]) if i < len(revealed_ja)
+        _move_effect_vec_from_id(revealed_ja[i], contrary=opp_contrary,
+                                 target_contrary=own_contrary)
+        if i < len(revealed_ja)
         else np.zeros(MOVE_EFFECT_DIM, dtype=np.float32)
         for i in range(N_MOVE_SLOTS)]
+
+    # 攻撃プロファイル (相手=判明技ベース/自分=登録技ベース) + ランク技効用
+    opp_phys, opp_spec = _attack_profile_dict(opp, revealed=True)
+    own_phys, own_spec = _attack_profile_dict(own, revealed=False)
+    profile_vec = np.array([opp_phys, opp_spec, own_phys, own_spec],
+                           dtype=np.float32)
+    from champions_agent.agent.encoders import _boost_utility
+    is_slower = speed[1] < 0.5
+    utility_vec = np.array([
+        _boost_utility(_poke_move(moves[i].get("move_id")) if i < len(moves)
+                       else None,
+                       own_phys, own_spec, opp_phys, opp_spec, is_slower,
+                       contrary=own_contrary)
+        for i in range(N_MOVE_SLOTS)], dtype=np.float32)
 
     f = state.get("field") or {}
     field_remaining = np.array([
@@ -522,6 +599,7 @@ def encode_state(state: dict, my_spe_actual: Optional[float] = None) -> Optional
                           own_item, opp_item, misc,
                           bench_tactics,
                           *own_move_effects, *opp_move_effects,
+                          profile_vec, utility_vec,
                           field_remaining, bench_matchup]).astype(np.float32)
     if len(vec) < OBS_DIM:
         vec = np.concatenate([vec, np.zeros(OBS_DIM - len(vec), dtype=np.float32)])
