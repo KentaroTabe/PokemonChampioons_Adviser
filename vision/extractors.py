@@ -475,7 +475,32 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
                 opp = state.opponent.ensure_active()
         else:
             opp = state.opponent.ensure_active()
-        opp.display_name = name_text
+        # 種族確定済みスロットへ「別のポケモンの名前」を上書きしない。
+        # (実戦: 交代を見逃した状態でHUDの新ポケモン名が前のポケモンの
+        #  display_nameに入り、イベントの名前照合が誤って一致して
+        #  別ポケモンの技として記録された)
+        from vision.normalize import loose_key as _lk
+        import difflib as _dl
+        key_new = _lk(name_text)
+        cur = [_lk(x) for x in (opp.species_ja, opp.display_name) if x]
+        similar = (not cur) or any(
+            k and (k in key_new or key_new in k
+                   or _dl.SequenceMatcher(None, key_new, k).ratio() >= 0.5)
+            for k in cur)
+        if similar:
+            opp.display_name = name_text
+        elif opp.species_ja:
+            # 見逃した交代の兆候: 表示名の合う既存枠があればそちらへ切替
+            idx = state.opponent.find_by_display_name(name_text)
+            if idx is not None:
+                state.opponent.switch_to(idx)
+                opp = state.opponent.party[idx]
+                opp.display_name = name_text
+            else:
+                state.log_event(
+                    "system",
+                    f"相手HUD名不一致 ({name_text}≠{opp.species_ja}) "
+                    "交代見逃しの疑い", event_id="hud_name_mismatch")
     else:
         opp = state.opponent.ensure_active()
     link_active_to_party(state, "opponent")

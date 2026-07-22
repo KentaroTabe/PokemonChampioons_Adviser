@@ -76,9 +76,19 @@ def _hazard_frac(mon: MonView, side: SimSide) -> float:
     return 0.125 * mult
 
 
-def _priority(move_id: Optional[str]) -> int:
+def _priority(move_id: Optional[str], view: Optional[MonView] = None) -> int:
+    """技の優先度 (特性補正込み: いたずらごころ=変化技+1 等)"""
     mv = get_dex().move(move_id) if move_id else None
-    return mv.get("priority", 0) if mv else 0
+    if not mv:
+        return 0
+    pri = mv.get("priority", 0)
+    ab = (view.ability or "") if view is not None else ""
+    if ab == "prankster" and (mv.get("category") or "") == "Status":
+        pri += 1
+    elif ab == "galewings" and (mv.get("type") or "") == "Flying" \
+            and view is not None and view.hp_frac >= 0.999:
+        pri += 1
+    return pri
 
 
 def _speed(view: MonView, fieldv: Optional[FieldView] = None) -> float:
@@ -152,10 +162,12 @@ def simulate_turn(me: SimSide, opp: SimSide, my_act: Action, opp_act: Action,
     movers = []
     if my_act.kind == "move" and me.active_hp > 0:
         movers.append(("me", my_act.move_id,
-                       _priority(my_act.move_id), _speed(me.active, my_field)))
+                       _priority(my_act.move_id, me.active),
+                       _speed(me.active, my_field)))
     if opp_act.kind == "move" and opp.active_hp > 0:
         movers.append(("opp", opp_act.move_id,
-                       _priority(opp_act.move_id), _speed(opp.active, my_field)))
+                       _priority(opp_act.move_id, opp.active),
+                       _speed(opp.active, my_field)))
     trick_room = bool(my_field and my_field.trick_room)
     movers.sort(key=lambda m: (-m[2], m[3] if trick_room else -m[3]))
 

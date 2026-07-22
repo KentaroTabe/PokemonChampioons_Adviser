@@ -436,6 +436,26 @@ class SpreadTracker:
         my_view, me = self._my_view(state)
         if not opp or not opp.get("species_id") or my_view is None:
             return
+        # 特性による優先度変化の可能性がある行動は先後観測に使わない
+        # (実戦: いたずらごころヤミラミのおにび先制を「実速が上」と誤学習し
+        #  推定素早さが大きく狂った)。可能特性ベースで保守的に弾く
+        def _pri_ability_noise(p_dict, mv) -> bool:
+            try:
+                from advisor.rl_bridge import _possible_abilities_dict
+                poss = _possible_abilities_dict(p_dict)
+            except Exception:
+                return False
+            cat = (mv.get("category") or "").lower()
+            mtype = (mv.get("type") or "").lower()
+            if "prankster" in poss and cat == "status":
+                return True   # いたずらごころ: 変化技+1
+            if "galewings" in poss and mtype == "flying":
+                return True   # はやてのつばさ: ひこう技+1 (満タン時)
+            if "triage" in poss and (mv.get("heal") or mv.get("drain")):
+                return True   # ヒーリングシフト
+            return False
+        if _pri_ability_noise(opp, mv_o) or _pri_ability_noise(me, mv_p):
+            return
         from advisor.damage import FieldView, effective_speed
         f = state.get("field", {})
         my_spe = effective_speed(my_view, FieldView(
