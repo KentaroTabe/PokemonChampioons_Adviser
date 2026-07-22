@@ -292,11 +292,18 @@ def _set_hp(state: BattleStateV2, side_name: str, mon,
         # 初回は即反映 (アドバイスが値なしで止まらないように)
         commit()
         mon._hp_event_base = new
+        mon._hp_stable_since = time.time()
         return
     if last_read is None or abs(new - last_read) > 2.0:
         mon._hp_stable_count = 1
+        mon._hp_stable_since = time.time()
         return   # 1回だけの観測は状態にも反映しない (誤読の混入防止)
     mon._hp_stable_count = getattr(mon, "_hp_stable_count", 1) + 1
+    # 時間安定条件: 気絶/被弾演出はHPバーが徐々に減るため、高頻度解析では
+    # 遷移中の値も2回連続で読めてしまう。同値が600ms以上続いた場合のみ
+    # 確定する (演出終了後の静止値だけが通る)
+    if time.time() - getattr(mon, "_hp_stable_since", 0.0) < 0.6:
+        return
     # ほぼ0%は交代/メガシンカ演出中の空バー誤読が多いため、3回連続観測を
     # 要求する (本物のひんし・瀕死残りなら低%表示が続くので3回目で確定する)。
     # バー由来の読取は1.4%等の端数になるため、閾値は0%だけでなく3%まで広げる

@@ -393,13 +393,15 @@
                 videoElement.onloadedmetadata = () => {
                     canvas.width = videoElement.videoWidth;
                     canvas.height = videoElement.videoHeight;
-                    // 5fps: メッセージ描画完了の安定化検知に十分なレート
+                    // 10fps: 解析レイテンシ実測 平均69ms (上限~14fps)。
+                    // 気絶演出中のHP遷移やランク変化メッセージの取りこぼしを減らす。
+                    // 重いフレーム処理中はサーバー側が自動でドロップする (最新優先)
                     setInterval(() => {
                         if (videoElement.readyState === videoElement.HAVE_ENOUGH_DATA) {
                             ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
                             socket.emit('send_frame', canvas.toDataURL('image/jpeg', 0.8));
                         }
-                    }, 200);
+                    }, 100);
                 };
             } catch (err) {
                 console.error('カメラ取得エラー: ', err);
