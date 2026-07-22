@@ -144,6 +144,69 @@ def show_history(cycles, n: int):
         print(f"{c['ts']}  " + "  ".join(parts))
 
 
+def _moving_avg(xs, ys, window: int = 5):
+    """欠測 (None) を飛ばした移動平均"""
+    pts = [(x, y) for x, y in zip(xs, ys) if y is not None]
+    out_x, out_y = [], []
+    for i in range(len(pts)):
+        seg = pts[max(0, i - window + 1):i + 1]
+        out_x.append(pts[i][0])
+        out_y.append(sum(v for _, v in seg) / len(seg))
+    return out_x, out_y
+
+
+def plot_history(cycles, n: int, out: Path):
+    """全性格の vsRandom / vsBenchmark 勝率を1枚のグラフに描画する"""
+    import matplotlib
+    matplotlib.use("Agg")
+    matplotlib.rcParams["font.family"] = [
+        "Hiragino Sans", "Arial Unicode MS", "sans-serif"]
+    import matplotlib.pyplot as plt
+
+    cycles = cycles[-n:]
+    if not cycles:
+        print("プロットするデータがありません")
+        return
+    styles = sorted({s for c in cycles for s in c["styles"]})
+    xs = list(range(len(cycles)))
+    colors = {"balance": "tab:blue", "offense": "tab:red",
+              "cycle": "tab:green", "stall": "tab:purple"}
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    for style in styles:
+        color = colors.get(style, None)
+        bench = [c["styles"].get(style, {}).get("benchmark") for c in cycles]
+        rand = [c["styles"].get(style, {}).get("random") for c in cycles]
+        # 生データは薄く、ベンチマークの移動平均を太線で
+        bx = [x for x, v in zip(xs, bench) if v is not None]
+        by = [v for v in bench if v is not None]
+        ax.plot(bx, by, ".", color=color, alpha=0.25, markersize=4)
+        mx, my = _moving_avg(xs, bench)
+        ax.plot(mx, my, "-", color=color, linewidth=2,
+                label=f"{style} vsBench(移動平均)")
+        rx = [x for x, v in zip(xs, rand) if v is not None]
+        ry = [v for v in rand if v is not None]
+        ax.plot(rx, ry, "--", color=color, alpha=0.35, linewidth=1,
+                label=f"{style} vsRandom")
+
+    ax.axhline(0.5, color="gray", linestyle=":", linewidth=1)
+    ax.set_ylim(0, 1.02)
+    ax.set_xlabel("サイクル")
+    ax.set_ylabel("勝率")
+    ax.set_title(f"学習推移 (直近{len(cycles)}サイクル: "
+                 f"{cycles[0]['ts']} 〜 {cycles[-1]['ts']})")
+    # x軸に日時ラベルを間引いて表示
+    step = max(1, len(cycles) // 10)
+    ax.set_xticks(xs[::step])
+    ax.set_xticklabels([cycles[i]["ts"][5:] for i in xs[::step]],
+                       rotation=45, ha="right", fontsize=8)
+    ax.legend(fontsize=8, ncol=2, loc="lower left")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out, dpi=110)
+    print(f"グラフを保存しました: {out}")
+
+
 def follow():
     print("ライブ追尾 (Ctrl+Cで終了):")
     proc = subprocess.Popen(
@@ -163,6 +226,10 @@ def main():
     ap = argparse.ArgumentParser(description="学習経過の観察")
     ap.add_argument("--history", type=int, metavar="N",
                     help="直近Nサイクルの評価履歴を一覧表示")
+    ap.add_argument("--plot", nargs="?", const="", metavar="PATH",
+                    help="勝率推移を1枚のグラフにPNG出力 "
+                         "(--history Nと併用で直近Nサイクル。既定の保存先は "
+                         "logs/training_history.png)")
     ap.add_argument("--follow", action="store_true",
                     help="train_forever.log をライブ追尾")
     args = ap.parse_args()
@@ -170,6 +237,10 @@ def main():
         follow()
         return
     cycles = parse_logs()
+    if args.plot is not None:
+        out = Path(args.plot) if args.plot else REPO / "logs" / "training_history.png"
+        plot_history(cycles, args.history or len(cycles), out)
+        return
     if args.history:
         show_history(cycles, args.history)
     else:

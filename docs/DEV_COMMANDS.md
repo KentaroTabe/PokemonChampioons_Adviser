@@ -99,6 +99,7 @@ plist本体は `scripts/com.championsadviser.train.plist` (repo管理)。編集�
 |---|---|
 | `python -m tools.watch_training` | 学習経過のサマリー (稼働状態/性格別勝率/推移スパークライン) |
 | `python -m tools.watch_training --history 20` | 直近20サイクルの評価履歴一覧 |
+| `python -m tools.watch_training --history 100 --plot` | 全性格の勝率推移を1枚のグラフにPNG出力 (logs/training_history.png) |
 | `python -m tools.watch_training --follow` | 学習ログのライブ追尾 (Ctrl+Cで終了) |
 | `bash champions_agent/scripts/setup_showdown.sh` | ローカルShowdown (8100) の準備 |
 | `bash champions_agent/scripts/train_forever.sh` | 連続学習ループ (nohup推奨) |
