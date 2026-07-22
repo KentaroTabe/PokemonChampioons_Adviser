@@ -307,17 +307,48 @@
             if (s.opponent && s.opponent.hazards && s.opponent.hazards.stealth_rock) parts.push('敵陣ステロ');
             document.getElementById('field-label').textContent = parts.join(' / ') || '場: 通常';
 
-            document.getElementById('my-party').innerHTML =
-                (s.player.party || []).map((p, i) => renderMon(p, i, s.player.active_index, 'my')).join('');
-            // 誤表示削減: 種族もタイプも不明な枠は描画しない (件数だけ表示)
+            // 自分のパーティ: 対戦中は選出3体 (白リボン追跡+登場済み) のみ表示
+            const inBattle = !['selection', 'standby', 'unknown'].includes(s.scene);
+            const myParty = s.player.party || [];
+            const picked = myParty.filter(p => p.is_picked).length;
+            const myShown = [];
+            myParty.forEach((p, i) => {
+                const appeared = i === s.player.active_index ||
+                    p.hp_percent != null || p.pick_order;
+                if (inBattle && picked >= 1 && !p.is_picked && !appeared) return;
+                myShown.push(renderMon(p, i, s.player.active_index, 'my'));
+            });
+            document.getElementById('my-party').innerHTML = myShown.join('');
+            // 相手のパーティ: 確定済みを先に、未確定枠は「予測 (あり得る順)」で表示
             const oppParty = s.opponent.party || [];
-            const shown = [];
+            const confirmed = [], predicted = [];
             let unknownCount = 0;
             oppParty.forEach((p, i) => {
-                if (p.species_ja || (p.types && p.types.length) || p.display_name)
-                    shown.push(renderMon(p, i, s.opponent.active_index, 'opp'));
-                else unknownCount++;
+                const isConfirmed = p.species_ja ||
+                    i === s.opponent.active_index || p.hp_percent != null;
+                if (isConfirmed) {
+                    confirmed.push([i, p]);
+                } else if ((p.types && p.types.length) || p.display_name) {
+                    const prob = (p.candidates && p.candidates[0]) ? p.candidates[0].pct : 0;
+                    predicted.push([prob, i, p]);
+                } else {
+                    unknownCount++;
+                }
             });
+            const shown = confirmed.map(([i, p]) => renderMon(p, i, s.opponent.active_index, 'opp'));
+            if (predicted.length) {
+                predicted.sort((a, b) => b[0] - a[0]);   // 最有力候補の確率順
+                shown.push('<div style="font-size:11px;color:#89a;margin-top:6px">裏の予測 (あり得る順):</div>');
+                predicted.forEach(([prob, i, p]) => {
+                    const cands = (p.candidates || []).slice(0, 3)
+                        .map(c => `${c.ja} ${c.pct}%`).join(' / ');
+                    const types = (p.types || []).join('・');
+                    const picker = (p.candidates && p.candidates.length) ?
+                        `<select onchange="setSpecies(${i}, this.value)" style="margin-left:6px;font-size:11px;background:#223;color:#cde;border:1px solid #446;border-radius:4px"><option value="">確定…</option>` +
+                        p.candidates.map(c => `<option value="${c.id}|${c.ja}">${c.ja} (${c.pct}%)</option>`).join('') + '</select>' : '';
+                    shown.push(`<div class="mon" style="opacity:.8">❓ [${types}] ${cands || '候補なし'}${picker}</div>`);
+                });
+            }
             if (unknownCount > 0)
                 shown.push(`<div class="mon" style="opacity:.5">未確認 ${unknownCount}枠</div>`);
             // 帰属不明の観測 (交代見逃しの疑い) があれば修正を促す
