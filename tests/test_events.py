@@ -294,6 +294,29 @@ def test_rate_extraction():
     print("test_rate_extraction OK")
 
 
+def test_move_attribution_requires_name():
+    # 実戦 (接続テスト): 「相手の型別対子のボルトチェンジ」のように種族名が
+    # OCR劣化すると、技がアクティブ扱いの別個体の判明技として記録された。
+    # 名前照合できない場合はイベントのみ発火し、個体への記録は行わない
+    from vision.state import PokemonState
+    state, p = new_parser()
+    p.parse("아相手の ハラバリーを 繰り出した!".replace("ハラバリー", "リザードン"))
+    active = state.opponent.active()
+    # 名前が完全に崩れたメッセージ: 技イベントは発火するが判明技は付かない
+    fired = p.parse("相手の型別対子のボルトチェンジ")
+    assert any("voltswitch" in f for f in fired), fired
+    assert "ボルトチェンジ" not in (active.revealed_moves or []), \
+        active.revealed_moves
+    # 軽度の崩れはファジー照合で救済され、正しく個体へ記録される
+    state2, p2 = new_parser()
+    p2.parse("아相手の リザードンを 繰り出した!")
+    act2 = state2.opponent.active()
+    fired = p2.parse("相手のリサードソのフレアドライブ")   # ザ->サ, ン->ソ
+    assert any("flareblitz" in f for f in fired), fired
+    assert "フレアドライブ" in (act2.revealed_moves or []), act2.revealed_moves
+    print("test_move_attribution_requires_name OK")
+
+
 def test_forfeit_win():
     # 相手の降参による勝ち (実戦 2026-07-22: 降参終了が辞書に無く取り逃した)
     state, p = new_parser()
@@ -318,5 +341,6 @@ if __name__ == "__main__":
     test_side_attribution_ocr_garble()
     test_charge_vs_electromorphosis()
     test_rate_extraction()
+    test_move_attribution_requires_name()
     test_forfeit_win()
     print("\nALL OK")

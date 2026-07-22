@@ -270,18 +270,44 @@ class EventParser:
             return "player"
         return "opponent" if is_opp else "player"
 
-    def _target_mon(self, cleaned: str, source: str):
+    def _target_mon_checked(self, cleaned: str, source: str):
+        """対象個体の特定。戻り値: (side_name, side, mon, 名前照合できたか)
+
+        名前照合はまず厳密部分一致、次にファジー (OCR劣化した名前の救済:
+        「ベリッパー」→ペリッパー等)。照合できない場合はアクティブへ
+        フォールバックするが、matched=False を返すので呼び出し側は
+        個体レベルの帰属 (判明技の記録等) を控えられる
+        (実戦: 「相手の型別対子のボルトチェンジ」等の名前崩れで、技が
+        別のポケモンの判明技として記録された)
+        """
         side_name = self._target_side(cleaned, source)
         side = self.state.side(side_name)
-        # メッセージに名前が含まれる個体を特定できればそれを対象にする
         norm = loose_key(cleaned)
         head = norm[:14]
         for mon in side.party:
             for cand in (mon.species_ja, mon.display_name):
                 ck = loose_key(cand) if cand else ""
                 if ck and len(ck) >= 3 and ck in head:
-                    return side_name, side, mon
-        return side_name, side, side.ensure_active()
+                    return side_name, side, mon, True
+        # ファジー照合: プレフィックスを除いた先頭セグメント vs パーティ名
+        seg = re.sub(r"^(相手の|あいての|.手の)", "", norm).split("の")[0][:8]
+        if len(seg) >= 3:
+            import difflib
+            names = {}
+            for mon in side.party:
+                for cand in (mon.species_ja, mon.display_name):
+                    ck = loose_key(cand) if cand else ""
+                    if ck and len(ck) >= 3:
+                        names[ck] = mon
+            m = difflib.get_close_matches(seg, list(names.keys()),
+                                          n=1, cutoff=0.6)
+            if m:
+                return side_name, side, names[m[0]], True
+        return side_name, side, side.ensure_active(), False
+
+    def _target_mon(self, cleaned: str, source: str):
+        side_name, side, mon, _matched = self._target_mon_checked(cleaned, source)
+        return side_name, side, mon
 
     # --------------------------------------------------------------
     def parse(self, raw_text: str, source: str = "message") -> list:
@@ -343,12 +369,16 @@ class EventParser:
                 # 「の」区切りで解決できない複合文: 文中の技名を部分一致で探す
                 found = self.resolver.find_in_text(cleaned, "moves", min_len=5)
                 if found:
-                    side_name, _side, mon = self._target_mon(cleaned, source)
-                    if (side_name == "opponent" and found[0] not in mon.revealed_moves
+                    side_name, _side, mon, matched = \
+                        self._target_mon_checked(cleaned, source)
+                    if (side_name == "opponent"
                             and not (found[1] == "charge" and self._recently(
                                 f"ability_{side_name}_electromorphosis"))
                             and not self._dedup(f"move_{side_name}_{found[1]}")):
-                        mon.revealed_moves.append(found[0])
+                        # 名前照合できた個体にのみ判明技を記録する
+                        # (照合失敗時のアクティブ帰属は別個体を汚染する)
+                        if matched and found[0] not in mon.revealed_moves:
+                            mon.revealed_moves.append(found[0])
                         fired.append(f"move_{side_name}_{found[1]}")
 
         self.state.log_event(source, cleaned, event_id=",".join(fired) or None)
@@ -411,7 +441,8 @@ class EventParser:
         if source in ("left_popup", "right_popup"):
             return self._parse_popup(cleaned, source)
 
-        side_name, side, mon = self._target_mon(cleaned, source)
+        side_name, side, mon, name_matched = \
+            self._target_mon_checked(cleaned, source)
         best = None
         for pos in reversed(positions):
             tail = body[pos + 1:]
@@ -437,7 +468,10 @@ class EventParser:
         event_id = f"move_{side_name}_{r[1]}"
         if self._dedup(event_id):
             return None   # OCR揺れの再読 (まきびし等の効果二重適用を防ぐ)
-        if side_name == "opponent" and r[0] not in mon.revealed_moves:
+        # 名前照合できた個体にのみ判明技を記録する (照合失敗時のアクティブ
+        # フォールバックは、追跡ズレ時に別個体の判明技を汚染する)
+        if side_name == "opponent" and name_matched \
+                and r[0] not in mon.revealed_moves:
             mon.revealed_moves.append(r[0])
         if apply_effects:
             # 他イベントが既に発火している場合は場への効果を二重適用しない

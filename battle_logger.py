@@ -164,9 +164,13 @@ class BattleLogger:
             self._finalize(state.get("outcome"))
 
         if fired:
+            # 原文はイベント化された行のみから対応付ける (イベント化されなかった
+            # ログ行が混ざると原文と発火IDの対応がズレる: 実測「Oncwn」等)
+            ev_texts = [e["text"] for e in state.get("events", [])
+                        if e.get("event")]
             self._write({"type": "events", "scene": scene, "turn": state.get("turn"),
                          "fired": fired,
-                         "texts": [e["text"] for e in state.get("events", [])[-len(fired):]]})
+                         "texts": ev_texts[-len(fired):]})
             # 勝敗推定用: 各側の最後の交代時刻
             for f in fired:
                 if f.startswith("switch_"):
