@@ -62,6 +62,50 @@ def extractors_resolver():
     return _RESOLVER
 
 
+def test_watch_screen_attribution():
+    # 様子見画面: 表示中の個体を特定してから書き込む (実戦: ブリジュラスの
+    # 詳細を見た瞬間に場のメガラグラージがドラゴンタイプになった)
+    from vision.state import BattleStateV2, PokemonState
+    from vision import extractors, zones
+
+    state = BattleStateV2()
+    state.player.party = [
+        PokemonState(species_ja="ラグラージ", species_id="swampert"),
+        PokemonState(species_ja="ブリジュラス", species_id="duraludon"),
+    ]
+    state.player.switch_to(0)
+    swampert = state.player.party[0]
+    duraludon = state.player.party[1]
+
+    def make_read(type_text):
+        def fake_read(img, zone, **kw):
+            if zone is zones.WATCH["type_row"]:
+                return type_text
+            return ""
+        return fake_read
+
+    img = np.zeros((1080, 1920, 3), np.uint8)
+    # ブリジュラスの詳細 (はがね/ドラゴン) を見た -> ブリジュラスへ帰属
+    with mock.patch.object(extractors.ocr, "read_zone_text",
+                           side_effect=make_read("はがね ドラゴン")):
+        extractors.extract_watch(img, state, extractors_resolver())
+    assert swampert.types == [], swampert.types          # 汚染されない
+    assert set(duraludon.types) == {"はがね", "ドラゴン"}, duraludon.types
+
+    # 誰の図鑑タイプとも一致しない読取 -> 書き込まない
+    with mock.patch.object(extractors.ocr, "read_zone_text",
+                           side_effect=make_read("ドラゴン フェアリー")):
+        extractors.extract_watch(img, state, extractors_resolver())
+    assert swampert.types == [] and set(duraludon.types) == {"はがね", "ドラゴン"}
+
+    # activeと一致する読取は従来どおりactiveへ
+    with mock.patch.object(extractors.ocr, "read_zone_text",
+                           side_effect=make_read("みず じめん")):
+        extractors.extract_watch(img, state, extractors_resolver())
+    assert set(swampert.types) == {"みず", "じめん"}, swampert.types
+    print("test_watch_screen_attribution OK")
+
+
 def test_prankster_speed_observation_skipped():
     from advisor.ev_infer import SpreadTracker
 
@@ -100,6 +144,7 @@ def test_prankster_search_priority():
 
 if __name__ == "__main__":
     test_hud_name_mismatch_guard()
+    test_watch_screen_attribution()
     test_prankster_speed_observation_skipped()
     test_prankster_search_priority()
     print("\nALL OK")

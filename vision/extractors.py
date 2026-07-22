@@ -1011,36 +1011,83 @@ def extract_field_check(img, state: BattleStateV2, resolver) -> None:
 # ==============================================================================
 # 様子を見る画面
 # ==============================================================================
-def extract_watch(img, state: BattleStateV2, resolver) -> None:
-    me = state.player.ensure_active()
+_EN2JA_TYPES = {"Normal": "ノーマル", "Fire": "ほのお", "Water": "みず",
+                "Electric": "でんき", "Grass": "くさ", "Ice": "こおり",
+                "Fighting": "かくとう", "Poison": "どく", "Ground": "じめん",
+                "Flying": "ひこう", "Psychic": "エスパー", "Bug": "むし",
+                "Rock": "いわ", "Ghost": "ゴースト", "Dragon": "ドラゴン",
+                "Dark": "あく", "Steel": "はがね", "Fairy": "フェアリー"}
 
+
+def _dex_types_ja(mon) -> Optional[set]:
+    """自分の個体の図鑑タイプ (日本語集合)。メガ済みならメガ後の姿で引く"""
+    sid = mon.species_id
+    if not sid:
+        return None
+    try:
+        from advisor.dex import get_dex
+        if mon.is_mega and get_dex().species(sid + "mega"):
+            sid = sid + "mega"
+        sp = get_dex().species(sid)
+        if sp:
+            return {_EN2JA_TYPES.get(t, t) for t in sp["types"]}
+    except Exception:
+        pass
+    return None
+
+
+def _watch_target(state: BattleStateV2, resolver, found_types, new_moves):
+    """様子見画面に表示されている個体を特定する。
+
+    この画面はカーソルを合わせた任意のポケモンを表示するため、
+    activeへ無条件に書き込むと「ブリジュラスの詳細を見た瞬間に
+    場のラグラージがドラゴンタイプになる」汚染が起きた (実戦)。
+    技 (登録技との一致) → タイプ (図鑑タイプとの一致) の順で特定し、
+    特定できなければ None (書き込まない)
+    """
+    party = state.player.party
+    # 1) 表示中の技4つと登録技の一致数で特定
+    ids = {s.move_id for s in new_moves if s.move_id}
+    if len(ids) >= 2:
+        scored = []
+        for p in party:
+            reg = _registered_move_ids(p.species_ja, resolver)
+            if reg:
+                scored.append((len(ids & reg), p))
+        if scored:
+            scored.sort(key=lambda x: -x[0])
+            if scored[0][0] >= 2 and (len(scored) == 1
+                                      or scored[0][0] > scored[1][0]):
+                return scored[0][1]
+    # 2) 表示タイプが図鑑タイプと一致する個体が一意なら特定
+    if found_types:
+        matches = [p for p in party
+                   if _dex_types_ja(p) == set(found_types)]
+        if len(matches) == 1:
+            return matches[0]
+    # 3) タイプ未読取ならactive (従来挙動)、読めたのに誰とも一致しない
+    #    場合は書き込まない (誤読 or 相手の詳細画面)
+    if not found_types:
+        return state.player.ensure_active()
+    active = state.player.ensure_active()
+    if _dex_types_ja(active) == set(found_types):
+        return active
+    return None
+
+
+def extract_watch(img, state: BattleStateV2, resolver) -> None:
     # タイプ (テキスト表記)
     type_text = ocr.read_zone_text(img, zones.WATCH["type_row"], mode="panel")
+    found = []
     if type_text:
-        found = []
         for jp in ("ノーマル", "ほのお", "みず", "でんき", "くさ", "こおり", "かくとう",
                     "どく", "じめん", "ひこう", "エスパー", "むし", "いわ", "ゴースト",
                     "ドラゴン", "あく", "はがね", "フェアリー"):
             from vision.normalize import loose_key
             if loose_key(jp) in loose_key(type_text):
                 found.append(jp)
-        if found:
-            me.types = found
 
-    # 特性 / 持ち物
-    ability_text = ocr.read_zone_text(img, zones.WATCH["ability_value"], mode="panel")
-    if ability_text:
-        ab = _resolve_ability_validated(resolver, ability_text, me)
-        if ab:
-            me.ability_ja, me.ability_id = ab[0], ab[1]
-    item_text = ocr.read_zone_text(img, zones.WATCH["item_value"], mode="panel")
-    if item_text:
-        it = resolver.resolve(item_text, "items", cutoff=0.72)
-        if it:
-            me.item_ja, me.item_id = it[0], it[1]
-
-    # 技 + PP: この画面は「場に出ているポケモンの4技」を必ず表示するため、
-    # 追記ではなく置き換える (交代をまたいで技リストが合成されるのを防ぐ)
+    # 技 + PP: 先に読み取り、持ち主特定に使う
     new_moves = []
     for i, row in enumerate(zones.WATCH_MOVES):
         name_text = ocr.read_zone_text(img, row["name"], mode="panel")
@@ -1054,6 +1101,28 @@ def extract_watch(img, state: BattleStateV2, resolver) -> None:
         if pp:
             slot.pp, slot.max_pp = pp[0], pp[1]
         new_moves.append(slot)
+
+    # 表示中の個体を特定してから書き込む (誤帰属防止)
+    me = _watch_target(state, resolver, found, new_moves)
+    if me is None:
+        state.log_event("system", f"様子見画面の帰属不能 (タイプ={found})",
+                        event_id=None)
+        return
+    if found:
+        me.types = found
+
+    # 特性 / 持ち物
+    ability_text = ocr.read_zone_text(img, zones.WATCH["ability_value"], mode="panel")
+    if ability_text:
+        ab = _resolve_ability_validated(resolver, ability_text, me)
+        if ab:
+            me.ability_ja, me.ability_id = ab[0], ab[1]
+    item_text = ocr.read_zone_text(img, zones.WATCH["item_value"], mode="panel")
+    if item_text:
+        it = resolver.resolve(item_text, "items", cutoff=0.72)
+        if it:
+            me.item_ja, me.item_id = it[0], it[1]
+
     if len(new_moves) >= 3:
         # 既存エントリのPP情報は引き継ぐ
         old = {m.move_id or m.name_ja: m for m in me.moves}
