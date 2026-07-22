@@ -8,6 +8,14 @@
 - 行動index: 0-5=交代(パーティ並び順) / 6-9=技 / 10-13=技+メガシンカ
 - 使用チェックポイント: RL_ADVICE_STYLE (既定 balance)
 - モデル/依存が無い環境では None を返して本体に影響しない
+
+学習側 (encoders.encode_battle) との既知の近似差 (意図的なもの):
+- ばけのかわ: 学習側はフォルム(busted)で正確、advisor側はHP>=87.5%近似
+- 天候/フィールド残り: 学習側は経過からの上限推定(8-経過)、advisor側は
+  画面から読んだ実残数 (advisorの方が正確)
+- 揮発状態/相手PP: 画面から観測できた範囲のみ (未観測は0/満タン扱い)
+これ以外の乖離はバグとして修正すること。次元はtest_rl_bridgeの
+パリティ検証 (BATTLE_OBS_DIM一致) で守られている。
 """
 from __future__ import annotations
 
@@ -31,7 +39,7 @@ STATUS_MAP = {"burn": "brn", "paralysis": "par", "sleep": "slp",
               "freeze": "frz", "poison": "psn", "toxic": "tox"}
 BOOST_KEYS = ["atk", "def", "spa", "spd", "spe", "acc", "eva"]
 BASE_KEYS = ["hp", "atk", "def", "spa", "spd", "spe"]
-N_MOVE_SLOTS, MOVE_FEAT_DIM, OBS_DIM = 4, 9, 384  # v5拡張 (v1=227の末尾追記)
+N_MOVE_SLOTS, MOVE_FEAT_DIM, OBS_DIM = 4, 9, 388  # v5拡張 (v1=227の末尾追記)
 MOVE_EFFECT_DIM = 8
 VOLATILE_EFFECTS = ["confusion", "leech_seed", "substitute", "taunt",
                     "encore", "yawn"]
@@ -150,12 +158,16 @@ def _possible_abilities_dict(p: Optional[dict]) -> set:
         return set()
 
 
-def _eff(mtype_en: str, defender: dict) -> float:
-    # 防御側の確定特性による無効化 (ふゆう=じめん無効等) を反映
-    from champions_agent.agent.encoders import IMMUNITY_ABILITIES
-    ab = _known_ability_dict(defender)
-    if ab and IMMUNITY_ABILITIES.get(ab) == mtype_en.lower():
-        return 0.0
+def _eff(mtype_en: str, defender: dict, attacker: dict = None) -> float:
+    # 防御側の確定特性による無効化 (ふゆう=じめん無効等) を反映。
+    # 攻撃側がかたやぶり系 (確定) なら無効化を無視する
+    from champions_agent.agent.encoders import (IMMUNITY_ABILITIES,
+                                                MOLDBREAKER_ABILITIES)
+    a_ab = _known_ability_dict(attacker) if attacker else None
+    if a_ab not in MOLDBREAKER_ABILITIES:
+        ab = _known_ability_dict(defender)
+        if ab and IMMUNITY_ABILITIES.get(ab) == mtype_en.lower():
+            return 0.0
     dex = get_dex()
     dtypes = [t.capitalize() for t in _en_types(defender)]
     return dex.effectiveness(mtype_en.capitalize(), dtypes) if dtypes else 1.0
@@ -180,7 +192,8 @@ def _move_vec(m: dict, own: dict, opp: Optional[dict]) -> np.ndarray:
     v[4] = 1.0 if cat == "special" else 0.0
     v[5] = 1.0 if cat == "status" else 0.0
     v[6] = 1.0 if mtype in _en_types(own) else 0.0
-    v[7] = (_eff(mtype, opp) / 4.0) if (opp is not None and power > 0) else 0.25
+    v[7] = (_eff(mtype, opp, attacker=own) / 4.0) \
+        if (opp is not None and power > 0) else 0.25
     v[8] = pp_frac
     return v
 
@@ -434,7 +447,8 @@ def _revealed_move_vec(ja: str, owner: dict, defender: Optional[dict]) -> np.nda
     v[4] = 1.0 if cat == "special" else 0.0
     v[5] = 1.0 if cat == "status" else 0.0
     v[6] = 1.0 if mtype in _en_types(owner) else 0.0
-    v[7] = (_eff(mtype, defender) / 4.0) if (defender is not None and power > 0) else 0.25
+    v[7] = (_eff(mtype, defender, attacker=owner) / 4.0) \
+        if (defender is not None and power > 0) else 0.25
     v[8] = 1.0   # PP残は不明のため満タン扱い
     return v
 
@@ -452,7 +466,7 @@ def _best_move_eff_dict(attacker: Optional[dict], defender: Optional[dict],
         moves = [dex.move(m.get("move_id")) for m in (attacker.get("moves") or [])]
     for mv in moves:
         if mv and (mv.get("power") or 0) > 0:
-            best = max(best, _eff((mv.get("type") or "normal").lower(), defender))
+            best = max(best, _eff((mv.get("type") or "normal").lower(), defender, attacker=attacker))
     return best
 
 
@@ -462,7 +476,7 @@ def _stab_threat_eff_dict(attacker: Optional[dict],
         return 0.0
     best = 0.0
     for t in _en_types(attacker):
-        best = max(best, _eff(t, defender))
+        best = max(best, _eff(t, defender, attacker=attacker))
     return best
 
 
@@ -544,6 +558,12 @@ def encode_state(state: dict, my_spe_actual: Optional[float] = None) -> Optional
     elif opp_base_spe > 0 and opp is not None:
         # 相手側の実効素早さ補正 (自分側は effective_speed 済みの my_spe_actual)
         from champions_agent.agent.encoders import WEATHER_SPEED_ABILITIES
+        # ランク補正 (spe_est経由の場合は仮説viewがboost込みのため不要)
+        stage = int((opp.get("boosts") or {}).get("spe") or 0)
+        if stage > 0:
+            opp_base_spe *= (2 + stage) / 2.0
+        elif stage < 0:
+            opp_base_spe *= 2.0 / (2 - stage)
         ab = _known_ability_dict(opp)
         wmap = {"rain": "rain", "sun": "sun", "sandstorm": "sand", "snow": "snow"}
         wnow = wmap.get((state.get("field") or {}).get("weather"))
@@ -629,7 +649,8 @@ def encode_state(state: dict, my_spe_actual: Optional[float] = None) -> Optional
         _boost_utility(_poke_move(moves[i].get("move_id")) if i < len(moves)
                        else None,
                        own_phys, own_spec, opp_phys, opp_spec, is_slower,
-                       contrary=own_contrary)
+                       contrary=own_contrary,
+                       opp_unaware=(_known_ability_dict(opp) == "unaware"))
         for i in range(N_MOVE_SLOTS)], dtype=np.float32)
 
     f = state.get("field") or {}
@@ -668,6 +689,20 @@ def encode_state(state: dict, my_spe_actual: Optional[float] = None) -> Optional
                 return 1.0
         return 0.0
 
+    def _multiscale_active_dict(p):
+        if not p or _hp_frac(p) < 0.999:
+            return 0.0
+        poss = _possible_abilities_dict(p)
+        return 1.0 if ("multiscale" in poss or "shadowshield" in poss) else 0.0
+
+    def _has_regen_dict(p):
+        return 1.0 if (p and "regenerator" in _possible_abilities_dict(p)) \
+            else 0.0
+
+    ability_vec = np.array([
+        _multiscale_active_dict(own), _multiscale_active_dict(opp),
+        _has_regen_dict(own), _has_regen_dict(opp)], dtype=np.float32)
+
     ps = state.get("protect_streak") or {}
     protect_vec = np.array([min(ps.get("player", 0), 3) / 3.0,
                             min(ps.get("opponent", 0), 3) / 3.0],
@@ -692,7 +727,8 @@ def encode_state(state: dict, my_spe_actual: Optional[float] = None) -> Optional
                           *own_move_effects, *opp_move_effects,
                           profile_vec, utility_vec,
                           field_remaining, bench_matchup,
-                          special_vec, protect_vec]).astype(np.float32)
+                          special_vec, protect_vec,
+                          ability_vec]).astype(np.float32)
     if len(vec) < OBS_DIM:
         vec = np.concatenate([vec, np.zeros(OBS_DIM - len(vec), dtype=np.float32)])
     return vec[:OBS_DIM]

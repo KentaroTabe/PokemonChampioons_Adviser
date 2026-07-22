@@ -136,27 +136,32 @@ def _possible_abilities(pokemon) -> set:
         return set()
 
 
-def _eff_mult(defender, move_or_type) -> float:
+MOLDBREAKER_ABILITIES = ("moldbreaker", "teravolt", "turboblaze")
+
+
+def _eff_mult(defender, move_or_type, attacker=None) -> float:
     """タイプ相性倍率 (0/0.25/0.5/1/2/4)。取得失敗時は1.0。
 
-    防御側の確定特性による無効化 (ふゆう=じめん無効等) を反映する
+    防御側の確定特性による無効化 (ふゆう=じめん無効等) を反映する。
+    攻撃側がかたやぶり系 (確定) なら特性無効化を無視する
     """
     try:
         mult = float(defender.damage_multiplier(move_or_type))
         if mult > 0:
-            tname = None
             t = getattr(move_or_type, "type", move_or_type)
             tname = getattr(t, "name", None)
             if tname:
-                ab = _known_ability(defender)
-                if ab and IMMUNITY_ABILITIES.get(ab) == tname.lower():
-                    return 0.0
+                a_ab = _known_ability(attacker) if attacker is not None else None
+                if a_ab not in MOLDBREAKER_ABILITIES:
+                    ab = _known_ability(defender)
+                    if ab and IMMUNITY_ABILITIES.get(ab) == tname.lower():
+                        return 0.0
         return mult
     except Exception:
         return 1.0
 
 
-def _encode_move(move, opponent) -> np.ndarray:
+def _encode_move(move, opponent, attacker=None) -> np.ndarray:
     """1技分の特徴量 (MOVE_FEAT_DIM=9)"""
     vec = np.zeros(MOVE_FEAT_DIM, dtype=np.float32)
     if move is None:
@@ -167,10 +172,12 @@ def _encode_move(move, opponent) -> np.ndarray:
         if acc > 1.0:
             acc /= 100.0
         cat = move.category.name.lower() if move.category else "status"
-        pp_frac = 0.0
+        # PP不明は満タン扱い (advisor側encode_stateと同じ既定値)
+        pp_frac = 1.0
         if move.max_pp:
             pp_frac = max(0.0, float(move.current_pp or 0) / move.max_pp)
-        eff = _eff_mult(opponent, move) if (opponent is not None and power > 0) else 1.0
+        eff = _eff_mult(opponent, move, attacker=attacker) \
+            if (opponent is not None and power > 0) else 1.0
 
         vec[0] = min(power, 150.0) / 150.0
         vec[1] = acc
@@ -206,7 +213,7 @@ def _encode_active(pokemon, opponent, with_moves: bool) -> np.ndarray:
             pass
         for i in range(N_MOVE_SLOTS):
             mv = moves[i] if i < len(moves) else None
-            stab_vec = _encode_move(mv, opponent)
+            stab_vec = _encode_move(mv, opponent, attacker=pokemon)
             # STABフラグ (index 6) はここで付与
             try:
                 if mv is not None and mv.type is not None and pokemon.types:
@@ -342,7 +349,7 @@ def _best_move_eff(attacker, defender) -> float:
     try:
         for mv in attacker.moves.values():
             if (mv.base_power or 0) > 0:
-                best = max(best, _eff_mult(defender, mv))
+                best = max(best, _eff_mult(defender, mv, attacker=attacker))
     except Exception:
         pass
     return best
@@ -354,7 +361,7 @@ def _stab_threat_eff(attacker, defender) -> float:
     try:
         for t in (attacker.types or []):
             if t is not None:
-                best = max(best, _eff_mult(defender, t))
+                best = max(best, _eff_mult(defender, t, attacker=attacker))
     except Exception:
         pass
     return best
@@ -497,7 +504,8 @@ def _attack_profile(pokemon, fallback_stats: bool = True) -> tuple:
 
 def _boost_utility(move, own_phys: float, own_spec: float,
                    opp_phys: float, opp_spec: float,
-                   is_slower: bool, contrary: bool = False) -> float:
+                   is_slower: bool, contrary: bool = False,
+                   opp_unaware: bool = False) -> float:
     """ランク技の文脈つき効用。
 
     B上げは相手の物理脅威シェア、D上げは特殊脅威シェアで重み付け
@@ -513,6 +521,10 @@ def _boost_utility(move, own_phys: float, own_spec: float,
     w = {"atk": own_phys, "spa": own_spec,
          "def": opp_phys, "spd": opp_spec,
          "spe": 0.9 if is_slower else 0.2}
+    if opp_unaware:
+        # 相手がてんねん (確定) なら攻撃系ランクはダメージに反映されない
+        w["atk"] = 0.0
+        w["spa"] = 0.0
     util = sum(max(sign * v, 0.0) * w.get(k, 0.3) for k, v in sb.items())
     return min(util, 4.0) / 4.0
 
@@ -561,7 +573,7 @@ def encode_battle(battle) -> np.ndarray:
         if own is not None:
             for mv in revealed:
                 if (mv.base_power or 0) > 0:
-                    max_eff = max(max_eff, _eff_mult(own, mv))
+                    max_eff = max(max_eff, _eff_mult(own, mv, attacker=opp))
         opp_extra = np.array([min(len(revealed), 4) / 4.0, max_eff / 4.0],
                              dtype=np.float32)
     else:
@@ -599,6 +611,15 @@ def encode_battle(battle) -> np.ndarray:
     # --- 素早さ比較 (天候特性すいすい等 + こだわりスカーフを反映) ---
     def _speed_mult(pokemon) -> float:
         mult = 1.0
+        try:
+            # ランク補正 (advisor側のeffective_speedはboost込みのため整合させる)
+            stage = int((pokemon.boosts or {}).get("spe") or 0)
+            if stage > 0:
+                mult *= (2 + stage) / 2.0
+            elif stage < 0:
+                mult *= 2.0 / (2 - stage)
+        except Exception:
+            pass
         try:
             ab = _known_ability(pokemon)
             if ab in WEATHER_SPEED_ABILITIES:
@@ -646,7 +667,7 @@ def encode_battle(battle) -> np.ndarray:
             pass
     for i in range(N_MOVE_SLOTS):
         mv = opp_revealed[i] if i < len(opp_revealed) else None
-        mvec = _encode_move(mv, own)
+        mvec = _encode_move(mv, own, attacker=opp)
         try:
             if mv is not None and mv.type is not None and opp is not None and opp.types:
                 if any(t is not None and t.name == mv.type.name for t in opp.types):
@@ -726,10 +747,11 @@ def encode_battle(battle) -> np.ndarray:
 
     # 自分の各技のランク技効用 (文脈重み付き。speed_vec[1]=1なら自分が速い)
     is_slower = speed_vec[1] < 0.5
+    opp_unaware = _known_ability(opp) == "unaware" if opp is not None else False
     utility_vec = np.array([
         _boost_utility(own_moves_list[i] if i < len(own_moves_list) else None,
                        own_phys, own_spec, opp_phys, opp_spec, is_slower,
-                       contrary=own_contrary)
+                       contrary=own_contrary, opp_unaware=opp_unaware)
         for i in range(N_MOVE_SLOTS)], dtype=np.float32)
 
     field_remaining = _field_remaining_vec(battle)
@@ -787,6 +809,22 @@ def encode_battle(battle) -> np.ndarray:
     protect_vec = np.array([_protect_count(own), _protect_count(opp)],
                            dtype=np.float32)
 
+    # v6: マルチスケイル満タン (被ダメ半減状態) + リジェネレーター持ち
+    def _multiscale_active(pokemon) -> float:
+        if pokemon is None or _hp_frac(pokemon) < 0.999:
+            return 0.0
+        poss = _possible_abilities(pokemon)
+        return 1.0 if ("multiscale" in poss or "shadowshield" in poss) else 0.0
+
+    def _has_regen(pokemon) -> float:
+        if pokemon is None:
+            return 0.0
+        return 1.0 if "regenerator" in _possible_abilities(pokemon) else 0.0
+
+    ability_vec = np.array([
+        _multiscale_active(own), _multiscale_active(opp),
+        _has_regen(own), _has_regen(opp)], dtype=np.float32)
+
     special_vec = np.array([
         _guard_flag(own),
         _guard_flag(opp),
@@ -805,7 +843,8 @@ def encode_battle(battle) -> np.ndarray:
                           *own_move_effects, *opp_move_effects,
                           profile_vec, utility_vec,
                           field_remaining, bench_matchup,
-                          special_vec, protect_vec]).astype(np.float32)
+                          special_vec, protect_vec,
+                          ability_vec]).astype(np.float32)
 
     # 固定長を保証
     if len(vec) < BATTLE_OBS_DIM:

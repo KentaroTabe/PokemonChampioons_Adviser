@@ -49,6 +49,21 @@ def _state():
     }
 
 
+def test_dim_parity():
+    # 学習側とadvisor側の観測次元・共有定数の一致 (ドリフト防止ガード)
+    from champions_agent.agent import spaces
+    from advisor import rl_bridge as rb
+    assert rb.OBS_DIM == spaces.BATTLE_OBS_DIM, \
+        (rb.OBS_DIM, spaces.BATTLE_OBS_DIM)
+    assert rb.MOVE_EFFECT_DIM == spaces.MOVE_EFFECT_DIM
+    assert rb.N_MOVE_SLOTS == spaces.N_MOVE_SLOTS
+    assert rb.MOVE_FEAT_DIM == spaces.MOVE_FEAT_DIM
+    from champions_agent.agent import encoders as enc
+    assert rb.VOLATILE_EFFECTS == enc.VOLATILE_EFFECTS
+    assert rb.ITEM_CATEGORIES == enc.ITEM_CATEGORIES
+    print(f"test_dim_parity OK (OBS_DIM={rb.OBS_DIM})")
+
+
 def test_encode():
     obs = encode_state(_state(), my_spe_actual=112)
     assert obs is not None and len(obs) == OBS_DIM, len(obs)
@@ -212,6 +227,72 @@ def test_meta_specials():
     print("test_meta_specials OK (ふゆう無効/ばけのかわ/タスキ/すいすい×雨)")
 
 
+def test_v6_abilities():
+    # マルチスケイル/リジェネレーター/かたやぶり/てんねん/きれあじ
+    from advisor.rl_bridge import _eff, encode_state
+    from advisor.damage import MonView, calc_damage
+    from advisor.dex import get_dex
+    from champions_agent.agent.encoders import _boost_utility
+    from poke_env.battle import Move
+
+    # 観測: 満タンカイリュー (マルチスケイル可能) -> フラグ1 / 50%なら0
+    st = _state()
+    st["opponent"]["party"][0] = {
+        "species_id": "dragonite", "species_ja": "カイリュー",
+        "types": ["ドラゴン", "ひこう"], "hp_percent": 100.0}
+    obs = encode_state(st, my_spe_actual=112)
+    assert obs[385] == 1.0, f"マルチスケイル位置ずれ: {obs[384:388]}"
+    st["opponent"]["party"][0]["hp_percent"] = 50.0
+    obs = encode_state(st, my_spe_actual=112)
+    assert obs[385] == 0.0
+    # リジェネレーター: ドヒドイデ
+    st["opponent"]["party"][0] = {
+        "species_id": "toxapex", "species_ja": "ドヒドイデ",
+        "types": ["どく", "みず"], "hp_percent": 100.0}
+    obs = encode_state(st, my_spe_actual=112)
+    assert obs[387] == 1.0, f"リジェネ位置ずれ: {obs[384:388]}"
+
+    # かたやぶり: ふゆうロトムへのじめんが無効でなくなる
+    rotom = {"species_id": "rotomwash", "types": ["でんき", "みず"]}
+    mold_attacker = {"species_id": "excadrill", "ability_id": "moldbreaker"}
+    assert _eff("ground", rotom) == 0.0
+    assert _eff("ground", rotom, attacker=mold_attacker) > 0.0
+
+    # ダメージ計算: マルチスケイル半減 (対応済みの回帰) + きれあじ + てんねん
+    sp_d = get_dex().species("dragonite")
+    dnite = MonView(species_id="dragonite", types=sp_d["types"],
+                    base=sp_d["baseStats"], ability="multiscale", hp_frac=1.0)
+    sp_g = get_dex().species("gallade")
+    gallade = MonView(species_id="gallade", types=sp_g["types"],
+                      base=sp_g["baseStats"], ev={"atk": 252})
+    d_plain = calc_damage(gallade, dnite, "psychocut")["avg"]
+    gallade_sharp = MonView(species_id="gallade", types=sp_g["types"],
+                            base=sp_g["baseStats"], ev={"atk": 252},
+                            ability="sharpness")
+    d_sharp = calc_damage(gallade_sharp, dnite, "psychocut")["avg"]
+    assert d_sharp > d_plain * 1.3, (d_plain, d_sharp)  # きれあじ1.5倍
+
+    # てんねん: 攻撃+6でもダメージが変わらない
+    sp_q = get_dex().species("quagsire")
+    quag = MonView(species_id="quagsire", types=sp_q["types"],
+                   base=sp_q["baseStats"], ability="unaware")
+    atk_boost = MonView(species_id="gallade", types=sp_g["types"],
+                        base=sp_g["baseStats"], ev={"atk": 252},
+                        boosts={"atk": 6})
+    atk_flat = MonView(species_id="gallade", types=sp_g["types"],
+                       base=sp_g["baseStats"], ev={"atk": 252})
+    d_boosted = calc_damage(atk_boost, quag, "psychocut")["avg"]
+    d_flat = calc_damage(atk_flat, quag, "psychocut")["avg"]
+    assert abs(d_boosted - d_flat) < 1.0, (d_boosted, d_flat)
+
+    # てんねん相手には攻撃ランク技の効用が0
+    swords = Move("swordsdance", gen=9)
+    u = _boost_utility(swords, 1.0, 0.0, 0.5, 0.5, is_slower=False,
+                       opp_unaware=True)
+    assert u == 0.0, u
+    print("test_v6_abilities OK (マルチスケイル/リジェネ/かたやぶり/きれあじ/てんねん)")
+
+
 def test_legal_actions():
     acts = _legal_actions(_state())
     labels = {a[1] for a in acts}
@@ -279,11 +360,13 @@ def test_engine_blend():
 
 
 if __name__ == "__main__":
+    test_dim_parity()
     test_encode()
     test_boost_utility_context()
     test_contrary()
     test_meta_specials()
     test_speed_estimate_integration()
+    test_v6_abilities()
     test_legal_actions()
     test_policy_hint()
     test_value_of_sim()

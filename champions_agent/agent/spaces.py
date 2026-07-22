@@ -67,8 +67,12 @@ _EXTRA_DIM_V4 = 6
 #     減衰するため「まもるで1ターン稼ぐ」戦術の学習に必須 ---
 _EXTRA_DIM_V5 = 2
 
+# --- v6拡張: マルチスケイル満タンフラグ (自分/相手: 被ダメ半減状態) +
+#     リジェネレーター (特性5位: アクティブが持ちか、交代サイクルの誘因) ---
+_EXTRA_DIM_V6 = 4
+
 BATTLE_OBS_DIM = (_OBS_DIM_V1 + _EXTRA_DIM_V2 + _EXTRA_DIM_V3
-                  + _EXTRA_DIM_V4 + _EXTRA_DIM_V5)  # = 384
+                  + _EXTRA_DIM_V4 + _EXTRA_DIM_V5 + _EXTRA_DIM_V6)  # = 388
 
 # --- 選出方策用の旧エンコーダ次元 (encoders.encode_own_pokemon 等) ---
 POKEMON_FEATURE_DIM = 64
