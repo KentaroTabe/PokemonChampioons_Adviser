@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import sys
 import time
@@ -22,6 +23,9 @@ def main() -> None:
     parser.add_argument("--format", type=str, default=TRAINING_BATTLE_FORMAT)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--timeout", type=int, default=300)
+    parser.add_argument("--n-envs", type=int,
+                        default=int(os.environ.get("N_ENVS", "1")),
+                        help="並列環境数 (Showdown通信律速の高速化)")
     args = parser.parse_args()
 
     def handler(sig, frame):
@@ -34,7 +38,7 @@ def main() -> None:
     t0 = time.time()
     from champions_agent.train.train_battle import train
     train(total_timesteps=args.timesteps, battle_format=args.format,
-          play_style=args.play_style, resume=args.resume)
+          play_style=args.play_style, resume=args.resume, n_envs=args.n_envs)
     print(f"[smoke_train] 完了: {time.time() - t0:.1f}秒")
 
 

@@ -124,20 +124,46 @@ class TypeInference:
                 "SELECT id FROM usage_snapshot ORDER BY id DESC LIMIT 1").fetchone()
             if snap is None:
                 return
+            # 全スナップショットを読む: 最新だけだと約半数の種族が候補から
+            # 消える (実測: 最新235種/全期間491種。むし/ひこう構成の
+            # ストライク等が推測不能だった)
             rows = conn.execute(
-                "SELECT pokemon_name, usage_percent FROM pokemon_usage "
-                "WHERE snapshot_id = ?", (snap["id"],)).fetchall()
+                "SELECT pokemon_name, usage_percent, snapshot_id "
+                "FROM pokemon_usage").fetchall()
             conn.close()
         except Exception:
             return
 
-        # ベース種へ使用率を合算 (メガ形態ページ等)
-        usage: dict[str, float] = {}
+        # ベース種へ使用率を合算 (メガ形態ページ等)。
+        # 最新スナップショットの使用率を優先し、最新に載っていない種族は
+        # 過去の最大使用率を減衰 (x0.25) して採用する (現メタ優先は保ちつつ
+        # 低使用率種もゼロにしない)
+        latest_id = snap["id"]
+        latest: dict[str, float] = {}
+        past: dict[str, float] = {}
         for r in rows:
             base = _base_species_id(_slug(r["pokemon_name"]))
-            usage[base] = usage.get(base, 0.0) + max(float(r["usage_percent"]), 0.05)
+            v = max(float(r["usage_percent"]), 0.05)
+            if r["snapshot_id"] == latest_id:
+                latest[base] = latest.get(base, 0.0) + v
+            else:
+                past[base] = max(past.get(base, 0.0), v)
+        usage: dict[str, float] = dict(latest)
+        for base, v in past.items():
+            if base not in usage:
+                usage[base] = v * 0.25
+
+        # チャンピオンズフィルタ: 全期間へ広げた際にSV由来スナップショットの
+        # 種族 (チャンピオンズに存在しない) が混入しないようにする
+        try:
+            from advisor.team_advice import champions_usable
+        except Exception:
+            def champions_usable(_sid):
+                return True
 
         for sid, weight in usage.items():
+            if not champions_usable(sid):
+                continue
             sp = dex.species(sid)
             if sp is None:
                 continue

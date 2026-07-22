@@ -38,7 +38,7 @@
             <div class="panel"><h3>イベントログ</h3><div id="events"></div></div>
         </div>
         <div id="right">
-            <div class="panel" id="advice"><h3>アドバイス</h3><pre id="advice-text">(コマンド選択画面になると表示されます)</pre></div>
+            <div class="panel" id="advice"><h3>アドバイス</h3><pre id="advice-text">(選出画面・コマンド選択画面で表示されます)</pre></div>
             <div class="panel"><h3>自分のパーティ
                 <button onclick="openTeamEditor()" style="float:right;font-size:11px;background:#356;color:#cde;border:1px solid #467;border-radius:4px;cursor:pointer">パーティ編集</button>
             </h3><div id="my-party"></div></div>
@@ -46,6 +46,15 @@
             <div class="panel" id="team-advice-panel" style="display:none">
                 <h3>📊 パーティ診断 (試合終了時に自動更新)</h3>
                 <pre id="team-advice-text" style="white-space:pre-wrap;font-size:12px"></pre>
+            </div>
+            <div class="panel" id="team-gen-panel">
+                <h3>🧪 1からのパーティ提案</h3>
+                <div style="font-size:11px;color:#89a;margin-bottom:6px">軸にするポケモンを入れて生成。共起データで6体を組み、実対戦で選抜します(数分)。</div>
+                <input list="tl-species" id="gen-core" placeholder="軸ポケモン (例: ガブリアス)" style="width:60%">
+                <label style="display:inline;font-size:11px;margin-left:8px"><input type="checkbox" id="gen-eval" checked style="width:auto"> 実対戦で選抜</label>
+                <button onclick="generateTeam()" id="gen-btn" style="margin-left:8px;background:#3567c9;color:#fff;border:none;border-radius:6px;padding:6px 14px;cursor:pointer">生成</button>
+                <div id="gen-progress" style="font-size:12px;color:#8ac;margin-top:8px;white-space:pre-wrap"></div>
+                <div id="gen-result" style="margin-top:8px"></div>
             </div>
             <div class="panel" id="team-editor" style="display:none">
                 <h3>パーティ編集 (保存で即反映)</h3>
@@ -65,7 +74,9 @@
         / <a href="https://champs.pokedb.tokyo" style="color:#aab">バトルデータベース チャンピオンズ</a>
     </footer>
     <script>
-        const socket = io('http://localhost:8000');
+        // バックエンドはフロントエンドと同じホストの8000番 (localhost固定だと
+        // LAN内の別端末 (Windows等) から開いたときに接続できない)
+        const socket = io('http://' + location.hostname + ':8000');
         const connLabel = document.getElementById('conn-label');
         socket.on('connect', () => {
             console.log('バックエンドに接続しました');
@@ -153,6 +164,45 @@
             document.getElementById('team-advice-text').textContent = a.text;
         });
 
+        // --- 1からのパーティ提案 (バックグラウンド生成+進捗) ---
+        function generateTeam() {
+            const core = document.getElementById('gen-core').value.trim();
+            if (!core) { alert('軸ポケモンを入力してください'); return; }
+            const evaluate = document.getElementById('gen-eval').checked;
+            document.getElementById('gen-btn').disabled = true;
+            document.getElementById('gen-progress').textContent = '⏳ 生成を開始しています…';
+            document.getElementById('gen-result').innerHTML = '';
+            socket.emit('generate_team', {core, evaluate});
+        }
+        socket.on('team_gen_progress', (p) => {
+            document.getElementById('gen-progress').textContent = '⏳ ' + p.msg;
+        });
+        socket.on('team_gen_result', (r) => {
+            document.getElementById('gen-btn').disabled = false;
+            const prog = document.getElementById('gen-progress');
+            const el = document.getElementById('gen-result');
+            if (!r.ok) { prog.textContent = '⚠ ' + (r.reason || '生成失敗'); return; }
+            prog.textContent = '✅ 生成完了';
+            let html = '<div style="font-size:12px;color:#89a">候補構築 (メタカバレッジ順):</div><ol style="font-size:12px;margin:4px 0">';
+            for (const c of r.candidates)
+                html += `<li>カバレッジ${Math.round(c.coverage*100)}%: ${c.names.join('・')}</li>`;
+            html += '</ol>';
+            if (r.best) {
+                html += `<div class="best" style="margin-top:6px">◎ 最有力 (実戦勝率${Math.round(r.best.win_rate*100)}%): <b>${r.best.names.join('・')}</b></div>`;
+                const w = r.best.weakness;
+                if (w && w.weak_mons && w.weak_mons.length) {
+                    html += '<div style="font-size:12px;color:#e99;margin-top:6px">⚠ 苦手なポケモン (対面が不利な順): '
+                        + w.weak_mons.map(m => `${m.name}(${m.margin>=0?'+':''}${m.margin})`).join(' / ') + '</div>';
+                    if (w.weak_teammates && w.weak_teammates.length)
+                        html += `<div style="font-size:12px;color:#e99">⚠ 苦手な構築の傾向: ${w.weak_teammates.join('・')} 軸</div>`;
+                }
+                const tt = r.best.team_text_ja || r.best.team_text;
+                if (tt)
+                    html += `<pre style="font-size:11px;background:#121826;padding:8px;border-radius:6px;overflow-x:auto">${tt}</pre>`;
+            }
+            el.innerHTML = html;
+        });
+
         // --- 手動修正 (誤認識のユーザー訂正。修正はログに記録され分析に使う) ---
         function fixMon(side, i) {
             const menu = prompt(
@@ -211,6 +261,12 @@
                 .map(([k,v]) => `${STAT_ABBR[k]||k}${v>0?'+':''}${v}`).join(' ');
             if (boosts) tags += `<span class="tag" style="background:#573">${boosts}</span>`;
             if (p.ability_ja) tags += `<span class="tag">${p.ability_ja}</span>`;
+            if (p.spe_est != null) {
+                // 先後観測で更新される推定実効素早さ (範囲があれば併記)
+                const r = p.spe_range || [];
+                const rng = (r[0] || r[1]) ? ` (${r[0] ? '>' + Math.round(r[0]) : ''}${r[0] && r[1] ? '·' : ''}${r[1] ? '<' + Math.round(r[1]) : ''})` : '';
+                tags += `<span class="tag" style="background:#357">S~${p.spe_est}${rng}</span>`;
+            }
             if (p.item_ja) tags += `<span class="tag">@${p.item_ja}</span>`;
             let moves = '';
             if (p.moves && p.moves.length)
@@ -233,7 +289,9 @@
         }
 
         socket.on('state_update', (s) => {
-            document.getElementById('scene-label').textContent = 'scene: ' + s.scene;
+            // レートは結果画面のOCRから取得 (勝敗推定にも使用)
+            const rate = s.last_rate && s.last_rate.value ? ` | レート${s.last_rate.value}` : '';
+            document.getElementById('scene-label').textContent = 'scene: ' + s.scene + rate;
             const f = s.field || {};
             const parts = [];
             if (f.weather) parts.push(WEATHER_JA[f.weather] || f.weather);

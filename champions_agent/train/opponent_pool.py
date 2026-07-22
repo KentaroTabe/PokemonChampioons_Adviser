@@ -27,9 +27,15 @@ EVAL_DIR = Path(__file__).resolve().parent / "logs"
 
 WIN_RATE_GATE = 0.75      # vs Random 勝率がこれ以上でプール入り
 MAX_ENTRIES_PER_STYLE = 5  # 性格ごとの保持世代数
-EPSILON_RANDOM = 0.15      # ランダム相手を混ぜる確率 (基礎相手の忘却防止)
-EPSILON_HEURISTIC = 0.25  # 上位構築ヒューリスティクス相手を混ぜる確率 (常設の強敵)
-RANKED_TEAM_PROB = 0.30   # 相手チームを上位構築の実物にする確率
+EPSILON_RANDOM = 0.10      # ランダム相手を混ぜる確率 (基礎相手の忘却防止)
+# 頭打ち対策: 評価指標 (vsベンチマーク) と学習分布を近づけるため、
+# ヒューリスティクス強敵と上位構築チームの比率を引き上げた
+# (旧: heuristic 0.25 / ranked 0.30 でベンチ勝率0.3-0.7の振動が続いた)
+EPSILON_HEURISTIC = 0.35  # 上位構築ヒューリスティクス相手を混ぜる確率 (常設の強敵)
+RANKED_TEAM_PROB = 0.50   # 相手チームを上位構築の実物にする確率
+OWN_RANKED_TEAM_PROB = 0.50  # 自分チームを上位構築の実物にする確率
+# (生成チームだけで学習すると「上位構築を操縦する」経験が積めず、
+#  アドバイザーの実用途=ユーザーの実チームでの助言と分布がズレる)
 
 
 class OpponentPool:
@@ -56,13 +62,14 @@ class OpponentPool:
     def has_entries(self) -> bool:
         return len(self.entries()) > 0
 
-    def add(self, style: str, checkpoint: Path, win_rate: float) -> Path:
+    def add(self, style: str, checkpoint: Path, win_rate: float,
+            bench_rate: float | None = None) -> Path:
         ts = time.strftime("%Y%m%d_%H%M%S")
         fname = f"{style}_{ts}.zip"
         shutil.copy(checkpoint, POOL_DIR / fname)
         self.state["entries"].append({
             "file": fname, "style": style,
-            "win_rate": win_rate, "added_at": ts,
+            "win_rate": win_rate, "bench_rate": bench_rate, "added_at": ts,
         })
         # 性格ごとに古い世代を間引く
         same = [e for e in self.state["entries"] if e["style"] == style]
@@ -74,13 +81,22 @@ class OpponentPool:
         return POOL_DIR / fname
 
     def sample(self, rng: random.Random | None = None) -> Path | None:
-        """プールからチェックポイントを1つ抽選する (新しい世代ほど高確率)"""
+        """プールからチェックポイントを1つ抽選する。
+
+        新しい世代ほど高確率、かつベンチマーク勝率が高い世代ほど高確率
+        (頭打ち対策: 強い過去世代を優先して当てることでselfplayに
+        上達圧力をかける。bench_rate未記録の旧エントリは0.4扱い)
+        """
         rng = rng or random
         entries = self.entries()
         if not entries:
             return None
         ordered = sorted(entries, key=lambda e: e["added_at"])
-        weights = [i + 1 for i in range(len(ordered))]  # 新しいほど重い
+        weights = [
+            (i + 1) * (0.3 + (e.get("bench_rate") if e.get("bench_rate")
+                              is not None else 0.4))
+            for i, e in enumerate(ordered)
+        ]
         chosen = rng.choices(ordered, weights=weights, k=1)[0]
         return POOL_DIR / chosen["file"]
 
@@ -170,9 +186,19 @@ def update_from_eval(style: str) -> bool:
         print(f"[opponent_pool] [{style}] 勝率{win_rate:.2f} < ゲート{WIN_RATE_GATE} "
               "のためプール追加を見送り (相手はRandomのまま)")
         return False
+    # ベンチマーク勝率が記録されていれば抽選の重み付けに使う
+    bench_rate = None
+    bench_path = EVAL_DIR / f"last_eval_{style}_benchmark.json"
+    if bench_path.exists():
+        try:
+            bench_rate = float(json.loads(
+                bench_path.read_text()).get("win_rate"))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
     pool = OpponentPool()
-    path = pool.add(style, ckpt, win_rate)
-    print(f"[opponent_pool] [{style}] 勝率{win_rate:.2f} でプール入り: {path.name} "
+    path = pool.add(style, ckpt, win_rate, bench_rate=bench_rate)
+    br = f" ベンチ{bench_rate:.2f}" if bench_rate is not None else ""
+    print(f"[opponent_pool] [{style}] 勝率{win_rate:.2f}{br} でプール入り: {path.name} "
           f"(計{len(pool.entries())}件) -> 次回学習からselfplay相手に使われます")
     return True
 

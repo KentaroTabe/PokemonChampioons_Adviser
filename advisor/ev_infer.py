@@ -297,6 +297,29 @@ class SpreadEstimator:
         }
 
 
+    def speed_estimate(self, opp_state: Optional[dict] = None) -> Optional[dict]:
+        """最良仮説の実効素早さを観測レンジでクランプした推定値。
+
+        戻り値: {"est": int, "lo": float|None, "hi": float|None, "n_obs": int}
+        (フロントエンド表示とRLの素早さ比較に使う)
+        """
+        if not self.hyps:
+            return None
+        top = max(self.hyps, key=lambda h: h["logw"])
+        v = self._view(top, opp_state or {})
+        if v is None:
+            return None
+        v.status = (opp_state or {}).get("status")
+        from advisor.damage import effective_speed
+        est = effective_speed(v)
+        if self.spe_lower:
+            est = max(est, int(self.spe_lower) + 1)
+        if self.spe_upper:
+            est = min(est, max(1, int(self.spe_upper) - 1))
+        return {"est": int(est), "lo": self.spe_lower, "hi": self.spe_upper,
+                "n_obs": self.n_obs}
+
+
 class SpreadTracker:
     """フレームストリームから観測を抽出し、種族ごとの推定器を更新する。
 
@@ -412,6 +435,26 @@ class SpreadTracker:
         opp = self._active(state, "opponent")
         my_view, me = self._my_view(state)
         if not opp or not opp.get("species_id") or my_view is None:
+            return
+        # 特性による優先度変化の可能性がある行動は先後観測に使わない
+        # (実戦: いたずらごころヤミラミのおにび先制を「実速が上」と誤学習し
+        #  推定素早さが大きく狂った)。可能特性ベースで保守的に弾く
+        def _pri_ability_noise(p_dict, mv) -> bool:
+            try:
+                from advisor.rl_bridge import _possible_abilities_dict
+                poss = _possible_abilities_dict(p_dict)
+            except Exception:
+                return False
+            cat = (mv.get("category") or "").lower()
+            mtype = (mv.get("type") or "").lower()
+            if "prankster" in poss and cat == "status":
+                return True   # いたずらごころ: 変化技+1
+            if "galewings" in poss and mtype == "flying":
+                return True   # はやてのつばさ: ひこう技+1 (満タン時)
+            if "triage" in poss and (mv.get("heal") or mv.get("drain")):
+                return True   # ヒーリングシフト
+            return False
+        if _pri_ability_noise(opp, mv_o) or _pri_ability_noise(me, mv_p):
             return
         from advisor.damage import FieldView, effective_speed
         f = state.get("field", {})

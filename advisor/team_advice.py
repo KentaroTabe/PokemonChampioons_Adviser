@@ -42,6 +42,33 @@ def _champions_filter(db) -> str:
     return f"snapshot_id IN ({','.join(ids)})"
 
 
+_CHAMPIONS_IDS = None
+
+
+def champions_usable(species_id: str) -> bool:
+    """championsの使用率データに存在する種族か (SV専用ポケモンを除外)。
+
+    championsのpokemon_usage/teammate_usageに一度でも現れた種族IDの集合で判定。
+    """
+    global _CHAMPIONS_IDS
+    if _CHAMPIONS_IDS is None:
+        db = sqlite3.connect(str(DB_PATH))
+        flt = _champions_filter(db)
+        ids = set()
+        for table in ("pokemon_usage", "teammate_usage"):
+            col = "pokemon_name"
+            for (name,) in db.execute(
+                    f"SELECT DISTINCT {col} FROM {table} WHERE {flt}"):
+                ids.add(_to_id(name))
+            if table == "teammate_usage":
+                for (name,) in db.execute(
+                        f"SELECT DISTINCT teammate_name FROM {table} WHERE {flt}"):
+                    ids.add(_to_id(name))
+        db.close()
+        _CHAMPIONS_IDS = ids
+    return _to_id(species_id) in _CHAMPIONS_IDS
+
+
 def meta_top(n: int = 20) -> list:
     db = sqlite3.connect(str(DB_PATH))
     flt = _champions_filter(db)
@@ -125,11 +152,40 @@ def team_advice(resolver, top_n: int = 15, n_suggest: int = 5) -> Optional[dict]
                 if duel(mv, 1.0, mmoves, ov, 1.0, omoves)]
         matchups.append({"name": ja, "wins": len(wins),
                          "total": len(meta_views)})
+    from advisor.endgame import duel_score
     holes = []
+    weak_mons = []   # 勝てるが余裕が小さい相手 (対面が薄い順)
+    my_ids_set = {mv.species_id for _j, mv, _m in mine}
     for sid, usage, ov, omoves in meta_views:
-        if not any(duel(mv, 1.0, mmoves, ov, 1.0, omoves)
-                   for _j, mv, mmoves in mine):
-            holes.append({"name": ov.name_ja, "usage": round(usage, 1)})
+        best = None
+        for _j, mv, mmoves in mine:
+            sc = duel_score(mv, 1.0, mmoves, ov, 1.0, omoves)
+            if sc is not None and (best is None or sc > best):
+                best = sc
+        if best is None or best <= 0:
+            holes.append({"name": ov.name_ja, "usage": round(usage, 1),
+                          "sid": sid})
+        elif sid not in my_ids_set and best < 0.4:
+            weak_mons.append({"name": ov.name_ja, "margin": round(best, 2),
+                              "usage": round(usage, 1), "sid": sid})
+    weak_mons.sort(key=lambda w: w["margin"])
+    weak_mons = weak_mons[:5]
+
+    # 苦手な構築の傾向 (穴+薄い相手の共起相方)
+    weak_teammates = []
+    try:
+        from tools.generate_teams import cooccurrence as _cooc
+        threat_ids = [h["sid"] for h in holes] + \
+                     [w["sid"] for w in weak_mons[:3]]
+        tscore = {}
+        for tid in threat_ids:
+            for cand, w in _cooc(tid).items():
+                if cand not in my_ids_set:
+                    tscore[cand] = tscore.get(cand, 0) + w
+        weak_teammates = [species_ja_name(s) for s, _w in
+                          sorted(tscore.items(), key=lambda kv: -kv[1])[:4]]
+    except Exception:
+        pass
 
     ohko_risks = []
     for ja, mv, _m in mine:
@@ -184,9 +240,75 @@ def team_advice(resolver, top_n: int = 15, n_suggest: int = 5) -> Optional[dict]
                 speed_tips.append(f"{ja}: +2ポイントで{ov.name_ja} (S{target}) 抜き")
                 break
 
+    # 入れ替え提案: 「誰を抜いて誰を入れるか」のカバレッジ差分評価
+    swaps = []
+    try:
+        swaps = _swap_suggestions(mine, meta_views, suggestions)
+    except Exception:
+        pass
+
     return {"matchups": matchups, "holes": holes, "ohko_risks": ohko_risks,
             "suggestions": suggestions, "speed_tips": speed_tips,
-            "meta_n": len(meta_views)}
+            "swaps": swaps, "weak_mons": weak_mons,
+            "weak_teammates": weak_teammates, "meta_n": len(meta_views)}
+
+
+def _swap_suggestions(mine: list, meta_views: list,
+                      suggestions: list, top_k: int = 3) -> list:
+    """各メンバー×補完候補の入れ替えで、メタカバレッジが最も改善する組を返す。
+
+    事前に「各ポケモン vs メタ各体」の勝敗ベクトルを計算しておき、
+    集合演算でカバレッジ差分を高速に評価する。
+    """
+    from advisor.endgame import duel_score
+
+    def margin_vec(view, moves):
+        # 各メタへの対面スコア (勝ち=正)。カバレッジだけでなく余裕も見る
+        return [duel_score(view, 1.0, moves, ov, 1.0, om) or -1.0
+                for _s, _u, ov, om in meta_views]
+
+    mine_vecs = [(ja, margin_vec(v, m)) for ja, v, m in mine]
+    cand_views = []
+    for s in suggestions:
+        for sid, _u in meta_top(40):
+            if species_ja_name(sid) == s["name"]:
+                cv, cm = build_meta_view(sid)
+                if cv is not None:
+                    cand_views.append((s["name"], margin_vec(cv, cm)))
+                break
+
+    n = len(meta_views)
+    THR = 0.4   # この余裕未満は「苦手」とみなす
+
+    def team_ok(vecs, i):
+        return max((vec[i] for vec in vecs), default=-1.0) >= THR
+
+    base_ok = sum(1 for i in range(n) if team_ok([v for _, v in mine_vecs], i))
+    results = []
+    for out_i, (out_ja, _out_vec) in enumerate(mine_vecs):
+        rest = [vec for j, (_, vec) in enumerate(mine_vecs) if j != out_i]
+        for in_ja, in_vec in cand_views:
+            new_vecs = rest + [in_vec]
+            ok = sum(1 for i in range(n) if team_ok(new_vecs, i))
+            delta = ok - base_ok
+            if delta > 0:
+                # 新たに「余裕を持って対応できる」ようになった相手
+                newly = [meta_views[i][2].name_ja for i in range(n)
+                         if team_ok(new_vecs, i)
+                         and not team_ok([v for _, v in mine_vecs], i)]
+                results.append({"out": out_ja, "in": in_ja,
+                                "delta": delta, "covers": newly[:3]})
+    results.sort(key=lambda r: -r["delta"])
+    # 同じin/outの重複を除いて上位を返す
+    seen, out = set(), []
+    for r in results:
+        key = (r["out"], r["in"])
+        if key not in seen:
+            seen.add(key)
+            out.append(r)
+        if len(out) >= top_k:
+            break
+    return out
 
 
 def format_team_advice(a: Optional[dict]) -> str:
@@ -200,14 +322,24 @@ def format_team_advice(a: Optional[dict]) -> str:
         names = "・".join(f"{h['name']}(使用率{h['usage']})" for h in a["holes"])
         lines.append(f"⚠ 構築の穴 (誰も勝てない): {names}")
     else:
-        lines.append("✅ メタ上位すべてに勝てる駒がいます")
+        lines.append("✅ メタ上位すべてに1v1で勝てる駒がいます")
+    if a.get("weak_mons"):
+        wm = " / ".join(f"{w['name']}({w['margin']:+.2f})" for w in a["weak_mons"])
+        lines.append(f"△ 苦手なポケモン (対面が薄い順): {wm}")
+    if a.get("weak_teammates"):
+        lines.append(f"△ 苦手な構築の傾向: {'・'.join(a['weak_teammates'])} 軸")
     for r in a["ohko_risks"]:
         lines.append(f"⚠ {r['name']}は一撃圏が多い: {', '.join(r['hits'])}")
     for tip in a["speed_tips"][:3]:
         lines.append(f"💨 {tip}")
-    if a["suggestions"]:
+    if a.get("swaps"):
+        for sw in a["swaps"][:2]:
+            covers = f" (改善: {'・'.join(sw['covers'])})" if sw["covers"] else ""
+            lines.append(f"🔁 {sw['out']} → {sw['in']} で"
+                         f"苦手/穴を{sw['delta']}体解消{covers}")
+    elif a["suggestions"]:
         sug = " / ".join(
             s["name"] + (f" (穴{len(s['covers'])}体に解答)" if s["covers"] else "")
             for s in a["suggestions"])
-        lines.append(f"💡 入れ替え候補: {sug}")
+        lines.append(f"💡 追加候補: {sug}")
     return "\n".join(lines)

@@ -260,6 +260,11 @@ def evaluate(state: dict, resolver=None) -> dict:
                 if not opp_view.item and guess["item"]:
                     opp_view.item = guess["item"]
                 opp_spread_note = f"相手の型推定: {guess['summary']}"
+            # 先後観測の実効素早さ範囲は確度に関係なく反映する
+            # (探索/詰み筋/RLの先手判定が観測と矛盾しないように)
+            if guess and (guess.get("spe_lower") or guess.get("spe_upper")):
+                opp_view.spe_bounds = (guess.get("spe_lower"),
+                                       guess.get("spe_upper"))
         except Exception:
             pass
 
@@ -410,10 +415,14 @@ def evaluate(state: dict, resolver=None) -> dict:
         })
 
     # ------------------------------------------------------------------
-    # 交代の評価
+    # 交代の評価 (選出済みの3体に限る: 未選出への交代は提案できない)
     # ------------------------------------------------------------------
+    from advisor.party import battle_party_indices
+    _allowed = battle_party_indices(my_state)
     for i, p in enumerate(my_state["party"]):
         if i == my_active_idx or p.get("status") == "fainted":
+            continue
+        if _allowed is not None and i not in _allowed:
             continue
         cand = build_mon_view(p, resolver, side="player")
         if cand is None or opp_view is None:
@@ -587,8 +596,15 @@ def _run_endgame(my_state, opp_state, resolver) -> str:
 
     def mons_of(side_state, side):
         out = []
-        for p in side_state.get("party", []):
+        # 自分側は選出済みの3体のみ (未選出は勝ち筋に数えられない)
+        allowed = None
+        if side == "player":
+            from advisor.party import battle_party_indices
+            allowed = battle_party_indices(side_state)
+        for i, p in enumerate(side_state.get("party", [])):
             if p.get("status") == "fainted":
+                continue
+            if allowed is not None and i not in allowed:
                 continue
             v = build_mon_view(p, resolver, side=side)
             if v is None:
@@ -638,8 +654,15 @@ def _run_search(state, my_state, my_view, my_p, opp_state, opp_view,
     def bench_of(side_state, side):
         bench = []
         active_idx = side_state.get("active_index")
+        # 自分側は選出済みの3体に限る (未選出は交代できない)
+        allowed = None
+        if side == "player":
+            from advisor.party import battle_party_indices
+            allowed = battle_party_indices(side_state)
         for i, p in enumerate(side_state.get("party", [])):
             if i == active_idx or p.get("status") == "fainted":
+                continue
+            if allowed is not None and i not in allowed:
                 continue
             v = build_mon_view(p, resolver, side=side)
             if v is not None:

@@ -232,6 +232,100 @@ def test_event_dedup():
     print("test_event_dedup OK")
 
 
+def test_side_attribution_ocr_garble():
+    # 実戦 (2026-07-22): 「相手の」が「狙手の」に化け、相手ハラバリーの
+    # みずびたしが自分の技 move_player_soak として二重帰属した
+    from vision.state import PokemonState
+    state, p = new_parser()
+    state.opponent.party.append(
+        PokemonState(species_ja="ハラバリー", species_id="bellibolt"))
+    f1 = p.parse("4V4相手のハラバリーのみすびたし")
+    assert any(f.startswith("move_opponent_soak") for f in f1), f1
+    # 化けた再読: 相手側として解決され、デデュープで再発火しない
+    f2 = p.parse("狙手のハラバリーのみすびたし")
+    assert not any(f.startswith("move_player_") for f in f2), f2
+    assert not any(f.startswith("move_opponent_soak") for f in f2), f2
+
+    # プレフィックスが完全に化けても、相手パーティの名前照合で相手側になる
+    state2, p2 = new_parser()
+    state2.opponent.party.append(
+        PokemonState(species_ja="ハラバリー", species_id="bellibolt"))
+    f3 = p2.parse("ニVAハラバリーのみすびたし")
+    assert not any(f.startswith("move_player_") for f in f3), f3
+    print("test_side_attribution_ocr_garble OK")
+
+
+def test_charge_vs_electromorphosis():
+    # 実戦 (2026-07-22): でんきにかえる発動時の「じゅうでん状態になった」を
+    # 技じゅうでん (move_charge) と誤検知した。特性発動直後は抑止する
+    from vision.state import PokemonState
+    state, p = new_parser()
+    state.opponent.party.append(
+        PokemonState(species_ja="ハラバリー", species_id="bellibolt"))
+    p.parse("아相手の ハラバリーを 繰り出した!")
+    f1 = p.parse("ハラバリーの でんきにかえる", source="right_popup")
+    assert any("electromorphosis" in f for f in f1), f1
+    f2 = p.parse("4V4相手のハラバリーはじゅうでん充地を始めた")
+    assert not any("charge" in f for f in f2), f2
+    # 特性発動を伴わない「じゅうでんを始めた」は技として通常どおり検知する
+    state2, p2 = new_parser()
+    state2.opponent.party.append(
+        PokemonState(species_ja="ハラバリー", species_id="bellibolt"))
+    f3 = p2.parse("相手の ハラバリーは じゅうでんを 始めた!")
+    assert any("charge" in f for f in f3), f3
+    print("test_charge_vs_electromorphosis OK")
+
+
+def test_rate_extraction():
+    # 結果画面のレート表示からレート数値を抽出して保持する (勝敗推定用)。
+    # ランク/レート表示はイベントとしては発火しない (従来どおり無視)
+    state, p = new_parser()
+    assert p.parse("ランクIV レート1602") == []
+    assert state.last_rate and state.last_rate["value"] == 1602, state.last_rate
+    # OCRノイズ混じり
+    assert p.parse("うノランク レート1618ボール級") == []
+    assert state.last_rate["value"] == 1618
+    # ありえない値は捨てる (直前の値を保持)
+    assert p.parse("ランク レート99999") == []
+    assert state.last_rate["value"] == 1618
+    # 対戦リセットを跨いで保持される
+    state.reset_battle()
+    assert state.last_rate and state.last_rate["value"] == 1618
+    print("test_rate_extraction OK")
+
+
+def test_move_attribution_requires_name():
+    # 実戦 (接続テスト): 「相手の型別対子のボルトチェンジ」のように種族名が
+    # OCR劣化すると、技がアクティブ扱いの別個体の判明技として記録された。
+    # 名前照合できない場合はイベントのみ発火し、個体への記録は行わない
+    from vision.state import PokemonState
+    state, p = new_parser()
+    p.parse("아相手の ハラバリーを 繰り出した!".replace("ハラバリー", "リザードン"))
+    active = state.opponent.active()
+    # 名前が完全に崩れたメッセージ: 技イベントは発火するが判明技は付かない
+    fired = p.parse("相手の型別対子のボルトチェンジ")
+    assert any("voltswitch" in f for f in fired), fired
+    assert "ボルトチェンジ" not in (active.revealed_moves or []), \
+        active.revealed_moves
+    # 軽度の崩れはファジー照合で救済され、正しく個体へ記録される
+    state2, p2 = new_parser()
+    p2.parse("아相手の リザードンを 繰り出した!")
+    act2 = state2.opponent.active()
+    fired = p2.parse("相手のリサードソのフレアドライブ")   # ザ->サ, ン->ソ
+    assert any("flareblitz" in f for f in fired), fired
+    assert "フレアドライブ" in (act2.revealed_moves or []), act2.revealed_moves
+    print("test_move_attribution_requires_name OK")
+
+
+def test_forfeit_win():
+    # 相手の降参による勝ち (実戦 2026-07-22: 降参終了が辞書に無く取り逃した)
+    state, p = new_parser()
+    fired = p.parse("相手が 降参した!")
+    assert "battle_win" in fired, fired
+    assert state.outcome == "win", state.outcome
+    print("test_forfeit_win OK")
+
+
 if __name__ == "__main__":
     test_weather_and_terrain()
     test_switch_and_mega()
@@ -244,4 +338,9 @@ if __name__ == "__main__":
     test_ability_species_validation()
     test_fixed_ability()
     test_event_dedup()
+    test_side_attribution_ocr_garble()
+    test_charge_vs_electromorphosis()
+    test_rate_extraction()
+    test_move_attribution_requires_name()
+    test_forfeit_win()
     print("\nALL OK")

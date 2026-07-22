@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 
 from champions_agent.config import (
     MODELS_DIR, RANDOM_SEED, DEFAULT_PLAY_STYLE, PLAY_STYLES,
@@ -18,10 +19,27 @@ from champions_agent.config import (
 from champions_agent.env.showdown_env import make_training_env
 
 
+def _make_env_fn(idx: int, battle_format: str, play_style: str,
+                 opp_play_style_pool):
+    """SubprocVecEnv用のenv生成関数 (spawnでpickle可能なトップレベル定義)。
+
+    idxごとにseedをずらし、各サブプロセスが独立にShowdownへ接続する
+    (poke-envのアカウント名は自動生成なので衝突しない)。
+    """
+    def _init():
+        from stable_baselines3.common.monitor import Monitor
+        env = make_training_env(battle_format=battle_format,
+                                own_play_style=play_style,
+                                opp_play_style_pool=opp_play_style_pool,
+                                seed=RANDOM_SEED + idx * 1000)
+        return Monitor(env)
+    return _init
+
+
 def train(total_timesteps: int = 10_000, battle_format: str = TRAINING_BATTLE_FORMAT,
           play_style: str = DEFAULT_PLAY_STYLE,
           opp_play_style_pool: list[str] | None = None,
-          resume: bool = False) -> None:
+          resume: bool = False, n_envs: int = 1) -> None:
     """戦闘方策を性格(play_style)ごとに学習する。
 
     play_style: このモデル自身の性格('offense'/'cycle'/'stall'/'balance')。
@@ -39,20 +57,67 @@ def train(total_timesteps: int = 10_000, battle_format: str = TRAINING_BATTLE_FO
     from sb3_contrib import MaskablePPO
     from stable_baselines3.common.monitor import Monitor
 
-    env = make_training_env(battle_format=battle_format, own_play_style=play_style,
-                             opp_play_style_pool=opp_play_style_pool, seed=RANDOM_SEED)
-    env = Monitor(env)
+    # 並列環境: Showdown通信レイテンシが律速 (単一env≒140fps) なので、
+    # 複数バトルを別プロセスで同時進行させて収集スループットを上げる。
+    # 各サブプロセスがローカルShowdown(8100)に独立接続する。
+    # 頭打ち対策のハイパーパラメータ (環境変数で調整可能):
+    # - ent_coef: SB3既定0.0では探索が縮退しプラトーで振動する。0.01で探索維持
+    # - learning_rate: 新規学習フェーズは標準の3e-4 (1e-4は旧400万step
+    #   モデルの微調整用だった。観測v6の新規学習では立ち上がりを遅くする)
+    # - net_arch: SB3既定の64x64は388次元観測に対して過小で、20万stepで
+    #   0.55前後に頭打ちした。256x256へ拡大 (Showdown律速のため計算コスト増は僅少)
+    lr = float(os.environ.get("TRAIN_LR", "3e-4"))
+    ent_coef = float(os.environ.get("TRAIN_ENT_COEF", "0.01"))
+    width = int(os.environ.get("TRAIN_NET_WIDTH", "256"))
+    ppo_kwargs = {"learning_rate": lr, "ent_coef": ent_coef,
+                  "policy_kwargs": {"net_arch": [width, width]}}
+    if n_envs > 1:
+        from stable_baselines3.common.vec_env import SubprocVecEnv
+        env = SubprocVecEnv(
+            [_make_env_fn(i, battle_format, play_style, opp_play_style_pool)
+             for i in range(n_envs)],
+            start_method="spawn")
+        # rollout長: 価値推定の安定化のため総サンプル4096/更新に拡大
+        # (勝敗という遅延報酬の伝播には長めのロールアウトが効く)
+        ppo_kwargs["n_steps"] = max(512, 4096 // n_envs)
+        print(f"[train_battle] 並列環境 {n_envs} で学習 "
+              f"(n_steps={ppo_kwargs['n_steps']}/env)")
+    else:
+        env = make_training_env(battle_format=battle_format,
+                                own_play_style=play_style,
+                                opp_play_style_pool=opp_play_style_pool,
+                                seed=RANDOM_SEED)
+        env = Monitor(env)
 
     save_path = MODELS_DIR / f"battle_policy_{play_style}.zip"
     model = None
     if resume and save_path.exists():
-        # 夜間バッチ等での継続学習: 既存チェックポイントから再開する
+        # 夜間バッチ等での継続学習: 既存チェックポイントから再開する。
+        # custom_objectsでLR/entropyを上書きしないと保存時の値を引き継いで
+        # しまい、ハイパーパラメータ変更が再開時に反映されない
         try:
-            model = MaskablePPO.load(str(save_path), env=env)
-            print(f"[train_battle] チェックポイントから再開: {save_path}")
+            model = MaskablePPO.load(
+                str(save_path), env=env,
+                custom_objects={"learning_rate": lr, "ent_coef": ent_coef})
+            # ネット幅が希望と違う場合は新規学習へ (SB3のloadは保存時の
+            # アーキテクチャを復元し、policy_kwargs指定を無視するため、
+            # 観測次元が同じだと旧64x64のまま再開してしまう)
+            try:
+                actual = model.policy.mlp_extractor.policy_net[0].out_features
+            except Exception:
+                actual = None
+            width = ppo_kwargs["policy_kwargs"]["net_arch"][0]
+            if actual is not None and actual != width:
+                raise ValueError(
+                    f"net_arch mismatch: checkpoint={actual} != 希望={width}")
+            print(f"[train_battle] チェックポイントから再開: {save_path} "
+                  f"(lr={lr}, ent_coef={ent_coef}, net={actual})")
         except Exception as e:
             # 観測空間の変更・アルゴリズム変更 (PPO->MaskablePPO) 等で
-            # 互換性が無い場合は退避して新規学習する
+            # 互換性が無い場合は退避して新規学習する。
+            # ロード成功後の検証 (net_arch不一致) で来た場合に備えて
+            # modelを必ずNoneへ戻す (残すと旧モデルの学習を続けてしまう)
+            model = None
             backup = save_path.with_suffix(".zip.incompatible")
             save_path.rename(backup)
             print(f"[train_battle] チェックポイントが非互換のため退避して"
@@ -63,6 +128,7 @@ def train(total_timesteps: int = 10_000, battle_format: str = TRAINING_BATTLE_FO
             env,
             verbose=1,
             seed=RANDOM_SEED,
+            **ppo_kwargs,
         )
     model.learn(total_timesteps=total_timesteps, reset_num_timesteps=not resume)
 
@@ -85,11 +151,14 @@ def main() -> None:
                          help="学習するエージェントの性格")
     parser.add_argument("--opp-play-styles", type=str, nargs="*", default=None,
                          help="対戦相手チーム生成に使う性格候補(省略時は全性格からランダム)")
+    parser.add_argument("--n-envs", type=int,
+                         default=int(os.environ.get("N_ENVS", "1")),
+                         help="並列環境数 (Showdown通信律速の高速化。8コアで6程度)")
     args = parser.parse_args()
 
     train(total_timesteps=args.timesteps, battle_format=args.format,
           play_style=args.play_style, opp_play_style_pool=args.opp_play_styles,
-          resume=args.resume)
+          resume=args.resume, n_envs=args.n_envs)
 
 
 

@@ -15,7 +15,9 @@ from advisor.rl_bridge import (_legal_actions, encode_state, policy_hint,
 def _state():
     return {
         "scene": "command", "turn": 4,
-        "field": {"weather": "rain", "terrain": None, "trick_room": False},
+        "protect_streak": {"player": 1, "opponent": 0},
+        "field": {"weather": "rain", "weather_turns": 5, "terrain": None,
+                  "trick_room": False},
         "mega_used": {"player": False, "opponent": False},
         "player": {"active_index": 0, "remaining": 3,
                    "hazards": {"stealth_rock": True, "spikes": 0,
@@ -47,16 +49,248 @@ def _state():
     }
 
 
+def test_dim_parity():
+    # 学習側とadvisor側の観測次元・共有定数の一致 (ドリフト防止ガード)
+    from champions_agent.agent import spaces
+    from advisor import rl_bridge as rb
+    assert rb.OBS_DIM == spaces.BATTLE_OBS_DIM, \
+        (rb.OBS_DIM, spaces.BATTLE_OBS_DIM)
+    assert rb.MOVE_EFFECT_DIM == spaces.MOVE_EFFECT_DIM
+    assert rb.N_MOVE_SLOTS == spaces.N_MOVE_SLOTS
+    assert rb.MOVE_FEAT_DIM == spaces.MOVE_FEAT_DIM
+    from champions_agent.agent import encoders as enc
+    assert rb.VOLATILE_EFFECTS == enc.VOLATILE_EFFECTS
+    assert rb.ITEM_CATEGORIES == enc.ITEM_CATEGORIES
+    print(f"test_dim_parity OK (OBS_DIM={rb.OBS_DIM})")
+
+
 def test_encode():
     obs = encode_state(_state(), my_spe_actual=112)
     assert obs is not None and len(obs) == OBS_DIM, len(obs)
     assert np.all(np.isfinite(obs))
     assert 0 <= obs.min() and obs.max() <= 4.0, (obs.min(), obs.max())
-    # レイアウト: own75 + opp39 + extra2 + own_bench40 + opp_bench42 +
-    #             count1 = 199; my_side8 -> 207; opp_side8 -> 215; field10
+    # v1レイアウト: own75 + opp39 + extra2 + own_bench40 + opp_bench42 +
+    #               count1 = 199; my_side8 -> 207; opp_side8 -> 215; field10
     assert obs[199] == 1.0, "自陣SRフラグ位置ずれ (199)"
     assert obs[215 + 1] == 1.0, "雨フラグ位置ずれ (216)"
-    print("test_encode OK (227dim, 値域正常, 位置検証OK)")
+    # v2拡張 (227以降): 判明技4x9 -> 263; volatiles12 -> 275; mega3 -> 278;
+    #                   items12 -> 290; misc2 -> 292; bench_tactics6 -> 298
+    # 相手の判明技スロット0 = じしん (威力100 -> 100/150, 物理フラグ)
+    assert abs(obs[227] - 100.0 / 150.0) < 1e-5, f"判明技威力位置ずれ: {obs[227]}"
+    assert obs[227 + 3] == 1.0, "判明技の物理フラグ位置ずれ"
+    # メガ: 自分はラグラージナイト持ち・未使用 -> can_mega=1, used=0
+    assert obs[275] == 1.0, f"メガ可能フラグ位置ずれ: {obs[275]}"
+    assert obs[276] == 0.0 and obs[277] == 0.0
+    # 自分の残数: 3体中ミミッキュひんし -> 2/3
+    assert abs(obs[290] - 2.0 / 3.0) < 1e-5, f"残数位置ずれ: {obs[290]}"
+    # v3拡張 (298以降): 自技効果4x8 -> 330; 相手技効果4x8 -> 362;
+    #   プロファイル4 -> 366; 効用4 -> 370; 天候残り2 -> 372; 控え同士4 -> 376
+    # 自分の技スロット2 = れいとうパンチ (副次10%こおり) -> 状態異常率0.1
+    assert abs(obs[298 + 2 * 8 + 6] - 0.1) < 1e-5, \
+        f"技効果(状態異常率)位置ずれ: {obs[320]}"
+    # スロット0 = じしん (付随効果なし) -> 全0
+    assert np.all(obs[298:306] == 0.0), obs[298:306]
+    # 攻撃プロファイル: 相手ガブリアス判明技=じしん(物理) -> 物理シェア1.0
+    assert abs(obs[362] - 1.0) < 1e-5, f"相手物理シェア位置ずれ: {obs[362]}"
+    # 自分も物理技3つ -> 物理シェア1.0
+    assert abs(obs[364] - 1.0) < 1e-5, f"自分物理シェア位置ずれ: {obs[364]}"
+    # 天候残りターン: weather_turns=5 -> 5/8
+    assert abs(obs[370] - 5.0 / 8.0) < 1e-5, f"天候残り位置ずれ: {obs[370]}"
+    # v5: 連続まもる (自分1回 -> 1/3) at 382
+    assert abs(obs[382] - 1.0 / 3.0) < 1e-5, f"まもるカウンタ位置ずれ: {obs[382]}"
+    assert obs[383] == 0.0
+    print(f"test_encode OK ({OBS_DIM}dim, 値域正常, v1-v5位置検証OK)")
+
+
+def test_speed_estimate_integration():
+    # 先後観測の推定素早さ: spe_est添付でRLの素早さ比較が変わり、
+    # spe_boundsで探索の実効素早さがクランプされる
+    from advisor.damage import MonView, effective_speed
+    from advisor.dex import get_dex
+    sp = get_dex().species("garchomp")
+    v = MonView(species_id="garchomp", types=sp["types"], base=sp["baseStats"])
+    base_spe = effective_speed(v)
+    # 「自分の150より速かった」観測 -> 下限151にクランプ
+    v.spe_bounds = (150.0, None)
+    assert effective_speed(v) >= 151, effective_speed(v)
+    # 「自分の90より遅かった」観測 -> 上限89にクランプ
+    v.spe_bounds = (None, 90.0)
+    assert effective_speed(v) <= 89, effective_speed(v)
+    v.spe_bounds = None
+    assert effective_speed(v) == base_spe
+
+    # rl_bridge: spe_est 添付で「自分が速いか」フラグが反転する
+    st = _state()
+    st["opponent"]["party"][0]["spe_est"] = 200   # 実効200と推定
+    obs_fast_opp = encode_state(st, my_spe_actual=112)
+    st["opponent"]["party"][0]["spe_est"] = 50
+    obs_slow_opp = encode_state(st, my_spe_actual=112)
+    assert obs_fast_opp[226] == 0.0 and obs_slow_opp[226] == 1.0, \
+        (obs_fast_opp[226], obs_slow_opp[226])
+    print("test_speed_estimate_integration OK")
+
+
+def test_boost_utility_context():
+    # ユーザー指摘の検証: B上げ (てっぺき) は相手が物理型なら効用が高く、
+    # 特殊型なら効用ゼロに近づく。A上げ (つるぎのまい) は自分が物理型なら
+    # 相手の型に依存しない
+    from poke_env.battle import Move
+    from champions_agent.agent.encoders import _boost_utility
+    iron = Move("irondefense", gen=9)     # B+2
+    swords = Move("swordsdance", gen=9)   # A+2
+    # 相手が物理100%: B上げの効用が高い
+    u_phys = _boost_utility(iron, 1.0, 0.0, 1.0, 0.0, is_slower=False)
+    # 相手が特殊100%: B上げの効用ゼロ
+    u_spec = _boost_utility(iron, 1.0, 0.0, 0.0, 1.0, is_slower=False)
+    assert u_phys > 0.4 and u_spec == 0.0, (u_phys, u_spec)
+    # A上げは自分が物理型なら相手の型に関係なく高効用
+    a1 = _boost_utility(swords, 1.0, 0.0, 1.0, 0.0, is_slower=False)
+    a2 = _boost_utility(swords, 1.0, 0.0, 0.0, 1.0, is_slower=False)
+    assert a1 == a2 > 0.4, (a1, a2)
+    # りゅうのまい: 相手より遅いときの方がS上げ分だけ効用が高い
+    dd = Move("dragondance", gen=9)
+    d_slow = _boost_utility(dd, 1.0, 0.0, 0.5, 0.5, is_slower=True)
+    d_fast = _boost_utility(dd, 1.0, 0.0, 0.5, 0.5, is_slower=False)
+    assert d_slow > d_fast, (d_slow, d_fast)
+    print(f"test_boost_utility_context OK: てっぺき vs物理{u_phys:.2f}/vs特殊{u_spec:.2f}, "
+          f"りゅうのまい 遅{d_slow:.2f}>速{d_fast:.2f}")
+
+
+def test_contrary():
+    # あまのじゃく (メガムクホーク等): ランク変化が反転する
+    from poke_env.battle import Move
+    from champions_agent.agent.encoders import (_move_effect_vec,
+                                                _boost_utility)
+    cc = Move("closecombat", gen=9)   # 通常: 自分B/D-1
+    normal = _move_effect_vec(cc)
+    inverted = _move_effect_vec(cc, contrary=True)
+    # BOOST_STAT_KEYS = (atk, def, spa, spd, spe): B=idx1, D=idx3
+    assert normal[1] == -0.5 and normal[3] == -0.5, normal[:5]
+    assert inverted[1] == 0.5 and inverted[3] == 0.5, inverted[:5]
+    # あまのじゃく+インファイトは「相手が物理型」のとき効用が出る
+    u = _boost_utility(cc, 1.0, 0.0, 1.0, 0.0, is_slower=False, contrary=True)
+    assert u > 0.2, u
+    # 逆にりゅうのまいは自傷になる -> 効用0
+    dd = Move("dragondance", gen=9)
+    u_dd = _boost_utility(dd, 1.0, 0.0, 0.5, 0.5, is_slower=True, contrary=True)
+    assert u_dd == 0.0, u_dd
+    # rl_bridge側: メガムクホーク (固定特性あまのじゃく) の判定
+    from advisor.rl_bridge import _has_contrary_dict
+    assert _has_contrary_dict({"species_id": "staraptor", "is_mega": True,
+                               "item_id": "staraptorite"}) or \
+        _has_contrary_dict({"species_id": "staraptor",
+                            "ability_id": "contrary"})
+    print(f"test_contrary OK: インファイト反転 {normal[:4]} -> {inverted[:4]}")
+
+
+def test_meta_specials():
+    # 環境使用率上位の特殊要素: ばけのかわ/タスキ/がんじょう/無効特性/天候素早さ
+    from advisor.rl_bridge import _eff, encode_state
+    # ふゆう固定のロトムにじめん技は無効
+    rotom = {"species_id": "rotomwash", "types": ["でんき", "みず"]}
+    assert _eff("ground", rotom) == 0.0, _eff("ground", rotom)
+    # ガブリアス (ふゆう無し) には等倍以上
+    garchomp = {"species_id": "garchomp", "types": ["ドラゴン", "じめん"]}
+    assert _eff("ground", garchomp) > 0, _eff("ground", garchomp)
+
+    # ばけのかわ: 満タンミミッキュ=guard 1 / 50% (破壊済み近似)=0
+    st = _state()
+    st["opponent"]["party"][0] = {
+        "species_id": "mimikyu", "species_ja": "ミミッキュ",
+        "types": ["ゴースト", "フェアリー"], "hp_percent": 100.0}
+    obs = encode_state(st, my_spe_actual=112)
+    assert obs[377] == 1.0, f"ばけのかわguard位置ずれ: {obs[376:382]}"
+    st["opponent"]["party"][0]["hp_percent"] = 50.0
+    obs = encode_state(st, my_spe_actual=112)
+    assert obs[377] == 0.0, obs[376:382]
+    # タスキ持ち満タン
+    st["opponent"]["party"][0] = {
+        "species_id": "garchomp", "species_ja": "ガブリアス",
+        "types": ["ドラゴン", "じめん"], "hp_percent": 100.0,
+        "item_id": "focussash"}
+    obs = encode_state(st, my_spe_actual=112)
+    assert obs[377] == 1.0, obs[376:382]
+
+    # すいすい×雨: 相手ペリッパー(すいすい判明)の実効素早さが倍
+    # -> 素早さ比 (speed[1]=自分が速いか) が反転する
+    st2 = _state()
+    st2["opponent"]["party"][0] = {
+        "species_id": "swampert", "species_ja": "ラグラージ",
+        "types": ["みず", "じめん"], "hp_percent": 100.0,
+        "ability_id": "swiftswim"}
+    obs_rain = encode_state(st2, my_spe_actual=112)   # 雨: 60*2=120 > 112
+    st2["field"]["weather"] = None
+    obs_dry = encode_state(st2, my_spe_actual=112)    # 無天候: 60 < 112
+    # v1レイアウトのspeed[1]は index 226
+    assert obs_dry[226] == 1.0 and obs_rain[226] == 0.0, \
+        (obs_dry[226], obs_rain[226])
+    print("test_meta_specials OK (ふゆう無効/ばけのかわ/タスキ/すいすい×雨)")
+
+
+def test_v6_abilities():
+    # マルチスケイル/リジェネレーター/かたやぶり/てんねん/きれあじ
+    from advisor.rl_bridge import _eff, encode_state
+    from advisor.damage import MonView, calc_damage
+    from advisor.dex import get_dex
+    from champions_agent.agent.encoders import _boost_utility
+    from poke_env.battle import Move
+
+    # 観測: 満タンカイリュー (マルチスケイル可能) -> フラグ1 / 50%なら0
+    st = _state()
+    st["opponent"]["party"][0] = {
+        "species_id": "dragonite", "species_ja": "カイリュー",
+        "types": ["ドラゴン", "ひこう"], "hp_percent": 100.0}
+    obs = encode_state(st, my_spe_actual=112)
+    assert obs[385] == 1.0, f"マルチスケイル位置ずれ: {obs[384:388]}"
+    st["opponent"]["party"][0]["hp_percent"] = 50.0
+    obs = encode_state(st, my_spe_actual=112)
+    assert obs[385] == 0.0
+    # リジェネレーター: ドヒドイデ
+    st["opponent"]["party"][0] = {
+        "species_id": "toxapex", "species_ja": "ドヒドイデ",
+        "types": ["どく", "みず"], "hp_percent": 100.0}
+    obs = encode_state(st, my_spe_actual=112)
+    assert obs[387] == 1.0, f"リジェネ位置ずれ: {obs[384:388]}"
+
+    # かたやぶり: ふゆうロトムへのじめんが無効でなくなる
+    rotom = {"species_id": "rotomwash", "types": ["でんき", "みず"]}
+    mold_attacker = {"species_id": "excadrill", "ability_id": "moldbreaker"}
+    assert _eff("ground", rotom) == 0.0
+    assert _eff("ground", rotom, attacker=mold_attacker) > 0.0
+
+    # ダメージ計算: マルチスケイル半減 (対応済みの回帰) + きれあじ + てんねん
+    sp_d = get_dex().species("dragonite")
+    dnite = MonView(species_id="dragonite", types=sp_d["types"],
+                    base=sp_d["baseStats"], ability="multiscale", hp_frac=1.0)
+    sp_g = get_dex().species("gallade")
+    gallade = MonView(species_id="gallade", types=sp_g["types"],
+                      base=sp_g["baseStats"], ev={"atk": 252})
+    d_plain = calc_damage(gallade, dnite, "psychocut")["avg"]
+    gallade_sharp = MonView(species_id="gallade", types=sp_g["types"],
+                            base=sp_g["baseStats"], ev={"atk": 252},
+                            ability="sharpness")
+    d_sharp = calc_damage(gallade_sharp, dnite, "psychocut")["avg"]
+    assert d_sharp > d_plain * 1.3, (d_plain, d_sharp)  # きれあじ1.5倍
+
+    # てんねん: 攻撃+6でもダメージが変わらない
+    sp_q = get_dex().species("quagsire")
+    quag = MonView(species_id="quagsire", types=sp_q["types"],
+                   base=sp_q["baseStats"], ability="unaware")
+    atk_boost = MonView(species_id="gallade", types=sp_g["types"],
+                        base=sp_g["baseStats"], ev={"atk": 252},
+                        boosts={"atk": 6})
+    atk_flat = MonView(species_id="gallade", types=sp_g["types"],
+                       base=sp_g["baseStats"], ev={"atk": 252})
+    d_boosted = calc_damage(atk_boost, quag, "psychocut")["avg"]
+    d_flat = calc_damage(atk_flat, quag, "psychocut")["avg"]
+    assert abs(d_boosted - d_flat) < 1.0, (d_boosted, d_flat)
+
+    # てんねん相手には攻撃ランク技の効用が0
+    swords = Move("swordsdance", gen=9)
+    u = _boost_utility(swords, 1.0, 0.0, 0.5, 0.5, is_slower=False,
+                       opp_unaware=True)
+    assert u == 0.0, u
+    print("test_v6_abilities OK (マルチスケイル/リジェネ/かたやぶり/きれあじ/てんねん)")
 
 
 def test_legal_actions():
@@ -126,7 +360,13 @@ def test_engine_blend():
 
 
 if __name__ == "__main__":
+    test_dim_parity()
     test_encode()
+    test_boost_utility_context()
+    test_contrary()
+    test_meta_specials()
+    test_speed_estimate_integration()
+    test_v6_abilities()
     test_legal_actions()
     test_policy_hint()
     test_value_of_sim()

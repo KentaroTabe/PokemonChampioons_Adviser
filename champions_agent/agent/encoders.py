@@ -9,11 +9,13 @@
 """
 from __future__ import annotations
 
+from typing import Optional
+
 import numpy as np
 
 from champions_agent.agent.spaces import (
     POKEMON_FEATURE_DIM, OPPONENT_POKEMON_FEATURE_DIM, FIELD_FEATURE_DIM,
-    BATTLE_OBS_DIM, N_MOVE_SLOTS, MOVE_FEAT_DIM,
+    BATTLE_OBS_DIM, N_MOVE_SLOTS, MOVE_FEAT_DIM, MOVE_EFFECT_DIM,
 )
 
 ALL_TYPES = [
@@ -88,15 +90,78 @@ def _hp_frac(pokemon) -> float:
         return 0.0
 
 
-def _eff_mult(defender, move_or_type) -> float:
-    """タイプ相性倍率 (0/0.25/0.5/1/2/4)。取得失敗時は1.0"""
+# タイプ無効化特性 (使用率上位: ふゆう900/もらいび358等)。
+# 特性が確定している場合のみ相性を0にする
+IMMUNITY_ABILITIES = {
+    "levitate": "ground", "eartheater": "ground",
+    "flashfire": "fire", "wellbakedbody": "fire",
+    "waterabsorb": "water", "stormdrain": "water", "dryskin": "water",
+    "voltabsorb": "electric", "lightningrod": "electric",
+    "motordrive": "electric",
+    "sapsipper": "grass", "windrider": "flying",
+}
+
+# 天候で素早さが倍になる特性
+WEATHER_SPEED_ABILITIES = {
+    "swiftswim": "rain", "chlorophyll": "sun",
+    "sandrush": "sand", "slushrush": "snow",
+}
+
+
+def _known_ability(pokemon) -> Optional[str]:
+    """確定している特性ID (判明済み or 種族の可能特性が1つのみ)"""
     try:
-        return float(defender.damage_multiplier(move_or_type))
+        ab = getattr(pokemon, "ability", None)
+        if ab:
+            return str(ab).lower().replace(" ", "")
+        poss = getattr(pokemon, "possible_abilities", None) or {}
+        vals = list({str(v).lower().replace(" ", "")
+                     for v in (poss.values() if isinstance(poss, dict) else poss)})
+        if len(vals) == 1:
+            return vals[0]
+    except Exception:
+        pass
+    return None
+
+
+def _possible_abilities(pokemon) -> set:
+    try:
+        ab = getattr(pokemon, "ability", None)
+        if ab:
+            return {str(ab).lower().replace(" ", "")}
+        poss = getattr(pokemon, "possible_abilities", None) or {}
+        return {str(v).lower().replace(" ", "")
+                for v in (poss.values() if isinstance(poss, dict) else poss)}
+    except Exception:
+        return set()
+
+
+MOLDBREAKER_ABILITIES = ("moldbreaker", "teravolt", "turboblaze")
+
+
+def _eff_mult(defender, move_or_type, attacker=None) -> float:
+    """タイプ相性倍率 (0/0.25/0.5/1/2/4)。取得失敗時は1.0。
+
+    防御側の確定特性による無効化 (ふゆう=じめん無効等) を反映する。
+    攻撃側がかたやぶり系 (確定) なら特性無効化を無視する
+    """
+    try:
+        mult = float(defender.damage_multiplier(move_or_type))
+        if mult > 0:
+            t = getattr(move_or_type, "type", move_or_type)
+            tname = getattr(t, "name", None)
+            if tname:
+                a_ab = _known_ability(attacker) if attacker is not None else None
+                if a_ab not in MOLDBREAKER_ABILITIES:
+                    ab = _known_ability(defender)
+                    if ab and IMMUNITY_ABILITIES.get(ab) == tname.lower():
+                        return 0.0
+        return mult
     except Exception:
         return 1.0
 
 
-def _encode_move(move, opponent) -> np.ndarray:
+def _encode_move(move, opponent, attacker=None) -> np.ndarray:
     """1技分の特徴量 (MOVE_FEAT_DIM=9)"""
     vec = np.zeros(MOVE_FEAT_DIM, dtype=np.float32)
     if move is None:
@@ -107,10 +172,12 @@ def _encode_move(move, opponent) -> np.ndarray:
         if acc > 1.0:
             acc /= 100.0
         cat = move.category.name.lower() if move.category else "status"
-        pp_frac = 0.0
+        # PP不明は満タン扱い (advisor側encode_stateと同じ既定値)
+        pp_frac = 1.0
         if move.max_pp:
             pp_frac = max(0.0, float(move.current_pp or 0) / move.max_pp)
-        eff = _eff_mult(opponent, move) if (opponent is not None and power > 0) else 1.0
+        eff = _eff_mult(opponent, move, attacker=attacker) \
+            if (opponent is not None and power > 0) else 1.0
 
         vec[0] = min(power, 150.0) / 150.0
         vec[1] = acc
@@ -146,7 +213,7 @@ def _encode_active(pokemon, opponent, with_moves: bool) -> np.ndarray:
             pass
         for i in range(N_MOVE_SLOTS):
             mv = moves[i] if i < len(moves) else None
-            stab_vec = _encode_move(mv, opponent)
+            stab_vec = _encode_move(mv, opponent, attacker=pokemon)
             # STABフラグ (index 6) はここで付与
             try:
                 if mv is not None and mv.type is not None and pokemon.types:
@@ -240,6 +307,248 @@ def _field_vec(battle) -> np.ndarray:
     return vec
 
 
+# v2拡張観測用の定義
+VOLATILE_EFFECTS = ["confusion", "leech_seed", "substitute", "taunt",
+                    "encore", "yawn"]
+ITEM_CATEGORIES = ["choicescarf", "choiceband", "choicespecs",
+                   "lifeorb", "leftovers"]  # 6枠目=その他判明
+
+
+def _volatiles_vec(pokemon) -> np.ndarray:
+    """揮発状態6フラグ (VOLATILE_EFFECTS 順)"""
+    vec = np.zeros(len(VOLATILE_EFFECTS), dtype=np.float32)
+    try:
+        for eff in (pokemon.effects or {}):
+            name = eff.name.lower()
+            if name in VOLATILE_EFFECTS:
+                vec[VOLATILE_EFFECTS.index(name)] = 1.0
+    except Exception:
+        pass
+    return vec
+
+
+def _item_vec(pokemon) -> np.ndarray:
+    """持ち物カテゴリ6: こだわり3種/珠/残飯/その他判明 (不明は全0)"""
+    vec = np.zeros(6, dtype=np.float32)
+    try:
+        item = pokemon.item
+        if item and item not in ("unknown_item",):
+            iid = str(item).lower().replace(" ", "")
+            if iid in ITEM_CATEGORIES:
+                vec[ITEM_CATEGORIES.index(iid)] = 1.0
+            else:
+                vec[5] = 1.0
+    except Exception:
+        pass
+    return vec
+
+
+def _best_move_eff(attacker, defender) -> float:
+    """attackerの判明技のうちdefenderに最も通る相性倍率 (攻撃技のみ)"""
+    best = 0.0
+    try:
+        for mv in attacker.moves.values():
+            if (mv.base_power or 0) > 0:
+                best = max(best, _eff_mult(defender, mv, attacker=attacker))
+    except Exception:
+        pass
+    return best
+
+
+def _stab_threat_eff(attacker, defender) -> float:
+    """attackerのタイプ一致打点がdefenderへ通る最大倍率 (技非依存の脅威推定)"""
+    best = 0.0
+    try:
+        for t in (attacker.types or []):
+            if t is not None:
+                best = max(best, _eff_mult(defender, t, attacker=attacker))
+    except Exception:
+        pass
+    return best
+
+
+def _mega_in_team(team) -> bool:
+    try:
+        return any("mega" in (p.species or "") for p in team.values())
+    except Exception:
+        return False
+
+
+def _move_self_boosts(move) -> dict:
+    """技が自分に与えるランク変化 {stat: 段数} (副次効果は確率加重)"""
+    out: dict = {}
+    if move is None:
+        return out
+    try:
+        boosts = getattr(move, "boosts", None) or {}
+        target = str(getattr(move, "target", "") or "").lower()
+        if "self" in target:
+            for k, v in boosts.items():
+                out[k] = out.get(k, 0.0) + v
+        sb = getattr(move, "self_boost", None) or {}
+        items = (sb.get("boosts") or {}).items() if "boosts" in sb else sb.items()
+        for k, v in items:
+            out[k] = out.get(k, 0.0) + v
+        sec_raw = getattr(move, "secondary", None)
+        secs = sec_raw if isinstance(sec_raw, list) else ([sec_raw] if sec_raw else [])
+        for sec in secs:
+            chance = float(sec.get("chance") or 100) / 100.0
+            for k, v in ((sec.get("self") or {}).get("boosts") or {}).items():
+                out[k] = out.get(k, 0.0) + v * chance
+    except Exception:
+        pass
+    return out
+
+
+def _has_contrary(pokemon) -> bool:
+    """あまのじゃく (ランク変化反転) 持ちか。
+
+    特性が判明していればそれを、未判明でも種族の可能特性が
+    あまのじゃくのみ (メガムクホーク等) なら真とみなす
+    """
+    if pokemon is None:
+        return False
+    try:
+        ab = getattr(pokemon, "ability", None)
+        if ab:
+            return str(ab).lower().replace(" ", "") == "contrary"
+        poss = getattr(pokemon, "possible_abilities", None) or {}
+        vals = [str(v).lower().replace(" ", "")
+                for v in (poss.values() if isinstance(poss, dict) else poss)]
+        return bool(vals) and all(v == "contrary" for v in vals)
+    except Exception:
+        return False
+
+
+def _move_effect_vec(move, contrary: bool = False,
+                     target_contrary: bool = False) -> np.ndarray:
+    """技の付随効果8次元:
+    [A/B/C/D/S別の符号付き自己ブースト(各/2), 相手ランク低下, 状態異常率, 回復率]
+
+    合計スカラーではなくステータス別に分解する: りゅうのまい[A+S]と
+    てっぺき[B]は価値の文脈 (自分の型・相手の攻撃プロファイル) が異なる。
+    contrary=使用者があまのじゃくなら自己ブーストの符号を反転
+    (メガムクホークのインファイト=B/D上昇)。target_contrary=対象が
+    あまのじゃくなら相手ランク低下は逆に強化になるため0にする
+    """
+    from champions_agent.agent.spaces import BOOST_STAT_KEYS
+    vec = np.zeros(MOVE_EFFECT_DIM, dtype=np.float32)
+    if move is None:
+        return vec
+    try:
+        self_boosts = _move_self_boosts(move)
+        sign = -1.0 if contrary else 1.0
+        for i, k in enumerate(BOOST_STAT_KEYS):
+            vec[i] = max(-1.0, min(1.0, sign * self_boosts.get(k, 0.0) / 2.0))
+        targ_down = 0.0
+        boosts = getattr(move, "boosts", None) or {}
+        target = str(getattr(move, "target", "") or "").lower()
+        if "self" not in target:
+            for v in boosts.values():
+                targ_down += max(-v, 0)
+        status_chance = 1.0 if getattr(move, "status", None) else 0.0
+        sec_raw = getattr(move, "secondary", None)
+        secs = sec_raw if isinstance(sec_raw, list) else ([sec_raw] if sec_raw else [])
+        for sec in secs:
+            chance = float(sec.get("chance") or 100) / 100.0
+            for v in (sec.get("boosts") or {}).values():
+                targ_down += max(-v, 0) * chance
+            if sec.get("status"):
+                status_chance = max(status_chance, chance)
+        heal = 0.0
+        h = getattr(move, "heal", None)
+        if h:
+            heal = float(h[0]) / float(h[1]) if isinstance(h, (list, tuple)) \
+                else float(h)
+        d = getattr(move, "drain", None)
+        if d:
+            heal = max(heal, (float(d[0]) / float(d[1]) if
+                              isinstance(d, (list, tuple)) else float(d)) * 0.75)
+        if target_contrary:
+            targ_down = 0.0   # あまのじゃく相手にはデバフが強化になる
+        vec[5] = min(targ_down, 4.0) / 4.0
+        vec[6] = min(status_chance, 1.0)
+        vec[7] = min(heal, 1.0)
+    except Exception:
+        pass
+    return vec
+
+
+def _attack_profile(pokemon, fallback_stats: bool = True) -> tuple:
+    """(物理シェア, 特殊シェア)。判明技の威力加重、なければ種族値A/C比"""
+    phys = spec = 0.0
+    try:
+        for mv in pokemon.moves.values():
+            p = float(mv.base_power or 0)
+            if p <= 0:
+                continue
+            cat = mv.category.name.lower() if mv.category else ""
+            if cat == "physical":
+                phys += p
+            elif cat == "special":
+                spec += p
+    except Exception:
+        pass
+    if phys + spec <= 0 and fallback_stats:
+        try:
+            bs = pokemon.base_stats or {}
+            phys = float(bs.get("atk") or 0)
+            spec = float(bs.get("spa") or 0)
+        except Exception:
+            pass
+    total = phys + spec
+    if total <= 0:
+        return 0.5, 0.5
+    return phys / total, spec / total
+
+
+def _boost_utility(move, own_phys: float, own_spec: float,
+                   opp_phys: float, opp_spec: float,
+                   is_slower: bool, contrary: bool = False,
+                   opp_unaware: bool = False) -> float:
+    """ランク技の文脈つき効用。
+
+    B上げは相手の物理脅威シェア、D上げは特殊脅威シェアで重み付け
+    (相手が特殊型ならB上げの効用は0に近づく)。A/C上げは自分の攻撃
+    プロファイル、S上げは「相手より遅い」ときに高価値。
+    contrary=あまのじゃくなら反転後のブーストで評価する
+    (インファイトのB/D上昇が効用として観測される)
+    """
+    sb = _move_self_boosts(move)
+    if not sb:
+        return 0.0
+    sign = -1.0 if contrary else 1.0
+    w = {"atk": own_phys, "spa": own_spec,
+         "def": opp_phys, "spd": opp_spec,
+         "spe": 0.9 if is_slower else 0.2}
+    if opp_unaware:
+        # 相手がてんねん (確定) なら攻撃系ランクはダメージに反映されない
+        w["atk"] = 0.0
+        w["spa"] = 0.0
+    util = sum(max(sign * v, 0.0) * w.get(k, 0.3) for k, v in sb.items())
+    return min(util, 4.0) / 4.0
+
+
+def _field_remaining_vec(battle) -> np.ndarray:
+    """天候/フィールドの残りターン概算 (/8)。正確な残数は岩/持ち物依存の
+    ため、開始からの経過で 8-経過 を上限推定する"""
+    vec = np.zeros(2, dtype=np.float32)
+    try:
+        turn = int(battle.turn or 0)
+        for _w, start in (battle.weather or {}).items():
+            vec[0] = max(0.0, 8.0 - (turn - int(start or turn))) / 8.0
+            break
+        for _f, start in (battle.fields or {}).items():
+            name = _f.name.lower()
+            if "trick_room" in name:
+                continue
+            vec[1] = max(0.0, 8.0 - (turn - int(start or turn))) / 8.0
+            break
+    except Exception:
+        pass
+    return vec
+
+
 def encode_battle(battle) -> np.ndarray:
     """AbstractBattle -> 固定長観測ベクトル (BATTLE_OBS_DIM)"""
     own = battle.active_pokemon
@@ -264,7 +573,7 @@ def encode_battle(battle) -> np.ndarray:
         if own is not None:
             for mv in revealed:
                 if (mv.base_power or 0) > 0:
-                    max_eff = max(max_eff, _eff_mult(own, mv))
+                    max_eff = max(max_eff, _eff_mult(own, mv, attacker=opp))
         opp_extra = np.array([min(len(revealed), 4) / 4.0, max_eff / 4.0],
                              dtype=np.float32)
     else:
@@ -299,11 +608,47 @@ def encode_battle(battle) -> np.ndarray:
     opp_side = _side_conditions_vec(getattr(battle, "opponent_side_conditions", None))
     field = _field_vec(battle)
 
-    # --- 素早さ比較 ---
+    # --- 素早さ比較 (天候特性すいすい等 + こだわりスカーフを反映) ---
+    def _speed_mult(pokemon) -> float:
+        mult = 1.0
+        try:
+            # ランク補正 (advisor側のeffective_speedはboost込みのため整合させる)
+            stage = int((pokemon.boosts or {}).get("spe") or 0)
+            if stage > 0:
+                mult *= (2 + stage) / 2.0
+            elif stage < 0:
+                mult *= 2.0 / (2 - stage)
+        except Exception:
+            pass
+        try:
+            ab = _known_ability(pokemon)
+            if ab in WEATHER_SPEED_ABILITIES:
+                need = WEATHER_SPEED_ABILITIES[ab]
+                for w in (battle.weather or {}):
+                    wn = w.name.lower()
+                    if (need == "rain" and "rain" in wn) or \
+                       (need == "sun" and "sun" in wn) or \
+                       (need == "sand" and "sand" in wn) or \
+                       (need == "snow" and ("snow" in wn or "hail" in wn)):
+                        mult *= 2.0
+            item = getattr(pokemon, "item", None)
+            if item and "choicescarf" in str(item).lower().replace(" ", ""):
+                mult *= 1.5
+            try:
+                if pokemon.status is not None and \
+                        pokemon.status.name.lower() == "par":
+                    mult *= 0.5
+            except Exception:
+                pass
+        except Exception:
+            pass
+        return mult
+
     speed_vec = np.zeros(2, dtype=np.float32)
     try:
-        my_spe = (own.stats or {}).get("spe") or (own.base_stats or {}).get("spe") or 0
-        opp_spe = (opp.base_stats or {}).get("spe") or 0
+        my_spe = ((own.stats or {}).get("spe")
+                  or (own.base_stats or {}).get("spe") or 0) * _speed_mult(own)
+        opp_spe = ((opp.base_stats or {}).get("spe") or 0) * _speed_mult(opp)
         if opp_spe > 0:
             ratio = my_spe / opp_spe
             speed_vec[0] = min(ratio, 2.0) / 2.0
@@ -311,9 +656,195 @@ def encode_battle(battle) -> np.ndarray:
     except Exception:
         pass
 
+    # ================= v2拡張観測 (末尾追記。v1プレフィックスは不変) =========
+    # 相手の判明技4スロット (自分を防御側とした技特徴 + 相手視点STAB)
+    opp_move_vecs = []
+    opp_revealed = []
+    if opp is not None:
+        try:
+            opp_revealed = list(opp.moves.values())
+        except Exception:
+            pass
+    for i in range(N_MOVE_SLOTS):
+        mv = opp_revealed[i] if i < len(opp_revealed) else None
+        mvec = _encode_move(mv, own, attacker=opp)
+        try:
+            if mv is not None and mv.type is not None and opp is not None and opp.types:
+                if any(t is not None and t.name == mv.type.name for t in opp.types):
+                    mvec[6] = 1.0
+        except Exception:
+            pass
+        opp_move_vecs.append(mvec)
+
+    # 揮発状態 (自分/相手)
+    own_vol = _volatiles_vec(own) if own is not None else np.zeros(6, dtype=np.float32)
+    opp_vol = _volatiles_vec(opp) if opp is not None else np.zeros(6, dtype=np.float32)
+
+    # メガ進化 (1試合1回の権利の管理)
+    mega_vec = np.zeros(3, dtype=np.float32)
+    try:
+        mega_vec[0] = 1.0 if getattr(battle, "can_mega_evolve", False) else 0.0
+    except Exception:
+        pass
+    mega_vec[1] = 1.0 if _mega_in_team(getattr(battle, "team", {}) or {}) else 0.0
+    mega_vec[2] = 1.0 if _mega_in_team(
+        getattr(battle, "opponent_team", {}) or {}) else 0.0
+
+    # 持ち物カテゴリ (自分/相手判明分)
+    own_item = _item_vec(own) if own is not None else np.zeros(6, dtype=np.float32)
+    opp_item = _item_vec(opp) if opp is not None else np.zeros(6, dtype=np.float32)
+
+    # 自分の残数 + 相手判明技の最大優先度
+    misc = np.zeros(2, dtype=np.float32)
+    try:
+        misc[0] = sum(1 for p in battle.team.values() if not p.fainted) / 3.0
+    except Exception:
+        misc[0] = 1.0
+    try:
+        pri = max((float(mv.priority or 0) for mv in opp_revealed), default=0.0)
+        misc[1] = (pri + 5.0) / 10.0
+    except Exception:
+        misc[1] = 0.5
+
+    # 控えの戦術情報 (交代判断用):
+    # 自分控え: その子の打点が相手アクティブへ通るか / 相手STABをどれだけ受けるか
+    bench_tactics = np.zeros(6, dtype=np.float32)
+    for i in range(2):
+        b = own_bench[i] if i < len(own_bench) else None
+        if b is not None and opp is not None:
+            bench_tactics[i * 2] = _best_move_eff(b, opp) / 4.0
+            bench_tactics[i * 2 + 1] = _stab_threat_eff(opp, b) / 4.0
+    # 相手控え: 自分アクティブの打点がその子へ通るか
+    for i in range(2):
+        b = opp_bench[i] if i < len(opp_bench) else None
+        if b is not None and own is not None:
+            bench_tactics[4 + i] = _best_move_eff(own, b) / 4.0
+
+    # ========== v3拡張 (技効果/脅威プロファイル/効用/天候残り/控え同士) ======
+    own_moves_list = []
+    if own is not None:
+        try:
+            own_moves_list = list(own.moves.values())
+        except Exception:
+            pass
+    # あまのじゃく (ランク反転) は技効果の意味を根本的に変えるため反映する
+    own_contrary = _has_contrary(own)
+    opp_contrary = _has_contrary(opp)
+    own_move_effects = [
+        _move_effect_vec(own_moves_list[i] if i < len(own_moves_list) else None,
+                         contrary=own_contrary, target_contrary=opp_contrary)
+        for i in range(N_MOVE_SLOTS)]
+    opp_move_effects = [
+        _move_effect_vec(opp_revealed[i] if i < len(opp_revealed) else None,
+                         contrary=opp_contrary, target_contrary=own_contrary)
+        for i in range(N_MOVE_SLOTS)]
+
+    # 攻撃プロファイル: 相手の物理/特殊脅威シェア + 自分の物理/特殊シェア
+    opp_phys, opp_spec = _attack_profile(opp) if opp is not None else (0.5, 0.5)
+    own_phys, own_spec = _attack_profile(own) if own is not None else (0.5, 0.5)
+    profile_vec = np.array([opp_phys, opp_spec, own_phys, own_spec],
+                           dtype=np.float32)
+
+    # 自分の各技のランク技効用 (文脈重み付き。speed_vec[1]=1なら自分が速い)
+    is_slower = speed_vec[1] < 0.5
+    opp_unaware = _known_ability(opp) == "unaware" if opp is not None else False
+    utility_vec = np.array([
+        _boost_utility(own_moves_list[i] if i < len(own_moves_list) else None,
+                       own_phys, own_spec, opp_phys, opp_spec, is_slower,
+                       contrary=own_contrary, opp_unaware=opp_unaware)
+        for i in range(N_MOVE_SLOTS)], dtype=np.float32)
+
+    field_remaining = _field_remaining_vec(battle)
+
+    # 自分控え2 x 相手控え2: 突破後の詰め筋 (自分の控えの打点が相手の控えに通るか)
+    bench_matchup = np.zeros(4, dtype=np.float32)
+    for i in range(2):
+        mb = own_bench[i] if i < len(own_bench) else None
+        for j in range(2):
+            ob = opp_bench[j] if j < len(opp_bench) else None
+            if mb is not None and ob is not None:
+                bench_matchup[i * 2 + j] = _best_move_eff(mb, ob) / 4.0
+
+    # ========== v4拡張: 環境使用率上位の特殊要素フラグ ======================
+    def _guard_flag(pokemon) -> float:
+        """次の一撃を無効/確定耐えする可能性:
+        ばけのかわ未破壊 (HP不問) / 満タン+きあいのタスキ / 満タン+がんじょう
+        """
+        if pokemon is None:
+            return 0.0
+        try:
+            # ミミッキュのばけのかわ: 破壊されるとフォルムが mimikyubusted になる
+            species = str(getattr(pokemon, "species", "") or "").lower()
+            if "mimikyu" in species and "busted" not in species \
+                    and not pokemon.fainted:
+                return 1.0
+        except Exception:
+            pass
+        if _hp_frac(pokemon) < 0.999:
+            return 0.0
+        try:
+            item = str(getattr(pokemon, "item", "") or "").lower().replace(" ", "")
+            if "focussash" in item:
+                return 1.0
+        except Exception:
+            pass
+        return 1.0 if "sturdy" in _possible_abilities(pokemon) else 0.0
+
+    def _side_has_ability(team, ability: str) -> float:
+        try:
+            for p in (team or {}).values():
+                if not p.fainted and ability in _possible_abilities(p):
+                    return 1.0
+        except Exception:
+            pass
+        return 0.0
+
+    # 連続まもるカウンタ (成功率減衰の学習用。poke-envが追跡)
+    def _protect_count(pokemon) -> float:
+        try:
+            return min(int(getattr(pokemon, "protect_counter", 0) or 0), 3) / 3.0
+        except Exception:
+            return 0.0
+
+    protect_vec = np.array([_protect_count(own), _protect_count(opp)],
+                           dtype=np.float32)
+
+    # v6: マルチスケイル満タン (被ダメ半減状態) + リジェネレーター持ち
+    def _multiscale_active(pokemon) -> float:
+        if pokemon is None or _hp_frac(pokemon) < 0.999:
+            return 0.0
+        poss = _possible_abilities(pokemon)
+        return 1.0 if ("multiscale" in poss or "shadowshield" in poss) else 0.0
+
+    def _has_regen(pokemon) -> float:
+        if pokemon is None:
+            return 0.0
+        return 1.0 if "regenerator" in _possible_abilities(pokemon) else 0.0
+
+    ability_vec = np.array([
+        _multiscale_active(own), _multiscale_active(opp),
+        _has_regen(own), _has_regen(opp)], dtype=np.float32)
+
+    special_vec = np.array([
+        _guard_flag(own),
+        _guard_flag(opp),
+        _side_has_ability(getattr(battle, "team", {}), "intimidate"),
+        _side_has_ability(getattr(battle, "opponent_team", {}), "intimidate"),
+        1.0 if own is not None and "prankster" in _possible_abilities(own) else 0.0,
+        1.0 if opp is not None and "prankster" in _possible_abilities(opp) else 0.0,
+    ], dtype=np.float32)
+
     vec = np.concatenate([own_vec, opp_vec, opp_extra,
                           *own_bench_vecs, *opp_bench_vecs, opp_count_vec,
-                          my_side, opp_side, field, speed_vec]).astype(np.float32)
+                          my_side, opp_side, field, speed_vec,
+                          *opp_move_vecs, own_vol, opp_vol, mega_vec,
+                          own_item, opp_item, misc,
+                          bench_tactics,
+                          *own_move_effects, *opp_move_effects,
+                          profile_vec, utility_vec,
+                          field_remaining, bench_matchup,
+                          special_vec, protect_vec,
+                          ability_vec]).astype(np.float32)
 
     # 固定長を保証
     if len(vec) < BATTLE_OBS_DIM:

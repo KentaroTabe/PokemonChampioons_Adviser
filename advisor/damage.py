@@ -28,6 +28,9 @@ class MonView:
     # EV仮定 (不明時は攻撃系/耐久系に252振り想定)
     ev: dict = field(default_factory=dict)
     nature: dict = field(default_factory=dict)     # stat -> 0.9/1.0/1.1
+    # 先後観測から狭めた実効素早さの範囲 (lower, upper)。
+    # effective_speed がこの範囲へクランプする (ev_infer.observe_speed 由来)
+    spe_bounds: Optional[tuple] = None
 
     def stat(self, key: str, ignore_boost: bool = False) -> int:
         b = self.base.get(key, 80)
@@ -53,12 +56,31 @@ class FieldView:
     aurora_veil: bool = False
 
 
-def _is_grounded(mon: MonView) -> bool:
-    if "Flying" in mon.types or mon.ability == "levitate":
+def _is_grounded(mon: MonView, ignore_ability: bool = False) -> bool:
+    """接地判定。ignore_ability=True (かたやぶり) ならふゆうを無視する"""
+    if "Flying" in mon.types:
+        return False
+    if not ignore_ability and mon.ability == "levitate":
         return False
     if mon.item == "airballoon":
         return False
     return True
+
+
+_FLAG_MOVES: dict = {}
+
+
+def moves_with_flag(flag: str) -> set:
+    """showdownの技フラグ (slicing/punch等) を持つ技ID集合 (きれあじ/てつのこぶし用)"""
+    if flag not in _FLAG_MOVES:
+        try:
+            from poke_env.data import GenData
+            _FLAG_MOVES[flag] = {
+                mid for mid, m in GenData.from_gen(9).moves.items()
+                if (m.get("flags") or {}).get(flag)}
+        except Exception:
+            _FLAG_MOVES[flag] = set()
+    return _FLAG_MOVES[flag]
 
 
 def effective_speed(mon: MonView, fieldv: Optional["FieldView"] = None) -> int:
@@ -81,6 +103,14 @@ def effective_speed(mon: MonView, fieldv: Optional["FieldView"] = None) -> int:
         spe = int(spe * 1.5)
     if mon.status == "paralysis" and ab != "quickfeet":
         spe = int(spe * 0.5)
+    # 先後観測から狭めた範囲へクランプ (最良仮説が観測と矛盾する場合の補正。
+    # 例: 仮説S=105でも「自分の112より速かった」観測があれば113以上とする)
+    if mon.spe_bounds:
+        lo, hi = mon.spe_bounds
+        if lo:
+            spe = max(spe, int(lo) + 1)
+        if hi:
+            spe = min(spe, max(1, int(hi) - 1))
     return int(spe)
 
 
@@ -135,9 +165,15 @@ def calc_damage(attacker: MonView, defender: MonView, move_id: str,
     power = float(move["power"])
     category = move["category"]
 
+    # かたやぶり系: 防御側の特性 (無効化/軽減/てんねん等) をすべて無視する
+    a_ab_early = attacker.ability or ""
+    mold = a_ab_early in ("moldbreaker", "teravolt", "turboblaze")
+    if mold:
+        notes.append("かたやぶりで相手特性無視")
+
     # --- 特性による無効化 ---
     imm = IMMUNITY_ABILITIES.get(defender.ability or "")
-    if imm and mtype in imm:
+    if imm and mtype in imm and not mold:
         return {"min": 0.0, "max": 0.0, "avg": 0.0, "type_mult": 0.0,
                 "category": category, "notes": [f"特性{defender.ability}で無効"]}
 
@@ -147,7 +183,7 @@ def calc_damage(attacker: MonView, defender: MonView, move_id: str,
     else:
         dtypes = defender.types or (dex.species(defender.species_id) or {}).get("types", [])
         type_mult = dex.effectiveness(mtype, dtypes)
-        if mtype == "Ground" and not _is_grounded(defender):
+        if mtype == "Ground" and not _is_grounded(defender, ignore_ability=mold):
             type_mult = 0.0
     if type_mult == 0.0:
         return {"min": 0.0, "max": 0.0, "avg": 0.0, "type_mult": 0.0,
@@ -158,12 +194,15 @@ def calc_damage(attacker: MonView, defender: MonView, move_id: str,
         atk_key, def_key = "atk", "def"
     else:
         atk_key, def_key = "spa", "spd"
-    # 攻撃側の不利ランクは無視しない/急所は考慮しない (通常時想定)
-    atk = attacker.stat(atk_key)
-    dfn = defender.stat(def_key)
+    # 攻撃側の不利ランクは無視しない/急所は考慮しない (通常時想定)。
+    # てんねん: 防御側がてんねんなら攻撃側のランクを無視、攻撃側がてんねん
+    # なら防御側のランクを無視する (かたやぶりで防御側てんねんは無効)
+    a_ab = attacker.ability or ""
+    d_ab_real = "" if mold else (defender.ability or "")
+    atk = attacker.stat(atk_key, ignore_boost=(d_ab_real == "unaware"))
+    dfn = defender.stat(def_key, ignore_boost=(a_ab == "unaware"))
 
     # --- 攻撃側の補正 ---
-    a_ab = attacker.ability or ""
     if a_ab in ("hugepower", "purepower") and atk_key == "atk":
         atk *= 2
     if a_ab == "guts" and attacker.status and atk_key == "atk":
@@ -175,8 +214,8 @@ def calc_damage(attacker: MonView, defender: MonView, move_id: str,
         atk = int(atk * 1.5)
         notes.append("サンパワー補正")
 
-    # --- 防御側の実数補正 ---
-    d_ab = defender.ability or ""
+    # --- 防御側の実数補正 (かたやぶりなら特性無視) ---
+    d_ab = d_ab_real
     # 砂嵐時の岩タイプ特防1.5倍
     if fv.weather == "sandstorm" and "Rock" in defender.types and def_key == "spd":
         dfn = int(dfn * 1.5)
@@ -190,6 +229,11 @@ def calc_damage(attacker: MonView, defender: MonView, move_id: str,
     # --- 威力補正 ---
     if a_ab == "technician" and power <= 60:
         power *= 1.5
+    if a_ab == "sharpness" and move_id in moves_with_flag("slicing"):
+        power *= 1.5
+        notes.append("きれあじ補正")
+    if a_ab == "ironfist" and move_id in moves_with_flag("punch"):
+        power *= 1.2
     tb = TYPE_BOOST_ABILITIES.get(a_ab)
     if tb and mtype == tb[0]:
         power *= tb[1]

@@ -30,7 +30,12 @@ class BattlePolicy:
     def __init__(self, model_path=None, play_style: str = DEFAULT_PLAY_STYLE):
         self.model = None
         self.play_style = play_style
-        path = model_path or (MODELS_DIR / f"battle_policy_{play_style}.zip")
+        # 最良スナップショット (_best) があれば優先する。学習は振動するため
+        # 最新チェックポイントが過去最良より弱いことがある (best_checkpoint.py)
+        best = MODELS_DIR / f"battle_policy_{play_style}_best.zip"
+        path = model_path or (
+            best if best.exists()
+            else MODELS_DIR / f"battle_policy_{play_style}.zip")
         if path.exists():
             # MaskablePPO (現行) -> PPO (旧チェックポイント) の順で試す
             try:
@@ -44,11 +49,31 @@ class BattlePolicy:
                     self.model = None
 
 
+    def _adapt_obs(self, obs):
+        """観測をモデルの期待次元へ合わせる (旧227次元チェックポイント互換)。
+
+        v2拡張はv1の227次元プレフィックスを変えずに末尾追記しているため、
+        スライスで意味が保たれる (プール相手・_bestの旧世代を使い続けられる)
+        """
+        try:
+            want = int(self.model.observation_space.shape[0])
+        except Exception:
+            return obs
+        if len(obs) == want:
+            return obs
+        if len(obs) > want:
+            return obs[:want]
+        import numpy as np
+        padded = np.zeros(want, dtype=obs.dtype)
+        padded[:len(obs)] = obs
+        return padded
+
     def choose_order(self, battle: AbstractBattle) -> BattleOrder:
         if self.model is None:
             return self._choose_random_legal(battle)
 
         obs = ChampionsSinglesEnv.embed_battle(self, battle)  # type: ignore[arg-type]
+        obs = self._adapt_obs(obs)
         try:
             order = self._choose_masked(battle, obs)
             if order is not None:

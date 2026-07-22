@@ -232,6 +232,11 @@ class BattleStateV2:
         self.events: list = []          # [{ts, source, text, event, target}]
         self.hp_max_votes: dict = {}    # (side, species) -> {最大HP読取値: 票数}
         self.last_texts = {"message": "", "left_popup": "", "right_popup": ""}
+        # 直近のレート表示 {"value": int, "ts": float}。結果画面のレート増減
+        # から勝敗を推定するため、対戦リセットを跨いで保持する
+        self.last_rate: Optional[dict] = None
+        # 連続まもる使用回数 (成功率減衰の追跡。他の技で0にリセット)
+        self.protect_streak = {"player": 0, "opponent": 0}
 
     # --- イベントログ ---
     def log_event(self, source: str, text: str, event_id: Optional[str] = None,
@@ -254,7 +259,9 @@ class BattleStateV2:
 
     def reset_battle(self):
         """新しい対戦の開始 (選出画面検知時など) に呼ぶ"""
+        keep_rate = self.last_rate   # レートは対戦を跨ぐ情報なので保持
         self.__init__()
+        self.last_rate = keep_rate
 
     def to_dict(self):
         return {
@@ -269,4 +276,6 @@ class BattleStateV2:
             "opponent": self.opponent.to_dict(),
             "mega_used": dict(self.mega_used),
             "events": self.events[-30:],
+            "last_rate": self.last_rate,
+            "protect_streak": dict(self.protect_streak),
         }

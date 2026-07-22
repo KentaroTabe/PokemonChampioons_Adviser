@@ -165,11 +165,15 @@ async def handle_frame(sid, data):
                 print(text)
             except Exception as e:
                 print(f"[server] パーティ診断エラー: {e}")
-        elif state.get("scene") == "selection":
+        elif state.get("scene") == "selection" and not state.get("outcome"):
+            # 次戦の選出でリセット。outcomeが残っている間は解除しない
+            # (パイプラインの対戦リセット前に解除すると診断が二重発火する)
             _team_advice_done = False
 
-        # 選出画面: 選出進捗の判定と選出提案 (パーティ情報が変わった時だけ)
-        if state["scene"] in ("selection", "standby"):
+        # 選出画面: 選出進捗の判定と選出提案 (パーティ情報が変わった時だけ)。
+        # outcomeが残っている間は前試合の相手パーティを参照してしまうため、
+        # パイプラインの対戦リセット (選出3フレーム連続) を待つ
+        if state["scene"] in ("selection", "standby") and not state.get("outcome"):
             sel_key = json.dumps([
                 state.get("selection_picked"),
                 [p.get("species_id") for p in state["player"]["party"]],
@@ -210,7 +214,11 @@ async def handle_frame(sid, data):
 
 
 def _attach_candidates(state: dict) -> None:
-    """相手の未確定ポケモンにタイプ推論の候補リストを付与する (プルダウン用)"""
+    """相手の未確定ポケモンにタイプ推論の候補リストを付与する (プルダウン用)。
+
+    あわせて型推定トラッカーの実効素早さ推定 (観測で更新される) を
+    相手ポケモンへ添付する (フロント表示 + RLの素早さ比較用)
+    """
     try:
         from advisor.infer import get_inference
         for i, p in enumerate(state["opponent"]["party"]):
@@ -221,6 +229,20 @@ def _attach_candidates(state: dict) -> None:
                 p["candidates"] = [
                     {"id": sid_, "ja": ja, "pct": round(prob * 100, 1)}
                     for sid_, prob, ja in cands]
+    except Exception:
+        pass
+    try:
+        from advisor.ev_infer import get_tracker
+        tracker = get_tracker()
+        for p in state["opponent"]["party"]:
+            sid_ = p.get("species_id")
+            est = tracker._est.get(sid_) if sid_ else None
+            if est is None:
+                continue
+            se = est.speed_estimate(p)
+            if se and (se["n_obs"] > 0 or se["lo"] or se["hi"]):
+                p["spe_est"] = se["est"]
+                p["spe_range"] = [se["lo"], se["hi"]]
     except Exception:
         pass
 
@@ -245,6 +267,54 @@ async def get_my_team(sid, data=None):
         await sio.emit('my_team_data', {"team": team, "names": names}, room=sid)
     except Exception as e:
         print(f"[server] get_my_teamエラー: {e}")
+
+
+_generating = False
+
+
+@sio.on('generate_team')
+async def generate_team(sid, data):
+    """コア軸から1からの構築を生成 (バックグラウンド、進捗を逐次配信)。
+
+    重い処理 (共起探索+実対戦評価で数分) のため、進捗を team_gen_progress で
+    流し、完了時に team_gen_result を配信する。多重起動は防止。
+    """
+    global _generating
+    if _generating:
+        await sio.emit('team_gen_progress',
+                       {"msg": "別の生成が実行中です"}, room=sid)
+        return
+    core = (data or {}).get("core", "").strip()
+    evaluate = bool((data or {}).get("evaluate", True))
+    if not core:
+        await sio.emit('team_gen_result',
+                       {"ok": False, "reason": "軸ポケモンを入力してください"},
+                       room=sid)
+        return
+    _generating = True
+    loop = asyncio.get_event_loop()
+
+    def _progress(msg):
+        # executorスレッドからemitするためcall_soon_threadsafeで戻す
+        loop.call_soon_threadsafe(
+            lambda: asyncio.ensure_future(
+                sio.emit('team_gen_progress', {"msg": msg}, room=sid)))
+
+    try:
+        from tools.generate_teams import generate_report
+        print(f"[server] 構築生成開始: {core} (evaluate={evaluate})")
+        result = await loop.run_in_executor(
+            None, lambda: generate_report(core, evaluate=evaluate,
+                                          progress=_progress))
+        await sio.emit('team_gen_result', result, room=sid)
+        print(f"[server] 構築生成完了: {core}")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        await sio.emit('team_gen_result',
+                       {"ok": False, "reason": f"生成エラー: {e}"}, room=sid)
+    finally:
+        _generating = False
 
 
 @sio.on('save_my_team')
@@ -383,6 +453,24 @@ async def set_species(sid, data):
                 "manual", f"相手の{species_ja}を手動確定 (候補から選択)",
                 event_id="species_manual")
             print(f"[server] 手動確定: 相手slot{idx} = {species_ja}")
+            # 自己改善ループ: 確定した種族のアイコンを直近の選出フレームから
+            # 収穫し、実キャプチャテンプレートとして保存する (次回から
+            # 同タイプ複数候補でも視覚照合で自動確定できるようになる)
+            try:
+                from vision.spriteid import harvest_from_frame
+                import glob as _glob
+                frames = sorted(_glob.glob(str(DUMP_DIR / "sel_*.png")),
+                                reverse=True)
+                for fp in frames[:5]:   # 直近5枚から最初に検証を通ったもの
+                    ts = int(Path(fp).stem.split("_")[-1])
+                    if time.time() - ts > 300:
+                        break
+                    if harvest_from_frame(fp, idx, species_id):
+                        print(f"[server] 種族アイコン収穫: {species_ja} <- "
+                              f"{Path(fp).name}")
+                        break
+            except Exception as e:
+                print(f"[server] アイコン収穫スキップ: {e}")
             state = pipeline.state.to_dict()
             _attach_candidates(state)
             await sio.emit('state_update', state, room=sid)

@@ -40,7 +40,11 @@ trap cleanup EXIT
   # Showdownが起動していなければ起動する
   if ! lsof -nP -iTCP:"$SHOWDOWN_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
     echo "[nightly] Showdownをポート$SHOWDOWN_PORT で起動します"
-    (cd pokemon-showdown && node pokemon-showdown start "$SHOWDOWN_PORT" --no-security) &
+    # 出力を tee パイプへ流し込まないよう別ログへリダイレクトする。
+    # (nodeがパイプ書き込み側を握り続けると tee が EOF を得られず、
+    #  本体が done を出してもスクリプトが終了できずデッドロックする)
+    (cd pokemon-showdown && node pokemon-showdown start "$SHOWDOWN_PORT" --no-security) \
+      >>"$LOG_DIR/showdown_train.log" 2>&1 &
     SHOWDOWN_PID=$!
     STARTED_SHOWDOWN=1
     sleep 10
@@ -54,11 +58,13 @@ trap cleanup EXIT
       cp "$ckpt" "$ckpt.prev" 2>/dev/null || true
     fi
     # スリープ抑止 + タイムアウト付きで学習 (ハングしても次の性格へ進む)
-    # タイムアウト: 想定処理速度50step/s基準 + 余裕15分
-    TRAIN_TIMEOUT=$((TIMESTEPS / 50 + 900))
+    # タイムアウト: 想定処理速度 (並列で概ね N_ENVS*100 step/s) + 余裕15分
+    N_ENVS="${N_ENVS:-1}"
+    RATE=$((N_ENVS * 80 + 40))
+    TRAIN_TIMEOUT=$((TIMESTEPS / RATE + 900))
     caffeinate -i python -m tools.smoke_train \
       --play-style "$style" --timesteps "$TIMESTEPS" --resume \
-      --timeout "$TRAIN_TIMEOUT" || {
+      --n-envs "$N_ENVS" --timeout "$TRAIN_TIMEOUT" || {
         echo "[nightly] [$style] 学習が失敗/タイムアウトしました"; continue; }
 
     echo "--- [$style] 評価 (vs Random, $EVAL_BATTLES 戦) ---"
@@ -66,14 +72,21 @@ trap cleanup EXIT
       --play-style "$style" --battles "$EVAL_BATTLES" --timeout 900 || \
       echo "[nightly] [$style] 評価が失敗/タイムアウトしました"
 
+    # 進歩の物差し: 上位構築xヒューリスティクスの固定強敵に対する勝率。
+    # 昇格判定に使うため対戦数を多めにしてノイズを抑える (30戦だと±0.09)
+    BENCH_BATTLES="${BENCH_BATTLES:-50}"
+    echo "--- [$style] ベンチマーク評価 (vs 上位構築ヒューリスティクス, $BENCH_BATTLES 戦) ---"
+    caffeinate -i python -m champions_agent.train.evaluate \
+      --play-style "$style" --battles "$BENCH_BATTLES" --opponent benchmark \
+      --timeout 900 || echo "[nightly] [$style] ベンチマーク評価が失敗しました"
+
     # 勝率ゲートを超えたらselfplay相手プールへスナップショット
+    # (ベンチマーク評価の後に実行し、ベンチ勝率を抽選重みに記録する)
     python -m champions_agent.train.opponent_pool --update-from-eval "$style" || true
 
-    # 進歩の物差し: 上位構築xヒューリスティクスの固定強敵に対する勝率
-    echo "--- [$style] ベンチマーク評価 (vs 上位構築ヒューリスティクス) ---"
-    caffeinate -i python -m champions_agent.train.evaluate \
-      --play-style "$style" --battles "$EVAL_BATTLES" --opponent benchmark \
-      --timeout 900 || echo "[nightly] [$style] ベンチマーク評価が失敗しました"
+    # ベンチ勝率が過去最良を上回ったら _best スナップショットを更新
+    # (学習は振動するため、アドバイザーには最良世代を配布する)
+    python -m champions_agent.train.best_checkpoint --update-from-eval "$style" || true
   done
 
   echo "===== done: $(date) ====="

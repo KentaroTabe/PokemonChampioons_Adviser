@@ -9,9 +9,10 @@ from advisor.selection import advise_selection, format_selection_advice
 
 def make_state(picked=0):
     """実戦相当のフィクスチャ: 自分6体(種族判明) vs 相手6枠(タイプのみ)"""
-    def mon(species_id, species_ja, item_id=None):
+    def mon(species_id, species_ja, item_id=None, ability_id=None):
         return {"species_id": species_id, "species_ja": species_ja,
-                "item_id": item_id, "is_picked": False, "types": []}
+                "item_id": item_id, "ability_id": ability_id,
+                "is_picked": False, "types": []}
 
     def opp(types):
         return {"species_id": None, "species_ja": None, "types": types}
@@ -19,7 +20,7 @@ def make_state(picked=0):
     return {
         "selection_picked": picked,
         "player": {"party": [
-            mon("pelipper", "ペリッパー", "damprock"),
+            mon("pelipper", "ペリッパー", "damprock", ability_id="drizzle"),
             mon("swampert", "ラグラージ", "megastone"),
             mon("mimikyu", "ミミッキュ", "lifeorb"),
             mon("duraludon", "ブリジュラス", "leftovers"),
@@ -61,6 +62,41 @@ def test_basic_recommendation():
     print(format_selection_advice(advice))
 
 
+def test_weather_synergy_and_mega_form():
+    # ペリッパー(あめふらし) + ラグラージ(ラグラージナイト=メガですいすい)
+    # の雨シナジーが選出評価に反映されること
+    state = make_state(picked=0)
+    state["player"]["party"][1]["item_id"] = "swampertite"  # 実ストーンID
+    advice = advise_selection(state)
+    assert advice["ok"], advice
+    names = [r["name"] for r in advice["recommend"]]
+    # 雨コア2枚は揃って選出されるはず (シナジーボーナス)
+    assert "ペリッパー" in names and "ラグラージ" in names, names
+    syn = advice.get("synergy")
+    assert syn and syn["weather"] == "rain", syn
+    assert syn["setter"] == "ペリッパー", syn
+    assert "ラグラージ" in syn["abusers"], syn
+    # メガ枠が明示されること
+    assigns = [r["name"] for r in advice["recommend"] if r.get("mega_assign")]
+    assert assigns == ["ラグラージ"], advice["recommend"]
+    text = format_selection_advice(advice)
+    assert "シナジー" in text, text
+    print("test_weather_synergy_and_mega_form OK")
+    print(text)
+
+
+def test_mega_form_evaluation():
+    # メガ後の姿の行列が使われること (swampertmega が dex に存在する前提)
+    from advisor.selection import _mega_species_id
+    assert _mega_species_id("swampert", "swampertite") == "swampertmega"
+    # X/Y分岐
+    mega_x = _mega_species_id("charizard", "charizarditex")
+    mega_y = _mega_species_id("charizard", "charizarditey")
+    if mega_x or mega_y:   # dexにあるときのみ検証
+        assert mega_x != mega_y
+    print("test_mega_form_evaluation OK")
+
+
 def test_type_inference():
     """ユーザー例: ほのお/ゴースト -> ラウドボーン or ソウブレイズ を使用率から推測"""
     from advisor.infer import get_inference
@@ -94,6 +130,8 @@ def test_insufficient_info():
 
 if __name__ == "__main__":
     test_basic_recommendation()
+    test_weather_synergy_and_mega_form()
+    test_mega_form_evaluation()
     test_type_inference()
     test_done_detection()
     test_insufficient_info()

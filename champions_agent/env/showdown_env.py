@@ -214,9 +214,28 @@ def make_training_env(battle_format: str = TRAINING_BATTLE_FORMAT,
     """
     rng = random.Random(seed)
 
-    # バトルごとに使用率メタから新チームを生成する (過学習防止)
+    # バトルごとに使用率メタから新チームを生成する (過学習防止)。
+    # 自分チームも一定確率で上位構築の実物にする: 生成チームだけでは
+    # 「上位構築を操縦する」経験が積めず、アドバイザーの実用途
+    # (ユーザーの実チームでの助言) やベンチマーク評価と分布がズレる
     own_teambuilder = ChampionsTeambuilder(size=team_size, play_style=own_play_style,
                                             rng=rng) if use_meta_team else None
+    if own_teambuilder is not None:
+        try:
+            from champions_agent.env.ranked_teams import RankedTeambuilder
+            from champions_agent.train.opponent_pool import OWN_RANKED_TEAM_PROB
+            _own_ranked = RankedTeambuilder(rng=rng)
+
+            class _OwnMixedTeambuilder(ChampionsTeambuilder):
+                def yield_team(self) -> str:
+                    if self.rng.random() < OWN_RANKED_TEAM_PROB:
+                        return _own_ranked.yield_team()
+                    return super().yield_team()
+
+            own_teambuilder = _OwnMixedTeambuilder(
+                size=team_size, play_style=own_play_style, rng=rng)
+        except Exception as e:
+            print(f"[showdown_env] 自分側の上位構築チームは無効 (メタ生成のみ): {e}")
     opp_teambuilder = ChampionsTeambuilder(size=team_size,
                                             style_pool=opp_play_style_pool,
                                             rng=rng) if use_meta_team else None
@@ -238,9 +257,19 @@ def make_training_env(battle_format: str = TRAINING_BATTLE_FORMAT,
     from champions_agent.train.opponent_pool import (
         OpponentPool, make_pool_opponent, RANKED_TEAM_PROB,
     )
+    from poke_env import AccountConfiguration
+
+    # 並列環境 (SubprocVecEnv) では各プロセスの対戦相手が同じサーバーに接続する。
+    # poke-envの自動生成はエージェント側だけなので、相手のアカウント名を
+    # プロセスPID+seedで一意化してユーザー名衝突 (nametaken) を防ぐ。
+    # PID併用でプロセス再起動をまたいだ残存接続との衝突も避ける
+    import os as _os
+    _uid = (seed if seed is not None else rng.randint(0, 9999)) % 10000
+    opp_account = AccountConfiguration(f"CO{_os.getpid() % 100000}x{_uid}", None)
 
     if opponent_mode == "random":
         opponent = RandomPlayer(
+            account_configuration=opp_account,
             battle_format=battle_format,
             server_configuration=TrainingServerConfiguration,
             team=opp_teambuilder,
@@ -266,6 +295,7 @@ def make_training_env(battle_format: str = TRAINING_BATTLE_FORMAT,
     pool = OpponentPool()
     opponent = make_pool_opponent(
         pool,
+        account_configuration=opp_account,
         battle_format=battle_format,
         server_configuration=TrainingServerConfiguration,
         team=opp_team,

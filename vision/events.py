@@ -155,6 +155,9 @@ SIMPLE_EVENTS = [
      "action": "battle_end", "value": "win"},
     {"id": "battle_lose", "keywords": [["勝負", "しようふ"], ["負けた", "まけた"]],
      "action": "battle_end", "value": "loss"},
+    # 相手の降参による勝ち (実戦: 降参終了は勝負メッセージ辞書に無く取り逃した)
+    {"id": "battle_win", "keywords": [["相手", "あいて"], ["降参", "こうさん", "投了"]],
+     "action": "battle_end", "value": "win"},
 
     # --- 持ち物 ---
     {"id": "leftovers_heal", "keywords": [["たべのこし", "食べ残し"], ["回復", "かいふく"]],
@@ -223,19 +226,38 @@ class EventParser:
         self._recent_fired[event_id] = now
         return last is not None and now - last < 3.0
 
+    def _recently(self, event_id: str, window: float = 6.0) -> bool:
+        """直近windowで発火済みか (タイムスタンプを更新しない参照専用)"""
+        last = self._recent_fired.get(event_id)
+        return last is not None and time.time() - last < window
+
     # --------------------------------------------------------------
     def _is_opponent_text(self, cleaned: str) -> Optional[bool]:
         norm = loose_key(cleaned)
         head = norm[:10]
         if "相手の" in head or "あいての" in head:
             return True
+        # OCR誤読対策: 「相手の」の1文字目が化けた「狙手の/柤手の」等。
+        # 自陣メッセージは種族名 (カタカナ) 始まりで文頭付近に「手の」は
+        # 現れないため、文頭6文字以内の「手の」は「相手の」とみなす
+        # (実戦: 「狙手のハラバリーのみすびたし」が自分の技に誤帰属した)
+        if "手の" in head[:6]:
+            return True
+        # パーティ名の照合: 文頭一致に限らず先頭14文字から両陣営を探す。
+        # 片方の陣営にだけ見つかった場合のみその陣営と判定する
+        # (ミラー・両陣営同種は判定しない = プレフィックス判定に委ねる)
+        scan = norm[:14]
+        found = set()
         for side_name, is_opp in (("player", False), ("opponent", True)):
             side = self.state.side(side_name)
             for mon in side.party:
                 for cand in (mon.species_ja, mon.display_name):
                     ck = loose_key(cand) if cand else ""
-                    if ck and len(ck) >= 3 and norm.startswith(ck[:3]):
-                        return is_opp
+                    if ck and len(ck) >= 3 and (norm.startswith(ck[:3])
+                                                or ck in scan):
+                        found.add(is_opp)
+        if len(found) == 1:
+            return found.pop()
         return None
 
     def _target_side(self, cleaned: str, source: str) -> str:
@@ -248,18 +270,44 @@ class EventParser:
             return "player"
         return "opponent" if is_opp else "player"
 
-    def _target_mon(self, cleaned: str, source: str):
+    def _target_mon_checked(self, cleaned: str, source: str):
+        """対象個体の特定。戻り値: (side_name, side, mon, 名前照合できたか)
+
+        名前照合はまず厳密部分一致、次にファジー (OCR劣化した名前の救済:
+        「ベリッパー」→ペリッパー等)。照合できない場合はアクティブへ
+        フォールバックするが、matched=False を返すので呼び出し側は
+        個体レベルの帰属 (判明技の記録等) を控えられる
+        (実戦: 「相手の型別対子のボルトチェンジ」等の名前崩れで、技が
+        別のポケモンの判明技として記録された)
+        """
         side_name = self._target_side(cleaned, source)
         side = self.state.side(side_name)
-        # メッセージに名前が含まれる個体を特定できればそれを対象にする
         norm = loose_key(cleaned)
         head = norm[:14]
         for mon in side.party:
             for cand in (mon.species_ja, mon.display_name):
                 ck = loose_key(cand) if cand else ""
                 if ck and len(ck) >= 3 and ck in head:
-                    return side_name, side, mon
-        return side_name, side, side.ensure_active()
+                    return side_name, side, mon, True
+        # ファジー照合: プレフィックスを除いた先頭セグメント vs パーティ名
+        seg = re.sub(r"^(相手の|あいての|.手の)", "", norm).split("の")[0][:8]
+        if len(seg) >= 3:
+            import difflib
+            names = {}
+            for mon in side.party:
+                for cand in (mon.species_ja, mon.display_name):
+                    ck = loose_key(cand) if cand else ""
+                    if ck and len(ck) >= 3:
+                        names[ck] = mon
+            m = difflib.get_close_matches(seg, list(names.keys()),
+                                          n=1, cutoff=0.6)
+            if m:
+                return side_name, side, names[m[0]], True
+        return side_name, side, side.ensure_active(), False
+
+    def _target_mon(self, cleaned: str, source: str):
+        side_name, side, mon, _matched = self._target_mon_checked(cleaned, source)
+        return side_name, side, mon
 
     # --------------------------------------------------------------
     def parse(self, raw_text: str, source: str = "message") -> list:
@@ -276,8 +324,17 @@ class EventParser:
         fired = []
         norm = loose_key(cleaned)
 
-        # リザルト/ランク表示 (「ランクIV レート1602」等) はバトルイベントではないので無視
+        # リザルト/ランク表示 (「ランクIV レート1602」等) はバトルイベントではないので無視。
+        # ただしレート数値は勝敗推定に使えるため抽出して保持する
+        # (勝敗メッセージのOCR取り逃しが6戦中2戦で発生。レートの増減は
+        #  結果画面に必ず表示されるので、増=勝ち/減=負けの裏付けになる)
         if re.search(r"(ランク|らんく).{0,4}(レート|れーと)|レート\d{3,}|ボール級", cleaned):
+            rm = re.search(r"レート\s*(\d{3,5})", cleaned)
+            if rm:
+                val = int(rm.group(1))
+                if 500 <= val <= 4000:   # ありえない値 (誤読) は捨てる
+                    self.state.last_rate = {"value": val,
+                                            "ts": round(time.time(), 2)}
             self.state.log_event(source, cleaned, event_id=None)
             return []
 
@@ -300,8 +357,10 @@ class EventParser:
         # 4. 技使用 / 特性発動 ("{名前}の {技/特性}")
         # 相手の判明技の収集が重要なため、他イベントと複合したメッセージ
         # (「相手のXのわざ! 効果は〜」等) でも技解析は常に試みる。
-        # 交代 (「〜を繰り出した」) は種族名が技に誤マッチしやすいので除外
-        if not any(f.startswith("switch") for f in fired):
+        # 交代 (「〜を繰り出した」) は種族名が技に誤マッチしやすいので除外。
+        # 効果切れ (「リフレクターがなくなった」等の *_end) は技の使用では
+        # ないため除外 (壁切れメッセージが move_opponent_reflect を誤発火した)
+        if not any(f.startswith("switch") or f.endswith("_end") for f in fired):
             mu = self._parse_move_or_ability(cleaned, norm, source,
                                              apply_effects=not fired)
             if mu and mu not in fired:
@@ -310,11 +369,31 @@ class EventParser:
                 # 「の」区切りで解決できない複合文: 文中の技名を部分一致で探す
                 found = self.resolver.find_in_text(cleaned, "moves", min_len=5)
                 if found:
-                    side_name, _side, mon = self._target_mon(cleaned, source)
-                    if (side_name == "opponent" and found[0] not in mon.revealed_moves
+                    side_name, _side, mon, matched = \
+                        self._target_mon_checked(cleaned, source)
+                    if (side_name == "opponent"
+                            and not (found[1] == "charge" and self._recently(
+                                f"ability_{side_name}_electromorphosis"))
                             and not self._dedup(f"move_{side_name}_{found[1]}")):
-                        mon.revealed_moves.append(found[0])
+                        # 名前照合できた個体にのみ判明技を記録する
+                        # (照合失敗時のアクティブ帰属は別個体を汚染する)
+                        if matched and found[0] not in mon.revealed_moves:
+                            mon.revealed_moves.append(found[0])
                         fired.append(f"move_{side_name}_{found[1]}")
+
+        # 連続まもるの追跡 (成功率減衰の観測用): まもる系の使用で+1、
+        # 同じ側が他の技を使ったら0にリセット
+        _PROTECT_IDS = ("protect", "detect", "banefulbunker", "spikyshield",
+                        "kingsshield", "silktrap", "burningbulwark", "obstruct")
+        for side in ("player", "opponent"):
+            moves_fired = [f for f in fired if f.startswith(f"move_{side}_")]
+            if not moves_fired:
+                continue
+            if any(f.split("_", 2)[2] in _PROTECT_IDS for f in moves_fired):
+                self.state.protect_streak[side] = \
+                    self.state.protect_streak.get(side, 0) + 1
+            else:
+                self.state.protect_streak[side] = 0
 
         self.state.log_event(source, cleaned, event_id=",".join(fired) or None)
         return fired
@@ -336,6 +415,12 @@ class EventParser:
         side.switch_to_species(jp, sid)
         from vision.extractors import link_active_to_party
         link_active_to_party(self.state, side_name)
+        # 交代後の新しい個体に前の個体のひんし裏付けを誤適用しない
+        # (実戦: マスカーニャひんし→メタグロス登場直後の空バー誤読1%が
+        #  「ひんし裏付けあり」としてHPイベント化した)
+        last_faint = getattr(self.state, "last_faint", None)
+        if last_faint and last_faint.get("side") == side_name:
+            self.state.last_faint = None
         fired.append(f"switch_{side_name}")
         return True
 
@@ -370,7 +455,8 @@ class EventParser:
         if source in ("left_popup", "right_popup"):
             return self._parse_popup(cleaned, source)
 
-        side_name, side, mon = self._target_mon(cleaned, source)
+        side_name, side, mon, name_matched = \
+            self._target_mon_checked(cleaned, source)
         best = None
         for pos in reversed(positions):
             tail = body[pos + 1:]
@@ -386,10 +472,20 @@ class EventParser:
             return None
         r, _ = best
 
+        # でんきにかえる(特性)の「じゅうでん状態になった」表示を技じゅうでんと
+        # 誤認しない: 直近で同陣営のでんきにかえるが発動していたらその状態表示
+        # とみなす (実戦: ハラバリー被弾時に move_charge が誤発火した)
+        if r[1] == "charge" and self._recently(
+                f"ability_{side_name}_electromorphosis"):
+            return None
+
         event_id = f"move_{side_name}_{r[1]}"
         if self._dedup(event_id):
             return None   # OCR揺れの再読 (まきびし等の効果二重適用を防ぐ)
-        if side_name == "opponent" and r[0] not in mon.revealed_moves:
+        # 名前照合できた個体にのみ判明技を記録する (照合失敗時のアクティブ
+        # フォールバックは、追跡ズレ時に別個体の判明技を汚染する)
+        if side_name == "opponent" and name_matched \
+                and r[0] not in mon.revealed_moves:
             mon.revealed_moves.append(r[0])
         if apply_effects:
             # 他イベントが既に発火している場合は場への効果を二重適用しない

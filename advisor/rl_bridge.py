@@ -8,6 +8,14 @@
 - 行動index: 0-5=交代(パーティ並び順) / 6-9=技 / 10-13=技+メガシンカ
 - 使用チェックポイント: RL_ADVICE_STYLE (既定 balance)
 - モデル/依存が無い環境では None を返して本体に影響しない
+
+学習側 (encoders.encode_battle) との既知の近似差 (意図的なもの):
+- ばけのかわ: 学習側はフォルム(busted)で正確、advisor側はHP>=87.5%近似
+- 天候/フィールド残り: 学習側は経過からの上限推定(8-経過)、advisor側は
+  画面から読んだ実残数 (advisorの方が正確)
+- 揮発状態/相手PP: 画面から観測できた範囲のみ (未観測は0/満タン扱い)
+これ以外の乖離はバグとして修正すること。次元はtest_rl_bridgeの
+パリティ検証 (BATTLE_OBS_DIM一致) で守られている。
 """
 from __future__ import annotations
 
@@ -31,7 +39,12 @@ STATUS_MAP = {"burn": "brn", "paralysis": "par", "sleep": "slp",
               "freeze": "frz", "poison": "psn", "toxic": "tox"}
 BOOST_KEYS = ["atk", "def", "spa", "spd", "spe", "acc", "eva"]
 BASE_KEYS = ["hp", "atk", "def", "spa", "spd", "spe"]
-N_MOVE_SLOTS, MOVE_FEAT_DIM, OBS_DIM = 4, 9, 227
+N_MOVE_SLOTS, MOVE_FEAT_DIM, OBS_DIM = 4, 9, 388  # v5拡張 (v1=227の末尾追記)
+MOVE_EFFECT_DIM = 8
+VOLATILE_EFFECTS = ["confusion", "leech_seed", "substitute", "taunt",
+                    "encore", "yawn"]
+ITEM_CATEGORIES = ["choicescarf", "choiceband", "choicespecs",
+                   "lifeorb", "leftovers"]
 
 _JA2EN_TYPES = {"ノーマル": "normal", "ほのお": "fire", "みず": "water",
                 "でんき": "electric", "くさ": "grass", "こおり": "ice",
@@ -50,7 +63,10 @@ def _load_model():
         return _model
     _model_tried = True
     style = os.environ.get("RL_ADVICE_STYLE", "balance")
-    path = CKPT_DIR / f"battle_policy_{style}.zip"
+    # 最良スナップショット (_best) を優先 (best_checkpoint.py が管理。
+    # 最新チェックポイントは学習の振動で過去最良より弱いことがある)
+    best = CKPT_DIR / f"battle_policy_{style}_best.zip"
+    path = best if best.exists() else CKPT_DIR / f"battle_policy_{style}.zip"
     try:
         from sb3_contrib import MaskablePPO
         _model = MaskablePPO.load(str(path), device="cpu")
@@ -115,7 +131,43 @@ def _hp_frac(p: dict) -> float:
     return 1.0
 
 
-def _eff(mtype_en: str, defender: dict) -> float:
+def _known_ability_dict(p: Optional[dict]) -> Optional[str]:
+    """確定している特性ID (判明済み or 固定特性)"""
+    if not p:
+        return None
+    if p.get("ability_id"):
+        return p["ability_id"]
+    try:
+        from vision.abilities import fixed_ability
+        return fixed_ability(p.get("species_id"),
+                             is_mega=bool(p.get("is_mega")),
+                             item_id=p.get("item_id") or "")
+    except Exception:
+        return None
+
+
+def _possible_abilities_dict(p: Optional[dict]) -> set:
+    if not p:
+        return set()
+    if p.get("ability_id"):
+        return {p["ability_id"]}
+    try:
+        from vision.abilities import legal_abilities
+        return set(legal_abilities(p.get("species_id")) or [])
+    except Exception:
+        return set()
+
+
+def _eff(mtype_en: str, defender: dict, attacker: dict = None) -> float:
+    # 防御側の確定特性による無効化 (ふゆう=じめん無効等) を反映。
+    # 攻撃側がかたやぶり系 (確定) なら無効化を無視する
+    from champions_agent.agent.encoders import (IMMUNITY_ABILITIES,
+                                                MOLDBREAKER_ABILITIES)
+    a_ab = _known_ability_dict(attacker) if attacker else None
+    if a_ab not in MOLDBREAKER_ABILITIES:
+        ab = _known_ability_dict(defender)
+        if ab and IMMUNITY_ABILITIES.get(ab) == mtype_en.lower():
+            return 0.0
     dex = get_dex()
     dtypes = [t.capitalize() for t in _en_types(defender)]
     return dex.effectiveness(mtype_en.capitalize(), dtypes) if dtypes else 1.0
@@ -140,7 +192,8 @@ def _move_vec(m: dict, own: dict, opp: Optional[dict]) -> np.ndarray:
     v[4] = 1.0 if cat == "special" else 0.0
     v[5] = 1.0 if cat == "status" else 0.0
     v[6] = 1.0 if mtype in _en_types(own) else 0.0
-    v[7] = (_eff(mtype, opp) / 4.0) if (opp is not None and power > 0) else 0.25
+    v[7] = (_eff(mtype, opp, attacker=own) / 4.0) \
+        if (opp is not None and power > 0) else 0.25
     v[8] = pp_frac
     return v
 
@@ -191,8 +244,255 @@ def _field_vec(state: dict) -> np.ndarray:
     return v
 
 
+_MOVE_RESOLVER = None
+_MOVE_JA_CACHE: dict = {}
+
+
+def _move_from_ja(name) -> Optional[dict]:
+    """技名 (日本語/ID混在) からdexの技データを引く。
+
+    dex.move はIDのみ受け付けるため、日本語名は NameResolver で解決する
+    (v1の判明技相性がこの未解決で常に0だった潜在バグの修正を兼ねる)
+    """
+    global _MOVE_RESOLVER
+    key = str(name)
+    if key in _MOVE_JA_CACHE:
+        return _MOVE_JA_CACHE[key]
+    dex = get_dex()
+    mv = dex.move(key)
+    if mv is None:
+        try:
+            if _MOVE_RESOLVER is None:
+                from vision.normalize import NameResolver
+                _MOVE_RESOLVER = NameResolver()
+            r = _MOVE_RESOLVER.resolve(key, "moves", cutoff=0.8)
+            if r:
+                mv = dex.move(r[1])
+        except Exception:
+            mv = None
+    _MOVE_JA_CACHE[key] = mv
+    return mv
+
+
+_MOVE_ID_CACHE: dict = {}
+_EFFECT_CACHE: dict = {}
+
+
+def _move_id_from_any(name) -> Optional[str]:
+    """技名 (ID/日本語) をshowdown IDへ解決する"""
+    global _MOVE_RESOLVER
+    key = str(name)
+    if key in _MOVE_ID_CACHE:
+        return _MOVE_ID_CACHE[key]
+    mid = None
+    if get_dex().move(key):
+        mid = key
+    else:
+        try:
+            if _MOVE_RESOLVER is None:
+                from vision.normalize import NameResolver
+                _MOVE_RESOLVER = NameResolver()
+            r = _MOVE_RESOLVER.resolve(key, "moves", cutoff=0.8)
+            if r:
+                mid = r[1]
+        except Exception:
+            mid = None
+    _MOVE_ID_CACHE[key] = mid
+    return mid
+
+
+_PMOVE_CACHE: dict = {}
+
+
+def _poke_move(name):
+    """技名 (ID/日本語) から poke-env の Move オブジェクトを得る (キャッシュ付き)"""
+    key = str(name) if name else ""
+    if key in _PMOVE_CACHE:
+        return _PMOVE_CACHE[key]
+    mv = None
+    mid = _move_id_from_any(key) if key else None
+    if mid:
+        try:
+            from poke_env.battle import Move
+            mv = Move(mid, gen=9)
+        except Exception:
+            mv = None
+    _PMOVE_CACHE[key] = mv
+    return mv
+
+
+def _has_contrary_dict(p: Optional[dict]) -> bool:
+    """あまのじゃく持ちか (判明特性 or 固定特性: メガムクホーク等)"""
+    if not p:
+        return False
+    if (p.get("ability_id") or "") == "contrary":
+        return True
+    try:
+        from vision.abilities import fixed_ability
+        return fixed_ability(p.get("species_id"),
+                             is_mega=bool(p.get("is_mega")),
+                             item_id=p.get("item_id") or "") == "contrary"
+    except Exception:
+        return False
+
+
+def _move_effect_vec_from_id(name, contrary: bool = False,
+                             target_contrary: bool = False) -> np.ndarray:
+    """技の付随効果8次元 (encoders._move_effect_vec と同義・共用)。
+
+    advisor側dexには効果フィールドが無いため poke-env の技データを使う
+    """
+    key = (str(name) if name else "", contrary, target_contrary)
+    if key in _EFFECT_CACHE:
+        return _EFFECT_CACHE[key]
+    from champions_agent.agent.encoders import _move_effect_vec
+    v = _move_effect_vec(_poke_move(key[0]), contrary=contrary,
+                         target_contrary=target_contrary)
+    _EFFECT_CACHE[key] = v
+    return v
+
+
+def _attack_profile_dict(p: Optional[dict], revealed: bool) -> tuple:
+    """(物理シェア, 特殊シェア)。技の威力加重、なければ種族値A/C比"""
+    phys = spec = 0.0
+    if p:
+        names = (p.get("revealed_moves") or []) if revealed else \
+            [m.get("move_id") for m in (p.get("moves") or [])]
+        for name in names:
+            mv = _poke_move(name)
+            if mv is None or (mv.base_power or 0) <= 0:
+                continue
+            cat = mv.category.name.lower() if mv.category else ""
+            if cat == "physical":
+                phys += float(mv.base_power)
+            elif cat == "special":
+                spec += float(mv.base_power)
+        if phys + spec <= 0:
+            sp = get_dex().species(p.get("species_id"))
+            if sp:
+                phys = float(sp["baseStats"].get("atk") or 0)
+                spec = float(sp["baseStats"].get("spa") or 0)
+    total = phys + spec
+    if total <= 0:
+        return 0.5, 0.5
+    return phys / total, spec / total
+
+
+def _adapt_obs(model, obs: np.ndarray) -> np.ndarray:
+    """観測をモデルの期待次元へ合わせる (旧227次元チェックポイント互換)。
+
+    v2拡張はv1プレフィックスを変えない末尾追記のため、スライスで意味が保たれる
+    """
+    try:
+        want = int(model.observation_space.shape[0])
+    except Exception:
+        return obs
+    if len(obs) == want:
+        return obs
+    if len(obs) > want:
+        return obs[:want]
+    padded = np.zeros(want, dtype=obs.dtype)
+    padded[:len(obs)] = obs
+    return padded
+
+
+def _volatiles_vec_dict(p: Optional[dict]) -> np.ndarray:
+    """揮発状態6フラグ (encoders.VOLATILE_EFFECTS と同順)。
+
+    画面認識の volatiles リスト (例: "confusion") + ねむけは status "drowsy"
+    からマップする
+    """
+    v = np.zeros(len(VOLATILE_EFFECTS), dtype=np.float32)
+    if not p:
+        return v
+    vols = {str(x).lower() for x in (p.get("volatiles") or [])}
+    alias = {"leechseed": "leech_seed"}
+    for name in vols:
+        name = alias.get(name, name)
+        if name in VOLATILE_EFFECTS:
+            v[VOLATILE_EFFECTS.index(name)] = 1.0
+    if p.get("status") == "drowsy":
+        v[VOLATILE_EFFECTS.index("yawn")] = 1.0
+    return v
+
+
+def _item_vec_dict(p: Optional[dict]) -> np.ndarray:
+    v = np.zeros(6, dtype=np.float32)
+    if not p:
+        return v
+    iid = (p.get("item_id") or "").lower().replace(" ", "")
+    if iid:
+        if iid in ITEM_CATEGORIES:
+            v[ITEM_CATEGORIES.index(iid)] = 1.0
+        else:
+            v[5] = 1.0
+    return v
+
+
+def _revealed_move_vec(ja: str, owner: dict, defender: Optional[dict]) -> np.ndarray:
+    """相手の判明技1つ分 (自分を防御側とした技特徴)"""
+    v = np.zeros(MOVE_FEAT_DIM, dtype=np.float32)
+    mv = _move_from_ja(ja)
+    if not mv:
+        return v
+    power = float(mv.get("power") or 0)
+    acc = mv.get("accuracy")
+    acc = 1.0 if acc in (None, True) else (acc / 100.0 if acc > 1 else float(acc))
+    cat = (mv.get("category") or "Status").lower()
+    mtype = (mv.get("type") or "Normal").lower()
+    v[0] = min(power, 150.0) / 150.0
+    v[1] = acc
+    v[2] = (float(mv.get("priority") or 0) + 5.0) / 10.0
+    v[3] = 1.0 if cat == "physical" else 0.0
+    v[4] = 1.0 if cat == "special" else 0.0
+    v[5] = 1.0 if cat == "status" else 0.0
+    v[6] = 1.0 if mtype in _en_types(owner) else 0.0
+    v[7] = (_eff(mtype, defender, attacker=owner) / 4.0) \
+        if (defender is not None and power > 0) else 0.25
+    v[8] = 1.0   # PP残は不明のため満タン扱い
+    return v
+
+
+def _best_move_eff_dict(attacker: Optional[dict], defender: Optional[dict],
+                        use_revealed: bool = False) -> float:
+    """attackerの技のうちdefenderへ最も通る相性倍率 (攻撃技のみ)"""
+    if not attacker or not defender:
+        return 0.0
+    best = 0.0
+    dex = get_dex()
+    if use_revealed:
+        moves = [_move_from_ja(ja) for ja in (attacker.get("revealed_moves") or [])]
+    else:
+        moves = [dex.move(m.get("move_id")) for m in (attacker.get("moves") or [])]
+    for mv in moves:
+        if mv and (mv.get("power") or 0) > 0:
+            best = max(best, _eff((mv.get("type") or "normal").lower(), defender, attacker=attacker))
+    return best
+
+
+def _stab_threat_eff_dict(attacker: Optional[dict],
+                          defender: Optional[dict]) -> float:
+    if not attacker or not defender:
+        return 0.0
+    best = 0.0
+    for t in _en_types(attacker):
+        best = max(best, _eff(t, defender, attacker=attacker))
+    return best
+
+
+def _is_mega_stone(p: Optional[dict]) -> bool:
+    if not p:
+        return False
+    if p.get("item_id") == "megastone":
+        return True
+    if "ナイト" in (p.get("item_ja") or ""):
+        return True
+    iid = p.get("item_id") or ""
+    return iid.endswith(("ite", "itex", "itey")) and iid != "eviolite"
+
+
 def encode_state(state: dict, my_spe_actual: Optional[float] = None) -> Optional[np.ndarray]:
-    """状態辞書 -> encode_battle と同義・同並びの227次元観測"""
+    """状態辞書 -> encode_battle と同義・同並びの観測 (OBS_DIM次元)"""
     my = state.get("player") or {}
     op = state.get("opponent") or {}
     mi, oi = my.get("active_index"), op.get("active_index")
@@ -219,7 +519,7 @@ def encode_state(state: dict, my_spe_actual: Optional[float] = None) -> Optional
         # 判明技の最大相性 (打点タイプのみ)。名前解決はresolver無しでも動くよう
         # dexのID直照合を先に試す
         for ja in revealed[:4]:
-            mv = get_dex().move(str(ja))
+            mv = _move_from_ja(ja)
             if mv and (mv.get("power") or 0) > 0:
                 max_eff = max(max_eff, _eff((mv.get("type") or "normal").lower(), own))
         opp_extra = np.array([min(len(revealed), 4) / 4.0, max_eff / 4.0],
@@ -244,16 +544,191 @@ def encode_state(state: dict, my_spe_actual: Optional[float] = None) -> Optional
 
     speed = np.zeros(2, dtype=np.float32)
     sp_opp = get_dex().species((opp or {}).get("species_id"))
-    opp_base_spe = (sp_opp["baseStats"].get("spe") if sp_opp else 0) or 0
+    opp_base_spe = float((sp_opp["baseStats"].get("spe") if sp_opp else 0) or 0)
+    if opp is not None and opp.get("spe_est"):
+        # 先後観測で更新された推定実効素早さ (server が添付)。
+        # スカーフ/まひ/仮説EVは推定に織り込み済みなので天候補正のみ後段で適用
+        opp_base_spe = float(opp["spe_est"])
+        from champions_agent.agent.encoders import WEATHER_SPEED_ABILITIES
+        ab = _known_ability_dict(opp)
+        wmap = {"rain": "rain", "sun": "sun", "sandstorm": "sand", "snow": "snow"}
+        wnow = wmap.get((state.get("field") or {}).get("weather"))
+        if ab in WEATHER_SPEED_ABILITIES and WEATHER_SPEED_ABILITIES[ab] == wnow:
+            opp_base_spe *= 2.0
+    elif opp_base_spe > 0 and opp is not None:
+        # 相手側の実効素早さ補正 (自分側は effective_speed 済みの my_spe_actual)
+        from champions_agent.agent.encoders import WEATHER_SPEED_ABILITIES
+        # ランク補正 (spe_est経由の場合は仮説viewがboost込みのため不要)
+        stage = int((opp.get("boosts") or {}).get("spe") or 0)
+        if stage > 0:
+            opp_base_spe *= (2 + stage) / 2.0
+        elif stage < 0:
+            opp_base_spe *= 2.0 / (2 - stage)
+        ab = _known_ability_dict(opp)
+        wmap = {"rain": "rain", "sun": "sun", "sandstorm": "sand", "snow": "snow"}
+        wnow = wmap.get((state.get("field") or {}).get("weather"))
+        if ab in WEATHER_SPEED_ABILITIES and WEATHER_SPEED_ABILITIES[ab] == wnow:
+            opp_base_spe *= 2.0
+        if (opp.get("item_id") or "") == "choicescarf":
+            opp_base_spe *= 1.5
+        if opp.get("status") == "paralysis":
+            opp_base_spe *= 0.5
     if my_spe_actual and opp_base_spe > 0:
         ratio = my_spe_actual / opp_base_spe
         speed[0] = min(ratio, 2.0) / 2.0
         speed[1] = 1.0 if ratio >= 1.0 else 0.0
 
+    # ============ v2拡張 (encoders.encode_battle と同義・同並び) ============
+    revealed_ja = (opp.get("revealed_moves") or []) if opp else []
+    opp_move_vecs = [
+        _revealed_move_vec(revealed_ja[i], opp, own) if (opp and i < len(revealed_ja))
+        else np.zeros(MOVE_FEAT_DIM, dtype=np.float32)
+        for i in range(N_MOVE_SLOTS)]
+
+    own_vol = _volatiles_vec_dict(own)
+    opp_vol = _volatiles_vec_dict(opp)
+
+    mega_used = state.get("mega_used") or {}
+    mega_vec = np.array([
+        1.0 if (_is_mega_stone(own) and not mega_used.get("player")) else 0.0,
+        1.0 if mega_used.get("player") else 0.0,
+        1.0 if mega_used.get("opponent") else 0.0], dtype=np.float32)
+
+    own_item = _item_vec_dict(own)
+    opp_item = _item_vec_dict(opp)
+
+    # encode_battle (battle.teamの非ひんし数) と同義: パーティから直接数える
+    # (state側のremainingはひんし反映が遅れることがあるため使わない)
+    picked = [p for p in my.get("party", []) if p.get("is_picked")] or \
+        my.get("party", [])[:3]
+    my_remaining = max(1, sum(1 for p in picked if p.get("status") != "fainted"))
+    max_pri = 0.0
+    for ja in revealed_ja[:4]:
+        mv = _move_from_ja(ja)
+        if mv:
+            max_pri = max(max_pri, float(mv.get("priority") or 0))
+    misc = np.array([min(my_remaining, 3) / 3.0, (max_pri + 5.0) / 10.0],
+                    dtype=np.float32)
+
+    bench_tactics = np.zeros(6, dtype=np.float32)
+    for i in range(2):
+        b = own_bench[i] if i < len(own_bench) else None
+        if b is not None and opp is not None:
+            bench_tactics[i * 2] = _best_move_eff_dict(b, opp) / 4.0
+            bench_tactics[i * 2 + 1] = _stab_threat_eff_dict(opp, b) / 4.0
+    for i in range(2):
+        b = opp_bench[i] if i < len(opp_bench) else None
+        if b is not None and own is not None:
+            bench_tactics[4 + i] = _best_move_eff_dict(own, b) / 4.0
+
+    # ============ v3拡張 (技効果/天候残り/控え同士。encoders と同並び) =======
+    own_contrary = _has_contrary_dict(own)
+    opp_contrary = _has_contrary_dict(opp)
+    own_move_effects = [
+        _move_effect_vec_from_id(moves[i].get("move_id"),
+                                 contrary=own_contrary,
+                                 target_contrary=opp_contrary)
+        if i < len(moves)
+        else np.zeros(MOVE_EFFECT_DIM, dtype=np.float32)
+        for i in range(N_MOVE_SLOTS)]
+    opp_move_effects = [
+        _move_effect_vec_from_id(revealed_ja[i], contrary=opp_contrary,
+                                 target_contrary=own_contrary)
+        if i < len(revealed_ja)
+        else np.zeros(MOVE_EFFECT_DIM, dtype=np.float32)
+        for i in range(N_MOVE_SLOTS)]
+
+    # 攻撃プロファイル (相手=判明技ベース/自分=登録技ベース) + ランク技効用
+    opp_phys, opp_spec = _attack_profile_dict(opp, revealed=True)
+    own_phys, own_spec = _attack_profile_dict(own, revealed=False)
+    profile_vec = np.array([opp_phys, opp_spec, own_phys, own_spec],
+                           dtype=np.float32)
+    from champions_agent.agent.encoders import _boost_utility
+    is_slower = speed[1] < 0.5
+    utility_vec = np.array([
+        _boost_utility(_poke_move(moves[i].get("move_id")) if i < len(moves)
+                       else None,
+                       own_phys, own_spec, opp_phys, opp_spec, is_slower,
+                       contrary=own_contrary,
+                       opp_unaware=(_known_ability_dict(opp) == "unaware"))
+        for i in range(N_MOVE_SLOTS)], dtype=np.float32)
+
+    f = state.get("field") or {}
+    field_remaining = np.array([
+        min(max(f.get("weather_turns") or 0, 0), 8) / 8.0,
+        min(max(f.get("terrain_turns") or 0, 0), 8) / 8.0], dtype=np.float32)
+
+    bench_matchup = np.zeros(4, dtype=np.float32)
+    for i in range(2):
+        mb = own_bench[i] if i < len(own_bench) else None
+        for j in range(2):
+            ob = opp_bench[j] if j < len(opp_bench) else None
+            if mb is not None and ob is not None:
+                bench_matchup[i * 2 + j] = _best_move_eff_dict(mb, ob) / 4.0
+
+    # v4: 環境使用率上位の特殊要素フラグ (encoders と同義・同並び)
+    def _guard_flag_dict(p: Optional[dict]) -> float:
+        """ばけのかわ未破壊 / 満タン+タスキ / 満タン+がんじょう"""
+        if not p or p.get("status") == "fainted":
+            return 0.0
+        sid = p.get("species_id") or ""
+        if "mimikyu" in sid and "busted" not in sid:
+            # 破壊で最大HP1/8減のため、87.5%以上なら未破壊とみなす近似
+            if _hp_frac(p) >= 0.875:
+                return 1.0
+        if _hp_frac(p) < 0.999:
+            return 0.0
+        if (p.get("item_id") or "") == "focussash":
+            return 1.0
+        return 1.0 if "sturdy" in _possible_abilities_dict(p) else 0.0
+
+    def _side_has_ability_dict(party: list, ability: str) -> float:
+        for p in party or []:
+            if p.get("status") != "fainted" and \
+                    ability in _possible_abilities_dict(p):
+                return 1.0
+        return 0.0
+
+    def _multiscale_active_dict(p):
+        if not p or _hp_frac(p) < 0.999:
+            return 0.0
+        poss = _possible_abilities_dict(p)
+        return 1.0 if ("multiscale" in poss or "shadowshield" in poss) else 0.0
+
+    def _has_regen_dict(p):
+        return 1.0 if (p and "regenerator" in _possible_abilities_dict(p)) \
+            else 0.0
+
+    ability_vec = np.array([
+        _multiscale_active_dict(own), _multiscale_active_dict(opp),
+        _has_regen_dict(own), _has_regen_dict(opp)], dtype=np.float32)
+
+    ps = state.get("protect_streak") or {}
+    protect_vec = np.array([min(ps.get("player", 0), 3) / 3.0,
+                            min(ps.get("opponent", 0), 3) / 3.0],
+                           dtype=np.float32)
+
+    special_vec = np.array([
+        _guard_flag_dict(own),
+        _guard_flag_dict(opp),
+        _side_has_ability_dict(my.get("party", []), "intimidate"),
+        _side_has_ability_dict(op.get("party", []), "intimidate"),
+        1.0 if "prankster" in _possible_abilities_dict(own) else 0.0,
+        1.0 if "prankster" in _possible_abilities_dict(opp) else 0.0,
+    ], dtype=np.float32)
+
     vec = np.concatenate([own_vec, opp_vec, opp_extra,
                           *own_bench_vecs, *opp_bench_vecs, opp_count,
                           _side_vec(my), _side_vec(op),
-                          _field_vec(state), speed]).astype(np.float32)
+                          _field_vec(state), speed,
+                          *opp_move_vecs, own_vol, opp_vol, mega_vec,
+                          own_item, opp_item, misc,
+                          bench_tactics,
+                          *own_move_effects, *opp_move_effects,
+                          profile_vec, utility_vec,
+                          field_remaining, bench_matchup,
+                          special_vec, protect_vec,
+                          ability_vec]).astype(np.float32)
     if len(vec) < OBS_DIM:
         vec = np.concatenate([vec, np.zeros(OBS_DIM - len(vec), dtype=np.float32)])
     return vec[:OBS_DIM]
@@ -266,9 +741,15 @@ def _legal_actions(state: dict) -> list:
     party = my.get("party", [])
     own = party[mi] if mi is not None and mi < len(party) else None
     out = []
+    # 交代は選出済みの3体に限る (未選出への交代提案の防止)
+    from advisor.party import battle_party_indices
+    allowed = battle_party_indices(my)
     for j, p in enumerate(party[:6]):
-        if j != mi and p.get("species_id") and p.get("status") != "fainted":
-            out.append((j, f"交代:{p.get('species_ja') or p['species_id']}", "switch"))
+        if j == mi or not p.get("species_id") or p.get("status") == "fainted":
+            continue
+        if allowed is not None and j not in allowed:
+            continue
+        out.append((j, f"交代:{p.get('species_ja') or p['species_id']}", "switch"))
     if own:
         mega_ok = (not (state.get("mega_used") or {}).get("player")) and \
             ((own.get("item_ja") or "").endswith(("ナイト", "ナイトX", "ナイトY"))
@@ -331,6 +812,7 @@ def value_of_sim(me, opp, my_moves: list, fieldv=None,
     obs = encode_state(state, my_spe_actual=effective_speed(me.active, fieldv))
     if obs is None:
         return None
+    obs = _adapt_obs(model, obs)
     import math
     import torch
     obs_t, _ = model.policy.obs_to_tensor(obs[None, :])
@@ -347,6 +829,7 @@ def policy_hint(state: dict, my_spe_actual: Optional[float] = None) -> Optional[
     obs = encode_state(state, my_spe_actual)
     if obs is None:
         return None
+    obs = _adapt_obs(model, obs)
     legal = _legal_actions(state)
     if not legal:
         return None

@@ -297,15 +297,17 @@ def _set_hp(state: BattleStateV2, side_name: str, mon,
         mon._hp_stable_count = 1
         return   # 1回だけの観測は状態にも反映しない (誤読の混入防止)
     mon._hp_stable_count = getattr(mon, "_hp_stable_count", 1) + 1
-    # 0%は交代アニメーション中の空バー誤読が多いため、3回連続観測を要求する
-    # (本物のひんしなら0%表示が続くので3回目で確定する)
-    if new <= 1.0 and mon._hp_stable_count < 3:
+    # ほぼ0%は交代/メガシンカ演出中の空バー誤読が多いため、3回連続観測を
+    # 要求する (本物のひんし・瀕死残りなら低%表示が続くので3回目で確定する)。
+    # バー由来の読取は1.4%等の端数になるため、閾値は0%だけでなく3%まで広げる
+    # (実戦: メガメタグロス100%→1.x%→59%のフラップがイベント化した)
+    if new <= 3.0 and mon._hp_stable_count < 3:
         return
     commit()
-    # 0%への低下イベントは、ひんしメッセージの裏付けがある場合のみ発火する
+    # ほぼ0%への低下イベントは、ひんしメッセージの裏付けがある場合のみ発火する
     # (交代アニメの空バーが3秒以上続くと3回連続確認をすり抜けた実績。
     #  状態値の更新自体は行い、誤りなら次の確定読取で戻る)
-    if new <= 1.0:
+    if new <= 3.0:
         last_faint = getattr(state, "last_faint", None)
         if not (last_faint and last_faint.get("side") == side_name
                 and time.time() - last_faint.get("ts", 0) < 20.0):
@@ -473,7 +475,32 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
                 opp = state.opponent.ensure_active()
         else:
             opp = state.opponent.ensure_active()
-        opp.display_name = name_text
+        # 種族確定済みスロットへ「別のポケモンの名前」を上書きしない。
+        # (実戦: 交代を見逃した状態でHUDの新ポケモン名が前のポケモンの
+        #  display_nameに入り、イベントの名前照合が誤って一致して
+        #  別ポケモンの技として記録された)
+        from vision.normalize import loose_key as _lk
+        import difflib as _dl
+        key_new = _lk(name_text)
+        cur = [_lk(x) for x in (opp.species_ja, opp.display_name) if x]
+        similar = (not cur) or any(
+            k and (k in key_new or key_new in k
+                   or _dl.SequenceMatcher(None, key_new, k).ratio() >= 0.5)
+            for k in cur)
+        if similar:
+            opp.display_name = name_text
+        elif opp.species_ja:
+            # 見逃した交代の兆候: 表示名の合う既存枠があればそちらへ切替
+            idx = state.opponent.find_by_display_name(name_text)
+            if idx is not None:
+                state.opponent.switch_to(idx)
+                opp = state.opponent.party[idx]
+                opp.display_name = name_text
+            else:
+                state.log_event(
+                    "system",
+                    f"相手HUD名不一致 ({name_text}≠{opp.species_ja}) "
+                    "交代見逃しの疑い", event_id="hud_name_mismatch")
     else:
         opp = state.opponent.ensure_active()
     link_active_to_party(state, "opponent")
@@ -627,6 +654,70 @@ def detect_move_rows(img) -> list:
     return rows
 
 
+_REG_MOVE_CACHE: dict = {}
+
+
+def _registered_move_ids(species_ja, resolver) -> set:
+    """my_team.json の登録技をshowdown ID集合で返す (キャッシュ付き)"""
+    if not species_ja:
+        return set()
+    if species_ja in _REG_MOVE_CACHE:
+        return _REG_MOVE_CACHE[species_ja]
+    ids = set()
+    try:
+        from advisor.my_team import get_my_moves
+        for ja in get_my_moves(species_ja):
+            r = resolver.resolve(ja, "moves", cutoff=0.7)
+            if r:
+                ids.add(r[1])
+    except Exception:
+        pass
+    _REG_MOVE_CACHE[species_ja] = ids
+    return ids
+
+
+def resolve_move_owner(state: BattleStateV2, move_ids: set, resolver):
+    """技画面に映っている技集合から「真の場のポケモン」を特定する。
+
+    交代直後は active_index の更新が画面より遅れることがあり、読み取った
+    技が前のポケモンへ書き込まれて「交代後のポケモンの技をお勧めする」
+    誤アドバイスが起きた (実戦)。登録技 (my_team.json) との一致数で
+    所有者を判定し、activeと食い違えばactiveを補正する。
+
+    戻り値: (対象のPokemonState, active修正したか)
+    """
+    me = state.player.ensure_active()
+    if not move_ids:
+        return me, False
+    best = None
+    for i, p in enumerate(state.player.party):
+        if p.status == "fainted":
+            continue
+        reg = _registered_move_ids(p.species_ja, resolver)
+        if not reg:
+            continue
+        score = len(move_ids & reg)
+        if best is None or score > best[0]:
+            best = (score, i, p)
+    if best is None:
+        return me, False
+    score, idx, owner = best
+    active_reg = _registered_move_ids(me.species_ja, resolver)
+    active_score = len(move_ids & active_reg) if active_reg else None
+    # 画面の技が別の登録ポケモンに2つ以上一致し、activeとの一致を上回る
+    # 場合のみ「activeの取り違え」とみなして補正する
+    if owner is not me and score >= 2 and score > (active_score or 0):
+        state.player.active_index = idx
+        for j, p in enumerate(state.player.party):
+            p.is_active = (j == idx)
+        state.log_event(
+            "system",
+            f"技画面照合: 場のポケモンを{owner.species_ja}に補正",
+            event_id="active_fix_by_moves")
+        return owner, True
+    return me, False
+
+
 def extract_move_select(img, state: BattleStateV2, resolver) -> None:
     me = state.player.ensure_active()
     new_moves = []
@@ -649,6 +740,9 @@ def extract_move_select(img, state: BattleStateV2, resolver) -> None:
         new_moves.append(slot)
 
     if new_moves:
+        # 技の所有者を登録技と照合し、activeの取り違えがあれば補正する
+        move_ids = {s.move_id for s in new_moves if s.move_id}
+        me, _fixed = resolve_move_owner(state, move_ids, resolver)
         # 既知の技リストへマージ (PP等を更新)
         existing = {m.move_id or m.name_ja: m for m in me.moves}
         merged = []
@@ -917,36 +1011,83 @@ def extract_field_check(img, state: BattleStateV2, resolver) -> None:
 # ==============================================================================
 # 様子を見る画面
 # ==============================================================================
-def extract_watch(img, state: BattleStateV2, resolver) -> None:
-    me = state.player.ensure_active()
+_EN2JA_TYPES = {"Normal": "ノーマル", "Fire": "ほのお", "Water": "みず",
+                "Electric": "でんき", "Grass": "くさ", "Ice": "こおり",
+                "Fighting": "かくとう", "Poison": "どく", "Ground": "じめん",
+                "Flying": "ひこう", "Psychic": "エスパー", "Bug": "むし",
+                "Rock": "いわ", "Ghost": "ゴースト", "Dragon": "ドラゴン",
+                "Dark": "あく", "Steel": "はがね", "Fairy": "フェアリー"}
 
+
+def _dex_types_ja(mon) -> Optional[set]:
+    """自分の個体の図鑑タイプ (日本語集合)。メガ済みならメガ後の姿で引く"""
+    sid = mon.species_id
+    if not sid:
+        return None
+    try:
+        from advisor.dex import get_dex
+        if mon.is_mega and get_dex().species(sid + "mega"):
+            sid = sid + "mega"
+        sp = get_dex().species(sid)
+        if sp:
+            return {_EN2JA_TYPES.get(t, t) for t in sp["types"]}
+    except Exception:
+        pass
+    return None
+
+
+def _watch_target(state: BattleStateV2, resolver, found_types, new_moves):
+    """様子見画面に表示されている個体を特定する。
+
+    この画面はカーソルを合わせた任意のポケモンを表示するため、
+    activeへ無条件に書き込むと「ブリジュラスの詳細を見た瞬間に
+    場のラグラージがドラゴンタイプになる」汚染が起きた (実戦)。
+    技 (登録技との一致) → タイプ (図鑑タイプとの一致) の順で特定し、
+    特定できなければ None (書き込まない)
+    """
+    party = state.player.party
+    # 1) 表示中の技4つと登録技の一致数で特定
+    ids = {s.move_id for s in new_moves if s.move_id}
+    if len(ids) >= 2:
+        scored = []
+        for p in party:
+            reg = _registered_move_ids(p.species_ja, resolver)
+            if reg:
+                scored.append((len(ids & reg), p))
+        if scored:
+            scored.sort(key=lambda x: -x[0])
+            if scored[0][0] >= 2 and (len(scored) == 1
+                                      or scored[0][0] > scored[1][0]):
+                return scored[0][1]
+    # 2) 表示タイプが図鑑タイプと一致する個体が一意なら特定
+    if found_types:
+        matches = [p for p in party
+                   if _dex_types_ja(p) == set(found_types)]
+        if len(matches) == 1:
+            return matches[0]
+    # 3) タイプ未読取ならactive (従来挙動)、読めたのに誰とも一致しない
+    #    場合は書き込まない (誤読 or 相手の詳細画面)
+    if not found_types:
+        return state.player.ensure_active()
+    active = state.player.ensure_active()
+    if _dex_types_ja(active) == set(found_types):
+        return active
+    return None
+
+
+def extract_watch(img, state: BattleStateV2, resolver) -> None:
     # タイプ (テキスト表記)
     type_text = ocr.read_zone_text(img, zones.WATCH["type_row"], mode="panel")
+    found = []
     if type_text:
-        found = []
         for jp in ("ノーマル", "ほのお", "みず", "でんき", "くさ", "こおり", "かくとう",
                     "どく", "じめん", "ひこう", "エスパー", "むし", "いわ", "ゴースト",
                     "ドラゴン", "あく", "はがね", "フェアリー"):
             from vision.normalize import loose_key
             if loose_key(jp) in loose_key(type_text):
                 found.append(jp)
-        if found:
-            me.types = found
 
-    # 特性 / 持ち物
-    ability_text = ocr.read_zone_text(img, zones.WATCH["ability_value"], mode="panel")
-    if ability_text:
-        ab = _resolve_ability_validated(resolver, ability_text, me)
-        if ab:
-            me.ability_ja, me.ability_id = ab[0], ab[1]
-    item_text = ocr.read_zone_text(img, zones.WATCH["item_value"], mode="panel")
-    if item_text:
-        it = resolver.resolve(item_text, "items", cutoff=0.72)
-        if it:
-            me.item_ja, me.item_id = it[0], it[1]
-
-    # 技 + PP: この画面は「場に出ているポケモンの4技」を必ず表示するため、
-    # 追記ではなく置き換える (交代をまたいで技リストが合成されるのを防ぐ)
+    # 技 + PP: 先に読み取り、持ち主特定に使う
     new_moves = []
     for i, row in enumerate(zones.WATCH_MOVES):
         name_text = ocr.read_zone_text(img, row["name"], mode="panel")
@@ -960,6 +1101,28 @@ def extract_watch(img, state: BattleStateV2, resolver) -> None:
         if pp:
             slot.pp, slot.max_pp = pp[0], pp[1]
         new_moves.append(slot)
+
+    # 表示中の個体を特定してから書き込む (誤帰属防止)
+    me = _watch_target(state, resolver, found, new_moves)
+    if me is None:
+        state.log_event("system", f"様子見画面の帰属不能 (タイプ={found})",
+                        event_id=None)
+        return
+    if found:
+        me.types = found
+
+    # 特性 / 持ち物
+    ability_text = ocr.read_zone_text(img, zones.WATCH["ability_value"], mode="panel")
+    if ability_text:
+        ab = _resolve_ability_validated(resolver, ability_text, me)
+        if ab:
+            me.ability_ja, me.ability_id = ab[0], ab[1]
+    item_text = ocr.read_zone_text(img, zones.WATCH["item_value"], mode="panel")
+    if item_text:
+        it = resolver.resolve(item_text, "items", cutoff=0.72)
+        if it:
+            me.item_ja, me.item_id = it[0], it[1]
+
     if len(new_moves) >= 3:
         # 既存エントリのPP情報は引き継ぐ
         old = {m.move_id or m.name_ja: m for m in me.moves}

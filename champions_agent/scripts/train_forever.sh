@@ -13,9 +13,13 @@ REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 SLEEP_BETWEEN="${SLEEP_BETWEEN:-60}"
+# 並列環境数: Showdown通信律速のため複数バトルを同時進行させる。
+# 8コアでは4が最適 (6にすると伸びが鈍化しサーバー/アドバイザーと競合。
+# 実測: 単一140fps -> 3並列271 -> 6並列323。4は約290fps=2倍)。
+export N_ENVS="${N_ENVS:-4}"
 CYCLE=0
 
-echo "[forever] 常時学習を開始します (Ctrl+Cで停止)"
+echo "[forever] 常時学習を開始します (N_ENVS=$N_ENVS, Ctrl+Cで停止)"
 trap 'echo "[forever] 停止します (サイクル$CYCLE完了)"; exit 0' INT TERM
 
 while true; do
