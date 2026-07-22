@@ -98,6 +98,88 @@ def _is_mega_holder(p: dict) -> bool:
 # (メガシンカは1試合1回のため、2体目以降のストーンは実質「持ち物なし」になる)
 MEGA_DUPLICATE_PENALTY = 0.6
 
+# 天候シナジーのボーナス (設置役+恩恵役が同時選出された場合、恩恵役1体あたり)。
+# スケール根拠: coverage合計は1対面あたり概ね0.5-1.0。天候下の素早さ倍化+
+# タイプ一致技1.5倍は実質1-2対面の有利化に相当する (実測: 雨コア
+# ペリッパー+メガラグラージが選ばれる閾値は1.2、余裕を持たせて1.4)
+WEATHER_SYNERGY_BONUS = 1.4
+
+# 天候の設置特性と恩恵特性 (選出シナジー評価用)
+_WEATHER_SETTERS = {
+    "drizzle": "rain", "drought": "sun",
+    "sandstream": "sand", "snowwarning": "snow",
+}
+_WEATHER_ABUSERS = {
+    "swiftswim": "rain", "raindish": "rain", "dryskin": "rain",
+    "chlorophyll": "sun", "solarpower": "sun", "flowergift": "sun",
+    "sandrush": "sand", "sandforce": "sand", "sandveil": "sand",
+    "slushrush": "snow", "icebody": "snow", "snowcloak": "snow",
+}
+
+
+def _mega_species_id(species_id: str, item_id: str) -> Optional[str]:
+    """メガストーン持ちのメガ後種族ID (dexに存在する場合のみ)"""
+    dex = get_dex()
+    # リザードン等のX/Y分岐はストーンIDの末尾で判別
+    if item_id and item_id.endswith(("itex", "itey")):
+        cand = f"{species_id}mega{item_id[-1]}"
+        if dex.species(cand):
+            return cand
+    cand = f"{species_id}mega"
+    return cand if dex.species(cand) else None
+
+
+_RESOLVER = None
+
+
+def _resolve_ability_id(ability_ja: str) -> Optional[str]:
+    global _RESOLVER
+    if _RESOLVER is None:
+        from vision.normalize import NameResolver
+        _RESOLVER = NameResolver()
+    r = _RESOLVER.resolve(ability_ja, "abilities", cutoff=0.8)
+    return r[1] if r else None
+
+
+def _own_ability(p: dict, species_id: str, is_mega: bool = False,
+                 item_id: str = "") -> Optional[str]:
+    """自分のポケモンの特性ID (状態 -> 型登録 -> 固定特性の順で解決)"""
+    if not is_mega:
+        if p.get("ability_id"):
+            return p["ability_id"]
+        # 型登録 (config/my_team.json) の特性 (例: ペリッパー=あめふらし)
+        try:
+            from advisor.my_team import get_my_build
+            b = get_my_build(p.get("species_ja"))
+            if b and b.get("ability_ja"):
+                aid = _resolve_ability_id(b["ability_ja"])
+                if aid:
+                    return aid
+        except Exception:
+            pass
+    try:
+        from vision.abilities import fixed_ability
+        return fixed_ability(species_id, is_mega=is_mega, item_id=item_id)
+    except Exception:
+        return None
+
+
+def _weather_synergy_bonus(members: list) -> float:
+    """選出3体の天候シナジー: 設置役がいれば恩恵役1体ごとにボーナス。
+
+    members: [{"ability": ..., ...}] (メガ枠はメガ後特性で渡すこと)
+    """
+    weathers = {_WEATHER_SETTERS[m["ability"]] for m in members
+                if m.get("ability") in _WEATHER_SETTERS}
+    if not weathers:
+        return 0.0
+    bonus = 0.0
+    for m in members:
+        ab = m.get("ability")
+        if ab in _WEATHER_ABUSERS and _WEATHER_ABUSERS[ab] in weathers:
+            bonus += WEATHER_SYNERGY_BONUS
+    return bonus
+
 
 def _make_view(species_id: str) -> Optional[MonView]:
     dex = get_dex()
@@ -181,6 +263,9 @@ def advise_selection(state: dict, resolver=None) -> dict:
         if sp is None:
             continue
         my_types = sp["types"]
+        is_mega_holder = _is_mega_holder(p)
+        item_id = p.get("item_id") or ""
+        mega_sid = _mega_species_id(sid, item_id) if is_mega_holder else None
         mine.append({
             "index": i,
             "name": p.get("species_ja") or p.get("display_name") or sid,
@@ -188,7 +273,13 @@ def advise_selection(state: dict, resolver=None) -> dict:
             "types": my_types,
             "profile": _my_attack_profile(sid),
             "picked": p.get("is_picked", False),
-            "mega_holder": _is_mega_holder(p),
+            "mega_holder": is_mega_holder,
+            # メガ後の姿での評価用 (種族値/タイプ/特性が変わる)
+            "mega_sid": mega_sid,
+            "ability": _own_ability(p, sid),
+            "mega_ability": (_own_ability(p, mega_sid or sid, is_mega=True,
+                                          item_id=item_id)
+                             if mega_sid else None),
         })
 
     inference = get_inference()
@@ -228,10 +319,11 @@ def advise_selection(state: dict, resolver=None) -> dict:
             moves_cache[sid] = _predicted_attack_moves(sid) if view_cache[sid] else []
         return view_cache[sid], moves_cache[sid]
 
-    # スコア行列: 候補種族分布で加重したダメージ計算ベース
-    matrix = {}
-    for m in mine:
-        my_view, my_moves = get_view(m["species_id"])
+    # スコア行列: 候補種族分布で加重したダメージ計算ベース。
+    # メガストーン持ちはメガ後の姿 (種族値/タイプ) でも行を作る
+    def score_row(eval_sid, m):
+        my_view, my_moves = get_view(eval_sid)
+        row = {}
         for o in opps:
             score = None
             if my_view is not None and o["candidates"]:
@@ -249,25 +341,54 @@ def advise_selection(state: dict, resolver=None) -> dict:
             if score is None:
                 # 候補が推測できない場合はタイプ相性フォールバック
                 score = _matchup_score(m["profile"], m["types"], o["types"])
-            matrix[(m["index"], o["index"])] = score
+            row[o["index"]] = score
+        return row
 
-    # C(n,3) 総当たり (メガストーン重複ペナルティ込み)
+    matrix = {}         # (my_index, opp_index) -> 素の姿のスコア
+    matrix_mega = {}    # (my_index, opp_index) -> メガ後の姿のスコア
+    for m in mine:
+        row = score_row(m["species_id"], m)
+        for j, v in row.items():
+            matrix[(m["index"], j)] = v
+        if m["mega_sid"]:
+            mrow = score_row(m["mega_sid"], m)
+            for j, v in mrow.items():
+                matrix_mega[(m["index"], j)] = v
+
+    # C(n,3) 総当たり。メガシンカは1試合1回なので、コンボ内のストーン持ち
+    # から「誰をメガ枠にするか」も同時に最適化する (メガ枠はメガ後の姿で
+    # 評価、他のストーン持ちは持ち物が死ぬのでペナルティ)。
+    # 天候シナジー (あめふらし→すいすい等) もコンボ単位で加点する
+    def cell(m, j, is_assignee):
+        if is_assignee and (m["index"], j) in matrix_mega:
+            return matrix_mega[(m["index"], j)]
+        return matrix[(m["index"], j)]
+
     best = None
     for combo in combinations(mine, 3):
-        coverage = sum(max(matrix[(m["index"], o["index"])] for m in combo)
-                       for o in opps)
-        individual = sum(
-            sum(matrix[(m["index"], o["index"])] for o in opps) / len(opps)
-            for m in combo)
-        total = coverage + 0.3 * individual
-        # メガシンカは1試合1回: ストーン持ち2体目以降は持ち物が死ぬ
-        n_mega = sum(1 for m in combo if m["mega_holder"])
-        if n_mega >= 2:
-            total -= MEGA_DUPLICATE_PENALTY * (n_mega - 1)
-        if best is None or total > best[0]:
-            best = (total, combo)
+        holders = [m for m in combo if m["mega_holder"]]
+        # メガ割当の候補: ストーン持ちそれぞれ + 割当なし
+        for assignee in (holders or [None]):
+            coverage = sum(
+                max(cell(m, o["index"], m is assignee) for m in combo)
+                for o in opps)
+            individual = sum(
+                sum(cell(m, o["index"], m is assignee) for o in opps) / len(opps)
+                for m in combo)
+            total = coverage + 0.3 * individual
+            # メガ枠以外のストーン持ちは持ち物が死ぬ
+            total -= MEGA_DUPLICATE_PENALTY * sum(
+                1 for m in holders if m is not assignee)
+            # 天候シナジー (メガ枠はメガ後特性で評価: メガラグラージ=すいすい等)
+            members = [
+                {"ability": (m["mega_ability"] if m is assignee
+                             and m["mega_ability"] else m["ability"])}
+                for m in combo]
+            total += _weather_synergy_bonus(members)
+            if best is None or total > best[0]:
+                best = (total, combo, assignee)
 
-    _, combo = best
+    _, combo, mega_assignee = best
     # 先発: 平均スコア最大
     lead = max(combo, key=lambda m: sum(matrix[(m["index"], o["index"])]
                                          for o in opps))
@@ -291,17 +412,38 @@ def advise_selection(state: dict, resolver=None) -> dict:
             inference_view.append(
                 {"types": o["types_ja"], "text": f"{'/'.join(o['types_ja'])}→{cand_txt}"})
 
+    # メガ枠 (最適化で選ばれた個体) を先頭に
     mega_picks = [m["name"] for m in ordered if m["mega_holder"]]
+    if mega_assignee is not None and mega_assignee["name"] in mega_picks:
+        mega_picks.remove(mega_assignee["name"])
+        mega_picks.insert(0, mega_assignee["name"])
+
+    # 天候シナジーの表示用データ
+    synergy = None
+    members = [{"ability": (m["mega_ability"] if m is mega_assignee
+                            and m["mega_ability"] else m["ability"]),
+                "name": m["name"]} for m in ordered]
+    setters = [m for m in members if m["ability"] in _WEATHER_SETTERS]
+    if setters:
+        weather = _WEATHER_SETTERS[setters[0]["ability"]]
+        abusers = [m["name"] for m in members
+                   if _WEATHER_ABUSERS.get(m["ability"]) == weather]
+        if abusers:
+            synergy = {"weather": weather, "setter": setters[0]["name"],
+                       "abusers": abusers}
+
     return {
         "ok": True,
         "picked": picked,
         "done": done,
         "recommend": [{"index": m["index"], "name": m["name"],
                        "lead": m is lead,
-                       "mega_holder": m["mega_holder"]} for m in ordered],
+                       "mega_holder": m["mega_holder"],
+                       "mega_assign": m is mega_assignee} for m in ordered],
         "reason": " / ".join(reasons),
         "inference": inference_view,
         "mega_picks": mega_picks,
+        "synergy": synergy,
     }
 
 
@@ -319,8 +461,15 @@ def format_selection_advice(advice: dict) -> str:
         if len(mega) == 1:
             base += f"\n  ⚡ メガ枠: {mega[0]}"
         elif len(mega) >= 2:
-            base += (f"\n  ⚠ メガストーン持ちが{len(mega)}体 ({'/'.join(mega)}) "
-                     "含まれています (メガシンカは1試合1回)")
+            base += (f"\n  ⚡ メガ枠: {mega[0]} を推奨 "
+                     f"(ストーン持ち{len(mega)}体: {'/'.join(mega)}。"
+                     "メガシンカは1試合1回、他の持ち物は死にます)")
+        syn = advice.get("synergy")
+        if syn:
+            wj = {"rain": "雨", "sun": "晴れ", "sand": "砂嵐",
+                  "snow": "雪"}.get(syn["weather"], syn["weather"])
+            base += (f"\n  ☔ {wj}シナジー: {syn['setter']} → "
+                     f"{'/'.join(syn['abusers'])}")
     picked = advice.get("picked")
     if advice.get("done"):
         return f"✅ 選出完了 (3/3)\n{base}"
