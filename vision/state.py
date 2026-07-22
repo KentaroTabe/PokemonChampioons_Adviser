@@ -142,6 +142,20 @@ class SideState:
         for i, p in enumerate(self.party):
             if p.species_ja == species_ja:
                 return i
+        # メガ正規化フォールバック: 「メガリザードン(X/Y)」と「リザードン」は
+        # 同一個体 (メガ後も画面表示は元の名前のため、表記が混在し得る)
+        def base(name):
+            if not name:
+                return None
+            if name.startswith("メガ"):
+                name = name[len("メガ"):]
+                name = name[:-1] if name.endswith(("X", "Y")) else name
+            return name
+        want = base(species_ja)
+        if want:
+            for i, p in enumerate(self.party):
+                if base(p.species_ja) == want:
+                    return i
         return None
 
     def find_by_display_name(self, name: str) -> Optional[int]:
