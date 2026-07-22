@@ -153,7 +153,17 @@ class TypeInference:
             if base not in usage:
                 usage[base] = v * 0.25
 
+        # チャンピオンズフィルタ: 全期間へ広げた際にSV由来スナップショットの
+        # 種族 (チャンピオンズに存在しない) が混入しないようにする
+        try:
+            from advisor.team_advice import champions_usable
+        except Exception:
+            def champions_usable(_sid):
+                return True
+
         for sid, weight in usage.items():
+            if not champions_usable(sid):
+                continue
             sp = dex.species(sid)
             if sp is None:
                 continue
