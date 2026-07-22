@@ -31,7 +31,8 @@ STATUS_MAP = {"burn": "brn", "paralysis": "par", "sleep": "slp",
               "freeze": "frz", "poison": "psn", "toxic": "tox"}
 BOOST_KEYS = ["atk", "def", "spa", "spd", "spe", "acc", "eva"]
 BASE_KEYS = ["hp", "atk", "def", "spa", "spd", "spe"]
-N_MOVE_SLOTS, MOVE_FEAT_DIM, OBS_DIM = 4, 9, 298  # v2拡張 (v1=227の末尾追記)
+N_MOVE_SLOTS, MOVE_FEAT_DIM, OBS_DIM = 4, 9, 344  # v3拡張 (v1=227/v2=298の末尾追記)
+MOVE_EFFECT_DIM = 5
 VOLATILE_EFFECTS = ["confusion", "leech_seed", "substitute", "taunt",
                     "encore", "yawn"]
 ITEM_CATEGORIES = ["choicescarf", "choiceband", "choicespecs",
@@ -226,6 +227,54 @@ def _move_from_ja(name) -> Optional[dict]:
             mv = None
     _MOVE_JA_CACHE[key] = mv
     return mv
+
+
+_MOVE_ID_CACHE: dict = {}
+_EFFECT_CACHE: dict = {}
+
+
+def _move_id_from_any(name) -> Optional[str]:
+    """技名 (ID/日本語) をshowdown IDへ解決する"""
+    global _MOVE_RESOLVER
+    key = str(name)
+    if key in _MOVE_ID_CACHE:
+        return _MOVE_ID_CACHE[key]
+    mid = None
+    if get_dex().move(key):
+        mid = key
+    else:
+        try:
+            if _MOVE_RESOLVER is None:
+                from vision.normalize import NameResolver
+                _MOVE_RESOLVER = NameResolver()
+            r = _MOVE_RESOLVER.resolve(key, "moves", cutoff=0.8)
+            if r:
+                mid = r[1]
+        except Exception:
+            mid = None
+    _MOVE_ID_CACHE[key] = mid
+    return mid
+
+
+def _move_effect_vec_from_id(name) -> np.ndarray:
+    """技の付随効果5次元 (encoders._move_effect_vec と同義)。
+
+    advisor側dexには効果フィールドが無いため poke-env の技データを使う
+    """
+    key = str(name) if name else ""
+    if key in _EFFECT_CACHE:
+        return _EFFECT_CACHE[key]
+    v = np.zeros(MOVE_EFFECT_DIM, dtype=np.float32)
+    mid = _move_id_from_any(key) if key else None
+    if mid:
+        try:
+            from poke_env.battle import Move
+            from champions_agent.agent.encoders import _move_effect_vec
+            v = _move_effect_vec(Move(mid, gen=9))
+        except Exception:
+            pass
+    _EFFECT_CACHE[key] = v
+    return v
 
 
 def _adapt_obs(model, obs: np.ndarray) -> np.ndarray:
@@ -442,13 +491,38 @@ def encode_state(state: dict, my_spe_actual: Optional[float] = None) -> Optional
         if b is not None and own is not None:
             bench_tactics[4 + i] = _best_move_eff_dict(own, b) / 4.0
 
+    # ============ v3拡張 (技効果/天候残り/控え同士。encoders と同並び) =======
+    own_move_effects = [
+        _move_effect_vec_from_id(moves[i].get("move_id")) if i < len(moves)
+        else np.zeros(MOVE_EFFECT_DIM, dtype=np.float32)
+        for i in range(N_MOVE_SLOTS)]
+    opp_move_effects = [
+        _move_effect_vec_from_id(revealed_ja[i]) if i < len(revealed_ja)
+        else np.zeros(MOVE_EFFECT_DIM, dtype=np.float32)
+        for i in range(N_MOVE_SLOTS)]
+
+    f = state.get("field") or {}
+    field_remaining = np.array([
+        min(max(f.get("weather_turns") or 0, 0), 8) / 8.0,
+        min(max(f.get("terrain_turns") or 0, 0), 8) / 8.0], dtype=np.float32)
+
+    bench_matchup = np.zeros(4, dtype=np.float32)
+    for i in range(2):
+        mb = own_bench[i] if i < len(own_bench) else None
+        for j in range(2):
+            ob = opp_bench[j] if j < len(opp_bench) else None
+            if mb is not None and ob is not None:
+                bench_matchup[i * 2 + j] = _best_move_eff_dict(mb, ob) / 4.0
+
     vec = np.concatenate([own_vec, opp_vec, opp_extra,
                           *own_bench_vecs, *opp_bench_vecs, opp_count,
                           _side_vec(my), _side_vec(op),
                           _field_vec(state), speed,
                           *opp_move_vecs, own_vol, opp_vol, mega_vec,
                           own_item, opp_item, misc,
-                          bench_tactics]).astype(np.float32)
+                          bench_tactics,
+                          *own_move_effects, *opp_move_effects,
+                          field_remaining, bench_matchup]).astype(np.float32)
     if len(vec) < OBS_DIM:
         vec = np.concatenate([vec, np.zeros(OBS_DIM - len(vec), dtype=np.float32)])
     return vec[:OBS_DIM]

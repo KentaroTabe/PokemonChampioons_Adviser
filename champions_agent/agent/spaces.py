@@ -40,7 +40,16 @@ N_VOLATILE_SLOTS = 6
 N_ITEM_CATS = 6
 _EXTRA_DIM_V2 = N_MOVE_SLOTS * MOVE_FEAT_DIM + 12 + 3 + 12 + 2 + 6  # = 71
 
-BATTLE_OBS_DIM = _OBS_DIM_V1 + _EXTRA_DIM_V2  # = 298
+# --- v3拡張: 技の付随効果 + 天候残り + 控え同士のマッチアップ ---
+# 技効果5次元 (自分ランク上昇/自分ランク低下/相手ランク低下/状態異常率/回復率)
+# を自分の技4 + 相手の判明技4 に付与 = 40
+# (りゅうのまい・でんじは・みがわり等の変化技が観測上区別できなかった)
+# 天候/フィールドの残りターン (概算/8) = 2
+# 自分控え2 x 相手控え2 の打点相性 (突破後の詰め筋評価) = 4
+MOVE_EFFECT_DIM = 5
+_EXTRA_DIM_V3 = 2 * N_MOVE_SLOTS * MOVE_EFFECT_DIM + 2 + 4  # = 46
+
+BATTLE_OBS_DIM = _OBS_DIM_V1 + _EXTRA_DIM_V2 + _EXTRA_DIM_V3  # = 344
 
 # --- 選出方策用の旧エンコーダ次元 (encoders.encode_own_pokemon 等) ---
 POKEMON_FEATURE_DIM = 64

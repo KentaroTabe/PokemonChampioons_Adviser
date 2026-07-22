@@ -13,7 +13,7 @@ import numpy as np
 
 from champions_agent.agent.spaces import (
     POKEMON_FEATURE_DIM, OPPONENT_POKEMON_FEATURE_DIM, FIELD_FEATURE_DIM,
-    BATTLE_OBS_DIM, N_MOVE_SLOTS, MOVE_FEAT_DIM,
+    BATTLE_OBS_DIM, N_MOVE_SLOTS, MOVE_FEAT_DIM, MOVE_EFFECT_DIM,
 )
 
 ALL_TYPES = [
@@ -307,6 +307,81 @@ def _mega_in_team(team) -> bool:
         return False
 
 
+def _move_effect_vec(move) -> np.ndarray:
+    """技の付随効果5次元: [自分ランク上昇, 自分ランク低下, 相手ランク低下,
+    状態異常付与率, 回復率]。りゅうのまい/でんじは等の変化技の区別に必須"""
+    vec = np.zeros(MOVE_EFFECT_DIM, dtype=np.float32)
+    if move is None:
+        return vec
+    try:
+        self_up = self_down = targ_down = 0.0
+        # 主効果boosts: target=selfなら自分、そうでなければ相手に適用
+        # (poke-envのtargetはTarget列挙型のため文字列包含で判定)
+        boosts = getattr(move, "boosts", None) or {}
+        target = str(getattr(move, "target", "") or "").lower()
+        for v in boosts.values():
+            if "self" in target:
+                self_up += max(v, 0)
+                self_down += max(-v, 0)
+            else:
+                targ_down += max(-v, 0)
+        sb = getattr(move, "self_boost", None) or {}
+        for v in (sb.get("boosts") or {}).values() if "boosts" in sb else sb.values():
+            self_up += max(v, 0)
+            self_down += max(-v, 0)
+        # 副次効果 (確率つき): 相手デバフ/状態異常
+        status_chance = 1.0 if getattr(move, "status", None) else 0.0
+        for sec in (getattr(move, "secondary", None) or []) if \
+                isinstance(getattr(move, "secondary", None), list) else \
+                ([move.secondary] if getattr(move, "secondary", None) else []):
+            chance = float(sec.get("chance") or 100) / 100.0
+            for v in (sec.get("boosts") or {}).values():
+                targ_down += max(-v, 0) * chance
+            if sec.get("status"):
+                status_chance = max(status_chance, chance)
+            sself = sec.get("self") or {}
+            for v in (sself.get("boosts") or {}).values():
+                self_up += max(v, 0) * chance
+        # 回復 (heal/drain)
+        heal = 0.0
+        h = getattr(move, "heal", None)
+        if h:
+            heal = float(h[0]) / float(h[1]) if isinstance(h, (list, tuple)) \
+                else float(h)
+        d = getattr(move, "drain", None)
+        if d:
+            heal = max(heal, (float(d[0]) / float(d[1]) if
+                              isinstance(d, (list, tuple)) else float(d)) * 0.75)
+        vec[0] = min(self_up, 4.0) / 4.0
+        vec[1] = min(self_down, 4.0) / 4.0
+        vec[2] = min(targ_down, 4.0) / 4.0
+        vec[3] = min(status_chance, 1.0)
+        vec[4] = min(heal, 1.0)
+    except Exception:
+        pass
+    return vec
+
+
+def _field_remaining_vec(battle) -> np.ndarray:
+    """天候/フィールドの残りターン概算 (/8)。正確な残数は岩/持ち物依存の
+    ため、開始からの経過で 8-経過 を上限推定する"""
+    vec = np.zeros(2, dtype=np.float32)
+    try:
+        turn = int(battle.turn or 0)
+        for _w, start in (battle.weather or {}).items():
+            vec[0] = max(0.0, 8.0 - (turn - int(start or turn))) / 8.0
+            break
+        for _f, start in (battle.fields or {}).items():
+            name = _f.name.lower()
+            if "trick_room" in name:
+                continue
+            vec[1] = max(0.0, 8.0 - (turn - int(start or turn))) / 8.0
+            break
+    except Exception:
+        pass
+    return vec
+
+
 def encode_battle(battle) -> np.ndarray:
     """AbstractBattle -> 固定長観測ベクトル (BATTLE_OBS_DIM)"""
     own = battle.active_pokemon
@@ -442,12 +517,39 @@ def encode_battle(battle) -> np.ndarray:
         if b is not None and own is not None:
             bench_tactics[4 + i] = _best_move_eff(own, b) / 4.0
 
+    # ================= v3拡張 (技効果/天候残り/控え同士) ====================
+    own_moves_list = []
+    if own is not None:
+        try:
+            own_moves_list = list(own.moves.values())
+        except Exception:
+            pass
+    own_move_effects = [
+        _move_effect_vec(own_moves_list[i] if i < len(own_moves_list) else None)
+        for i in range(N_MOVE_SLOTS)]
+    opp_move_effects = [
+        _move_effect_vec(opp_revealed[i] if i < len(opp_revealed) else None)
+        for i in range(N_MOVE_SLOTS)]
+
+    field_remaining = _field_remaining_vec(battle)
+
+    # 自分控え2 x 相手控え2: 突破後の詰め筋 (自分の控えの打点が相手の控えに通るか)
+    bench_matchup = np.zeros(4, dtype=np.float32)
+    for i in range(2):
+        mb = own_bench[i] if i < len(own_bench) else None
+        for j in range(2):
+            ob = opp_bench[j] if j < len(opp_bench) else None
+            if mb is not None and ob is not None:
+                bench_matchup[i * 2 + j] = _best_move_eff(mb, ob) / 4.0
+
     vec = np.concatenate([own_vec, opp_vec, opp_extra,
                           *own_bench_vecs, *opp_bench_vecs, opp_count_vec,
                           my_side, opp_side, field, speed_vec,
                           *opp_move_vecs, own_vol, opp_vol, mega_vec,
                           own_item, opp_item, misc,
-                          bench_tactics]).astype(np.float32)
+                          bench_tactics,
+                          *own_move_effects, *opp_move_effects,
+                          field_remaining, bench_matchup]).astype(np.float32)
 
     # 固定長を保証
     if len(vec) < BATTLE_OBS_DIM:

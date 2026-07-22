@@ -15,7 +15,8 @@ from advisor.rl_bridge import (_legal_actions, encode_state, policy_hint,
 def _state():
     return {
         "scene": "command", "turn": 4,
-        "field": {"weather": "rain", "terrain": None, "trick_room": False},
+        "field": {"weather": "rain", "weather_turns": 5, "terrain": None,
+                  "trick_room": False},
         "mega_used": {"player": False, "opponent": False},
         "player": {"active_index": 0, "remaining": 3,
                    "hazards": {"stealth_rock": True, "spikes": 0,
@@ -66,7 +67,16 @@ def test_encode():
     assert obs[276] == 0.0 and obs[277] == 0.0
     # 自分の残数: 3体中ミミッキュひんし -> 2/3
     assert abs(obs[290] - 2.0 / 3.0) < 1e-5, f"残数位置ずれ: {obs[290]}"
-    print(f"test_encode OK ({OBS_DIM}dim, 値域正常, v1/v2位置検証OK)")
+    # v3拡張 (298以降): 自技効果4x5 -> 318; 相手技効果4x5 -> 338;
+    #                   天候残り2 -> 340; 控え同士4 -> 344
+    # 自分の技スロット2 = れいとうパンチ (副次10%こおり) -> 状態異常率0.1
+    assert abs(obs[298 + 2 * 5 + 3] - 0.1) < 1e-5, \
+        f"技効果(状態異常率)位置ずれ: {obs[311]}"
+    # スロット0 = じしん (付随効果なし) -> 全0
+    assert np.all(obs[298:303] == 0.0), obs[298:303]
+    # 天候残りターン: weather_turns=5 -> 5/8
+    assert abs(obs[338] - 5.0 / 8.0) < 1e-5, f"天候残り位置ずれ: {obs[338]}"
+    print(f"test_encode OK ({OBS_DIM}dim, 値域正常, v1/v2/v3位置検証OK)")
 
 
 def test_legal_actions():
