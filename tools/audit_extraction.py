@@ -67,7 +67,7 @@ def _summarize_state(st: dict) -> str:
     return "\n".join(lines)
 
 
-def audit(battle_log: str) -> None:
+def audit(battle_log: str, include_selection: bool = False) -> None:
     frames = _frames()
     print(f"=== 監査ペア: {battle_log} (フレーム{len(frames)}枚) ===")
     print("各行のフレームをReadで目視し、抽出状態と突き合わせる:\n")
@@ -77,6 +77,11 @@ def audit(battle_log: str) -> None:
         t = d.get("t", 0)
         typ = d.get("type")
         if typ not in ("scene", "events", "hp"):
+            continue
+        # 既定は対戦中の状況理解が主目的: 選出画面レコードはスキップ
+        # (選出抽出は監査済みでほぼ正確なため。--include-selection で含める)
+        if not include_selection and typ == "scene" and \
+                d.get("scene") in ("selection", "standby"):
             continue
         hit = _nearest_frame(frames, t)
         if hit is None:
@@ -98,6 +103,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="抽出監査ハーネス")
     ap.add_argument("--battle", default=None)
     ap.add_argument("--at", type=float, default=None)
+    ap.add_argument("--include-selection", action="store_true",
+                    help="選出画面のレコードも監査対象に含める")
     args = ap.parse_args()
     if args.at:
         # 指定時刻に最も近い対戦ログレコードを表示
@@ -114,7 +121,7 @@ def main() -> None:
         return
     battle = args.battle or sorted(
         glob.glob(str(REPO / "logs" / "battles" / "*.jsonl")))[-1]
-    audit(battle)
+    audit(battle, include_selection=args.include_selection)
 
 
 if __name__ == "__main__":
