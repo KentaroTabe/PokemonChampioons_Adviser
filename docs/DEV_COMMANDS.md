@@ -120,6 +120,8 @@ HP幻視があり監査に不適。根拠はtools/audit_subtask.pyのdocstring�
 | `tail -f logs/auto_tune.log` | チューナーの判定ログ |
 | `python -m champions_agent.train.opponent_pool --list` | selfplay相手プールの一覧 |
 | `python -m tools.probe_policy` | 方策の健全性プローブ (攻撃率/抜群率) |
+| `python -m tools.check_search_expert [--battles N] [--depth 1\|2]` | 探索エキスパート (学習相手/BC教師) の実戦強度診断 |
+| `python -m champions_agent.train.bc_pretrain --dry-run` | 探索エンジンの行動クローン微調整 (⚠実行条件はdocstring参照) |
 | `python -m tools.smoke_train` / `smoke_selfplay` | 短時間の学習/セルフプレイ疎通 |
 | `python -m tools.validate_teams` | 生成チームのShowdownバリデーション |
 | `python -m tools.check_action_mask` | 行動マスクの検証 |
