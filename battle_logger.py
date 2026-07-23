@@ -29,6 +29,7 @@ def _compact_state(state: dict) -> dict:
         return {
             "species": p.get("species_id"),
             "ja": p.get("species_ja"),
+            "types": p.get("types"),
             "hp": p.get("hp_percent"),
             "hp_raw": [p.get("hp_current"), p.get("hp_max")],
             "status": p.get("status"),

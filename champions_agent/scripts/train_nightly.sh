@@ -66,13 +66,13 @@ trap cleanup EXIT
     N_ENVS="${N_ENVS:-1}"
     RATE=$((N_ENVS * 80 + 40))
     TRAIN_TIMEOUT=$((TIMESTEPS / RATE + 900))
-    caffeinate -i python -m tools.smoke_train \
+    caffeinate -i -s python -m tools.smoke_train \
       --play-style "$style" --timesteps "$TIMESTEPS" --resume \
       --n-envs "$N_ENVS" --timeout "$TRAIN_TIMEOUT" || {
         echo "[nightly] [$style] 学習が失敗/タイムアウトしました"; continue; }
 
     echo "--- [$style] 評価 (vs Random, $EVAL_BATTLES 戦) ---"
-    caffeinate -i python -m champions_agent.train.evaluate \
+    caffeinate -i -s python -m champions_agent.train.evaluate \
       --play-style "$style" --battles "$EVAL_BATTLES" --timeout 900 || \
       echo "[nightly] [$style] 評価が失敗/タイムアウトしました"
 
@@ -80,7 +80,7 @@ trap cleanup EXIT
     # 昇格判定に使うため対戦数を多めにしてノイズを抑える (30戦だと±0.09)
     BENCH_BATTLES="${BENCH_BATTLES:-50}"
     echo "--- [$style] ベンチマーク評価 (vs 上位構築ヒューリスティクス, $BENCH_BATTLES 戦) ---"
-    caffeinate -i python -m champions_agent.train.evaluate \
+    caffeinate -i -s python -m champions_agent.train.evaluate \
       --play-style "$style" --battles "$BENCH_BATTLES" --opponent benchmark \
       --timeout 900 || echo "[nightly] [$style] ベンチマーク評価が失敗しました"
 
