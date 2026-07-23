@@ -1,8 +1,8 @@
 #!/bin/bash
 # 夜間セルフプレイ学習バッチ
 #
-#   bash champions_agent/scripts/train_nightly.sh                # 全性格 各50kステップ
-#   TIMESTEPS=200000 STYLES="offense stall" bash champions_agent/scripts/train_nightly.sh
+#   bash champions_agent/scripts/train_nightly.sh   # 既定: 日中50k/夜間200kステップ
+#   TIMESTEPS=200000 STYLES="offense cycle" bash champions_agent/scripts/train_nightly.sh
 #
 # - Showdownをポート8100で起動する (アドバイザーのバックエンド8000と併用可)
 # - caffeinate でMacのスリープを抑止する
@@ -14,8 +14,20 @@ REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"
 source .venv/bin/activate
 
-TIMESTEPS="${TIMESTEPS:-50000}"
-STYLES="${STYLES:-balance offense cycle stall}"
+# TIMESTEPS未指定時は時間帯で自動切替: 夜間(23時-7時)はマシンが空くため
+# 増量する (評価オーバーヘッド比を下げ、同じ壁時間で勾配量を増やす)
+if [ -z "${TIMESTEPS:-}" ]; then
+  HOUR=$(date +%H)
+  if [ "$HOUR" -ge 23 ] || [ "$HOUR" -lt 7 ]; then
+    TIMESTEPS=200000
+  else
+    TIMESTEPS=50000
+  fi
+fi
+# stallは既定から除外 (2026-07-24判断: アドバイザー未使用の性格で、
+# ベンチ勝率が構造的に~0.31に張り付き平均を下げ、学習時間の1/4を
+# 消費していた。相手チームとしてのstall構築は引き続き登場する)
+STYLES="${STYLES:-balance offense cycle}"
 EVAL_BATTLES="${EVAL_BATTLES:-30}"
 export SHOWDOWN_PORT="${SHOWDOWN_PORT:-8100}"
 
