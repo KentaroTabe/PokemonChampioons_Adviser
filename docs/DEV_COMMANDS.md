@@ -84,9 +84,13 @@ plist本体は `scripts/com.championsadviser.train.plist` (repo管理)。編集�
 | `python -m tools.analyze_corrections` | 手動修正ログの集計 (誤認識ランキング) |
 | `python -m tools.audit_extraction [--battle <log>]` | 監査ペア一覧 (フレーム×抽出主張、対戦中フェーズ主体) |
 | `python -m tools.audit_subtask [--battle <log>] [--max-frames N]` | 抽出監査をsonnetサブタスクで実行 → `logs/audit_reports/` にレポート |
+| `python -m tools.audit_monitor [--backfill N]` | リアルタイム監査: 対戦終了を検知して自動でsonnet監査 (フォアグラウンド常駐、Ctrl+Cで停止) |
 
 監査サブタスクのモデルはsonnet固定 (2026-07-23実測: haikuは技名の取り違え・
 HP幻視があり監査に不適。根拠はtools/audit_subtask.pyのdocstring参照)。
+リアルタイム監査は起動後に終わった対戦のみ対象 (起動前の分は `--backfill N` で
+直近N対戦まで遡れる)。レポート済みの対戦は再監査しない。1対戦あたり
+数分・API課金が発生するため、必要な検証期間だけ起動する運用を想定。
 
 デバッグフレーム: サーバーを `DEBUG_DUMP_FRAMES=1` で起動すると
 `debug_frames/` に保存される (通常10秒毎、場の状況=fc_/選出=sel_は2秒毎)。

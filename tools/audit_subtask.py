@@ -79,7 +79,7 @@ def run(battle_log: str, max_frames: int, timeout: int) -> Path:
         raise SystemExit(f"監査ペアなし: {battle_log} (フレーム保持期間切れの可能性)")
     prompt, n = build_prompt(pairs, max_frames)
     print(f"[audit_subtask] {Path(battle_log).name}: "
-          f"{len(pairs)}ペア → フレーム{n}枚を監査 (model={MODEL})")
+          f"{len(pairs)}ペア → フレーム{n}枚を監査 (model={MODEL})", flush=True)
     t0 = time.time()
     res = subprocess.run(
         ["claude", "-p", prompt, "--model", MODEL,
@@ -93,7 +93,7 @@ def run(battle_log: str, max_frames: int, timeout: int) -> Path:
               f"- 実行: {time.strftime('%Y-%m-%d %H:%M:%S')} / model={MODEL}"
               f" / フレーム{n}枚 / 所要{time.time() - t0:.0f}s\n\n")
     out.write_text(header + res.stdout, encoding="utf-8")
-    print(f"[audit_subtask] レポート: {out}")
+    print(f"[audit_subtask] レポート: {out}", flush=True)
     return out
 
 
