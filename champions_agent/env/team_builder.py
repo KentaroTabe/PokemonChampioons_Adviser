@@ -229,11 +229,10 @@ def _legal_item_ids() -> set:
                 ids |= set(_re.findall(r"^\t(\w+): \{", ts.read_text(), _re.M))
             except Exception:
                 pass
-        try:
-            jp = repo / "vision" / "data" / "jp_names.json"
-            ids |= set(json.loads(jp.read_text()).get("items", {}).values())
-        except Exception:
-            pass
+        # 注意: jp_names.json は合法集合に含めない。あれは表示名解決用の
+        # 辞書であり、シムに存在しないIDが混ざるとバリデーション却下で
+        # env起動が全滅する (2026-07-23 に発生: 合成ストーンIDが混入し
+        # 学習サイクルが空回りした)
         _LEGAL_ITEM_IDS = ids
     return _LEGAL_ITEM_IDS
 
