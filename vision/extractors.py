@@ -258,12 +258,22 @@ def _set_hp(state: BattleStateV2, side_name: str, mon,
     old = mon.hp_percent
     raw = None
     if cur is not None and mx:
-        # 自分側: チーム全員の理論最大HP集合に無い最大値は誤読として棄却
-        # (watch/場の状況画面など全ての読取経路に適用する)
+        # 自分側: 型登録済みの種族のみ理論最大HPで検証する。
+        # 未登録種族 (チーム変更後にmy_team.json未更新) まで集合検証すると
+        # 全読取が棄却されHPが取れなくなる (2026-07-23 監査で発見)
         if side_name == "player":
-            legal = _my_legal_maxes()
-            if legal and mx not in legal:
+            expected = _expected_my_max(mon)
+            if expected and mx != expected:
                 return
+            if expected is None:
+                legal = _my_legal_maxes()
+                try:
+                    from advisor.my_team import has_build
+                    registered = has_build(mon.species_ja)
+                except Exception:
+                    registered = False
+                if registered and legal and mx not in legal:
+                    return
         # 最大HPは種族ごとの多数決で確定する (「28/167」→「28/67」のような
         # 桁落ち誤読が50以上のガードを通過して定着するのを防ぐ)
         votes = state.hp_max_votes.setdefault((side_name, mon.species_ja), {})
@@ -371,10 +381,15 @@ def extract_field_hp(img, state: BattleStateV2) -> None:
             known = _expected_my_max(me) or \
                 (me.hp_max if me.hp_max and me.hp_max >= 50 else None)
             legal = _my_legal_maxes()
+            try:
+                from advisor.my_team import has_build
+                registered = has_build(me.species_ja)
+            except Exception:
+                registered = False
             if known and mx != known:
                 pass   # 基準と食い違う読みは捨てる (桁落ちは現在値も壊れている)
-            elif known is None and legal and mx not in legal:
-                pass   # チームの理論最大HP集合に無い読みも捨てる
+            elif known is None and registered and legal and mx not in legal:
+                pass   # 登録済み種族なのに理論最大集合に無い読みは捨てる
             elif cur <= mx:
                 _set_hp(state, "player", me, cur=cur, mx=mx)
 
