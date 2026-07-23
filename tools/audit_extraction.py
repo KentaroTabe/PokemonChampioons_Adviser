@@ -67,19 +67,21 @@ def _summarize_state(st: dict) -> str:
     return "\n".join(lines)
 
 
-def audit(battle_log: str, include_selection: bool = False) -> None:
+def collect_pairs(battle_log: str, include_selection: bool = False) -> list:
+    """対戦ログとデバッグフレームの監査ペアを構造化して返す。
+
+    返り値: [{"t", "ts_s", "frame", "tol", "claim"}]  (claim = 抽出主張の要約文)
+    既定は対戦中の状況理解が主目的のため選出画面レコードはスキップする
+    (選出抽出は監査済みでほぼ正確。include_selection=True で含める)
+    """
     frames = _frames()
-    print(f"=== 監査ペア: {battle_log} (フレーム{len(frames)}枚) ===")
-    print("各行のフレームをReadで目視し、抽出状態と突き合わせる:\n")
-    n = 0
+    pairs = []
     for line in open(battle_log):
         d = json.loads(line)
         t = d.get("t", 0)
         typ = d.get("type")
         if typ not in ("scene", "events", "hp"):
             continue
-        # 既定は対戦中の状況理解が主目的: 選出画面レコードはスキップ
-        # (選出抽出は監査済みでほぼ正確なため。--include-selection で含める)
         if not include_selection and typ == "scene" and \
                 d.get("scene") in ("selection", "standby"):
             continue
@@ -88,15 +90,23 @@ def audit(battle_log: str, include_selection: bool = False) -> None:
             continue
         ts_s = time.strftime("%H:%M:%S", time.localtime(t))
         if typ == "scene":
-            st = d.get("state") or {}
-            print(f"--- {ts_s} scene={d.get('scene')} frame={hit[2]} "
-                  f"(±{hit[0]:.0f}s)")
-            print(_summarize_state(st))
+            claim = f"scene={d.get('scene')}\n" + \
+                _summarize_state(d.get("state") or {})
         else:
-            info = d.get("fired") or d.get("text")
-            print(f"--- {ts_s} {typ}: {info} frame={hit[2]} (±{hit[0]:.0f}s)")
-        n += 1
-    print(f"\n監査対象 {n}件")
+            claim = f"{typ}: {d.get('fired') or d.get('text')}"
+        pairs.append({"t": t, "ts_s": ts_s, "frame": hit[2],
+                      "tol": hit[0], "claim": claim})
+    return pairs
+
+
+def audit(battle_log: str, include_selection: bool = False) -> None:
+    pairs = collect_pairs(battle_log, include_selection)
+    print(f"=== 監査ペア: {battle_log} ===")
+    print("各行のフレームをReadで目視し、抽出状態と突き合わせる:\n")
+    for p in pairs:
+        print(f"--- {p['ts_s']} frame={p['frame']} (±{p['tol']:.0f}s)")
+        print(p["claim"])
+    print(f"\n監査対象 {len(pairs)}件")
 
 
 def main() -> None:
