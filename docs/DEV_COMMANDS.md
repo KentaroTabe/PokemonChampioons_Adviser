@@ -190,6 +190,7 @@ search=探索エキスパート (アドバイザーの読み筋)。
 - `README.md` — セットアップと実運用/学習テストの手順
 - `ARCHITECTURE.md` — 全体設計
 - `docs/OPERATIONS.md` — 常駐プロセス運用 (nohup起動/反映/停止)
+- `docs/CONNECTION_TEST_CHECKLIST.md` — 接続テストで確認すべき項目 (2026-07-24更新分)
 - `docs/TOP_PLAYER_PLAN.md` — 機能ロードマップと実施状況
 - `docs/WINDOWS_IPHONE_TEST.md` — Windows+iPhoneでのテスト手順
 - `docs/REPORT_EXTRACTION_PLAN.md` — 課題提出用の部分公開方針
