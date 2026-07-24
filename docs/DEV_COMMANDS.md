@@ -108,6 +108,14 @@ HP幻視があり監査に不適。根拠はtools/audit_subtask.pyのdocstring�
 |---|---|
 | `python -m tools.team_report [--suggest] [--top N]` | 構築診断 (マッチアップ/穴/S関係/補完) |
 | `python -m tools.generate_teams <コア名> [--beam N] [--n N]` | 共起ビーム探索で構築生成 |
+| `python -m tools.evaluate_team <6体\|--myteam> [--battles N] [--random-preview]` | チーム固定の実対戦評価 (両側RL操縦+相性選出、構築の強さを分離測定) |
+| `python -m tools.check_team_eval [--battles 60]` | 評価の一貫性ゲート (再現性/順位安定性。進化探索の前提確認) |
+| `python -m tools.evolve_teams [--population 12] [--generations 3] [--battles 60] [--update-archive]` | 構築の進化探索 (対戦AIが評価関数。結果は logs/team_evolution/) |
+
+進化探索は相手分布に `--forecast-mix` (使用率トレンドの1期外挿。履歴が
+2ヶ月分たまるまで自動無効) と `--archive-mix` (過去の優勝チーム=PSRO反復)
+を混ぜられる。`--update-archive` で今回の最優秀をアーカイブへ追加し、
+定期実行すると「対策の対策」まで見た頑健な構築へ収束していく。
 
 ## 強化学習 (champions_agent)
 
