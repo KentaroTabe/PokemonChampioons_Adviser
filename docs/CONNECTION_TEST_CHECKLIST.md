@@ -6,13 +6,11 @@
 
 ## 0. 前提と起動
 
-- [ ] 学習ループが対戦の妨げになる場合は一時停止
-      (`launchctl unload ~/Library/LaunchAgents/com.championsadviser.train.plist`)
-- [ ] `bash scripts/deploy.sh` で更新を反映 (対戦中ガードが働くこと自体も確認対象)
-- [ ] `bash scripts/start_all_nohup.sh` で常駐起動 (Showdown 8100 / API 8000 / フロント 3000)
-- [ ] ブラウザで 3000 を開き「バックエンド: 接続中」表示
-- [ ] もっと見る検証をするなら `DEBUG_DUMP_FRAMES=1` で起動しておく
-      (不一致時の原因調査にフレームが要る)
+- [ ] `bash scripts/start_connection_test.sh` を実行する
+      (学習ループ一時停止 → Showdown確保 → 最新コードでアドバイザー+
+      フロント起動 → 接続先URLの表示、まで一括。フレーム保存も有効)
+- [ ] リアルタイム監査も検証する場合は `--with-audit` 付きで実行する
+- [ ] ブラウザで表示されたURL (3000) を開き「バックエンド: 接続中」表示
 
 ## A. もっと見る画面の自パーティ自動登録 (最重要・新機能)
 
@@ -70,20 +68,18 @@
 
 ## E. リアルタイム監査 (任意・通常は停止のまま)
 
-検証したい場合のみ:
+`--with-audit` で開始した場合のみ:
 
-- [ ] `DEBUG_DUMP_FRAMES=1` でサーバー起動+`python -m tools.audit_monitor` を起動
 - [ ] 1対戦終えて約30〜40秒後に監査が自動実行され、
       `logs/audit_reports/<対戦名>.md` が生成される
 - [ ] レート画面などを開いたままでも対戦終了が検知される (レコード内容ベース判定)
-- [ ] 終わったらモニターは Ctrl+C で停止する (常駐させない)
 
 ## F. テスト後の確認
 
-- [ ] `python -m tools.analyze_battles --last 10` に今回の対戦が反映されている
-- [ ] `python -m tools.check_battle_log` で対戦ログの内容が妥当
-- [ ] 一時停止した学習ループを再開
-      (`launchctl load -w ~/Library/LaunchAgents/com.championsadviser.train.plist`)
+- [ ] `bash scripts/end_connection_test.sh` を実行する
+      (監査モニター停止 → アドバイザー/フロント停止 → 学習ループ再開 →
+      直近10戦のサマリー表示、まで一括)
+- [ ] 表示されたサマリーに今回の対戦が反映されている
 - [ ] 気づいた誤認識は `python -m tools.audit_subtask` (sonnet監査) か
       debug_frames の該当フレーム共有で報告
 
