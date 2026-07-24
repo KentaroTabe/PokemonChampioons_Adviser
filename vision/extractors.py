@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import difflib
 import re
 import time
 from typing import Optional
@@ -258,12 +259,22 @@ def _set_hp(state: BattleStateV2, side_name: str, mon,
     old = mon.hp_percent
     raw = None
     if cur is not None and mx:
-        # 自分側: チーム全員の理論最大HP集合に無い最大値は誤読として棄却
-        # (watch/場の状況画面など全ての読取経路に適用する)
+        # 自分側: 型登録済みの種族のみ理論最大HPで検証する。
+        # 未登録種族 (チーム変更後にmy_team.json未更新) まで集合検証すると
+        # 全読取が棄却されHPが取れなくなる (2026-07-23 監査で発見)
         if side_name == "player":
-            legal = _my_legal_maxes()
-            if legal and mx not in legal:
+            expected = _expected_my_max(mon)
+            if expected and mx != expected:
                 return
+            if expected is None:
+                legal = _my_legal_maxes()
+                try:
+                    from advisor.my_team import has_build
+                    registered = has_build(mon.species_ja)
+                except Exception:
+                    registered = False
+                if registered and legal and mx not in legal:
+                    return
         # 最大HPは種族ごとの多数決で確定する (「28/167」→「28/67」のような
         # 桁落ち誤読が50以上のガードを通過して定着するのを防ぐ)
         votes = state.hp_max_votes.setdefault((side_name, mon.species_ja), {})
@@ -292,11 +303,18 @@ def _set_hp(state: BattleStateV2, side_name: str, mon,
         # 初回は即反映 (アドバイスが値なしで止まらないように)
         commit()
         mon._hp_event_base = new
+        mon._hp_stable_since = time.time()
         return
     if last_read is None or abs(new - last_read) > 2.0:
         mon._hp_stable_count = 1
+        mon._hp_stable_since = time.time()
         return   # 1回だけの観測は状態にも反映しない (誤読の混入防止)
     mon._hp_stable_count = getattr(mon, "_hp_stable_count", 1) + 1
+    # 時間安定条件: 気絶/被弾演出はHPバーが徐々に減るため、高頻度解析では
+    # 遷移中の値も2回連続で読めてしまう。同値が600ms以上続いた場合のみ
+    # 確定する (演出終了後の静止値だけが通る)
+    if time.time() - getattr(mon, "_hp_stable_since", 0.0) < 0.6:
+        return
     # ほぼ0%は交代/メガシンカ演出中の空バー誤読が多いため、3回連続観測を
     # 要求する (本物のひんし・瀕死残りなら低%表示が続くので3回目で確定する)。
     # バー由来の読取は1.4%等の端数になるため、閾値は0%だけでなく3%まで広げる
@@ -364,10 +382,15 @@ def extract_field_hp(img, state: BattleStateV2) -> None:
             known = _expected_my_max(me) or \
                 (me.hp_max if me.hp_max and me.hp_max >= 50 else None)
             legal = _my_legal_maxes()
+            try:
+                from advisor.my_team import has_build
+                registered = has_build(me.species_ja)
+            except Exception:
+                registered = False
             if known and mx != known:
                 pass   # 基準と食い違う読みは捨てる (桁落ちは現在値も壊れている)
-            elif known is None and legal and mx not in legal:
-                pass   # チームの理論最大HP集合に無い読みも捨てる
+            elif known is None and registered and legal and mx not in legal:
+                pass   # 登録済み種族なのに理論最大集合に無い読みは捨てる
             elif cur <= mx:
                 _set_hp(state, "player", me, cur=cur, mx=mx)
 
@@ -488,6 +511,11 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
                    or _dl.SequenceMatcher(None, key_new, k).ratio() >= 0.5)
             for k in cur)
         if similar:
+            # OCR揺れの別表記をエイリアスとして蓄積 (以後の帰属照合に使う)
+            if opp.display_name and opp.display_name != name_text \
+                    and opp.display_name not in (opp.aliases or []):
+                opp.aliases.append(opp.display_name)
+                opp.aliases = opp.aliases[-6:]
             opp.display_name = name_text
         elif opp.species_ja:
             # 見逃した交代の兆候: 表示名の合う既存枠があればそちらへ切替
@@ -1019,21 +1047,152 @@ _EN2JA_TYPES = {"Normal": "ノーマル", "Fire": "ほのお", "Water": "みず"
                 "Dark": "あく", "Steel": "はがね", "Fairy": "フェアリー"}
 
 
-def _dex_types_ja(mon) -> Optional[set]:
-    """自分の個体の図鑑タイプ (日本語集合)。メガ済みならメガ後の姿で引く"""
-    sid = mon.species_id
-    if not sid:
+def _dex_types_ja_by_id(species_id) -> Optional[set]:
+    """種族IDの図鑑タイプ (日本語集合)"""
+    if not species_id:
         return None
     try:
         from advisor.dex import get_dex
-        if mon.is_mega and get_dex().species(sid + "mega"):
-            sid = sid + "mega"
-        sp = get_dex().species(sid)
+        sp = get_dex().species(species_id)
         if sp:
             return {_EN2JA_TYPES.get(t, t) for t in sp["types"]}
     except Exception:
         pass
     return None
+
+
+def _dex_types_ja(mon) -> Optional[set]:
+    """自分の個体の図鑑タイプ (日本語集合)。メガ済みならメガ後の姿で引く"""
+    sid = mon.species_id
+    if sid and mon.is_mega:
+        try:
+            from advisor.dex import get_dex
+            if get_dex().species(sid + "mega"):
+                sid = sid + "mega"
+        except Exception:
+            pass
+    return _dex_types_ja_by_id(sid)
+
+
+_LIME_LOW = np.array([30, 100, 120])
+_LIME_HIGH = np.array([50, 255, 255])
+_STAT_KEYS = ("hp", "atk", "def", "spa", "spd", "spe")
+
+
+def _lime_ratio(region) -> float:
+    if region is None or region.size == 0:
+        return 0.0
+    hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, _LIME_LOW, _LIME_HIGH)
+    return cv2.countNonZero(mask) / float(region.shape[0] * region.shape[1])
+
+
+def _watch_active_tab(img) -> str:
+    """もっと見るパネルの選択中タブ (ライム色ピルの左右位置で判定)"""
+    tb = zones.WATCH["tab_bar"]
+    mid = (tb["x0"] + tb["x1"]) / 2.0
+    left = _lime_ratio(crop(img, {**tb, "x1": mid}))
+    right = _lime_ratio(crop(img, {**tb, "x0": mid}))
+    return "status" if right > left else "ability"
+
+
+def _highlight_species(img, resolver):
+    """もっと見る画面で左列のハイライト行 (カーソル対象) の種族を読む。
+
+    選出画面と交代画面で行ピッチが異なるため両ゾーン群を走査し、
+    ライム比率が最大の行の名前をOCRして種族に解決する。
+    """
+    best_r, best_zone = 0.0, None
+    for zset in (zones.SELECTION_MY, zones.WATCH_MY):
+        for z in zset:
+            r = _lime_ratio(crop(img, z["panel"]))
+            if r > best_r:
+                best_r, best_zone = r, z
+    if best_zone is None or best_r < 0.10:
+        return None
+    name = ocr.read_zone_text(img, best_zone["name"], mode="panel",
+                              allowlist=ocr.KATAKANA_ALLOWLIST)
+    if not name:
+        return None
+    return resolver.resolve_species(name, cutoff=0.7)
+
+
+def _extract_watch_status(img, state: BattleStateV2, resolver) -> None:
+    """ステータスタブ: 実数値/能力ポイント/性格を読み取り、種族値からの
+    理論値と全6ステータスが一致した場合のみ my_team へ型を保存する。
+
+    もっと見る画面 (選出/交代) からの自パーティ登録の自動化。理論値照合を
+    通った読取だけを保存するため、OCR誤読・誤帰属で誤った型は登録されない。
+    """
+    sp = _highlight_species(img, resolver)
+    if sp is None:
+        me = state.player.ensure_active()
+        if me is not None and me.species_ja:
+            sp = (me.species_ja, me.species_id)
+    if sp is None or not sp[1]:
+        return
+
+    values, ocr_points = {}, {}
+    for key, z in zip(_STAT_KEYS, zones.WATCH_STATS):
+        v = ocr.read_zone_text(img, z["value"], mode="panel",
+                               allowlist="0123456789")
+        if not v or not v.isdigit():
+            return   # 実数値6行すべて読めた場合のみ扱う
+        values[key] = int(v)
+        p = ocr.read_zone_text(img, z["points"], mode="panel",
+                               allowlist="0123456789")
+        # ポイント列は1桁の小さな文字でOCRが落ちやすい (実測: 0/1/2が空読み)。
+        # 読めた場合の照合にのみ使い、確定値は実数値からの逆算で決める
+        ocr_points[key] = int(p) if p and p.isdigit() else None
+
+    from advisor.my_team import (nature_multipliers, nature_names_ja,
+                                 update_build)
+    nature_text = ocr.read_zone_text(img, zones.WATCH["nature_value"],
+                                     mode="panel")
+    match = difflib.get_close_matches(nature_text or "", nature_names_ja(),
+                                      n=1, cutoff=0.6)
+    if not match:
+        return
+    nature = match[0]
+
+    try:
+        from advisor.dex import calc_hp, calc_stat, get_dex
+        base = (get_dex().species(sp[1]) or {}).get("baseStats") or {}
+    except Exception:
+        return
+    if not base:
+        return
+
+    # 能力ポイントの逆算: Lv50では実数値がポイントに対して単調増加のため
+    # 一意に定まる。逆算値が存在しない実数値 (誤読/種族違い) は保存しない
+    mults = nature_multipliers(nature) or {}
+    points = {}
+    for key in _STAT_KEYS:
+        cands = []
+        for p in range(33):
+            ev = min(252, p * 8)
+            calc = calc_hp(base.get("hp", 0), ev, 50) if key == "hp" else \
+                calc_stat(base.get(key, 0), ev, mults.get(key, 1.0), 50)
+            if calc == values[key]:
+                cands.append(p)
+        op = ocr_points[key]
+        if op is not None and op in cands:
+            points[key] = op
+        elif cands:
+            # 下降補正 (×0.9) では隣接ポイントが同じ実数値になり得る
+            # (例: ペリッパー攻撃63はp0/p1両方)。実数値が同じ=計算上
+            # 等価なので最小値を採る
+            points[key] = min(cands)
+        else:
+            state.log_event(
+                "system", f"もっと見る不一致: {sp[0]} {key} 実{values[key]} "
+                f"(逆算候補なし OCR{op}) 保存見送り", event_id=None)
+            return
+
+    if update_build(sp[0], {"能力ポイント": points, "性格": nature}):
+        pts = " ".join(f"{k}{v}" for k, v in points.items() if v)
+        state.log_event("system", f"my_team更新: {sp[0]} {nature} {pts}",
+                        event_id=None)
 
 
 def _watch_target(state: BattleStateV2, resolver, found_types, new_moves):
@@ -1076,6 +1235,16 @@ def _watch_target(state: BattleStateV2, resolver, found_types, new_moves):
 
 
 def extract_watch(img, state: BattleStateV2, resolver) -> None:
+    """様子を見る/もっと見る画面。中央パネルはタブで内容が変わる:
+    能力タブ=技/特性/持ち物、ステータスタブ=実数値/能力ポイント/性格"""
+    if _watch_active_tab(img) == "status":
+        _extract_watch_status(img, state, resolver)
+    else:
+        _extract_watch_ability(img, state, resolver)
+    _extract_watch_side_columns(img, state, resolver)
+
+
+def _extract_watch_ability(img, state: BattleStateV2, resolver) -> None:
     # タイプ (テキスト表記)
     type_text = ocr.read_zone_text(img, zones.WATCH["type_row"], mode="panel")
     found = []
@@ -1102,28 +1271,44 @@ def extract_watch(img, state: BattleStateV2, resolver) -> None:
             slot.pp, slot.max_pp = pp[0], pp[1]
         new_moves.append(slot)
 
-    # 表示中の個体を特定してから書き込む (誤帰属防止)
+    # 表示中の個体を特定してから書き込む (誤帰属防止)。
+    # 状態未構築 (選出中のもっと見る等) ではハイライト行の名前で特定する
     me = _watch_target(state, resolver, found, new_moves)
+    build_species = me.species_ja if me is not None else None
     if me is None:
-        state.log_event("system", f"様子見画面の帰属不能 (タイプ={found})",
-                        event_id=None)
-        return
-    if found:
-        me.types = found
+        hl = _highlight_species(img, resolver)
+        if hl is not None and found and \
+                _dex_types_ja_by_id(hl[1]) == set(found):
+            build_species = hl[0]   # my_team登録のみ行う (状態へは書かない)
+        else:
+            state.log_event("system", f"様子見画面の帰属不能 (タイプ={found})",
+                            event_id=None)
+            return
 
     # 特性 / 持ち物
+    ability_ja, item_ja = None, None
     ability_text = ocr.read_zone_text(img, zones.WATCH["ability_value"], mode="panel")
     if ability_text:
-        ab = _resolve_ability_validated(resolver, ability_text, me)
+        if me is not None:
+            ab = _resolve_ability_validated(resolver, ability_text, me)
+        else:
+            ab = resolver.resolve(ability_text, "abilities", cutoff=0.72)
         if ab:
-            me.ability_ja, me.ability_id = ab[0], ab[1]
+            ability_ja = ab[0]
+            if me is not None:
+                me.ability_ja, me.ability_id = ab[0], ab[1]
     item_text = ocr.read_zone_text(img, zones.WATCH["item_value"], mode="panel")
     if item_text:
         it = resolver.resolve(item_text, "items", cutoff=0.72)
         if it:
-            me.item_ja, me.item_id = it[0], it[1]
+            item_ja = it[0]
+            if me is not None:
+                me.item_ja, me.item_id = it[0], it[1]
 
-    if len(new_moves) >= 3:
+    if found and me is not None:
+        me.types = found
+
+    if len(new_moves) >= 3 and me is not None:
         # 既存エントリのPP情報は引き継ぐ
         old = {m.move_id or m.name_ja: m for m in me.moves}
         for slot in new_moves:
@@ -1134,6 +1319,19 @@ def extract_watch(img, state: BattleStateV2, resolver) -> None:
                 slot.effectiveness = prev.effectiveness
         me.moves = new_moves
 
+    # 自パーティ登録 (my_team) の自動更新: 技4つが読めた場合のみ技を保存
+    if build_species:
+        from advisor.my_team import update_build
+        patch = {"特性": ability_ja, "持ち物": item_ja}
+        if len(new_moves) == 4:
+            patch["技"] = [m.name_ja for m in new_moves]
+        if update_build(build_species, patch):
+            state.log_event("system",
+                            f"my_team更新: {build_species} (能力タブ)",
+                            event_id=None)
+
+
+def _extract_watch_side_columns(img, state: BattleStateV2, resolver) -> None:
     # 左列: 自分の選出パーティのHP実数値
     for i, z in enumerate(zones.WATCH_MY[:3]):
         name_text = ocr.read_zone_text(img, z["name"], mode="panel",

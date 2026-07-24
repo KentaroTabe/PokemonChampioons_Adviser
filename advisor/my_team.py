@@ -1,8 +1,9 @@
 """自分のチームの型 (能力ポイント/性格/持ち物) の登録と参照。
 
-画面からは自分のポケモンの努力値配分・性格は読み取れないため、既定では
-攻撃系252振りを仮定している。config/my_team.json に型を登録すると、
-自分側のダメージ計算・素早さ比較が実際の型で行われる。
+登録は「もっと見る」画面 (選出画面/交代画面) の自動読み取りで行われる
+(vision/extractors.py の様子見抽出がステータスタブ/能力タブを読んで
+update_build を呼ぶ)。config/my_team.json を手で編集しても良い。
+未登録の個体は攻撃系252振りを仮定してダメージ計算する。
 
 config/my_team.json の形式 (config/my_team.example.json 参照):
 {
@@ -119,6 +120,61 @@ def get_my_build(species_ja: Optional[str]) -> Optional[dict]:
 
 def has_build(species_ja: Optional[str]) -> bool:
     return get_my_build(species_ja) is not None
+
+
+def nature_names_ja() -> list:
+    """日本語の性格名一覧 (もっと見る画面のOCR照合用)"""
+    return [k for k in _NATURES if not k.isascii()]
+
+
+def nature_multipliers(nature_ja: str) -> Optional[dict]:
+    """性格名 -> {stat: 0.9/1.0/1.1}。未知の性格は None"""
+    if nature_ja not in _NATURES:
+        return None
+    pair = _NATURES[nature_ja]
+    return {pair[0]: 1.1, pair[1]: 0.9} if pair else {}
+
+
+_POINT_KEYS = {"hp": "h", "atk": "a", "def": "b",
+               "spa": "c", "spd": "d", "spe": "s"}
+
+
+def update_build(species_ja: str, patch: dict) -> bool:
+    """もっと見る画面の読み取り結果でエントリを更新する。
+
+    patch: {"能力ポイント": {stat: 0-32}, "性格": str, "持ち物": str,
+            "特性": str, "技": [str]} の部分集合 (空値は無視)。
+    変更があった場合のみ保存して True を返す。
+    """
+    if not species_ja:
+        return False
+    if "能力ポイント" in patch and patch["能力ポイント"]:
+        patch = dict(patch)
+        patch["能力ポイント"] = {
+            _POINT_KEYS.get(k, k): v
+            for k, v in patch["能力ポイント"].items() if v}
+    data = {k: dict(v) for k, v in _load().items()}
+    entry = data.get(species_ja, {})
+    changed = False
+    for key, val in patch.items():
+        if val in (None, "", [], {}):
+            continue
+        if entry.get(key) != val:
+            entry[key] = val
+            changed = True
+    if not changed:
+        return False
+    data[species_ja] = entry
+    try:
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CONFIG_PATH.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8")
+    except OSError as e:
+        print(f"[my_team] 保存失敗: {e}")
+        return False
+    print(f"[my_team] {species_ja} の型を更新: {list(patch.keys())}")
+    return True
 
 
 def get_my_moves(species_ja: Optional[str]) -> list:

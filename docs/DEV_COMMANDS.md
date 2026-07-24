@@ -80,11 +80,27 @@ plist本体は `scripts/com.championsadviser.train.plist` (repo管理)。編集�
 | `python -m tools.check_flow_tracking [dir]` | ターン/HP/スムージングの検証 |
 | `python -m tools.check_field_my_hp <frame...>` | 自分HPゾーンのOCR診断 |
 | `python -m tools.check_selection_frame <frame>` | 選出画面の抽出診断 |
+| `python -m tools.check_look_more <frame...>` | もっと見る画面の読取診断 (タブ/対象/実数値/性格) |
 | `python -m tools.check_battle_log [file]` | 対戦ログの内容確認 |
 | `python -m tools.analyze_corrections` | 手動修正ログの集計 (誤認識ランキング) |
+| `python -m tools.audit_extraction [--battle <log>]` | 監査ペア一覧 (フレーム×抽出主張、対戦中フェーズ主体) |
+| `python -m tools.audit_subtask [--battle <log>] [--max-frames N]` | 抽出監査をsonnetサブタスクで実行 → `logs/audit_reports/` にレポート |
+| `python -m tools.audit_monitor [--backfill N]` | リアルタイム監査: 対戦終了を検知して自動でsonnet監査 (フォアグラウンド常駐、Ctrl+Cで停止) |
+
+監査サブタスクのモデルはsonnet固定 (2026-07-23実測: haikuは技名の取り違え・
+HP幻視があり監査に不適。根拠はtools/audit_subtask.pyのdocstring参照)。
+リアルタイム監査は対戦中レコード (events/hp/対戦シーン) が30秒途絶えたら
+対戦終了と判定する (レート・選出などの対戦外の書き込みは無視)。起動後に
+終わった対戦のみ対象で、起動前の分は `--backfill N` で直近N対戦まで遡れる。
+1対戦あたり数分・API課金が発生するため、必要な検証期間だけ起動する運用を想定。
 
 デバッグフレーム: サーバーを `DEBUG_DUMP_FRAMES=1` で起動すると
 `debug_frames/` に保存される (通常10秒毎、場の状況=fc_/選出=sel_は2秒毎)。
+
+自パーティの型登録 (config/my_team.json) は「もっと見る」画面
+(選出画面/交代画面で各ポケモンにカーソル→もっと見る) の自動読み取りで行われる。
+能力タブ=技/特性/持ち物、ステータスタブ=能力ポイント/性格 (実数値との
+理論値照合を通った場合のみ保存)。フロントのパーティ編集フォームは手動修正用。
 
 ## パーティ構築
 
@@ -92,6 +108,14 @@ plist本体は `scripts/com.championsadviser.train.plist` (repo管理)。編集�
 |---|---|
 | `python -m tools.team_report [--suggest] [--top N]` | 構築診断 (マッチアップ/穴/S関係/補完) |
 | `python -m tools.generate_teams <コア名> [--beam N] [--n N]` | 共起ビーム探索で構築生成 |
+| `python -m tools.evaluate_team <6体\|--myteam> [--battles N] [--random-preview]` | チーム固定の実対戦評価 (両側RL操縦+相性選出、構築の強さを分離測定) |
+| `python -m tools.check_team_eval [--battles 60]` | 評価の一貫性ゲート (再現性/順位安定性。進化探索の前提確認) |
+| `python -m tools.evolve_teams [--population 12] [--generations 3] [--battles 60] [--update-archive]` | 構築の進化探索 (対戦AIが評価関数。結果は logs/team_evolution/) |
+
+進化探索は相手分布に `--forecast-mix` (使用率トレンドの1期外挿。履歴が
+2ヶ月分たまるまで自動無効) と `--archive-mix` (過去の優勝チーム=PSRO反復)
+を混ぜられる。`--update-archive` で今回の最優秀をアーカイブへ追加し、
+定期実行すると「対策の対策」まで見た頑健な構築へ収束していく。
 
 ## 強化学習 (champions_agent)
 
@@ -106,11 +130,35 @@ plist本体は `scripts/com.championsadviser.train.plist` (repo管理)。編集�
 | `bash champions_agent/scripts/train_nightly.sh` | 夜間バッチ1サイクル |
 | `python -m champions_agent.train.evaluate --opponent benchmark` | ベンチマーク評価 |
 | `python -m champions_agent.train.best_checkpoint --list` | 最良チェックポイント (_best) の記録確認 |
+| `python -m champions_agent.train.auto_tune --status` | 自律チューニングの状態 (試行履歴/現設定) |
+| `tail -f logs/auto_tune.log` | チューナーの判定ログ |
 | `python -m champions_agent.train.opponent_pool --list` | selfplay相手プールの一覧 |
 | `python -m tools.probe_policy` | 方策の健全性プローブ (攻撃率/抜群率) |
+| `python -m tools.check_search_expert [--battles N] [--depth 1\|2]` | 探索エキスパート (学習相手/BC教師) の実戦強度診断 |
+| `python -m champions_agent.train.bc_pretrain --dry-run` | 探索エンジンの行動クローン微調整 (⚠実行条件はdocstring参照) |
 | `python -m tools.smoke_train` / `smoke_selfplay` | 短時間の学習/セルフプレイ疎通 |
 | `python -m tools.validate_teams` | 生成チームのShowdownバリデーション |
 | `python -m tools.check_action_mask` | 行動マスクの検証 |
+
+## 人間 vs AI 対戦 (学習進捗の体感チェック)
+
+| コマンド | 用途 |
+|---|---|
+| `python -m tools.human_battle --name <名前> [--opponent model\|benchmark\|search] [--style balance] [--battles N] [--timer]` | AIから対戦チャレンジを送る (`--mode accept` で人間からの申請を待つ) |
+| `python -m tools.export_my_team_showdown [--out <ファイル>]` | my_team.json をShowdownチームテキストへ書き出し (貼り付け用) |
+| `python -m tools.check_human_battle [--opponent <種別>]` | 疎通確認 (RandomPlayerが人間の代役で1戦、記録なし) |
+
+手順:
+1. ローカルShowdown (8100) 稼働中に `human_battle` を起動する
+2. ブラウザで `https://play.pokemonshowdown.com/~~localhost:8100/` を開き、
+   `--name` と同じ名前でログインする (パスワード不要。同一LANのスマホも可)
+3. チームビルダーで `[Gen 9] Champions BSS Reg MB` を選び、
+   `export_my_team_showdown` の出力を Import に貼り付ける
+4. 届いたチャレンジを Accept する (表示は英語、挙動はchampions仕様)
+
+結果は `logs/human_battles.jsonl` に記録される (人間相手の勝率=進捗の物差し)。
+相手: model=学習済み方策 (性格別/_best優先) / benchmark=上位構築ヒューリスティクス /
+search=探索エキスパート (アドバイザーの読み筋)。
 
 ## データ更新
 

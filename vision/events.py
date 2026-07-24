@@ -251,7 +251,8 @@ class EventParser:
         for side_name, is_opp in (("player", False), ("opponent", True)):
             side = self.state.side(side_name)
             for mon in side.party:
-                for cand in (mon.species_ja, mon.display_name):
+                for cand in (mon.species_ja, mon.display_name,
+                             *(mon.aliases or [])):
                     ck = loose_key(cand) if cand else ""
                     if ck and len(ck) >= 3 and (norm.startswith(ck[:3])
                                                 or ck in scan):
@@ -285,7 +286,8 @@ class EventParser:
         norm = loose_key(cleaned)
         head = norm[:14]
         for mon in side.party:
-            for cand in (mon.species_ja, mon.display_name):
+            for cand in (mon.species_ja, mon.display_name,
+                         *(mon.aliases or [])):
                 ck = loose_key(cand) if cand else ""
                 if ck and len(ck) >= 3 and ck in head:
                     return side_name, side, mon, True
@@ -295,7 +297,8 @@ class EventParser:
             import difflib
             names = {}
             for mon in side.party:
-                for cand in (mon.species_ja, mon.display_name):
+                for cand in (mon.species_ja, mon.display_name,
+                             *(mon.aliases or [])):
                     ck = loose_key(cand) if cand else ""
                     if ck and len(ck) >= 3:
                         names[ck] = mon
@@ -506,7 +509,8 @@ class EventParser:
         for side_name in (default_side,
                           "opponent" if default_side == "player" else "player"):
             for mon in self.state.side(side_name).party:
-                for cand in (mon.species_ja, mon.display_name):
+                for cand in (mon.species_ja, mon.display_name,
+                             *(mon.aliases or [])):
                     ck = loose_key(cand) if cand else ""
                     if ck and len(ck) >= 3 and (ck in name_key or name_key in ck):
                         return side_name, mon
@@ -671,7 +675,17 @@ class EventParser:
             self.state.mega_used[side_name] = True
             sp = self.resolver.find_species_in_text(cleaned, cutoff=0.7)
             if sp and sp[0].startswith("メガ"):
-                mon.merge_species(sp[0], sp[1])
+                # species_id はメガ後 (種族値/特性計算用) にするが、
+                # species_ja はメガ前の名前を維持する: 画面のHUD表示は
+                # メガ後も元の名前のままなので、メガ名に変えると以後の
+                # 名前照合が失敗して別枠が生える (実戦で重複を観測)
+                mon.species_id = sp[1]
+                base_ja = re.sub(r"[XY]$", "", sp[0][len("メガ"):])
+                if not mon.species_ja:
+                    mon.species_ja = base_ja
+                # メガ名でも照合できるよう別名に登録
+                if sp[0] not in (mon.aliases or []):
+                    mon.aliases.append(sp[0])
             # メガフォルムの特性は固定なので確定値として設定する
             from vision.abilities import fixed_ability
             fa = fixed_ability(mon.species_id, is_mega=True, item_id=mon.item_id)

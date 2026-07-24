@@ -1,8 +1,8 @@
 #!/bin/bash
 # 夜間セルフプレイ学習バッチ
 #
-#   bash champions_agent/scripts/train_nightly.sh                # 全性格 各50kステップ
-#   TIMESTEPS=200000 STYLES="offense stall" bash champions_agent/scripts/train_nightly.sh
+#   bash champions_agent/scripts/train_nightly.sh   # 既定: 日中50k/夜間200kステップ
+#   TIMESTEPS=200000 STYLES="offense cycle" bash champions_agent/scripts/train_nightly.sh
 #
 # - Showdownをポート8100で起動する (アドバイザーのバックエンド8000と併用可)
 # - caffeinate でMacのスリープを抑止する
@@ -14,8 +14,20 @@ REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"
 source .venv/bin/activate
 
-TIMESTEPS="${TIMESTEPS:-50000}"
-STYLES="${STYLES:-balance offense cycle stall}"
+# TIMESTEPS未指定時は時間帯で自動切替: 夜間(23時-7時)はマシンが空くため
+# 増量する (評価オーバーヘッド比を下げ、同じ壁時間で勾配量を増やす)
+if [ -z "${TIMESTEPS:-}" ]; then
+  HOUR=$(date +%H)
+  if [ "$HOUR" -ge 23 ] || [ "$HOUR" -lt 7 ]; then
+    TIMESTEPS=200000
+  else
+    TIMESTEPS=50000
+  fi
+fi
+# stallは既定から除外 (2026-07-24判断: アドバイザー未使用の性格で、
+# ベンチ勝率が構造的に~0.31に張り付き平均を下げ、学習時間の1/4を
+# 消費していた。相手チームとしてのstall構築は引き続き登場する)
+STYLES="${STYLES:-balance offense cycle}"
 EVAL_BATTLES="${EVAL_BATTLES:-30}"
 export SHOWDOWN_PORT="${SHOWDOWN_PORT:-8100}"
 
@@ -51,6 +63,10 @@ trap cleanup EXIT
   fi
 
   for style in $STYLES; do
+    # 自律チューナーが管理する学習設定 (報酬シェイピング等) を反映
+    if [ -f "$REPO_ROOT/champions_agent/train/auto_env.sh" ]; then
+      source "$REPO_ROOT/champions_agent/train/auto_env.sh"
+    fi
     echo "--- [$style] 学習開始: $(date) ---"
     # チェックポイントの世代バックアップ (直近3世代)
     ckpt="$CKPT_DIR/battle_policy_${style}.zip"
@@ -62,13 +78,13 @@ trap cleanup EXIT
     N_ENVS="${N_ENVS:-1}"
     RATE=$((N_ENVS * 80 + 40))
     TRAIN_TIMEOUT=$((TIMESTEPS / RATE + 900))
-    caffeinate -i python -m tools.smoke_train \
+    caffeinate -i -s python -m tools.smoke_train \
       --play-style "$style" --timesteps "$TIMESTEPS" --resume \
       --n-envs "$N_ENVS" --timeout "$TRAIN_TIMEOUT" || {
         echo "[nightly] [$style] 学習が失敗/タイムアウトしました"; continue; }
 
     echo "--- [$style] 評価 (vs Random, $EVAL_BATTLES 戦) ---"
-    caffeinate -i python -m champions_agent.train.evaluate \
+    caffeinate -i -s python -m champions_agent.train.evaluate \
       --play-style "$style" --battles "$EVAL_BATTLES" --timeout 900 || \
       echo "[nightly] [$style] 評価が失敗/タイムアウトしました"
 
@@ -76,7 +92,7 @@ trap cleanup EXIT
     # 昇格判定に使うため対戦数を多めにしてノイズを抑える (30戦だと±0.09)
     BENCH_BATTLES="${BENCH_BATTLES:-50}"
     echo "--- [$style] ベンチマーク評価 (vs 上位構築ヒューリスティクス, $BENCH_BATTLES 戦) ---"
-    caffeinate -i python -m champions_agent.train.evaluate \
+    caffeinate -i -s python -m champions_agent.train.evaluate \
       --play-style "$style" --battles "$BENCH_BATTLES" --opponent benchmark \
       --timeout 900 || echo "[nightly] [$style] ベンチマーク評価が失敗しました"
 

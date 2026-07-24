@@ -31,7 +31,12 @@ EPSILON_RANDOM = 0.10      # ランダム相手を混ぜる確率 (基礎相手�
 # 頭打ち対策: 評価指標 (vsベンチマーク) と学習分布を近づけるため、
 # ヒューリスティクス強敵と上位構築チームの比率を引き上げた
 # (旧: heuristic 0.25 / ranked 0.30 でベンチ勝率0.3-0.7の振動が続いた)
-EPSILON_HEURISTIC = 0.35  # 上位構築ヒューリスティクス相手を混ぜる確率 (常設の強敵)
+EPSILON_HEURISTIC = 0.25  # 上位構築ヒューリスティクス相手を混ぜる確率 (常設の強敵)
+# 探索エンジン相手 (advisor/searchのダメ計+択読み)。実測強度はベンチ勝率
+# 0.41で学習済み方策と同格だが、ヒューリスティクスとは読み筋・交代傾向が
+# 異なるため相手多様性として混入する (2026-07-24導入。heuristic 0.35→0.25
+# に減らして枠を捻出、selfplayプール枠は0.45)
+EPSILON_SEARCH = 0.20
 RANKED_TEAM_PROB = 0.50   # 相手チームを上位構築の実物にする確率
 OWN_RANKED_TEAM_PROB = 0.50  # 自分チームを上位構築の実物にする確率
 # (生成チームだけで学習すると「上位構築を操縦する」経験が積めず、
@@ -111,13 +116,15 @@ class PoolOpponentPlayer:
 
 def make_pool_opponent(pool: OpponentPool, epsilon_random: float = EPSILON_RANDOM,
                        epsilon_heuristic: float = EPSILON_HEURISTIC,
+                       epsilon_search: float = EPSILON_SEARCH,
                        **player_kwargs):
     """混合対戦相手を生成する。バトルごとに以下から抽選:
 
     - "heuristic": SimpleHeuristicsPlayer (ダメージ計算+交代判断の固定強敵)
+    - "search":    探索エンジン (advisor/search、深さ1の択読み)
     - "random":    ランダム行動 (基礎相手の忘却防止)
     - それ以外:    selfplayプールの過去チェックポイント方策
-    プールが空の場合は heuristic / random のみで構成される (カリキュラム初期)。
+    プールが空の場合は heuristic / search / random で構成される (カリキュラム初期)。
     """
     from poke_env.player import SimpleHeuristicsPlayer
     from champions_agent.agent.policy_battle import BattlePolicy
@@ -135,7 +142,10 @@ def make_pool_opponent(pool: OpponentPool, epsilon_random: float = EPSILON_RANDO
                 r = random.random()
                 if r < epsilon_heuristic:
                     self._assign[tag] = "heuristic"
-                elif r < epsilon_heuristic + epsilon_random or not self._pool.has_entries():
+                elif r < epsilon_heuristic + epsilon_search:
+                    self._assign[tag] = "search"
+                elif r < epsilon_heuristic + epsilon_search + epsilon_random \
+                        or not self._pool.has_entries():
                     self._assign[tag] = "random"
                 else:
                     path = self._pool.sample()
@@ -159,6 +169,17 @@ def make_pool_opponent(pool: OpponentPool, epsilon_random: float = EPSILON_RANDO
             policy = self._policy_for(battle)
             if policy == "heuristic":
                 return super().choose_move(battle)
+            if policy == "search":
+                try:
+                    from champions_agent.env.search_expert import decide
+                    d = decide(battle, depth=1)
+                    if d is not None:
+                        if d["kind"] == "move":
+                            return self.create_order(d["move"], mega=d["mega"])
+                        return self.create_order(d["pokemon"])
+                except Exception:
+                    pass
+                return super().choose_move(battle)   # 失敗時はヒューリスティクス
             if policy == "random":
                 return self.choose_random_move(battle)
             try:

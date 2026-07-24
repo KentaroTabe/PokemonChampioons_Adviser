@@ -120,6 +120,37 @@ def build() -> dict:
         if ja:
             out["items"][ja] = _to_showdown_id(row["identifier"])
 
+    # --- チャンピオンズ新規メガストーンの補完 ---
+    # 標準データソースには存在しないため、ローカルShowdownのメガ種一覧から
+    # 「{日本語種族名}ナイト(X/Y)」を生成して追加する (既存の正規ID登録は優先)
+    try:
+        import subprocess
+        # championsモッドの実在ストーンID (megaStone付きitems) を正とする。
+        # IDを推測生成するとシムに存在しないIDが混ざり、チーム生成の
+        # バリデーション却下で学習が止まる (2026-07-23 に発生)
+        node_out = subprocess.run(
+            ["node", "-e",
+             "const dex=require('./pokemon-showdown/dist/sim/dex.js')"
+             ".Dex.mod('champions');const m=[];"
+             "for(const it of dex.items.all()){if(it.megaStone)"
+             "m.push({id:it.id,base:Object.keys(it.megaStone)[0]});}"
+             "console.log(JSON.stringify(m));"],
+            capture_output=True, text=True, timeout=60)
+        stones = json.loads(node_out.stdout.strip())
+        ja_by_id = {v["id"]: k for k, v in out["species"].items()
+                    if isinstance(v, dict)}
+        for st in stones:
+            base_id = re.sub(r"[^a-z0-9]", "", st["base"].lower())
+            base_ja = ja_by_id.get(base_id)
+            if not base_ja:
+                continue
+            suffix = "X" if st["id"].endswith("x") else \
+                ("Y" if st["id"].endswith("y") else "")
+            stone_ja = base_ja + "ナイト" + suffix
+            out["items"][stone_ja] = st["id"]
+    except Exception as e:
+        print(f"[fetch_jp_names] メガストーン補完をスキップ: {e}")
+
     # --- タイプ ---
     for row in types_rows:
         tid = int(row["id"])

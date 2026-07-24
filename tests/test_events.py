@@ -317,6 +317,29 @@ def test_move_attribution_requires_name():
     print("test_move_attribution_requires_name OK")
 
 
+def test_mega_keeps_base_name_no_duplicate():
+    # メガシンカ後も画面表示は元の名前のため、species_jaはメガ前を維持し
+    # (species_idのみメガ後)、以後の照合で別枠が生えないこと (実戦で重複)
+    state, p = new_parser()
+    p.parse("아나이뚜は リザードンを 繰り出した!")
+    n_before = len(state.opponent.party)
+    fired = p.parse("相手の リザードンは メガリザードンYに メガシンカした!")
+    assert "mega_evolve" in fired, fired
+    mon = state.opponent.active()
+    assert mon.is_mega
+    assert mon.species_ja == "リザードン", mon.species_ja   # メガ前の名前を維持
+    assert "mega" in (mon.species_id or ""), mon.species_id  # IDはメガ後
+    assert any(a.startswith("メガ") for a in mon.aliases), mon.aliases
+    # メガ後にHUDが元の名前を表示しても同じ枠に解決される (重複しない)
+    mon2 = state.opponent.switch_to_species("リザードン", "charizard")
+    assert mon2 is mon, "メガ後のHUD名で別枠が生えた"
+    assert len(state.opponent.party) == n_before
+    # メガ名からも同枠が引ける (find_by_speciesの正規化)
+    assert state.opponent.find_by_species("メガリザードンY") == \
+        state.opponent.find_by_species("リザードン")
+    print("test_mega_keeps_base_name_no_duplicate OK")
+
+
 def test_forfeit_win():
     # 相手の降参による勝ち (実戦 2026-07-22: 降参終了が辞書に無く取り逃した)
     state, p = new_parser()
@@ -342,5 +365,6 @@ if __name__ == "__main__":
     test_charge_vs_electromorphosis()
     test_rate_extraction()
     test_move_attribution_requires_name()
+    test_mega_keeps_base_name_no_duplicate()
     test_forfeit_win()
     print("\nALL OK")

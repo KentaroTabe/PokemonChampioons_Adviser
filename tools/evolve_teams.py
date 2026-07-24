@@ -1,0 +1,322 @@
+"""構築の進化探索: 対戦AIを評価関数にしてメタに強いチームを育てる。
+
+フェーズ2 (進化ループ):
+  初期集団 (上位実構築 + 使用率メタ生成チーム) → 各チームを実対戦で評価
+  (両サイド同一のRL方策 + 相性選出、相手=メタ分布の構築群) → 上位を残して
+  1枠入替の変異 → 世代を回す。
+
+フェーズ3 (メタ遷移対応):
+  --forecast-mix: 使用率スナップショットの月次履歴から上昇トレンドを外挿し、
+    「伸びている種族を含む構築」を相手分布に混ぜる (履歴が1ヶ月分しか
+    ない間は自動で無効化し、現行メタのみで評価する)
+  --archive-mix: 過去の探索で勝ち残ったチーム (アーカイブ) を相手に混ぜ、
+    「自分の対策構築が普及した後のメタ」への頑健性を測る (PSRO-lite)。
+    --update-archive で今回の最優秀チームをアーカイブへ追加する。
+
+    python -m tools.evolve_teams --population 12 --generations 3 --battles 40
+    python -m tools.evolve_teams --population 6 --generations 2 --battles 20   # スモーク
+    python -m tools.evolve_teams --update-archive                              # 反復運用
+
+結果: logs/team_evolution/run_<時刻>.json + 最優秀チームの日本語表示。
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import logging
+import random
+import re
+import time
+from pathlib import Path
+
+# champions modの未知エフェクト警告 (MEGA_SOL等) は動作に影響しないため抑制
+logging.getLogger("poke-env").setLevel(logging.ERROR)
+
+from champions_agent.config import USAGE_TARGET_FORMAT
+from champions_agent.data import database as db
+from champions_agent.env.ranked_teams import build_ranked_teams
+from champions_agent.env.team_builder import (
+    PokemonSet, _base_species_key, _fetch_meta_pool, _sanitize_item,
+    _sanitize_species, build_random_team_text, to_showdown_name,
+)
+
+REPO = Path(__file__).resolve().parent.parent
+OUT_DIR = REPO / "logs" / "team_evolution"
+ARCHIVE_PATH = OUT_DIR / "archive.json"
+
+
+def _to_id(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(name).lower())
+
+
+def _team_species(team_text: str) -> list:
+    """チームテキスト -> 種族id列 (ブロック先頭行から)"""
+    out = []
+    for block in team_text.strip().split("\n\n"):
+        head = block.strip().split("\n")[0]
+        out.append(_to_id(head.split(" @ ")[0]))
+    return out
+
+
+def _team_ja(team_text: str) -> str:
+    from advisor.infer import species_ja_name
+    return " / ".join(species_ja_name(s) or s for s in _team_species(team_text))
+
+
+# ------------------------------------------------------------------
+# フェーズ3: メタ遷移の外挿
+# ------------------------------------------------------------------
+def forecast_scores() -> dict | None:
+    """種族id -> 予測使用率 (現在値 + 月次トレンドの1期外挿)。
+
+    champions-singles のスナップショットが2ヶ月分未満なら None
+    (トレンドが定義できないため呼び出し側で無効化する)。
+    """
+    with db.get_connection() as conn:
+        rows = conn.execute(
+            """SELECT id, source_month FROM usage_snapshot
+               WHERE format = ? ORDER BY fetched_at""",
+            (USAGE_TARGET_FORMAT,)).fetchall()
+        by_month = {}
+        for r in rows:                      # 同月の再取得は最新を採用
+            by_month[r["source_month"]] = r["id"]
+        if len(by_month) < 2:
+            return None
+        months = list(by_month)[-2:]
+        usage = {}
+        for i, m in enumerate(months):
+            for r in conn.execute(
+                    """SELECT pokemon_name, usage_percent FROM pokemon_usage
+                       WHERE snapshot_id = ?""", (by_month[m],)):
+                usage.setdefault(_to_id(r["pokemon_name"]), [0.0, 0.0])[i] = \
+                    r["usage_percent"]
+    return {sid: max(0.0, cur + (cur - prev))
+            for sid, (prev, cur) in usage.items()}
+
+
+# ------------------------------------------------------------------
+# 相手分布 (現行メタ + 予測メタ + アーカイブ)
+# ------------------------------------------------------------------
+try:
+    from poke_env.teambuilder import Teambuilder as _TB
+except Exception:
+    _TB = object
+
+
+class WeightedTextsTeambuilder(_TB):
+    """チームテキスト群から重み付きで1チームを選ぶTeambuilder"""
+
+    def __init__(self, texts, weights=None, rng=None):
+        self.texts = list(texts)
+        self.weights = list(weights) if weights else None
+        self.rng = rng or random.Random()
+        self._packed = {}
+
+    def yield_team(self) -> str:
+        text = self.rng.choices(self.texts, weights=self.weights, k=1)[0]
+        if text not in self._packed:
+            self._packed[text] = self.join_team(
+                self.parse_showdown_team(text))
+        return self._packed[text]
+
+
+class MixtureTeambuilder(_TB):
+    """複数Teambuilderの重み付き混合"""
+
+    def __init__(self, parts, rng=None):   # parts: [(weight, teambuilder)]
+        self.parts = [(w, tb) for w, tb in parts if w > 0]
+        self.rng = rng or random.Random()
+
+    def yield_team(self) -> str:
+        weights = [w for w, _ in self.parts]
+        _, tb = self.rng.choices(self.parts, weights=weights, k=1)[0]
+        return tb.yield_team()
+
+
+def load_archive() -> list:
+    if ARCHIVE_PATH.exists():
+        try:
+            return json.loads(ARCHIVE_PATH.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return []
+
+
+def build_opponent(forecast_mix: float, archive_mix: float,
+                   rng: random.Random):
+    """相手チーム分布: 現行メタ + 予測メタ + アーカイブの混合"""
+    ranked = build_ranked_teams()
+    parts = []
+    fs = forecast_scores() if forecast_mix > 0 else None
+    if forecast_mix > 0 and fs is None:
+        print("[evolve] 使用率履歴が2ヶ月分未満のため予測メタ混合は無効化 "
+              "(現行メタのみで評価)", flush=True)
+    if fs:
+        w = [sum(fs.get(s, 0.0) for s in _team_species(t)) + 1e-6
+             for t in ranked]
+        parts.append((forecast_mix,
+                      WeightedTextsTeambuilder(ranked, w, rng)))
+    archive = load_archive()
+    if archive_mix > 0 and archive:
+        parts.append((archive_mix, WeightedTextsTeambuilder(
+            [e["text"] for e in archive], rng=rng)))
+    base = 1.0 - sum(w for w, _ in parts)
+    parts.append((base, WeightedTextsTeambuilder(ranked, rng=rng)))
+    return MixtureTeambuilder(parts, rng=rng)
+
+
+# ------------------------------------------------------------------
+# フェーズ2: 集団の初期化・変異・評価
+# ------------------------------------------------------------------
+def init_population(size: int, rng: random.Random) -> list:
+    """初期集団: 半分は上位実構築、半分は使用率メタからの生成チーム"""
+    ranked = build_ranked_teams()
+    pop = [{"origin": "ranked", "text": t, "fitness": None}
+           for t in ranked[:size // 2]]
+    while len(pop) < size:
+        pop.append({"origin": "generated",
+                    "text": build_random_team_text(size=6), "fitness": None})
+    return pop
+
+
+def _meta_pool_rows() -> list:
+    with db.get_connection() as conn:
+        snap = db.latest_snapshot_id(conn, fmt=USAGE_TARGET_FORMAT)
+        return _fetch_meta_pool(conn, snap) if snap else []
+
+
+def mutate(team_text: str, pool_rows: list, rng: random.Random) -> str:
+    """1枠を使用率重み付きの別種族 (meta_setsの型) に入れ替える"""
+    blocks = team_text.strip().split("\n\n")
+    idx = rng.randrange(len(blocks))
+    current = {_base_species_key(s) for s in _team_species(team_text)}
+    cands = [r for r in pool_rows
+             if _base_species_key(_to_id(r["pokemon_name"])) not in current]
+    if not cands:
+        return team_text
+    weights = [max(0.01, float(r["weight"] or 0.01)) for r in cands]
+    row = rng.choices(cands, weights=weights, k=1)[0]
+    item = _sanitize_item(row["item_name"])
+    used_items = {b.split(" @ ", 1)[1].split("\n")[0].strip()
+                  for b in blocks[:idx] + blocks[idx + 1:] if " @ " in b}
+    if item and _to_id(item) in {_to_id(i) for i in used_items}:
+        item = None   # アイテムクローズ
+    new_set = PokemonSet(
+        species=to_showdown_name(_sanitize_species(row["pokemon_name"])),
+        ability=row["ability_name"], item=item,
+        tera_type=row["tera_type"], nature=row["nature"], evs=row["evs"],
+        moves=[row["move1"], row["move2"], row["move3"], row["move4"]])
+    blocks[idx] = new_set.to_showdown_text()
+    return "\n\n".join(blocks)
+
+
+async def evaluate_population(pop: list, n_battles: int, opp_builder,
+                              concurrency: int = 3) -> None:
+    from tools.evaluate_team import evaluate_team_text
+    todo = [m for m in pop if m["fitness"] is None]
+    for i in range(0, len(todo), concurrency):
+        chunk = todo[i:i + concurrency]
+        results = await asyncio.gather(*[
+            evaluate_team_text(m["text"], n_battles=n_battles,
+                               opp_teambuilder=opp_builder)
+            for m in chunk], return_exceptions=True)
+        for m, r in zip(chunk, results):
+            if isinstance(r, Exception):
+                print(f"[evolve] 評価失敗 ({_team_ja(m['text'])[:40]}): {r}",
+                      flush=True)
+                m["fitness"] = 0.0
+            else:
+                m["fitness"] = r["win_rate"]
+
+
+async def run(args) -> None:
+    rng = random.Random(args.seed)
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    opp = build_opponent(args.forecast_mix, args.archive_mix, rng)
+    pool_rows = _meta_pool_rows()
+    pop = init_population(args.population, rng)
+    history = []
+
+    for gen in range(args.generations):
+        t0 = time.time()
+        await evaluate_population(pop, args.battles, opp,
+                                  concurrency=args.concurrency)
+        pop.sort(key=lambda m: -m["fitness"])
+        print(f"===== 世代{gen + 1}/{args.generations} "
+              f"({time.time() - t0:.0f}s) =====", flush=True)
+        for m in pop:
+            print(f"  {m['fitness']:.2f} [{m['origin']}] "
+                  f"{_team_ja(m['text'])}", flush=True)
+        history.append([{"origin": m["origin"], "fitness": m["fitness"],
+                         "species": _team_species(m["text"])} for m in pop])
+        if gen == 0:
+            # 健全性: 既知の強構築 (ranked) が生成チームを平均で上回るか
+            by = {}
+            for m in pop:
+                by.setdefault(m["origin"], []).append(m["fitness"])
+            means = {k: sum(v) / len(v) for k, v in by.items()}
+            if len(means) == 2:
+                verdict = "OK" if means.get("ranked", 0) >= \
+                    means.get("generated", 0) else "⚠要確認"
+                print(f"  健全性: ranked平均{means.get('ranked', 0):.2f} vs "
+                      f"generated平均{means.get('generated', 0):.2f} {verdict}",
+                      flush=True)
+        if gen + 1 >= args.generations:
+            break
+        survivors = pop[:max(2, len(pop) // 2)]
+        children = []
+        while len(survivors) + len(children) < args.population:
+            parent = survivors[len(children) % len(survivors)]
+            children.append({"origin": "mutant",
+                             "text": mutate(parent["text"], pool_rows, rng),
+                             "fitness": None})
+        pop = survivors + children   # 生存者の評価値は再利用 (相手分布固定のため)
+
+    best = pop[0]
+    run_path = OUT_DIR / f"run_{time.strftime('%Y%m%d_%H%M%S')}.json"
+    run_path.write_text(json.dumps({
+        "battles": args.battles, "population": args.population,
+        "generations": args.generations, "forecast_mix": args.forecast_mix,
+        "archive_mix": args.archive_mix,
+        "best": {"fitness": best["fitness"], "text": best["text"]},
+        "history": history,
+    }, ensure_ascii=False, indent=1), encoding="utf-8")
+    print(f"\n最優秀 (勝率{best['fitness']:.2f}): {_team_ja(best['text'])}")
+    from tools.evaluate_team import team_text_to_ja
+    print(team_text_to_ja(best["text"]))
+    print(f"記録: {run_path}", flush=True)
+
+    if args.update_archive:
+        archive = load_archive()
+        key = sorted(_team_species(best["text"]))
+        if not any(sorted(e.get("species", [])) == key for e in archive):
+            archive.append({"t": time.time(), "fitness": best["fitness"],
+                            "species": key, "text": best["text"]})
+            ARCHIVE_PATH.write_text(
+                json.dumps(archive, ensure_ascii=False, indent=1),
+                encoding="utf-8")
+            print(f"アーカイブへ追加 (計{len(archive)}件) — 次回の相手分布に"
+                  "混ざります (--archive-mix)", flush=True)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="構築の進化探索")
+    ap.add_argument("--population", type=int, default=12)
+    ap.add_argument("--generations", type=int, default=3)
+    ap.add_argument("--battles", type=int, default=40,
+                    help="1チームあたりの評価対戦数")
+    ap.add_argument("--concurrency", type=int, default=3)
+    ap.add_argument("--forecast-mix", type=float, default=0.3,
+                    help="予測メタを相手に混ぜる比率 (履歴不足時は自動無効)")
+    ap.add_argument("--archive-mix", type=float, default=0.2,
+                    help="過去の優勝チームを相手に混ぜる比率")
+    ap.add_argument("--update-archive", action="store_true",
+                    help="最優秀チームをアーカイブへ追加 (PSRO反復)")
+    ap.add_argument("--seed", type=int, default=None)
+    args = ap.parse_args()
+    asyncio.run(run(args))
+
+
+if __name__ == "__main__":
+    main()

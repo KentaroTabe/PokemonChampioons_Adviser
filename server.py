@@ -54,6 +54,23 @@ print("[server] 準備完了。フロントエンドからの接続を待って�
 DUMP_FRAMES = os.environ.get("DEBUG_DUMP_FRAMES") == "1"
 DUMP_DIR = Path("debug_frames")
 
+# 対戦状態スナップショット: 対戦中のデプロイ/再起動でも選出画面由来の
+# 相手ロスター等を失わないよう、定期保存して起動時に復元する
+SNAPSHOT_PATH = Path("logs") / "state_snapshot.json"
+_last_snapshot_time = 0.0
+try:
+    if SNAPSHOT_PATH.exists() and \
+            time.time() - SNAPSHOT_PATH.stat().st_mtime < 300:
+        _snap = json.loads(SNAPSHOT_PATH.read_text())
+        if _snap.get("battle_active") or _snap.get("scene") in (
+                "command", "move_select", "field", "watch", "battle_hud"):
+            pipeline.state.restore_from_dict(_snap)
+            print("[server] 対戦状態を復元しました "
+                  f"(相手ロスター{len(pipeline.state.opponent.party)}枠, "
+                  f"ターン{pipeline.state.turn})")
+except Exception as e:
+    print(f"[server] 状態復元をスキップ: {e}")
+
 frame_counter = 0
 processed_counter = 0
 dropped_counter = 0
@@ -143,6 +160,17 @@ async def handle_frame(sid, data):
         if fired:
             for f in fired:
                 print(f"[server] イベント検知: {f}")
+
+        # 対戦状態スナップショット (5秒毎。再起動時の対戦中リカバリ用)
+        global _last_snapshot_time
+        if time.time() - _last_snapshot_time > 5:
+            _last_snapshot_time = time.time()
+            try:
+                SNAPSHOT_PATH.parent.mkdir(exist_ok=True)
+                SNAPSHOT_PATH.write_text(
+                    json.dumps(state, ensure_ascii=False))
+            except OSError:
+                pass
 
         _attach_candidates(state)
         state_json = json.dumps(state, ensure_ascii=False, sort_keys=True)
@@ -243,6 +271,43 @@ def _attach_candidates(state: dict) -> None:
             if se and (se["n_obs"] > 0 or se["lo"] or se["hi"]):
                 p["spe_est"] = se["est"]
                 p["spe_range"] = [se["lo"], se["hi"]]
+    except Exception:
+        pass
+    # 未確定枠に「次に出してきそう度」を付与 (相手視点のマッチアップ:
+    # 自分の場のポケモンに有利な候補ほど次に出やすい、を候補確率で加重)
+    try:
+        from advisor.dex import get_dex
+        from advisor.rl_bridge import _JA2EN_TYPES
+        dex = get_dex()
+        mi = state["player"].get("active_index")
+        me = state["player"]["party"][mi] if mi is not None and \
+            mi < len(state["player"].get("party", [])) else None
+        my_types = []
+        if me:
+            my_types = [_JA2EN_TYPES.get(t, t).capitalize()
+                        for t in (me.get("types") or [])]
+            if not my_types and me.get("species_id"):
+                sp_me = dex.species(me["species_id"])
+                my_types = sp_me["types"] if sp_me else []
+        if my_types:
+            for p in state["opponent"]["party"]:
+                if p.get("species_ja") or not p.get("candidates"):
+                    continue
+                acc = tot = 0.0
+                for c in p["candidates"]:
+                    sp = dex.species(c["id"])
+                    if sp is None:
+                        continue
+                    # 候補のSTABが自分にどれだけ通るか - 自分のSTABの通り
+                    offense = max((dex.effectiveness(t, my_types)
+                                   for t in sp["types"]), default=1.0)
+                    incoming = max((dex.effectiveness(t, sp["types"])
+                                    for t in my_types), default=1.0)
+                    w = c["pct"] / 100.0
+                    acc += w * (offense - 0.8 * incoming)
+                    tot += w
+                if tot > 0:
+                    p["next_score"] = round(acc / tot, 3)
     except Exception:
         pass
 
@@ -449,6 +514,22 @@ async def set_species(sid, data):
         party = pipeline.state.opponent.party
         if 0 <= idx < len(party):
             party[idx].merge_species(species_ja, species_id)
+            # 直近の「HUD名不一致」で観測された別名をこの個体に紐づける
+            # (試合中の個体名キャッシュ: 以後その名前のイベントが正しく帰属する)
+            import re as _re
+            now_ts = time.time()
+            for e in pipeline.state.events[-40:]:
+                if e.get("event") != "hud_name_mismatch":
+                    continue
+                if now_ts - e.get("ts", 0) > 120:
+                    continue
+                m = _re.search(r"\(([^≠)]+)≠", e.get("text") or "")
+                if m:
+                    alias = m.group(1).strip()
+                    if alias and alias not in party[idx].aliases:
+                        party[idx].aliases.append(alias)
+                        print(f"[server] 別名を紐づけ: {species_ja} <- {alias}")
+            party[idx].aliases = party[idx].aliases[-6:]
             pipeline.state.log_event(
                 "manual", f"相手の{species_ja}を手動確定 (候補から選択)",
                 event_id="species_manual")

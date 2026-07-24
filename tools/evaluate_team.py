@@ -31,16 +31,23 @@ def _to_id(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(name).lower())
 
 
-def _uniq_name(prefix: str) -> str:
-    """Showdownで衝突しない一意なアカウント名 (PID+時刻下位+乱数、18文字以内)。
+_uniq_seq = None
 
-    学習ループや同時実行の評価とサーバーを共有するため、乱数だけでは
-    衝突する (実運用でnametaken観測)。PIDと時刻を混ぜて確実に一意化する。
+
+def _uniq_name(prefix: str) -> str:
+    """Showdownで衝突しない一意なアカウント名 (PID+連番+乱数、18文字以内)。
+
+    学習ループや同時実行の評価とサーバーを共有するため、乱数や時刻だけでは
+    衝突する (同一プロセスの並行評価で同時刻生成のnametakenを実測)。
+    プロセス内は連番、プロセス間はPIDで確実に一意化する。
     """
+    import itertools
     import os
     import random
-    import time
-    base = f"{prefix}{os.getpid() % 100000}{int(time.time() * 10) % 10000}" \
+    global _uniq_seq
+    if _uniq_seq is None:
+        _uniq_seq = itertools.count(1)
+    base = f"{prefix}{os.getpid() % 100000}x{next(_uniq_seq)}" \
            f"{random.randint(10, 99)}"
     return base[:18]
 
@@ -244,13 +251,32 @@ def build_myteam_text() -> str:
     return "\n\n".join(blocks)
 
 
-def _make_player(team_text, tag_suffix, evaluator="rl"):
+def _with_matchup_preview(cls):
+    """タイプ相性ベースの選出 (teampreview) を行うプレイヤー派生クラス。
+
+    構築の強さは6→3選出込みで決まるため、既定のランダム選出だと
+    「選出でカバーできる構築」が過小評価される。両サイドに適用して
+    対称にする (選出込みの構築力を測る)。
+    """
+    class _P(cls):
+        def teampreview(self, battle):
+            try:
+                from champions_agent.env.search_expert import teampreview_order
+                return teampreview_order(battle)
+            except Exception:
+                return self.random_teampreview(battle)
+    _P.__name__ = cls.__name__ + "MatchupPreview"
+    return _P
+
+
+def _make_player(team_text, tag_suffix, evaluator="rl", preview="matchup"):
     """評価用プレイヤーを作る。
 
     evaluator="rl": 学習済みRL方策 (雨/すいすい・積み・メガのタイミングを
       SimpleHeuristicsより活用でき、プレイング前提構築も測れる)。
       モデルが無ければ自動でヒューリスティクスにフォールバック。
     evaluator="heuristic": SimpleHeuristicsPlayer (定跡AI・固定基準)。
+    preview="matchup": 相性ベースの選出 / "random": 既定のランダム選出。
     両サイド同一の評価者にすることで「構築の強さだけ」を分離評価する。
     """
     from poke_env import AccountConfiguration
@@ -264,29 +290,39 @@ def _make_player(team_text, tag_suffix, evaluator="rl"):
               server_configuration=TrainingServerConfiguration,
               team=ConstantTeambuilder(team_text),
               max_concurrent_battles=1)
+    heuristic_cls = SimpleHeuristicsPlayer
     if evaluator == "rl":
         from champions_agent.train.evaluate import ModelPlayer
-        from champions_agent.config import DEFAULT_PLAY_STYLE
         import os
         style = os.environ.get("RL_ADVICE_STYLE", "balance")
-        p = ModelPlayer(play_style=style, **kw)
+        model_cls = _with_matchup_preview(ModelPlayer) \
+            if preview == "matchup" else ModelPlayer
+        p = model_cls(play_style=style, **kw)
         if getattr(p, "policy", None) is None or p.policy.model is None:
-            return SimpleHeuristicsPlayer(**kw), "heuristic"
+            if preview == "matchup":
+                heuristic_cls = _with_matchup_preview(heuristic_cls)
+            return heuristic_cls(**kw), "heuristic"
         return p, "rl"
-    return SimpleHeuristicsPlayer(**kw), "heuristic"
+    if preview == "matchup":
+        heuristic_cls = _with_matchup_preview(heuristic_cls)
+    return heuristic_cls(**kw), "heuristic"
 
 
 async def evaluate_team_text(team_text: str, n_battles: int = 20,
                              opp_text: str = None,
-                             evaluator: str = "rl") -> dict:
-    """team_text を評価する。opp_text 未指定ならベンチマーク構築群と対戦。
+                             evaluator: str = "rl",
+                             preview: str = "matchup",
+                             opp_teambuilder=None) -> dict:
+    """team_text を評価する。相手は opp_text (固定チーム) →
+    opp_teambuilder (任意のTeambuilder: 進化探索のメタ混合等) →
+    未指定ならベンチマーク構築群、の優先順。
 
-    両サイドを同じ評価者 (RL方策 or ヒューリスティクス) で回し、
+    両サイドを同じ評価者 (RL方策 or ヒューリスティクス)・同じ選出方式で回し、
     構築の強さだけを比較する。
     """
-    me, ev_used = _make_player(team_text, "A", evaluator)
+    me, ev_used = _make_player(team_text, "A", evaluator, preview)
     if opp_text is not None:
-        opp, _ = _make_player(opp_text, "B", ev_used)
+        opp, _ = _make_player(opp_text, "B", ev_used, preview)
     else:
         # ベンチマーク: ランクマ上位構築群 (相手も同じ評価者)
         from poke_env import AccountConfiguration
@@ -297,15 +333,20 @@ async def evaluate_team_text(team_text: str, n_battles: int = 20,
         kw = dict(account_configuration=acc,
                   battle_format=TRAINING_BATTLE_FORMAT,
                   server_configuration=TrainingServerConfiguration,
-                  team=RankedTeambuilder(), max_concurrent_battles=1)
+                  team=opp_teambuilder or RankedTeambuilder(),
+                  max_concurrent_battles=1)
         if ev_used == "rl":
             from champions_agent.train.evaluate import ModelPlayer
             import os
-            opp = ModelPlayer(
+            cls = _with_matchup_preview(ModelPlayer) \
+                if preview == "matchup" else ModelPlayer
+            opp = cls(
                 play_style=os.environ.get("RL_ADVICE_STYLE", "balance"), **kw)
         else:
             from poke_env.player import SimpleHeuristicsPlayer
-            opp = SimpleHeuristicsPlayer(**kw)
+            cls = _with_matchup_preview(SimpleHeuristicsPlayer) \
+                if preview == "matchup" else SimpleHeuristicsPlayer
+            opp = cls(**kw)
     await asyncio.wait_for(me.battle_against(opp, n_battles=n_battles),
                            timeout=120 * n_battles)
     return {"n_battles": n_battles, "wins": me.n_won_battles,
@@ -318,11 +359,13 @@ def main():
     n = int(sys.argv[sys.argv.index("--battles") + 1]) \
         if "--battles" in sys.argv else 20
     evaluator = "heuristic" if "--heuristic" in sys.argv else "rl"
+    preview = "random" if "--random-preview" in sys.argv else "matchup"
     if "--myteam" in sys.argv:
         text = build_myteam_text()
         print(f"現在のパーティ (登録型) を{n}戦で評価 (評価者={evaluator}):")
         result = asyncio.run(evaluate_team_text(text, n_battles=n,
-                                                evaluator=evaluator))
+                                                evaluator=evaluator,
+                                                preview=preview))
     elif args:
         species = [s for s in re.split(r"[、,]", args[0]) if s.strip()]
         print(f"評価対象: {species} ({n}戦, 評価者={evaluator})")

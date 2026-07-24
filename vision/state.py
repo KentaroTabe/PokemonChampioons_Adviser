@@ -62,6 +62,10 @@ class PokemonState:
     moves: list = field(default_factory=list)      # list[MoveSlot] 自分側: 画面から確定
     revealed_moves: list = field(default_factory=list)  # 相手側: 使用を目撃した技 (日本語)
 
+    # この試合中に観測されたこの個体の別名 (OCR揺れの表示名キャッシュ)。
+    # 手動確定や類似照合の際に蓄積し、以後のイベント帰属に使う
+    aliases: list = field(default_factory=list)
+
     is_mega: bool = False
     is_active: bool = False
     is_picked: bool = False          # 選出画面で選出済み (左端の白リボン)
@@ -117,23 +121,48 @@ class SideState:
         return None
 
     def ensure_active(self) -> PokemonState:
-        """場に出ているポケモンを返す。未確定ならプレースホルダを作る。"""
+        """場に出ているポケモンを返す。未確定ならプレースホルダを作る。
+
+        パーティが満枠 (6) の場合は新枠を作らず、帰属不明の観測を吸収する
+        使い捨て枠 (UI非表示) を返す — ロスターは試合中に増えない
+        """
         mon = self.active()
         if mon is None:
-            mon = PokemonState(is_active=True)
-            self.party.append(mon)
-            self.active_index = len(self.party) - 1
+            if len(self.party) < 6:
+                mon = PokemonState(is_active=True)
+                self.party.append(mon)
+                self.active_index = len(self.party) - 1
+            else:
+                if getattr(self, "_limbo", None) is None:
+                    self._limbo = PokemonState()
+                return self._limbo
         return mon
 
     def find_by_species(self, species_ja: str) -> Optional[int]:
         for i, p in enumerate(self.party):
             if p.species_ja == species_ja:
                 return i
+        # メガ正規化フォールバック: 「メガリザードン(X/Y)」と「リザードン」は
+        # 同一個体 (メガ後も画面表示は元の名前のため、表記が混在し得る)
+        def base(name):
+            if not name:
+                return None
+            if name.startswith("メガ"):
+                name = name[len("メガ"):]
+                name = name[:-1] if name.endswith(("X", "Y")) else name
+            return name
+        want = base(species_ja)
+        if want:
+            for i, p in enumerate(self.party):
+                if base(p.species_ja) == want:
+                    return i
         return None
 
     def find_by_display_name(self, name: str) -> Optional[int]:
         for i, p in enumerate(self.party):
             if p.display_name and p.display_name == name:
+                return i
+            if name in (p.aliases or []):
                 return i
         return None
 
@@ -262,6 +291,57 @@ class BattleStateV2:
         keep_rate = self.last_rate   # レートは対戦を跨ぐ情報なので保持
         self.__init__()
         self.last_rate = keep_rate
+
+    def restore_from_dict(self, d: dict) -> None:
+        """スナップショットからの復元 (サーバー再起動の対戦中リカバリ用)。
+
+        選出画面でしか取れない情報 (相手ロスター/選出フラグ) を含む
+        主要フィールドを書き戻す。イベントログ等は復元しない
+        """
+        def load_mon(md: dict) -> PokemonState:
+            mon = PokemonState()
+            for k in ("species_ja", "species_id", "display_name", "gender",
+                      "types", "hp_percent", "hp_current", "hp_max",
+                      "status", "volatiles", "boosts", "ability_ja",
+                      "ability_id", "item_ja", "item_id", "item_consumed",
+                      "revealed_moves", "aliases", "is_mega", "is_active",
+                      "is_picked", "pick_order"):
+                if k in md and md[k] is not None:
+                    setattr(mon, k, md[k])
+            mon.moves = [MoveSlot(**{kk: m.get(kk) for kk in
+                                     ("name_ja", "move_id", "pp", "max_pp",
+                                      "effectiveness")})
+                         for m in (md.get("moves") or [])]
+            return mon
+
+        for side_name in ("player", "opponent"):
+            sd = d.get(side_name) or {}
+            side = self.side(side_name)
+            side.party = [load_mon(m) for m in (sd.get("party") or [])[:6]]
+            side.active_index = sd.get("active_index")
+            hz = sd.get("hazards") or {}
+            side.stealth_rock = bool(hz.get("stealth_rock"))
+            side.spikes = int(hz.get("spikes") or 0)
+            side.toxic_spikes = int(hz.get("toxic_spikes") or 0)
+            side.sticky_web = bool(hz.get("sticky_web"))
+            sc = sd.get("screens") or {}
+            side.reflect = bool(sc.get("reflect"))
+            side.light_screen = bool(sc.get("light_screen"))
+            side.aurora_veil = bool(sc.get("aurora_veil"))
+            side.tailwind = bool(sd.get("tailwind"))
+        f = d.get("field") or {}
+        self.field.weather = f.get("weather")
+        self.field.weather_turns = f.get("weather_turns")
+        self.field.terrain = f.get("terrain")
+        self.field.terrain_turns = f.get("terrain_turns")
+        self.field.trick_room = bool(f.get("trick_room"))
+        self.turn = int(d.get("turn") or 0)
+        self.mega_used = dict(d.get("mega_used") or
+                              {"player": False, "opponent": False})
+        self.protect_streak = dict(d.get("protect_streak") or
+                                   {"player": 0, "opponent": 0})
+        self.battle_active = bool(d.get("battle_active"))
+        self.selection_picked = d.get("selection_picked")
 
     def to_dict(self):
         return {
