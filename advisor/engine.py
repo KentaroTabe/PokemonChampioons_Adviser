@@ -330,6 +330,11 @@ def evaluate(state: dict, resolver=None) -> dict:
     # ------------------------------------------------------------------
     # 自分の技の評価
     # ------------------------------------------------------------------
+    # わざふうじ状態: ちょうはつ=変化技不可 / かなしばり=特定技不可 /
+    # アンコール=直前の技以外不可 (直前技は追跡不確実なため注記のみ)
+    my_vols = {str(v).lower() for v in (my_p.get("volatiles") or [])}
+    disabled_ids = {v.split("_", 1)[1] for v in my_vols
+                    if v.startswith("disable_")}
     for slot in my_p.get("moves") or []:
         mid = slot.get("move_id")
         mv = dex.move(mid)
@@ -337,6 +342,17 @@ def evaluate(state: dict, resolver=None) -> dict:
         if mv is None:
             continue
         if slot.get("pp") == 0:
+            continue
+        if mid in disabled_ids:
+            actions.append({"kind": "move", "id": mid, "name": name,
+                            "score": -99.0,
+                            "reason": "かなしばりで選べない"})
+            continue
+        if "taunt" in my_vols and (mv["category"] == "Status"
+                                   or not mv["power"]):
+            actions.append({"kind": "move", "id": mid, "name": name,
+                            "score": -99.0,
+                            "reason": "ちょうはつ中は変化技を選べない"})
             continue
 
         acc = (mv["accuracy"] or 100) / 100.0
@@ -532,6 +548,10 @@ def evaluate(state: dict, resolver=None) -> dict:
             actions.sort(key=lambda a: -a["score"])
     except Exception:
         pass
+
+    if "encore" in my_vols:
+        speed_note = ("アンコール中: 直前に使った技しか選べません。" +
+                      speed_note)
 
     return {
         "ok": True,

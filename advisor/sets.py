@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import threading
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
@@ -27,6 +28,11 @@ class SetPredictor:
         self.db_path = db_path
         self._conn = None
         self._snapshot_id = None
+        # サーバーはフレーム処理をスレッドプールで回すため、predict() が
+        # 接続を作ったスレッドと別のスレッドから呼ばれる (選出評価が
+        # "SQLite objects created in a thread..." で落ちた実績)。
+        # 読み取り専用DBなので check_same_thread=False + ロック直列化で守る
+        self._lock = threading.Lock()
 
     def _connect(self) -> Optional[sqlite3.Connection]:
         if self._conn is not None:
@@ -34,7 +40,8 @@ class SetPredictor:
         if not self.db_path.exists():
             return None
         try:
-            self._conn = sqlite3.connect(str(self.db_path))
+            self._conn = sqlite3.connect(str(self.db_path),
+                                         check_same_thread=False)
             row = self._conn.execute(
                 "SELECT id FROM usage_snapshot ORDER BY id DESC LIMIT 1").fetchone()
             self._snapshot_id = row[0] if row else None
@@ -59,29 +66,31 @@ class SetPredictor:
                  "abilities": [(ability_id, pct)], "found": bool}
         """
         empty = {"moves": [], "items": [], "abilities": [], "found": False}
-        conn = self._connect()
-        if conn is None or self._snapshot_id is None:
-            return empty
+        with self._lock:
+            conn = self._connect()
+            if conn is None or self._snapshot_id is None:
+                return empty
 
-        name = self._find_usage_name(conn, "move_usage", species_id)
-        if name is None:
-            return empty
+            name = self._find_usage_name(conn, "move_usage", species_id)
+            if name is None:
+                return empty
 
-        def top(table: str, col: str, limit: int):
-            rows = conn.execute(
-                f"SELECT {col}, usage_percent FROM {table} "
-                f"WHERE snapshot_id=? AND pokemon_name=? "
-                f"ORDER BY usage_percent DESC LIMIT ?",
-                (self._snapshot_id, name, limit)).fetchall()
-            total = sum(r[1] for r in rows) or 1.0
-            return [(_slug_to_id(r[0]), round(100.0 * r[1] / total, 1)) for r in rows]
+            def top(table: str, col: str, limit: int):
+                rows = conn.execute(
+                    f"SELECT {col}, usage_percent FROM {table} "
+                    f"WHERE snapshot_id=? AND pokemon_name=? "
+                    f"ORDER BY usage_percent DESC LIMIT ?",
+                    (self._snapshot_id, name, limit)).fetchall()
+                total = sum(r[1] for r in rows) or 1.0
+                return [(_slug_to_id(r[0]), round(100.0 * r[1] / total, 1))
+                        for r in rows]
 
-        return {
-            "moves": top("move_usage", "move_name", 8),
-            "items": top("item_usage", "item_name", 4),
-            "abilities": top("ability_usage", "ability_name", 3),
-            "found": True,
-        }
+            return {
+                "moves": top("move_usage", "move_name", 8),
+                "items": top("item_usage", "item_name", 4),
+                "abilities": top("ability_usage", "ability_name", 3),
+                "found": True,
+            }
 
 
 _predictor = None

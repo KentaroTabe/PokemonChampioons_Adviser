@@ -42,7 +42,26 @@ EXPECTED = {
 }
 
 
+def test_move_pool_correction() -> None:
+    """技名取り違えの補正: プール外の解決結果はその種族の実使用技へ寄せる
+    (実測: オーロンゲの ふいうち が おいうち に誤解決されて登録された)"""
+    from vision.extractors import _correct_moves_by_species
+    from vision.normalize import NameResolver
+    from vision.state import MoveSlot
+    resolver = NameResolver()
+    slot = MoveSlot(name_ja="おいうち", move_id="pursuit")
+    _correct_moves_by_species(resolver, [("おいうち", slot)], "grimmsnarl")
+    assert slot.move_id == "suckerpunch", (slot.name_ja, slot.move_id)
+    assert slot.name_ja == "ふいうち"
+    # プールに似た技が無い読取は書き換えない
+    slot2 = MoveSlot(name_ja="アンコール", move_id="encore")
+    _correct_moves_by_species(resolver, [("アンコール", slot2)], "grimmsnarl")
+    assert slot2.move_id == "encore", slot2
+    print("技プール補正 OK (おいうち→ふいうち / 圏外技は維持)")
+
+
 def main() -> None:
+    test_move_pool_correction()
     if not IMG_DIR.exists():
         print("test_look_more SKIP (images/look_more なし)")
         return

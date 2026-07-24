@@ -34,6 +34,53 @@ def _best_dmg(attacker: MonView, defender: MonView, moves: list) -> float:
     return best
 
 
+def _setup_boosted(view: MonView, moves: list) -> Optional[MonView]:
+    """積み技を持つ場合、1回積んだ後のビューを返す (無ければ None)"""
+    from dataclasses import replace
+    from advisor.search import SETUP_MOVES
+    best_id, best_gain = None, 0
+    for mid in moves:
+        deltas = SETUP_MOVES.get(mid)
+        if not deltas:
+            continue
+        gain = sum(v for k, v in deltas.items() if k in ("atk", "spa", "spe"))
+        if gain > best_gain:
+            best_id, best_gain = mid, gain
+    if best_id is None:
+        return None
+    deltas = SETUP_MOVES[best_id]
+    boosts = dict(view.boosts or {})
+    for k, v in deltas.items():
+        boosts[k] = max(-6, min(6, boosts.get(k, 0) + v))
+    return replace(view, boosts=boosts)
+
+
+def _race_turns(view: MonView, hp: float, moves: list,
+                opp: MonView, opp_hp: float, opp_moves: list) -> tuple:
+    """(撃破に必要なターン数, その系列での実効ビュー)。
+
+    積み技を持ち、かつ相手の打点に3ターン以上の猶予がある場合は
+    「1ターン積んでから殴る」系列も評価し、速い方を採る
+    (積みエース評価の底上げ: 積んだ後の性能込みで対面を測る)。
+    """
+    dmg = _best_dmg(view, opp, moves)
+    if dmg <= 0:
+        return None, view
+    turns = math.ceil((opp_hp * 100) / dmg)
+    su = _setup_boosted(view, moves)
+    if su is not None:
+        dmg_opp = _best_dmg(opp, view, opp_moves)
+        survive = math.inf if dmg_opp <= 0 else \
+            math.ceil((hp * 100) / dmg_opp)
+        if survive >= 3:
+            dmg_su = _best_dmg(su, opp, moves)
+            if dmg_su > 0:
+                t_su = 1 + math.ceil((opp_hp * 100) / dmg_su)
+                if t_su < turns:
+                    return t_su, su
+    return turns, view
+
+
 def duel_score(a: MonView, a_hp: float, a_moves: list,
                b: MonView, b_hp: float, b_moves: list,
                fieldv=None) -> Optional[float]:
@@ -41,20 +88,19 @@ def duel_score(a: MonView, a_hp: float, a_moves: list,
 
     タイプ相性だけでなく「実際に対面で戦った場合の勝敗」を表す:
     最大打点 (命中込み) での撃破ターン数の差 + 先手権 (特性込みの
-    実効素早さ) で連続値にする。判定不能 (双方打点なし) は None。
+    実効素早さ) で連続値にする。積み技持ちは「積んでから殴る」系列も
+    込みで評価する。判定不能 (双方打点なし) は None。
     """
-    dmg_a = _best_dmg(a, b, a_moves)
-    dmg_b = _best_dmg(b, a, b_moves)
-    if dmg_a <= 0 and dmg_b <= 0:
+    turns_a, eff_a = _race_turns(a, a_hp, a_moves, b, b_hp, b_moves)
+    turns_b, eff_b = _race_turns(b, b_hp, b_moves, a, a_hp, a_moves)
+    if turns_a is None and turns_b is None:
         return None
-    if dmg_a <= 0:
+    if turns_a is None:
         return -1.0
-    if dmg_b <= 0:
+    if turns_b is None:
         return 1.0
-    turns_a = math.ceil((b_hp * 100) / dmg_a)   # aがbを倒すのに必要なターン
-    turns_b = math.ceil((a_hp * 100) / dmg_b)
     from advisor.damage import effective_speed
-    a_first = effective_speed(a, fieldv) >= effective_speed(b, fieldv)
+    a_first = effective_speed(eff_a, fieldv) >= effective_speed(eff_b, fieldv)
     margin = (turns_b - turns_a) + (0.5 if a_first else -0.5)
     return math.tanh(margin * 0.8)
 

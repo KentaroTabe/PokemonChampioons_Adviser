@@ -118,6 +118,24 @@ def test_evaluate_end_to_end():
     assert "エレクトロビーム" in names[0:2], names  # 電気4倍が上位に来るはず
     top_move = advice["actions"][0]
     print("test_evaluate_end_to_end OK")
+
+    # わざふうじ: ちょうはつ中は変化技 (まもる) が候補から実質除外される
+    import copy
+    sealed = copy.deepcopy(state)
+    sealed["player"]["party"][0]["volatiles"] = ["taunt"]
+    adv2 = evaluate(sealed)
+    protect = next(a for a in adv2["actions"] if a["id"] == "protect")
+    assert protect["score"] <= -90, protect
+    assert "ちょうはつ" in protect["reason"], protect
+    # かなしばり: 封じられた技のみ除外される
+    sealed["player"]["party"][0]["volatiles"] = ["disable",
+                                                 "disable_dragonpulse"]
+    adv3 = evaluate(sealed)
+    dp = next(a for a in adv3["actions"] if a["id"] == "dragonpulse")
+    assert dp["score"] <= -90, dp
+    es = next(a for a in adv3["actions"] if a["id"] == "electroshot")
+    assert es["score"] > 0, es
+    print("test_move_seal_filter OK")
     print("--- アドバイス出力例 ---")
     from advisor.service import Advisor
     print(Advisor().format_advice(advice))

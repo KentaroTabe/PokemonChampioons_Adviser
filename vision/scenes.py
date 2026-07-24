@@ -24,6 +24,27 @@ from vision.zones import crop
 _FIELD_CHECK_ANCHOR_ZONE = {"x0": 0.45, "y0": 0.19, "x1": 0.75, "y1": 0.30}
 _fc_cache = {"ts": 0.0, "result": False, "sig": None}
 
+# 「対戦準備中」(選出確認) 画面のアンカー文言 (タイマー右)
+_PREP_ANCHOR_ZONE = {"x0": 0.495, "y0": 0.090, "x1": 0.625, "y1": 0.140}
+_prep_cache = {"ts": 0.0, "result": False, "sig": None}
+
+
+def _looks_like_battle_prep(img) -> bool:
+    """中央上の「対戦準備中」文言をOCRで確認する (スロットリング付き)"""
+    now = time.time()
+    sig = int(img[::64, ::64].mean() * 10)
+    if now - _prep_cache["ts"] < 1.0 and sig == _prep_cache["sig"]:
+        return _prep_cache["result"]
+    _prep_cache["ts"] = now
+    _prep_cache["sig"] = sig
+    from vision import ocr
+    from vision.normalize import similarity
+    text = ocr.read_zone_text(img, _PREP_ANCHOR_ZONE)
+    result = bool(text) and ("準備中" in text
+                             or similarity(text[:5], "対戦準備中") >= 0.6)
+    _prep_cache["result"] = result
+    return result
+
 
 def _looks_like_field_check(img) -> bool:
     """固定文言「効果と場の状態」ピルをOCRで確認する (同一画面向けスロットリング)"""
@@ -168,6 +189,22 @@ def classify(img) -> dict:
     scores["watch_tab"] = round(tab, 3)
     if center > 0.45 and tab > 0.04:
         return {"scene": "watch", "scores": scores}
+
+    # --- 対戦準備中 (選出確認) 画面: 左に自分ロスター+右に相手ロスター ---
+    # 選出画面より行が内側に配置されるため selection 判定に掛からず、背景の
+    # 炎・レーザー演出が battle_hud/command 条件を偶発的に満たして「幻のHUD」
+    # が付与されていた (2026-07-24監査)。色の粗選別 → 文言アンカーで確定する
+    prep_left = _purple_ratio(crop(img, {"x0": 0.150, "y0": 0.140,
+                                         "x1": 0.310, "y1": 0.880})) + \
+        _ratio_in_range(crop(img, {"x0": 0.150, "y0": 0.140,
+                                   "x1": 0.310, "y1": 0.880}),
+                        [30, 80, 120], [55, 255, 255])
+    prep_right = _crimson_ratio(crop(img, {"x0": 0.690, "y0": 0.140,
+                                           "x1": 0.850, "y1": 0.880}))
+    scores["prep_left"] = round(prep_left, 3)
+    scores["prep_right"] = round(prep_right, 3)
+    if prep_left > 0.20 and prep_right > 0.20 and _looks_like_battle_prep(img):
+        return {"scene": "standby", "scores": scores}
 
     # --- 選出画面: 相手パーティパネル(赤) + 選出完了バー(紫) ---
     opp_panel = _crimson_ratio(crop(img, zones.SELECTION_OPP[0]["panel"]))

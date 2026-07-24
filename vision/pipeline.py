@@ -105,6 +105,39 @@ class VisionPipeline:
         self._resolution_seen = True
 
     # ------------------------------------------------------------------
+    def _tick_field_effects(self) -> None:
+        """新ターン確定時に天候/フィールド/トリックルームの残りターンを減算し、
+        尽きたら消す。
+
+        終了ダイアログはフレーム間引きで取り逃すことがある (実測: 天候終了の
+        見逃し)。残りターンは開始メッセージ (5に設定) と場の状況画面 (n/m) で
+        供給されるため、経過で自動失効させれば状態が古いまま残らない。
+        終了メッセージを拾えた場合はそちらが先に消す (二重処理は無害)
+        """
+        f = self.state.field
+        if f.weather and f.weather_turns is not None:
+            f.weather_turns -= 1
+            if f.weather_turns <= 0:
+                self.state.log_event(
+                    "system", f"天候({f.weather})がターン経過で終了と推定",
+                    event_id="weather_expire")
+                f.weather, f.weather_turns = None, None
+        if f.terrain and f.terrain_turns is not None:
+            f.terrain_turns -= 1
+            if f.terrain_turns <= 0:
+                self.state.log_event(
+                    "system", f"フィールド({f.terrain})がターン経過で終了と推定",
+                    event_id="terrain_expire")
+                f.terrain, f.terrain_turns = None, None
+        if f.trick_room and f.trick_room_turns is not None:
+            f.trick_room_turns -= 1
+            if f.trick_room_turns <= 0:
+                self.state.log_event(
+                    "system", "トリックルームがターン経過で終了と推定",
+                    event_id="trickroom_expire")
+                f.trick_room, f.trick_room_turns = False, None
+
+    # ------------------------------------------------------------------
     def _should_run_heavy(self, scene: str, force: bool) -> bool:
         if force:
             return True
@@ -215,6 +248,7 @@ class VisionPipeline:
         elif scene == "command" and self._resolution_seen:
             self._resolution_seen = False
             self.state.turn += 1
+            self._tick_field_effects()
 
         heavy = self._should_run_heavy(scene, force=single_shot)
 
