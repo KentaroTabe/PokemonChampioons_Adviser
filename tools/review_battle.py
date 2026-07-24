@@ -60,7 +60,17 @@ def _active_species(records: list, i: int):
     return None, None
 
 
-def review(path: str, show_all: bool) -> None:
+def latest_decided_battle() -> str | None:
+    """勝敗が確定している最新の対戦ログ"""
+    for f in reversed(sorted(glob.glob(str(BATTLE_DIR / "*.jsonl")))):
+        recs = _load(f)
+        if any(d.get("type") == "outcome" and
+               d.get("outcome") in ("win", "loss") for d in recs):
+            return f
+    return None
+
+
+def review_text(path: str, show_all: bool = False) -> str:
     from vision.normalize import NameResolver
     resolver = NameResolver()
     records = _load(path)
@@ -99,12 +109,12 @@ def review(path: str, show_all: bool) -> None:
     name = Path(path).name
     n = len(decisions)
     n_agree = sum(1 for x in decisions if x[3])
-    print(f"🔍 レビュー: {name} → 結果: "
-          f"{'勝ち' if outcome == 'win' else '負け' if outcome == 'loss' else '不明'}")
+    lines = [f"🔍 レビュー: {name} → 結果: "
+             f"{'勝ち' if outcome == 'win' else '負け' if outcome == 'loss' else '不明'}"]
     if not n:
-        print("アドバイスと行動の対応付けができる手がありません")
-        return
-    print(f"アドバイス一致率: {n_agree}/{n} ({n_agree / n:.0%})\n")
+        lines.append("アドバイスと行動の対応付けができる手がありません")
+        return "\n".join(lines)
+    lines.append(f"アドバイス一致率: {n_agree}/{n} ({n_agree / n:.0%})\n")
     for t, actual, best, agree in decisions:
         if agree and not show_all:
             continue
@@ -115,11 +125,12 @@ def review(path: str, show_all: bool) -> None:
         line = f"{mark} [{ts}] 実際 {actual} / 推奨 {rec_label}"
         if not agree and best.get("reason"):
             line += f"  ({best['reason']})"
-        print(line)
+        lines.append(line)
     if n_agree == n:
-        print("(全手がアドバイスと一致)")
+        lines.append("(全手がアドバイスと一致)")
     elif outcome == "loss":
-        print("\n負け試合の分岐点は上の ≠ の手。次戦で試す候補になる")
+        lines.append("\n負け試合の分岐点は上の ≠ の手。次戦で試す候補になる")
+    return "\n".join(lines)
 
 
 def main() -> None:
@@ -127,17 +138,10 @@ def main() -> None:
     ap.add_argument("--battle", default=None)
     ap.add_argument("--all", action="store_true", help="一致した手も表示")
     args = ap.parse_args()
-    battle = args.battle
-    if battle is None:
-        for f in reversed(sorted(glob.glob(str(BATTLE_DIR / "*.jsonl")))):
-            recs = _load(f)
-            if any(d.get("type") == "outcome" and
-                   d.get("outcome") in ("win", "loss") for d in recs):
-                battle = f
-                break
+    battle = args.battle or latest_decided_battle()
     if battle is None:
         raise SystemExit("勝敗確定の対戦ログがありません")
-    review(battle, args.all)
+    print(review_text(battle, args.all))
 
 
 if __name__ == "__main__":

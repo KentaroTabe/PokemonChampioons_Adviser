@@ -81,6 +81,7 @@ _last_advice_key = ""
 _last_dump_time = 0.0
 _last_scene_log = 0.0
 _last_scene = "unknown"
+_last_frame_ts = 0.0
 
 
 def _advice_key(state: dict) -> str:
@@ -109,8 +110,9 @@ async def connect(sid, environ):
 async def handle_frame(sid, data):
     global frame_counter, processed_counter, dropped_counter, _busy
     global _last_state_json, _last_advice_time, _last_advice_key
-    global _last_dump_time, _last_scene_log
+    global _last_dump_time, _last_scene_log, _last_frame_ts
     frame_counter += 1
+    _last_frame_ts = time.time()
 
     # 処理が追いつかない場合は古いフレームを捨てる (最新優先)。
     # OCRは重いので、これが無いとキューが伸び続けて表示が遅延し続ける
@@ -380,6 +382,126 @@ async def generate_team(sid, data):
                        {"ok": False, "reason": f"生成エラー: {e}"}, room=sid)
     finally:
         _generating = False
+
+
+# ------------------------------------------------------------------
+# 分析・コーチング (敗因分析 / 環境 / レビュー / プレイブック / 改善)
+# ------------------------------------------------------------------
+_analysis_busy = False
+_ANALYSIS_GUARD_SCENES = ("selection", "standby", "command", "move_select",
+                          "watch", "field_check", "battle_hud", "field")
+
+
+def _battle_in_progress() -> bool:
+    """対戦中は重い分析ジョブを実行しない (フレーム解析と競合するため)"""
+    return (time.time() - _last_frame_ts < 60 and
+            pipeline.state.scene in _ANALYSIS_GUARD_SCENES)
+
+
+@sio.on('run_analysis')
+async def run_analysis(sid, data):
+    """軽量分析: 敗因分析 / 環境ダイジェスト / 直近対戦レビュー"""
+    kind = (data or {}).get("kind", "battles")
+
+    def _work():
+        if kind == "meta":
+            from tools.meta_digest import digest
+            return digest(12, None)
+        if kind == "review":
+            from tools.review_battle import latest_decided_battle, review_text
+            path = latest_decided_battle()
+            return review_text(path) if path else "勝敗確定の対戦ログがありません"
+        from tools.analyze_battles import load_battles, report, summarize
+        battles = load_battles(last=int((data or {}).get("last") or 50))
+        if not battles:
+            return "対戦ログがありません"
+        return report(summarize(battles))
+
+    try:
+        text = await asyncio.get_event_loop().run_in_executor(None, _work)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        text = f"分析エラー: {e}"
+    await sio.emit('analysis_result', {"kind": kind, "text": text}, room=sid)
+
+
+def _analysis_progress_cb(sid):
+    loop = asyncio.get_event_loop()
+
+    def _progress(msg):
+        loop.call_soon_threadsafe(
+            lambda: asyncio.ensure_future(
+                sio.emit('analysis_progress', {"msg": str(msg)}, room=sid)))
+    return _progress
+
+
+async def _run_heavy_analysis(sid, kind, coro_factory):
+    """実対戦を伴う重いジョブ (プレイブック/改善) の共通ランナー"""
+    global _analysis_busy
+    if _analysis_busy:
+        await sio.emit('analysis_progress',
+                       {"msg": "別の分析ジョブが実行中です"}, room=sid)
+        return
+    if _battle_in_progress():
+        await sio.emit('analysis_result',
+                       {"kind": kind, "text": "対戦中のため実行できません "
+                        "(フレーム解析と競合します)。対戦後に再実行してください"},
+                       room=sid)
+        return
+    _analysis_busy = True
+    try:
+        text = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: asyncio.run(coro_factory()))
+        await sio.emit('analysis_result', {"kind": kind, "text": text},
+                       room=sid)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        await sio.emit('analysis_result',
+                       {"kind": kind, "text": f"実行エラー: {e}"}, room=sid)
+    finally:
+        _analysis_busy = False
+
+
+@sio.on('run_playbook')
+async def run_playbook(sid, data):
+    """プレイブック生成 (自チーム×環境上位構築、実対戦ベース)"""
+    from types import SimpleNamespace
+    progress = _analysis_progress_cb(sid)
+    args = SimpleNamespace(
+        opponents=int((data or {}).get("opponents") or 10),
+        battles=int((data or {}).get("battles") or 20),
+        concurrency=3, team_file=None)
+
+    async def _job():
+        from tools.playbook import run as pb_run
+        result = await pb_run(args, log=progress)
+        return result["md"]
+
+    await _run_heavy_analysis(sid, "playbook", _job)
+
+
+@sio.on('improve_team')
+async def improve_team(sid, data):
+    """制約付きパーティ改善 (自チームを種にした進化探索)"""
+    from types import SimpleNamespace
+    progress = _analysis_progress_cb(sid)
+    args = SimpleNamespace(
+        population=8, generations=3,
+        battles=int((data or {}).get("battles") or 30),
+        concurrency=3, forecast_mix=0.3, archive_mix=0.2,
+        update_archive=False, seed_myteam=True, seed_file=None,
+        locked=(data or {}).get("locked") or None,
+        max_changes=int((data or {}).get("max_changes") or 2), seed=None)
+
+    async def _job():
+        from tools.evolve_teams import run as ev_run
+        result = await ev_run(args, log=progress)
+        return (f"改善候補 (対環境の実測勝率 {result['fitness']:.0%}):\n\n"
+                f"{result['best_ja']}")
+
+    await _run_heavy_analysis(sid, "improve", _job)
 
 
 @sio.on('save_my_team')

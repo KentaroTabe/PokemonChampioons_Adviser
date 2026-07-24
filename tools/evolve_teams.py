@@ -291,7 +291,13 @@ async def evaluate_population(pop: list, n_battles: int, opp_builder,
                 m["fitness"] = r["win_rate"]
 
 
-async def run(args) -> None:
+async def run(args, log=None) -> dict:
+    """進化探索を実行し、最優秀チーム等を返す。
+
+    log: 進捗コールバック (省略時は標準出力)。サーバーからの実行用。
+    返り値: {"best_text", "best_ja", "fitness", "path"}
+    """
+    log = log or (lambda m: print(m, flush=True))
     rng = random.Random(args.seed)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     opp = build_opponent(args.forecast_mix, args.archive_mix, rng)
@@ -306,9 +312,8 @@ async def run(args) -> None:
         locked = [s for s in (args.locked or "").replace("、", ",").split(",")
                   if s.strip()]
         constraint = Constraint(seed_text, locked, args.max_changes)
-        print(f"[evolve] 制約付き改善: 種={_team_ja(seed_text)} / "
-              f"固定{len(constraint.locked)}枠 / 変更上限{args.max_changes}",
-              flush=True)
+        log(f"[evolve] 制約付き改善: 種={_team_ja(seed_text)} / "
+            f"固定{len(constraint.locked)}枠 / 変更上限{args.max_changes}")
         pop = init_population_seeded(args.population, seed_text,
                                      constraint, pool_rows, rng)
     else:
@@ -320,11 +325,11 @@ async def run(args) -> None:
         await evaluate_population(pop, args.battles, opp,
                                   concurrency=args.concurrency)
         pop.sort(key=lambda m: -m["fitness"])
-        print(f"===== 世代{gen + 1}/{args.generations} "
-              f"({time.time() - t0:.0f}s) =====", flush=True)
+        log(f"===== 世代{gen + 1}/{args.generations} "
+            f"({time.time() - t0:.0f}s) =====")
         for m in pop:
-            print(f"  {m['fitness']:.2f} [{m['origin']}] "
-                  f"{_team_ja(m['text'])}", flush=True)
+            log(f"  {m['fitness']:.2f} [{m['origin']}] "
+                f"{_team_ja(m['text'])}")
         history.append([{"origin": m["origin"], "fitness": m["fitness"],
                          "species": _team_species(m["text"])} for m in pop])
         if gen == 0:
@@ -336,9 +341,8 @@ async def run(args) -> None:
             if "ranked" in means and "generated" in means:
                 verdict = "OK" if means.get("ranked", 0) >= \
                     means.get("generated", 0) else "⚠要確認"
-                print(f"  健全性: ranked平均{means.get('ranked', 0):.2f} vs "
-                      f"generated平均{means.get('generated', 0):.2f} {verdict}",
-                      flush=True)
+                log(f"  健全性: ranked平均{means.get('ranked', 0):.2f} vs "
+                    f"generated平均{means.get('generated', 0):.2f} {verdict}")
         if gen + 1 >= args.generations:
             break
         survivors = pop[:max(2, len(pop) // 2)]
@@ -360,10 +364,11 @@ async def run(args) -> None:
         "best": {"fitness": best["fitness"], "text": best["text"]},
         "history": history,
     }, ensure_ascii=False, indent=1), encoding="utf-8")
-    print(f"\n最優秀 (勝率{best['fitness']:.2f}): {_team_ja(best['text'])}")
+    log(f"\n最優秀 (勝率{best['fitness']:.2f}): {_team_ja(best['text'])}")
     from tools.evaluate_team import team_text_to_ja
-    print(team_text_to_ja(best["text"]))
-    print(f"記録: {run_path}", flush=True)
+    best_ja = team_text_to_ja(best["text"])
+    log(best_ja)
+    log(f"記録: {run_path}")
 
     if args.update_archive:
         archive = load_archive()
@@ -374,8 +379,10 @@ async def run(args) -> None:
             ARCHIVE_PATH.write_text(
                 json.dumps(archive, ensure_ascii=False, indent=1),
                 encoding="utf-8")
-            print(f"アーカイブへ追加 (計{len(archive)}件) — 次回の相手分布に"
-                  "混ざります (--archive-mix)", flush=True)
+            log(f"アーカイブへ追加 (計{len(archive)}件) — 次回の相手分布に"
+                "混ざります (--archive-mix)")
+    return {"best_text": best["text"], "best_ja": best_ja,
+            "fitness": best["fitness"], "path": str(run_path)}
 
 
 def main() -> None:

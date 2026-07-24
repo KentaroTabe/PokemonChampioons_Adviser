@@ -128,7 +128,12 @@ def _entry_text(opp_ids: list, r: dict, my_ids: list) -> tuple:
     return head, lines
 
 
-async def run(args) -> None:
+async def run(args, log=None) -> dict:
+    """プレイブックを生成して {"md", "path", "overall"} を返す。
+
+    log: 進捗コールバック (省略時は標準出力)。サーバーからの実行用。
+    """
+    log = log or (lambda m: print(m, flush=True))
     from champions_agent.env.ranked_teams import build_ranked_teams
     from tools.evaluate_team import build_myteam_text
     if args.team_file:
@@ -137,8 +142,8 @@ async def run(args) -> None:
         my_text = build_myteam_text()
     my_ids = _team_ids(my_text)
     opps = build_ranked_teams()[:args.opponents]
-    print(f"[playbook] 自チーム: {' / '.join(_ja(m) for m in my_ids)}")
-    print(f"[playbook] 相手: 上位{len(opps)}構築 x 各{args.battles}戦", flush=True)
+    log(f"[playbook] 自チーム: {' / '.join(_ja(m) for m in my_ids)}")
+    log(f"[playbook] 相手: 上位{len(opps)}構築 x 各{args.battles}戦")
 
     results = []
     t0 = time.time()
@@ -149,10 +154,10 @@ async def run(args) -> None:
             return_exceptions=True)
         for o, r in zip(chunk, rs):
             if isinstance(r, Exception):
-                print(f"[playbook] 対戦失敗 (相手{i}): {r}", flush=True)
+                log(f"[playbook] 対戦失敗 (相手{i}): {r}")
                 continue
             results.append((o, r))
-        print(f"[playbook] {len(results)}/{len(opps)} 構築完了", flush=True)
+        log(f"[playbook] {len(results)}/{len(opps)} 構築完了")
 
     results.sort(key=lambda x: x[1]["win_rate"])
     overall = sum(r["wins"] for _, r in results) / \
@@ -170,13 +175,15 @@ async def run(args) -> None:
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     path = OUT_DIR / f"playbook_{time.strftime('%Y%m%d_%H%M')}.md"
-    path.write_text("\n".join(md), encoding="utf-8")
-    print(f"\n総合勝率: {overall:.0%}")
-    print("苦手トップ3:")
+    md_text = "\n".join(md)
+    path.write_text(md_text, encoding="utf-8")
+    log(f"\n総合勝率: {overall:.0%}")
+    log("苦手トップ3:")
     for opp_text, r in results[:3]:
-        print(f"  {r['win_rate']:.0%} vs "
-              f"{' / '.join(_ja(o) for o in _team_ids(opp_text))}")
-    print(f"プレイブック: {path}", flush=True)
+        log(f"  {r['win_rate']:.0%} vs "
+            f"{' / '.join(_ja(o) for o in _team_ids(opp_text))}")
+    log(f"プレイブック: {path}")
+    return {"md": md_text, "path": str(path), "overall": overall}
 
 
 def main() -> None:
