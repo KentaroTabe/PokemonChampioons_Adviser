@@ -13,8 +13,13 @@
     「自分の対策構築が普及した後のメタ」への頑健性を測る (PSRO-lite)。
     --update-archive で今回の最優秀チームをアーカイブへ追加する。
 
+制約付き改善 (自分のパーティを少しだけ変える):
+  --seed-myteam: config/my_team.json の登録チームを種にする
+  --locked "ペリッパー,ラグラージ": 入れ替え禁止の固定枠
+  --max-changes 2: 種チームから同時に変えてよい枠数の上限
+
     python -m tools.evolve_teams --population 12 --generations 3 --battles 40
-    python -m tools.evolve_teams --population 6 --generations 2 --battles 20   # スモーク
+    python -m tools.evolve_teams --seed-myteam --locked ミミッキュ --max-changes 2
     python -m tools.evolve_teams --update-archive                              # 反復運用
 
 結果: logs/team_evolution/run_<時刻>.json + 最優秀チームの日本語表示。
@@ -180,16 +185,72 @@ def init_population(size: int, rng: random.Random) -> list:
     return pop
 
 
+class Constraint:
+    """制約付き改善: 種チームからの距離上限と固定枠"""
+
+    def __init__(self, seed_text: str, locked_ja: list, max_changes: int):
+        self.seed_keys = {_base_species_key(s)
+                          for s in _team_species(seed_text)}
+        self.max_changes = max_changes
+        self.locked = set()
+        if locked_ja:
+            from vision.normalize import NameResolver
+            resolver = NameResolver()
+            for name in locked_ja:
+                r = resolver.resolve_species(name.strip(), cutoff=0.8)
+                if r is None:
+                    raise SystemExit(f"--locked の種族を解決できません: {name}")
+                self.locked.add(_base_species_key(r[1]))
+        unknown = self.locked - self.seed_keys
+        if unknown:
+            raise SystemExit(f"--locked が種チームにいません: {unknown}")
+
+    def mutable_slots(self, team_text: str) -> list:
+        """変異してよいスロット番号。固定枠は常に不可。既に max_changes
+        枠変わっているチームは「変更済みスロットの再変異」のみ許す"""
+        species = [_base_species_key(s) for s in _team_species(team_text)]
+        changed = [i for i, s in enumerate(species)
+                   if s not in self.seed_keys]
+        if len(changed) >= self.max_changes:
+            return [i for i in changed if species[i] not in self.locked]
+        return [i for i, s in enumerate(species) if s not in self.locked]
+
+
+def init_population_seeded(size: int, seed_text: str, constraint: Constraint,
+                           pool_rows: list, rng: random.Random) -> list:
+    """種チーム + その制約内変異体で初期集団を作る"""
+    pop = [{"origin": "seed", "text": seed_text, "fitness": None}]
+    tries = 0
+    while len(pop) < size and tries < size * 20:
+        tries += 1
+        text = mutate(seed_text, pool_rows, rng, constraint)
+        if rng.random() < 0.5:   # 半分は2枠目まで変異
+            text = mutate(text, pool_rows, rng, constraint)
+        if all(text != m["text"] for m in pop):
+            pop.append({"origin": "mutant", "text": text, "fitness": None})
+    return pop
+
+
 def _meta_pool_rows() -> list:
     with db.get_connection() as conn:
         snap = db.latest_snapshot_id(conn, fmt=USAGE_TARGET_FORMAT)
         return _fetch_meta_pool(conn, snap) if snap else []
 
 
-def mutate(team_text: str, pool_rows: list, rng: random.Random) -> str:
-    """1枠を使用率重み付きの別種族 (meta_setsの型) に入れ替える"""
+def mutate(team_text: str, pool_rows: list, rng: random.Random,
+           constraint: "Constraint | None" = None) -> str:
+    """1枠を使用率重み付きの別種族 (meta_setsの型) に入れ替える。
+
+    constraint があれば固定枠と変更数上限 (種チームからの距離) を守る。
+    """
     blocks = team_text.strip().split("\n\n")
-    idx = rng.randrange(len(blocks))
+    if constraint is not None:
+        slots = constraint.mutable_slots(team_text)
+        if not slots:
+            return team_text
+        idx = rng.choice(slots)
+    else:
+        idx = rng.randrange(len(blocks))
     current = {_base_species_key(s) for s in _team_species(team_text)}
     cands = [r for r in pool_rows
              if _base_species_key(_to_id(r["pokemon_name"])) not in current]
@@ -235,7 +296,23 @@ async def run(args) -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     opp = build_opponent(args.forecast_mix, args.archive_mix, rng)
     pool_rows = _meta_pool_rows()
-    pop = init_population(args.population, rng)
+    constraint = None
+    if args.seed_myteam or args.seed_file:
+        if args.seed_file:
+            seed_text = Path(args.seed_file).read_text(encoding="utf-8")
+        else:
+            from tools.evaluate_team import build_myteam_text
+            seed_text = build_myteam_text()
+        locked = [s for s in (args.locked or "").replace("、", ",").split(",")
+                  if s.strip()]
+        constraint = Constraint(seed_text, locked, args.max_changes)
+        print(f"[evolve] 制約付き改善: 種={_team_ja(seed_text)} / "
+              f"固定{len(constraint.locked)}枠 / 変更上限{args.max_changes}",
+              flush=True)
+        pop = init_population_seeded(args.population, seed_text,
+                                     constraint, pool_rows, rng)
+    else:
+        pop = init_population(args.population, rng)
     history = []
 
     for gen in range(args.generations):
@@ -256,7 +333,7 @@ async def run(args) -> None:
             for m in pop:
                 by.setdefault(m["origin"], []).append(m["fitness"])
             means = {k: sum(v) / len(v) for k, v in by.items()}
-            if len(means) == 2:
+            if "ranked" in means and "generated" in means:
                 verdict = "OK" if means.get("ranked", 0) >= \
                     means.get("generated", 0) else "⚠要確認"
                 print(f"  健全性: ranked平均{means.get('ranked', 0):.2f} vs "
@@ -269,7 +346,8 @@ async def run(args) -> None:
         while len(survivors) + len(children) < args.population:
             parent = survivors[len(children) % len(survivors)]
             children.append({"origin": "mutant",
-                             "text": mutate(parent["text"], pool_rows, rng),
+                             "text": mutate(parent["text"], pool_rows, rng,
+                                            constraint),
                              "fitness": None})
         pop = survivors + children   # 生存者の評価値は再利用 (相手分布固定のため)
 
@@ -313,6 +391,14 @@ def main() -> None:
                     help="過去の優勝チームを相手に混ぜる比率")
     ap.add_argument("--update-archive", action="store_true",
                     help="最優秀チームをアーカイブへ追加 (PSRO反復)")
+    ap.add_argument("--seed-myteam", action="store_true",
+                    help="config/my_team.json を種にした制約付き改善")
+    ap.add_argument("--seed-file", default=None,
+                    help="種チームのShowdownテキストファイル")
+    ap.add_argument("--locked", default=None,
+                    help="入れ替え禁止の種族 (カンマ区切り、日本語可)")
+    ap.add_argument("--max-changes", type=int, default=2,
+                    help="種チームから同時に変えてよい枠数")
     ap.add_argument("--seed", type=int, default=None)
     args = ap.parse_args()
     asyncio.run(run(args))
