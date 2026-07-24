@@ -84,6 +84,19 @@ def main() -> None:
             else:
                 print(f"  {sp}.{key} OK")
     assert ok, f"保存内容が正解と不一致: {json.dumps(saved, ensure_ascii=False)}"
+
+    # 登録済みデータからのShowdownチーム書き出し (human_battle用)
+    from tools.export_my_team_showdown import export_team
+    text = export_team()
+    assert "pelipper @ damprock" in text, text
+    assert "Ability: drizzle" in text, text
+    assert "EVs: 252 HP / 16 Def / 252 SpD" in text, text
+    assert "Calm Nature" in text, text
+    assert "- hurricane" in text, text
+    assert "swampert @ swampertite" in text, text
+    assert "archaludon @ leftovers" in text, text
+    assert "Bold Nature" in text, text
+    print("Showdownエクスポート OK")
     print("test_look_more ALL OK")
 
 

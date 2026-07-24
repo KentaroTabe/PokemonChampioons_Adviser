@@ -132,6 +132,26 @@ HP幻視があり監査に不適。根拠はtools/audit_subtask.pyのdocstring�
 | `python -m tools.validate_teams` | 生成チームのShowdownバリデーション |
 | `python -m tools.check_action_mask` | 行動マスクの検証 |
 
+## 人間 vs AI 対戦 (学習進捗の体感チェック)
+
+| コマンド | 用途 |
+|---|---|
+| `python -m tools.human_battle --name <名前> [--opponent model\|benchmark\|search] [--style balance] [--battles N] [--timer]` | AIから対戦チャレンジを送る (`--mode accept` で人間からの申請を待つ) |
+| `python -m tools.export_my_team_showdown [--out <ファイル>]` | my_team.json をShowdownチームテキストへ書き出し (貼り付け用) |
+| `python -m tools.check_human_battle [--opponent <種別>]` | 疎通確認 (RandomPlayerが人間の代役で1戦、記録なし) |
+
+手順:
+1. ローカルShowdown (8100) 稼働中に `human_battle` を起動する
+2. ブラウザで `https://play.pokemonshowdown.com/~~localhost:8100/` を開き、
+   `--name` と同じ名前でログインする (パスワード不要。同一LANのスマホも可)
+3. チームビルダーで `[Gen 9] Champions BSS Reg MB` を選び、
+   `export_my_team_showdown` の出力を Import に貼り付ける
+4. 届いたチャレンジを Accept する (表示は英語、挙動はchampions仕様)
+
+結果は `logs/human_battles.jsonl` に記録される (人間相手の勝率=進捗の物差し)。
+相手: model=学習済み方策 (性格別/_best優先) / benchmark=上位構築ヒューリスティクス /
+search=探索エキスパート (アドバイザーの読み筋)。
+
 ## データ更新
 
 | コマンド | 用途 |
