@@ -112,10 +112,25 @@ HP幻視があり監査に不適。根拠はtools/audit_subtask.pyのdocstring�
 | `python -m tools.check_team_eval [--battles 60]` | 評価の一貫性ゲート (再現性/順位安定性。進化探索の前提確認) |
 | `python -m tools.evolve_teams [--population 12] [--generations 3] [--battles 60] [--update-archive]` | 構築の進化探索 (対戦AIが評価関数。結果は logs/team_evolution/) |
 
+| `python -m tools.evolve_teams --seed-myteam [--locked <種族,..>] [--max-changes 2]` | 制約付き改善: 自分のパーティを種に「少しだけ変える」探索 |
+| `python -m tools.playbook [--opponents 12] [--battles 30]` | プレイブック生成: 相手構築別の選出チャート+勝ち筋 → `logs/playbooks/` |
+
 進化探索は相手分布に `--forecast-mix` (使用率トレンドの1期外挿。履歴が
 2ヶ月分たまるまで自動無効) と `--archive-mix` (過去の優勝チーム=PSRO反復)
 を混ぜられる。`--update-archive` で今回の最優秀をアーカイブへ追加し、
 定期実行すると「対策の対策」まで見た頑健な構築へ収束していく。
+
+## 振り返り・環境分析
+
+| コマンド | 用途 |
+|---|---|
+| `python -m tools.analyze_battles [--last N] [--days N]` | 敗因分析 (勝敗/レート推移/負け寄与ランキング/選出別勝率/ローカルメタ) |
+| `python -m tools.review_battle [--battle <log>] [--all]` | ポストゲームレビュー (アドバイスと実際の行動の分岐点) |
+| `python -m tools.meta_digest [--top N] [--days N]` | 環境ダイジェスト (使用率上位/トレンド/並び/自分のレート帯との比較) |
+
+上記の分析とプレイブック生成/パーティ改善は、フロントエンド (3000) の
+「📈 分析・コーチング」パネルからも実行できる (バックエンド8000経由。
+実対戦を伴うジョブは対戦中は実行を拒否し、進捗を逐次表示する)。
 
 ## 強化学習 (champions_agent)
 
@@ -175,6 +190,7 @@ search=探索エキスパート (アドバイザーの読み筋)。
 - `README.md` — セットアップと実運用/学習テストの手順
 - `ARCHITECTURE.md` — 全体設計
 - `docs/OPERATIONS.md` — 常駐プロセス運用 (nohup起動/反映/停止)
+- `docs/CONNECTION_TEST_CHECKLIST.md` — 接続テストで確認すべき項目 (2026-07-24更新分)
 - `docs/TOP_PLAYER_PLAN.md` — 機能ロードマップと実施状況
 - `docs/WINDOWS_IPHONE_TEST.md` — Windows+iPhoneでのテスト手順
 - `docs/REPORT_EXTRACTION_PLAN.md` — 課題提出用の部分公開方針

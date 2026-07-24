@@ -20,6 +20,8 @@
         .fainted { color: #866; text-decoration: line-through; }
         .tag { background: #345; border-radius: 4px; padding: 0 5px; margin-left: 4px; font-size: 11px; }
         button { background: #46f; color: #fff; border: 0; padding: 8px 16px; border-radius: 6px; cursor: pointer; margin-right: 8px; }
+        .mini-btn { font-size: 12px; padding: 5px 10px; margin-right: 6px; background: #356; }
+        .mini-btn:disabled { opacity: 0.5; cursor: default; }
         #events { max-height: 180px; overflow-y: auto; font-size: 12px; color: #aac; }
     </style>
 </head>
@@ -60,6 +62,25 @@
                 <button onclick="generateTeam()" id="gen-btn" style="margin-left:8px;background:#3567c9;color:#fff;border:none;border-radius:6px;padding:6px 14px;cursor:pointer">生成</button>
                 <div id="gen-progress" style="font-size:12px;color:#8ac;margin-top:8px;white-space:pre-wrap"></div>
                 <div id="gen-result" style="margin-top:8px"></div>
+            </div>
+            <div class="panel" id="analysis-panel">
+                <h3>📈 分析・コーチング</h3>
+                <div style="margin-bottom:6px">
+                    <button class="mini-btn" onclick="runAnalysis('battles')">敗因分析</button>
+                    <button class="mini-btn" onclick="runAnalysis('meta')">環境ダイジェスト</button>
+                    <button class="mini-btn" onclick="runAnalysis('review')">直近対戦レビュー</button>
+                </div>
+                <div style="margin-bottom:6px">
+                    <button class="mini-btn" style="background:#3567c9" onclick="runPlaybook()">プレイブック生成</button>
+                    <button class="mini-btn" style="background:#3567c9" onclick="improveTeam()">パーティ改善案</button>
+                    <span style="font-size:11px;color:#89a">← 実対戦シミュレーション (数十秒〜数分)</span>
+                </div>
+                <div style="font-size:11px;color:#89a;margin-bottom:6px">
+                    改善の固定枠: <input id="improve-locked" placeholder="例: ミミッキュ,ラグラージ" style="width:180px;font-size:11px">
+                    変更上限: <select id="improve-changes" style="font-size:11px"><option>1</option><option selected>2</option><option>3</option></select>枠
+                </div>
+                <div id="analysis-progress" style="font-size:11px;color:#8ac;white-space:pre-wrap;max-height:90px;overflow-y:auto"></div>
+                <pre id="analysis-result" style="white-space:pre-wrap;font-size:12px;max-height:420px;overflow-y:auto"></pre>
             </div>
             <div class="panel" id="team-editor" style="display:none">
                 <h3>パーティ編集 (保存で即反映)</h3>
@@ -107,6 +128,46 @@
             const [id, ja] = val.split('|');
             socket.emit('set_species', {index: i, species_id: id, species_ja: ja});
         }
+
+        // --- 分析・コーチング (敗因分析/環境/レビュー/プレイブック/改善) ---
+        const anProgress = document.getElementById('analysis-progress');
+        const anResult = document.getElementById('analysis-result');
+        function setAnalysisBusy(busy) {
+            document.querySelectorAll('#analysis-panel .mini-btn')
+                .forEach(b => b.disabled = busy);
+        }
+        function runAnalysis(kind) {
+            anResult.textContent = '';
+            anProgress.textContent = '実行中...';
+            setAnalysisBusy(true);
+            socket.emit('run_analysis', {kind});
+        }
+        function runPlaybook() {
+            anResult.textContent = '';
+            anProgress.textContent = 'プレイブック生成を開始 (実対戦シミュレーション)...\n';
+            setAnalysisBusy(true);
+            socket.emit('run_playbook', {opponents: 10, battles: 20});
+        }
+        function improveTeam() {
+            anResult.textContent = '';
+            anProgress.textContent = 'パーティ改善探索を開始...\n';
+            setAnalysisBusy(true);
+            socket.emit('improve_team', {
+                locked: document.getElementById('improve-locked').value,
+                max_changes: document.getElementById('improve-changes').value,
+            });
+        }
+        socket.on('analysis_progress', (d) => {
+            const lines = (anProgress.textContent + d.msg + '\n').split('\n');
+            anProgress.textContent = lines.slice(-12).join('\n');
+            anProgress.scrollTop = anProgress.scrollHeight;
+        });
+        socket.on('analysis_result', (d) => {
+            anProgress.textContent = '';
+            anResult.textContent = d.text || '';
+            setAnalysisBusy(false);
+        });
+        socket.on('disconnect', () => setAnalysisBusy(false));
 
         // --- パーティ編集 (config/my_team.json をフロントエンドから登録) ---
         const PT_STATS = [["h","HP"],["a","攻"],["b","防"],["c","特攻"],["d","特防"],["s","素早"]];
