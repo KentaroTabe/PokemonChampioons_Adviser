@@ -84,15 +84,14 @@ plist本体は `scripts/com.championsadviser.train.plist` (repo管理)。編集�
 | `python -m tools.check_battle_log [file]` | 対戦ログの内容確認 |
 | `python -m tools.analyze_corrections` | 手動修正ログの集計 (誤認識ランキング) |
 | `python -m tools.audit_extraction [--battle <log>]` | 監査ペア一覧 (フレーム×抽出主張、対戦中フェーズ主体) |
-| `python -m tools.audit_subtask [--battle <log>] [--max-frames N]` | 抽出監査をsonnetサブタスクで実行 → `logs/audit_reports/` にレポート |
-| `python -m tools.audit_monitor [--backfill N]` | リアルタイム監査: 対戦終了を検知して自動でsonnet監査 (フォアグラウンド常駐、Ctrl+Cで停止) |
+| `python -m tools.audit_subtask [--battle <log>] [--max-frames N]` | 1対戦の抽出監査をsonnetサブタスクで実行 → `logs/audit_reports/` |
+| `python -m tools.audit_session [--last N] [--budget 30]` | セッション一括監査: 全対戦横断で矛盾候補の機械検出+層化サンプリング→sonnet 1回 |
 
 監査サブタスクのモデルはsonnet固定 (2026-07-23実測: haikuは技名の取り違え・
 HP幻視があり監査に不適。根拠はtools/audit_subtask.pyのdocstring参照)。
-リアルタイム監査は対戦中レコード (events/hp/対戦シーン) が30秒途絶えたら
-対戦終了と判定する (レート・選出などの対戦外の書き込みは無視)。起動後に
-終わった対戦のみ対象で、起動前の分は `--backfill N` で直近N対戦まで遡れる。
-1対戦あたり数分・API課金が発生するため、必要な検証期間だけ起動する運用を想定。
+通常運用は end_connection_test.sh が自動実行する一括監査 (audit_session)。
+HPの急回復・ひんし後の再表示・7匹化などはPython側で先に検出し、
+sonnetは疑い箇所の検証+少数サンプルの網羅に専念する (タスク数最小化)。
 
 デバッグフレーム: サーバーを `DEBUG_DUMP_FRAMES=1` で起動すると
 `debug_frames/` に保存される (通常10秒毎、場の状況=fc_/選出=sel_は2秒毎)。
