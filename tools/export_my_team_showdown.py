@@ -29,9 +29,10 @@ def _nature_en(nature_ja: str) -> str:
 
 
 def export_team() -> str:
+    from tools.evaluate_team import current_team_entries
     resolver = NameResolver()
     sets, skipped = [], []
-    for ja, entry in my_team._load().items():
+    for ja, entry in current_team_entries().items():
         moves_ja = list(entry.get("技") or entry.get("moves") or [])
         sp = resolver.resolve_species(ja, cutoff=0.9)
         if sp is None or len(moves_ja) < 4:
