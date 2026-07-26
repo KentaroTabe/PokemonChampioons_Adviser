@@ -31,11 +31,11 @@ else
   echo "  launchctl load -w ~/Library/LaunchAgents/com.championsadviser.train.plist"
 fi
 
-# 今回の対戦サマリー
+# 今回の対戦サマリー (セッション中の全対戦。マーカーが無ければ直近10戦)
 echo ""
-echo "=== 直近10戦のサマリー ==="
+echo "=== セッションのサマリー ==="
 source .venv/bin/activate 2>/dev/null
-python -m tools.analyze_battles --last 10 2>/dev/null \
+python -m tools.analyze_battles --session --last 10 2>/dev/null \
   || echo "(対戦ログの集計に失敗。scripts/run_test.sh 環境を確認)"
 
 # セッション一括監査 (sonnet 1回。今回の全対戦を横断)

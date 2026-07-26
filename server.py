@@ -412,7 +412,9 @@ async def run_analysis(sid, data):
             path = latest_decided_battle()
             return review_text(path) if path else "勝敗確定の対戦ログがありません"
         from tools.analyze_battles import run_report
-        text, _ = run_report(last=int((data or {}).get("last") or 50))
+        # 接続テスト中はセッション全体、それ以外は直近50戦
+        text, _ = run_report(last=int((data or {}).get("last") or 50),
+                             session=True)
         return text
 
     try:

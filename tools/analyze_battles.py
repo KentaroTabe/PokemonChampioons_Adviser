@@ -25,6 +25,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 BATTLE_DIR = REPO / "logs" / "battles"
+MARKER = REPO / "logs" / ".connection_test_start"   # 接続テスト開始時刻
 
 _BATTLE_SCENES = {"command", "move_select", "watch",
                   "field_check", "battle_hud", "field"}
@@ -76,9 +77,20 @@ def _parse_battle(path: str) -> dict:
             "n_battle_scenes": n_battle_scenes}
 
 
-def load_battles(days: float | None = None, last: int | None = None) -> list:
+def session_start_ts() -> float | None:
+    """接続テスト開始マーカーの時刻 (無ければ None)"""
+    try:
+        return float(MARKER.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def load_battles(days: float | None = None, last: int | None = None,
+                 since_ts: float | None = None) -> list:
     """対戦ログを新しい順に読み込む (対戦シーンが無いログは除外)"""
     files = sorted(glob.glob(str(BATTLE_DIR / "*.jsonl")))
+    if since_ts:
+        files = [f for f in files if Path(f).stat().st_mtime >= since_ts]
     if days:
         cutoff = time.time() - days * 86400
         files = [f for f in files if Path(f).stat().st_mtime >= cutoff]
@@ -186,9 +198,21 @@ def report(s: dict) -> str:
     return "\n".join(lines)
 
 
-def run_report(days: float | None = None, last: int | None = None):
-    """分析を実行し (レポート文字列, 保存先Path|None) を返す"""
-    battles = load_battles(days=days, last=last)
+def run_report(days: float | None = None, last: int | None = None,
+               session: bool = False):
+    """分析を実行し (レポート文字列, 保存先Path|None) を返す。
+
+    session=True: 接続テスト開始マーカー以降の全対戦を対象にする
+    (件数上限なし。マーカーが無ければ last/days にフォールバック)
+    """
+    since_ts = None
+    scope = ""
+    if session:
+        since_ts = session_start_ts()
+        if since_ts is not None:
+            last, days = None, None
+            scope = " (接続テストセッション全体)"
+    battles = load_battles(days=days, last=last, since_ts=since_ts)
     if not battles:
         return "対象の対戦ログがありません", None
     text = report(summarize(battles))
@@ -196,7 +220,7 @@ def run_report(days: float | None = None, last: int | None = None):
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"analysis_{time.strftime('%Y%m%d_%H%M')}.md"
     header = (f"# 対戦ログ分析 ({time.strftime('%Y-%m-%d %H:%M')})\n"
-              f"対象: {len(battles)}戦"
+              f"対象: {len(battles)}戦" + scope
               + (f" (直近{last}戦)" if last else "")
               + (f" (直近{days}日)" if days else "") + "\n\n")
     path.write_text(header + text + "\n", encoding="utf-8")
@@ -207,6 +231,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="対戦ログの敗因分析")
     ap.add_argument("--days", type=float, default=None)
     ap.add_argument("--last", type=int, default=None)
+    ap.add_argument("--session", action="store_true",
+                    help="接続テスト開始マーカー以降の全対戦を対象 (件数上限なし)")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
     if args.json:
@@ -220,7 +246,8 @@ def main() -> None:
         s["encounters"] = dict(s["encounters"])
         print(json.dumps(s, ensure_ascii=False, indent=1))
     else:
-        text, _ = run_report(days=args.days, last=args.last)
+        text, _ = run_report(days=args.days, last=args.last,
+                             session=args.session)
         print(text)
 
 
