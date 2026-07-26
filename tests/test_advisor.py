@@ -141,9 +141,75 @@ def test_evaluate_end_to_end():
     print(Advisor().format_advice(advice))
 
 
+def _mini_state(my_mon, opp_mon):
+    empty_haz = {"stealth_rock": False, "spikes": 0, "toxic_spikes": 0,
+                 "sticky_web": False}
+    empty_scr = {"reflect": False, "light_screen": False,
+                 "aurora_veil": False}
+    return {
+        "field": {"weather": None, "terrain": None, "trick_room": False},
+        "mega_used": {"player": False, "opponent": False},
+        "player": {"active_index": 0, "tailwind": False,
+                   "hazards": dict(empty_haz), "screens": dict(empty_scr),
+                   "party": [my_mon]},
+        "opponent": {"active_index": 0, "tailwind": False,
+                     "hazards": dict(empty_haz), "screens": dict(empty_scr),
+                     "party": [opp_mon]},
+    }
+
+
+def test_priority_evaluation():
+    # 1) 遅いミミッキュでも、かげうちがKO圏なら「先制技で先に倒せる」扱い
+    my = {"species_id": "mimikyu", "species_ja": "ミミッキュ",
+          "types": ["ゴースト", "フェアリー"], "hp_percent": 100.0,
+          "hp_current": 131, "hp_max": 131, "status": None, "boosts": {},
+          "ability_id": "disguise", "item_id": None,
+          "moves": [
+              {"name_ja": "かげうち", "move_id": "shadowsneak",
+               "pp": 20, "max_pp": 20, "effectiveness": "super"},
+              {"name_ja": "じゃれつく", "move_id": "playrough",
+               "pp": 10, "max_pp": 10, "effectiveness": "neutral"},
+          ], "revealed_moves": []}
+    opp = {"species_id": "gengar", "species_ja": "ゲンガー",
+           "types": ["ゴースト", "どく"], "hp_percent": 15.0,
+           "hp_current": None, "hp_max": None, "status": None, "boosts": {},
+           "ability_id": None, "item_id": None, "moves": [],
+           "revealed_moves": ["シャドーボール"]}
+    from vision.normalize import NameResolver
+    resolver = NameResolver()
+    adv = evaluate(_mini_state(my, opp), resolver)
+    sneak = next(a for a in adv["actions"] if a["id"] == "shadowsneak")
+    assert "先に倒せる" in sneak["reason"], sneak
+    assert sneak["score"] > 40, sneak
+
+    # 2) 相手のKO圏の先制技 (ふいうち判明): 素早さで勝っていても
+    #    「先に殴られる」前提の警告が出る
+    my2 = {"species_id": "gengar", "species_ja": "ゲンガー",
+           "types": ["ゴースト", "どく"], "hp_percent": 30.0,
+           "hp_current": 40, "hp_max": 135, "status": None, "boosts": {},
+           "ability_id": None, "item_id": None,
+           "moves": [
+               {"name_ja": "みちづれ", "move_id": "destinybond",
+                "pp": 8, "max_pp": 8, "effectiveness": None},
+               {"name_ja": "シャドーボール", "move_id": "shadowball",
+                "pp": 16, "max_pp": 16, "effectiveness": "resist"},
+           ], "revealed_moves": []}
+    opp2 = {"species_id": "grimmsnarl", "species_ja": "オーロンゲ",
+            "types": ["あく", "フェアリー"], "hp_percent": 100.0,
+            "hp_current": None, "hp_max": None, "status": None, "boosts": {},
+            "ability_id": None, "item_id": None, "moves": [],
+            "revealed_moves": ["ふいうち"]}
+    adv2 = evaluate(_mini_state(my2, opp2), resolver)
+    assert "先制技" in adv2["speed_note"], adv2["speed_note"]
+    db = next(a for a in adv2["actions"] if a["id"] == "destinybond")
+    assert "先制技で倒される危険" in db["reason"], db
+    print("test_priority_evaluation OK")
+
+
 if __name__ == "__main__":
     test_stats()
     test_type_chart()
     test_damage_sanity()
     test_weather_and_screens()
     test_evaluate_end_to_end()
+    test_priority_evaluation()

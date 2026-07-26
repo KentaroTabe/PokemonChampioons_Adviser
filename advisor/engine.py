@@ -327,6 +327,21 @@ def evaluate(state: dict, resolver=None) -> dict:
     opp_hp_pct = opp_view.hp_frac * 100.0 if opp_view else 100.0
     threat_ko = opp_best_dmg >= my_hp_pct * 0.95
 
+    # 相手の先制技: KO圏の先制技を持つ相手には、素早さで勝っていても
+    # 「先に殴られる」前提で評価する (かげうち/ふいうち/しんそく等)
+    opp_priority_threat = 0     # KO圏の先制技の最大優先度
+    for t in threats:
+        mv_t = dex.move(t["move_id"])
+        pri_t = (mv_t or {}).get("priority") or 0
+        if pri_t > 0 and t["dmg_max"] >= my_hp_pct * 0.95:
+            opp_priority_threat = max(opp_priority_threat, pri_t)
+    # 「相手の攻撃が自分より先に来る」状況 (素早さ負け or 先制技KO圏)
+    threat_faces_me = threat_ko and (i_am_faster is False
+                                     or opp_priority_threat > 0)
+    if opp_priority_threat > 0 and i_am_faster:
+        speed_note = (f"⚠相手はKO圏の先制技持ち (優先度+{opp_priority_threat})。"
+                      "素早さで勝っていても先に殴られる想定。" + speed_note)
+
     # ------------------------------------------------------------------
     # 自分の技の評価
     # ------------------------------------------------------------------
@@ -370,12 +385,14 @@ def evaluate(state: dict, resolver=None) -> dict:
             if mid == "stealthrock" and opp_state["hazards"]["stealth_rock"]:
                 score = 2.0
                 reason_parts.append("既に設置済み")
-            if mid == "protect" and threat_ko and not i_am_faster:
+            if mid == "protect" and threat_faces_me:
                 score += 10
                 reason_parts.append("高火力を一度受け流せる")
-            if threat_ko and i_am_faster is False and mid not in ("protect",):
+            if threat_faces_me and mid not in ("protect",):
                 score -= 15
-                reason_parts.append("相手の攻撃で倒される危険あり")
+                reason_parts.append("相手の攻撃で倒される危険あり"
+                                    if i_am_faster is False else
+                                    "相手の先制技で倒される危険あり")
         else:
             override = None
             if opp_view is None:
@@ -401,18 +418,33 @@ def evaluate(state: dict, resolver=None) -> dict:
 
             effective = min(exp, opp_hp_pct)
             score = effective + ko_prob * 40.0
-            if mv["priority"] > 0:
+            mv_pri = mv["priority"] or 0
+            # この技での実効先手: 優先度が相手のKO圏先制技を上回れば
+            # 素早さ不問で先に動ける (しんそく+2 > かげうち+1 の撃ち合い等)
+            strikes_first = (mv_pri > opp_priority_threat) or \
+                (mv_pri == opp_priority_threat and bool(i_am_faster))
+            if mv_pri > 0:
                 score += 6.0
                 if threat_ko:
                     score += 14.0
                     reason_parts.append("先制技: 倒される前に削れる")
-            if i_am_faster and ko_prob >= 0.5:
+            elif mv_pri < 0:
+                reason_parts.append("後攻技 (必ず相手が先に動く)")
+                if threat_ko:
+                    score -= 10.0
+            if strikes_first and ko_prob >= 0.5:
                 score += 25.0
-                reason_parts.append("先手で倒せる見込み")
-            elif ko_prob >= 0.5 and not i_am_faster:
-                reason_parts.append("倒せる圏内だが相手が先手の可能性")
-            if threat_ko and not i_am_faster and mv["priority"] <= 0 and ko_prob < 0.5:
+                reason_parts.append("先制技で先に倒せる見込み"
+                                    if mv_pri > 0 and not i_am_faster
+                                    else "先手で倒せる見込み")
+            elif ko_prob >= 0.5:
+                reason_parts.append(
+                    "倒せる圏内だが相手の先制技が先の可能性"
+                    if mv_pri > 0 else "倒せる圏内だが相手が先手の可能性")
+            if threat_faces_me and mv_pri <= 0 and ko_prob < 0.5:
                 score -= 12.0
+            if mid in ("suckerpunch", "thunderclap"):
+                reason_parts.append("相手が攻撃技以外 (交代/変化技) だと失敗")
 
             eff_txt = {4.0: "抜群(4倍)", 2.0: "抜群", 1.0: "等倍", 0.5: "いまひとつ",
                        0.25: "いまひとつ(1/4)", 0.0: "無効"}.get(d["type_mult"], "")
@@ -476,8 +508,8 @@ def evaluate(state: dict, resolver=None) -> dict:
         score = (counter * 0.45) - (incoming * 0.5) - hazard_dmg * 0.8
         if survives:
             score += 20.0
-        if threat_ko and not i_am_faster:
-            score += 10.0  # 居座りが危険なら交代の価値が上がる
+        if threat_faces_me:
+            score += 10.0  # 居座りが危険 (素早さ負け or 先制技KO圏) なら交代の価値が上がる
 
         reason = (f"被ダメ予測 {incoming:.0f}%"
                   + (f" + 設置技 {hazard_dmg:.0f}%" if hazard_dmg else "")
@@ -540,6 +572,8 @@ def evaluate(state: dict, resolver=None) -> dict:
                 probs[t["label"]] = t["prob"]
             RL_BLEND = float(os.environ.get("RL_BLEND_WEIGHT", "25"))
             for a in actions:
+                if a["score"] <= -90:
+                    continue   # わざふうじ等で選べない行動はブレンドしない
                 key = a["name"] if a["kind"] == "move" else f"交代:{a['name']}"
                 p = probs.get(key)
                 if p:
