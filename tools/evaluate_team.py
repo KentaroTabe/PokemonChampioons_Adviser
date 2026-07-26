@@ -297,7 +297,8 @@ def _make_player(team_text, tag_suffix, evaluator="rl", preview="matchup"):
         style = os.environ.get("RL_ADVICE_STYLE", "balance")
         model_cls = _with_matchup_preview(ModelPlayer) \
             if preview == "matchup" else ModelPlayer
-        p = model_cls(play_style=style, **kw)
+        # チーム評価の操縦者は安定した最良世代 (_best) を使う
+        p = model_cls(play_style=style, checkpoint="best", **kw)
         if getattr(p, "policy", None) is None or p.policy.model is None:
             if preview == "matchup":
                 heuristic_cls = _with_matchup_preview(heuristic_cls)
@@ -341,7 +342,8 @@ async def evaluate_team_text(team_text: str, n_battles: int = 20,
             cls = _with_matchup_preview(ModelPlayer) \
                 if preview == "matchup" else ModelPlayer
             opp = cls(
-                play_style=os.environ.get("RL_ADVICE_STYLE", "balance"), **kw)
+                play_style=os.environ.get("RL_ADVICE_STYLE", "balance"),
+                checkpoint="best", **kw)
         else:
             from poke_env.player import SimpleHeuristicsPlayer
             cls = _with_matchup_preview(SimpleHeuristicsPlayer) \

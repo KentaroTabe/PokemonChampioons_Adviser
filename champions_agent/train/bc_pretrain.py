@@ -5,10 +5,11 @@
 教師の選択に近づける教師あり微調整を行う。新規学習ではなく既存の
 チェックポイントへの上書き微調整のため、RLの継続学習 (--resume) と両立する。
 
-⚠ 実行前に教師の強度を確認すること (tools/check_search_expert)。
-2026-07-24時点の実測では教師のベンチ勝率0.41で学習済み方策 (0.46-0.48) を
-上回っておらず、BCは方策を弱める可能性が高い。エキスパートが方策を
-明確に上回ってから実行する (それまでは --dry-run で疎通のみ)。
+教師の強度 (tools/check_search_expert で確認):
+- 2026-07-24: 素の2手読み = ベンチ0.41 (方策未満、BC見送り)
+- 2026-07-26: RL価値関数の葉評価ブレンド = ベンチ0.64 (方策超え、BC解禁)
+チェックポイントが無い/ネット幅が違う場合は TRAIN_NET_WIDTH の新規ネットを
+作ってBC初期化する (容量拡大時のゼロからの自己対戦をスキップする用途)。
 
 前提: ローカルShowdown (ポート8100) が起動していること。
 
@@ -95,16 +96,66 @@ async def collect(style: str, n_battles: int, depth: int) -> dict:
     }
 
 
-def finetune(style: str, data: dict, epochs: int, lr: float,
-             batch_size: int = 256, dry_run: bool = False) -> None:
-    """既存チェックポイントを教師データで微調整して上書き保存する"""
-    import torch
+class _DummyBattleEnv:
+    """BC専用のスペース定義env (Showdown接続なしで新規モデルを作るため)"""
+
+    def __new__(cls):
+        import gymnasium as gym
+        import numpy as np
+        from champions_agent.agent.spaces import BATTLE_OBS_DIM
+
+        class _E(gym.Env):
+            observation_space = gym.spaces.Box(
+                low=-np.inf, high=np.inf, shape=(BATTLE_OBS_DIM,),
+                dtype=np.float32)
+            action_space = gym.spaces.Discrete(26)
+
+            def reset(self, *a, **k):
+                import numpy as _np
+                return _np.zeros(BATTLE_OBS_DIM, dtype=_np.float32), {}
+
+            def step(self, action):
+                import numpy as _np
+                return (_np.zeros(BATTLE_OBS_DIM, dtype=_np.float32),
+                        0.0, True, False, {})
+
+        return _E()
+
+
+def _load_or_create(style: str):
+    """チェックポイントをロードする。無い/ネット幅が違う場合は
+    TRAIN_NET_WIDTH (既定512) の新規モデルを作る (容量拡大の初期化に使う)"""
+    import os
     from sb3_contrib import MaskablePPO
 
+    width = int(os.environ.get("TRAIN_NET_WIDTH", "512"))
     ckpt = MODELS_DIR / f"battle_policy_{style}.zip"
-    if not ckpt.exists():
-        raise SystemExit(f"チェックポイントがありません: {ckpt}")
-    model = MaskablePPO.load(str(ckpt), device="cpu")
+    if ckpt.exists():
+        model = MaskablePPO.load(str(ckpt), device="cpu")
+        try:
+            actual = model.policy.mlp_extractor.policy_net[0].out_features
+        except Exception:
+            actual = None
+        if actual == width:
+            print(f"[bc_pretrain] 既存チェックポイントへ微調整: {ckpt.name} "
+                  f"(net={actual})", flush=True)
+            return model
+        print(f"[bc_pretrain] ネット幅不一致 (既存{actual}≠希望{width}) → "
+              f"新規{width}x{width}モデルをBC初期化します", flush=True)
+    else:
+        print(f"[bc_pretrain] チェックポイントなし → 新規{width}x{width}"
+              "モデルをBC初期化します", flush=True)
+    return MaskablePPO("MlpPolicy", _DummyBattleEnv(), device="cpu",
+                       policy_kwargs={"net_arch": [width, width]})
+
+
+def finetune(style: str, data: dict, epochs: int, lr: float,
+             batch_size: int = 256, dry_run: bool = False) -> None:
+    """チェックポイント (無ければ新規ネット) を教師データでBC学習して保存する"""
+    import torch
+
+    ckpt = MODELS_DIR / f"battle_policy_{style}.zip"
+    model = _load_or_create(style)
     policy = model.policy
     optim = torch.optim.Adam(policy.parameters(), lr=lr)
 
@@ -130,16 +181,18 @@ def finetune(style: str, data: dict, epochs: int, lr: float,
     if dry_run:
         print("[bc_pretrain] dry-run のため保存しません", flush=True)
         return
-    ckpt_prev = ckpt.with_suffix(".zip.prev_bc")
-    ckpt_prev.write_bytes(ckpt.read_bytes())
+    if ckpt.exists():
+        ckpt_prev = ckpt.with_suffix(".zip.prev_bc")
+        ckpt_prev.write_bytes(ckpt.read_bytes())
     model.save(str(ckpt))
-    print(f"[bc_pretrain] 保存: {ckpt.name} (BC前は {ckpt_prev.name})",
-          flush=True)
+    print(f"[bc_pretrain] 保存: {ckpt.name}", flush=True)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="探索エンジンの行動クローン微調整")
     ap.add_argument("--style", default="balance")
+    ap.add_argument("--styles", default=None,
+                    help="複数性格を同じ教師データでBCする (カンマ区切り)")
     ap.add_argument("--battles", type=int, default=200,
                     help="教師データ収集の対戦数")
     ap.add_argument("--depth", type=int, default=2,
@@ -152,8 +205,10 @@ def main() -> None:
                     help="チェックポイントを保存しない (疎通確認用)")
     args = ap.parse_args()
 
+    styles = [s.strip() for s in (args.styles or args.style).split(",")
+              if s.strip()]
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    data_path = LOG_DIR / f"bc_dataset_{args.style}.npz"
+    data_path = LOG_DIR / f"bc_dataset_{styles[0]}.npz"
     if args.reuse_data and data_path.exists():
         z = np.load(data_path)
         data = {k: z[k] for k in ("obs", "mask", "act")}
@@ -161,7 +216,7 @@ def main() -> None:
               f"({len(data['act'])}サンプル)", flush=True)
     else:
         t0 = time.time()
-        data = asyncio.run(collect(args.style, args.battles, args.depth))
+        data = asyncio.run(collect(styles[0], args.battles, args.depth))
         if not args.dry_run:   # 疎通確認の小データで保存済みを潰さない
             np.savez_compressed(data_path, obs=data["obs"], mask=data["mask"],
                                 act=data["act"])
@@ -171,7 +226,8 @@ def main() -> None:
               flush=True)
     if len(data["act"]) < 100 and not args.dry_run:
         raise SystemExit("教師データが少なすぎます (収集失敗の可能性)")
-    finetune(args.style, data, args.epochs, args.lr, dry_run=args.dry_run)
+    for style in styles:
+        finetune(style, data, args.epochs, args.lr, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":

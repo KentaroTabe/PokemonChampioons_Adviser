@@ -64,8 +64,13 @@ def train(total_timesteps: int = 10_000, battle_format: str = TRAINING_BATTLE_FO
     # - ent_coef: SB3既定0.0では探索が縮退しプラトーで振動する。0.01で探索維持
     # - learning_rate: 新規学習フェーズは標準の3e-4 (1e-4は旧400万step
     #   モデルの微調整用だった。観測v6の新規学習では立ち上がりを遅くする)
-    # - net_arch: SB3既定の64x64は388次元観測に対して過小で、20万stepで
-    #   0.55前後に頭打ちした。256x256へ拡大 (Showdown律速のため計算コスト増は僅少)
+    # - net_arch: SB3既定の64x64は388次元観測に対して過小 (0.55で頭打ち)。
+    #   現行は256x256。「256でも0.52で頭打ち」に見えていたのは評価が凍結
+    #   された_bestを測り続けるバグ (2026-07-26発見・修正済み。真値は
+    #   balance 0.70)。512への切替は、正直な評価で本物の頭打ちを確認して
+    #   から: TRAIN_NET_WIDTH=512 + bc_pretrain でBC初期化
+    #   (512のBC初期値は checkpoints/battle_policy_*_512bc.zip に作成済み、
+    #    初期ベンチ0.40)
     lr = float(os.environ.get("TRAIN_LR", "3e-4"))
     ent_coef = float(os.environ.get("TRAIN_ENT_COEF", "0.01"))
     width = int(os.environ.get("TRAIN_NET_WIDTH", "256"))

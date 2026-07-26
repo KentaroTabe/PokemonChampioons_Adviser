@@ -142,7 +142,7 @@ sonnetは疑い箇所の検証+少数サンプルの網羅に専念する (タ�
 | `bash champions_agent/scripts/setup_showdown.sh` | ローカルShowdown (8100) の準備 |
 | `bash champions_agent/scripts/train_forever.sh` | 連続学習ループ (nohup推奨) |
 | `bash champions_agent/scripts/train_nightly.sh` | 夜間バッチ1サイクル |
-| `python -m champions_agent.train.evaluate --opponent benchmark` | ベンチマーク評価 |
+| `python -m champions_agent.train.evaluate --opponent benchmark [--checkpoint current\|best]` | ベンチマーク評価 (current=学習進捗 / best=配布版) |
 | `python -m champions_agent.train.best_checkpoint --list` | 最良チェックポイント (_best) の記録確認 |
 | `python -m champions_agent.train.auto_tune --status` | 自律チューニングの状態 (試行履歴/現設定) |
 | `tail -f logs/auto_tune.log` | チューナーの判定ログ |
@@ -153,6 +153,10 @@ sonnetは疑い箇所の検証+少数サンプルの網羅に専念する (タ�
 | `python -m tools.smoke_train` / `smoke_selfplay` | 短時間の学習/セルフプレイ疎通 |
 | `python -m tools.validate_teams` | 生成チームのShowdownバリデーション |
 | `python -m tools.check_action_mask` | 行動マスクの検証 |
+
+⚠ 2026-07-26以前の夜間ベンチ履歴は「凍結された_best」を測っていた
+(評価が_best優先ロードだったバグ。watch_trainingの過去推移は学習進捗を
+反映していない)。同日修正済みで、以後の履歴は current の真値。
 
 ## 人間 vs AI 対戦 (学習進捗の体感チェック)
 

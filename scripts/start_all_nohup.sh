@@ -7,7 +7,7 @@ mkdir -p logs
 up() { lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; }
 
 if up 8000; then echo "アドバイザー(8000): 稼働中"; else
-  nohup bash -c 'source .venv/bin/activate && PYTHONUNBUFFERED=1 DEBUG_DUMP_FRAMES=1 uvicorn server:app_asgi --host 0.0.0.0 --port 8000' \
+  nohup bash -c 'source .venv/bin/activate && PYTHONUNBUFFERED=1 DEBUG_DUMP_FRAMES=1 RL_ADVICE_STYLE=balance uvicorn server:app_asgi --host 0.0.0.0 --port 8000' \
     > logs/server_nohup.log 2>&1 & disown
   echo "アドバイザー(8000): 起動"
 fi
