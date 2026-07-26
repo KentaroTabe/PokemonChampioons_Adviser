@@ -411,11 +411,9 @@ async def run_analysis(sid, data):
             from tools.review_battle import latest_decided_battle, review_text
             path = latest_decided_battle()
             return review_text(path) if path else "勝敗確定の対戦ログがありません"
-        from tools.analyze_battles import load_battles, report, summarize
-        battles = load_battles(last=int((data or {}).get("last") or 50))
-        if not battles:
-            return "対戦ログがありません"
-        return report(summarize(battles))
+        from tools.analyze_battles import run_report
+        text, _ = run_report(last=int((data or {}).get("last") or 50))
+        return text
 
     try:
         text = await asyncio.get_event_loop().run_in_executor(None, _work)
