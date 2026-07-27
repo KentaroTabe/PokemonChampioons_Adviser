@@ -25,6 +25,25 @@ from poke_env.player import RandomPlayer
 from poke_env.teambuilder import ConstantTeambuilder
 
 
+_eval_seq = 0
+
+
+def _uniq_accounts():
+    """評価1回ぶんの一意なアカウント名ペア (PID+連番+乱数、18文字以内)。
+
+    同一プロセスで連続評価しても、別プロセスの評価と同時に走っても
+    衝突しないようにする (衝突するとチャレンジが成立せずハングする)。
+    """
+    import os
+    import random
+    from poke_env import AccountConfiguration
+    global _eval_seq
+    _eval_seq += 1
+    tag = f"{os.getpid() % 10000}x{_eval_seq}{random.randint(10, 99)}"
+    return (AccountConfiguration(f"EvA{tag}"[:18], None),
+            AccountConfiguration(f"EvB{tag}"[:18], None))
+
+
 class ModelPlayer(RandomPlayer):
     """学習済みPPOモデルで行動選択するPlayer(モデルが無ければRandomPlayer相当)。
 
@@ -71,7 +90,14 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
                                           play_style=play_style)
         own_teambuilder = ConstantTeambuilder(own_team)
 
+    # アカウント名を一意にする。poke-envの既定名 ("ModelPlayer 1" 等) のままだと
+    # 別プロセスの評価と名前が衝突し、サーバーに残った古いチャレンジが
+    # 「There's already a challenge between you and RandomPlayer 1」を返して
+    # battle_against が返らなくなる (2026-07-27に夜間評価が5時間空転した実績。
+    # 手動評価と学習ループの評価が同名だったのが原因)
+    acc1, acc2 = _uniq_accounts()
     player1 = ModelPlayer(
+        account_configuration=acc1,
         battle_format=battle_format,
         server_configuration=TrainingServerConfiguration,
         team=own_teambuilder,
@@ -81,11 +107,13 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
 
     if opponent_kind == "benchmark":
         from champions_agent.env.showdown_env import make_benchmark_player
-        player2 = make_benchmark_player(battle_format=battle_format)
+        player2 = make_benchmark_player(battle_format=battle_format,
+                                        account_configuration=acc2)
     elif opponent_play_style:
         opp_team = build_random_team_text(size=TRAINING_TEAM_SIZE, play_style=opponent_play_style)
         opp_teambuilder = ConstantTeambuilder(opp_team)
         player2 = ModelPlayer(
+            account_configuration=acc2,
             battle_format=battle_format,
             server_configuration=TrainingServerConfiguration,
             team=opp_teambuilder,
@@ -95,6 +123,7 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
         opp_team = build_random_team_text(size=TRAINING_TEAM_SIZE, play_style="balance")
         opp_teambuilder = ConstantTeambuilder(opp_team)
         player2 = RandomPlayer(
+            account_configuration=acc2,
             battle_format=battle_format,
             server_configuration=TrainingServerConfiguration,
             team=opp_teambuilder,
