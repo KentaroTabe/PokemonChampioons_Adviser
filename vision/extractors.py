@@ -256,6 +256,13 @@ def _set_hp(state: BattleStateV2, side_name: str, mon,
     フラップした実績: 7%↔0%の往復など)。また回復技の上限を超える
     +60%超の増加は交代/別個体の出現とみなし、イベント化せず基準だけ移す。
     """
+    # ひんし確定後のHP再表示は矛盾 (蘇生は存在しない)。別個体のバーを
+    # 誤って帰属した読取なので棄却する (監査2026-07-24: リザードン
+    # 「たおれた!」後に34%が記録された)。交代で別個体が出た場合は
+    # そのmonへ書き込まれるためここには来ない
+    if mon.status == "fainted" and ((pct or 0) > 3 or (cur or 0) > 3):
+        return
+
     old = mon.hp_percent
     raw = None
     if cur is not None and mx:
@@ -482,11 +489,15 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
     # --- 相手: 表示名 + HP% ---
     name_text = ocr.read_zone_text(img, zones.BATTLE["opp_name"], mode="panel")
     opp = state.opponent.active()
+    # HUD名がactive個体と照合できたか。照合できないフレームのHP%は
+    # 誤帰属の危険がある (実戦: ゲッコウガの23%がドリュウズに記録された)
+    opp_name_verified = False
     if name_text:
         sp = resolver.resolve_species(name_text, cutoff=0.85)
         if sp:
             # 種族名がそのまま表示されている場合: 種族で枠を確定
             opp = state.opponent.switch_to_species(sp[0], sp[1])
+            opp_name_verified = True
         elif opp is None or (opp.display_name and
                              opp.display_name != name_text and not opp.species_ja):
             # ニックネーム表示: 表示名で追跡
@@ -494,6 +505,7 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
             if idx is not None:
                 state.opponent.switch_to(idx)
                 opp = state.opponent.party[idx]
+                opp_name_verified = True
             else:
                 opp = state.opponent.ensure_active()
         else:
@@ -517,6 +529,7 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
                 opp.aliases.append(opp.display_name)
                 opp.aliases = opp.aliases[-6:]
             opp.display_name = name_text
+            opp_name_verified = True
         elif opp.species_ja:
             # 見逃した交代の兆候: 表示名の合う既存枠があればそちらへ切替
             idx = state.opponent.find_by_display_name(name_text)
@@ -524,6 +537,7 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
                 state.opponent.switch_to(idx)
                 opp = state.opponent.party[idx]
                 opp.display_name = name_text
+                opp_name_verified = True
             else:
                 state.log_event(
                     "system",
@@ -563,14 +577,25 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
                                  allowlist="0123456789%")
     pct = ocr.parse_percent(hp_text)
     bar = ocr.hp_bar_ratio(crop(img, zones.BATTLE["opp_hp_bar"]))
+    eff_pct = None
     if pct is not None:
         # OCRとバー残量が大きく食い違う場合 (「1%」->「19」等の誤読) はバーを信用する
-        if bar is not None and abs(pct - bar * 100) > 15:
-            _set_hp(state, "opponent", opp, pct=round(bar * 100, 1))
-        else:
-            _set_hp(state, "opponent", opp, pct=float(pct))
+        eff_pct = round(bar * 100, 1) if (bar is not None and
+                                          abs(pct - bar * 100) > 15) \
+            else float(pct)
     elif bar is not None:
-        _set_hp(state, "opponent", opp, pct=round(bar * 100, 1))
+        eff_pct = round(bar * 100, 1)
+    if eff_pct is not None:
+        # HUD名が照合できないフレームでは、大きなHP変化を書き込まない
+        # (交代見逃し中に別個体のHP%をactiveへ誤帰属した実戦事故の防止。
+        #  名前不一致を検知した場合は変化量に関わらず書かない)
+        if not opp_name_verified and name_text and opp.species_ja:
+            pass   # 明確な名前不一致: このフレームのHPは信用しない
+        elif not opp_name_verified and opp.hp_percent is not None and \
+                abs(eff_pct - opp.hp_percent) > 15:
+            pass   # 名前未読 + 大変化: 誤帰属の疑いが強いので見送る
+        else:
+            _set_hp(state, "opponent", opp, pct=eff_pct)
 
     # --- 自分: 表示名 + HP実数 ---
     me = state.player.ensure_active()
@@ -620,6 +645,13 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
             # 種族特定前でも、チーム全員の理論最大HP集合に無い読みは誤読
             # (「16/67」が特定前に素通りして定着する事故の防止)
             ok = False
+        # OCR分数とHPバーの塗り割合を照合する。イタリック数字の桁化けは
+        # 基準最大HPとの突き合わせをすり抜ける ("111/162"→"16/162"=10%、
+        # "162/162"→100% を実戦で観測)。バーとの乖離が大きい読みは棄却する
+        if ok and cur <= mx:
+            bar = ocr.hp_bar_ratio(crop(img, zones.BATTLE["my_hp_bar"]))
+            if bar is not None and abs(cur / mx - bar) > 0.15:
+                ok = False
         if ok and cur <= mx:
             _set_hp(state, "player", me, cur=cur, mx=mx)
         # 過去に定着した誤った最大HPの掃除 (理論値と食い違えば読み直しに戻す)
@@ -845,7 +877,7 @@ def extract_field_check(img, state: BattleStateV2, resolver) -> None:
     レイアウトは表示中の陣営 (自分=藍紫/相手=深紅パネル) や特性行の有無で
     ずれるため、行OCR (座標付き) のラベル位置をアンカーにする。
     """
-    from vision.normalize import loose_key
+    from vision.normalize import loose_key, similarity
 
     lines = ocr.apple_ocr_lines(img, scale=1.0)
     if not lines:
@@ -854,8 +886,10 @@ def extract_field_check(img, state: BattleStateV2, resolver) -> None:
     def find(pred):
         return [(t, bb) for t, bb in lines if pred(t, bb)]
 
-    # アンカー確認
-    if not any("効果と場の状" in t or "こうかとはのしよ" in loose_key(t)
+    # アンカー確認 (末尾の誤OCRに頑健にする: 「効果と場の秋感」等の実測あり。
+    # 完全一致だと画面全体の抽出が丸ごと落ちる)
+    if not any("効果と場" in t or "こうかとはのしよ" in loose_key(t)
+               or similarity(t[:7], "効果と場の状態") >= 0.6
                for t, _ in lines):
         return
 
@@ -1244,6 +1278,37 @@ def extract_watch(img, state: BattleStateV2, resolver) -> None:
     _extract_watch_side_columns(img, state, resolver)
 
 
+def _species_move_pool(species_id) -> set:
+    """種族の使用率上位技のID集合 (my_team登録の取り違え補正用)"""
+    if not species_id:
+        return set()
+    try:
+        from advisor.sets import get_predictor
+        return {m for m, _ in get_predictor().predict(species_id)["moves"]}
+    except Exception:
+        return set()
+
+
+def _correct_moves_by_species(resolver, raw_moves: list, species_id) -> None:
+    """OCR技名を種族の実使用技プールで再照合し、取り違えを補正する。
+
+    実測: オーロンゲの「ふいうち」が実在する別技「おいうち」(1字違い) に
+    解決されmy_teamへ誤登録された。プール外の解決結果に対し、プール内に
+    類似度0.7以上の技があればそちら (その種族が実際に使う技) を採用する。
+    プールに似た技が無い場合は書き換えない (新規/マイナー技はそのまま)。
+    raw_moves: [(OCR原文, MoveSlot)]。MoveSlotを書き換える。
+    """
+    pool = _species_move_pool(species_id)
+    if not pool:
+        return
+    for text, slot in raw_moves:
+        if slot.move_id in pool:
+            continue
+        rp = resolver.resolve_restricted(text, "moves", pool, cutoff=0.7)
+        if rp is not None:
+            slot.name_ja, slot.move_id = rp[0], rp[1]
+
+
 def _extract_watch_ability(img, state: BattleStateV2, resolver) -> None:
     # タイプ (テキスト表記)
     type_text = ocr.read_zone_text(img, zones.WATCH["type_row"], mode="panel")
@@ -1257,7 +1322,7 @@ def _extract_watch_ability(img, state: BattleStateV2, resolver) -> None:
                 found.append(jp)
 
     # 技 + PP: 先に読み取り、持ち主特定に使う
-    new_moves = []
+    new_moves, raw_moves = [], []
     for i, row in enumerate(zones.WATCH_MOVES):
         name_text = ocr.read_zone_text(img, row["name"], mode="panel")
         if not name_text:
@@ -1270,20 +1335,26 @@ def _extract_watch_ability(img, state: BattleStateV2, resolver) -> None:
         if pp:
             slot.pp, slot.max_pp = pp[0], pp[1]
         new_moves.append(slot)
+        raw_moves.append((name_text, slot))
 
     # 表示中の個体を特定してから書き込む (誤帰属防止)。
     # 状態未構築 (選出中のもっと見る等) ではハイライト行の名前で特定する
     me = _watch_target(state, resolver, found, new_moves)
     build_species = me.species_ja if me is not None else None
+    species_id_for_pool = me.species_id if me is not None else None
     if me is None:
         hl = _highlight_species(img, resolver)
         if hl is not None and found and \
                 _dex_types_ja_by_id(hl[1]) == set(found):
             build_species = hl[0]   # my_team登録のみ行う (状態へは書かない)
+            species_id_for_pool = hl[1]
         else:
             state.log_event("system", f"様子見画面の帰属不能 (タイプ={found})",
                             event_id=None)
             return
+
+    # 種族が確定したので、技名の取り違えを実使用技プールで補正する
+    _correct_moves_by_species(resolver, raw_moves, species_id_for_pool)
 
     # 特性 / 持ち物
     ability_ja, item_ja = None, None

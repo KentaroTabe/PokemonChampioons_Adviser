@@ -15,6 +15,7 @@ import base64
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import cv2
@@ -75,6 +76,7 @@ frame_counter = 0
 processed_counter = 0
 dropped_counter = 0
 _busy = False
+_pending_frame = None      # 処理中に届いた最新フレーム (sid, data)
 _last_state_json = ""
 _last_advice_time = 0.0
 _last_advice_key = ""
@@ -82,6 +84,23 @@ _last_dump_time = 0.0
 _last_scene_log = 0.0
 _last_scene = "unknown"
 _last_frame_ts = 0.0
+
+# デバッグフレームの保存は1枚あたり約46ms (1920x1080 PNG) かかり、
+# フレーム処理と同じ経路に置くとその間に届くフレームが捨てられる。
+# 専用スレッド1本に投げて処理を止めない (順序は保たれ、取りこぼし時も
+# 検証データとしては十分)
+_dump_pool = ThreadPoolExecutor(max_workers=1)
+
+
+def _dump_frame_async(img, prefix: str) -> None:
+    def _write(image, name):
+        try:
+            DUMP_DIR.mkdir(exist_ok=True)
+            cv2.imwrite(str(DUMP_DIR / name), image)
+        except Exception as e:
+            print(f"[server] フレーム保存に失敗: {e}")
+
+    _dump_pool.submit(_write, img.copy(), f"{prefix}_{int(time.time())}.png")
 
 
 def _advice_key(state: dict) -> str:
@@ -108,18 +127,39 @@ async def connect(sid, environ):
 
 @sio.on('send_frame')
 async def handle_frame(sid, data):
-    global frame_counter, processed_counter, dropped_counter, _busy
-    global _last_state_json, _last_advice_time, _last_advice_key
-    global _last_dump_time, _last_scene_log, _last_frame_ts
+    """受信フレームの受け口。処理中なら最新1枚だけ保持し、続けて処理する。
+
+    以前は処理中に届いたフレームを即破棄していたため、1枚を処理し終えて
+    から次の到着 (最大100ms後) まで遊ぶ時間が生まれ、実効レートが
+    100msの倍数に丸められていた (実測: 受信17642枚中62%を破棄)。
+    最新1枚を保持して連続処理することで、パイプラインの処理能力ぶんだけ
+    確実に拾う (メッセージの見落とし削減)。
+    """
+    global frame_counter, dropped_counter, _busy, _pending_frame
+    global _last_frame_ts
     frame_counter += 1
     _last_frame_ts = time.time()
 
-    # 処理が追いつかない場合は古いフレームを捨てる (最新優先)。
-    # OCRは重いので、これが無いとキューが伸び続けて表示が遅延し続ける
     if _busy:
-        dropped_counter += 1
+        if _pending_frame is not None:
+            dropped_counter += 1   # 保持中の1枚を上書き = 実質の破棄
+        _pending_frame = (sid, data)
         return
     _busy = True
+    try:
+        await _handle_one_frame(sid, data)
+        while _pending_frame is not None:
+            pend_sid, pend_data = _pending_frame
+            _pending_frame = None
+            await _handle_one_frame(pend_sid, pend_data)
+    finally:
+        _busy = False
+
+
+async def _handle_one_frame(sid, data):
+    global processed_counter
+    global _last_state_json, _last_advice_time, _last_advice_key
+    global _last_dump_time, _last_scene_log
     try:
         encoded_data = data.split(',')[1]
         nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
@@ -129,8 +169,7 @@ async def handle_frame(sid, data):
 
         if DUMP_FRAMES and time.time() - _last_dump_time > 10:
             _last_dump_time = time.time()
-            DUMP_DIR.mkdir(exist_ok=True)
-            cv2.imwrite(str(DUMP_DIR / f"frame_{int(time.time())}.png"), img)
+            _dump_frame_async(img, "frame")
 
         # CPU重処理はexecutorで実行し、イベントループ (受信/送信) を塞がない
         loop = asyncio.get_event_loop()
@@ -145,9 +184,8 @@ async def handle_frame(sid, data):
                                               "standby") and \
                 time.time() - _last_dump_time > 2:
             _last_dump_time = time.time()
-            DUMP_DIR.mkdir(exist_ok=True)
-            prefix = "fc" if state["scene"] == "field_check" else "sel"
-            cv2.imwrite(str(DUMP_DIR / f"{prefix}_{int(time.time())}.png"), img)
+            _dump_frame_async(img,
+                              "fc" if state["scene"] == "field_check" else "sel")
 
         # 動作確認用: シーンが変わった瞬間 + 5秒ごとに状況をログ
         global _last_scene
@@ -239,8 +277,6 @@ async def handle_frame(sid, data):
 
     except Exception as e:
         print(f"[server] 画像処理エラー: {e}")
-    finally:
-        _busy = False
 
 
 def _attach_candidates(state: dict) -> None:
@@ -411,11 +447,11 @@ async def run_analysis(sid, data):
             from tools.review_battle import latest_decided_battle, review_text
             path = latest_decided_battle()
             return review_text(path) if path else "勝敗確定の対戦ログがありません"
-        from tools.analyze_battles import load_battles, report, summarize
-        battles = load_battles(last=int((data or {}).get("last") or 50))
-        if not battles:
-            return "対戦ログがありません"
-        return report(summarize(battles))
+        from tools.analyze_battles import run_report
+        # 接続テスト中はセッション全体、それ以外は直近50戦
+        text, _ = run_report(last=int((data or {}).get("last") or 50),
+                             session=True)
+        return text
 
     try:
         text = await asyncio.get_event_loop().run_in_executor(None, _work)

@@ -54,6 +54,38 @@ def test_clean_kill_preferred():
     print(f"test_clean_kill_preferred OK: {top['label']} 保証{top['worst']}")
 
 
+def test_priority_mechanics():
+    # ふいうち: 相手が「攻撃技を選んで未行動」の場合のみ成功する
+    me = SimSide(active=_view("grimmsnarl", ja="オーロンゲ"), active_hp=1.0)
+    opp = SimSide(active=_view("garchomp", ja="ガブリアス"), active_hp=1.0,
+                  bench=[(_view("rotomwash"), 1.0)])
+    _, o2 = simulate_turn(me, opp, Action("move", move_id="suckerpunch"),
+                          Action("switch", bench_index=0), None, None, "avg")
+    assert o2.active_hp == 1.0, "交代相手にふいうちが当たっている"
+    _, o3 = simulate_turn(me, opp, Action("move", move_id="suckerpunch"),
+                          Action("move", move_id="earthquake"),
+                          None, None, "avg")
+    assert o3.active_hp < 1.0, "攻撃してきた相手へのふいうちが失敗扱い"
+    _, o4 = simulate_turn(me, opp, Action("move", move_id="suckerpunch"),
+                          Action("move", move_id="swordsdance"),
+                          None, None, "avg")
+    assert o4.active_hp == 1.0, "変化技の相手にふいうちが当たっている"
+
+    # 優先度の段階: しんそく(+2) はアクアジェット(+1) より先に動く
+    slow_es = SimSide(active=_view("dragonite", ja="カイリュー",
+                                   ev={"atk": 252}), active_hp=1.0)
+    fast_jet = SimSide(active=_view("floatzel", ja="フローゼル",
+                                    ev={"atk": 252, "spe": 252}),
+                       active_hp=0.03)
+    m2, o5 = simulate_turn(slow_es, fast_jet,
+                           Action("move", move_id="extremespeed"),
+                           Action("move", move_id="aquajet"),
+                           None, None, "avg")
+    assert o5.active_hp <= 0.0, "しんそくが先に解決されていない"
+    assert m2.active_hp == 1.0, "倒れた相手のアクアジェットが発動している"
+    print("test_priority_mechanics OK")
+
+
 def test_simulate_turn_faint_and_switch():
     me = SimSide(active=_view("mimikyu", ja="ミミッキュ",
                               nature={"atk": 1.1}, item="lifeorb"),
@@ -133,6 +165,7 @@ def test_performance():
 
 
 if __name__ == "__main__":
+    test_priority_mechanics()
     test_simulate_turn_faint_and_switch()
     test_clean_kill_preferred()
     test_lethal_dodge()

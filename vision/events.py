@@ -134,6 +134,12 @@ SIMPLE_EVENTS = [
      "action": "volatile", "key": "taunt", "value": False},
     {"id": "encore_on", "keywords": [["アンコール", "あんこる"]],
      "action": "volatile", "key": "encore", "value": True},
+    # かなしばり: 解除を先に判定する (両方「かなしばり」を含むため)
+    {"id": "disable_off", "keywords": [["かなしばり", "金縛り"],
+                                       ["とけた", "解けた"]],
+     "action": "volatile", "key": "disable", "value": False},
+    {"id": "disable_on", "keywords": [["かなしばり", "金縛り"]],
+     "action": "volatile", "key": "disable", "value": True},
     {"id": "saltcure_on", "keywords": [["塩漬け", "しおつけ"]],
      "action": "volatile", "key": "saltcure", "value": True},
     {"id": "attract_on", "keywords": [["メロメロ", "めろめろ"]],
@@ -669,6 +675,17 @@ class EventParser:
                 mon.volatiles.append(ev["key"])
             elif not ev["value"] and ev["key"] in mon.volatiles:
                 mon.volatiles.remove(ev["key"])
+            if ev["key"] == "disable":
+                if ev["value"]:
+                    # 「◯◯の △△を かなしばりにした!」から封じられた技を特定
+                    m = re.search(r"の\s*(.+?)\s*を", cleaned)
+                    r = self.resolver.resolve(m.group(1), "moves",
+                                              cutoff=0.72) if m else None
+                    if r and f"disable_{r[1]}" not in mon.volatiles:
+                        mon.volatiles.append(f"disable_{r[1]}")
+                else:
+                    mon.volatiles = [v for v in mon.volatiles
+                                     if not v.startswith("disable_")]
         elif action == "mega":
             side_name, side, mon = self._target_mon(cleaned, source)
             mon.is_mega = True

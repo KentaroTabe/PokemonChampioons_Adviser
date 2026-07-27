@@ -19,6 +19,22 @@ STAT_KEYS = ("atk", "def", "spa", "spd", "spe", "acc", "eva")
 MAJOR_STATUSES = ("poison", "toxic", "burn", "paralysis", "sleep", "freeze", "drowsy")
 
 
+def _dex_types_ja_of(species_id: Optional[str]) -> Optional[set]:
+    """種族IDの図鑑タイプ (日本語集合)。図鑑が引けない場合は None"""
+    if not species_id:
+        return None
+    try:
+        from advisor.dex import get_dex
+        from advisor.engine import type_ja2en
+        sp = get_dex().species(species_id)
+        if not sp:
+            return None
+        en2ja = {v: k for k, v in type_ja2en().items()}
+        return {en2ja.get(t, t) for t in sp["types"]}
+    except Exception:
+        return None
+
+
 @dataclass
 class MoveSlot:
     name_ja: str = ""
@@ -175,6 +191,34 @@ class SideState:
 
     def switch_to_species(self, species_ja: str, species_id: Optional[str]) -> PokemonState:
         idx = self.find_by_species(species_ja)
+        if idx is None and len(self.party) >= 6:
+            # 満枠での「初登場」= 既存枠の視覚同定ミスが濃厚 (実測:
+            # ラフレシアと誤同定した枠の実体がフシギバナで、appendにより
+            # ルール上あり得ない7匹構成になった)。図鑑タイプが一致し
+            # 技未判明の非アクティブ枠を新種で置き換える。ロスターは
+            # 対戦中に6を超えない
+            new_types = _dex_types_ja_of(species_id)
+            cand = None
+            for i, p in enumerate(self.party):
+                if i == self.active_index or p.revealed_moves or \
+                        p.status == "fainted":
+                    continue
+                if new_types and p.types and set(p.types) == new_types:
+                    cand = i
+                    break
+                if cand is None and not p.species_ja:
+                    cand = i
+            if cand is None:
+                for i, p in enumerate(self.party):
+                    if i != self.active_index and not p.revealed_moves and \
+                            p.status != "fainted":
+                        cand = i
+                        break
+            if cand is not None:
+                p = self.party[cand]
+                p.species_ja, p.species_id = species_ja, species_id
+                p.types = list(new_types) if new_types else []
+                idx = cand
         if idx is None:
             # 初登場 -> 一旦末尾に追加する (どの選出枠に対応するかは
             # link_active_to_party がタイプ照合で解決し、余剰枠を除去する)

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 import cv2
@@ -103,6 +104,39 @@ class VisionPipeline:
         self.state.reset_battle()
         self.parser = EventParser(self.state, self.resolver)
         self._resolution_seen = True
+
+    # ------------------------------------------------------------------
+    def _tick_field_effects(self) -> None:
+        """新ターン確定時に天候/フィールド/トリックルームの残りターンを減算し、
+        尽きたら消す。
+
+        終了ダイアログはフレーム間引きで取り逃すことがある (実測: 天候終了の
+        見逃し)。残りターンは開始メッセージ (5に設定) と場の状況画面 (n/m) で
+        供給されるため、経過で自動失効させれば状態が古いまま残らない。
+        終了メッセージを拾えた場合はそちらが先に消す (二重処理は無害)
+        """
+        f = self.state.field
+        if f.weather and f.weather_turns is not None:
+            f.weather_turns -= 1
+            if f.weather_turns <= 0:
+                self.state.log_event(
+                    "system", f"天候({f.weather})がターン経過で終了と推定",
+                    event_id="weather_expire")
+                f.weather, f.weather_turns = None, None
+        if f.terrain and f.terrain_turns is not None:
+            f.terrain_turns -= 1
+            if f.terrain_turns <= 0:
+                self.state.log_event(
+                    "system", f"フィールド({f.terrain})がターン経過で終了と推定",
+                    event_id="terrain_expire")
+                f.terrain, f.terrain_turns = None, None
+        if f.trick_room and f.trick_room_turns is not None:
+            f.trick_room_turns -= 1
+            if f.trick_room_turns <= 0:
+                self.state.log_event(
+                    "system", "トリックルームがターン経過で終了と推定",
+                    event_id="trickroom_expire")
+                f.trick_room, f.trick_room_turns = False, None
 
     # ------------------------------------------------------------------
     def _should_run_heavy(self, scene: str, force: bool) -> bool:
@@ -215,6 +249,7 @@ class VisionPipeline:
         elif scene == "command" and self._resolution_seen:
             self._resolution_seen = False
             self.state.turn += 1
+            self._tick_field_effects()
 
         heavy = self._should_run_heavy(scene, force=single_shot)
 
@@ -239,48 +274,67 @@ class VisionPipeline:
                     extractors.extract_field_hp(img, self.state)
                 except Exception:
                     pass
-            fired += self._process_text_region(img, "message", zones.MESSAGE["text"],
-                                               single_shot)
-            fired += self._process_text_region(img, "left_popup",
-                                               zones.MESSAGE["left_popup"], single_shot)
-            fired += self._process_text_region(img, "right_popup",
-                                               zones.MESSAGE["right_popup"], single_shot)
+            fired += self._process_text_regions(img, [
+                ("message", zones.MESSAGE["text"]),
+                ("left_popup", zones.MESSAGE["left_popup"]),
+                ("right_popup", zones.MESSAGE["right_popup"]),
+            ], single_shot)
 
         return self.state.to_dict(), fired
 
     # ------------------------------------------------------------------
-    def _process_text_region(self, img, source: str, zone, single_shot: bool) -> list:
+    def _needs_ocr(self, img, source: str, zone, single_shot: bool):
+        """OCRすべきクロップを返す (不要なら None)。状態の更新もここで行う。
+
+        マスクは「縁取り文字が存在するか / 内容が変わったか」の検知に使い、
+        OCR自体は生のクロップに対して行う (精度が大きく向上する)。
+        OCR本体は呼び出し側が並列に実行するため、ここでは判定だけを行う。
+        """
         crop_img = zones.crop(img, zone)
         if crop_img is None:
-            return []
+            return None
         mask = ocr.outlined_text_mask(crop_img)
-
-        # マスクは「縁取り文字が存在するか / 内容が変わったか」の検知に使い、
-        # OCR自体は生のクロップに対して行う (精度が大きく向上する)
         if single_shot:
-            if mask is None:
-                return []
-            text = ocr.read_crop_direct(crop_img)
-            if not text:
-                return []
-            return self.parser.parse(text, source=source)
+            return crop_img if mask is not None else None
 
         # ストリーム: 技使用メッセージは表示時間が短く「安定待ち」では
         # 取りこぼすため、内容が変わったら即OCRする (同一テキストは
         # EventParser側の重複排除で二重処理されない)
         if mask is None:
             self._last_masks[source] = None
-            return []
-        now = time.time()
+            return None
         prev = self._last_masks.get(source)
         changed = (prev is None or prev.shape != mask.shape
                    or cv2.countNonZero(cv2.absdiff(prev, mask)) > 250)
-        if changed and now - self._last_ocr_ts.get(source, 0.0) >= 0.3:
-            self._last_masks[source] = mask
-            self._last_ocr_ts[source] = now
-            text = ocr.read_crop_direct(crop_img)
+        if not changed:
+            return None
+        self._last_masks[source] = mask
+        if time.time() - self._last_ocr_ts.get(source, 0.0) < 0.3:
+            return None
+        self._last_ocr_ts[source] = time.time()
+        return crop_img
+
+    def _process_text_regions(self, img, regions: list, single_shot: bool) -> list:
+        """メッセージ/ポップアップ領域をまとめて処理する。
+
+        Apple Vision の呼び出しは1回あたり数十msかかり、field シーンでは
+        これが処理時間の大半を占める (実測: fieldが全体の54%)。OCRだけを
+        並列実行し、状態を触る解析は元の順序で逐次に行う
+        (フレーム落ち削減。解析順を保つのは帰属ロジックの前提のため)
+        """
+        pending = [(src, self._needs_ocr(img, src, zone, single_shot))
+                   for src, zone in regions]
+        pending = [(src, crop) for src, crop in pending if crop is not None]
+        if not pending:
+            return []
+        if len(pending) == 1:
+            texts = [ocr.read_crop_direct(pending[0][1])]
+        else:
+            with ThreadPoolExecutor(max_workers=len(pending)) as pool:
+                texts = list(pool.map(lambda c: ocr.read_crop_direct(c),
+                                      [c for _, c in pending]))
+        fired = []
+        for (src, _), text in zip(pending, texts):
             if text:
-                return self.parser.parse(text, source=source)
-        elif changed:
-            self._last_masks[source] = mask
-        return []
+                fired += self.parser.parse(text, source=src)
+        return fired

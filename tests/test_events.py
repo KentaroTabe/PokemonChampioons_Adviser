@@ -99,6 +99,24 @@ def test_status_and_volatile():
     print("test_status_and_volatile OK")
 
 
+def test_move_seal_states():
+    # ちょうはつ / かなしばり (封じ技の特定込み) / 解除
+    state, p = new_parser()
+    p.parse("ブリジュラスは 挑発に 乗ってしまった!")
+    me = state.player.party[0]
+    assert "taunt" in me.volatiles, me.volatiles
+    p.parse("ブリジュラスの 挑発は とけた!")
+    assert "taunt" not in me.volatiles
+
+    p.parse("ブリジュラスの りゅうのはどうを かなしばりにした!")
+    assert "disable" in me.volatiles, me.volatiles
+    assert "disable_dragonpulse" in me.volatiles, me.volatiles
+    p.parse("ブリジュラスの かなしばりが とけた!")
+    assert "disable" not in me.volatiles
+    assert not any(v.startswith("disable_") for v in me.volatiles)
+    print("test_move_seal_states OK")
+
+
 def test_ability_popup():
     state, p = new_parser()
     fired = p.parse("リザードンの ひでり", source="right_popup")
@@ -355,6 +373,7 @@ if __name__ == "__main__":
     test_rank_change()
     test_hazards_and_screens()
     test_status_and_volatile()
+    test_move_seal_states()
     test_ability_popup()
     test_popup_attribution_guard()
     test_move_reveal()

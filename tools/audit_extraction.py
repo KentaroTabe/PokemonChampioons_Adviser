@@ -54,7 +54,12 @@ def _summarize_state(st: dict) -> str:
             rows.append(f"    {p.get('ja') or '?'}{mega}{hp_s}"
                         f" [{types}]" + (f" 判明技:{rev}" if rev else ""))
         act = sd.get("active")
-        return [f"  {label} (active={act}):"] + rows
+        sc = sd.get("screens") or {}
+        walls = [n for k, n in (("reflect", "リフレクター"),
+                                ("light_screen", "ひかりのかべ"),
+                                ("aurora_veil", "オーロラベール")) if sc.get(k)]
+        wall_s = f" 壁:{'/'.join(walls)}" if walls else ""
+        return [f"  {label} (active={act}){wall_s}:"] + rows
 
     lines = []
     lines += side(st.get("player") or {}, "自分")

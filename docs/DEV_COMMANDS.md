@@ -81,18 +81,19 @@ plist本体は `scripts/com.championsadviser.train.plist` (repo管理)。編集�
 | `python -m tools.check_field_my_hp <frame...>` | 自分HPゾーンのOCR診断 |
 | `python -m tools.check_selection_frame <frame>` | 選出画面の抽出診断 |
 | `python -m tools.check_look_more <frame...>` | もっと見る画面の読取診断 (タブ/対象/実数値/性格) |
+| `python -m tools.bench_pipeline [--label <条件>]` | 解析性能の実測 (1フレーム処理時間・予算超過率・シーン別内訳) |
+| `bash scripts/show_frame_stats.sh` | 直近のフレーム受信統計 (受信/処理/破棄と取りこぼし率) |
 | `python -m tools.check_battle_log [file]` | 対戦ログの内容確認 |
 | `python -m tools.analyze_corrections` | 手動修正ログの集計 (誤認識ランキング) |
 | `python -m tools.audit_extraction [--battle <log>]` | 監査ペア一覧 (フレーム×抽出主張、対戦中フェーズ主体) |
-| `python -m tools.audit_subtask [--battle <log>] [--max-frames N]` | 抽出監査をsonnetサブタスクで実行 → `logs/audit_reports/` にレポート |
-| `python -m tools.audit_monitor [--backfill N]` | リアルタイム監査: 対戦終了を検知して自動でsonnet監査 (フォアグラウンド常駐、Ctrl+Cで停止) |
+| `python -m tools.audit_subtask [--battle <log>] [--max-frames N]` | 1対戦の抽出監査をsonnetサブタスクで実行 → `logs/audit_reports/` |
+| `python -m tools.audit_session [--last N] [--budget 30]` | セッション一括監査: 全対戦横断で矛盾候補の機械検出+層化サンプリング→sonnet 1回 |
 
 監査サブタスクのモデルはsonnet固定 (2026-07-23実測: haikuは技名の取り違え・
 HP幻視があり監査に不適。根拠はtools/audit_subtask.pyのdocstring参照)。
-リアルタイム監査は対戦中レコード (events/hp/対戦シーン) が30秒途絶えたら
-対戦終了と判定する (レート・選出などの対戦外の書き込みは無視)。起動後に
-終わった対戦のみ対象で、起動前の分は `--backfill N` で直近N対戦まで遡れる。
-1対戦あたり数分・API課金が発生するため、必要な検証期間だけ起動する運用を想定。
+通常運用は end_connection_test.sh が自動実行する一括監査 (audit_session)。
+HPの急回復・ひんし後の再表示・7匹化などはPython側で先に検出し、
+sonnetは疑い箇所の検証+少数サンプルの網羅に専念する (タスク数最小化)。
 
 デバッグフレーム: サーバーを `DEBUG_DUMP_FRAMES=1` で起動すると
 `debug_frames/` に保存される (通常10秒毎、場の状況=fc_/選出=sel_は2秒毎)。
@@ -143,17 +144,30 @@ HP幻視があり監査に不適。根拠はtools/audit_subtask.pyのdocstring�
 | `bash champions_agent/scripts/setup_showdown.sh` | ローカルShowdown (8100) の準備 |
 | `bash champions_agent/scripts/train_forever.sh` | 連続学習ループ (nohup推奨) |
 | `bash champions_agent/scripts/train_nightly.sh` | 夜間バッチ1サイクル |
-| `python -m champions_agent.train.evaluate --opponent benchmark` | ベンチマーク評価 |
+| `python -m champions_agent.train.evaluate --opponent benchmark [--checkpoint current\|best]` | ベンチマーク評価 (current=学習進捗 / best=配布版) |
 | `python -m champions_agent.train.best_checkpoint --list` | 最良チェックポイント (_best) の記録確認 |
 | `python -m champions_agent.train.auto_tune --status` | 自律チューニングの状態 (試行履歴/現設定) |
 | `tail -f logs/auto_tune.log` | チューナーの判定ログ |
 | `python -m champions_agent.train.opponent_pool --list` | selfplay相手プールの一覧 |
 | `python -m tools.probe_policy` | 方策の健全性プローブ (攻撃率/抜群率) |
 | `python -m tools.check_search_expert [--battles N] [--depth 1\|2]` | 探索エキスパート (学習相手/BC教師) の実戦強度診断 |
-| `python -m champions_agent.train.bc_pretrain --dry-run` | 探索エンジンの行動クローン微調整 (⚠実行条件はdocstring参照) |
+| `python -m champions_agent.train.bc_pretrain [--styles a,b,c] [--battles N]` | 探索エキスパートの行動クローン (新規ネットの初期化にも使う) |
 | `python -m tools.smoke_train` / `smoke_selfplay` | 短時間の学習/セルフプレイ疎通 |
 | `python -m tools.validate_teams` | 生成チームのShowdownバリデーション |
 | `python -m tools.check_action_mask` | 行動マスクの検証 |
+| `python -m tools.check_checkpoint_width [--want 512]` | チェックポイントのネット幅確認 (幅変更後・学習再開前に実行) |
+
+⚠ 2026-07-26以前の夜間ベンチ履歴は「凍結された_best」を測っていた
+(評価が_best優先ロードだったバグ。watch_trainingの過去推移は学習進捗を
+反映していない)。同日修正済みで、以後の履歴は current の真値。
+
+ネット幅の変更手順 (2026-07-27に256→512を実施):
+1. 学習ループを停止し、現行チェックポイントを `checkpoints/net256_backup/` へ退避
+2. `TRAIN_NET_WIDTH` の既定を変更 (train_battle.py)
+3. `bc_pretrain --teacher policy` で旧ネット (_best) を新幅ネットへ蒸留
+   — ゼロからの自己対戦を省く。初期値は教師より下がるので必ず
+   `evaluate --checkpoint current` で測ってから学習を再開する
+4. 戻す場合は既定幅を戻し、net256_backup を書き戻す
 
 ## 人間 vs AI 対戦 (学習進捗の体感チェック)
 

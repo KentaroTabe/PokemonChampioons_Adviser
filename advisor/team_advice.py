@@ -117,11 +117,25 @@ def _my_views(resolver) -> list:
         r = resolver.resolve_species(ja, cutoff=0.9)
         if not r:
             continue
-        sid = r[1]
-        sp = get_dex().species(sid)
+        base_sid = r[1]
+        sid, sp = base_sid, get_dex().species(base_sid)
         b = get_my_build(ja)
         if not (sp and b):
             continue
+        # メガストーン所持なら診断はメガ後の性能で行う (1戦1回の制約は
+        # あるが、1v1対面の実力はメガ前提が実態に近い。ライチュウ等の
+        # メガ進化前の種族値で過小評価される問題の対策)
+        item_ja = b.get("item_ja") or ""
+        if item_ja.endswith(("ナイト", "ナイトX", "ナイトY")):
+            suffix = "x" if item_ja.endswith("X") else \
+                ("y" if item_ja.endswith("Y") else "")
+            cands = [base_sid + "mega" + suffix] if suffix else \
+                [base_sid + "mega", base_sid + "megax", base_sid + "megay"]
+            for cand in cands:   # 表記ゆれ (X/Y未記載の登録) はX優先で補完
+                msp = get_dex().species(cand)
+                if msp:
+                    sid, sp = cand, msp
+                    break
         view = MonView(species_id=sid, name_ja=ja, types=sp["types"],
                        base=sp["baseStats"], ev=b["ev"], nature=b["nature"])
         moves = []
@@ -130,7 +144,9 @@ def _my_views(resolver) -> list:
             if rm:
                 moves.append(rm[1])
         if not moves:
-            moves = [m for m, _ in get_predictor().predict(sid)["moves"][:4]]
+            # 技の使用率はベース種族で引く (メガIDはDB未収録で空になる)
+            moves = [m for m, _ in
+                     get_predictor().predict(base_sid)["moves"][:4]]
         out.append((ja, view, moves))
     return out
 

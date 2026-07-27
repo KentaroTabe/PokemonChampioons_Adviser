@@ -85,7 +85,7 @@ trap cleanup EXIT
 
     echo "--- [$style] 評価 (vs Random, $EVAL_BATTLES 戦) ---"
     caffeinate -i -s python -m champions_agent.train.evaluate \
-      --play-style "$style" --battles "$EVAL_BATTLES" --timeout 900 || \
+      --play-style "$style" --battles "$EVAL_BATTLES" --timeout 420 || \
       echo "[nightly] [$style] 評価が失敗/タイムアウトしました"
 
     # 進歩の物差し: 上位構築xヒューリスティクスの固定強敵に対する勝率。
@@ -94,7 +94,7 @@ trap cleanup EXIT
     echo "--- [$style] ベンチマーク評価 (vs 上位構築ヒューリスティクス, $BENCH_BATTLES 戦) ---"
     caffeinate -i -s python -m champions_agent.train.evaluate \
       --play-style "$style" --battles "$BENCH_BATTLES" --opponent benchmark \
-      --timeout 900 || echo "[nightly] [$style] ベンチマーク評価が失敗しました"
+      --timeout 420 || echo "[nightly] [$style] ベンチマーク評価が失敗しました"
 
     # 勝率ゲートを超えたらselfplay相手プールへスナップショット
     # (ベンチマーク評価の後に実行し、ベンチ勝率を抽選重みに記録する)

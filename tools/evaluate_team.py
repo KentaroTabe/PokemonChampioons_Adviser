@@ -179,13 +179,46 @@ def team_text_to_ja(team_text: str) -> str:
     return "\n\n".join(out_blocks)
 
 
+def current_team_entries() -> dict:
+    """my_team.json から「現在のパーティ6体」ぶんのエントリを選ぶ。
+
+    もっと見る自動登録の蓄積で7体以上残ることがある (旧チームは型ライブラリ
+    として保持する仕様)。7体以上のままチーム化するとShowdownに拒否され、
+    開始しない対戦を待ち続けてハングする (2026-07-26実測: 9体で発生)。
+    直近の対戦ログの自選出に登場した種族→技登録済み→登録順、の優先で絞る。
+    """
+    from advisor.my_team import _load
+    team = _load()
+    if len(team) <= 6:
+        return dict(team)
+    order = []
+    try:
+        from tools.analyze_battles import load_battles
+        for b in reversed(load_battles(last=20)):
+            for ja in b.get("my_picked") or []:
+                if ja in team and ja not in order:
+                    order.append(ja)
+    except Exception:
+        pass
+    for ja, e in team.items():
+        if ja not in order and (e.get("技") or e.get("moves")):
+            order.append(ja)
+    for ja in team:
+        if ja not in order:
+            order.append(ja)
+    picked = order[:6]
+    print(f"[my_team] 登録{len(team)}体から現在の6体を推定: "
+          f"{' / '.join(picked)}")
+    return {ja: team[ja] for ja in picked}
+
+
 def build_myteam_text() -> str:
     """config/my_team.json の登録型 (性格/能力ポイント/持ち物/技/特性) で
     チームテキストを作る (meta_setsではなく実際の自分の型で評価する)"""
-    from advisor.my_team import _load as load_my_team, _NATURES
+    from advisor.my_team import _NATURES
     from vision.normalize import NameResolver
     resolver = NameResolver()
-    team = load_my_team()
+    team = current_team_entries()
     if not team:
         raise RuntimeError("config/my_team.json が未登録です")
     ev_keys = {"h": "HP", "a": "Atk", "b": "Def", "c": "SpA", "d": "SpD",
@@ -297,7 +330,8 @@ def _make_player(team_text, tag_suffix, evaluator="rl", preview="matchup"):
         style = os.environ.get("RL_ADVICE_STYLE", "balance")
         model_cls = _with_matchup_preview(ModelPlayer) \
             if preview == "matchup" else ModelPlayer
-        p = model_cls(play_style=style, **kw)
+        # チーム評価の操縦者は安定した最良世代 (_best) を使う
+        p = model_cls(play_style=style, checkpoint="best", **kw)
         if getattr(p, "policy", None) is None or p.policy.model is None:
             if preview == "matchup":
                 heuristic_cls = _with_matchup_preview(heuristic_cls)
@@ -341,7 +375,8 @@ async def evaluate_team_text(team_text: str, n_battles: int = 20,
             cls = _with_matchup_preview(ModelPlayer) \
                 if preview == "matchup" else ModelPlayer
             opp = cls(
-                play_style=os.environ.get("RL_ADVICE_STYLE", "balance"), **kw)
+                play_style=os.environ.get("RL_ADVICE_STYLE", "balance"),
+                checkpoint="best", **kw)
         else:
             from poke_env.player import SimpleHeuristicsPlayer
             cls = _with_matchup_preview(SimpleHeuristicsPlayer) \

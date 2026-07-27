@@ -25,13 +25,46 @@ from poke_env.player import RandomPlayer
 from poke_env.teambuilder import ConstantTeambuilder
 
 
-class ModelPlayer(RandomPlayer):
-    """学習済みPPOモデルで行動選択するPlayer(モデルが無ければRandomPlayer相当)。"""
+_eval_seq = 0
 
-    def __init__(self, *args, play_style: str = DEFAULT_PLAY_STYLE, **kwargs):
+
+def _uniq_accounts():
+    """評価1回ぶんの一意なアカウント名ペア (PID+連番+乱数、18文字以内)。
+
+    同一プロセスで連続評価しても、別プロセスの評価と同時に走っても
+    衝突しないようにする (衝突するとチャレンジが成立せずハングする)。
+    """
+    import os
+    import random
+    from poke_env import AccountConfiguration
+    global _eval_seq
+    _eval_seq += 1
+    tag = f"{os.getpid() % 10000}x{_eval_seq}{random.randint(10, 99)}"
+    return (AccountConfiguration(f"EvA{tag}"[:18], None),
+            AccountConfiguration(f"EvB{tag}"[:18], None))
+
+
+class ModelPlayer(RandomPlayer):
+    """学習済みPPOモデルで行動選択するPlayer(モデルが無ければRandomPlayer相当)。
+
+    checkpoint="current": 学習中の最新チェックポイントを評価する (既定)。
+    checkpoint="best":    配布用の最良スナップショット (_best) を使う。
+    ⚠ 2026-07-26まで既定がBattlePolicy任せ (=_best優先) だったため、
+    _best作成以降の夜間ベンチは「凍結された_best」を測り続けていた
+    (どの施策でもベンチが不動だった頭打ちの正体)。学習進捗の評価は
+    必ず current を測ること。
+    """
+
+    def __init__(self, *args, play_style: str = DEFAULT_PLAY_STYLE,
+                 checkpoint: str = "current", **kwargs):
         super().__init__(*args, **kwargs)
         from champions_agent.agent.policy_battle import BattlePolicy
-        self.policy = BattlePolicy(play_style=play_style)
+        if checkpoint == "current":
+            path = MODELS_DIR / f"battle_policy_{play_style}.zip"
+            self.policy = BattlePolicy(model_path=path if path.exists()
+                                       else None, play_style=play_style)
+        else:
+            self.policy = BattlePolicy(play_style=play_style)
 
     def choose_move(self, battle):
         return self.policy.choose_order(battle)
@@ -41,7 +74,8 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
                           opponent_play_style: str | None = None,
                           n_battles: int = 50,
                           battle_format: str = TRAINING_BATTLE_FORMAT,
-                          opponent_kind: str = "random") -> dict:
+                          opponent_kind: str = "random",
+                          checkpoint: str = "current") -> dict:
     """play_styleモデル vs (opponent_play_styleモデル or RandomPlayer) をn_battles戦させる。"""
     # 自分チーム: 以前は「生成チーム1個を全戦使い回し」(ConstantTeambuilder)
     # だったため、勝率がチームドローの当たり外れで±0.2以上振動し、方策の
@@ -56,20 +90,30 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
                                           play_style=play_style)
         own_teambuilder = ConstantTeambuilder(own_team)
 
+    # アカウント名を一意にする。poke-envの既定名 ("ModelPlayer 1" 等) のままだと
+    # 別プロセスの評価と名前が衝突し、サーバーに残った古いチャレンジが
+    # 「There's already a challenge between you and RandomPlayer 1」を返して
+    # battle_against が返らなくなる (2026-07-27に夜間評価が5時間空転した実績。
+    # 手動評価と学習ループの評価が同名だったのが原因)
+    acc1, acc2 = _uniq_accounts()
     player1 = ModelPlayer(
+        account_configuration=acc1,
         battle_format=battle_format,
         server_configuration=TrainingServerConfiguration,
         team=own_teambuilder,
         play_style=play_style,
+        checkpoint=checkpoint,
     )
 
     if opponent_kind == "benchmark":
         from champions_agent.env.showdown_env import make_benchmark_player
-        player2 = make_benchmark_player(battle_format=battle_format)
+        player2 = make_benchmark_player(battle_format=battle_format,
+                                        account_configuration=acc2)
     elif opponent_play_style:
         opp_team = build_random_team_text(size=TRAINING_TEAM_SIZE, play_style=opponent_play_style)
         opp_teambuilder = ConstantTeambuilder(opp_team)
         player2 = ModelPlayer(
+            account_configuration=acc2,
             battle_format=battle_format,
             server_configuration=TrainingServerConfiguration,
             team=opp_teambuilder,
@@ -79,6 +123,7 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
         opp_team = build_random_team_text(size=TRAINING_TEAM_SIZE, play_style="balance")
         opp_teambuilder = ConstantTeambuilder(opp_team)
         player2 = RandomPlayer(
+            account_configuration=acc2,
             battle_format=battle_format,
             server_configuration=TrainingServerConfiguration,
             team=opp_teambuilder,
@@ -110,6 +155,9 @@ def main() -> None:
     parser.add_argument("--timeout", type=int, default=0,
                          help="秒数を指定すると評価全体にタイムアウトをかける (ハング対策)")
     parser.add_argument("--format", type=str, default=TRAINING_BATTLE_FORMAT)
+    parser.add_argument("--checkpoint", type=str, default="current",
+                         choices=["current", "best"],
+                         help="current=学習中の最新 (進捗測定) / best=_best (配布版の実力測定)")
     args = parser.parse_args()
 
     if args.timeout > 0:
@@ -129,12 +177,14 @@ def main() -> None:
         n_battles=args.battles,
         battle_format=args.format,
         opponent_kind=args.opponent,
+        checkpoint=args.checkpoint,
     ))
     print(f"[evaluate] {result}")
 
     # 評価結果の保存: vs Random は opponent_pool の勝率ゲート判定、
     # vs benchmark は最良チェックポイント保持とプール抽選の重み付けに使う
-    if not args.opponent_play_style:
+    # (currentの測定のみ保存する。bestの再測定で昇格判定を汚さない)
+    if not args.opponent_play_style and args.checkpoint == "current":
         import json
         from pathlib import Path
         log_dir = Path(__file__).resolve().parent / "logs"

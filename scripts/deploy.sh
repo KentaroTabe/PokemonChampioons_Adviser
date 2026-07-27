@@ -22,7 +22,9 @@ fi
 pkill -f "uvicorn server:app_asgi" 2>/dev/null
 sleep 2
 mkdir -p logs
-nohup bash -c 'source .venv/bin/activate && PYTHONUNBUFFERED=1 DEBUG_DUMP_FRAMES=1 uvicorn server:app_asgi --host 0.0.0.0 --port 8000' \
+# RL_ADVICE_STYLE=balance: 正直な再測定 (2026-07-26、評価凍結バグ修正後)
+# で balance が最強 (ベンチ0.70)。_best昇格も同測定に基づく
+nohup bash -c 'source .venv/bin/activate && PYTHONUNBUFFERED=1 DEBUG_DUMP_FRAMES=1 RL_ADVICE_STYLE=balance uvicorn server:app_asgi --host 0.0.0.0 --port 8000' \
   > logs/server_nohup.log 2>&1 & disown
 
 for _ in $(seq 1 30); do

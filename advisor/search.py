@@ -45,6 +45,20 @@ STATUS_MOVES = {"willowisp": "burn", "thunderwave": "paralysis",
                 "hypnosis": "sleep", "darkvoid": "sleep", "glare": "paralysis",
                 "nuzzle": "paralysis", "yawn": "sleep"}
 HAZARD_MOVES = {"stealthrock"}
+# ふいうち系: 相手が「攻撃技を選んでいて、まだ動いていない」場合のみ成功
+SUCKER_MOVES = {"suckerpunch", "thunderclap"}
+
+
+def _is_attack_action(act: "Action") -> bool:
+    """その行動が攻撃技か (ふいうち系の成功判定用)"""
+    if act.kind != "move" or not act.move_id:
+        return False
+    if act.move_id in PROTECT_MOVES or act.move_id in HEAL_MOVES or \
+            act.move_id in SETUP_MOVES or act.move_id in STATUS_MOVES or \
+            act.move_id in HAZARD_MOVES:
+        return False
+    mv = get_dex().move(act.move_id)
+    return bool(mv and mv.get("category") != "Status" and mv.get("power"))
 
 
 @dataclass
@@ -172,12 +186,20 @@ def simulate_turn(me: SimSide, opp: SimSide, my_act: Action, opp_act: Action,
     movers.sort(key=lambda m: (-m[2], m[3] if trick_room else -m[3]))
 
     protected = {"me": False, "opp": False}
+    moved: set = set()
     for who, move_id, _pri, _spe in movers:
         atk_side, def_side = ("me", "opp") if who == "me" else ("opp", "me")
         atk = me if who == "me" else opp
         dfn = opp if who == "me" else me
         if atk.active_hp <= 0:
             continue
+        moved.add(who)
+
+        # ふいうち系: 相手が攻撃技を選んでいて未行動の場合のみ成功する
+        if move_id in SUCKER_MOVES:
+            def_act = opp_act if who == "me" else my_act
+            if def_side in moved or not _is_attack_action(def_act):
+                continue   # 失敗 (交代/変化技/相手行動済み)
 
         # --- 補助技の効果 ---
         if move_id in PROTECT_MOVES:

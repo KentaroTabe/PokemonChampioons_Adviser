@@ -56,8 +56,8 @@ def _make_ai(kind: str, style: str, depth: int, timer: bool):
         return make_search_expert_player(
             depth=depth, team=RankedTeambuilder(), **common), ai_name
     from champions_agent.train.evaluate import ModelPlayer
-    return ModelPlayer(play_style=style, team=RankedTeambuilder(),
-                       **common), ai_name
+    return ModelPlayer(play_style=style, checkpoint="best",
+                       team=RankedTeambuilder(), **common), ai_name
 
 
 async def run(args) -> None:

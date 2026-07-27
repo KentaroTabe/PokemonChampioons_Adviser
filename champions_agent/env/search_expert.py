@@ -10,12 +10,18 @@
 探索は自分側=全情報 (実数値まで使用)、相手側=公開情報 (視認済みの技・HP) を
 使う。未視認技は使用率DBの実技セット、DBに無い種族はタイプ代表技で補完する。
 
-実測強度 (2026-07-24, tools/check_search_expert, 100戦):
-  vs ベンチマーク (上位構築×SimpleHeuristics) 勝率0.41 (depth=2)
-  [参考: RandomPlayer 0.1-0.2 / 学習済み方策 0.46-0.48]
-  → 現状は学習済み方策と同格で「格上の教師」ではない。BCの実行は
-    エキスパートが方策を明確に上回ってから (simulate_turnの追加効果
-    未対応などが残る改善余地)。対戦相手としての混入は多様性目的で有効。
+実測強度 (tools/check_search_expert, 各100戦 vs 上位構築×SimpleHeuristics):
+  - 2026-07-24 素の2手読み (depth=2): 0.41
+  - 2026-07-26 価値ブレンド (当時の_best参照): 0.64 — 一時BC教師に採用
+  - 2026-07-27 素の2手読み: 0.44 / 価値ブレンド (現_best参照): 0.34
+  [参考: RandomPlayer 0.1-0.2 / 学習済み方策 0.56-0.62]
+⚠ 価値ブレンドの効果は参照する _best に強く依存し、現在は逆効果
+  (0.44→0.34)。価値ヘッドはモデルごとに報酬スケールが異なり、SimSide由来の
+  合成状態では較正が保証されないため。use_value を有効にする場合は
+  check_search_expert で必ず前後比較すること。
+  BC教師としては方策 (0.56-0.62) に劣るため、ネット拡幅の初期化には
+  bc_pretrain --teacher policy (方策蒸留) を使う。
+  対戦相手としての混入 (depth=1, 価値なし) は多様性目的で有効。
 """
 from __future__ import annotations
 
@@ -195,7 +201,8 @@ def _opp_move_pool(opp_active) -> list:
             if t in _TYPE_REP_MOVES] or [("bodyslam", 1.0)]
 
 
-def decide(battle, depth: int = 1, by: str = "recommended") -> Optional[dict]:
+def decide(battle, depth: int = 1, by: str = "recommended",
+           use_value: bool = False) -> Optional[dict]:
     """探索で最善行動を選ぶ。
 
     返り値: {"kind": "move"|"switch", "move": Move|None, "mega": bool,
@@ -203,6 +210,10 @@ def decide(battle, depth: int = 1, by: str = "recommended") -> Optional[dict]:
     action_index は学習環境のアクション番号 (0-5=交代 / 6-9=技 / 10-13=技+メガ)
     by: 行動の選択基準。"recommended" (期待値+保証値のブレンド) か
         "expected" (純期待値。読みを外しても咎めない相手には強気が正着)
+    use_value: depth>=2 のとき、RL価値関数を葉評価にブレンドする。
+        効果が参照する _best に依存し不安定なため既定はOFF
+        (2026-07-26は0.41→0.64と改善、2026-07-27は0.44→0.34と劣化)。
+        有効化する場合は check_search_expert --no-value との比較必須
     """
     active = battle.active_pokemon
     opp_active = battle.opponent_active_pokemon
@@ -222,11 +233,26 @@ def decide(battle, depth: int = 1, by: str = "recommended") -> Optional[dict]:
 
     available = {m.id: m for m in (battle.available_moves or [])}
     my_moves = list(available.keys())[:4]
+    my_field = _field_view(battle, battle.side_conditions)
+
+    # RL価値関数の葉評価ブレンド (アドバイザーの_run_searchと同じ構成)
+    leaf_fn = None
+    if use_value and depth >= 2:
+        try:
+            from advisor.rl_bridge import _load_model, value_of_sim
+            if _load_model() is not None:
+                turn = getattr(battle, "turn", None) or 5
+
+                def leaf_fn(m2, o2):
+                    return value_of_sim(m2, o2, my_moves, my_field, turn=turn)
+        except Exception:
+            leaf_fn = None
+
     result = search(me, opp, my_moves, _opp_move_pool(opp_active),
-                    my_field=_field_view(battle, battle.side_conditions),
+                    my_field=my_field,
                     opp_field=_field_view(battle,
                                           battle.opponent_side_conditions),
-                    depth=depth)
+                    depth=depth, leaf_value_fn=leaf_fn)
 
     switchable = {p.species for p in (battle.available_switches or [])}
     team_order = list(battle.team.values())[:6]
