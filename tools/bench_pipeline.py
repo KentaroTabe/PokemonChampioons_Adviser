@@ -70,7 +70,7 @@ def run(n_frames: int, label: str, repeats: int = 1) -> dict:
         ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
         encoded.append(base64.b64encode(buf).decode() if ok else None)
 
-    all_times, scenes = [], {}
+    all_times, scenes, scene_seq = [], {}, []
     for _ in range(repeats):
         pipe = VisionPipeline()
         pipe.process(frames[0][1], single_shot=True)   # OCR初期化を除外
@@ -84,6 +84,7 @@ def run(n_frames: int, label: str, repeats: int = 1) -> dict:
             state, _ = pipe.process(img)
             dt = time.perf_counter() - t0
             all_times.append(dt)
+            scene_seq.append(state["scene"])
             scenes[state["scene"]] = scenes.get(state["scene"], 0) + 1
             rest = 0.1 - dt          # 10fps送信の間隔を模す
             if rest > 0:
@@ -93,6 +94,10 @@ def run(n_frames: int, label: str, repeats: int = 1) -> dict:
     over = sum(1 for t in all_times if t > 0.1) / len(all_times)
     res = {"label": label, "n": len(all_times), **s, "over_budget": over,
            "scenes": scenes}
+    # シーン別の内訳 (どの経路が尾を引いているかの特定用)
+    by_scene: dict = {}
+    for sc, t in zip(scene_seq, all_times):
+        by_scene.setdefault(sc, []).append(t)
     print(f"=== パイプライン性能 [{label}] {res['n']}フレーム "
           f"(10fps再生 x{repeats}周) ===")
     print(f"1フレーム処理時間: 平均{s['mean_ms']:.0f}ms / "
@@ -100,8 +105,36 @@ def run(n_frames: int, label: str, repeats: int = 1) -> dict:
           f"最大{s['max_ms']:.0f}ms")
     print(f"予算100ms超過フレーム: {over:.0%} "
           f"(この間に届くフレームがサーバーで捨てられる)")
-    print(f"シーン内訳: {res['scenes']}")
+    print("シーン別 (平均/最大/枚数, 合計時間の占有率):")
+    total = sum(all_times)
+    for sc, ts in sorted(by_scene.items(), key=lambda kv: -sum(kv[1])):
+        print(f"  {sc}: 平均{statistics.mean(ts) * 1000:.0f}ms / "
+              f"最大{max(ts) * 1000:.0f}ms / {len(ts)}枚 "
+              f"({sum(ts) / total:.0%})")
     return res
+
+
+def bench_dump(n_frames: int = 3) -> None:
+    """デバッグフレーム保存 (DEBUG_DUMP_FRAMES=1) のコスト。
+
+    本番のサーバーは通常10秒毎・場の状況/選出は2秒毎にPNGを書き出す。
+    これがフレーム処理と同じ経路にあると、書き出し中に届くフレームが
+    まとめて捨てられる。
+    """
+    import tempfile
+    frames = _load_frames(n_frames)
+    if not frames:
+        return
+    img = frames[-1][1]
+    tmp = Path(tempfile.mkdtemp())
+    for ext, label in ((".png", "PNG (現行)"), (".jpg", "JPEG")):
+        times = []
+        for i in range(3):
+            t0 = time.perf_counter()
+            cv2.imwrite(str(tmp / f"t{i}{ext}"), img)
+            times.append(time.perf_counter() - t0)
+        print(f"フレーム保存 {label}: 平均{statistics.mean(times) * 1000:.0f}ms "
+              f"({img.shape[1]}x{img.shape[0]})")
 
 
 def bench_advice(n_frames: int) -> None:
@@ -145,6 +178,7 @@ def main() -> None:
                     help="アドバイス計算のコストも測る")
     args = ap.parse_args()
     run(args.frames, args.label, args.repeats)
+    bench_dump()
     if args.advice:
         bench_advice(args.frames)
 

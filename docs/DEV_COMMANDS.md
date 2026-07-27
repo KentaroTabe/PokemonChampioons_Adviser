@@ -81,6 +81,8 @@ plist本体は `scripts/com.championsadviser.train.plist` (repo管理)。編集�
 | `python -m tools.check_field_my_hp <frame...>` | 自分HPゾーンのOCR診断 |
 | `python -m tools.check_selection_frame <frame>` | 選出画面の抽出診断 |
 | `python -m tools.check_look_more <frame...>` | もっと見る画面の読取診断 (タブ/対象/実数値/性格) |
+| `python -m tools.bench_pipeline [--label <条件>]` | 解析性能の実測 (1フレーム処理時間・予算超過率・シーン別内訳) |
+| `bash scripts/show_frame_stats.sh` | 直近のフレーム受信統計 (受信/処理/破棄と取りこぼし率) |
 | `python -m tools.check_battle_log [file]` | 対戦ログの内容確認 |
 | `python -m tools.analyze_corrections` | 手動修正ログの集計 (誤認識ランキング) |
 | `python -m tools.audit_extraction [--battle <log>]` | 監査ペア一覧 (フレーム×抽出主張、対戦中フェーズ主体) |

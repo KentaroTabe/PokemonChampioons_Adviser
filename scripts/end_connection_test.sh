@@ -7,10 +7,11 @@
 # やること:
 #  1. アドバイザー(8000)+フロントエンド(3000) の停止
 #     (Showdownは学習が使うため止めない)
-#  2. 学習ループの再開 (launchd)
-#  3. 今回の対戦の簡易サマリー表示 (敗因分析 直近10戦)
+#  2. 学習ループの確認 (テスト中も止めていないので、落ちていた場合のみ再開)
+#  3. 今回の対戦の簡易サマリー表示 (敗因分析: セッション全体)
 #  4. セッション一括監査 (tools/audit_session): 今回の全対戦を横断して
 #     矛盾候補の機械検出+層化サンプリングで sonnet 1回にまとめて検証する
+#  5. フレーム取りこぼし率の表示 (受信/処理/破棄。改善効果の確認用)
 cd "$(dirname "$0")/.." || exit 1
 
 echo "=== 接続テスト終了処理 ==="
@@ -21,15 +22,22 @@ pkill -f "uvicorn server:app_asgi" 2>/dev/null && echo "アドバイザー(8000)
 pkill -f "http.server 3000" 2>/dev/null && echo "フロントエンド(3000): 停止" \
   || echo "フロントエンド(3000): 未起動"
 
-# 3. 学習ループ再開
-launchctl load -w ~/Library/LaunchAgents/com.championsadviser.train.plist 2>/dev/null
-sleep 3
+# 学習ループの確認 (テスト中も止めていないため、通常はそのまま稼働中)
 if pgrep -f train_forever >/dev/null; then
-  echo "学習ループ: 再開 (launchd)"
+  echo "学習ループ: 稼働中 (テスト中も継続)"
 else
-  echo "⚠ 学習ループが起動していません。手動確認:"
-  echo "  launchctl load -w ~/Library/LaunchAgents/com.championsadviser.train.plist"
+  launchctl load -w ~/Library/LaunchAgents/com.championsadviser.train.plist 2>/dev/null
+  sleep 3
+  if pgrep -f train_forever >/dev/null; then
+    echo "学習ループ: 停止していたため再開しました"
+  else
+    echo "⚠ 学習ループが起動していません。手動確認:"
+    echo "  launchctl load -w ~/Library/LaunchAgents/com.championsadviser.train.plist"
+  fi
 fi
+
+# フレーム取りこぼし率 (改善効果の確認用)
+bash scripts/show_frame_stats.sh
 
 # 今回の対戦サマリー (セッション中の全対戦。マーカーが無ければ直近10戦)
 echo ""
