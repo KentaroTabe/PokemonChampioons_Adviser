@@ -11,11 +11,17 @@
 使う。未視認技は使用率DBの実技セット、DBに無い種族はタイプ代表技で補完する。
 
 実測強度 (tools/check_search_expert, 各100戦 vs 上位構築×SimpleHeuristics):
-  - 2026-07-24 素の2手読み (depth=2): 0.41 — 方策と同格止まり
-  - 2026-07-26 RL価値関数の葉評価ブレンド (use_value): 0.64 — 方策を
-    明確に超過。BC教師として解禁 (train/bc_pretrain.py)
-  [参考: RandomPlayer 0.1-0.2]
-  対戦相手としての混入 (depth=1, 価値なし) は従来どおり多様性目的。
+  - 2026-07-24 素の2手読み (depth=2): 0.41
+  - 2026-07-26 価値ブレンド (当時の_best参照): 0.64 — 一時BC教師に採用
+  - 2026-07-27 素の2手読み: 0.44 / 価値ブレンド (現_best参照): 0.34
+  [参考: RandomPlayer 0.1-0.2 / 学習済み方策 0.56-0.62]
+⚠ 価値ブレンドの効果は参照する _best に強く依存し、現在は逆効果
+  (0.44→0.34)。価値ヘッドはモデルごとに報酬スケールが異なり、SimSide由来の
+  合成状態では較正が保証されないため。use_value を有効にする場合は
+  check_search_expert で必ず前後比較すること。
+  BC教師としては方策 (0.56-0.62) に劣るため、ネット拡幅の初期化には
+  bc_pretrain --teacher policy (方策蒸留) を使う。
+  対戦相手としての混入 (depth=1, 価値なし) は多様性目的で有効。
 """
 from __future__ import annotations
 
@@ -196,7 +202,7 @@ def _opp_move_pool(opp_active) -> list:
 
 
 def decide(battle, depth: int = 1, by: str = "recommended",
-           use_value: bool = True) -> Optional[dict]:
+           use_value: bool = False) -> Optional[dict]:
     """探索で最善行動を選ぶ。
 
     返り値: {"kind": "move"|"switch", "move": Move|None, "mega": bool,
@@ -204,9 +210,10 @@ def decide(battle, depth: int = 1, by: str = "recommended",
     action_index は学習環境のアクション番号 (0-5=交代 / 6-9=技 / 10-13=技+メガ)
     by: 行動の選択基準。"recommended" (期待値+保証値のブレンド) か
         "expected" (純期待値。読みを外しても咎めない相手には強気が正着)
-    use_value: depth>=2 のとき、アドバイザーと同じくRL価値関数を葉評価に
-        ブレンドする (探索の読み+学習済みの局面感覚のハイブリッド。
-        2026-07-26導入: 素の2手読みはベンチ0.41で方策を超えられなかった)
+    use_value: depth>=2 のとき、RL価値関数を葉評価にブレンドする。
+        効果が参照する _best に依存し不安定なため既定はOFF
+        (2026-07-26は0.41→0.64と改善、2026-07-27は0.44→0.34と劣化)。
+        有効化する場合は check_search_expert --no-value との比較必須
     """
     active = battle.active_pokemon
     opp_active = battle.opponent_active_pokemon

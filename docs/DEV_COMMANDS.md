@@ -149,14 +149,23 @@ sonnetは疑い箇所の検証+少数サンプルの網羅に専念する (タ�
 | `python -m champions_agent.train.opponent_pool --list` | selfplay相手プールの一覧 |
 | `python -m tools.probe_policy` | 方策の健全性プローブ (攻撃率/抜群率) |
 | `python -m tools.check_search_expert [--battles N] [--depth 1\|2]` | 探索エキスパート (学習相手/BC教師) の実戦強度診断 |
-| `python -m champions_agent.train.bc_pretrain --dry-run` | 探索エンジンの行動クローン微調整 (⚠実行条件はdocstring参照) |
+| `python -m champions_agent.train.bc_pretrain [--styles a,b,c] [--battles N]` | 探索エキスパートの行動クローン (新規ネットの初期化にも使う) |
 | `python -m tools.smoke_train` / `smoke_selfplay` | 短時間の学習/セルフプレイ疎通 |
 | `python -m tools.validate_teams` | 生成チームのShowdownバリデーション |
 | `python -m tools.check_action_mask` | 行動マスクの検証 |
+| `python -m tools.check_checkpoint_width [--want 512]` | チェックポイントのネット幅確認 (幅変更後・学習再開前に実行) |
 
 ⚠ 2026-07-26以前の夜間ベンチ履歴は「凍結された_best」を測っていた
 (評価が_best優先ロードだったバグ。watch_trainingの過去推移は学習進捗を
 反映していない)。同日修正済みで、以後の履歴は current の真値。
+
+ネット幅の変更手順 (2026-07-27に256→512を実施):
+1. 学習ループを停止し、現行チェックポイントを `checkpoints/net256_backup/` へ退避
+2. `TRAIN_NET_WIDTH` の既定を変更 (train_battle.py)
+3. `bc_pretrain --teacher policy` で旧ネット (_best) を新幅ネットへ蒸留
+   — ゼロからの自己対戦を省く。初期値は教師より下がるので必ず
+   `evaluate --checkpoint current` で測ってから学習を再開する
+4. 戻す場合は既定幅を戻し、net256_backup を書き戻す
 
 ## 人間 vs AI 対戦 (学習進捗の体感チェック)
 

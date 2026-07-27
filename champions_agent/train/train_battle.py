@@ -65,15 +65,16 @@ def train(total_timesteps: int = 10_000, battle_format: str = TRAINING_BATTLE_FO
     # - learning_rate: 新規学習フェーズは標準の3e-4 (1e-4は旧400万step
     #   モデルの微調整用だった。観測v6の新規学習では立ち上がりを遅くする)
     # - net_arch: SB3既定の64x64は388次元観測に対して過小 (0.55で頭打ち)。
-    #   現行は256x256。「256でも0.52で頭打ち」に見えていたのは評価が凍結
-    #   された_bestを測り続けるバグ (2026-07-26発見・修正済み。真値は
-    #   balance 0.70)。512への切替は、正直な評価で本物の頭打ちを確認して
-    #   から: TRAIN_NET_WIDTH=512 + bc_pretrain でBC初期化
-    #   (512のBC初期値は checkpoints/battle_policy_*_512bc.zip に作成済み、
-    #    初期ベンチ0.40)
+    #   256x256は正直な評価 (2026-07-26に評価凍結バグを修正) の下で
+    #   +600万stepを積んでもベンチ0.56前後で収束したため、2026-07-27に
+    #   512x512へ切替えた。新規512ネットはゼロからではなく bc_pretrain の
+    #   行動クローンで初期化する (探索エキスパートを教師にして自己対戦の
+    #   立ち上がり数日ぶんを短縮する)。
+    #   256系統は checkpoints/net256_backup/ に退避 (戻す場合は
+    #   TRAIN_NET_WIDTH=256 + バックアップを書き戻す)
     lr = float(os.environ.get("TRAIN_LR", "3e-4"))
     ent_coef = float(os.environ.get("TRAIN_ENT_COEF", "0.01"))
-    width = int(os.environ.get("TRAIN_NET_WIDTH", "256"))
+    width = int(os.environ.get("TRAIN_NET_WIDTH", "512"))
     ppo_kwargs = {"learning_rate": lr, "ent_coef": ent_coef,
                   "policy_kwargs": {"net_arch": [width, width]}}
     if n_envs > 1:

@@ -16,7 +16,8 @@ import time
 from champions_agent.config import TRAINING_BATTLE_FORMAT
 
 
-async def run(n_battles: int, depth: int, by: str = "recommended") -> None:
+async def run(n_battles: int, depth: int, by: str = "recommended",
+              use_value: bool = True) -> None:
     from poke_env import AccountConfiguration
     from poke_env.player import Player, RandomPlayer
     from champions_agent.env.ranked_teams import RankedTeambuilder
@@ -31,7 +32,7 @@ async def run(n_battles: int, depth: int, by: str = "recommended") -> None:
     class _DiagExpert(Player):
         def choose_move(self, battle):
             try:
-                d = decide(battle, depth=depth, by=by)
+                d = decide(battle, depth=depth, by=by, use_value=use_value)
             except Exception as e:
                 stats["error"] += 1
                 stats.setdefault("last_error", repr(e))
@@ -101,8 +102,11 @@ def main() -> None:
     ap.add_argument("--depth", type=int, default=1)
     ap.add_argument("--by", default="recommended",
                     choices=["recommended", "expected"])
+    ap.add_argument("--no-value", action="store_true",
+                    help="RL価値関数の葉評価ブレンドを無効化 (素の探索を測る)")
     args = ap.parse_args()
-    asyncio.run(run(args.battles, args.depth, args.by))
+    asyncio.run(run(args.battles, args.depth, args.by,
+                    use_value=not args.no_value))
 
 
 if __name__ == "__main__":
