@@ -7,12 +7,15 @@
 - パーティ編集方策(policy_teambuild)
 を生成するための橋渡し役。
 
-現時点ではPokemon Showdownサーバーへの依存を避け、
-train_selection.py の学習ループを検証できるよう、
-env/team_builder.py のダミーメタデータを使った簡易シミュレーションを提供する。
+本モジュールの generate_selection_episode は**ダミー報酬のプレースホルダ**
+(「種族値合計が高い3体を選ぶほど勝ちやすい」という仮定) で、学習には使えない。
 
-TODO: showdown_env.py の実バトル環境と接続し、
-      「選出→バトル(PPO推論)→勝敗→選出方策への報酬」の一連を自動化する。
+実対戦ベースの収集は tools/collect_selection_data.py に実装済み:
+  python -m tools.collect_selection_data --battles 300
+  → champions_agent/train/logs/selection_data.npz に
+    (観測, 機能埋め込み, 選出インデックス, 勝敗) を追記で蓄積する
+選出方策を学習する際はこちらのデータを使うこと。ベースライン
+(現行ヒューリスティクスの実力) は tools/check_selection.py で測る。
 """
 from __future__ import annotations
 

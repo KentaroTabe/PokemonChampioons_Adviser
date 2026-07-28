@@ -40,24 +40,63 @@ def _to_id(name: str) -> str:
 # ------------------------------------------------------------------
 # functional: メタ上位への対面スコアベクトル
 # ------------------------------------------------------------------
+def _view_with_moves(sid: str):
+    """(MonView, moves)。使用率データが無い種族は代表技で補完する。
+
+    メタ外の種族 (ユーザーの実チームには普通に入る) でもベクトルを作れる
+    ようにするための補完。技が空だと対面スコアが常にNoneになり使えない。
+    """
+    from advisor.team_advice import build_meta_view
+    view, moves = build_meta_view(sid)
+    if view is None:
+        return None, []
+    if not moves:
+        from champions_agent.env.search_expert import _TYPE_REP_MOVES
+        moves = [_TYPE_REP_MOVES[t] for t in (view.types or [])
+                 if t in _TYPE_REP_MOVES] or ["bodyslam"]
+    return view, moves
+
+
+def _target_species() -> list:
+    """ベクトルを作る対象。championsで使える全種族 + 自分の登録チーム"""
+    from advisor.dex import get_dex
+    from advisor.team_advice import champions_usable
+    out = {sid for sid in get_dex()._species if champions_usable(sid)}
+    try:
+        from advisor.my_team import _load
+        from vision.normalize import NameResolver
+        resolver = NameResolver()
+        for ja in _load():
+            r = resolver.resolve_species(ja, cutoff=0.85)
+            if r:
+                out.add(_to_id(r[1]))
+    except Exception:
+        pass
+    return sorted(out)
+
+
 def build_functional() -> dict:
     """species_id -> [メタ上位N体への対面スコア]。
 
-    team_advice の margin_vec と同じ考え方 (duel_score) を全種族へ広げ、
-    再利用できるようキャッシュする。
+    team_advice の margin_vec と同じ考え方 (duel_score) を、メタ上位だけで
+    なく「championsで使える全種族 + 自分の登録チーム」へ広げる
+    (選出モデルの入力にするには未収録種族があると欠損するため)。
     """
     from advisor.endgame import duel_score
-    from advisor.team_advice import build_meta_view, meta_top
+    from advisor.team_advice import meta_top
 
-    metas = meta_top(META_TOP_N)
     basis = []
-    for entry in metas:
+    for entry in meta_top(META_TOP_N):
         sid = entry[0] if isinstance(entry, (list, tuple)) else entry
-        view, moves = build_meta_view(sid)
+        view, moves = _view_with_moves(sid)
         if view is not None:
             basis.append((sid, view, moves))
+
     out = {"basis": [sid for sid, _, _ in basis], "vectors": {}}
-    for sid, view, moves in basis:
+    for sid in _target_species():
+        view, moves = _view_with_moves(sid)
+        if view is None:
+            continue
         vec = []
         for _osid, oview, omoves in basis:
             s = duel_score(view, 1.0, moves, oview, 1.0, omoves)

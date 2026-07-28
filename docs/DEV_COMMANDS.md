@@ -158,6 +158,8 @@ sonnetは疑い箇所の検証+少数サンプルの網羅に専念する (タ�
 | `python -m tools.check_action_mask` | 行動マスクの検証 |
 | `python -m tools.check_checkpoint_width [--want 512]` | チェックポイントのネット幅確認 (幅変更後・学習再開前に実行) |
 | `python -m tools.species_embedding [--species <名前>] [--kind functional\|context\|synergy]` | ポケモンのベクトル化 (似た種族の確認・組合せ圧縮の基盤) |
+| `python -m tools.check_selection [--battles N] [--strategies random,matchup,statsum]` | 選出方策の比較 (選出だけ変えて勝率を測る。学習型の前のベースライン) |
+| `python -m tools.collect_selection_data [--battles N] [--explore 0.5]` / `--show` | 選出学習のデータ収集 (実対戦。obsと機能埋め込みの両方を記録) |
 
 学習に変更を入れたら `champions_agent/train/training_changes.json` に追記する。
 `watch_training` の履歴と `--plot` のグラフに赤い縦線で表示され、推移の
