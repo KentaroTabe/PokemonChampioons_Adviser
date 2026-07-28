@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import json
 import re
 import subprocess
 import time
@@ -134,8 +135,44 @@ def show_summary(cycles):
     print("\n(vsBench=上位構築ヒューリスティクス相手の勝率。目標: 0.5超の安定)")
 
 
+CHANGES_PATH = (Path(__file__).resolve().parent.parent / "champions_agent"
+                / "train" / "training_changes.json")
+_KIND_JA = {"net": "ネット", "reward": "報酬", "opponent": "相手",
+            "env": "環境", "eval": "評価", "fix": "修正"}
+
+
+def load_changes() -> list:
+    """学習に影響する変更の記録 [(時刻文字列, kind, label, detail)] を返す。
+
+    グラフの赤い縦線・履歴表示の区切りに使う。追記は
+    champions_agent/train/training_changes.json を直接編集する。
+    """
+    try:
+        data = json.loads(CHANGES_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    out = []
+    for c in data.get("changes", []):
+        if c.get("at"):
+            out.append((c["at"], c.get("kind", ""), c.get("label", ""),
+                        c.get("detail", "")))
+    return sorted(out, key=lambda x: x[0])
+
+
 def show_history(cycles, n: int):
-    for c in cycles[-n:]:
+    shown = cycles[-n:]
+    changes = load_changes()
+    ci = 0
+    # 表示範囲より前の変更は飛ばす
+    while ci < len(changes) and shown and changes[ci][0] < shown[0]["ts"]:
+        ci += 1
+    for c in shown:
+        # このサイクルより前に入った変更をここで差し込む
+        while ci < len(changes) and changes[ci][0] <= c["ts"]:
+            at, kind, label, _ = changes[ci]
+            print(f"{'─' * 8} {at} ▼変更[{_KIND_JA.get(kind, kind)}] {label} "
+                  f"{'─' * 8}")
+            ci += 1
         parts = []
         for style, st in c["styles"].items():
             r = f"{st['random']:.2f}" if st["random"] is not None else "-"
@@ -188,6 +225,18 @@ def plot_history(cycles, n: int, out: Path):
         ry = [v for v in rand if v is not None]
         ax.plot(rx, ry, "--", color=color, alpha=0.35, linewidth=1,
                 label=f"{style} vsRandom")
+
+    # 学習に変更を入れたタイミングを赤い縦線で示す (推移の解釈用)。
+    # サイクルの時刻と突き合わせ、その変更以降で最初のサイクル位置に引く
+    for at, kind, label, _ in load_changes():
+        pos = next((i for i, c in enumerate(cycles) if c["ts"] >= at), None)
+        if pos is None or at < cycles[0]["ts"]:
+            continue    # 表示範囲の外 (前後どちらか) は描かない
+        ax.axvline(pos, color="red", linestyle="--", linewidth=1.2, alpha=0.7)
+        ax.annotate(f"{_KIND_JA.get(kind, kind)}: {label}",
+                    xy=(pos, 1.0), xytext=(2, -4),
+                    textcoords="offset points", rotation=90,
+                    va="top", ha="left", fontsize=7, color="red")
 
     ax.axhline(0.5, color="gray", linestyle=":", linewidth=1)
     ax.set_ylim(0, 1.02)

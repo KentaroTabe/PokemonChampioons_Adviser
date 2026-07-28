@@ -237,6 +237,34 @@ def _meta_pool_rows() -> list:
         return _fetch_meta_pool(conn, snap) if snap else []
 
 
+def _apply_synergy_bias(team_text: str, idx: int, cands: list,
+                        weights: list) -> list:
+    """残す5体との共起 (synergy) で候補の重みを最大2倍までブーストする。
+
+    埋め込みが無い/読めない場合は元の重みをそのまま返す (安全側)。
+    """
+    try:
+        from tools.species_embedding import load
+        syn = load()["cooccurrence"]["synergy"]
+    except Exception:
+        return weights
+    keep = [s for i, s in enumerate(_team_species(team_text)) if i != idx]
+    scores = []
+    for r in cands:
+        sid = _to_id(r["pokemon_name"])
+        vec = syn.get(sid)
+        if not vec:
+            scores.append(0.0)
+            continue
+        ids = load()["cooccurrence"]["ids"]
+        pos = {s: i for i, s in enumerate(ids)}
+        scores.append(sum(vec[pos[k]] for k in keep if k in pos))
+    hi = max(scores) if scores else 0.0
+    if hi <= 0:
+        return weights
+    return [w * (1.0 + s / hi) for w, s in zip(weights, scores)]
+
+
 def mutate(team_text: str, pool_rows: list, rng: random.Random,
            constraint: "Constraint | None" = None) -> str:
     """1枠を使用率重み付きの別種族 (meta_setsの型) に入れ替える。
@@ -257,6 +285,10 @@ def mutate(team_text: str, pool_rows: list, rng: random.Random,
     if not cands:
         return team_text
     weights = [max(0.01, float(r["weight"] or 0.01)) for r in cands]
+    # 共起埋め込みで「残る5体と噛み合う候補」を優先する。闇雲な入れ替えより
+    # 収束が速い (tools/species_embedding の synergy = 一緒に使われる度合い)。
+    # 使用率重みは残したまま最大2倍までのブーストに留め、多様性は保つ
+    weights = _apply_synergy_bias(team_text, idx, cands, weights)
     row = rng.choices(cands, weights=weights, k=1)[0]
     item = _sanitize_item(row["item_name"])
     used_items = {b.split(" @ ", 1)[1].split("\n")[0].strip()

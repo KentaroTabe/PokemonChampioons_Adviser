@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.championsadviser.evolve</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/kenta/GitHub/PokemonChampioons_Adviser/champions_agent/scripts/evolve_daily.sh</string>
+    </array>
+    <!-- 学習の夜間バッチ (23-7時) とアドバイザー利用時間を避けて昼に回す -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key><integer>13</integer>
+        <key>Minute</key><integer>0</integer>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>/Users/kenta/GitHub/PokemonChampioons_Adviser</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/kenta/GitHub/PokemonChampioons_Adviser/logs/evolve_daily.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/kenta/GitHub/PokemonChampioons_Adviser/logs/evolve_daily.log</string>
+</dict>
+</plist>

@@ -26,6 +26,7 @@
 | `launchctl unload ~/Library/LaunchAgents/com.championsadviser.train.plist` | 学習の一時停止 |
 | `launchctl load -w ~/Library/LaunchAgents/com.championsadviser.train.plist` | 学習の再開 |
 | `cp scripts/com.championsadviser.train.plist ~/Library/LaunchAgents/` | plist更新の反映 (unload→cp→load の順) |
+| `launchctl list \| grep champion` | 常駐ジョブ一覧 (train=学習ループ / evolve=日次の進化探索13時) |
 
 plist本体は `scripts/com.championsadviser.train.plist` (repo管理)。編集後は
 `~/Library/LaunchAgents/` へコピーし、`unload` → `load -w` で再読込する。
@@ -156,6 +157,11 @@ sonnetは疑い箇所の検証+少数サンプルの網羅に専念する (タ�
 | `python -m tools.validate_teams` | 生成チームのShowdownバリデーション |
 | `python -m tools.check_action_mask` | 行動マスクの検証 |
 | `python -m tools.check_checkpoint_width [--want 512]` | チェックポイントのネット幅確認 (幅変更後・学習再開前に実行) |
+| `python -m tools.species_embedding [--species <名前>] [--kind functional\|context\|synergy]` | ポケモンのベクトル化 (似た種族の確認・組合せ圧縮の基盤) |
+
+学習に変更を入れたら `champions_agent/train/training_changes.json` に追記する。
+`watch_training` の履歴と `--plot` のグラフに赤い縦線で表示され、推移の
+解釈時に「どこで条件が変わったか」が分かる。
 
 ⚠ 2026-07-26以前の夜間ベンチ履歴は「凍結された_best」を測っていた
 (評価が_best優先ロードだったバグ。watch_trainingの過去推移は学習進捗を
