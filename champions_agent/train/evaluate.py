@@ -84,7 +84,8 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
     # =ユーザーの実チームを操縦する、とも整合)
     if opponent_kind == "benchmark":
         from champions_agent.env.ranked_teams import RankedTeambuilder
-        own_teambuilder = RankedTeambuilder()
+        # 評価基準を動かさないため上位60構築に固定 (make_benchmark_player と対)
+        own_teambuilder = RankedTeambuilder(top_n=60, include_external=False)
     else:
         own_team = build_random_team_text(size=TRAINING_TEAM_SIZE,
                                           play_style=play_style)
