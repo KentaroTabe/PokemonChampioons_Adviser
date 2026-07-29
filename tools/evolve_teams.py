@@ -151,7 +151,10 @@ def load_archive() -> list:
 def build_opponent(forecast_mix: float, archive_mix: float,
                    rng: random.Random):
     """相手チーム分布: 現行メタ + 予測メタ + アーカイブの混合"""
-    ranked = build_ranked_teams()
+    # 上位60構築に固定。ここが動くと適応度の基準が変わり、過去の実行結果や
+    # アーカイブの fitness と比較できなくなる (広げる場合は別の実験として
+    # training_changes.json に記録すること)
+    ranked = build_ranked_teams(top_n=60, include_external=False)
     parts = []
     fs = forecast_scores() if forecast_mix > 0 else None
     if forecast_mix > 0 and fs is None:
@@ -176,7 +179,7 @@ def build_opponent(forecast_mix: float, archive_mix: float,
 # ------------------------------------------------------------------
 def init_population(size: int, rng: random.Random) -> list:
     """初期集団: 半分は上位実構築、半分は使用率メタからの生成チーム"""
-    ranked = build_ranked_teams()
+    ranked = build_ranked_teams(top_n=60, include_external=False)
     pop = [{"origin": "ranked", "text": t, "fitness": None}
            for t in ranked[:size // 2]]
     while len(pop) < size:
