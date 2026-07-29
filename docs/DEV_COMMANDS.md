@@ -161,9 +161,13 @@ sonnetは疑い箇所の検証+少数サンプルの網羅に専念する (タ�
 | `python -m tools.check_selection [--battles N] [--strategies random,matchup,statsum]` | 選出方策の比較 (選出だけ変えて勝率を測る。学習型の前のベースライン) |
 | `python -m tools.collect_selection_data [--battles N] [--explore 0.5]` / `--show` | 選出学習のデータ収集 (実対戦。obsと機能埋め込みの両方を記録) |
 
+| `python -m tools.compare_periods [--since <時刻>] [--list]` | 変更前後のベンチを統計比較 (平均・ばらつき・有意性の目安) |
+
 学習に変更を入れたら `champions_agent/train/training_changes.json` に追記する。
 `watch_training` の履歴と `--plot` のグラフに赤い縦線で表示され、推移の
-解釈時に「どこで条件が変わったか」が分かる。
+解釈時に「どこで条件が変わったか」が分かる。効果の判定は `compare_periods`
+で行う (⚠ `--since` で前区間を絞らないと、直前の別変更を跨いだ比較になり
+見かけの改善が出る)。
 
 ⚠ 2026-07-26以前の夜間ベンチ履歴は「凍結された_best」を測っていた
 (評価が_best優先ロードだったバグ。watch_trainingの過去推移は学習進捗を

@@ -90,6 +90,8 @@ async def collect(n_battles: int, explore: float, style: str) -> dict:
                     _emb_of([p.species for p in mons]),
                     _emb_of([p.species for p in opp_mons])]),
                 "action": SELECTION_PERMUTATIONS.index(perm),
+                # 行動インデックスを後から3体の名前へ戻せるよう並び順も保存する
+                "team": [p.species for p in mons],
             }
         except Exception:
             pass
@@ -110,7 +112,7 @@ async def collect(n_battles: int, explore: float, style: str) -> dict:
 
     await me.battle_against(opp, n_battles=n_battles)
 
-    obs, emb, act, rew = [], [], [], []
+    obs, emb, act, rew, team = [], [], [], [], []
     for tag, battle in me.battles.items():
         rec = records.get(tag)
         if rec is None or battle.won is None:
@@ -119,10 +121,12 @@ async def collect(n_battles: int, explore: float, style: str) -> dict:
         emb.append(rec["emb"])
         act.append(rec["action"])
         rew.append(1.0 if battle.won else 0.0)
+        team.append(rec["team"])
     return {"obs": np.asarray(obs, dtype=np.float32),
             "emb": np.asarray(emb, dtype=np.float32),
             "action": np.asarray(act, dtype=np.int64),
-            "reward": np.asarray(rew, dtype=np.float32)}
+            "reward": np.asarray(rew, dtype=np.float32),
+            "team": np.asarray(team, dtype="<U24")}
 
 
 def _merge_save(new: dict) -> dict:
@@ -131,8 +135,13 @@ def _merge_save(new: dict) -> dict:
     if OUT.exists():
         try:
             old = np.load(OUT)
-            if len(old["action"]) and old["obs"].shape[1] == new["obs"].shape[1]:
+            same_schema = (set(old.files) == set(new)
+                           and old["obs"].shape[1] == new["obs"].shape[1])
+            if len(old["action"]) and same_schema:
                 new = {k: np.concatenate([old[k], new[k]]) for k in new}
+            elif len(old["action"]):
+                print("[collect_selection] 形式が変わったため既存データは"
+                      "引き継がず作り直します")
         except Exception as e:
             print(f"[collect_selection] 既存データを引き継げません ({e})")
     np.savez_compressed(OUT, **new)
@@ -150,18 +159,42 @@ def show() -> None:
     print(f"全体勝率: {d['reward'].mean():.3f}")
     uniq = len(set(d["action"].tolist()))
     print(f"出現した選出パターン: {uniq}/120 通り")
-    # 出現5回以上の選出だけ勝率を出す (少数は判断材料にならない)
+
     from collections import Counter
+    from champions_agent.agent.spaces import SELECTION_PERMUTATIONS
+    from advisor.infer import species_ja_name
+
+    def _label(action: int, row: int) -> str:
+        """行動インデックス -> 「先発/2番手/3番手」の日本語名"""
+        try:
+            perm = SELECTION_PERMUTATIONS[action]
+            team = d["team"][row] if "team" in d.files else None
+            if team is None:
+                return f"行動{action}"
+            names = [species_ja_name(str(team[i])) or str(team[i])
+                     for i in perm]
+            return f"★{names[0]} → {names[1]} → {names[2]}"
+        except Exception:
+            return f"行動{action}"
+
     cnt = Counter(d["action"].tolist())
-    rows = []
-    for a, c in cnt.items():
-        if c >= 5:
-            rows.append((a, c, float(d["reward"][d["action"] == a].mean())))
+    first_row = {}
+    for i, a in enumerate(d["action"].tolist()):
+        first_row.setdefault(a, i)
+    # 出現5回以上の選出だけ勝率を出す (少数は判断材料にならない)
+    rows = [(a, c, float(d["reward"][d["action"] == a].mean()))
+            for a, c in cnt.items() if c >= 5]
     rows.sort(key=lambda x: -x[2])
     if rows:
-        print("選出別の勝率 (5回以上):")
-        for a, c, wr in rows[:10]:
-            print(f"  行動{a}: {wr:.2f} ({c}回)")
+        print(f"\n■ 勝率の高い選出 (5回以上、★=先発):")
+        for a, c, wr in rows[:8]:
+            print(f"  {wr:.2f} ({c:>3}回)  {_label(a, first_row[a])}")
+        print(f"\n■ 勝率の低い選出:")
+        for a, c, wr in rows[-5:]:
+            print(f"  {wr:.2f} ({c:>3}回)  {_label(a, first_row[a])}")
+        best = rows[0][2]
+        print(f"\n選出による勝率の幅: {rows[-1][2]:.2f} 〜 {best:.2f} "
+              f"(全体平均 {d['reward'].mean():.2f})")
     print("\n※ 学習には数千件規模が必要 (1選出あたり数十件は欲しい)")
 
 
