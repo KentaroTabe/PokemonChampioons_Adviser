@@ -129,6 +129,12 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
             team=opp_teambuilder,
         )
 
+    # 選出を学習環境と同じ相性ベースに揃える (両陣営に適用するので対称)。
+    # 既定のランダム選出は勝敗にノイズを乗せ、ベンチの分解能を下げていた
+    from champions_agent.env.showdown_env import apply_matchup_teampreview
+    apply_matchup_teampreview(player1)
+    apply_matchup_teampreview(player2)
+
     await player1.battle_against(player2, n_battles=n_battles)
 
     result = {

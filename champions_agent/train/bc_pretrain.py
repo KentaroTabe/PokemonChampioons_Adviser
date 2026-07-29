@@ -215,7 +215,10 @@ def _load_or_create(style: str):
     else:
         print(f"[bc_pretrain] チェックポイントなし → 新規{width}x{width}"
               "モデルをBC初期化します", flush=True)
+    # verbose=1: 保存値が学習再開時に復元されるため、ここで0にすると
+    # 以後の学習でSB3の進捗テーブルが出なくなる (ステップ数が追えない)
     return MaskablePPO("MlpPolicy", _DummyBattleEnv(), device="cpu",
+                       verbose=1,
                        policy_kwargs={"net_arch": [width, width]})
 
 

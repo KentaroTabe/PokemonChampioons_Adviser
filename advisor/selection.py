@@ -447,6 +447,34 @@ def advise_selection(state: dict, resolver=None) -> dict:
     }
 
 
+def attach_model_pick(advice: dict, my_party: list, opp_party: list) -> None:
+    """学習済み選出モデルの推しを advice に添える (既存の提案は残す)。
+
+    ヒューリスティクスの提案には「なぜ」の説明があり、モデルには実測の
+    強さがある (2026-07-29の実戦比較: ランダム0.25 / 相性0.29 / モデル0.51)。
+    片方に置き換えず併記して、判断材料を両方見せる。
+    """
+    try:
+        from champions_agent.agent.selection_model import predict_best
+        mine = [p.get("species_id") for p in my_party if p.get("species_id")]
+        if len(mine) < 3:
+            return
+        best = predict_best(
+            mine, [p.get("species_id") for p in opp_party if p.get("species_id")])
+        if best is None:
+            return
+        perm, prob = best
+        names = [my_party[i].get("species_ja")
+                 or my_party[i].get("species_id") for i in perm]
+        from champions_agent.agent.selection_model import is_in_distribution
+        advice["model_pick"] = {
+            "names": names, "win_prob": round(prob, 3),
+            "trained": is_in_distribution(mine),
+        }
+    except Exception:
+        pass
+
+
 def format_selection_advice(advice: dict) -> str:
     if not advice.get("ok"):
         base = f"[選出評価不可] {advice.get('reason')}"
@@ -464,6 +492,12 @@ def format_selection_advice(advice: dict) -> str:
             base += (f"\n  ⚡ メガ枠: {mega[0]} を推奨 "
                      f"(ストーン持ち{len(mega)}体: {'/'.join(mega)}。"
                      "メガシンカは1試合1回、他の持ち物は死にます)")
+        mp = advice.get("model_pick")
+        if mp:
+            note = ("" if mp.get("trained")
+                    else " ※このチームは未学習のため参考値")
+            base += (f"\n  🤖 学習モデルの推し: {' → '.join(mp['names'])} "
+                     f"(予測勝率{mp['win_prob']:.0%}){note}")
         syn = advice.get("synergy")
         if syn:
             wj = {"rain": "雨", "sun": "晴れ", "sand": "砂嵐",

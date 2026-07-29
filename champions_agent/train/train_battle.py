@@ -116,6 +116,11 @@ def train(total_timesteps: int = 10_000, battle_format: str = TRAINING_BATTLE_FO
             if actual is not None and actual != width:
                 raise ValueError(
                     f"net_arch mismatch: checkpoint={actual} != 希望={width}")
+            # verboseは保存時の値が復元される。bc_pretrainで作った
+            # チェックポイントは0で保存されており、そのままだとSB3の
+            # 進捗テーブル (total_timesteps/fps) が出ず watch_training が
+            # ステップ数を読めなくなる (2026-07-27の512化以降に発生)
+            model.verbose = 1
             print(f"[train_battle] チェックポイントから再開: {save_path} "
                   f"(lr={lr}, ent_coef={ent_coef}, net={actual})")
         except Exception as e:

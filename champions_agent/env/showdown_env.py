@@ -100,6 +100,26 @@ def compute_action_mask(battle) -> np.ndarray:
     return mask
 
 
+def apply_matchup_teampreview(player) -> None:
+    """プレイヤーの選出 (teampreview) を相性ベースに差し替える。
+
+    poke-env の既定はランダム選出で、学習・評価の両方で「良いプレイをしたのに
+    選出が悪くて負けた」というノイズが報酬とベンチに混入していた
+    (実測: ベンチが1サイクル50戦で0.34-0.76まで振れる一因)。
+    両陣営に同じ規則を適用するため対称で、構築の有利不利は歪めない。
+    """
+    import types
+
+    def _teampreview(self, battle):
+        try:
+            from champions_agent.env.search_expert import teampreview_order
+            return teampreview_order(battle)
+        except Exception:
+            return self.random_teampreview(battle)
+
+    player.teampreview = types.MethodType(_teampreview, player)
+
+
 class MaskedSingleAgentWrapper(SingleAgentWrapper):
     """SingleAgentWrapper + MaskablePPO用の action_masks() 提供"""
 
@@ -121,6 +141,11 @@ class ChampionsSinglesEnv(SinglesEnv):
         # (SingleAgentWrapper が __init__ 時に observation_spaces を参照するため必須)
         obs_space = Box(low=-np.inf, high=np.inf, shape=(BATTLE_OBS_DIM,), dtype=np.float32)
         self.observation_spaces = {agent: obs_space for agent in self.possible_agents}
+        # 選出はRLの行動空間 (26次元) の外で決まるため、環境側の両プレイヤーに
+        # 相性ベースの選出を入れる (既定のランダム選出はノイズ源)
+        for agent in (getattr(self, "agent1", None), getattr(self, "agent2", None)):
+            if agent is not None:
+                apply_matchup_teampreview(agent)
 
 
     def embed_battle(self, battle: AbstractBattle) -> np.ndarray:
