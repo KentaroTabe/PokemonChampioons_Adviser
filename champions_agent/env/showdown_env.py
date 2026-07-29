@@ -157,6 +157,21 @@ def apply_model_teampreview(player, path=None) -> None:
     player.teampreview = types.MethodType(_teampreview, player)
 
 
+TRAIN_SELECTION = os.environ.get("TRAIN_SELECTION", "model")
+
+
+def apply_train_teampreview(player) -> None:
+    """学習ループ用の選出。TRAIN_SELECTION=matchup で従来の相性ベースに戻せる。
+
+    学習と評価で選出方式が食い違うとベンチの解釈ができなくなるので、
+    切替は必ず training_changes.json に記録すること。
+    """
+    if TRAIN_SELECTION == "model":
+        apply_model_teampreview(player)
+    else:
+        apply_matchup_teampreview(player)
+
+
 class MaskedSingleAgentWrapper(SingleAgentWrapper):
     """SingleAgentWrapper + MaskablePPO用の action_masks() 提供"""
 
@@ -179,10 +194,13 @@ class ChampionsSinglesEnv(SinglesEnv):
         obs_space = Box(low=-np.inf, high=np.inf, shape=(BATTLE_OBS_DIM,), dtype=np.float32)
         self.observation_spaces = {agent: obs_space for agent in self.possible_agents}
         # 選出はRLの行動空間 (26次元) の外で決まるため、環境側の両プレイヤーに
-        # 相性ベースの選出を入れる (既定のランダム選出はノイズ源)
+        # 明示的な選出を入れる (既定のランダム選出はノイズ源)。
+        # TRAIN_SELECTION=model で学習済み選出モデルを使う。配布アドバイザーは
+        # モデルの選出を提示しているので、そこで実際に生じる3体構成を操縦する
+        # 経験を積ませる狙い (認定測定 400戦: 相性0.572 → モデル0.620)。
         for agent in (getattr(self, "agent1", None), getattr(self, "agent2", None)):
             if agent is not None:
-                apply_matchup_teampreview(agent)
+                apply_train_teampreview(agent)
 
 
     def embed_battle(self, battle: AbstractBattle) -> np.ndarray:

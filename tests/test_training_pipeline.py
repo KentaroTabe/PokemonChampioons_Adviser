@@ -47,31 +47,40 @@ def test_best_checkpoint_update():
     ckpt = models / "battle_policy_balance.zip"
     ckpt.write_bytes(b"model-v1")
 
+    eval_path = logs / "last_eval_balance_benchmark.json"
+
+    def feed(rate, n=50, times=1):
+        eval_path.write_text(json.dumps({"win_rate": rate, "n_battles": n}))
+        return [bc.update_from_eval("balance") for _ in range(times)][-1]
+
     with mock.patch.object(bc, "MODELS_DIR", models), \
          mock.patch.object(bc, "EVAL_DIR", logs), \
          mock.patch.object(bc, "STATE_PATH", models / "best_state.json"):
         # 評価なし -> 見送り
         assert bc.update_from_eval("balance") is False
-        # 初回 (0.60, 50戦) -> 最良更新
-        (logs / "last_eval_balance_benchmark.json").write_text(json.dumps(
-            {"win_rate": 0.60, "n_battles": 50}))
-        assert bc.update_from_eval("balance") is True
+        # 窓が埋まるまでは判定しない (単発50戦はSE 0.071で判定に使えない)
+        assert feed(0.60, times=bc.WINDOW - 1) is False
+        # 窓が埋まったら最良として記録
+        assert feed(0.60) is True
         assert (models / "battle_policy_balance_best.zip").read_bytes() == b"model-v1"
-        # 劣化 (0.40) -> 据え置き (bestはv1のまま)
+
+        # ★本命: 単発の幸運では更新されない (旧実装はここで更新していた)
         ckpt.write_bytes(b"model-v2")
-        (logs / "last_eval_balance_benchmark.json").write_text(json.dumps(
-            {"win_rate": 0.40, "n_battles": 50}))
-        assert bc.update_from_eval("balance") is False
+        assert feed(0.95) is False
         assert (models / "battle_policy_balance_best.zip").read_bytes() == b"model-v1"
-        # 更新 (0.72) -> v2がbestに
-        (logs / "last_eval_balance_benchmark.json").write_text(json.dumps(
-            {"win_rate": 0.72, "n_battles": 50}))
-        assert bc.update_from_eval("balance") is True
+
+        # 明確な改善が続けば更新される
+        assert feed(0.95, times=bc.WINDOW - 1) is True
         assert (models / "battle_policy_balance_best.zip").read_bytes() == b"model-v2"
-        # 対戦数不足 (0.90だが10戦) -> 見送り
-        (logs / "last_eval_balance_benchmark.json").write_text(json.dumps(
-            {"win_rate": 0.90, "n_battles": 10}))
-        assert bc.update_from_eval("balance") is False
+
+        # 劣化が続いても据え置き (bestはv2のまま)
+        ckpt.write_bytes(b"model-v3")
+        assert feed(0.40, times=bc.WINDOW) is False
+        assert (models / "battle_policy_balance_best.zip").read_bytes() == b"model-v2"
+
+        # 1回の評価の対戦数が少なすぎるものは窓に入れない
+        assert feed(0.99, n=10, times=bc.WINDOW) is False
+        assert (models / "battle_policy_balance_best.zip").read_bytes() == b"model-v2"
     print("test_best_checkpoint_update OK")
 
 
