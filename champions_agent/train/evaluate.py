@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import random
 
 from champions_agent.config import (
-    DEFAULT_PLAY_STYLE, PLAY_STYLES, MODELS_DIR,
+    DEFAULT_PLAY_STYLE, PLAY_STYLES, MODELS_DIR, RANDOM_SEED,
     TRAINING_BATTLE_FORMAT, TRAINING_TEAM_SIZE,
 )
 from champions_agent.env.team_builder import build_random_team_text
@@ -75,7 +76,9 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
                           n_battles: int = 50,
                           battle_format: str = TRAINING_BATTLE_FORMAT,
                           opponent_kind: str = "random",
-                          checkpoint: str = "current") -> dict:
+                          checkpoint: str = "current",
+                          selection: str = "matchup",
+                          own_teams: str = "train") -> dict:
     """play_styleモデル vs (opponent_play_styleモデル or RandomPlayer) をn_battles戦させる。"""
     # 自分チーム: 以前は「生成チーム1個を全戦使い回し」(ConstantTeambuilder)
     # だったため、勝率がチームドローの当たり外れで±0.2以上振動し、方策の
@@ -84,8 +87,30 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
     # =ユーザーの実チームを操縦する、とも整合)
     if opponent_kind == "benchmark":
         from champions_agent.env.ranked_teams import RankedTeambuilder
-        # 評価基準を動かさないため上位60構築に固定 (make_benchmark_player と対)
-        own_teambuilder = RankedTeambuilder(top_n=60, include_external=False)
+        if own_teams == "holdout":
+            # 学習に使っていない構築だけで測る。ベンチの上昇が
+            # 「相手ヒューリスティクスへの過学習」でないかの検証用
+            # (学習側は上位60構築に固定してあるので、それ以外が未学習)
+            from champions_agent.env.ranked_teams import build_ranked_teams
+            all_teams = build_ranked_teams(include_external=False)
+            trained = set(build_ranked_teams(top_n=60, include_external=False))
+            held = [t for t in all_teams if t not in trained]
+            from poke_env.teambuilder import Teambuilder as _TB
+
+            class _Held(_TB):
+                def __init__(self, texts):
+                    self.texts = texts
+                    self.rng = random.Random(RANDOM_SEED)
+
+                def yield_team(self):
+                    return self.join_team(self.parse_showdown_team(
+                        self.rng.choice(self.texts)))
+
+            own_teambuilder = _Held(held)
+        else:
+            # 評価基準を動かさないため上位60構築に固定 (make_benchmark_player と対)
+            own_teambuilder = RankedTeambuilder(top_n=60,
+                                                include_external=False)
     else:
         own_team = build_random_team_text(size=TRAINING_TEAM_SIZE,
                                           play_style=play_style)
@@ -132,8 +157,16 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
 
     # 選出を学習環境と同じ相性ベースに揃える (両陣営に適用するので対称)。
     # 既定のランダム選出は勝敗にノイズを乗せ、ベンチの分解能を下げていた
-    from champions_agent.env.showdown_env import apply_matchup_teampreview
-    apply_matchup_teampreview(player1)
+    from champions_agent.env.showdown_env import (
+        apply_matchup_teampreview, apply_model_teampreview,
+    )
+    if selection == "model":
+        # 自分側だけモデル選出にする (配布アドバイザーと同じ条件)。
+        # 相手は相性のままにして、既存ベンチとの差が選出モデルの寄与だけに
+        # なるようにする
+        apply_model_teampreview(player1)
+    else:
+        apply_matchup_teampreview(player1)
     apply_matchup_teampreview(player2)
 
     await player1.battle_against(player2, n_battles=n_battles)

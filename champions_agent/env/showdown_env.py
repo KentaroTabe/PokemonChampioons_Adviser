@@ -120,6 +120,43 @@ def apply_matchup_teampreview(player) -> None:
     player.teampreview = types.MethodType(_teampreview, player)
 
 
+def apply_model_teampreview(player, path=None) -> None:
+    """プレイヤーの選出を学習済み選出モデルに差し替える。
+
+    相性ベースとの違いは実測で大きい (同一チーム・同一相手・同一操縦で
+    相性0.24-0.30 → モデル0.51)。配布アドバイザーはモデルの選出を提示して
+    いるため、配布実態に沿った測定にはこちらを使う。
+
+    path 未指定なら汎用モデル (微調整前)。ベンチマークは毎戦チームが
+    変わるので、my_team に寄せた配布版を使うと偏る。
+    モデルが読めないときは相性ベースに落ちる (無選出で壊れないように)。
+    """
+    import types
+    from champions_agent.agent.selection_model import (
+        GENERAL_MODEL_PATH, predict_best,
+    )
+    model_path = path or GENERAL_MODEL_PATH
+
+    def _teampreview(self, battle):
+        try:
+            mons = list(battle.team.values())
+            mine = [p.species for p in mons]
+            opp = [p.species for p in battle.opponent_team.values()]
+            best = predict_best(mine, opp, model_path)
+            if best is not None:
+                perm = best[0]
+                # Showdown は1始まりの並びで6体すべてを並べる (先頭3体が選出)
+                rest = [i for i in range(len(mons)) if i not in perm]
+                return "/team " + "".join(str(i + 1)
+                                          for i in list(perm) + rest)
+        except Exception:
+            pass
+        from champions_agent.env.search_expert import teampreview_order
+        return teampreview_order(battle)
+
+    player.teampreview = types.MethodType(_teampreview, player)
+
+
 class MaskedSingleAgentWrapper(SingleAgentWrapper):
     """SingleAgentWrapper + MaskablePPO用の action_masks() 提供"""
 

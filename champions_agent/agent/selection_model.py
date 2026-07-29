@@ -22,6 +22,10 @@ from champions_agent.agent.spaces import SELECTION_PERMUTATIONS
 from champions_agent.config import MODELS_DIR
 
 MODEL_PATH = MODELS_DIR / "selection_model.pt"
+# 微調整前の汎用モデル。配布版 (MODEL_PATH) は my_team に寄せてあるため、
+# ランクド構築でのベンチマークにはこちらを使う (自チームが毎戦変わる場面で
+# 特定チーム向けの偏りを持ち込まない)
+GENERAL_MODEL_PATH = MODELS_DIR / "selection_model_general.pt"
 META_PATH = MODELS_DIR / "selection_model_meta.json"
 EMB_DIM = 20        # 機能埋め込みの次元 (メタ上位N体)
 FEATURE_DIM = EMB_DIM * 6   # 選出3体(順序込み) + 控え平均 + 相手平均/最大
@@ -77,24 +81,22 @@ def make_net():
     )
 
 
-_model = None
-_model_tried = False
+_models: dict = {}   # path -> net or None
 
 
 def load_model(path: Path = MODEL_PATH):
-    global _model, _model_tried
-    if _model_tried:
-        return _model
-    _model_tried = True
+    key = str(path)
+    if key in _models:
+        return _models[key]
     try:
         import torch
         net = make_net()
         net.load_state_dict(torch.load(path, map_location="cpu"))
         net.eval()
-        _model = net
+        _models[key] = net
     except Exception:
-        _model = None
-    return _model
+        _models[key] = None
+    return _models[key]
 
 
 def trained_teams() -> list:
@@ -115,9 +117,10 @@ def is_in_distribution(my_species: list) -> bool:
     return tuple(sorted(_to_id(s) for s in my_species)) in teams
 
 
-def score_all(my_species: list, opp_species: list) -> list:
+def score_all(my_species: list, opp_species: list,
+              path: Path = MODEL_PATH) -> list:
     """[(perm, 予測勝率)] を降順で返す。モデルが無ければ空リスト"""
-    net = load_model()
+    net = load_model(path)
     if net is None or len(my_species) < 3:
         return []
     import torch
@@ -131,7 +134,8 @@ def score_all(my_species: list, opp_species: list) -> list:
     return out
 
 
-def predict_best(my_species: list, opp_species: list):
+def predict_best(my_species: list, opp_species: list,
+                 path: Path = MODEL_PATH):
     """最良の選出 (perm, 予測勝率)。モデルが無ければ None"""
-    scored = score_all(my_species, opp_species)
+    scored = score_all(my_species, opp_species, path)
     return scored[0] if scored else None

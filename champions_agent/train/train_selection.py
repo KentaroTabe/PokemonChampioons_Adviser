@@ -34,7 +34,7 @@ from pathlib import Path
 import numpy as np
 
 from champions_agent.agent.selection_model import (
-    META_PATH, MODEL_PATH, build_features, make_net,
+    GENERAL_MODEL_PATH, META_PATH, MODEL_PATH, build_features, make_net,
 )
 from champions_agent.agent.spaces import SELECTION_PERMUTATIONS
 from champions_agent.config import MODELS_DIR, RANDOM_SEED
@@ -216,10 +216,15 @@ def train(epochs: int = 300, lr: float = 1e-3, holdout: float = 0.2,
         print("  ⚠ 平均予測をほとんど超えられていません。"
               "この状態のモデルは配布に値しません (データ量/特徴量を見直す)")
 
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    # 微調整前の汎用モデルを別に残す。my_team に寄せた配布版では
+    # 「毎戦チームが変わる」ベンチマークの測定に使えない
+    torch.save(net.state_dict(), GENERAL_MODEL_PATH)
+    print(f"[train_selection] 汎用モデル保存: {GENERAL_MODEL_PATH}")
+
     if finetune:
         _finetune_on_myteam(net, X, y, meta, lr / 10)
 
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
     torch.save(net.state_dict(), MODEL_PATH)
     # 学習に使ったチームを記録する。未学習のチームでは予測が外挿になるため、
     # アドバイザー側で「参考値」と断って表示するのに使う
