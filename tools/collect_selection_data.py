@@ -118,8 +118,14 @@ async def collect(n_battles: int, explore: float, style: str,
         team=own_teambuilder, play_style=style,
         checkpoint="best", max_concurrent_battles=1)
     me.teampreview = types.MethodType(_teampreview, me)
+    # 相手のチームも構築プール全体から引き直す。make_benchmark_player の既定は
+    # 評価基準を動かさないため上位60構築に固定してあるが、選出モデルにとって
+    # 「相手構築の種類」は汎化の主因なので、収集時はここだけ広げる
+    # (実戦では毎回違う相手に当たる。60種の相手しか見ないと条件付けを学べない)
+    from champions_agent.env.ranked_teams import RankedTeambuilder
     opp = make_benchmark_player(
         battle_format=TRAINING_BATTLE_FORMAT,
+        team=RankedTeambuilder(),
         account_configuration=AccountConfiguration(f"SelE{uid}", None))
     apply_matchup_teampreview(opp)
 

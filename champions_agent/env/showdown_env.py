@@ -346,21 +346,26 @@ def make_training_env(battle_format: str = TRAINING_BATTLE_FORMAT,
 
 
 def make_benchmark_player(battle_format: str = TRAINING_BATTLE_FORMAT,
-                          top_n: int = 60, **kwargs):
+                          top_n: int = 60, team=None, **kwargs):
     """評価用の固定ベンチマーク相手: 上位構築 x SimpleHeuristicsPlayer
 
-    ⚠ チームプールは上位60構築に固定し、取り込んだ外部構築も混ぜない。
+    ⚠ 既定のチームプールは上位60構築に固定し、取り込んだ外部構築も混ぜない。
     ここが増えると過去のベンチ履歴と比較できなくなる (評価基準が動く)。
     広げる場合は training_changes.json に記録し、compare_periods で
     前後を切って読むこと。
+
+    team を渡すと差し替えられる。評価以外の用途 (選出データ収集など、
+    相手構築の種類を増やしたい場面) はこちらを使うこと。
     """
     from poke_env.player import SimpleHeuristicsPlayer
     from champions_agent.env.ranked_teams import RankedTeambuilder
 
+    if team is None:
+        team = RankedTeambuilder(top_n=top_n, include_external=False)
     return SimpleHeuristicsPlayer(
         battle_format=battle_format,
         server_configuration=TrainingServerConfiguration,
-        team=RankedTeambuilder(top_n=top_n, include_external=False),
+        team=team,
         **kwargs,
     )
 

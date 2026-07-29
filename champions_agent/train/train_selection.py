@@ -10,13 +10,21 @@ tools/collect_selection_data.py が集めた実対戦データ
 前提: python -m tools.collect_selection_data --battles 2000 でデータを収集済み。
 学習後は tools/check_selection --strategies matchup,model で実戦比較する。
 
-⚠ 実測で分かっている前提 (2026-07-29, 各200戦):
-  - 他プレイヤーのチーム60種 20000件だけで学習しても、未知チーム (my_team) では
-    相性ヒューリスティクスと同等の 0.34 止まりだった。機能埋め込みがあっても
-    「見たことのないチームの選出」までは汎化しない。
-  - そこへ my_team のデータ 5000件を足すと 0.52 (相性 0.30) まで戻る。
-  つまり多チームデータは土台にしかならず、**実際に使うチームのデータ収集が必須**。
-  my_team を変えたら scripts/collect_selection.sh 2 2500 myteam を回して学習し直すこと。
+⚠ 実測で分かっている前提 (2026-07-29, my_team実戦は各200戦):
+
+  | 構築プール | 未知チーム検証 | my_team実戦 | 相性 |
+  |---|---|---|---|
+  | 60種 (多チームのみ)        | +1.4% | 0.34 | 0.34 |
+  | 60種 + my_team 5000件      | +4.7% | 0.52 | 0.30 |
+  | 272種 + my_team 5000件     | +7.3% | 0.44 | 0.27 |
+  | 272種 + my_team微調整      | +7.3% | 0.51 | 0.24 |
+
+  - 機能埋め込みがあっても「見たことのないチームの選出」までは汎化しない。
+    多チームデータは土台にしかならず、**実際に使うチームのデータ収集が必須**。
+  - 構築プールを広げると汎化は上がるが、その分 my_team への密着が落ちる
+    (0.52→0.44)。全体で学習したあと my_team で微調整して寄せ直す。
+  - my_team を変えたら scripts/collect_selection.sh 2 2500 myteam を回して
+    学習し直すこと (微調整のデータが無いと自動で見送られる)。
 """
 from __future__ import annotations
 
@@ -63,7 +71,80 @@ def load_dataset(path: Path = DATA_PATH):
              "has_opp": has_opp, "team_key": team_key})
 
 
-def train(epochs: int = 300, lr: float = 1e-3, holdout: float = 0.2) -> None:
+def _norm_species(s: str) -> str:
+    import re
+    return re.sub(r"[^a-z0-9]", "", str(s).lower())
+
+
+def _myteam_species() -> set:
+    """config/my_team.json の現在の6体を showdown ID の集合で返す"""
+    from tools.evaluate_team import current_team_entries
+    from vision.normalize import NameResolver
+    resolver = NameResolver()
+    out = set()
+    for ja in current_team_entries():
+        r = resolver.resolve_species(ja, cutoff=0.85)
+        if r:
+            out.add(_norm_species(r[1]))
+    return out
+
+
+def _finetune_on_myteam(net, X, y, meta, lr: float, epochs: int = 200) -> None:
+    """全体で学習したあと、実際に使うチームのデータだけで微調整する。
+
+    構築プールを60→272に広げると未知チームへの汎化は上がるが、その分
+    my_team への密着が落ちる (実測: 未知チーム検証 +4.7%→+7.3% の一方で
+    my_team実戦 0.52→0.44)。汎化を土台にしてから使うチームに寄せ直す。
+    """
+    import torch
+    from torch.optim import Adam
+    try:
+        mine = _myteam_species()
+    except Exception as e:
+        print(f"  微調整をとばします (my_teamを読めない: {e})")
+        return
+    idx = [i for i, k in enumerate(meta["team_key"])
+           if {_norm_species(s) for s in k.split("|")} == mine]
+    if len(idx) < 500:
+        print(f"  微調整をとばします (my_teamのデータが{len(idx)}件と少ない。"
+              "bash scripts/collect_selection.sh 2 2500 myteam で収集する)")
+        return
+
+    rng = np.random.default_rng(RANDOM_SEED)
+    idx = np.array(idx)
+    rng.shuffle(idx)
+    n_val = max(1, len(idx) // 5)
+    va, tr = idx[:n_val], idx[n_val:]
+    Xtr, ytr = torch.from_numpy(X[tr]), torch.from_numpy(y[tr]).unsqueeze(1)
+    Xva, yva = torch.from_numpy(X[va]), torch.from_numpy(y[va]).unsqueeze(1)
+
+    opt = Adam(net.parameters(), lr=lr, weight_decay=1e-3)
+    loss_fn = torch.nn.MSELoss()
+    net.eval()
+    with torch.no_grad():
+        before = float(loss_fn(net(Xva), yva))
+    best, best_state = before, {k: v.clone() for k, v in net.state_dict().items()}
+    for _ in range(epochs):
+        net.train()
+        perm_idx = torch.randperm(len(Xtr))
+        for s in range(0, len(Xtr), 512):
+            sel = perm_idx[s:s + 512]
+            opt.zero_grad()
+            loss_fn(net(Xtr[sel]), ytr[sel]).backward()
+            opt.step()
+        net.eval()
+        with torch.no_grad():
+            v = float(loss_fn(net(Xva), yva))
+        if v < best:
+            best = v
+            best_state = {k: t.clone() for k, t in net.state_dict().items()}
+    net.load_state_dict(best_state)
+    print(f"  my_teamで微調整: {len(tr)}件 / 保持{len(va)}件 "
+          f"MSE {before:.4f} → {best:.4f}")
+
+
+def train(epochs: int = 300, lr: float = 1e-3, holdout: float = 0.2,
+          finetune: bool = True) -> None:
     import torch
     from torch.optim import Adam
 
@@ -135,6 +216,9 @@ def train(epochs: int = 300, lr: float = 1e-3, holdout: float = 0.2) -> None:
         print("  ⚠ 平均予測をほとんど超えられていません。"
               "この状態のモデルは配布に値しません (データ量/特徴量を見直す)")
 
+    if finetune:
+        _finetune_on_myteam(net, X, y, meta, lr / 10)
+
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     torch.save(net.state_dict(), MODEL_PATH)
     # 学習に使ったチームを記録する。未学習のチームでは予測が外挿になるため、
@@ -177,8 +261,10 @@ def main() -> None:
     ap.add_argument("--epochs", type=int, default=300)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--holdout", type=float, default=0.2)
+    ap.add_argument("--no-finetune", action="store_true",
+                    help="my_teamでの微調整を行わない (汎用モデルを見たいとき)")
     args = ap.parse_args()
-    train(args.epochs, args.lr, args.holdout)
+    train(args.epochs, args.lr, args.holdout, finetune=not args.no_finetune)
 
 
 if __name__ == "__main__":

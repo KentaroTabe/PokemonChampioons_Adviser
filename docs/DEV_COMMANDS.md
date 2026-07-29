@@ -164,19 +164,27 @@ sonnetは疑い箇所の検証+少数サンプルの網羅に専念する (タ�
 | `bash scripts/selection_stats.sh` | 収集データの要約 (件数/チーム種類/相手記録の有無。収集の進捗確認) |
 | `python -m champions_agent.train.train_selection` | 選出モデルの学習 (勝率回帰。検証は未知チームで実施) |
 
-**選出モデルを更新する手順** (my_team を変えたら必須)。実測で、
-他プレイヤーのチーム60種2万件だけで学習しても未知チームでは相性ヒューリスティクスと
-同等 (0.34 vs 0.34) にしかならず、使うチーム自身のデータを足して初めて
-0.52 になる。多チームデータは土台で、**専用データの収集が本体**。
+**選出モデルを更新する手順** (my_team を変えたら必須)。他プレイヤーの構築だけで
+学習しても未知チームでは相性ヒューリスティクスと同等 (0.34 vs 0.34) にしかならず、
+使うチーム自身のデータを足して初めて 0.51 になる。多チームデータは土台で、
+**専用データの収集が本体**。
 
 ```bash
-bash scripts/collect_selection.sh 8 2500 ranked   # 土台 (他プレイヤーの構築)
+bash scripts/collect_selection.sh 8 2500 ranked   # 土台 (他プレイヤーの構築272種)
 bash scripts/collect_selection.sh 2 2500 myteam   # 自チーム専用 (ここが効く)
 python -m champions_agent.train.train_selection --epochs 120
 python -m tools.check_selection --battles 200 --strategies matchup,model
 ```
 
+学習は「全体で学習 → my_team で微調整」の2段になっている。構築プールを広げると
+未知チームへの汎化は上がる一方 my_team への密着が落ちる (実測 0.52→0.44) ため、
+最後に寄せ直している。my_team のデータが無いと微調整は自動で見送られる。
+
 最後の比較で model が matchup を上回らなければ配布しない (my_team のデータ不足を疑う)。
+
+⚠ 構築プール (`RankedTeambuilder`) を広げてよいのは選出データ収集だけ。
+ベンチマーク評価・学習ループ・`bc_pretrain` は上位60構築に固定してある。
+ここが動くと過去のベンチ履歴と比較できなくなる。
 
 | `python -m tools.compare_periods [--since <時刻>] [--list]` | 変更前後のベンチを統計比較 (平均・ばらつき・有意性の目安) |
 
