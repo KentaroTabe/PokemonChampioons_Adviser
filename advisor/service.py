@@ -28,9 +28,15 @@ class Advisor:
 
     def advise_selection(self, state_dict: dict) -> dict:
         """選出画面用: 選出進捗の判定と最適選出の提案"""
-        from advisor.selection import advise_selection, format_selection_advice
+        from advisor.selection import (advise_selection, attach_model_pick,
+                                       format_selection_advice)
         try:
             result = advise_selection(state_dict, self.resolver)
+            # 学習済み選出モデルの推しを併記する (ヒューリスティクスの
+            # 説明は残す。実戦比較では モデル0.51 > 相性0.29 > 乱択0.25)
+            attach_model_pick(result,
+                              state_dict.get("player", {}).get("party", []),
+                              state_dict.get("opponent", {}).get("party", []))
         except Exception as e:
             import traceback
             traceback.print_exc()

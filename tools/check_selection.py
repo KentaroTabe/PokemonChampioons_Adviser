@@ -41,6 +41,22 @@ def _make_teampreview(strategy: str):
                 return teampreview_order(battle)
             except Exception:
                 return self.random_teampreview(battle)
+    elif strategy == "model":
+        def _fn(self, battle):
+            try:
+                from champions_agent.agent.selection_model import predict_best
+                mons = list(battle.team.values())
+                best = predict_best([p.species for p in mons],
+                                    [p.species for p in
+                                     battle.opponent_team.values()])
+                if best is None:
+                    return self.random_teampreview(battle)
+                perm = best[0]
+                rest = [i for i in range(len(mons)) if i not in perm]
+                return "/team " + "".join(str(i + 1) for i in
+                                          list(perm) + rest)
+            except Exception:
+                return self.random_teampreview(battle)
     elif strategy == "statsum":
         def _fn(self, battle):
             try:
