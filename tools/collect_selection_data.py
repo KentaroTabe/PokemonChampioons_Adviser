@@ -51,7 +51,8 @@ def _emb_of(species_list: list) -> np.ndarray:
     return np.concatenate(out) if out else np.zeros(0, dtype=np.float32)
 
 
-async def collect(n_battles: int, explore: float, style: str) -> dict:
+async def collect(n_battles: int, explore: float, style: str,
+                  teams: str = "myteam") -> dict:
     import random
     import types
     from poke_env import AccountConfiguration
@@ -67,7 +68,15 @@ async def collect(n_battles: int, explore: float, style: str) -> dict:
     from tools.evaluate_team import build_myteam_text
 
     records: dict = {}      # battle_tag -> {obs, emb, action}
-    team_text = build_myteam_text()
+    if teams == "ranked":
+        # 他プレイヤーの実構築 (ラダー上位) を毎バトル引き直す。
+        # 単一チームのデータだとモデルがそのチーム専用になるため、
+        # 「チーム一般の選出判断」を学ぶには多数の構築が要る
+        from champions_agent.env.ranked_teams import RankedTeambuilder
+        own_teambuilder = RankedTeambuilder()
+    else:
+        from poke_env.teambuilder import ConstantTeambuilder
+        own_teambuilder = ConstantTeambuilder(build_myteam_text())
 
     def _teampreview(self, battle):
         mons = list(battle.team.values())
@@ -92,6 +101,10 @@ async def collect(n_battles: int, explore: float, style: str) -> dict:
                 "action": SELECTION_PERMUTATIONS.index(perm),
                 # 行動インデックスを後から3体の名前へ戻せるよう並び順も保存する
                 "team": [p.species for p in mons],
+                # 相手6体も選出画面では見えている (battle.opponent_team は
+                # 対戦前は teampreview の6体を返す)。これを保存しないと
+                # 「相手に応じた選出」が学習できない
+                "opp_team": ([p.species for p in opp_mons] + [""] * 6)[:6],
             }
         except Exception:
             pass
@@ -102,7 +115,7 @@ async def collect(n_battles: int, explore: float, style: str) -> dict:
         account_configuration=AccountConfiguration(f"SelD{uid}", None),
         battle_format=TRAINING_BATTLE_FORMAT,
         server_configuration=TrainingServerConfiguration,
-        team=ConstantTeambuilder(team_text), play_style=style,
+        team=own_teambuilder, play_style=style,
         checkpoint="best", max_concurrent_battles=1)
     me.teampreview = types.MethodType(_teampreview, me)
     opp = make_benchmark_player(
@@ -112,7 +125,7 @@ async def collect(n_battles: int, explore: float, style: str) -> dict:
 
     await me.battle_against(opp, n_battles=n_battles)
 
-    obs, emb, act, rew, team = [], [], [], [], []
+    obs, emb, act, rew, team, opp_team = [], [], [], [], [], []
     for tag, battle in me.battles.items():
         rec = records.get(tag)
         if rec is None or battle.won is None:
@@ -122,11 +135,13 @@ async def collect(n_battles: int, explore: float, style: str) -> dict:
         act.append(rec["action"])
         rew.append(1.0 if battle.won else 0.0)
         team.append(rec["team"])
+        opp_team.append(rec["opp_team"])
     return {"obs": np.asarray(obs, dtype=np.float32),
             "emb": np.asarray(emb, dtype=np.float32),
             "action": np.asarray(act, dtype=np.int64),
             "reward": np.asarray(rew, dtype=np.float32),
-            "team": np.asarray(team, dtype="<U24")}
+            "team": np.asarray(team, dtype="<U24"),
+            "opp_team": np.asarray(opp_team, dtype="<U24")}
 
 
 def _merge_save(new: dict) -> dict:
@@ -144,7 +159,12 @@ def _merge_save(new: dict) -> dict:
                       "引き継がず作り直します")
         except Exception as e:
             print(f"[collect_selection] 既存データを引き継げません ({e})")
-    np.savez_compressed(OUT, **new)
+    # 一時ファイル + rename で置き換える。直接上書きすると、収集中に
+    # 学習や統計表示が読みに来たとき書きかけを掴んで BadZipFile になる
+    # 末尾は .npz にしておく (numpy は .npz でない名前へ勝手に付け足す)
+    tmp = OUT.with_name(OUT.name + ".tmp.npz")
+    np.savez_compressed(tmp, **new)
+    tmp.replace(OUT)
     return new
 
 
@@ -204,6 +224,8 @@ def main() -> None:
     ap.add_argument("--explore", type=float, default=0.5,
                     help="ランダム選出にする確率 (未経験の組み合わせを踏むため)")
     ap.add_argument("--style", default="balance")
+    ap.add_argument("--teams", default="myteam", choices=["myteam", "ranked"],
+                    help="myteam=自分の登録チーム固定 / ranked=他プレイヤーの実構築を毎回引き直す")
     ap.add_argument("--show", action="store_true", help="集計表示のみ")
     args = ap.parse_args()
     if args.show:
@@ -211,7 +233,8 @@ def main() -> None:
         return
     import time
     t0 = time.time()
-    data = asyncio.run(collect(args.battles, args.explore, args.style))
+    data = asyncio.run(collect(args.battles, args.explore, args.style,
+                               args.teams))
     if not len(data["action"]):
         raise SystemExit("記録できたエピソードがありません")
     merged = _merge_save(data)

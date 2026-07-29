@@ -159,7 +159,24 @@ sonnetは疑い箇所の検証+少数サンプルの網羅に専念する (タ�
 | `python -m tools.check_checkpoint_width [--want 512]` | チェックポイントのネット幅確認 (幅変更後・学習再開前に実行) |
 | `python -m tools.species_embedding [--species <名前>] [--kind functional\|context\|synergy]` | ポケモンのベクトル化 (似た種族の確認・組合せ圧縮の基盤) |
 | `python -m tools.check_selection [--battles N] [--strategies random,matchup,statsum]` | 選出方策の比較 (選出だけ変えて勝率を測る。学習型の前のベースライン) |
-| `python -m tools.collect_selection_data [--battles N] [--explore 0.5]` / `--show` | 選出学習のデータ収集 (実対戦。obsと機能埋め込みの両方を記録) |
+| `bash scripts/collect_selection.sh [回数] [1回の戦数] [ranked\|myteam]` | 選出学習データの収集 (既定: 他プレイヤーの実構築で6回×4000戦) |
+| `python -m tools.collect_selection_data --show` | 収集データの集計 (選出別勝率を日本語で表示) |
+| `bash scripts/selection_stats.sh` | 収集データの要約 (件数/チーム種類/相手記録の有無。収集の進捗確認) |
+| `python -m champions_agent.train.train_selection` | 選出モデルの学習 (勝率回帰。検証は未知チームで実施) |
+
+**選出モデルを更新する手順** (my_team を変えたら必須)。実測で、
+他プレイヤーのチーム60種2万件だけで学習しても未知チームでは相性ヒューリスティクスと
+同等 (0.34 vs 0.34) にしかならず、使うチーム自身のデータを足して初めて
+0.52 になる。多チームデータは土台で、**専用データの収集が本体**。
+
+```bash
+bash scripts/collect_selection.sh 8 2500 ranked   # 土台 (他プレイヤーの構築)
+bash scripts/collect_selection.sh 2 2500 myteam   # 自チーム専用 (ここが効く)
+python -m champions_agent.train.train_selection --epochs 120
+python -m tools.check_selection --battles 200 --strategies matchup,model
+```
+
+最後の比較で model が matchup を上回らなければ配布しない (my_team のデータ不足を疑う)。
 
 | `python -m tools.compare_periods [--since <時刻>] [--list]` | 変更前後のベンチを統計比較 (平均・ばらつき・有意性の目安) |
 

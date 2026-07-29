@@ -10,9 +10,13 @@ tools/collect_selection_data.py が集めた実対戦データ
 前提: python -m tools.collect_selection_data --battles 2000 でデータを収集済み。
 学習後は tools/check_selection --strategies matchup,model で実戦比較する。
 
-⚠ 現在のデータは単一チームで集めたもの。モデルは機能埋め込みを入力に
-  取るため構造上は他チームへ汎化しうるが、実際に汎化させるには
-  複数チームでの収集が要る (単一チームだけだと「このチーム専用」になる)。
+⚠ 実測で分かっている前提 (2026-07-29, 各200戦):
+  - 他プレイヤーのチーム60種 20000件だけで学習しても、未知チーム (my_team) では
+    相性ヒューリスティクスと同等の 0.34 止まりだった。機能埋め込みがあっても
+    「見たことのないチームの選出」までは汎化しない。
+  - そこへ my_team のデータ 5000件を足すと 0.52 (相性 0.30) まで戻る。
+  つまり多チームデータは土台にしかならず、**実際に使うチームのデータ収集が必須**。
+  my_team を変えたら scripts/collect_selection.sh 2 2500 myteam を回して学習し直すこと。
 """
 from __future__ import annotations
 
@@ -39,16 +43,24 @@ def load_dataset(path: Path = DATA_PATH):
     d = np.load(path)
     if "team" not in d.files:
         raise SystemExit("古い形式のデータです。収集し直してください")
+    has_opp = "opp_team" in d.files
+    if not has_opp:
+        print("  ⚠ 相手チームが記録されていない古いデータです "
+              "(相手を見ない学習になります)。収集し直しを推奨")
     feats, rewards = [], []
     for i in range(len(d["action"])):
         team = [str(s) for s in d["team"][i]]
+        # 相手6体は選出画面で見えている。使わないと「相手に応じた選出」を
+        # 学習できず、平均的に強い3体しか選べなくなる
+        opp = ([str(s) for s in d["opp_team"][i] if str(s)]
+               if has_opp else [])
         perm = SELECTION_PERMUTATIONS[int(d["action"][i])]
-        # 相手の6体は観測に含まれるが、収集時点では種族が未判明のことが多い。
-        # 埋め込み側は空を許容する (相手情報なしでも自分の選出は学べる)
-        feats.append(build_features(team, [], perm))
+        feats.append(build_features(team, opp, perm))
         rewards.append(float(d["reward"][i]))
+    team_key = ["|".join(sorted(str(s) for s in t)) for t in d["team"]]
     return (np.stack(feats), np.array(rewards, dtype=np.float32),
-            {"n": len(rewards), "teams": len({tuple(t) for t in d["team"]})})
+            {"n": len(rewards), "teams": len(set(team_key)),
+             "has_opp": has_opp, "team_key": team_key})
 
 
 def train(epochs: int = 300, lr: float = 1e-3, holdout: float = 0.2) -> None:
@@ -64,24 +76,43 @@ def train(epochs: int = 300, lr: float = 1e-3, holdout: float = 0.2) -> None:
     if meta["teams"] == 1:
         print("  ※ 単一チームのデータのため、学習結果はそのチーム専用")
 
-    idx = rng.permutation(len(y))
-    n_val = max(1, int(len(y) * holdout))
-    val_idx, tr_idx = idx[:n_val], idx[n_val:]
+    # 検証は「学習に出てこないチーム」で行う (同じチームで割ると
+    # 丸暗記でも高得点になり、未知チームへの汎化を測れない)
+    if meta["teams"] > 5 and meta.get("team_key") is not None:
+        keys = meta["team_key"]
+        uniq = sorted(set(keys))
+        rng.shuffle(uniq)
+        held = set(uniq[:max(1, int(len(uniq) * holdout))])
+        val_idx = np.array([i for i, k in enumerate(keys) if k in held])
+        tr_idx = np.array([i for i, k in enumerate(keys) if k not in held])
+        print(f"  検証は未知チーム {len(held)}種 ({len(val_idx)}件) で実施")
+    else:
+        idx = rng.permutation(len(y))
+        n_val = max(1, int(len(y) * holdout))
+        val_idx, tr_idx = idx[:n_val], idx[n_val:]
     Xtr = torch.from_numpy(X[tr_idx])
     ytr = torch.from_numpy(y[tr_idx]).unsqueeze(1)
     Xva = torch.from_numpy(X[val_idx])
     yva = torch.from_numpy(y[val_idx]).unsqueeze(1)
 
     net = make_net()
-    opt = Adam(net.parameters(), lr=lr)
+    # weight_decay: 未知チーム検証で train 0.09 / val 0.30 と強い過学習が
+    # 出たため正則化する (選出データは1戦=1サンプルで枚数が稼ぎにくい)
+    opt = Adam(net.parameters(), lr=lr, weight_decay=1e-3)
     loss_fn = torch.nn.MSELoss()
     best_val, best_state = float("inf"), None
+    batch = 512
     for ep in range(1, epochs + 1):
         net.train()
-        opt.zero_grad()
-        loss = loss_fn(net(Xtr), ytr)
-        loss.backward()
-        opt.step()
+        # ミニバッチ (数千件規模では全バッチ勾配だと収束が遅い)
+        perm_idx = torch.randperm(len(Xtr))
+        loss = None
+        for s in range(0, len(Xtr), batch):
+            sel = perm_idx[s:s + batch]
+            opt.zero_grad()
+            loss = loss_fn(net(Xtr[sel]), ytr[sel])
+            loss.backward()
+            opt.step()
         net.eval()
         with torch.no_grad():
             vloss = float(loss_fn(net(Xva), yva))
@@ -98,8 +129,11 @@ def train(epochs: int = 300, lr: float = 1e-3, holdout: float = 0.2) -> None:
     base = float(((yva - ytr.mean()) ** 2).mean())
     print(f"[train_selection] 最良val MSE={best_val:.4f} "
           f"(平均予測のみ={base:.4f})")
-    if best_val >= base:
-        print("  ⚠ 平均予測を超えられていません。データ量か特徴量を見直すこと")
+    gain = (base - best_val) / base * 100 if base else 0.0
+    print(f"  平均予測からの改善: {gain:+.1f}%")
+    if best_val >= base * 0.98:
+        print("  ⚠ 平均予測をほとんど超えられていません。"
+              "この状態のモデルは配布に値しません (データ量/特徴量を見直す)")
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     torch.save(net.state_dict(), MODEL_PATH)
