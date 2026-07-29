@@ -126,6 +126,25 @@ class WeightedTextsTeambuilder(_TB):
         return self._packed[text]
 
 
+class FixedSequenceTeambuilder(_TB):
+    """あらかじめ決めた相手チームを順番に返す (共通乱数)。
+
+    候補ごとに同じ相手列を当てることで、チーム間の差が相手の引き運に
+    埋もれないようにする。相手を引き直して評価すると、120戦でも
+    標準誤差0.046・12個体の最大値を取ると勝者の呪いで0.07〜0.09上振れし、
+    構築間の差 (おそらく0.05前後) が読めない。
+    """
+
+    def __init__(self, packed_teams):
+        self.packed = list(packed_teams)
+        self.i = 0
+
+    def yield_team(self) -> str:
+        t = self.packed[self.i % len(self.packed)]
+        self.i += 1
+        return t
+
+
 class MixtureTeambuilder(_TB):
     """複数Teambuilderの重み付き混合"""
 
@@ -308,22 +327,62 @@ def mutate(team_text: str, pool_rows: list, rng: random.Random,
 
 
 async def evaluate_population(pop: list, n_battles: int, opp_builder,
-                              concurrency: int = 3) -> None:
+                              concurrency: int = 3,
+                              opponents: list = None) -> None:
+    """集団を評価する。
+
+    ⚠ 毎世代すべての個体を測り直す。以前は生存者の評価値を再利用していたが、
+    固定なのは相手の「分布」であって引きは毎回違うため、1世代目でたまたま
+    勝った個体が上振れした点数のまま居座り、探索が原理的に進まなくなっていた
+    (世代推移が 0.70→0.70→0.70 とフラットになる症状)。
+
+    opponents を渡すと全個体が同じ相手列と戦う (共通乱数)。
+    """
     from tools.evaluate_team import evaluate_team_text
-    todo = [m for m in pop if m["fitness"] is None]
-    for i in range(0, len(todo), concurrency):
-        chunk = todo[i:i + concurrency]
+    for i in range(0, len(pop), concurrency):
+        chunk = pop[i:i + concurrency]
         results = await asyncio.gather(*[
-            evaluate_team_text(m["text"], n_battles=n_battles,
-                               opp_teambuilder=opp_builder)
+            evaluate_team_text(
+                m["text"], n_battles=n_battles,
+                # 個体ごとに独立したインスタンスを渡す (同じ順で同じ相手に当たる)
+                opp_teambuilder=(FixedSequenceTeambuilder(opponents)
+                                 if opponents else opp_builder))
             for m in chunk], return_exceptions=True)
         for m, r in zip(chunk, results):
             if isinstance(r, Exception):
                 print(f"[evolve] 評価失敗 ({_team_ja(m['text'])[:40]}): {r}",
                       flush=True)
                 m["fitness"] = 0.0
+                m["outcomes"] = []
             else:
                 m["fitness"] = r["win_rate"]
+                m["outcomes"] = r.get("outcomes") or []
+                # 累積 (世代をまたいだ総合成績。報告用)
+                m["cum_wins"] = m.get("cum_wins", 0) + r["wins"]
+                m["cum_battles"] = m.get("cum_battles", 0) + r["n_battles"]
+
+
+def _paired_verdict(pop: list, log) -> None:
+    """上位2件を「同じ相手列での対応のある比較」で検定する。
+
+    絶対勝率の差は相手の引きに左右されるが、相手を揃えてあれば
+    対戦ごとの差を取れる。これが誤差に埋もれるなら、1位を選んだこと自体に
+    根拠がない (探索が進んでいないのに進んだように見えるのを防ぐ)。
+    """
+    if len(pop) < 2:
+        return
+    a, b = pop[0].get("outcomes"), pop[1].get("outcomes")
+    if not a or not b or len(a) != len(b):
+        return
+    d = [x - y for x, y in zip(a, b)]
+    n = len(d)
+    mean = sum(d) / n
+    var = sum((x - mean) ** 2 for x in d) / (n - 1) if n > 1 else 0.0
+    se = (var / n) ** 0.5
+    verdict = "有意差あり" if abs(mean) > 2 * se else "⚠ 差は誤差の範囲"
+    log(f"  1位 vs 2位 (対応のある比較): {mean:+.3f} ± {se:.3f} → {verdict}")
+    top_se = (pop[0]["fitness"] * (1 - pop[0]["fitness"]) / n) ** 0.5
+    log(f"  1位の勝率 {pop[0]['fitness']:.2f} ± {top_se:.3f} (SE)")
 
 
 async def run(args, log=None) -> dict:
@@ -357,8 +416,13 @@ async def run(args, log=None) -> dict:
 
     for gen in range(args.generations):
         t0 = time.time()
+        # 世代ごとに相手列を1本引き、その世代の全個体を同じ列で評価する
+        # (世代内は対応のある比較。世代をまたぐと相手が変わるので、
+        #  世代間の勝率を直接比べてはいけない)
+        opponents = [opp.yield_team() for _ in range(args.battles)]
         await evaluate_population(pop, args.battles, opp,
-                                  concurrency=args.concurrency)
+                                  concurrency=args.concurrency,
+                                  opponents=opponents)
         pop.sort(key=lambda m: -m["fitness"])
         log(f"===== 世代{gen + 1}/{args.generations} "
             f"({time.time() - t0:.0f}s) =====")
@@ -366,7 +430,10 @@ async def run(args, log=None) -> dict:
             log(f"  {m['fitness']:.2f} [{m['origin']}] "
                 f"{_team_ja(m['text'])}")
         history.append([{"origin": m["origin"], "fitness": m["fitness"],
+                         "cum_wins": m.get("cum_wins"),
+                         "cum_battles": m.get("cum_battles"),
                          "species": _team_species(m["text"])} for m in pop])
+        _paired_verdict(pop, log)
         if gen == 0:
             # 健全性: 既知の強構築 (ranked) が生成チームを平均で上回るか
             by = {}
@@ -388,7 +455,9 @@ async def run(args, log=None) -> dict:
                              "text": mutate(parent["text"], pool_rows, rng,
                                             constraint),
                              "fitness": None})
-        pop = survivors + children   # 生存者の評価値は再利用 (相手分布固定のため)
+        # 生存者も次世代で測り直す (評価値の再利用はしない。
+        # 上の evaluate_population の注記を参照)
+        pop = survivors + children
 
     best = pop[0]
     run_path = OUT_DIR / f"run_{time.strftime('%Y%m%d_%H%M%S')}.json"

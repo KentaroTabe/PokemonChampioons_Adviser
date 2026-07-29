@@ -384,9 +384,13 @@ async def evaluate_team_text(team_text: str, n_battles: int = 20,
             opp = cls(**kw)
     await asyncio.wait_for(me.battle_against(opp, n_battles=n_battles),
                            timeout=120 * n_battles)
+    # 対戦ごとの勝敗も返す。相手を揃えて評価したとき (進化探索の共通乱数)
+    # 候補同士の「対応のある比較」ができる。max_concurrent_battles=1 なので
+    # me.battles の挿入順 = 対戦順 = 相手の出現順
+    outcomes = [1 if b.won else 0 for b in me.battles.values()]
     return {"n_battles": n_battles, "wins": me.n_won_battles,
             "win_rate": me.n_won_battles / n_battles if n_battles else 0.0,
-            "evaluator": ev_used}
+            "outcomes": outcomes, "evaluator": ev_used}
 
 
 def main():
