@@ -157,11 +157,16 @@ def apply_model_teampreview(player, path=None) -> None:
     player.teampreview = types.MethodType(_teampreview, player)
 
 
-TRAIN_SELECTION = os.environ.get("TRAIN_SELECTION", "model")
+# 既定は matchup。model を試したが効果がなく costs だけ残った (2026-07-30):
+#   配布条件 (certify model) 0.620 → 0.617 で横ばい
+#   相性条件                 0.572 → 0.518 と悪化 (学習と評価の分布ずれ)
+#   fps 250 → 212 (選出モデルの推論で学習量が約15%減)
+# 「学習時の選出を配布時に揃える」という仮説は棄却。TRAIN_SELECTION=model で再試行可。
+TRAIN_SELECTION = os.environ.get("TRAIN_SELECTION", "matchup")
 
 
 def apply_train_teampreview(player) -> None:
-    """学習ループ用の選出。TRAIN_SELECTION=matchup で従来の相性ベースに戻せる。
+    """学習ループ用の選出。TRAIN_SELECTION=model で選出モデルに切り替わる。
 
     学習と評価で選出方式が食い違うとベンチの解釈ができなくなるので、
     切替は必ず training_changes.json に記録すること。
