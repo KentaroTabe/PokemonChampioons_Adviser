@@ -18,7 +18,10 @@ DB_DIR = DATA_DIR / "db"
 DB_PATH = DB_DIR / "champions.sqlite3"
 SCHEMA_PATH = DB_DIR / "schema.sql"
 
-MODELS_DIR = BASE_DIR / "train" / "checkpoints"
+# CHAMPIONS_MODELS_DIR で差し替えられる。報酬スイープなど、本番の
+# チェックポイントを汚さずに複数条件を並列で学習するときに使う
+MODELS_DIR = Path(os.environ.get("CHAMPIONS_MODELS_DIR")
+                  or BASE_DIR / "train" / "checkpoints")
 
 # --- ローカルShowdownサーバー (学習用) ---
 # アドバイザーのバックエンド (ポート8000) と常時併用できるよう別ポートで運用する。

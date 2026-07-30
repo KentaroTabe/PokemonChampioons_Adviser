@@ -48,7 +48,36 @@ REWARD_PRESETS: dict[str, RewardConfig] = {
 
 
 def get_reward_config(play_style: str = "balance") -> RewardConfig:
-    return REWARD_PRESETS.get(play_style, DEFAULT_REWARD_CONFIG)
+    cfg = REWARD_PRESETS.get(play_style, DEFAULT_REWARD_CONFIG)
+    return _apply_env_override(cfg)
+
+
+def _apply_env_override(cfg: RewardConfig) -> RewardConfig:
+    """REWARD_OVERRIDE="hp_diff_weight=0.3,faint_bonus=4" で各項を上書きする。
+
+    報酬スイープで、シェイピングの強さ (REWARD_SHAPE_SCALE) だけでなく
+    「何を評価するか」の形そのものを比較するために使う。
+    HP削り重視とKO重視では最適な方策が変わりうるが、これまで比較されて
+    いなかった (2026-07-24のauto_tuneはスケールしか振っておらず、
+    しかも評価凍結バグの期間中だった)。
+    """
+    import os
+    raw = os.environ.get("REWARD_OVERRIDE", "").strip()
+    if not raw:
+        return cfg
+    import dataclasses
+    changes = {}
+    for part in raw.split(","):
+        if "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        k = k.strip()
+        if k in {f.name for f in dataclasses.fields(RewardConfig)}:
+            try:
+                changes[k] = float(v)
+            except ValueError:
+                pass
+    return dataclasses.replace(cfg, **changes) if changes else cfg
 
 
 

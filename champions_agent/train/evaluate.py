@@ -188,6 +188,10 @@ def main() -> None:
     parser.add_argument("--opponent-play-style", type=str, default=None,
                          choices=list(PLAY_STYLES.keys()) + [None],
                          help="省略時はRandomPlayerと対戦")
+    parser.add_argument("--no-save", action="store_true",
+                         help="評価結果を last_eval_*.json に書かない。"
+                              "報酬スイープ等、本番の昇格判定 (best_checkpoint) や "
+                              "プール抽選に混ぜたくない測定で使う")
     parser.add_argument("--battles", type=int, default=50)
     parser.add_argument("--opponent", type=str, default="random",
                          choices=["random", "benchmark"],
@@ -224,7 +228,8 @@ def main() -> None:
     # 評価結果の保存: vs Random は opponent_pool の勝率ゲート判定、
     # vs benchmark は最良チェックポイント保持とプール抽選の重み付けに使う
     # (currentの測定のみ保存する。bestの再測定で昇格判定を汚さない)
-    if not args.opponent_play_style and args.checkpoint == "current":
+    if (not args.opponent_play_style and args.checkpoint == "current"
+            and not args.no_save):
         import json
         from pathlib import Path
         log_dir = Path(__file__).resolve().parent / "logs"
