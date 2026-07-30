@@ -24,11 +24,21 @@ trap 'echo "[forever] 停止します (サイクル$CYCLE完了)"; exit 0' INT T
 
 while true; do
   # 一時停止フラグ。launchd の KeepAlive=true のため launchctl stop では
-  # 10秒後に再起動されてしまい、報酬スイープ等でCPUを空けられない
+  # 10秒後に再起動されてしまい、報酬スイープ等でCPUを空けられない。
+  #
+  # ⚠ フラグが古い場合は無視して再開する。スイープが異常終了すると
+  # フラグが残り、学習が止まったままになる (2026-07-30に5時間20分停止した)。
+  # 正常に走っているスイープは毎ラウンド touch して鮮度を保つ。
   if [ -f logs/PAUSE_TRAINING ]; then
-    echo "[forever] logs/PAUSE_TRAINING があるため休止中: $(date)"
-    sleep 30
-    continue
+    if [ -n "$(find logs/PAUSE_TRAINING -mmin +40 2>/dev/null)" ]; then
+      echo "[forever] PAUSE_TRAINING が40分以上更新されていないため、"\
+           "異常終了とみなして学習を再開します: $(date)"
+      rm -f logs/PAUSE_TRAINING
+    else
+      echo "[forever] logs/PAUSE_TRAINING があるため休止中: $(date)"
+      sleep 30
+      continue
+    fi
   fi
   CYCLE=$((CYCLE + 1))
   echo "[forever] ===== サイクル $CYCLE 開始: $(date) ====="

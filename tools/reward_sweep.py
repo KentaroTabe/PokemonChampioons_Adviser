@@ -220,6 +220,11 @@ def main() -> None:
         # 1回の実行が長いと打ち切られて条件間の学習量がずれるため、
         # 短い区間を繰り返して積み増す (--resume で継続学習になる)
         for rnd in range(1, args.rounds + 1):
+            # 一時停止フラグの鮮度を保つ。更新が止まると学習ループ側が
+            # 異常終了とみなして自動で再開する (止めっぱなしを防ぐ)
+            flag = REPO / "logs" / "PAUSE_TRAINING"
+            if flag.exists():
+                flag.touch()
             for style in styles:
                 print(f"\n[sweep] {style}: {len(VARIANTS)}条件を並列学習 "
                       f"(第{rnd}/{args.rounds}回 x {args.steps}ステップ)",

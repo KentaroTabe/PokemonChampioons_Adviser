@@ -18,8 +18,11 @@ SEEDS="${6:-1}"
 LOG="logs/reward_sweep/run.log"
 
 mkdir -p logs/reward_sweep
-nohup bash scripts/reward_sweep_run.sh "$STEPS" "$ROUNDS" "$BATTLES" "$STYLES" \
-  "$ARMS" "$SEEDS" > "$LOG" 2>&1 &
+# setsid で新しいセッションに切り離す。nohup だけだと SIGHUP しか無視できず、
+# 呼び出し元のプロセスグループごと落とされると道連れになる
+# (2026-07-30: 起動直後に落ちて1回目の保存にも届かなかった)
+setsid nohup bash scripts/reward_sweep_run.sh "$STEPS" "$ROUNDS" "$BATTLES" \
+  "$STYLES" "$ARMS" "$SEEDS" > "$LOG" 2>&1 < /dev/null &
 echo "[sweep] 切り離して開始しました (PID $!)"
 echo "[sweep] 進捗: tail -f $LOG"
 echo "[sweep] 停止: bash scripts/reward_sweep_stop.sh"
