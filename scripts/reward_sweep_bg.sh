@@ -13,11 +13,13 @@ STEPS="${1:-100000}"
 ROUNDS="${2:-6}"
 BATTLES="${3:-600}"
 STYLES="${4:-balance}"
+ARMS="${5:-}"
+SEEDS="${6:-1}"
 LOG="logs/reward_sweep/run.log"
 
 mkdir -p logs/reward_sweep
 nohup bash scripts/reward_sweep_run.sh "$STEPS" "$ROUNDS" "$BATTLES" "$STYLES" \
-  > "$LOG" 2>&1 &
+  "$ARMS" "$SEEDS" > "$LOG" 2>&1 &
 echo "[sweep] 切り離して開始しました (PID $!)"
 echo "[sweep] 進捗: tail -f $LOG"
 echo "[sweep] 停止: bash scripts/reward_sweep_stop.sh"
