@@ -7,9 +7,14 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-STEPS="${1:-400000}"
+# 既定を150000にしている。1回の実行が長いと途中で打ち切られ、
+# 学習量が条件間でずれる恐れがある (2026-07-30に400000で打ち切られた)。
+# 積み増したいときは同じコマンドを繰り返す (--resume で continue する)
+STEPS="${1:-150000}"
 BATTLES="${2:-400}"
 STYLES="${3:-balance}"
+ROUNDS="${4:-1}"
+RESUME="${5:-}"
 JOB="com.championsadviser.train"
 
 restore() {
@@ -23,4 +28,5 @@ launchctl stop "$JOB" 2>/dev/null || true
 sleep 5
 
 .venv/bin/python -m tools.reward_sweep \
-  --steps "$STEPS" --battles "$BATTLES" --styles "$STYLES" 2>/dev/null
+  --steps "$STEPS" --battles "$BATTLES" --styles "$STYLES" \
+  --rounds "$ROUNDS" ${RESUME:+--resume-sweep} 2>/dev/null

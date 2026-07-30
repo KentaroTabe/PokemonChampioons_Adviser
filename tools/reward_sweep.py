@@ -122,6 +122,10 @@ def main() -> None:
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--eval-only", action="store_true",
                     help="学習をとばして評価だけ行う (中断からの再開用)")
+    ap.add_argument("--rounds", type=int, default=1,
+                    help="--steps を何回積み増すか (打ち切られにくくするため)")
+    ap.add_argument("--resume-sweep", action="store_true",
+                    help="種チェックポイントを配り直さず、前回の続きから積む")
     args = ap.parse_args()
 
     if args.list:
@@ -134,17 +138,22 @@ def main() -> None:
     SWEEP_ROOT.mkdir(parents=True, exist_ok=True)
 
     if not args.eval_only:
-        prepare(styles)
-        for style in styles:
-            print(f"\n[sweep] {style}: {len(VARIANTS)}条件を並列学習 "
-                  f"({args.steps}ステップ)", flush=True)
-            t0 = time.time()
-            procs = [(v, train_cmd(v, style, args.steps, args.n_envs))
-                     for v in VARIANTS]
-            for v, p in procs:
-                code = p.wait()
-                print(f"  {v['name']:8s} 終了 (exit={code}, "
-                      f"{time.time() - t0:.0f}s)", flush=True)
+        if not args.resume_sweep:
+            prepare(styles)
+        # 1回の実行が長いと打ち切られて条件間の学習量がずれるため、
+        # 短い区間を繰り返して積み増す (--resume で継続学習になる)
+        for rnd in range(1, args.rounds + 1):
+            for style in styles:
+                print(f"\n[sweep] {style}: {len(VARIANTS)}条件を並列学習 "
+                      f"(第{rnd}/{args.rounds}回 x {args.steps}ステップ)",
+                      flush=True)
+                t0 = time.time()
+                procs = [(v, train_cmd(v, style, args.steps, args.n_envs))
+                         for v in VARIANTS]
+                for v, p in procs:
+                    code = p.wait()
+                    print(f"  {v['name']:8s} 終了 (exit={code}, "
+                          f"{time.time() - t0:.0f}s)", flush=True)
 
     print(f"\n[sweep] 評価 (各{args.battles}戦)", flush=True)
     se = (0.25 / args.battles) ** 0.5
