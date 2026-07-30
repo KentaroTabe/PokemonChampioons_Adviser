@@ -66,9 +66,37 @@ def load_dataset(path: Path = DATA_PATH):
         feats.append(build_features(team, opp, perm))
         rewards.append(float(d["reward"][i]))
     team_key = ["|".join(sorted(str(s) for s in t)) for t in d["team"]]
+    # group: 対応のある収集 (--paired) で同一条件だった対戦の識別子。-1は対応なし
+    group = (d["group"].astype(np.int64) if "group" in d.files
+             else np.full(len(rewards), -1, dtype=np.int64))
     return (np.stack(feats), np.array(rewards, dtype=np.float32),
             {"n": len(rewards), "teams": len(set(team_key)),
-             "has_opp": has_opp, "team_key": team_key})
+             "has_opp": has_opp, "team_key": team_key, "group": group})
+
+
+def build_pairs(group: np.ndarray, y: np.ndarray, idx: np.ndarray) -> tuple:
+    """同一グループ内で勝敗が割れた組を (勝った側, 負けた側) で返す。
+
+    必要なのは120通りの順位だけで絶対勝率ではないので、同条件で
+    「どちらが勝ったか」を直接学習するほうがサンプル効率が良い。
+    相手が同じなので、差が相手の引き運に汚されていない。
+    """
+    from collections import defaultdict
+    pos = {v: k for k, v in enumerate(idx)}
+    buckets = defaultdict(list)
+    for i in idx:
+        g = int(group[i])
+        if g >= 0:
+            buckets[g].append(i)
+    win, lose = [], []
+    for members in buckets.values():
+        w = [i for i in members if y[i] > 0.5]
+        l = [i for i in members if y[i] <= 0.5]
+        for a in w:
+            for b in l:
+                win.append(pos[a])
+                lose.append(pos[b])
+    return np.array(win, dtype=np.int64), np.array(lose, dtype=np.int64)
 
 
 def _norm_species(s: str) -> str:
@@ -119,7 +147,12 @@ def _finetune_on_myteam(net, X, y, meta, lr: float, epochs: int = 200) -> None:
     Xva, yva = torch.from_numpy(X[va]), torch.from_numpy(y[va]).unsqueeze(1)
 
     opt = Adam(net.parameters(), lr=lr, weight_decay=1e-3)
-    loss_fn = torch.nn.MSELoss()
+    mse = torch.nn.MSELoss()
+
+    def loss_fn(pred, target):
+        # net はロジットを返すので勝率に直してから二乗誤差を取る
+        return mse(torch.sigmoid(pred), target)
+
     net.eval()
     with torch.no_grad():
         before = float(loss_fn(net(Xva), yva))
@@ -144,7 +177,8 @@ def _finetune_on_myteam(net, X, y, meta, lr: float, epochs: int = 200) -> None:
 
 
 def train(epochs: int = 300, lr: float = 1e-3, holdout: float = 0.2,
-          finetune: bool = True) -> None:
+          finetune: bool = True, pair_weight: float = 0.5,
+          force: bool = False) -> None:
     import torch
     from torch.optim import Adam
 
@@ -180,7 +214,23 @@ def train(epochs: int = 300, lr: float = 1e-3, holdout: float = 0.2,
     # weight_decay: 未知チーム検証で train 0.09 / val 0.30 と強い過学習が
     # 出たため正則化する (選出データは1戦=1サンプルで枚数が稼ぎにくい)
     opt = Adam(net.parameters(), lr=lr, weight_decay=1e-3)
-    loss_fn = torch.nn.MSELoss()
+    mse = torch.nn.MSELoss()
+
+    def loss_fn(pred, target):
+        return mse(torch.sigmoid(pred), target)
+
+    # 対応のある収集 (--paired) があれば、同一条件での勝ち負けの組を作る。
+    # 必要なのは順位だけなので、絶対勝率の回帰より情報が濃い
+    win_i, lose_i = build_pairs(meta["group"], y, tr_idx)
+    if len(win_i):
+        Wtr = torch.from_numpy(X[tr_idx][win_i])
+        Ltr = torch.from_numpy(X[tr_idx][lose_i])
+        print(f"  対応のある比較 {len(win_i)}組を併用 "
+              f"(同じ相手に対する選出の勝ち負け)")
+    else:
+        Wtr = Ltr = None
+        print("  対応のある比較なし (--paired で収集すると使える)")
+
     best_val, best_state = float("inf"), None
     batch = 512
     for ep in range(1, epochs + 1):
@@ -192,6 +242,12 @@ def train(epochs: int = 300, lr: float = 1e-3, holdout: float = 0.2,
             sel = perm_idx[s:s + batch]
             opt.zero_grad()
             loss = loss_fn(net(Xtr[sel]), ytr[sel])
+            if Wtr is not None:
+                # ペアワイズ: 勝った選出のスコアが負けた選出を上回るように
+                p = torch.randint(0, len(Wtr), (min(batch, len(Wtr)),))
+                diff = (net(Wtr[p]) - net(Ltr[p])).squeeze(-1)
+                loss = loss + pair_weight * torch.nn.functional.softplus(
+                    -diff).mean()
             loss.backward()
             opt.step()
         net.eval()
@@ -215,6 +271,10 @@ def train(epochs: int = 300, lr: float = 1e-3, holdout: float = 0.2,
     if best_val >= base * 0.98:
         print("  ⚠ 平均予測をほとんど超えられていません。"
               "この状態のモデルは配布に値しません (データ量/特徴量を見直す)")
+        if not force:
+            print("  → 保存を中止します。既存モデルは維持されます "
+                  "(--force で上書き可)")
+            return
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     # 微調整前の汎用モデルを別に残す。my_team に寄せた配布版では
@@ -249,7 +309,7 @@ def _report_top(net, X, y) -> None:
     feats = np.stack([build_features(team, [], p)
                       for p in SELECTION_PERMUTATIONS])
     with torch.no_grad():
-        pred = net(torch.from_numpy(feats)).squeeze(-1).numpy()
+        pred = torch.sigmoid(net(torch.from_numpy(feats))).squeeze(-1).numpy()
     order = np.argsort(-pred)
     print("\n■ モデルが推す選出 (上位5, ★=先発)")
     for rank in order[:5]:
@@ -268,8 +328,13 @@ def main() -> None:
     ap.add_argument("--holdout", type=float, default=0.2)
     ap.add_argument("--no-finetune", action="store_true",
                     help="my_teamでの微調整を行わない (汎用モデルを見たいとき)")
+    ap.add_argument("--pair-weight", type=float, default=0.5,
+                    help="ペアワイズ損失の重み (0で無効)")
+    ap.add_argument("--force", action="store_true",
+                    help="平均予測を超えられなくても保存する")
     args = ap.parse_args()
-    train(args.epochs, args.lr, args.holdout, finetune=not args.no_finetune)
+    train(args.epochs, args.lr, args.holdout, finetune=not args.no_finetune,
+          pair_weight=args.pair_weight, force=args.force)
 
 
 if __name__ == "__main__":

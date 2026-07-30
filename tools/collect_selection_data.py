@@ -51,6 +51,130 @@ def _emb_of(species_list: list) -> np.ndarray:
     return np.concatenate(out) if out else np.zeros(0, dtype=np.float32)
 
 
+def _make_switchable():
+    """途中でチームを差し替えられる Teambuilder を1つ作る。
+
+    同じ (自チーム, 相手チーム) の組に対して複数の選出を試すため、
+    グループ単位でチームを固定したい。
+    """
+    from poke_env.teambuilder import Teambuilder
+
+    class _Switchable(Teambuilder):
+        def __init__(self):
+            self.packed = None
+
+        def set_text(self, text: str) -> None:
+            self.packed = self.join_team(self.parse_showdown_team(text))
+
+        def yield_team(self) -> str:
+            return self.packed
+
+    return _Switchable()
+
+
+async def collect_paired(n_groups: int, group_size: int, style: str,
+                         teams: str = "ranked") -> dict:
+    """対応のある収集: 同じ相手に対して複数の選出を試す。
+
+    従来の収集は候補ごとに相手を引き直していたため、選出間の差が
+    相手の引き運に埋もれていた (勝敗0/1の分散0.25に対し、選出間の
+    真の差は0.1前後)。同じ (自チーム, 相手チーム) の組で group_size 通りの
+    選出を試し、group を記録することで「同条件での比較」が作れる。
+    相手の選出も相性ベースで決定的なので、グループ内で固定される。
+
+    残る差異は乱数 (ダメージ乱数・急所) のみ。進化探索で同じ手法を入れた
+    ところ、平均回帰が可視化できるようになった実績がある。
+    """
+    import random
+    import types
+    from poke_env import AccountConfiguration
+    from champions_agent.agent.policy_selection import build_selection_observation
+    from champions_agent.agent.spaces import SELECTION_PERMUTATIONS
+    from champions_agent.config import TRAINING_BATTLE_FORMAT
+    from champions_agent.env.ranked_teams import RankedTeambuilder, build_ranked_teams
+    from champions_agent.env.showdown_env import (
+        TrainingServerConfiguration, apply_matchup_teampreview,
+        make_benchmark_player,
+    )
+    from champions_agent.train.evaluate import ModelPlayer
+    from tools.evaluate_team import build_myteam_text
+
+    pool = build_ranked_teams()
+    my_texts = ([build_myteam_text()] if teams == "myteam" else pool)
+
+    records: dict = {}
+    state = {"perms": [], "i": 0, "group": 0}
+
+    def _teampreview(self, battle):
+        mons = list(battle.team.values())
+        opp_mons = list(battle.opponent_team.values())
+        perms = state["perms"]
+        perm = perms[state["i"] % len(perms)]
+        state["i"] += 1
+        try:
+            own = [{"species": p.species, "hp_percent": 1.0,
+                    "status": "none"} for p in mons]
+            opp = [{"species": p.species} for p in opp_mons]
+            records[battle.battle_tag] = {
+                "obs": build_selection_observation(own, opp),
+                "emb": np.concatenate([
+                    _emb_of([p.species for p in mons]),
+                    _emb_of([p.species for p in opp_mons])]),
+                "action": SELECTION_PERMUTATIONS.index(perm),
+                "team": [p.species for p in mons],
+                "opp_team": ([p.species for p in opp_mons] + [""] * 6)[:6],
+                "group": state["group"],
+            }
+        except Exception:
+            pass
+        rest = [i for i in range(len(mons)) if i not in perm]
+        return "/team " + "".join(str(i + 1) for i in list(perm) + rest)
+
+    uid = os.getpid() % 10000
+    my_tb, opp_tb = _make_switchable(), _make_switchable()
+    me = ModelPlayer(
+        account_configuration=AccountConfiguration(f"SpD{uid}", None),
+        battle_format=TRAINING_BATTLE_FORMAT,
+        server_configuration=TrainingServerConfiguration,
+        team=my_tb, play_style=style,
+        checkpoint="best", max_concurrent_battles=1)
+    me.teampreview = types.MethodType(_teampreview, me)
+    opp = make_benchmark_player(
+        battle_format=TRAINING_BATTLE_FORMAT, team=opp_tb,
+        account_configuration=AccountConfiguration(f"SpE{uid}", None))
+    apply_matchup_teampreview(opp)
+
+    for g in range(n_groups):
+        my_tb.set_text(random.choice(my_texts))
+        opp_tb.set_text(random.choice(pool))
+        state["perms"] = random.sample(SELECTION_PERMUTATIONS,
+                                       min(group_size,
+                                           len(SELECTION_PERMUTATIONS)))
+        state["i"] = 0
+        state["group"] = g
+        await me.battle_against(opp, n_battles=len(state["perms"]))
+
+    obs, emb, act, rew, team, opp_team, group = [], [], [], [], [], [], []
+    for tag, battle in me.battles.items():
+        rec = records.get(tag)
+        if rec is None or battle.won is None:
+            continue
+        obs.append(rec["obs"])
+        emb.append(rec["emb"])
+        act.append(rec["action"])
+        rew.append(1.0 if battle.won else 0.0)
+        team.append(rec["team"])
+        opp_team.append(rec["opp_team"])
+        group.append(rec["group"])
+    return {"obs": np.asarray(obs, dtype=np.float32),
+            "emb": np.asarray(emb, dtype=np.float32),
+            "action": np.asarray(act, dtype=np.int64),
+            "reward": np.asarray(rew, dtype=np.float32),
+            "team": np.asarray(team, dtype="<U24"),
+            "opp_team": np.asarray(opp_team, dtype="<U24"),
+            "group": np.asarray(group, dtype=np.int64)}
+
+
 async def collect(n_battles: int, explore: float, style: str,
                   teams: str = "myteam") -> dict:
     import random
@@ -147,7 +271,27 @@ async def collect(n_battles: int, explore: float, style: str,
             "action": np.asarray(act, dtype=np.int64),
             "reward": np.asarray(rew, dtype=np.float32),
             "team": np.asarray(team, dtype="<U24"),
-            "opp_team": np.asarray(opp_team, dtype="<U24")}
+            "opp_team": np.asarray(opp_team, dtype="<U24"),
+            # -1 = 対応なし (毎戦チームを引き直しているので比較相手がいない)
+            "group": np.full(len(rew), -1, dtype=np.int64)}
+
+
+def _default_column(sample: np.ndarray, n: int) -> np.ndarray:
+    """新しく増えた列を旧データぶん埋めるための既定値"""
+    if sample.dtype.kind in "iu":
+        return np.full((n,) + sample.shape[1:], -1, dtype=sample.dtype)
+    if sample.dtype.kind == "f":
+        return np.zeros((n,) + sample.shape[1:], dtype=sample.dtype)
+    return np.full((n,) + sample.shape[1:], "", dtype=sample.dtype)
+
+
+def _migrate(old, new: dict) -> dict:
+    """旧データを新スキーマへ寄せる (増えた列は既定値、消えた列は捨てる)"""
+    n = len(old["action"]) if "action" in old.files else 0
+    out = {}
+    for k, v in new.items():
+        out[k] = old[k] if k in old.files else _default_column(v, n)
+    return out
 
 
 def _merge_save(new: dict) -> dict:
@@ -156,9 +300,21 @@ def _merge_save(new: dict) -> dict:
     if OUT.exists():
         try:
             old = np.load(OUT)
-            same_schema = (set(old.files) == set(new)
+            # 列が増えただけなら旧データを捨てずに既定値で埋めて引き継ぐ。
+            # 完全一致を要求していたため、group列を足したときに25000件を
+            # 失った (2026-07-30)。観測次元が変わった場合だけ作り直す
+            old = _migrate(old, new)
+            same_schema = (set(old.keys()) == set(new)
                            and old["obs"].shape[1] == new["obs"].shape[1])
             if len(old["action"]) and same_schema:
+                # グループIDは収集回ごとに0から振り直されるので、既存の
+                # 最大値の先へずらす (別の回の対戦が同一グループとして
+                # 対応づけられ、比較にならないのを防ぐ)
+                if "group" in new and len(old["group"]):
+                    base = int(old["group"].max()) + 1
+                    g = new["group"].copy()
+                    g[g >= 0] += base
+                    new["group"] = g
                 new = {k: np.concatenate([old[k], new[k]]) for k in new}
             elif len(old["action"]):
                 print("[collect_selection] 形式が変わったため既存データは"
@@ -233,14 +389,27 @@ def main() -> None:
     ap.add_argument("--teams", default="myteam", choices=["myteam", "ranked"],
                     help="myteam=自分の登録チーム固定 / ranked=他プレイヤーの実構築を毎回引き直す")
     ap.add_argument("--show", action="store_true", help="集計表示のみ")
+    ap.add_argument("--paired", action="store_true",
+                    help="対応のある収集: 同じ(自チーム,相手チーム)の組に対して"
+                         "複数の選出を試す。選出間の差が相手の引き運に"
+                         "埋もれるのを防ぐ")
+    ap.add_argument("--group-size", type=int, default=6,
+                    help="--paired のとき、1組あたり何通りの選出を試すか")
     args = ap.parse_args()
     if args.show:
         show()
         return
     import time
     t0 = time.time()
-    data = asyncio.run(collect(args.battles, args.explore, args.style,
-                               args.teams))
+    if args.paired:
+        groups = max(1, args.battles // args.group_size)
+        print(f"[collect_selection] 対応のある収集: {groups}組 x "
+              f"{args.group_size}選出 = {groups * args.group_size}戦")
+        data = asyncio.run(collect_paired(groups, args.group_size,
+                                          args.style, args.teams))
+    else:
+        data = asyncio.run(collect(args.battles, args.explore, args.style,
+                                   args.teams))
     if not len(data["action"]):
         raise SystemExit("記録できたエピソードがありません")
     merged = _merge_save(data)

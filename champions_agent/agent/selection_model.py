@@ -72,12 +72,18 @@ def build_features(my_species: list, opp_species: list, perm) -> np.ndarray:
 
 
 def make_net():
-    """勝率回帰のMLP (小さめ: データが数千件規模のため)"""
+    """勝率回帰のMLP (小さめ: データが数千件規模のため)。
+
+    出力は**ロジット**。勝率が要る場所で sigmoid をかける。
+    ペアワイズ学習 (同一条件の2つの選出のどちらが勝ったかを学ぶ) で
+    スコア差をそのまま扱いたいため。Sigmoid は重みを持たないので、
+    末尾に含めていた頃のチェックポイントもそのまま読める。
+    """
     import torch.nn as nn
     return nn.Sequential(
         nn.Linear(FEATURE_DIM, 64), nn.ReLU(),
         nn.Linear(64, 32), nn.ReLU(),
-        nn.Linear(32, 1), nn.Sigmoid(),
+        nn.Linear(32, 1),
     )
 
 
@@ -129,7 +135,7 @@ def score_all(my_species: list, opp_species: list,
     feats = np.stack([build_features(my_species, opp_species, p)
                       for p in perms])
     with torch.no_grad():
-        pred = net(torch.from_numpy(feats)).squeeze(-1).numpy()
+        pred = torch.sigmoid(net(torch.from_numpy(feats))).squeeze(-1).numpy()
     out = sorted(zip(perms, pred.tolist()), key=lambda x: -x[1])
     return out
 
