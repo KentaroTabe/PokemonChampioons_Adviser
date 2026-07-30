@@ -34,9 +34,10 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 SRC_MODELS = REPO / "champions_agent" / "train" / "checkpoints"
 SWEEP_ROOT = REPO / "logs" / "reward_sweep"
+OPP_SEED = 20260730   # 全条件で同じ相手列を使うための固定シード
 
 # 比較する報酬設計。scale はシェイピング全体の強さ、override は報酬の「形」
-VARIANTS = [
+ALL_VARIANTS = [
     {"name": "control", "scale": "0.15", "override": "",
      "desc": "現行設定 (auto_tuneが定着させた値)"},
     {"name": "outcome", "scale": "0.0", "override": "",
@@ -47,6 +48,31 @@ VARIANTS = [
     {"name": "shaped", "scale": "0.45", "override": "",
      "desc": "シェイピング強め (現行の3倍)"},
 ]
+VARIANTS = list(ALL_VARIANTS)
+
+
+def select_arms(names: str, seeds: int) -> None:
+    """比較する条件を絞り、シードごとに複製する。
+
+    1条件1回の学習では「その回の運」と報酬設計の効果が区別できないため、
+    採否を決める比較では複数シードを回して符号の一致を見る。
+    """
+    global VARIANTS
+    wanted = [n for n in names.split(",") if n] if names else None
+    base = ([v for v in ALL_VARIANTS if v["name"] in wanted] if wanted
+            else list(ALL_VARIANTS))
+    if seeds <= 1:
+        VARIANTS = base
+        return
+    out = []
+    for s in range(seeds):
+        for v in base:
+            w = dict(v)
+            w["name"] = f"{v['name']}_s{s}"
+            w["arm"] = v["name"]
+            w["seed"] = s
+            out.append(w)
+    VARIANTS = out
 
 
 def _seed_dir(name: str) -> Path:
@@ -113,6 +139,9 @@ def train_cmd(v: dict, style: str, steps: int, n_envs: int) -> subprocess.Popen:
     # 学習ループ側の設定は引き継がない (auto_env.sh は source しない)
     env["TRAIN_ENT_COEF"] = env.get("TRAIN_ENT_COEF", "0.03")
     env["TRAIN_LR"] = env.get("TRAIN_LR", "3e-4")
+    # シードごとに学習の乱数を変える (同じ設定でも別の軌跡になるようにする)
+    if "seed" in v:
+        env["TRAIN_SEED"] = str(1000 + v["seed"])
     log = SWEEP_ROOT / v["name"] / f"train_{style}.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     return subprocess.Popen(
@@ -138,7 +167,9 @@ def evaluate(v: dict, style: str, battles: int) -> float:
     r = subprocess.run(
         [sys.executable, "-m", "champions_agent.train.evaluate",
          "--play-style", style, "--battles", str(battles),
-         "--opponent", "benchmark", "--checkpoint", "current", "--no-save"],
+         "--opponent", "benchmark", "--checkpoint", "current", "--no-save",
+         # 全条件に同じ相手列を当てる (差が相手の引き運に埋もれないように)
+         "--opp-seed", str(OPP_SEED)],
         cwd=REPO, env=env, capture_output=True, text=True)
     for line in r.stdout.splitlines():
         if line.startswith("[evaluate] "):
@@ -167,7 +198,12 @@ def main() -> None:
                     help="種チェックポイントを配り直さず、前回の続きから積む")
     ap.add_argument("--force", action="store_true",
                     help="チェックポイントが同一でも評価する")
+    ap.add_argument("--arms", default="",
+                    help="比較する条件を絞る (例: control,ko)")
+    ap.add_argument("--seeds", type=int, default=1,
+                    help="1条件あたりの独立した学習回数")
     args = ap.parse_args()
+    select_arms(args.arms, args.seeds)
 
     if args.list:
         for v in VARIANTS:
@@ -221,12 +257,32 @@ def main() -> None:
 
     print("\n=== 比較 (controlとの差) ===")
     for style in styles:
-        base = results[style].get("control")
-        for name, wr in sorted(results[style].items(), key=lambda x: -x[1]):
-            d = wr - base if base is not None else 0.0
-            verdict = "" if name == "control" else (
-                "有意" if abs(d) > 2 * se * (2 ** 0.5) else "ノイズ範囲")
-            print(f"  {style:8s} {name:8s} {wr:.3f}  {d:+.3f} {verdict}")
+        by_arm = {}
+        for v in VARIANTS:
+            by_arm.setdefault(v.get("arm", v["name"]), []).append(
+                results[style][v["name"]])
+        base_runs = by_arm.get("control", [])
+        base = sum(base_runs) / len(base_runs) if base_runs else None
+        for arm, runs in sorted(by_arm.items(),
+                                key=lambda x: -sum(x[1]) / len(x[1])):
+            m = sum(runs) / len(runs)
+            detail = ("  [" + " ".join(f"{r:.3f}" for r in runs) + "]"
+                      if len(runs) > 1 else "")
+            d = m - base if base is not None else 0.0
+            print(f"  {style:8s} {arm:10s} {m:.3f}  {d:+.3f}{detail}")
+
+        # 事前に決めた基準で機械的に判定する (結果を見てから基準を決めない)
+        if base is not None and len(by_arm) == 2:
+            from tools.ab_decision import decide
+            arm = [a for a in by_arm if a != "control"][0]
+            runs = by_arm[arm]
+            signs = ([r - b for r, b in zip(runs, base_runs)]
+                     if len(runs) == len(base_runs) else None)
+            r = decide(base, sum(runs) / len(runs),
+                       args.battles * len(base_runs), signs)
+            print(f"\n  差 {r['diff']:+.3f} ± {r['se']:.3f} "
+                  f"(95%CI {r['ci'][0]:+.3f}〜{r['ci'][1]:+.3f})")
+            print(f"  判定: {r['verdict']}  [{arm} vs control]")
     print(f"\n記録: {out}")
 
 

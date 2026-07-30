@@ -78,7 +78,8 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
                           opponent_kind: str = "random",
                           checkpoint: str = "current",
                           selection: str = "matchup",
-                          own_teams: str = "train") -> dict:
+                          own_teams: str = "train",
+                          opp_seed: int | None = None) -> dict:
     """play_styleモデル vs (opponent_play_styleモデル or RandomPlayer) をn_battles戦させる。"""
     # 自分チーム: 以前は「生成チーム1個を全戦使い回し」(ConstantTeambuilder)
     # だったため、勝率がチームドローの当たり外れで±0.2以上振動し、方策の
@@ -133,7 +134,15 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
 
     if opponent_kind == "benchmark":
         from champions_agent.env.showdown_env import make_benchmark_player
+        # opp_seed を渡すと相手チームの並びが再現される。A/B比較で両条件に
+        # 同じ相手列を当てると、差が相手の引き運に埋もれなくなる
+        team = None
+        if opp_seed is not None:
+            from champions_agent.env.ranked_teams import RankedTeambuilder
+            team = RankedTeambuilder(top_n=60, include_external=False,
+                                     rng=random.Random(opp_seed))
         player2 = make_benchmark_player(battle_format=battle_format,
+                                        team=team,
                                         account_configuration=acc2)
     elif opponent_play_style:
         opp_team = build_random_team_text(size=TRAINING_TEAM_SIZE, play_style=opponent_play_style)
@@ -193,6 +202,9 @@ def main() -> None:
                               "報酬スイープ等、本番の昇格判定 (best_checkpoint) や "
                               "プール抽選に混ぜたくない測定で使う")
     parser.add_argument("--battles", type=int, default=50)
+    parser.add_argument("--opp-seed", type=int, default=None,
+                         help="相手チームの並びを固定する。A/B比較で両条件に"
+                              "同じ相手列を当てると差が読みやすくなる")
     parser.add_argument("--opponent", type=str, default="random",
                          choices=["random", "benchmark"],
                          help="benchmark=上位構築xヒューリスティクスの固定強敵")
@@ -222,6 +234,7 @@ def main() -> None:
         battle_format=args.format,
         opponent_kind=args.opponent,
         checkpoint=args.checkpoint,
+        opp_seed=args.opp_seed,
     ))
     print(f"[evaluate] {result}")
 
