@@ -11,12 +11,54 @@ from __future__ import annotations
 
 import argparse
 import os
+from pathlib import Path
 
 from champions_agent.config import (
     MODELS_DIR, RANDOM_SEED, DEFAULT_PLAY_STYLE, PLAY_STYLES,
     TRAINING_BATTLE_FORMAT,
 )
 from champions_agent.env.showdown_env import make_training_env
+
+# 途中保存の間隔 (ステップ)。0で無効。
+SAVE_EVERY = int(os.environ.get("TRAIN_SAVE_EVERY", "20000"))
+
+
+def _atomic_save(model, save_path: Path) -> None:
+    """一時ファイルへ書いてから置き換える。
+
+    保存先は評価やアドバイザーが読むため、書き込み途中のzipを掴ませない。
+    SB3のsaveは拡張子が.zipでないと.zipを付け足すので、
+    一時ファイル名も.zipで終わらせる。
+    """
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = save_path.with_name(save_path.name + ".tmp.zip")
+    model.save(str(tmp))
+    tmp.replace(save_path)
+
+
+def _make_periodic_save(save_path: Path, every: int):
+    """一定ステップごとにチェックポイントを保存するコールバックを作る。
+
+    元は学習の最後にしか保存していなかったため、OSの自動更新やプロセスの
+    強制終了でその回の学習が丸ごと失われていた
+    (2026-07-30: 報酬スイープが起動直後に落ち、10万ステップ x 6条件が消えた)。
+    """
+    from stable_baselines3.common.callbacks import BaseCallback
+
+    class _PeriodicSave(BaseCallback):
+        def _on_training_start(self) -> None:
+            # 再開時は num_timesteps が引き継がれるため、開始時点を基準にする
+            self._next = self.num_timesteps + every
+
+        def _on_step(self) -> bool:
+            if self.num_timesteps >= self._next:
+                self._next = self.num_timesteps + every
+                _atomic_save(self.model, save_path)
+                if self.verbose:
+                    print(f"[train_battle] 途中保存: {self.num_timesteps}ステップ")
+            return True
+
+    return _PeriodicSave(verbose=1)
 
 
 def _make_env_fn(idx: int, battle_format: str, play_style: str,
@@ -141,11 +183,11 @@ def train(total_timesteps: int = 10_000, battle_format: str = TRAINING_BATTLE_FO
             seed=RANDOM_SEED,
             **ppo_kwargs,
         )
-    model.learn(total_timesteps=total_timesteps, reset_num_timesteps=not resume)
+    callback = _make_periodic_save(save_path, SAVE_EVERY) if SAVE_EVERY > 0 else None
+    model.learn(total_timesteps=total_timesteps, reset_num_timesteps=not resume,
+                callback=callback)
 
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    save_path = MODELS_DIR / f"battle_policy_{play_style}.zip"
-    model.save(str(save_path))
+    _atomic_save(model, save_path)
     print(f"[train_battle] 学習済みモデルを保存しました: {save_path}")
 
     env.close()
