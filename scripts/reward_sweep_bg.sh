@@ -18,11 +18,24 @@ SEEDS="${6:-1}"
 LOG="logs/reward_sweep/run.log"
 
 mkdir -p logs/reward_sweep
-# setsid で新しいセッションに切り離す。nohup だけだと SIGHUP しか無視できず、
-# 呼び出し元のプロセスグループごと落とされると道連れになる
-# (2026-07-30: 起動直後に落ちて1回目の保存にも届かなかった)
-setsid nohup bash scripts/reward_sweep_run.sh "$STEPS" "$ROUNDS" "$BATTLES" \
-  "$STYLES" "$ARMS" "$SEEDS" > "$LOG" 2>&1 < /dev/null &
-echo "[sweep] 切り離して開始しました (PID $!)"
+# 新しいセッションに切り離す。nohup だけだと SIGHUP しか無視できず、
+# 呼び出し元のプロセスグループごと落とされると道連れになる。
+# macOS に setsid は無いため Python の start_new_session を使う
+# (2026-07-31: setsid を検証せずに入れて起動が丸ごと失敗した)
+PID=$(.venv/bin/python -m tools.spawn_detached "$LOG" \
+  bash scripts/reward_sweep_run.sh "$STEPS" "$ROUNDS" "$BATTLES" \
+  "$STYLES" "$ARMS" "$SEEDS")
+
+# 起動できたことをその場で確かめる。起動に失敗したまま放置すると、
+# 本番の学習を止めたまま何時間も無駄にする
+sleep 3
+if ! kill -0 "$PID" 2>/dev/null; then
+  echo "[sweep] NG: 起動に失敗しました。ログを確認してください: $LOG"
+  bash scripts/reward_sweep_stop.sh
+  exit 1
+fi
+
+echo "[sweep] 切り離して開始しました (PID $PID)"
 echo "[sweep] 進捗: tail -f $LOG"
 echo "[sweep] 停止: bash scripts/reward_sweep_stop.sh"
+echo "[sweep] 保存が効いているかの確認: bash scripts/sweep_watch_divergence.sh"
