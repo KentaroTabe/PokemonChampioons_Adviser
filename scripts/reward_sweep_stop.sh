@@ -4,6 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+rm -f logs/PAUSE_TRAINING
 pkill -f "tools.reward_sweep" 2>/dev/null || true
 pkill -f "reward_sweep_run.sh" 2>/dev/null || true
 pkill -f "champions_agent.train.train_battle" 2>/dev/null || true

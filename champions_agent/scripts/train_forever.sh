@@ -23,6 +23,13 @@ echo "[forever] 常時学習を開始します (N_ENVS=$N_ENVS, Ctrl+Cで停止)
 trap 'echo "[forever] 停止します (サイクル$CYCLE完了)"; exit 0' INT TERM
 
 while true; do
+  # 一時停止フラグ。launchd の KeepAlive=true のため launchctl stop では
+  # 10秒後に再起動されてしまい、報酬スイープ等でCPUを空けられない
+  if [ -f logs/PAUSE_TRAINING ]; then
+    echo "[forever] logs/PAUSE_TRAINING があるため休止中: $(date)"
+    sleep 30
+    continue
+  fi
   CYCLE=$((CYCLE + 1))
   echo "[forever] ===== サイクル $CYCLE 開始: $(date) ====="
   bash champions_agent/scripts/train_nightly.sh || \

@@ -80,15 +80,28 @@ def check_distinct(styles: list) -> bool:
 
 
 def prepare(styles: list) -> None:
-    """各条件の作業ディレクトリを作り、同じ種チェックポイントを配る"""
+    """各条件の作業ディレクトリを作り、同じ種チェックポイントと相手プールを配る。
+
+    ⚠ selfplay相手プール (checkpoints/pool) も配ること。これを忘れると
+    「selfplayプール0件」となり、ヒューリスティクス/探索/ランダムだけを
+    相手に学習する状態になる。本番と学習分布が変わり、絶対値が本番と
+    比較できなくなる (2026-07-30に発生し、全条件が0.54→0.43まで落ちた)。
+    """
     for v in VARIANTS:
         d = _seed_dir(v["name"])
         d.mkdir(parents=True, exist_ok=True)
         for style in styles:
-            src = SRC_MODELS / f"battle_policy_{style}.zip"
-            if src.exists():
-                shutil.copy(src, d / src.name)
-    print(f"[sweep] 種チェックポイントを配布: {SWEEP_ROOT}")
+            for name in (f"battle_policy_{style}.zip",
+                         f"battle_policy_{style}_best.zip"):
+                src = SRC_MODELS / name
+                if src.exists():
+                    shutil.copy(src, d / name)
+        pool_src = SRC_MODELS / "pool"
+        if pool_src.is_dir():
+            shutil.copytree(pool_src, d / "pool", dirs_exist_ok=True)
+    n_pool = len(list((SRC_MODELS / "pool").glob("*.zip"))) \
+        if (SRC_MODELS / "pool").is_dir() else 0
+    print(f"[sweep] 種チェックポイントと相手プール({n_pool}件)を配布: {SWEEP_ROOT}")
 
 
 def train_cmd(v: dict, style: str, steps: int, n_envs: int) -> subprocess.Popen:
