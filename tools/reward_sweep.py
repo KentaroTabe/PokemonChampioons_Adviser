@@ -53,6 +53,32 @@ def _seed_dir(name: str) -> Path:
     return SWEEP_ROOT / name / "checkpoints"
 
 
+def _digest(path: Path) -> str:
+    import hashlib
+    return hashlib.md5(path.read_bytes()).hexdigest() if path.exists() else ""
+
+
+def check_distinct(styles: list) -> bool:
+    """条件間でチェックポイントが実際に違うことを確認する。
+
+    train_battle は学習の最後にしか保存しないため、実行が途中で打ち切られると
+    どの条件も種チェックポイントのままになる。それに気づかず評価すると
+    「同一モデルを4回測って差がない」という無意味な結論が出る
+    (2026-07-30に実際にこれをやった)。
+    """
+    ok = True
+    for style in styles:
+        digests = {v["name"]: _digest(_seed_dir(v["name"]) /
+                                     f"battle_policy_{style}.zip")
+                   for v in VARIANTS}
+        uniq = set(d for d in digests.values() if d)
+        if len(uniq) <= 1:
+            print(f"  ⚠ {style}: 全条件のチェックポイントが同一です。"
+                  "学習が保存前に打ち切られています。評価しても意味がありません")
+            ok = False
+    return ok
+
+
 def prepare(styles: list) -> None:
     """各条件の作業ディレクトリを作り、同じ種チェックポイントを配る"""
     for v in VARIANTS:
@@ -126,6 +152,8 @@ def main() -> None:
                     help="--steps を何回積み増すか (打ち切られにくくするため)")
     ap.add_argument("--resume-sweep", action="store_true",
                     help="種チェックポイントを配り直さず、前回の続きから積む")
+    ap.add_argument("--force", action="store_true",
+                    help="チェックポイントが同一でも評価する")
     args = ap.parse_args()
 
     if args.list:
@@ -154,6 +182,13 @@ def main() -> None:
                     code = p.wait()
                     print(f"  {v['name']:8s} 終了 (exit={code}, "
                           f"{time.time() - t0:.0f}s)", flush=True)
+
+    print(f"\n[sweep] 評価前の確認", flush=True)
+    if not check_distinct(styles) and not args.force:
+        raise SystemExit(
+            "評価を中止します。--steps を小さくして (1回が数分で終わる量に) "
+            "確実に保存されるようにするか、scripts/reward_sweep_bg.sh で\n"
+            "打ち切られない形で回してください (--force で強行可)")
 
     print(f"\n[sweep] 評価 (各{args.battles}戦)", flush=True)
     se = (0.25 / args.battles) ** 0.5
