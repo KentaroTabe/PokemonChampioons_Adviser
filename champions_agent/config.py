@@ -18,7 +18,15 @@ DB_DIR = DATA_DIR / "db"
 DB_PATH = DB_DIR / "champions.sqlite3"
 SCHEMA_PATH = DB_DIR / "schema.sql"
 
-MODELS_DIR = BASE_DIR / "train" / "checkpoints"
+# CHAMPIONS_MODELS_DIR で差し替えられる。報酬スイープなど、本番の
+# チェックポイントを汚さずに複数条件を並列で学習するときに使う
+MODELS_DIR = Path(os.environ.get("CHAMPIONS_MODELS_DIR")
+                  or BASE_DIR / "train" / "checkpoints")
+
+# TRAIN_SEED で学習の乱数 (RANDOM_SEED) を差し替える。A/B比較で
+# 「同じ設定を複数回」回し、その回の運と設定の効果を切り分けるために使う
+TRAIN_SEED_OVERRIDE = os.environ.get("TRAIN_SEED")
+
 
 # --- ローカルShowdownサーバー (学習用) ---
 # アドバイザーのバックエンド (ポート8000) と常時併用できるよう別ポートで運用する。
@@ -84,7 +92,7 @@ class Regulation:
 DEFAULT_REGULATION = Regulation()
 
 # --- 学習設定(暫定デフォルト) ---
-RANDOM_SEED = 42
+RANDOM_SEED = int(TRAIN_SEED_OVERRIDE) if TRAIN_SEED_OVERRIDE else 42
 SELFPLAY_OPPONENT_POOL_SIZE = 50  # team_builder が保持する対戦相手チーム候補数
 
 

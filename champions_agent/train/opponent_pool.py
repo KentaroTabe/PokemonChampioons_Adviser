@@ -188,9 +188,9 @@ def make_pool_opponent(pool: OpponentPool, epsilon_random: float = EPSILON_RANDO
                 return self.choose_random_move(battle)
 
     opp = _PoolOpponent(**player_kwargs)
-    # 選出も相性ベースに揃える (学習環境側と対称にする)
-    from champions_agent.env.showdown_env import apply_matchup_teampreview
-    apply_matchup_teampreview(opp)
+    # 選出は学習環境側と揃える (対称にする。TRAIN_SELECTION で切り替わる)
+    from champions_agent.env.showdown_env import apply_train_teampreview
+    apply_train_teampreview(opp)
     return opp
 
 

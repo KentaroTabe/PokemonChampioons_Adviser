@@ -126,6 +126,25 @@ class WeightedTextsTeambuilder(_TB):
         return self._packed[text]
 
 
+class FixedSequenceTeambuilder(_TB):
+    """あらかじめ決めた相手チームを順番に返す (共通乱数)。
+
+    候補ごとに同じ相手列を当てることで、チーム間の差が相手の引き運に
+    埋もれないようにする。相手を引き直して評価すると、120戦でも
+    標準誤差0.046・12個体の最大値を取ると勝者の呪いで0.07〜0.09上振れし、
+    構築間の差 (おそらく0.05前後) が読めない。
+    """
+
+    def __init__(self, packed_teams):
+        self.packed = list(packed_teams)
+        self.i = 0
+
+    def yield_team(self) -> str:
+        t = self.packed[self.i % len(self.packed)]
+        self.i += 1
+        return t
+
+
 class MixtureTeambuilder(_TB):
     """複数Teambuilderの重み付き混合"""
 
@@ -151,7 +170,10 @@ def load_archive() -> list:
 def build_opponent(forecast_mix: float, archive_mix: float,
                    rng: random.Random):
     """相手チーム分布: 現行メタ + 予測メタ + アーカイブの混合"""
-    ranked = build_ranked_teams()
+    # 上位60構築に固定。ここが動くと適応度の基準が変わり、過去の実行結果や
+    # アーカイブの fitness と比較できなくなる (広げる場合は別の実験として
+    # training_changes.json に記録すること)
+    ranked = build_ranked_teams(top_n=60, include_external=False)
     parts = []
     fs = forecast_scores() if forecast_mix > 0 else None
     if forecast_mix > 0 and fs is None:
@@ -176,7 +198,7 @@ def build_opponent(forecast_mix: float, archive_mix: float,
 # ------------------------------------------------------------------
 def init_population(size: int, rng: random.Random) -> list:
     """初期集団: 半分は上位実構築、半分は使用率メタからの生成チーム"""
-    ranked = build_ranked_teams()
+    ranked = build_ranked_teams(top_n=60, include_external=False)
     pop = [{"origin": "ranked", "text": t, "fitness": None}
            for t in ranked[:size // 2]]
     while len(pop) < size:
@@ -304,23 +326,254 @@ def mutate(team_text: str, pool_rows: list, rng: random.Random,
     return "\n\n".join(blocks)
 
 
+# ------------------------------------------------------------------
+# セット内変異 (種族は保ったまま型を変える局所改善)
+# ------------------------------------------------------------------
+# 上位プレイヤーの改善は種族の総入れ替えより「持ち物・技1枠・配分」の
+# 局所手術が主。従来の mutate (種族入れ替えのみ) ではこの近傍を探索
+# できなかった。
+#
+# ⚠ 候補をランキング上位チームのテキストから引いてはいけない。
+# オープンデータにはチームごとの技・配分が含まれず、テキスト生成時に
+# メタ最頻セットで埋められるため、「変種」は持ち物しか違わない
+# (2026-07-31に実測: gengar変種2件の観測技は4種のみ)。
+# 使用率DB (move_usage / item_usage / spread_usage) から使用率重みで
+# 引く。実際に使われている型の範囲なので一貫性も保たれる。
+
+_usage_cache: dict | None = None
+
+
+def _usage_alternatives() -> dict:
+    """種族id -> {"moves": [(技, %)], "items": [(持ち物, %)],
+    "spreads": [(性格, EV文字列, %)]} (最新スナップショット)"""
+    global _usage_cache
+    if _usage_cache is None:
+        out: dict = {}
+        with db.get_connection() as conn:
+            snap = db.latest_snapshot_id(conn, fmt=USAGE_TARGET_FORMAT)
+            if snap:
+                for r in conn.execute(
+                        """SELECT pokemon_name, move_name, usage_percent
+                           FROM move_usage WHERE snapshot_id = ?""", (snap,)):
+                    out.setdefault(_to_id(r["pokemon_name"]),
+                                   {"moves": [], "items": [], "spreads": []})[
+                        "moves"].append((r["move_name"], r["usage_percent"]))
+                for r in conn.execute(
+                        """SELECT pokemon_name, item_name, usage_percent
+                           FROM item_usage WHERE snapshot_id = ?""", (snap,)):
+                    out.setdefault(_to_id(r["pokemon_name"]),
+                                   {"moves": [], "items": [], "spreads": []})[
+                        "items"].append((r["item_name"], r["usage_percent"]))
+                for r in conn.execute(
+                        """SELECT pokemon_name, nature, evs, usage_percent
+                           FROM spread_usage WHERE snapshot_id = ?""", (snap,)):
+                    out.setdefault(_to_id(r["pokemon_name"]),
+                                   {"moves": [], "items": [], "spreads": []})[
+                        "spreads"].append(
+                            (r["nature"], r["evs"], r["usage_percent"]))
+        _usage_cache = out
+    return _usage_cache
+
+
+def _block_item(block: str) -> str | None:
+    head = block.strip().split("\n")[0]
+    return head.split(" @ ", 1)[1].strip() if " @ " in head else None
+
+
+def _block_moves(block: str) -> list:
+    return [l[2:].strip() for l in block.strip().split("\n")
+            if l.startswith("- ")]
+
+
+def _replace_item(block: str, item: str | None) -> str:
+    lines = block.strip().split("\n")
+    species = lines[0].split(" @ ")[0].strip()
+    lines[0] = f"{species} @ {item}" if item else species
+    return "\n".join(lines)
+
+
+def _team_items(blocks: list, skip: int) -> set:
+    """アイテムクローズ用: skip以外のスロットが持つアイテムid集合"""
+    return {_to_id(_block_item(b)) for i, b in enumerate(blocks)
+            if i != skip and _block_item(b)}
+
+
+def _evs_line(evs: str) -> str | None:
+    """EV文字列 "H/A/B/C/D/S" -> "EVs: 2 HP / 32 SpA" 形式の行。
+
+    クランプ (各32/合計66) は PokemonSet.to_showdown_text と同じ規則
+    (champions modの能力ポイント仕様)。
+    """
+    labels = ["HP", "Atk", "Def", "SpA", "SpD", "Spe"]
+    values = []
+    for v in str(evs or "").split("/"):
+        try:
+            values.append(max(0, min(32, int(v))))
+        except ValueError:
+            values.append(0)
+    while sum(values) > 66:
+        i = values.index(max(values))
+        values[i] -= sum(values) - 66 if values[i] >= sum(values) - 66 else 1
+    parts = [f"{v} {l}" for l, v in zip(labels, values) if v]
+    return ("EVs: " + " / ".join(parts)) if parts else None
+
+
+def mutate_set(team_text: str, rng: random.Random,
+               constraint: "Constraint | None" = None) -> str:
+    """1枠の種族は保ったまま、型 (持ち物/技1枠/性格・配分) を変える。
+
+    候補は使用率DBから使用率重みで引く (実際に使われている型の範囲)。
+    種族が変わらないため Constraint の変更数 (種チームからの距離) は
+    増えない。固定枠は型もいじらない (ユーザーが実機で使うセットを
+    勝手に変えない) ため mutable_slots に従う。
+    """
+    blocks = [b.strip() for b in team_text.strip().split("\n\n")]
+    slots = (constraint.mutable_slots(team_text) if constraint
+             else list(range(len(blocks))))
+    if not slots:
+        return team_text
+    # 不発 (その種族の使用率データが無い等) のときは別の操作/別のスロットを
+    # 試す。不発をそのまま返すとGAが同一個体を再評価して対戦数を無駄にする
+    kinds = ["item", "move", "spread"]
+    rng.shuffle(kinds)
+    rng.shuffle(slots)
+    for idx in slots:
+        sid = _to_id(blocks[idx].split("\n")[0].split(" @ ")[0])
+        alt = _usage_alternatives().get(sid)
+        if not alt:
+            continue
+        for kind in kinds:
+            if kind == "item":
+                used = _team_items(blocks, idx)
+                cur = _to_id(_block_item(blocks[idx]) or "")
+                cands = [(_sanitize_item(n), w) for n, w in alt["items"]]
+                cands = [(n, w) for n, w in cands
+                         if n and _to_id(n) not in used and _to_id(n) != cur]
+                if cands:
+                    item = rng.choices([n for n, _ in cands],
+                                       weights=[max(w, 0.1)
+                                                for _, w in cands], k=1)[0]
+                    blocks[idx] = _replace_item(blocks[idx], item)
+                    return "\n\n".join(blocks)
+
+            if kind == "move":
+                cur_moves = _block_moves(blocks[idx])
+                cur_ids = {_to_id(m) for m in cur_moves}
+                cands = [(n, w) for n, w in alt["moves"]
+                         if _to_id(n) not in cur_ids]
+                if cur_moves and cands:
+                    new_move = rng.choices([n for n, _ in cands],
+                                           weights=[max(w, 0.1)
+                                                    for _, w in cands],
+                                           k=1)[0]
+                    old = rng.choice(cur_moves)
+                    lines = blocks[idx].split("\n")
+                    for i, l in enumerate(lines):
+                        if l.strip() == f"- {old}":
+                            lines[i] = f"- {new_move}"
+                            break
+                    blocks[idx] = "\n".join(lines)
+                    return "\n\n".join(blocks)
+
+            if kind == "spread":
+                lines = blocks[idx].split("\n")
+                ev_i = next((i for i, l in enumerate(lines)
+                             if l.startswith("EVs: ")), None)
+                nat_i = next((i for i, l in enumerate(lines)
+                              if l.endswith(" Nature")), None)
+                # championsスナップショットは nature が None (EVのみ記録)。
+                # その場合はEV行だけを差し替え、性格は現在のまま残す
+                cands = [(nat, evs, w) for nat, evs, w in alt["spreads"]
+                         if evs and _evs_line(evs)]
+                if ev_i is not None and cands:
+                    nat, evs, _w = rng.choices(
+                        cands, weights=[max(c[2], 0.1) for c in cands],
+                        k=1)[0]
+                    new_ev = _evs_line(evs)
+                    new_nat = (f"{str(nat).capitalize()} Nature"
+                               if nat and nat_i is not None else None)
+                    changed = lines[ev_i] != new_ev or \
+                        (new_nat is not None and lines[nat_i] != new_nat)
+                    if not changed:
+                        continue   # 現在と同じ配分を引いた
+                    lines[ev_i] = new_ev
+                    if new_nat is not None:
+                        lines[nat_i] = new_nat
+                    blocks[idx] = "\n".join(lines)
+                    return "\n\n".join(blocks)
+
+    return team_text
+
+
+def mutate_any(team_text: str, pool_rows: list, rng: random.Random,
+               constraint: "Constraint | None" = None,
+               set_prob: float = 0.5) -> str:
+    """set_prob の確率でセット内変異、残りは従来の種族入れ替え"""
+    if rng.random() < set_prob:
+        out = mutate_set(team_text, rng, constraint)
+        if out != team_text:
+            return out
+        # セット内変異が不発 (候補なし) なら種族入れ替えへフォールバック
+    return mutate(team_text, pool_rows, rng, constraint)
+
+
 async def evaluate_population(pop: list, n_battles: int, opp_builder,
-                              concurrency: int = 3) -> None:
+                              concurrency: int = 3,
+                              opponents: list = None) -> None:
+    """集団を評価する。
+
+    ⚠ 毎世代すべての個体を測り直す。以前は生存者の評価値を再利用していたが、
+    固定なのは相手の「分布」であって引きは毎回違うため、1世代目でたまたま
+    勝った個体が上振れした点数のまま居座り、探索が原理的に進まなくなっていた
+    (世代推移が 0.70→0.70→0.70 とフラットになる症状)。
+
+    opponents を渡すと全個体が同じ相手列と戦う (共通乱数)。
+    """
     from tools.evaluate_team import evaluate_team_text
-    todo = [m for m in pop if m["fitness"] is None]
-    for i in range(0, len(todo), concurrency):
-        chunk = todo[i:i + concurrency]
+    for i in range(0, len(pop), concurrency):
+        chunk = pop[i:i + concurrency]
         results = await asyncio.gather(*[
-            evaluate_team_text(m["text"], n_battles=n_battles,
-                               opp_teambuilder=opp_builder)
+            evaluate_team_text(
+                m["text"], n_battles=n_battles,
+                # 個体ごとに独立したインスタンスを渡す (同じ順で同じ相手に当たる)
+                opp_teambuilder=(FixedSequenceTeambuilder(opponents)
+                                 if opponents else opp_builder))
             for m in chunk], return_exceptions=True)
         for m, r in zip(chunk, results):
             if isinstance(r, Exception):
                 print(f"[evolve] 評価失敗 ({_team_ja(m['text'])[:40]}): {r}",
                       flush=True)
                 m["fitness"] = 0.0
+                m["outcomes"] = []
             else:
                 m["fitness"] = r["win_rate"]
+                m["outcomes"] = r.get("outcomes") or []
+                # 累積 (世代をまたいだ総合成績。報告用)
+                m["cum_wins"] = m.get("cum_wins", 0) + r["wins"]
+                m["cum_battles"] = m.get("cum_battles", 0) + r["n_battles"]
+
+
+def _paired_verdict(pop: list, log) -> None:
+    """上位2件を「同じ相手列での対応のある比較」で検定する。
+
+    絶対勝率の差は相手の引きに左右されるが、相手を揃えてあれば
+    対戦ごとの差を取れる。これが誤差に埋もれるなら、1位を選んだこと自体に
+    根拠がない (探索が進んでいないのに進んだように見えるのを防ぐ)。
+    """
+    if len(pop) < 2:
+        return
+    a, b = pop[0].get("outcomes"), pop[1].get("outcomes")
+    if not a or not b or len(a) != len(b):
+        return
+    d = [x - y for x, y in zip(a, b)]
+    n = len(d)
+    mean = sum(d) / n
+    var = sum((x - mean) ** 2 for x in d) / (n - 1) if n > 1 else 0.0
+    se = (var / n) ** 0.5
+    verdict = "有意差あり" if abs(mean) > 2 * se else "⚠ 差は誤差の範囲"
+    log(f"  1位 vs 2位 (対応のある比較): {mean:+.3f} ± {se:.3f} → {verdict}")
+    top_se = (pop[0]["fitness"] * (1 - pop[0]["fitness"]) / n) ** 0.5
+    log(f"  1位の勝率 {pop[0]['fitness']:.2f} ± {top_se:.3f} (SE)")
 
 
 async def run(args, log=None) -> dict:
@@ -354,8 +607,13 @@ async def run(args, log=None) -> dict:
 
     for gen in range(args.generations):
         t0 = time.time()
+        # 世代ごとに相手列を1本引き、その世代の全個体を同じ列で評価する
+        # (世代内は対応のある比較。世代をまたぐと相手が変わるので、
+        #  世代間の勝率を直接比べてはいけない)
+        opponents = [opp.yield_team() for _ in range(args.battles)]
         await evaluate_population(pop, args.battles, opp,
-                                  concurrency=args.concurrency)
+                                  concurrency=args.concurrency,
+                                  opponents=opponents)
         pop.sort(key=lambda m: -m["fitness"])
         log(f"===== 世代{gen + 1}/{args.generations} "
             f"({time.time() - t0:.0f}s) =====")
@@ -363,7 +621,10 @@ async def run(args, log=None) -> dict:
             log(f"  {m['fitness']:.2f} [{m['origin']}] "
                 f"{_team_ja(m['text'])}")
         history.append([{"origin": m["origin"], "fitness": m["fitness"],
+                         "cum_wins": m.get("cum_wins"),
+                         "cum_battles": m.get("cum_battles"),
                          "species": _team_species(m["text"])} for m in pop])
+        _paired_verdict(pop, log)
         if gen == 0:
             # 健全性: 既知の強構築 (ranked) が生成チームを平均で上回るか
             by = {}
@@ -382,10 +643,13 @@ async def run(args, log=None) -> dict:
         while len(survivors) + len(children) < args.population:
             parent = survivors[len(children) % len(survivors)]
             children.append({"origin": "mutant",
-                             "text": mutate(parent["text"], pool_rows, rng,
-                                            constraint),
+                             "text": mutate_any(parent["text"], pool_rows,
+                                                rng, constraint,
+                                                getattr(args, "set_mut", 0.5)),
                              "fitness": None})
-        pop = survivors + children   # 生存者の評価値は再利用 (相手分布固定のため)
+        # 生存者も次世代で測り直す (評価値の再利用はしない。
+        # 上の evaluate_population の注記を参照)
+        pop = survivors + children
 
     best = pop[0]
     run_path = OUT_DIR / f"run_{time.strftime('%Y%m%d_%H%M%S')}.json"
@@ -438,6 +702,9 @@ def main() -> None:
                     help="入れ替え禁止の種族 (カンマ区切り、日本語可)")
     ap.add_argument("--max-changes", type=int, default=2,
                     help="種チームから同時に変えてよい枠数")
+    ap.add_argument("--set-mut", type=float, default=0.5,
+                    help="セット内変異 (持ち物/技/型) を使う確率。"
+                         "0で従来の種族入れ替えのみ")
     ap.add_argument("--seed", type=int, default=None)
     args = ap.parse_args()
     asyncio.run(run(args))

@@ -1,6 +1,6 @@
 """選出データセットの中身を要約する。
 
-    python -m tools.selection_stats
+    python -m tools.selection_stats [npzのパス]
 
 収集 (tools/collect_selection_data.py) の進捗確認と、学習前の健全性チェックに使う。
 「自チームが何種類あるか」「相手チームが記録されているか」を見ないと、
@@ -8,7 +8,9 @@
 """
 from __future__ import annotations
 
+import sys
 from collections import Counter
+from pathlib import Path
 
 import numpy as np
 
@@ -16,15 +18,16 @@ from champions_agent.train.train_selection import DATA_PATH
 
 
 def main() -> None:
-    if not DATA_PATH.exists():
-        print(f"データがありません: {DATA_PATH}")
+    path = Path(sys.argv[1]) if len(sys.argv) > 1 else DATA_PATH
+    if not path.exists():
+        print(f"データがありません: {path}")
         return
-    d = np.load(DATA_PATH)
+    d = np.load(path)
     n = len(d["action"])
     team_key = ["|".join(sorted(str(s) for s in t)) for t in d["team"]]
     reward = d["reward"]
 
-    print(f"■ 選出データ {DATA_PATH}")
+    print(f"■ 選出データ {path}")
     print(f"  件数        : {n}")
     print(f"  自チーム種類: {len(set(team_key))}")
     if "opp_team" in d.files:

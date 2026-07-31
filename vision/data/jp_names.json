@@ -7821,7 +7821,10 @@
   "ミュウツーナイトX": "mewtwonitex",
   "ミュウツーナイトY": "mewtwonitey",
   "シャリタツナイト": "tatsugirinite",
-  "ゼラオラナイト": "zeraorite"
+  "ゼラオラナイト": "zeraorite",
+  "フラエッテナイト": "floettite",
+  "ジガルデナイト": "zygardite",
+  "クルシベルナイト": "crucibellite"
  },
  "types": {
   "ノーマル": "Normal",

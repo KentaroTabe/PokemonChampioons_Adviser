@@ -529,7 +529,8 @@ async def improve_team(sid, data):
         concurrency=3, forecast_mix=0.3, archive_mix=0.2,
         update_archive=False, seed_myteam=True, seed_file=None,
         locked=(data or {}).get("locked") or None,
-        max_changes=int((data or {}).get("max_changes") or 2), seed=None)
+        max_changes=int((data or {}).get("max_changes") or 2), seed=None,
+        set_mut=0.5)
 
     async def _job():
         from tools.evolve_teams import run as ev_run

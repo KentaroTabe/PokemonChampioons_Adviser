@@ -152,7 +152,7 @@ async def collect(style: str, n_battles: int, depth: int,
                                                    None),
         battle_format=TRAINING_BATTLE_FORMAT,
         server_configuration=TrainingServerConfiguration,
-        team=RankedTeambuilder(),
+        team=RankedTeambuilder(top_n=60, include_external=False),
     )
     opponent = make_benchmark_player(
         battle_format=TRAINING_BATTLE_FORMAT,

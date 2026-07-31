@@ -120,6 +120,105 @@ def apply_matchup_teampreview(player) -> None:
     player.teampreview = types.MethodType(_teampreview, player)
 
 
+def apply_matrix_teampreview(player) -> None:
+    """プレイヤーの選出を「読み合いの均衡解」に差し替える。
+
+    相手も6体からこちらを見て3体を選ぶ同時手番ゲームとして、
+    自分120通り × 相手20通りの利得行列を条件付きモデルで作り、
+    均衡混合戦略から選出する (selection_model.predict_maximin)。
+    条件付きモデルが無い/相手が見えない場合は汎用モデルのargmax、
+    それも無ければ相性ベースへ落ちる。
+
+    実測 (2026-07-31, 各1,000戦・同一相手列・_best操縦):
+        相性0.539 / argmax 0.611 / 均衡 0.597
+    ベンチ相手の選出は決定的な相性ヒューリスティクスなので、読みを
+    外される前提の均衡は argmax に対して期待値を上げられない (差は
+    誤差の範囲)。均衡の価値は「相手がこちらの選出に適応してくる」
+    対人戦で出る想定であり、ベンチではargmaxを既定にしておく。
+    """
+    import types
+    from champions_agent.agent.selection_model import (
+        GENERAL_MODEL_PATH, predict_best, predict_maximin,
+    )
+
+    def _teampreview(self, battle):
+        try:
+            mons = list(battle.team.values())
+            mine = [p.species for p in mons]
+            opp = [p.species for p in battle.opponent_team.values()]
+            got = predict_maximin(mine, opp)
+            if got is None:
+                got = predict_best(mine, opp, GENERAL_MODEL_PATH)
+            if got is not None:
+                perm = got[0]
+                rest = [i for i in range(len(mons)) if i not in perm]
+                return "/team " + "".join(str(i + 1)
+                                          for i in list(perm) + rest)
+        except Exception:
+            pass
+        from champions_agent.env.search_expert import teampreview_order
+        return teampreview_order(battle)
+
+    player.teampreview = types.MethodType(_teampreview, player)
+
+
+def apply_model_teampreview(player, path=None) -> None:
+    """プレイヤーの選出を学習済み選出モデルに差し替える。
+
+    相性ベースとの違いは実測で大きい (同一チーム・同一相手・同一操縦で
+    相性0.24-0.30 → モデル0.51)。配布アドバイザーはモデルの選出を提示して
+    いるため、配布実態に沿った測定にはこちらを使う。
+
+    path 未指定なら汎用モデル (微調整前)。ベンチマークは毎戦チームが
+    変わるので、my_team に寄せた配布版を使うと偏る。
+    モデルが読めないときは相性ベースに落ちる (無選出で壊れないように)。
+    """
+    import types
+    from champions_agent.agent.selection_model import (
+        GENERAL_MODEL_PATH, predict_best,
+    )
+    model_path = path or GENERAL_MODEL_PATH
+
+    def _teampreview(self, battle):
+        try:
+            mons = list(battle.team.values())
+            mine = [p.species for p in mons]
+            opp = [p.species for p in battle.opponent_team.values()]
+            best = predict_best(mine, opp, model_path)
+            if best is not None:
+                perm = best[0]
+                # Showdown は1始まりの並びで6体すべてを並べる (先頭3体が選出)
+                rest = [i for i in range(len(mons)) if i not in perm]
+                return "/team " + "".join(str(i + 1)
+                                          for i in list(perm) + rest)
+        except Exception:
+            pass
+        from champions_agent.env.search_expert import teampreview_order
+        return teampreview_order(battle)
+
+    player.teampreview = types.MethodType(_teampreview, player)
+
+
+# 既定は matchup。model を試したが効果がなく costs だけ残った (2026-07-30):
+#   配布条件 (certify model) 0.620 → 0.617 で横ばい
+#   相性条件                 0.572 → 0.518 と悪化 (学習と評価の分布ずれ)
+#   fps 250 → 212 (選出モデルの推論で学習量が約15%減)
+# 「学習時の選出を配布時に揃える」という仮説は棄却。TRAIN_SELECTION=model で再試行可。
+TRAIN_SELECTION = os.environ.get("TRAIN_SELECTION", "matchup")
+
+
+def apply_train_teampreview(player) -> None:
+    """学習ループ用の選出。TRAIN_SELECTION=model で選出モデルに切り替わる。
+
+    学習と評価で選出方式が食い違うとベンチの解釈ができなくなるので、
+    切替は必ず training_changes.json に記録すること。
+    """
+    if TRAIN_SELECTION == "model":
+        apply_model_teampreview(player)
+    else:
+        apply_matchup_teampreview(player)
+
+
 class MaskedSingleAgentWrapper(SingleAgentWrapper):
     """SingleAgentWrapper + MaskablePPO用の action_masks() 提供"""
 
@@ -142,10 +241,13 @@ class ChampionsSinglesEnv(SinglesEnv):
         obs_space = Box(low=-np.inf, high=np.inf, shape=(BATTLE_OBS_DIM,), dtype=np.float32)
         self.observation_spaces = {agent: obs_space for agent in self.possible_agents}
         # 選出はRLの行動空間 (26次元) の外で決まるため、環境側の両プレイヤーに
-        # 相性ベースの選出を入れる (既定のランダム選出はノイズ源)
+        # 明示的な選出を入れる (既定のランダム選出はノイズ源)。
+        # TRAIN_SELECTION=model で学習済み選出モデルを使う。配布アドバイザーは
+        # モデルの選出を提示しているので、そこで実際に生じる3体構成を操縦する
+        # 経験を積ませる狙い (認定測定 400戦: 相性0.572 → モデル0.620)。
         for agent in (getattr(self, "agent1", None), getattr(self, "agent2", None)):
             if agent is not None:
-                apply_matchup_teampreview(agent)
+                apply_train_teampreview(agent)
 
 
     def embed_battle(self, battle: AbstractBattle) -> np.ndarray:
@@ -259,7 +361,10 @@ def make_training_env(battle_format: str = TRAINING_BATTLE_FORMAT,
         try:
             from champions_agent.env.ranked_teams import RankedTeambuilder
             from champions_agent.train.opponent_pool import OWN_RANKED_TEAM_PROB
-            _own_ranked = RankedTeambuilder(rng=rng)
+            # 学習の条件を動かさないため上位60構築に固定 (選出モデル側の
+            # 実験と同時に学習分布が変わると、ベンチの解釈ができなくなる)
+            _own_ranked = RankedTeambuilder(top_n=60, rng=rng,
+                                            include_external=False)
 
             class _OwnMixedTeambuilder(ChampionsTeambuilder):
                 def yield_team(self) -> str:
@@ -314,7 +419,8 @@ def make_training_env(battle_format: str = TRAINING_BATTLE_FORMAT,
     opp_team = opp_teambuilder
     try:
         from champions_agent.env.ranked_teams import RankedTeambuilder
-        ranked_tb = RankedTeambuilder(rng=rng)
+        # 上と同じ理由で上位60構築に固定
+        ranked_tb = RankedTeambuilder(top_n=60, rng=rng, include_external=False)
 
         class _MixedTeambuilder(ChampionsTeambuilder):
             def yield_team(self) -> str:
@@ -342,15 +448,26 @@ def make_training_env(battle_format: str = TRAINING_BATTLE_FORMAT,
 
 
 def make_benchmark_player(battle_format: str = TRAINING_BATTLE_FORMAT,
-                          top_n: int = 60, **kwargs):
-    """評価用の固定ベンチマーク相手: 上位構築 x SimpleHeuristicsPlayer"""
+                          top_n: int = 60, team=None, **kwargs):
+    """評価用の固定ベンチマーク相手: 上位構築 x SimpleHeuristicsPlayer
+
+    ⚠ 既定のチームプールは上位60構築に固定し、取り込んだ外部構築も混ぜない。
+    ここが増えると過去のベンチ履歴と比較できなくなる (評価基準が動く)。
+    広げる場合は training_changes.json に記録し、compare_periods で
+    前後を切って読むこと。
+
+    team を渡すと差し替えられる。評価以外の用途 (選出データ収集など、
+    相手構築の種類を増やしたい場面) はこちらを使うこと。
+    """
     from poke_env.player import SimpleHeuristicsPlayer
     from champions_agent.env.ranked_teams import RankedTeambuilder
 
+    if team is None:
+        team = RankedTeambuilder(top_n=top_n, include_external=False)
     return SimpleHeuristicsPlayer(
         battle_format=battle_format,
         server_configuration=TrainingServerConfiguration,
-        team=RankedTeambuilder(top_n=top_n),
+        team=team,
         **kwargs,
     )
 
