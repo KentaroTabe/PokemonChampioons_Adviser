@@ -128,6 +128,13 @@ def apply_matrix_teampreview(player) -> None:
     均衡混合戦略から選出する (selection_model.predict_maximin)。
     条件付きモデルが無い/相手が見えない場合は汎用モデルのargmax、
     それも無ければ相性ベースへ落ちる。
+
+    実測 (2026-07-31, 各1,000戦・同一相手列・_best操縦):
+        相性0.539 / argmax 0.611 / 均衡 0.597
+    ベンチ相手の選出は決定的な相性ヒューリスティクスなので、読みを
+    外される前提の均衡は argmax に対して期待値を上げられない (差は
+    誤差の範囲)。均衡の価値は「相手がこちらの選出に適応してくる」
+    対人戦で出る想定であり、ベンチではargmaxを既定にしておく。
     """
     import types
     from champions_agent.agent.selection_model import (
