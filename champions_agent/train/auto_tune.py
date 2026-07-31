@@ -37,6 +37,15 @@ LADDER = [
     {"REWARD_SHAPE_SCALE": "0.3", "TRAIN_ENT_COEF": "0.01", "TRAIN_LR": "1.5e-4"},
 ]
 
+# A/B比較で採用が確定した設定。ラダーとは独立に auto_env.sh へ常に書き出す
+# (ラダーのリセットや再試行で採用済みの結論が消えないようにする)。
+# 2026-07-31 ko報酬を採用: control比 +0.040 (3,000戦x3シード,
+# 95%CI +0.025〜+0.054, 全シード符号一致, 事前登録判定で「採用」。
+# 1回目1,500戦は差+0.027で判定不能 → 事前登録の手順どおり倍増して確定)
+ADOPTED = {
+    "REWARD_OVERRIDE": "hp_diff_weight=0.3,faint_bonus=4.0,fainted_penalty=4.0",
+}
+
 
 def _log(msg: str) -> None:
     line = f"[auto_tune] {time.strftime('%m-%d %H:%M')} {msg}"
@@ -64,7 +73,7 @@ def _save_state(state: dict) -> None:
 
 def _write_env(config: dict) -> None:
     lines = ["# auto_tune が管理する学習設定 (train_nightly.sh が source する)"]
-    for k, v in config.items():
+    for k, v in {**config, **ADOPTED}.items():
         lines.append(f"export {k}={v}")
     ENV_PATH.write_text("\n".join(lines) + "\n")
 
