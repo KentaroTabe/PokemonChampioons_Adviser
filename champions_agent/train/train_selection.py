@@ -42,8 +42,14 @@ from champions_agent.config import MODELS_DIR, RANDOM_SEED
 DATA_PATH = Path(__file__).resolve().parent / "logs" / "selection_data.npz"
 
 
-def load_dataset(path: Path = DATA_PATH):
-    """収集データ -> (特徴量, 勝敗, メタ情報)"""
+def load_dataset(path: Path = DATA_PATH, opp_col: str = "team"):
+    """収集データ -> (特徴量, 勝敗, メタ情報)。
+
+    opp_col="team": 相手6体 (選出画面で見える情報) に条件付ける (既定)。
+    opp_col="sel" : 相手が実際に選出した3体 (opp_sel) に条件付ける。
+        選出の読み合いを解く利得行列 (payoff_matrix) 用のモデルは
+        こちらで学習する。3体判明している行だけを使う。
+    """
     if not path.exists():
         raise SystemExit(
             f"収集データがありません: {path}\n"
@@ -55,19 +61,32 @@ def load_dataset(path: Path = DATA_PATH):
     if not has_opp:
         print("  ⚠ 相手チームが記録されていない古いデータです "
               "(相手を見ない学習になります)。収集し直しを推奨")
-    feats, rewards = [], []
+    if opp_col == "sel" and "opp_sel" not in d.files:
+        raise SystemExit("opp_sel が記録されていないデータです。"
+                         "収集し直してください (2026-07-31以降の収集で記録)")
+    feats, rewards, rows = [], [], []
     for i in range(len(d["action"])):
         team = [str(s) for s in d["team"][i]]
-        # 相手6体は選出画面で見えている。使わないと「相手に応じた選出」を
-        # 学習できず、平均的に強い3体しか選べなくなる
-        opp = ([str(s) for s in d["opp_team"][i] if str(s)]
-               if has_opp else [])
+        if opp_col == "sel":
+            opp = [str(s) for s in d["opp_sel"][i] if str(s)]
+            if len(opp) < 3:
+                continue   # 相手の3体が判明しきらなかった対戦は使わない
+        else:
+            # 相手6体は選出画面で見えている。使わないと「相手に応じた選出」を
+            # 学習できず、平均的に強い3体しか選べなくなる
+            opp = ([str(s) for s in d["opp_team"][i] if str(s)]
+                   if has_opp else [])
         perm = SELECTION_PERMUTATIONS[int(d["action"][i])]
         feats.append(build_features(team, opp, perm))
         rewards.append(float(d["reward"][i]))
-    team_key = ["|".join(sorted(str(s) for s in t)) for t in d["team"]]
+        rows.append(i)
+    if not feats:
+        raise SystemExit(f"使える行がありません (opp_col={opp_col})")
+    rows = np.array(rows, dtype=np.int64)
+    team_key = ["|".join(sorted(str(s) for s in d["team"][i]))
+                for i in rows]
     # group: 対応のある収集 (--paired) で同一条件だった対戦の識別子。-1は対応なし
-    group = (d["group"].astype(np.int64) if "group" in d.files
+    group = (d["group"][rows].astype(np.int64) if "group" in d.files
              else np.full(len(rewards), -1, dtype=np.int64))
     return (np.stack(feats), np.array(rewards, dtype=np.float32),
             {"n": len(rewards), "teams": len(set(team_key)),
@@ -178,15 +197,17 @@ def _finetune_on_myteam(net, X, y, meta, lr: float, epochs: int = 200) -> None:
 
 def train(epochs: int = 300, lr: float = 1e-3, holdout: float = 0.2,
           finetune: bool = True, pair_weight: float = 0.5,
-          force: bool = False) -> None:
+          force: bool = False, cond_sel: bool = False) -> None:
     import torch
     from torch.optim import Adam
 
     torch.manual_seed(RANDOM_SEED)
     rng = np.random.default_rng(RANDOM_SEED)
 
-    X, y, meta = load_dataset()
-    print(f"[train_selection] データ {meta['n']}件 / チーム{meta['teams']}種 / "
+    X, y, meta = load_dataset(opp_col="sel" if cond_sel else "team")
+    tag = " (相手の実選出3体に条件付け)" if cond_sel else ""
+    print(f"[train_selection] データ {meta['n']}件{tag} / "
+          f"チーム{meta['teams']}種 / "
           f"特徴{X.shape[1]}次元 / 全体勝率{y.mean():.3f}")
     if meta["teams"] == 1:
         print("  ※ 単一チームのデータのため、学習結果はそのチーム専用")
@@ -277,6 +298,15 @@ def train(epochs: int = 300, lr: float = 1e-3, holdout: float = 0.2,
             return
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    if cond_sel:
+        # 条件付きモデルは利得行列 (payoff_matrix) 専用の別ファイル。
+        # 配布版/汎用モデル (相手6体に条件付け) とは入力の意味が違うため
+        # 上書きしてはいけない
+        from champions_agent.agent.selection_model import COND_MODEL_PATH
+        torch.save(net.state_dict(), COND_MODEL_PATH)
+        print(f"[train_selection] 条件付きモデル保存: {COND_MODEL_PATH}")
+        _report_top(net, X, y)
+        return
     # 微調整前の汎用モデルを別に残す。my_team に寄せた配布版では
     # 「毎戦チームが変わる」ベンチマークの測定に使えない
     torch.save(net.state_dict(), GENERAL_MODEL_PATH)
@@ -332,9 +362,13 @@ def main() -> None:
                     help="ペアワイズ損失の重み (0で無効)")
     ap.add_argument("--force", action="store_true",
                     help="平均予測を超えられなくても保存する")
+    ap.add_argument("--cond-sel", action="store_true",
+                    help="相手の実選出3体に条件付けたモデルを学習する "
+                         "(利得行列/読み合い用。opp_sel入りのデータが必要)")
     args = ap.parse_args()
     train(args.epochs, args.lr, args.holdout, finetune=not args.no_finetune,
-          pair_weight=args.pair_weight, force=args.force)
+          pair_weight=args.pair_weight, force=args.force,
+          cond_sel=args.cond_sel)
 
 
 if __name__ == "__main__":

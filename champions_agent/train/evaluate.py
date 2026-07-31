@@ -71,6 +71,40 @@ class ModelPlayer(RandomPlayer):
         return self.policy.choose_order(battle)
 
 
+class HybridPlayer(ModelPlayer):
+    """探索 (深さ2) + RL価値の葉評価で行動選択するPlayer。
+
+    従来のベンチはRL方策単体を測っていたが、配布アドバイザーは探索との
+    複合体を提示する。方策のPPO積み増しはベンチが動かないと実測済みの
+    ため (2.58Mステップで横ばい)、伸ばすべきは複合体で、それには複合体を
+    測るベンチ経路が要る。
+
+    葉評価のRL価値は advisor.rl_bridge 経由 (配布と同じ _best を読む)。
+    探索が行動を返せない局面 (情報不足など) はRL方策へフォールバック。
+    ⚠ use_value の効果は葉評価に使う _best の質に依存する。過去の
+    不安定 (0.41→0.64改善 / 0.44→0.34劣化) は _best の昇格が壊れていた
+    時期のもので、昇格修正後 (2026-07-30) の再測定が必要。
+    """
+
+    def __init__(self, *args, depth: int = 2, use_value: bool = True,
+                 **kwargs):
+        super().__init__(*args, **kwargs)
+        self._depth = depth
+        self._use_value = use_value
+
+    def choose_move(self, battle):
+        from champions_agent.env.search_expert import decide
+        try:
+            d = decide(battle, depth=self._depth, use_value=self._use_value)
+        except Exception:
+            d = None
+        if d is None:
+            return self.policy.choose_order(battle)
+        if d["kind"] == "move":
+            return self.create_order(d["move"], mega=d["mega"])
+        return self.create_order(d["pokemon"])
+
+
 async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
                           opponent_play_style: str | None = None,
                           n_battles: int = 50,
@@ -79,7 +113,8 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
                           checkpoint: str = "current",
                           selection: str = "matchup",
                           own_teams: str = "train",
-                          opp_seed: int | None = None) -> dict:
+                          opp_seed: int | None = None,
+                          agent: str = "policy") -> dict:
     """play_styleモデル vs (opponent_play_styleモデル or RandomPlayer) をn_battles戦させる。"""
     # 自分チーム: 以前は「生成チーム1個を全戦使い回し」(ConstantTeambuilder)
     # だったため、勝率がチームドローの当たり外れで±0.2以上振動し、方策の
@@ -123,7 +158,10 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
     # battle_against が返らなくなる (2026-07-27に夜間評価が5時間空転した実績。
     # 手動評価と学習ループの評価が同名だったのが原因)
     acc1, acc2 = _uniq_accounts()
-    player1 = ModelPlayer(
+    # agent="hybrid": 探索+RL価値の複合体 (配布アドバイザー相当) を測る。
+    # 従来の "policy" はRL方策単体
+    cls = HybridPlayer if agent == "hybrid" else ModelPlayer
+    player1 = cls(
         account_configuration=acc1,
         battle_format=battle_format,
         server_configuration=TrainingServerConfiguration,
@@ -183,6 +221,7 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
     result = {
         "play_style": play_style,
         "opponent": opponent_play_style or opponent_kind,
+        "agent": agent,
         "n_battles": n_battles,
         "wins": player1.n_won_battles,
         "win_rate": player1.n_won_battles / n_battles if n_battles else 0.0,
@@ -214,6 +253,10 @@ def main() -> None:
     parser.add_argument("--checkpoint", type=str, default="current",
                          choices=["current", "best"],
                          help="current=学習中の最新 (進捗測定) / best=_best (配布版の実力測定)")
+    parser.add_argument("--agent", type=str, default="policy",
+                         choices=["policy", "hybrid"],
+                         help="policy=RL方策単体 (既定・従来のベンチ) / "
+                              "hybrid=探索+RL価値の複合体 (配布相当)")
     args = parser.parse_args()
 
     if args.timeout > 0:
@@ -235,14 +278,16 @@ def main() -> None:
         opponent_kind=args.opponent,
         checkpoint=args.checkpoint,
         opp_seed=args.opp_seed,
+        agent=args.agent,
     ))
     print(f"[evaluate] {result}")
 
     # 評価結果の保存: vs Random は opponent_pool の勝率ゲート判定、
     # vs benchmark は最良チェックポイント保持とプール抽選の重み付けに使う
-    # (currentの測定のみ保存する。bestの再測定で昇格判定を汚さない)
+    # (currentの測定のみ保存する。bestの再測定で昇格判定を汚さない。
+    #  hybrid等の複合体は方策の学習進捗ではないので保存しない)
     if (not args.opponent_play_style and args.checkpoint == "current"
-            and not args.no_save):
+            and args.agent == "policy" and not args.no_save):
         import json
         from pathlib import Path
         log_dir = Path(__file__).resolve().parent / "logs"

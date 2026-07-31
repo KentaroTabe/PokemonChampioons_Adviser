@@ -39,6 +39,19 @@ def _to_id(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(name).lower())
 
 
+def _opp_selected(battle) -> list:
+    """相手が実際に選出した3体 (対戦後に判明した範囲。長さ3にパディング)。
+
+    選出画面では相手6体が見えるが、実際に出てくるのは3体。
+    「相手の選出に条件付けた勝率予測」(選出の読み合いを解く利得行列) の
+    学習にはこの3体が要る。対戦が早く終わると3体出きらないことがあり、
+    その場合は判明分のみ (残りは空文字)。
+    """
+    sel = [p.species for p in battle.opponent_team.values()
+           if getattr(p, "revealed", False)]
+    return (sel + [""] * 3)[:3]
+
+
 def _emb_of(species_list: list) -> np.ndarray:
     """種族列 -> 機能埋め込みの連結 (未収録種族はゼロ埋め)"""
     from tools.species_embedding import load, vector
@@ -154,7 +167,8 @@ async def collect_paired(n_groups: int, group_size: int, style: str,
         state["group"] = g
         await me.battle_against(opp, n_battles=len(state["perms"]))
 
-    obs, emb, act, rew, team, opp_team, group = [], [], [], [], [], [], []
+    obs, emb, act, rew, team, opp_team, group, opp_sel = \
+        [], [], [], [], [], [], [], []
     for tag, battle in me.battles.items():
         rec = records.get(tag)
         if rec is None or battle.won is None:
@@ -166,13 +180,15 @@ async def collect_paired(n_groups: int, group_size: int, style: str,
         team.append(rec["team"])
         opp_team.append(rec["opp_team"])
         group.append(rec["group"])
+        opp_sel.append(_opp_selected(battle))
     return {"obs": np.asarray(obs, dtype=np.float32),
             "emb": np.asarray(emb, dtype=np.float32),
             "action": np.asarray(act, dtype=np.int64),
             "reward": np.asarray(rew, dtype=np.float32),
             "team": np.asarray(team, dtype="<U24"),
             "opp_team": np.asarray(opp_team, dtype="<U24"),
-            "group": np.asarray(group, dtype=np.int64)}
+            "group": np.asarray(group, dtype=np.int64),
+            "opp_sel": np.asarray(opp_sel, dtype="<U24")}
 
 
 async def collect(n_battles: int, explore: float, style: str,
@@ -255,7 +271,7 @@ async def collect(n_battles: int, explore: float, style: str,
 
     await me.battle_against(opp, n_battles=n_battles)
 
-    obs, emb, act, rew, team, opp_team = [], [], [], [], [], []
+    obs, emb, act, rew, team, opp_team, opp_sel = [], [], [], [], [], [], []
     for tag, battle in me.battles.items():
         rec = records.get(tag)
         if rec is None or battle.won is None:
@@ -266,6 +282,7 @@ async def collect(n_battles: int, explore: float, style: str,
         rew.append(1.0 if battle.won else 0.0)
         team.append(rec["team"])
         opp_team.append(rec["opp_team"])
+        opp_sel.append(_opp_selected(battle))
     return {"obs": np.asarray(obs, dtype=np.float32),
             "emb": np.asarray(emb, dtype=np.float32),
             "action": np.asarray(act, dtype=np.int64),
@@ -273,7 +290,8 @@ async def collect(n_battles: int, explore: float, style: str,
             "team": np.asarray(team, dtype="<U24"),
             "opp_team": np.asarray(opp_team, dtype="<U24"),
             # -1 = 対応なし (毎戦チームを引き直しているので比較相手がいない)
-            "group": np.full(len(rew), -1, dtype=np.int64)}
+            "group": np.full(len(rew), -1, dtype=np.int64),
+            "opp_sel": np.asarray(opp_sel, dtype="<U24")}
 
 
 def _default_column(sample: np.ndarray, n: int) -> np.ndarray:
