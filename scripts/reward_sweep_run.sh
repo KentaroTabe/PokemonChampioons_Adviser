@@ -30,6 +30,10 @@ launchctl stop "$JOB" 2>/dev/null || true
 # 走っているサイクルが終わるのを待つ
 sleep 30
 
+# 本番を止めると、その子プロセスである Showdown も落ちる。
+# スイープ自身が対戦サーバーを確保する (切り離して起動するので巻き込まれない)
+bash scripts/ensure_showdown.sh 8100
+
 .venv/bin/python -m tools.reward_sweep \
   --steps "$STEPS" --rounds "$ROUNDS" --battles "$BATTLES" \
   --styles "$STYLES" --seeds "$SEEDS" ${ARMS:+--arms "$ARMS"} 2>/dev/null

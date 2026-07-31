@@ -1,6 +1,6 @@
 """コマンドを新しいセッションに切り離して起動する。
 
-    python -m tools.spawn_detached <ログのパス> <コマンド...>
+    python -m tools.spawn_detached [--cwd DIR] <ログのパス> <コマンド...>
     -> 起動したPIDを標準出力に1行で返す
 
 macOS には setsid が無い (util-linux のコマンド)。2026-07-31、これを知らずに
@@ -19,17 +19,22 @@ from pathlib import Path
 
 
 def main() -> None:
-    if len(sys.argv) < 3:
+    argv = sys.argv[1:]
+    cwd = None
+    if argv[:1] == ["--cwd"]:
+        cwd = argv[1]
+        argv = argv[2:]
+    if len(argv) < 2:
         print(__doc__)
         raise SystemExit(2)
-    log = Path(sys.argv[1])
-    cmd = sys.argv[2:]
+    log = Path(argv[0])
+    cmd = argv[1:]
 
     log.parent.mkdir(parents=True, exist_ok=True)
     # ログのファイルハンドルは子プロセスへ引き継がれる
     handle = log.open("w")
     proc = subprocess.Popen(
-        cmd,
+        cmd, cwd=cwd,
         stdout=handle, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
         start_new_session=True, close_fds=True,
     )

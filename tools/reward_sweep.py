@@ -232,10 +232,20 @@ def main() -> None:
                 t0 = time.time()
                 procs = [(v, train_cmd(v, style, args.steps, args.n_envs))
                          for v in VARIANTS]
+                codes = []
                 for v, p in procs:
                     code = p.wait()
+                    codes.append(code)
                     print(f"  {v['name']:8s} 終了 (exit={code}, "
                           f"{time.time() - t0:.0f}s)", flush=True)
+                # 全条件が失敗しているなら環境側の問題 (Showdown不在など)。
+                # 残りの回を回しても無駄で、本番の学習を止める時間だけが延びる
+                # (2026-07-31: 8100へ接続できず6回を空回りした)
+                if all(c != 0 for c in codes):
+                    log = SWEEP_ROOT / VARIANTS[0]["name"] / f"train_{style}.log"
+                    raise SystemExit(
+                        f"[sweep] 全条件の学習が失敗しました (第{rnd}回)。"
+                        f"中止します。ログ: {log}")
 
     print(f"\n[sweep] 評価前の確認", flush=True)
     if not check_distinct(styles) and not args.force:
