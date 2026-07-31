@@ -79,6 +79,30 @@ def _seed_dir(name: str) -> Path:
     return SWEEP_ROOT / name / "checkpoints"
 
 
+def _start_pause_heartbeat(max_hours: float = 12.0) -> None:
+    """PAUSE_TRAINING を定期的に touch するデーモンスレッドを起動する。
+
+    train_forever.sh はフラグが40分更新されないと異常終了とみなして学習を
+    再開する。従来はラウンド完了ごとに touch していたが、--eval-only や
+    3,000戦評価ではラウンドが無い/1区間が40分を超え、スイープの最中に
+    本番が再開してCPUを取り合ってしまう。
+    スレッド方式はプロセスが死ねば止まる (クラッシュからの自動復旧は維持)。
+    ハング (死なずに進まない) には max_hours の上限で保険をかける。
+    """
+    import threading
+
+    flag = REPO / "logs" / "PAUSE_TRAINING"
+    stop_at = time.time() + max_hours * 3600
+
+    def _beat():
+        while time.time() < stop_at:
+            if flag.exists():
+                flag.touch()
+            time.sleep(600)
+
+    threading.Thread(target=_beat, daemon=True).start()
+
+
 def _digest(path: Path) -> str:
     import hashlib
     return hashlib.md5(path.read_bytes()).hexdigest() if path.exists() else ""
@@ -204,6 +228,7 @@ def main() -> None:
                     help="1条件あたりの独立した学習回数")
     args = ap.parse_args()
     select_arms(args.arms, args.seeds)
+    _start_pause_heartbeat()
 
     if args.list:
         for v in VARIANTS:
