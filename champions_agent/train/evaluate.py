@@ -215,13 +215,17 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
     # 選出を学習環境と同じ相性ベースに揃える (両陣営に適用するので対称)。
     # 既定のランダム選出は勝敗にノイズを乗せ、ベンチの分解能を下げていた
     from champions_agent.env.showdown_env import (
-        apply_matchup_teampreview, apply_model_teampreview,
+        apply_matchup_teampreview, apply_matrix_teampreview,
+        apply_model_teampreview,
     )
     if selection == "model":
         # 自分側だけモデル選出にする (配布アドバイザーと同じ条件)。
         # 相手は相性のままにして、既存ベンチとの差が選出モデルの寄与だけに
         # なるようにする
         apply_model_teampreview(player1)
+    elif selection == "matrix":
+        # 読み合いの均衡解 (条件付きモデル + 利得行列)
+        apply_matrix_teampreview(player1)
     else:
         apply_matchup_teampreview(player1)
     apply_matchup_teampreview(player2)
@@ -268,6 +272,11 @@ def main() -> None:
                          help="policy=RL方策単体 (既定・従来のベンチ) / "
                               "hybrid=探索+RL価値の複合体 (配布相当) / "
                               "search=葉評価なしの純探索 (切り分け用)")
+    parser.add_argument("--selection", type=str, default="matchup",
+                         choices=["matchup", "model", "matrix"],
+                         help="自分側の選出: matchup=相性 (既定) / "
+                              "model=選出モデルargmax / "
+                              "matrix=読み合いの均衡解 (条件付きモデル)")
     args = parser.parse_args()
 
     if args.timeout > 0:
@@ -290,15 +299,17 @@ def main() -> None:
         checkpoint=args.checkpoint,
         opp_seed=args.opp_seed,
         agent=args.agent,
+        selection=args.selection,
     ))
     print(f"[evaluate] {result}")
 
     # 評価結果の保存: vs Random は opponent_pool の勝率ゲート判定、
     # vs benchmark は最良チェックポイント保持とプール抽選の重み付けに使う
     # (currentの測定のみ保存する。bestの再測定で昇格判定を汚さない。
-    #  hybrid等の複合体は方策の学習進捗ではないので保存しない)
+    #  hybrid等の複合体や選出モデルの測定は方策の学習進捗ではないので保存しない)
     if (not args.opponent_play_style and args.checkpoint == "current"
-            and args.agent == "policy" and not args.no_save):
+            and args.agent == "policy" and args.selection == "matchup"
+            and not args.no_save):
         import json
         from pathlib import Path
         log_dir = Path(__file__).resolve().parent / "logs"

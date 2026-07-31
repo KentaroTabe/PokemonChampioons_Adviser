@@ -120,6 +120,41 @@ def apply_matchup_teampreview(player) -> None:
     player.teampreview = types.MethodType(_teampreview, player)
 
 
+def apply_matrix_teampreview(player) -> None:
+    """プレイヤーの選出を「読み合いの均衡解」に差し替える。
+
+    相手も6体からこちらを見て3体を選ぶ同時手番ゲームとして、
+    自分120通り × 相手20通りの利得行列を条件付きモデルで作り、
+    均衡混合戦略から選出する (selection_model.predict_maximin)。
+    条件付きモデルが無い/相手が見えない場合は汎用モデルのargmax、
+    それも無ければ相性ベースへ落ちる。
+    """
+    import types
+    from champions_agent.agent.selection_model import (
+        GENERAL_MODEL_PATH, predict_best, predict_maximin,
+    )
+
+    def _teampreview(self, battle):
+        try:
+            mons = list(battle.team.values())
+            mine = [p.species for p in mons]
+            opp = [p.species for p in battle.opponent_team.values()]
+            got = predict_maximin(mine, opp)
+            if got is None:
+                got = predict_best(mine, opp, GENERAL_MODEL_PATH)
+            if got is not None:
+                perm = got[0]
+                rest = [i for i in range(len(mons)) if i not in perm]
+                return "/team " + "".join(str(i + 1)
+                                          for i in list(perm) + rest)
+        except Exception:
+            pass
+        from champions_agent.env.search_expert import teampreview_order
+        return teampreview_order(battle)
+
+    player.teampreview = types.MethodType(_teampreview, player)
+
+
 def apply_model_teampreview(player, path=None) -> None:
     """プレイヤーの選出を学習済み選出モデルに差し替える。
 
