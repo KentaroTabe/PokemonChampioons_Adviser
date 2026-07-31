@@ -20,6 +20,13 @@ if python -m tools.check_battle_active 1 >/dev/null 2>&1; then
   exit 0
 fi
 
+# 報酬スイープ等がCPUを空けるために立てるフラグを尊重する
+# (2026-07-31、スイープの最中に13時の本ジョブが走り測定と競合していた)
+if [ -f logs/PAUSE_TRAINING ]; then
+  echo "[evolve_daily] PAUSE_TRAINING があるため中止: $(date)" >> "$LOG"
+  exit 0
+fi
+
 {
   echo "===== 進化探索 (日次): $(date) ====="
   # 埋め込みは使用率DBとメタに依存するので毎回作り直す (数秒)
