@@ -18,8 +18,15 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
     echo "[watch] NG: スイープのプロセスが見当たりません (異常終了した可能性)"
     exit 1
   fi
-  uniq_n=$(md5 -q logs/reward_sweep/*_s*/battle_policy_"${STYLE}".zip 2>/dev/null \
-    | sort -u | wc -l | tr -d ' ')
+  # 保存先は <条件>/checkpoints/ 配下 (CHAMPIONS_MODELS_DIR の直下ではない)
+  files=$(ls logs/reward_sweep/*_s*/checkpoints/battle_policy_"${STYLE}".zip \
+    2>/dev/null | wc -l | tr -d ' ')
+  uniq_n=$(md5 -q logs/reward_sweep/*_s*/checkpoints/battle_policy_"${STYLE}".zip \
+    2>/dev/null | sort -u | wc -l | tr -d ' ')
+  if [ "${files:-0}" -eq 0 ]; then
+    echo "[watch] NG: チェックポイントが1つも見つかりません (パスの指定を確認)"
+    exit 1
+  fi
   if [ "${uniq_n:-0}" -ge 2 ]; then
     echo "[watch] OK: 条件ごとのチェックポイントが分岐しました (${uniq_n}種)"
     exit 0
