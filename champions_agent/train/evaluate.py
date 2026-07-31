@@ -75,15 +75,18 @@ class HybridPlayer(ModelPlayer):
     """探索 (深さ2) + RL価値の葉評価で行動選択するPlayer。
 
     従来のベンチはRL方策単体を測っていたが、配布アドバイザーは探索との
-    複合体を提示する。方策のPPO積み増しはベンチが動かないと実測済みの
-    ため (2.58Mステップで横ばい)、伸ばすべきは複合体で、それには複合体を
-    測るベンチ経路が要る。
+    複合体を提示する。複合体を測るためのベンチ経路。
 
     葉評価のRL価値は advisor.rl_bridge 経由 (配布と同じ _best を読む)。
     探索が行動を返せない局面 (情報不足など) はRL方策へフォールバック。
-    ⚠ use_value の効果は葉評価に使う _best の質に依存する。過去の
-    不安定 (0.41→0.64改善 / 0.44→0.34劣化) は _best の昇格が壊れていた
-    時期のもので、昇格修正後 (2026-07-30) の再測定が必要。
+
+    ⚠ 実測 (2026-07-31, 各1,000戦・同一相手列・_best):
+        policy 0.560 / hybrid 0.320 / search(葉評価なし) 0.326
+    「探索を主・方策を従」にするこの構成は方策単体より大幅に弱い。
+    原因は葉評価ではなく探索エンジン自体 (手書き評価の深さ2) が
+    方策に大きく劣ること。方策はBC後の自己対戦で教師 (探索) を
+    とうに超えている。複合で方策を超えたい場合は、方策を主にして
+    探索は限定的な役割 (確定勝ち筋の検出など) に絞る設計が必要。
     """
 
     def __init__(self, *args, depth: int = 2, use_value: bool = True,
@@ -159,8 +162,14 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
     # 手動評価と学習ループの評価が同名だったのが原因)
     acc1, acc2 = _uniq_accounts()
     # agent="hybrid": 探索+RL価値の複合体 (配布アドバイザー相当) を測る。
+    # agent="search": 葉評価なしの純探索 (価値関数の寄与の切り分け用)。
     # 従来の "policy" はRL方策単体
-    cls = HybridPlayer if agent == "hybrid" else ModelPlayer
+    extra = {}
+    if agent in ("hybrid", "search"):
+        cls = HybridPlayer
+        extra["use_value"] = (agent == "hybrid")
+    else:
+        cls = ModelPlayer
     player1 = cls(
         account_configuration=acc1,
         battle_format=battle_format,
@@ -168,6 +177,7 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
         team=own_teambuilder,
         play_style=play_style,
         checkpoint=checkpoint,
+        **extra,
     )
 
     if opponent_kind == "benchmark":
@@ -254,9 +264,10 @@ def main() -> None:
                          choices=["current", "best"],
                          help="current=学習中の最新 (進捗測定) / best=_best (配布版の実力測定)")
     parser.add_argument("--agent", type=str, default="policy",
-                         choices=["policy", "hybrid"],
+                         choices=["policy", "hybrid", "search"],
                          help="policy=RL方策単体 (既定・従来のベンチ) / "
-                              "hybrid=探索+RL価値の複合体 (配布相当)")
+                              "hybrid=探索+RL価値の複合体 (配布相当) / "
+                              "search=葉評価なしの純探索 (切り分け用)")
     args = parser.parse_args()
 
     if args.timeout > 0:
