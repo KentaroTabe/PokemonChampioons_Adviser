@@ -326,6 +326,197 @@ def mutate(team_text: str, pool_rows: list, rng: random.Random,
     return "\n\n".join(blocks)
 
 
+# ------------------------------------------------------------------
+# セット内変異 (種族は保ったまま型を変える局所改善)
+# ------------------------------------------------------------------
+# 上位プレイヤーの改善は種族の総入れ替えより「持ち物・技1枠・配分」の
+# 局所手術が主。従来の mutate (種族入れ替えのみ) ではこの近傍を探索
+# できなかった。
+#
+# ⚠ 候補をランキング上位チームのテキストから引いてはいけない。
+# オープンデータにはチームごとの技・配分が含まれず、テキスト生成時に
+# メタ最頻セットで埋められるため、「変種」は持ち物しか違わない
+# (2026-07-31に実測: gengar変種2件の観測技は4種のみ)。
+# 使用率DB (move_usage / item_usage / spread_usage) から使用率重みで
+# 引く。実際に使われている型の範囲なので一貫性も保たれる。
+
+_usage_cache: dict | None = None
+
+
+def _usage_alternatives() -> dict:
+    """種族id -> {"moves": [(技, %)], "items": [(持ち物, %)],
+    "spreads": [(性格, EV文字列, %)]} (最新スナップショット)"""
+    global _usage_cache
+    if _usage_cache is None:
+        out: dict = {}
+        with db.get_connection() as conn:
+            snap = db.latest_snapshot_id(conn, fmt=USAGE_TARGET_FORMAT)
+            if snap:
+                for r in conn.execute(
+                        """SELECT pokemon_name, move_name, usage_percent
+                           FROM move_usage WHERE snapshot_id = ?""", (snap,)):
+                    out.setdefault(_to_id(r["pokemon_name"]),
+                                   {"moves": [], "items": [], "spreads": []})[
+                        "moves"].append((r["move_name"], r["usage_percent"]))
+                for r in conn.execute(
+                        """SELECT pokemon_name, item_name, usage_percent
+                           FROM item_usage WHERE snapshot_id = ?""", (snap,)):
+                    out.setdefault(_to_id(r["pokemon_name"]),
+                                   {"moves": [], "items": [], "spreads": []})[
+                        "items"].append((r["item_name"], r["usage_percent"]))
+                for r in conn.execute(
+                        """SELECT pokemon_name, nature, evs, usage_percent
+                           FROM spread_usage WHERE snapshot_id = ?""", (snap,)):
+                    out.setdefault(_to_id(r["pokemon_name"]),
+                                   {"moves": [], "items": [], "spreads": []})[
+                        "spreads"].append(
+                            (r["nature"], r["evs"], r["usage_percent"]))
+        _usage_cache = out
+    return _usage_cache
+
+
+def _block_item(block: str) -> str | None:
+    head = block.strip().split("\n")[0]
+    return head.split(" @ ", 1)[1].strip() if " @ " in head else None
+
+
+def _block_moves(block: str) -> list:
+    return [l[2:].strip() for l in block.strip().split("\n")
+            if l.startswith("- ")]
+
+
+def _replace_item(block: str, item: str | None) -> str:
+    lines = block.strip().split("\n")
+    species = lines[0].split(" @ ")[0].strip()
+    lines[0] = f"{species} @ {item}" if item else species
+    return "\n".join(lines)
+
+
+def _team_items(blocks: list, skip: int) -> set:
+    """アイテムクローズ用: skip以外のスロットが持つアイテムid集合"""
+    return {_to_id(_block_item(b)) for i, b in enumerate(blocks)
+            if i != skip and _block_item(b)}
+
+
+def _evs_line(evs: str) -> str | None:
+    """EV文字列 "H/A/B/C/D/S" -> "EVs: 2 HP / 32 SpA" 形式の行。
+
+    クランプ (各32/合計66) は PokemonSet.to_showdown_text と同じ規則
+    (champions modの能力ポイント仕様)。
+    """
+    labels = ["HP", "Atk", "Def", "SpA", "SpD", "Spe"]
+    values = []
+    for v in str(evs or "").split("/"):
+        try:
+            values.append(max(0, min(32, int(v))))
+        except ValueError:
+            values.append(0)
+    while sum(values) > 66:
+        i = values.index(max(values))
+        values[i] -= sum(values) - 66 if values[i] >= sum(values) - 66 else 1
+    parts = [f"{v} {l}" for l, v in zip(labels, values) if v]
+    return ("EVs: " + " / ".join(parts)) if parts else None
+
+
+def mutate_set(team_text: str, rng: random.Random,
+               constraint: "Constraint | None" = None) -> str:
+    """1枠の種族は保ったまま、型 (持ち物/技1枠/性格・配分) を変える。
+
+    候補は使用率DBから使用率重みで引く (実際に使われている型の範囲)。
+    種族が変わらないため Constraint の変更数 (種チームからの距離) は
+    増えない。固定枠は型もいじらない (ユーザーが実機で使うセットを
+    勝手に変えない) ため mutable_slots に従う。
+    """
+    blocks = [b.strip() for b in team_text.strip().split("\n\n")]
+    slots = (constraint.mutable_slots(team_text) if constraint
+             else list(range(len(blocks))))
+    if not slots:
+        return team_text
+    # 不発 (その種族の使用率データが無い等) のときは別の操作/別のスロットを
+    # 試す。不発をそのまま返すとGAが同一個体を再評価して対戦数を無駄にする
+    kinds = ["item", "move", "spread"]
+    rng.shuffle(kinds)
+    rng.shuffle(slots)
+    for idx in slots:
+        sid = _to_id(blocks[idx].split("\n")[0].split(" @ ")[0])
+        alt = _usage_alternatives().get(sid)
+        if not alt:
+            continue
+        for kind in kinds:
+            if kind == "item":
+                used = _team_items(blocks, idx)
+                cur = _to_id(_block_item(blocks[idx]) or "")
+                cands = [(_sanitize_item(n), w) for n, w in alt["items"]]
+                cands = [(n, w) for n, w in cands
+                         if n and _to_id(n) not in used and _to_id(n) != cur]
+                if cands:
+                    item = rng.choices([n for n, _ in cands],
+                                       weights=[max(w, 0.1)
+                                                for _, w in cands], k=1)[0]
+                    blocks[idx] = _replace_item(blocks[idx], item)
+                    return "\n\n".join(blocks)
+
+            if kind == "move":
+                cur_moves = _block_moves(blocks[idx])
+                cur_ids = {_to_id(m) for m in cur_moves}
+                cands = [(n, w) for n, w in alt["moves"]
+                         if _to_id(n) not in cur_ids]
+                if cur_moves and cands:
+                    new_move = rng.choices([n for n, _ in cands],
+                                           weights=[max(w, 0.1)
+                                                    for _, w in cands],
+                                           k=1)[0]
+                    old = rng.choice(cur_moves)
+                    lines = blocks[idx].split("\n")
+                    for i, l in enumerate(lines):
+                        if l.strip() == f"- {old}":
+                            lines[i] = f"- {new_move}"
+                            break
+                    blocks[idx] = "\n".join(lines)
+                    return "\n\n".join(blocks)
+
+            if kind == "spread":
+                lines = blocks[idx].split("\n")
+                ev_i = next((i for i, l in enumerate(lines)
+                             if l.startswith("EVs: ")), None)
+                nat_i = next((i for i, l in enumerate(lines)
+                              if l.endswith(" Nature")), None)
+                # championsスナップショットは nature が None (EVのみ記録)。
+                # その場合はEV行だけを差し替え、性格は現在のまま残す
+                cands = [(nat, evs, w) for nat, evs, w in alt["spreads"]
+                         if evs and _evs_line(evs)]
+                if ev_i is not None and cands:
+                    nat, evs, _w = rng.choices(
+                        cands, weights=[max(c[2], 0.1) for c in cands],
+                        k=1)[0]
+                    new_ev = _evs_line(evs)
+                    new_nat = (f"{str(nat).capitalize()} Nature"
+                               if nat and nat_i is not None else None)
+                    changed = lines[ev_i] != new_ev or \
+                        (new_nat is not None and lines[nat_i] != new_nat)
+                    if not changed:
+                        continue   # 現在と同じ配分を引いた
+                    lines[ev_i] = new_ev
+                    if new_nat is not None:
+                        lines[nat_i] = new_nat
+                    blocks[idx] = "\n".join(lines)
+                    return "\n\n".join(blocks)
+
+    return team_text
+
+
+def mutate_any(team_text: str, pool_rows: list, rng: random.Random,
+               constraint: "Constraint | None" = None,
+               set_prob: float = 0.5) -> str:
+    """set_prob の確率でセット内変異、残りは従来の種族入れ替え"""
+    if rng.random() < set_prob:
+        out = mutate_set(team_text, rng, constraint)
+        if out != team_text:
+            return out
+        # セット内変異が不発 (候補なし) なら種族入れ替えへフォールバック
+    return mutate(team_text, pool_rows, rng, constraint)
+
+
 async def evaluate_population(pop: list, n_battles: int, opp_builder,
                               concurrency: int = 3,
                               opponents: list = None) -> None:
@@ -452,8 +643,9 @@ async def run(args, log=None) -> dict:
         while len(survivors) + len(children) < args.population:
             parent = survivors[len(children) % len(survivors)]
             children.append({"origin": "mutant",
-                             "text": mutate(parent["text"], pool_rows, rng,
-                                            constraint),
+                             "text": mutate_any(parent["text"], pool_rows,
+                                                rng, constraint,
+                                                getattr(args, "set_mut", 0.5)),
                              "fitness": None})
         # 生存者も次世代で測り直す (評価値の再利用はしない。
         # 上の evaluate_population の注記を参照)
@@ -510,6 +702,9 @@ def main() -> None:
                     help="入れ替え禁止の種族 (カンマ区切り、日本語可)")
     ap.add_argument("--max-changes", type=int, default=2,
                     help="種チームから同時に変えてよい枠数")
+    ap.add_argument("--set-mut", type=float, default=0.5,
+                    help="セット内変異 (持ち物/技/型) を使う確率。"
+                         "0で従来の種族入れ替えのみ")
     ap.add_argument("--seed", type=int, default=None)
     args = ap.parse_args()
     asyncio.run(run(args))
