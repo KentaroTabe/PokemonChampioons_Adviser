@@ -42,13 +42,15 @@ from champions_agent.config import MODELS_DIR, RANDOM_SEED
 DATA_PATH = Path(__file__).resolve().parent / "logs" / "selection_data.npz"
 
 
-def load_dataset(path: Path = DATA_PATH, opp_col: str = "team"):
+def load_dataset(path: Path = DATA_PATH, opp_col: str = "team",
+                 builder=build_features):
     """収集データ -> (特徴量, 勝敗, メタ情報)。
 
     opp_col="team": 相手6体 (選出画面で見える情報) に条件付ける (既定)。
     opp_col="sel" : 相手が実際に選出した3体 (opp_sel) に条件付ける。
         選出の読み合いを解く利得行列 (payoff_matrix) 用のモデルは
         こちらで学習する。3体判明している行だけを使う。
+    builder: 特徴量関数 (v2比較では build_features_v2 を渡す)
     """
     if not path.exists():
         raise SystemExit(
@@ -77,7 +79,7 @@ def load_dataset(path: Path = DATA_PATH, opp_col: str = "team"):
             opp = ([str(s) for s in d["opp_team"][i] if str(s)]
                    if has_opp else [])
         perm = SELECTION_PERMUTATIONS[int(d["action"][i])]
-        feats.append(build_features(team, opp, perm))
+        feats.append(builder(team, opp, perm))
         rewards.append(float(d["reward"][i]))
         rows.append(i)
     if not feats:
@@ -197,15 +199,26 @@ def _finetune_on_myteam(net, X, y, meta, lr: float, epochs: int = 200) -> None:
 
 def train(epochs: int = 300, lr: float = 1e-3, holdout: float = 0.2,
           finetune: bool = True, pair_weight: float = 0.5,
-          force: bool = False, cond_sel: bool = False) -> None:
+          force: bool = False, cond_sel: bool = False,
+          features: str = "v1") -> None:
     import torch
     from torch.optim import Adam
 
     torch.manual_seed(RANDOM_SEED)
     rng = np.random.default_rng(RANDOM_SEED)
 
-    X, y, meta = load_dataset(opp_col="sel" if cond_sel else "team")
+    if features == "v2":
+        from champions_agent.agent.selection_features_v2 import (
+            build_features_v2,
+        )
+        builder = build_features_v2
+    else:
+        builder = build_features
+    X, y, meta = load_dataset(opp_col="sel" if cond_sel else "team",
+                              builder=builder)
     tag = " (相手の実選出3体に条件付け)" if cond_sel else ""
+    if features == "v2":
+        tag += " [v2特徴量: 型情報+メタ事前分布]"
     print(f"[train_selection] データ {meta['n']}件{tag} / "
           f"チーム{meta['teams']}種 / "
           f"特徴{X.shape[1]}次元 / 全体勝率{y.mean():.3f}")
@@ -231,7 +244,11 @@ def train(epochs: int = 300, lr: float = 1e-3, holdout: float = 0.2,
     Xva = torch.from_numpy(X[val_idx])
     yva = torch.from_numpy(y[val_idx]).unsqueeze(1)
 
-    net = make_net()
+    if features == "v2":
+        from champions_agent.agent.selection_features_v2 import make_net_v2
+        net = make_net_v2()
+    else:
+        net = make_net()
     # weight_decay: 未知チーム検証で train 0.09 / val 0.30 と強い過学習が
     # 出たため正則化する (選出データは1戦=1サンプルで枚数が稼ぎにくい)
     opt = Adam(net.parameters(), lr=lr, weight_decay=1e-3)
@@ -298,6 +315,14 @@ def train(epochs: int = 300, lr: float = 1e-3, holdout: float = 0.2,
             return
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    if features == "v2":
+        # v2は比較実験中の候補。v1の配布/汎用/微調整には触れない
+        from champions_agent.agent.selection_features_v2 import (
+            V2_GENERAL_MODEL_PATH,
+        )
+        torch.save(net.state_dict(), V2_GENERAL_MODEL_PATH)
+        print(f"[train_selection] v2汎用モデル保存: {V2_GENERAL_MODEL_PATH}")
+        return
     if cond_sel:
         # 条件付きモデルは利得行列 (payoff_matrix) 専用の別ファイル。
         # 配布版/汎用モデル (相手6体に条件付け) とは入力の意味が違うため
@@ -365,10 +390,13 @@ def main() -> None:
     ap.add_argument("--cond-sel", action="store_true",
                     help="相手の実選出3体に条件付けたモデルを学習する "
                          "(利得行列/読み合い用。opp_sel入りのデータが必要)")
+    ap.add_argument("--features", default="v1", choices=["v1", "v2"],
+                    help="v2=型情報+メタ事前分布を加えた特徴量 (比較実験用。"
+                         "保存先も selection_model_v2_general.pt に分離)")
     args = ap.parse_args()
     train(args.epochs, args.lr, args.holdout, finetune=not args.no_finetune,
           pair_weight=args.pair_weight, force=args.force,
-          cond_sel=args.cond_sel)
+          cond_sel=args.cond_sel, features=args.features)
 
 
 if __name__ == "__main__":
