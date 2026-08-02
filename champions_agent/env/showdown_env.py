@@ -120,6 +120,34 @@ def apply_matchup_teampreview(player) -> None:
     player.teampreview = types.MethodType(_teampreview, player)
 
 
+def apply_model2_teampreview(player) -> None:
+    """プレイヤーの選出を v2特徴量モデル (型情報+メタ事前分布) に差し替える。
+
+    v1との並行比較用。モデルが読めなければ相性ベースに落ちる
+    (v1へ落とすと比較が「v1 vs ほぼv1」になり差が消えるため落とさない)。
+    """
+    import types
+    from champions_agent.agent.selection_features_v2 import predict_best_v2
+
+    def _teampreview(self, battle):
+        try:
+            mons = list(battle.team.values())
+            mine = [p.species for p in mons]
+            opp = [p.species for p in battle.opponent_team.values()]
+            best = predict_best_v2(mine, opp)
+            if best is not None:
+                perm = best[0]
+                rest = [i for i in range(len(mons)) if i not in perm]
+                return "/team " + "".join(str(i + 1)
+                                          for i in list(perm) + rest)
+        except Exception:
+            pass
+        from champions_agent.env.search_expert import teampreview_order
+        return teampreview_order(battle)
+
+    player.teampreview = types.MethodType(_teampreview, player)
+
+
 def apply_matrix_teampreview(player) -> None:
     """プレイヤーの選出を「読み合いの均衡解」に差し替える。
 
