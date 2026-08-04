@@ -113,6 +113,16 @@ class Advisor:
             b = advice["best"]
             kind = "技" if b["kind"] == "move" else "交代"
             lines.append(f"◎ 推奨: [{kind}] {b['name']} (スコア {b['score']})")
+        # 技が未読取で交代しか評価できていない場合は、末尾の📱提案では
+        # 気づかれない (2026-08-05接続テストのフィードバック)。
+        # 推奨行の直後に目立つ形で明示する
+        moves_unread = (advice.get("actions")
+                        and not any(a["kind"] == "move"
+                                    for a in advice["actions"]))
+        if moves_unread:
+            lines.append("  ⚠ 技が未読取のため交代のみで評価しています。"
+                         "技選択画面を一度開くと技とPPを読み取り、"
+                         "技を含めた評価に切り替わります")
         for a in advice["actions"][:6]:
             kind = "技" if a["kind"] == "move" else "交代"
             lines.append(f"  - [{kind}] {a['name']}: {a['score']}  {a['reason']}")
@@ -144,6 +154,8 @@ class Advisor:
             mark = "(判明済)" if t.get("revealed") else "(予測)"
             lines.append(f"  ⚠ 最大脅威: {t['move_id']} {mark} "
                          f"被ダメ {t['dmg_min']:.0f}〜{t['dmg_max']:.0f}%")
-        if advice.get("suggestion"):
+        if advice.get("suggestion") and not (
+                moves_unread and "技選択画面" in advice["suggestion"]):
+            # 上部の警告と同内容の提案は重複表示しない
             lines.append(f"  📱 {advice['suggestion']}")
         return "\n".join(lines)
