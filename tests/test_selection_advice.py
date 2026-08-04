@@ -128,6 +128,31 @@ def test_insufficient_info():
     print("test_insufficient_info OK")
 
 
+def test_partial_reads_do_not_crash():
+    """読み取りが部分的な瞬間 (2026-08-05接続テストで実際に発生) の耐性。
+
+    - 相手のタイプ2枠のうち1枠だけ読めて [str, None] になる
+    - 自分のパーティに種族未判明の欠け枠が混ざる
+    どちらも従来は join / インデックスずれで落ちていた。
+    """
+    state = make_state()
+    # 相手: タイプ欠け (Noneが混ざる)
+    state["opponent"]["party"][0]["types"] = ["ほのお", None]
+    state["opponent"]["party"][1]["types"] = [None]
+    # 自分: 2枠が未判明 (species_idなし) — モデル推しのインデックスずれ検証
+    state["player"]["party"][1]["species_id"] = None
+    state["player"]["party"][1]["species_ja"] = None
+    state["player"]["party"][3]["species_id"] = None
+    state["player"]["party"][3]["species_ja"] = None
+    advice = advise_selection(state)
+    text = format_selection_advice(advice)   # 従来ここで落ちた
+    assert isinstance(text, str) and text
+    if advice.get("model_pick"):
+        assert all(n for n in advice["model_pick"]["names"]), \
+            advice["model_pick"]
+    print("test_partial_reads_do_not_crash OK")
+
+
 if __name__ == "__main__":
     test_basic_recommendation()
     test_weather_synergy_and_mega_form()
@@ -135,4 +160,5 @@ if __name__ == "__main__":
     test_type_inference()
     test_done_detection()
     test_insufficient_info()
+    test_partial_reads_do_not_crash()
     print("\nALL OK")
