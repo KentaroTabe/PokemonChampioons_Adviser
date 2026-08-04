@@ -137,6 +137,12 @@ class Advisor:
             lines.append("  🎲 択評価 (期待値/最悪ケース保証値):")
             for sl in gt["summary_lines"]:
                 lines.append(f"     {sl}")
+        if gt and gt.get("setup_bait"):
+            # 起点警告: 推奨上位の行動が相手の積みを最善応手にしてしまう場合
+            # (千日手に見える様子見が起点になる、の定説)
+            b = gt["setup_bait"][0]
+            lines.append(f"  ⚠ 起点注意: {b['my']} は相手の {b['opp']} が"
+                         "最善応手 (積みの起点を与えます)")
         if advice.get("endgame_note"):
             lines.append(f"  🏁 {advice['endgame_note']}")
         rl = advice.get("rl_hint")

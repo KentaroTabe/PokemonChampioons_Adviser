@@ -22,7 +22,29 @@ from advisor.damage import MonView, FieldView, calc_damage
 from advisor.dex import get_dex
 
 ROLL_GROUPS = ((0.25, "min"), (0.5, "avg"), (0.25, "max"))
-RISK_WEIGHT = 0.4   # 推奨値 = (1-w)*期待値 + w*保証値
+RISK_WEIGHT = 0.4   # 推奨値 = (1-w)*期待値 + w*保証値 (中立局面での基準)
+
+# 相手の積み技 (起点警告と応手評価用)。網羅より安定を優先した代表セット
+SETUP_MOVE_IDS = {
+    "swordsdance", "nastyplot", "dragondance", "calmmind", "irondefense",
+    "bulkup", "quiverdance", "shellsmash", "agility", "curse", "howl",
+    "workup", "coil", "shiftgear", "victorydance", "tidyup",
+}
+
+
+def dynamic_risk_weight(position: float) -> float:
+    """局面の有利不利で保証値の重みを変える (定説「負けている時は分散を
+    取り、勝っている時は堅く」)。
+
+    position: 最善手の期待値 (≒この局面の評価)。
+    優勢 (+0.3以上) → w=0.6 で択を避けて堅く寄せる。
+    劣勢 (−0.3以下) → w=0.15 で期待値 (アップサイド) に賭ける。
+    中立 (0) では従来の RISK_WEIGHT≒0.4 に一致し、挙動の連続性を保つ。
+    """
+    lo, hi = -0.3, 0.3
+    w_min, w_max = 0.15, 0.6
+    t = min(1.0, max(0.0, (position - lo) / (hi - lo)))
+    return w_min + t * (w_max - w_min)
 
 # --- 補助技の効果モデル (探索で「効果ゼロの技」にしないため) ---
 PROTECT_MOVES = {"protect", "detect", "banefulbunker", "spikyshield",
@@ -322,15 +344,28 @@ def search(me: SimSide, opp: SimSide, my_moves: list, opp_move_pool: list,
             expected += oa.prob * v
             if v < worst:
                 worst, worst_reply = v, oa.label
-        recommended = (1 - RISK_WEIGHT) * expected + RISK_WEIGHT * worst
         results.append({
             "label": ma.label, "kind": ma.kind,
             "move_id": ma.move_id, "bench_index": ma.bench_index,
             "expected": round(expected, 3),
             "worst": round(worst, 3),
             "worst_reply": worst_reply,
-            "recommended": round(recommended, 3),
             "risky": (expected - worst) > 0.35,
         })
+
+    # 状況依存のリスク調整: 局面評価 (=最善手の期待値) で保証値の重みを
+    # 変えてから推奨順を決める。優勢なら択を避け、劣勢なら賭ける
+    position = max(r["expected"] for r in results)
+    w = dynamic_risk_weight(position)
+    for r in results:
+        r["recommended"] = round((1 - w) * r["expected"] + w * r["worst"], 3)
     results.sort(key=lambda r: -r["recommended"])
-    return {"actions": results, "matrix": matrix}
+
+    # 起点警告: 最悪応手が積み技の行動 (その行動を選ぶと相手の最善が
+    # 積みになる = 起点を与えている)
+    setup_bait = [{"my": r["label"], "opp": r["worst_reply"]}
+                  for r in results
+                  if r.get("worst_reply") in SETUP_MOVE_IDS]
+    return {"actions": results, "matrix": matrix,
+            "risk_weight": round(w, 3), "position": round(position, 3),
+            "setup_bait": setup_bait}
