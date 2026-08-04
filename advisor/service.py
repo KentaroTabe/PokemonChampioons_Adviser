@@ -145,6 +145,8 @@ class Advisor:
                          "最善応手 (積みの起点を与えます)")
         if advice.get("endgame_note"):
             lines.append(f"  🏁 {advice['endgame_note']}")
+        if advice.get("sacrifice_note"):
+            lines.append(f"  🪦 {advice['sacrifice_note']}")
         rl = advice.get("rl_hint")
         if rl and rl.get("top"):
             picks = " / ".join(f"{t['label']} {t['prob']:.0%}"

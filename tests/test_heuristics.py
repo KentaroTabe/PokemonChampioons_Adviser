@@ -92,9 +92,56 @@ def test_search_emits_new_fields():
           f"(w={r['risk_weight']}, bait={len(r['setup_bait'])})")
 
 
+def test_sacrifice_note_ranking_and_wincon():
+    """H2: 死に出しは無償降臨価値で選び、勝ち筋は温存する"""
+    from advisor.engine import _sacrifice_note
+    actions = [
+        {"kind": "move", "name": "たきのぼり", "score": 10.0},
+        # A: 打点は高いが勝ち筋 -> 温存されるべき
+        {"kind": "switch", "name": "ラグラージ", "score": 5.0,
+         "counter": 90.0, "incoming": 40.0, "hazard": 0.0},
+        # B: 次点の打点 -> こちらが捨て先/後続になる
+        {"kind": "switch", "name": "ペリッパー", "score": 4.0,
+         "counter": 70.0, "incoming": 30.0, "hazard": 0.0},
+    ]
+    endgame = "勝ち筋: ラグラージ が相手の残り全員に勝てる見込み。"
+    note = _sacrifice_note(actions, endgame)
+    assert "ペリッパー" in note and "無償" in note, note
+    assert "温存" in note and "ラグラージ" in note, note
+    # 勝ち筋でなければ最大打点がそのまま選ばれる
+    note2 = _sacrifice_note(actions, "")
+    assert "ラグラージ" in note2 and "温存" not in note2, note2
+    # 設置技のダメージは無償降臨でも受けるため割り引かれる
+    actions3 = [
+        {"kind": "switch", "name": "A", "score": 0,
+         "counter": 80.0, "incoming": 0.0, "hazard": 25.0},
+        {"kind": "switch", "name": "B", "score": 0,
+         "counter": 70.0, "incoming": 0.0, "hazard": 0.0},
+    ]
+    note3 = _sacrifice_note(actions3, "")
+    assert "B を無償で出す" in note3, note3
+    print("test_sacrifice_note_ranking_and_wincon OK")
+
+
+def test_sacrifice_note_shown_in_text():
+    from advisor.service import Advisor
+    advice = {
+        "ok": True,
+        "best": {"kind": "move", "name": "なみのり", "score": 20.0},
+        "actions": [{"kind": "move", "name": "なみのり", "score": 20.0,
+                     "reason": "削り"}],
+        "sacrifice_note": "死に出しプラン: ...",
+    }
+    text = Advisor.__new__(Advisor).format_advice(advice)
+    assert "🪦" in text and "死に出しプラン" in text, text
+    print("test_sacrifice_note_shown_in_text OK")
+
+
 if __name__ == "__main__":
     test_dynamic_risk_weight_shape()
     test_losing_position_prefers_upside()
     test_setup_bait_detection()
     test_search_emits_new_fields()
+    test_sacrifice_note_ranking_and_wincon()
+    test_sacrifice_note_shown_in_text()
     print("\nALL OK")
