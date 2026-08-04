@@ -1500,16 +1500,38 @@ def _extract_watch_side_columns(img, state: BattleStateV2, resolver) -> None:
             state.player.party.append(mon)
             idx = len(state.player.party) - 1
         mon = state.player.party[idx]
+        if frac[0] == 0 and mon.status != "fainted":
+            # 裏付けの無い 0/xxx 読みでひんし確定しない。ハイライト演出等の
+            # 誤読1フレームで健在のポケモンが偽ひんし化し、以後の評価から
+            # 消えた (2026-08-04監査: 健在183/183のラグラージがT8のwatchで
+            # 0%→fainted固定)。faintイベントの裏付けがある場合のみ通す
+            lf = getattr(state, "last_faint", None)
+            if not (lf and lf.get("side") == "player"):
+                continue
         _set_hp(state, "player", mon, cur=frac[0], mx=frac[1])
         if frac[0] == 0 and mon.hp_current == 0:
             mon.status = "fainted"
 
     # 右列: 相手パーティのHP% (視認済みのポケモンのみ表示される)
+    # ⚠ 行の並びは視認順で、選出画面由来のparty配列の順とは一致しない。
+    # 位置対応で書くとHPが別ポケモンへ入れ替わり続ける (2026-08-04監査:
+    # ガルーラ/キラフロルのHPが0%↔100%で往復し「ひんし後の再表示」候補を
+    # 量産した)。スプライト照合で行の主を特定できた場合のみ書き込む
+    from vision.spriteid import identify_species_color
+    cands = [(p.species_id, 0.5, p.species_ja)
+             for p in state.opponent.party if p.species_id and p.species_ja]
     for i, z in enumerate(zones.WATCH_OPP):
-        if i >= len(state.opponent.party):
-            break
         hp_text = ocr.read_zone_text(img, z["hp_text"], mode="panel",
                                      allowlist="0123456789%")
         pct = ocr.parse_percent(hp_text)
-        if pct is not None:
-            state.opponent.party[i].hp_percent = float(pct)
+        if pct is None or not cands:
+            continue
+        try:
+            hit = identify_species_color(crop(img, z["panel"]), cands)
+        except Exception:
+            hit = None
+        if not hit:
+            continue
+        idx2 = state.opponent.find_by_species(hit[1])
+        if idx2 is not None:
+            state.opponent.party[idx2].hp_percent = float(pct)
