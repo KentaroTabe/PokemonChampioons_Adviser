@@ -96,9 +96,19 @@ def test_backfill_static_info():
     b.types = ["ドラゴン"]            # 部分読取 (正しくは はがね/ドラゴン)
     state.player.party = [a, b]
 
+    # 相手側: タイプアイコン誤分類 (ガルーラ=じめん) が図鑑で訂正される
+    o = PokemonState()
+    o.species_ja, o.species_id = "ガルーラ", "kangaskhan"
+    o.types = ["じめん"]
+    o2 = PokemonState()          # 種族未特定の枠はアイコン情報を保持する
+    o2.types = ["ほのお", "ひこう"]
+    state.opponent.party = [o, o2]
+
     backfill_player_static(state, resolver)
     assert set(a.types) == {"みず", "じめん"}, a.types
     assert set(b.types) == {"はがね", "ドラゴン"}, b.types
+    assert set(o.types) == {"ノーマル"}, o.types
+    assert o2.types == ["ほのお", "ひこう"], o2.types
     # 登録があれば持ち物も補完される (登録が無い環境ではスキップ)
     from advisor.my_team import get_my_build
     if (get_my_build("ラグラージ") or {}).get("item_ja"):

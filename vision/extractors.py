@@ -453,16 +453,22 @@ def _species_types_ja(species_id: str) -> list:
 
 
 def backfill_player_static(state: BattleStateV2, resolver) -> None:
-    """自分側パーティの静的情報を確定ソースから補完する。
+    """両パーティの静的情報を確定ソースから補完する。
 
-    - タイプ: 種族が判明していれば図鑑から確定 (画面読みの部分読取
-      「ブリジュラス=ドラゴンのみ」等を上書きして正す)
-    - 持ち物/特性: 画面から読めていなければ my_team 登録から補完
-
-    画面のOCRだけに頼ると「種族は分かっているのにタイプ欄が空」が
-    残り続ける (2026-08-05接続テスト: ラグラージ/ガブリアスのタイプ空、
-    ガブリアスの持ち物None)。相手側には適用しない (登録情報が無い)。
+    - タイプ (両陣営): 種族が判明していれば図鑑から確定。
+      自分側は部分読取 (「ブリジュラス=ドラゴンのみ」) の訂正、
+      相手側は選出画面のタイプアイコン誤分類の訂正
+      (2026-08-05接続テスト: ガルーラがアイコン誤分類の「じめん」のまま
+      1試合続いた。名前はHUDの別経路で正しく確定していたのに、
+      アイコン由来のタイプを図鑑で正す処理が無かった)
+    - 持ち物/特性 (自分側のみ): 画面から読めていなければ my_team 登録から補完
     """
+    for p in state.opponent.party:
+        if not p.species_id:
+            continue
+        t = _species_types_ja(p.species_id)
+        if t and set(p.types or []) != set(t):
+            p.types = t
     for p in state.player.party:
         if not p.species_id:
             continue
