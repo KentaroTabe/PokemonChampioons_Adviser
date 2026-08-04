@@ -489,8 +489,14 @@ def link_active_to_party(state: BattleStateV2, side_name: str) -> None:
         val = getattr(active, attr)
         if val is not None:
             setattr(slot, attr, val)
-    slot.volatiles = active.volatiles
-    slot.boosts = active.boosts
+    # ブースト/揮発状態はプレースホルダが実情報を持つときだけ上書きする。
+    # HUD由来のプレースホルダは常に空なので、無条件代入だとイベントで
+    # 付けたランク変化が毎フレーム消える (2026-08-05接続テスト:
+    # つるぎのまい+2が次のcommand画面で{}に戻っていた)
+    if any(active.boosts.values()):
+        slot.boosts = active.boosts
+    if active.volatiles:
+        slot.volatiles = active.volatiles
     slot.moves = active.moves or slot.moves
     slot.revealed_moves = list({*slot.revealed_moves, *active.revealed_moves})
     slot.is_mega = active.is_mega or slot.is_mega

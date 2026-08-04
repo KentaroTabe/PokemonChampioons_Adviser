@@ -367,6 +367,34 @@ def test_forfeit_win():
     print("test_forfeit_win OK")
 
 
+def test_boost_survives_active_relink():
+    """イベントで付けたランク変化が、HUD由来プレースホルダとのマージで
+    消えないこと (2026-08-05接続テスト: つるぎのまい+2が次のcommand画面で
+    {}に戻っていた。link_active_to_partyが空ブーストで上書きしていた)"""
+    from vision.extractors import link_active_to_party
+    from vision.state import PokemonState
+    state, p = new_parser()
+    p.parse("相手は ルカリオを 繰り出した!")
+    fired = p.parse("相手の ルカリオの つるぎのまい!")
+    assert any(f.startswith("move_opponent") for f in fired), fired
+    fired = p.parse("相手の ルカリオの こうげきが ぐーんとあがった!")
+    assert any(f.startswith("boost_opponent_atk") for f in fired), fired
+    mon = state.opponent.active()
+    assert mon.boosts.get("atk", 0) >= 2, mon.boosts
+
+    # HUD再読で生えた同種族のプレースホルダ (ブースト情報なし) をマージ
+    ph = PokemonState()
+    ph.species_ja, ph.species_id = "ルカリオ", "lucario"
+    state.opponent.party.append(ph)
+    state.opponent.active_index = len(state.opponent.party) - 1
+    link_active_to_party(state, "opponent")
+    mon = state.opponent.active()
+    assert mon.boosts.get("atk", 0) >= 2, \
+        f"マージでランク変化が消えた: {mon.boosts}"
+    assert "つるぎのまい" in mon.revealed_moves, mon.revealed_moves
+    print("test_boost_survives_active_relink OK")
+
+
 if __name__ == "__main__":
     test_weather_and_terrain()
     test_switch_and_mega()
@@ -380,6 +408,7 @@ if __name__ == "__main__":
     test_ability_species_validation()
     test_fixed_ability()
     test_event_dedup()
+    test_boost_survives_active_relink()
     test_side_attribution_ocr_garble()
     test_charge_vs_electromorphosis()
     test_rate_extraction()

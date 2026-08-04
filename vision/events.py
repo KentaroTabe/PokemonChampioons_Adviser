@@ -405,6 +405,11 @@ class EventParser:
                 self.state.protect_streak[side] = 0
 
         self.state.log_event(source, cleaned, event_id=",".join(fired) or None)
+        if fired:
+            # 生テキストを残す: 「技の取りこぼし」「誤帰属」の事後調査は
+            # イベントIDだけでは不可能 (2026-08-05接続テストで、どの誤読が
+            # 原因か特定できなかった)
+            print(f"[events] {','.join(fired)} <- {cleaned[:48]}")
         return fired
 
     # --------------------------------------------------------------
