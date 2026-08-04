@@ -556,6 +556,30 @@ async def evaluate_population(pop: list, n_battles: int, opp_builder,
                 m["cum_battles"] = m.get("cum_battles", 0) + r["n_battles"]
 
 
+# 対面操作 (ピボット) 技と起点作り技。読み負荷の説明変数として数える
+# (定説: 対面操作は後出しじゃんけんを先出しに変える = 読みを構造的に減らす)
+PIVOT_MOVE_IDS = {
+    "uturn", "voltswitch", "flipturn", "partingshot", "teleport",
+    "batonpass", "shedtail", "chillyreception",
+}
+HAZARD_MOVE_IDS = {
+    "stealthrock", "spikes", "toxicspikes", "stickyweb",
+}
+
+
+def _team_style_counts(team_text: str) -> dict:
+    """チームのピボット技/起点作り技の本数 (技idで判定)"""
+    pivots = hazards = 0
+    for block in team_text.strip().split("\n\n"):
+        for m in _block_moves(block):
+            mid = _to_id(m)
+            if mid in PIVOT_MOVE_IDS:
+                pivots += 1
+            if mid in HAZARD_MOVE_IDS:
+                hazards += 1
+    return {"pivots": pivots, "hazards": hazards}
+
+
 def _burden_correlation(pop: list, log) -> None:
     """世代内の (勝率, 読み負荷) の相関を表示する (Phase Bの材料)。
 
@@ -578,6 +602,20 @@ def _burden_correlation(pop: list, log) -> None:
     r = sxy / (sxx * syy) ** 0.5
     log(f"  読み負荷: 平均{my:.1f}回/戦 / 勝率との相関 r={r:+.2f} "
         f"(n={n}, 負なら「択が多いほど弱い」)")
+    # 説明変数: ピボット技が多いチームは読み負荷が低いか (定説の検証)
+    pv = [(m["read_burden"], _team_style_counts(m["text"])["pivots"])
+          for m in pop if m.get("read_burden") is not None]
+    if len(pv) >= 4:
+        n2 = len(pv)
+        mb = sum(p[0] for p in pv) / n2
+        mp = sum(p[1] for p in pv) / n2
+        sxy2 = sum((b - mb) * (p - mp) for b, p in pv)
+        sxx2 = sum((b - mb) ** 2 for b, _ in pv)
+        syy2 = sum((p - mp) ** 2 for _, p in pv)
+        if sxx2 > 0 and syy2 > 0:
+            r2 = sxy2 / (sxx2 * syy2) ** 0.5
+            log(f"  ピボット技: 平均{mp:.1f}本 / 読み負荷との相関 "
+                f"r={r2:+.2f} (負なら「対面操作が択を減らす」)")
 
 
 def _paired_verdict(pop: list, log) -> None:
@@ -652,6 +690,7 @@ async def run(args, log=None) -> dict:
         _burden_correlation(pop, log)
         history.append([{"origin": m["origin"], "fitness": m["fitness"],
                          "read_burden": m.get("read_burden"),
+                         "style": _team_style_counts(m["text"]),
                          "cum_wins": m.get("cum_wins"),
                          "cum_battles": m.get("cum_battles"),
                          "species": _team_species(m["text"])} for m in pop])

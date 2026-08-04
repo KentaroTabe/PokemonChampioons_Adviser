@@ -302,14 +302,31 @@ def _position_value(me: SimSide, opp: SimSide, my_moves: list,
     return best
 
 
+WINCON_PRESERVE_W = 0.15   # 勝ち筋個体のHP残存ボーナスの重み
+
+
+def _mon_hp_of(side: SimSide, sid: str) -> float:
+    """陣営内の指定種族の残りHP割合 (いなければ0)"""
+    if side.active is not None and side.active.species_id == sid:
+        return max(0.0, side.active_hp)
+    for mv, hp in side.bench:
+        if mv.species_id == sid:
+            return max(0.0, hp)
+    return 0.0
+
+
 def search(me: SimSide, opp: SimSide, my_moves: list, opp_move_pool: list,
            my_field: Optional[FieldView] = None,
            opp_field: Optional[FieldView] = None,
            depth: int = 2,
-           leaf_value_fn=None) -> dict:
+           leaf_value_fn=None,
+           wincon_sid: Optional[str] = None) -> dict:
     """利得行列を構築し、行動ごとの期待値/保証値/択リスクを返す。
 
     my_moves: 自分の技ID列。opp_move_pool: [(move_id, weight)]。
+    wincon_sid: 勝ち筋 (endgame検出) の種族ID。指定すると葉評価に
+        その個体のHP残存ボーナスを加え、勝ち筋を消耗させる行動を
+        相対的に下げる (定説「勝ち筋は大切に扱う」)。
     戻り値 {"actions": [{label, kind, expected, worst, worst_reply,
                           recommended, risky}], "matrix": {...}}
     """
@@ -337,9 +354,14 @@ def search(me: SimSide, opp: SimSide, my_moves: list, opp_move_pool: list,
                         rv = leaf_value_fn(m2, o2)
                         if rv is not None:
                             base = 0.7 * base + 0.3 * rv
+                    if wincon_sid:
+                        base += WINCON_PRESERVE_W * _mon_hp_of(m2, wincon_sid)
                     v += w * base
                 else:
-                    v += w * static_eval(m2, o2)
+                    sv = static_eval(m2, o2)
+                    if wincon_sid:
+                        sv += WINCON_PRESERVE_W * _mon_hp_of(m2, wincon_sid)
+                    v += w * sv
             matrix.append({"my": ma.label, "opp": oa.label, "v": round(v, 3)})
             expected += oa.prob * v
             if v < worst:

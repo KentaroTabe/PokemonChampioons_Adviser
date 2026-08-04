@@ -137,6 +137,58 @@ def test_sacrifice_note_shown_in_text():
     print("test_sacrifice_note_shown_in_text OK")
 
 
+def test_wincon_preservation_in_search():
+    """H3: 勝ち筋を消耗させる行動が、勝ち筋指定時に相対的に下がる"""
+    from advisor.dex import get_dex
+    from advisor.search import SimSide, search
+    from advisor.damage import MonView
+
+    dex = get_dex()
+
+    def mon(sid):
+        sp = dex.species(sid)
+        return MonView(species_id=sid, name_ja=sid, types=sp["types"],
+                       base=sp["baseStats"],
+                       ev={"atk": 252, "spa": 252, "spe": 252})
+
+    # 自分: アクティブ=ガブリアス / 控え=勝ち筋のラグラージ。
+    # 相手: ギャラドス (こちらの交代先にも打点がある)
+    me = SimSide(active=mon("garchomp"), active_hp=0.6,
+                 bench=[(mon("swampert"), 1.0)])
+    opp = SimSide(active=mon("gyarados"), active_hp=1.0, bench=[])
+    kw = dict(my_moves=["earthquake", "stoneedge"],
+              opp_move_pool=[("waterfall", 0.6), ("icefang", 0.4)],
+              depth=1)
+    base = search(me, opp, **kw)
+    guarded = search(me, opp, wincon_sid="swampert", **kw)
+
+    def rec(result, label):
+        return next(a["recommended"] for a in result["actions"]
+                    if a["label"] == label)
+
+    sw = "交代:swampert"
+    stay = "earthquake"
+    # 勝ち筋指定で「勝ち筋を交代で晒す」行動の相対値が下がる
+    rel_base = rec(base, sw) - rec(base, stay)
+    rel_guarded = rec(guarded, sw) - rec(guarded, stay)
+    assert rel_guarded < rel_base, (rel_base, rel_guarded)
+    print(f"test_wincon_preservation_in_search OK "
+          f"(相対値 {rel_base:+.3f} → {rel_guarded:+.3f})")
+
+
+def test_team_style_counts():
+    """H4: ピボット技/起点作り技のカウント"""
+    from tools.evolve_teams import _team_style_counts
+    text = (
+        "Pelipper @ damprock\nLevel: 50\n- uturn\n- hurricane\n\n"
+        "Swampert @ swampertite\nLevel: 50\n- flipturn\n- stealthrock\n\n"
+        "Garchomp @ focussash\nLevel: 50\n- earthquake\n- spikes\n"
+    )
+    c = _team_style_counts(text)
+    assert c == {"pivots": 2, "hazards": 2}, c
+    print("test_team_style_counts OK")
+
+
 if __name__ == "__main__":
     test_dynamic_risk_weight_shape()
     test_losing_position_prefers_upside()
@@ -144,4 +196,6 @@ if __name__ == "__main__":
     test_search_emits_new_fields()
     test_sacrifice_note_ranking_and_wincon()
     test_sacrifice_note_shown_in_text()
+    test_wincon_preservation_in_search()
+    test_team_style_counts()
     print("\nALL OK")

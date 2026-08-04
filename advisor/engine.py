@@ -545,22 +545,31 @@ def evaluate(state: dict, resolver=None) -> dict:
         except Exception:
             pass
 
+    # 詰み筋・勝ち筋判定 (残存メンバーの1v1マッチアップ行列)。
+    # 探索より先に計算し、勝ち筋の温存を探索の葉評価へ渡す (定説H3)
+    endgame = ""
+    wincon_sid = None
+    try:
+        endgame = _run_endgame(my_state, opp_state, resolver)
+        import re as _re
+        m = _re.search(r"勝ち筋:\s*(\S+)\s*が", endgame or "")
+        if m:
+            wincon_sid = next(
+                (p.get("species_id") for p in my_state.get("party", [])
+                 if p.get("species_ja") == m.group(1)), None)
+    except Exception:
+        pass
+
     # 同時手番探索 (択の利得行列 + 2手読み)。失敗しても本体は返す
     gtheory = None
     try:
         gtheory = _run_search(state, my_state, my_view, my_p,
                               opp_state, opp_view, resolver,
-                              pool, my_field, opp_field)
+                              pool, my_field, opp_field,
+                              wincon_sid=wincon_sid)
     except Exception:
         import traceback
         traceback.print_exc()
-
-    # 詰み筋・勝ち筋判定 (残存メンバーの1v1マッチアップ行列)
-    endgame = ""
-    try:
-        endgame = _run_endgame(my_state, opp_state, resolver)
-    except Exception:
-        pass
 
     # RL学習済み方策 (行動分布+局面価値)。表示に加えて、
     # 行動スコアへ確率をブレンドし推奨順位にも反映する
@@ -743,7 +752,7 @@ def _hp_frac_of(p: dict) -> float:
 
 
 def _run_search(state, my_state, my_view, my_p, opp_state, opp_view,
-                resolver, pool, my_field, opp_field):
+                resolver, pool, my_field, opp_field, wincon_sid=None):
     """状態辞書 -> SimSide を組み立てて同時手番探索を実行する"""
     from advisor.search import SimSide, search
     if my_view is None or opp_view is None:
@@ -793,7 +802,7 @@ def _run_search(state, my_state, my_view, my_p, opp_state, opp_view,
 
     result = search(me, opp, my_moves, pool,
                     my_field=my_field, opp_field=opp_field,
-                    leaf_value_fn=leaf_fn)
+                    leaf_value_fn=leaf_fn, wincon_sid=wincon_sid)
     # 表示用の要約 (上位3行動)
     lines = []
     for a in result["actions"][:3]:
