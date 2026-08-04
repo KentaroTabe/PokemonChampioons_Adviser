@@ -34,6 +34,31 @@ EFFECTIVENESS_MAP = [
 ]
 
 
+def resolve_my_species(resolver, name_text: str, cutoff: float = 0.72):
+    """自分側の種族名解決: 登録済みmy_teamの名前を優先する。
+
+    汎用のファジー解決は全種族が母集団のため、OCRの揺れで近縁の別種へ
+    飛ぶことがある (2026-08-05接続テスト: ゲッコウガ→ケイコウオ。
+    「ケイコウガ」のような誤読はケイコウオとの類似度の方が高くなる)。
+    自分側の画面に出るのは登録済みパーティだけなので、まず登録名と照合し、
+    十分近ければそれを採用する。登録が無い/遠い場合は従来の解決に落ちる。
+    """
+    try:
+        from advisor.my_team import registered_species_ja
+        names = registered_species_ja()
+        if names:
+            best = max(names, key=lambda n: difflib.SequenceMatcher(
+                None, name_text, n).ratio())
+            if difflib.SequenceMatcher(
+                    None, name_text, best).ratio() >= 0.55:
+                r = resolver.resolve_species(best, cutoff=0.9)
+                if r:
+                    return r
+    except Exception:
+        pass
+    return resolver.resolve_species(name_text, cutoff=cutoff)
+
+
 def _normalize_hint(text: str) -> Optional[str]:
     from vision.normalize import loose_key
     key = loose_key(text)
@@ -119,7 +144,7 @@ def extract_selection(img, state: BattleStateV2, resolver) -> None:
                                        allowlist=ocr.KATAKANA_ALLOWLIST)
         if not name_text:
             continue
-        sp = resolver.resolve_species(name_text, cutoff=0.72)
+        sp = resolve_my_species(resolver, name_text, cutoff=0.72)
         mon = PokemonState()
         if sp:
             mon.species_ja, mon.species_id = sp[0], sp[1]
@@ -427,6 +452,48 @@ def _species_types_ja(species_id: str) -> list:
     return []
 
 
+def backfill_player_static(state: BattleStateV2, resolver) -> None:
+    """両パーティの静的情報を確定ソースから補完する。
+
+    - タイプ (両陣営): 種族が判明していれば図鑑から確定。
+      自分側は部分読取 (「ブリジュラス=ドラゴンのみ」) の訂正、
+      相手側は選出画面のタイプアイコン誤分類の訂正
+      (2026-08-05接続テスト: ガルーラがアイコン誤分類の「じめん」のまま
+      1試合続いた。名前はHUDの別経路で正しく確定していたのに、
+      アイコン由来のタイプを図鑑で正す処理が無かった)
+    - 持ち物/特性 (自分側のみ): 画面から読めていなければ my_team 登録から補完
+    """
+    for p in state.opponent.party:
+        if not p.species_id:
+            continue
+        t = _species_types_ja(p.species_id)
+        if t and set(p.types or []) != set(t):
+            p.types = t
+    for p in state.player.party:
+        if not p.species_id:
+            continue
+        t = _species_types_ja(p.species_id)
+        if t and set(p.types or []) != set(t):
+            p.types = t
+        if p.item_id and p.ability_id:
+            continue
+        try:
+            from advisor.my_team import get_my_build
+            build = get_my_build(p.species_ja)
+        except Exception:
+            build = None
+        if not build:
+            continue
+        if not p.item_id and build.get("item_ja"):
+            it = resolver.resolve(build["item_ja"], "items", cutoff=0.9)
+            if it:
+                p.item_ja, p.item_id = it[0], it[1]
+        if not p.ability_id and build.get("ability_ja"):
+            ab = resolver.resolve(build["ability_ja"], "abilities", cutoff=0.9)
+            if ab:
+                p.ability_ja, p.ability_id = ab[0], ab[1]
+
+
 def link_active_to_party(state: BattleStateV2, side_name: str) -> None:
     """種族が判明した場に出ているポケモンを、選出画面由来のパーティ枠へ紐付ける。
 
@@ -464,8 +531,14 @@ def link_active_to_party(state: BattleStateV2, side_name: str) -> None:
         val = getattr(active, attr)
         if val is not None:
             setattr(slot, attr, val)
-    slot.volatiles = active.volatiles
-    slot.boosts = active.boosts
+    # ブースト/揮発状態はプレースホルダが実情報を持つときだけ上書きする。
+    # HUD由来のプレースホルダは常に空なので、無条件代入だとイベントで
+    # 付けたランク変化が毎フレーム消える (2026-08-05接続テスト:
+    # つるぎのまい+2が次のcommand画面で{}に戻っていた)
+    if any(active.boosts.values()):
+        slot.boosts = active.boosts
+    if active.volatiles:
+        slot.volatiles = active.volatiles
     slot.moves = active.moves or slot.moves
     slot.revealed_moves = list({*slot.revealed_moves, *active.revealed_moves})
     slot.is_mega = active.is_mega or slot.is_mega
@@ -603,7 +676,7 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
                                  allowlist=ocr.KATAKANA_ALLOWLIST)
     if my_name:
         me.display_name = my_name
-        sp = resolver.resolve_species(my_name, cutoff=0.8)
+        sp = resolve_my_species(resolver, my_name, cutoff=0.8)
         if sp:
             # 表示名=種族名のケース (ニックネーム未設定)
             idx = state.player.find_by_species(sp[0])
@@ -1427,16 +1500,38 @@ def _extract_watch_side_columns(img, state: BattleStateV2, resolver) -> None:
             state.player.party.append(mon)
             idx = len(state.player.party) - 1
         mon = state.player.party[idx]
+        if frac[0] == 0 and mon.status != "fainted":
+            # 裏付けの無い 0/xxx 読みでひんし確定しない。ハイライト演出等の
+            # 誤読1フレームで健在のポケモンが偽ひんし化し、以後の評価から
+            # 消えた (2026-08-04監査: 健在183/183のラグラージがT8のwatchで
+            # 0%→fainted固定)。faintイベントの裏付けがある場合のみ通す
+            lf = getattr(state, "last_faint", None)
+            if not (lf and lf.get("side") == "player"):
+                continue
         _set_hp(state, "player", mon, cur=frac[0], mx=frac[1])
         if frac[0] == 0 and mon.hp_current == 0:
             mon.status = "fainted"
 
     # 右列: 相手パーティのHP% (視認済みのポケモンのみ表示される)
+    # ⚠ 行の並びは視認順で、選出画面由来のparty配列の順とは一致しない。
+    # 位置対応で書くとHPが別ポケモンへ入れ替わり続ける (2026-08-04監査:
+    # ガルーラ/キラフロルのHPが0%↔100%で往復し「ひんし後の再表示」候補を
+    # 量産した)。スプライト照合で行の主を特定できた場合のみ書き込む
+    from vision.spriteid import identify_species_color
+    cands = [(p.species_id, 0.5, p.species_ja)
+             for p in state.opponent.party if p.species_id and p.species_ja]
     for i, z in enumerate(zones.WATCH_OPP):
-        if i >= len(state.opponent.party):
-            break
         hp_text = ocr.read_zone_text(img, z["hp_text"], mode="panel",
                                      allowlist="0123456789%")
         pct = ocr.parse_percent(hp_text)
-        if pct is not None:
-            state.opponent.party[i].hp_percent = float(pct)
+        if pct is None or not cands:
+            continue
+        try:
+            hit = identify_species_color(crop(img, z["panel"]), cands)
+        except Exception:
+            hit = None
+        if not hit:
+            continue
+        idx2 = state.opponent.find_by_species(hit[1])
+        if idx2 is not None:
+            state.opponent.party[idx2].hp_percent = float(pct)

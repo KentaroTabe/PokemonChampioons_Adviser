@@ -355,6 +355,10 @@ async def evaluate_team_text(team_text: str, n_battles: int = 20,
     構築の強さだけを比較する。
     """
     me, ev_used = _make_player(team_text, "A", evaluator, preview)
+    # 読み負荷 (重い択) の測定。行動選択は変えず、深さ1の択評価 (~4ms) を
+    # ターンごとに回して数えるだけ (docs/READ_BURDEN_DESIGN.md Phase A)
+    from champions_agent.env.read_burden import attach_burden_meter, summarize
+    attach_burden_meter(me)
     if opp_text is not None:
         opp, _ = _make_player(opp_text, "B", ev_used, preview)
     else:
@@ -390,7 +394,8 @@ async def evaluate_team_text(team_text: str, n_battles: int = 20,
     outcomes = [1 if b.won else 0 for b in me.battles.values()]
     return {"n_battles": n_battles, "wins": me.n_won_battles,
             "win_rate": me.n_won_battles / n_battles if n_battles else 0.0,
-            "outcomes": outcomes, "evaluator": ev_used}
+            "outcomes": outcomes, "evaluator": ev_used,
+            "read_burden": summarize(me, n_battles)}
 
 
 def main():

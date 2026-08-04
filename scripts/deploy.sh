@@ -19,6 +19,15 @@ if [ "$1" != "--force" ]; then
   fi
 fi
 
+# もともと起動していなければ、反映のために起動はしない (2026-08-05指示)。
+# 停止中 = 意図的に止めている状態であり、deployが勝手に起こすと
+# テスト終了後などに常駐へ戻ってしまう。次回の起動時に最新コードが載る
+if ! lsof -nP -iTCP:8000 -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "アドバイザー(8000) は停止中のため起動しません"
+  echo "(次回 start_connection_test.sh / start_all_nohup.sh 起動時に最新コードが反映されます)"
+  exit 0
+fi
+
 pkill -f "uvicorn server:app_asgi" 2>/dev/null
 sleep 2
 mkdir -p logs

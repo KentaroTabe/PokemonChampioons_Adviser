@@ -350,6 +350,7 @@ def evaluate(state: dict, resolver=None) -> dict:
     my_vols = {str(v).lower() for v in (my_p.get("volatiles") or [])}
     disabled_ids = {v.split("_", 1)[1] for v in my_vols
                     if v.startswith("disable_")}
+    can_ko_first = False   # 先に動いて倒せる技があるか (死に出し判定用)
     for slot in my_p.get("moves") or []:
         mid = slot.get("move_id")
         mv = dex.move(mid)
@@ -434,6 +435,7 @@ def evaluate(state: dict, resolver=None) -> dict:
                     score -= 10.0
             if strikes_first and ko_prob >= 0.5:
                 score += 25.0
+                can_ko_first = True
                 reason_parts.append("先制技で先に倒せる見込み"
                                     if mv_pri > 0 and not i_am_faster
                                     else "先手で倒せる見込み")
@@ -523,6 +525,10 @@ def evaluate(state: dict, resolver=None) -> dict:
             "name": p.get("species_ja") or p.get("display_name") or f"{i}番",
             "score": round(score, 1),
             "reason": reason,
+            # 死に出し評価用の内訳 (無償降臨なら incoming を受けずに着地)
+            "counter": round(counter, 1),
+            "incoming": round(incoming, 1),
+            "hazard": round(hazard_dmg, 1),
         })
 
     actions.sort(key=lambda a: -a["score"])
@@ -539,22 +545,31 @@ def evaluate(state: dict, resolver=None) -> dict:
         except Exception:
             pass
 
+    # 詰み筋・勝ち筋判定 (残存メンバーの1v1マッチアップ行列)。
+    # 探索より先に計算し、勝ち筋の温存を探索の葉評価へ渡す (定説H3)
+    endgame = ""
+    wincon_sid = None
+    try:
+        endgame = _run_endgame(my_state, opp_state, resolver)
+        import re as _re
+        m = _re.search(r"勝ち筋:\s*(\S+)\s*が", endgame or "")
+        if m:
+            wincon_sid = next(
+                (p.get("species_id") for p in my_state.get("party", [])
+                 if p.get("species_ja") == m.group(1)), None)
+    except Exception:
+        pass
+
     # 同時手番探索 (択の利得行列 + 2手読み)。失敗しても本体は返す
     gtheory = None
     try:
         gtheory = _run_search(state, my_state, my_view, my_p,
                               opp_state, opp_view, resolver,
-                              pool, my_field, opp_field)
+                              pool, my_field, opp_field,
+                              wincon_sid=wincon_sid)
     except Exception:
         import traceback
         traceback.print_exc()
-
-    # 詰み筋・勝ち筋判定 (残存メンバーの1v1マッチアップ行列)
-    endgame = ""
-    try:
-        endgame = _run_endgame(my_state, opp_state, resolver)
-    except Exception:
-        pass
 
     # RL学習済み方策 (行動分布+局面価値)。表示に加えて、
     # 行動スコアへ確率をブレンドし推奨順位にも反映する
@@ -587,6 +602,17 @@ def evaluate(state: dict, resolver=None) -> dict:
         speed_note = ("アンコール中: 直前に使った技しか選べません。" +
                       speed_note)
 
+    # 死に出しプランニング (定説: 捨てる順番と無償降臨。HEURISTICS_CATALOG H2)
+    # 「相手のKO圏の攻撃が先に来る」かつ「先に倒し返せない」= この場は
+    # 確定で落ちる。逃げても交代先が攻撃を受けるだけなので、削ってから
+    # 倒され、次を無償で出すプランを明示する。勝ち筋の個体は温存する
+    sacrifice_note = ""
+    try:
+        if threat_faces_me and not can_ko_first:
+            sacrifice_note = _sacrifice_note(actions, endgame)
+    except Exception:
+        pass
+
     return {
         "ok": True,
         "actions": actions,
@@ -598,9 +624,41 @@ def evaluate(state: dict, resolver=None) -> dict:
         "opp_spread_note": opp_spread_note,
         "gtheory": gtheory,
         "endgame_note": endgame,
+        "sacrifice_note": sacrifice_note,
         "rl_hint": rl_hint,
         "best": actions[0] if actions else None,
     }
+
+
+def _sacrifice_note(actions: list, endgame: str) -> str:
+    """死に出しプラン: 無償降臨価値で後続を選ぶ。
+
+    無償降臨は相手の攻撃 (incoming) を受けずに着地する (設置技は受ける)。
+    今すぐ交代すると incoming を受けるため、確定死の局面では
+    「攻撃で削ってから倒され、次を無償で出す」のが一般に得。
+    勝ち筋 (endgame検出) の個体を捨て先の筆頭にしない。
+    """
+    import re
+    switches = [a for a in actions
+                if a["kind"] == "switch" and a.get("counter") is not None]
+    if not switches:
+        return ""
+    # 無償降臨価値: 出た後の打点 − 設置技 − 次ターン以降の被弾リスク(軽く)
+    ranked = sorted(switches, key=lambda a: -(
+        a["counter"] - a.get("hazard", 0.0) * 0.8
+        - a.get("incoming", 0.0) * 0.2))
+    wincon = None
+    m = re.search(r"勝ち筋:\s*(\S+)\s*が", endgame or "")
+    if m:
+        wincon = m.group(1)
+    best = ranked[0]
+    keep = ""
+    if wincon and best["name"] == wincon and len(ranked) >= 2:
+        best = ranked[1]
+        keep = f" (勝ち筋の {wincon} は温存)"
+    return (f"死に出しプラン: この場は最悪応手前提で倒される見込みです。"
+            f"攻撃で削ってから倒され、{best['name']} を無償で出すのが"
+            f"有効です{keep}")
 
 
 def _mega_timing_note(my_p, my_view, opp_view, my_field, resolver):
@@ -694,7 +752,7 @@ def _hp_frac_of(p: dict) -> float:
 
 
 def _run_search(state, my_state, my_view, my_p, opp_state, opp_view,
-                resolver, pool, my_field, opp_field):
+                resolver, pool, my_field, opp_field, wincon_sid=None):
     """状態辞書 -> SimSide を組み立てて同時手番探索を実行する"""
     from advisor.search import SimSide, search
     if my_view is None or opp_view is None:
@@ -744,7 +802,7 @@ def _run_search(state, my_state, my_view, my_p, opp_state, opp_view,
 
     result = search(me, opp, my_moves, pool,
                     my_field=my_field, opp_field=opp_field,
-                    leaf_value_fn=leaf_fn)
+                    leaf_value_fn=leaf_fn, wincon_sid=wincon_sid)
     # 表示用の要約 (上位3行動)
     lines = []
     for a in result["actions"][:3]:

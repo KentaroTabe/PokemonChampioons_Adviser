@@ -201,6 +201,37 @@ def _opp_move_pool(opp_active) -> list:
             if t in _TYPE_REP_MOVES] or [("bodyslam", 1.0)]
 
 
+def search_options(battle, depth: int = 1,
+                   use_value: bool = False) -> Optional[dict]:
+    """現局面の択評価 (行動ごとの期待値/保証値) を返す。
+
+    decide の探索部分だけを切り出したもの。読み負荷の測定
+    (期待値と保証値の差 = 読み依存度) など、行動選択以外の用途で使う。
+    戻り値: search() の結果 {"actions": [...], "matrix": [...]} or None
+    """
+    active = battle.active_pokemon
+    opp_active = battle.opponent_active_pokemon
+    if active is None or opp_active is None:
+        return None
+    my_view, opp_view = _mon_view(active, own=True), _mon_view(opp_active)
+    if my_view is None or opp_view is None:
+        return None
+
+    my_bench, _ = _bench(battle.team.values(), active, own=True)
+    opp_bench, _ = _bench(battle.opponent_team.values(), opp_active)
+    me = SimSide(active=my_view, active_hp=my_view.hp_frac, bench=my_bench,
+                 stealth_rock="STEALTH_ROCK" in _names(battle.side_conditions))
+    opp = SimSide(active=opp_view, active_hp=opp_view.hp_frac, bench=opp_bench,
+                  stealth_rock="STEALTH_ROCK" in
+                  _names(battle.opponent_side_conditions))
+    my_moves = [m.id for m in (battle.available_moves or [])][:4]
+    return search(me, opp, my_moves, _opp_move_pool(opp_active),
+                  my_field=_field_view(battle, battle.side_conditions),
+                  opp_field=_field_view(battle,
+                                        battle.opponent_side_conditions),
+                  depth=depth)
+
+
 def decide(battle, depth: int = 1, by: str = "recommended",
            use_value: bool = False) -> Optional[dict]:
     """探索で最善行動を選ぶ。

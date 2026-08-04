@@ -285,7 +285,9 @@ def advise_selection(state: dict, resolver=None) -> dict:
     inference = get_inference()
     opps = []
     for j, p in enumerate(opp_party):
-        types_ja = p.get("types") or []
+        # タイプ欠け (2枠中1枠だけ読めた瞬間など) の None を落とす。
+        # 残すと "/".join(types_ja) が落ちる (2026-08-05接続テストで発生)
+        types_ja = [t for t in (p.get("types") or []) if t]
         types_en = [ja2en.get(t, t) for t in types_ja]
         if not types_en and p.get("species_id"):
             sp = dex.species(p["species_id"])
@@ -456,7 +458,11 @@ def attach_model_pick(advice: dict, my_party: list, opp_party: list) -> None:
     """
     try:
         from champions_agent.agent.selection_model import predict_best
-        mine = [p.get("species_id") for p in my_party if p.get("species_id")]
+        # perm は「species_idを持つ枠だけを並べた座標」を指す。元のパーティを
+        # そのまま引くと欠け枠があるときにずれる (2026-08-05接続テストで
+        # 名前がNoneになりjoinが落ちた)
+        idx = [i for i, p in enumerate(my_party) if p.get("species_id")]
+        mine = [my_party[i]["species_id"] for i in idx]
         if len(mine) < 3:
             return
         best = predict_best(
@@ -464,8 +470,8 @@ def attach_model_pick(advice: dict, my_party: list, opp_party: list) -> None:
         if best is None:
             return
         perm, prob = best
-        names = [my_party[i].get("species_ja")
-                 or my_party[i].get("species_id") for i in perm]
+        names = [my_party[idx[i]].get("species_ja")
+                 or my_party[idx[i]].get("species_id") or "?" for i in perm]
         from champions_agent.agent.selection_model import is_in_distribution
         advice["model_pick"] = {
             "names": names, "win_prob": round(prob, 3),

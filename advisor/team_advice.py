@@ -110,8 +110,25 @@ def build_meta_view(sid: str) -> tuple:
     return _META_CACHE[sid]
 
 
-def _my_views(resolver) -> list:
+def _my_views(resolver, party_ja: list | None = None) -> list:
+    """診断対象の自分側ビューを作る。
+
+    my_team.json は「もっと見る」自動登録の蓄積で7体以上残る (旧チームは
+    型ライブラリとして保持)。全登録を診断すると「13体のパーティ」の
+    ような結果になるため、現在のパーティ6体に絞る:
+    party_ja (対戦から判明した実際の6体) 優先、無ければ登録から推定。
+    """
     team = load_my_team()
+    if party_ja:
+        picked = {ja: team[ja] for ja in party_ja if ja in team}
+        if picked:
+            team = picked
+    if len(team) > 6:
+        try:
+            from tools.evaluate_team import current_team_entries
+            team = current_team_entries()
+        except Exception:
+            pass
     out = []
     for ja, entry in team.items():
         r = resolver.resolve_species(ja, cutoff=0.9)
@@ -151,9 +168,13 @@ def _my_views(resolver) -> list:
     return out
 
 
-def team_advice(resolver, top_n: int = 15, n_suggest: int = 5) -> Optional[dict]:
-    """構築診断+改善案。my_teamが未登録なら None"""
-    mine = _my_views(resolver)
+def team_advice(resolver, top_n: int = 15, n_suggest: int = 5,
+                party_ja: list | None = None) -> Optional[dict]:
+    """構築診断+改善案。my_teamが未登録なら None。
+
+    party_ja: 今対戦した実際の6体 (日本語名)。渡されればそれだけを診断する
+    """
+    mine = _my_views(resolver, party_ja=party_ja)
     if not mine:
         return None
     meta_views = []
