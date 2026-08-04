@@ -224,8 +224,14 @@ async def _handle_one_frame(sid, data):
             _team_advice_done = True
             try:
                 from advisor.team_advice import team_advice, format_team_advice
+                # 診断は今対戦した実際の6体に絞る (my_team登録は型ライブラリ
+                # として7体以上蓄積されるため、全登録を診断すると
+                # 「13体のパーティ」のような結果になる)
+                party_ja = [p.get("species_ja") for p in
+                            state["player"]["party"] if p.get("species_ja")]
                 data = await loop.run_in_executor(
-                    None, team_advice, pipeline.resolver)
+                    None, lambda: team_advice(pipeline.resolver,
+                                              party_ja=party_ja))
                 text = format_team_advice(data)
                 await sio.emit('team_advice', {"text": text, "data": data},
                                room=sid)

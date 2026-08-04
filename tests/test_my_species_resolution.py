@@ -20,13 +20,31 @@ def test_misread_prefers_registered():
     if "ゲッコウガ" not in registered_species_ja():
         print("test_misread_prefers_registered SKIP (ゲッコウガ未登録)")
         return
-    # 汎用解決では ケイコウオ の方が文字列的に近い (バグの再現条件)
+    # 非参戦種の除外により、汎用解決でもケイコウオには飛ばなくなった
     generic = resolver.resolve_species("ケイコウガ", cutoff=0.72)
+    assert generic is None or generic[0] != "ケイコウオ", generic
     r = resolve_my_species(resolver, "ケイコウガ", cutoff=0.72)
     assert r is not None
     assert r[0] == "ゲッコウガ", f"解決先: {r} (汎用は{generic})"
     print(f"test_misread_prefers_registered OK "
           f"(汎用={generic and generic[0]} → 登録優先={r[0]})")
+
+
+def test_illegal_species_excluded():
+    """非参戦種 (ケイコウオ/メタング) は解決候補に出ない。参戦種は出る"""
+    from vision.normalize import champions_illegal_ids
+    illegal = champions_illegal_ids()
+    if not illegal:
+        print("test_illegal_species_excluded SKIP (mod定義が読めない)")
+        return
+    assert "finneon" in illegal and "metang" in illegal
+    assert resolver.resolve_species("ケイコウオ", cutoff=0.9) is None
+    assert resolver.resolve_species("メタング", cutoff=0.9) is None
+    r = resolver.resolve_species("ゲッコウガ", cutoff=0.9)
+    assert r is not None and r[1] == "greninja", r
+    r = resolver.resolve_species("メタグロス", cutoff=0.9)
+    assert r is not None and r[1] == "metagross", r
+    print(f"test_illegal_species_excluded OK (非参戦{len(illegal)}種を除外)")
 
 
 def test_exact_name_still_works():
@@ -112,6 +130,7 @@ def test_no_seventh_slot_when_full():
 
 if __name__ == "__main__":
     test_misread_prefers_registered()
+    test_illegal_species_excluded()
     test_exact_name_still_works()
     test_unregistered_falls_back()
     test_garbage_returns_none_or_far()

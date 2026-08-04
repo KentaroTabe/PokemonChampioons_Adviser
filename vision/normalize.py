@@ -63,16 +63,48 @@ def similarity(a: str, b: str) -> float:
     return max(n1, n2)
 
 
+_ILLEGAL_SPECIES_PATH = (Path(__file__).resolve().parent.parent
+                         / "pokemon-showdown" / "data" / "mods"
+                         / "champions" / "formats-data.ts")
+
+
+def champions_illegal_ids() -> set:
+    """チャンピオンズ非参戦の種族ID集合 (modの定義で tier: Illegal 明示)。
+
+    全国図鑑ベースの辞書で解決すると、OCRの揺れが非参戦の近縁種へ飛ぶ
+    (2026-08-05接続テスト: ゲッコウガ→ケイコウオ / メタグロス→メタング。
+    どちらも非参戦)。明示的に Illegal とされた種族だけを除外し、
+    定義に無い種族は安全側で残す。ファイルが読めなければ空集合 (制限なし)。
+    """
+    try:
+        text = _ILLEGAL_SPECIES_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return set()
+    out = set()
+    for m in re.finditer(r"^\t(\w+): \{([^}]*)\}", text, flags=re.M):
+        if '"Illegal"' in m.group(2):
+            out.add(m.group(1))
+    return out
+
+
 class NameResolver:
-    """jp_names.json に基づく日本語名 -> 英語ID の解決器"""
+    """jp_names.json に基づく日本語名 -> 英語ID の解決器。
+
+    種族はチャンピオンズ参戦のものに絞る (非参戦種は解決候補にしない)。
+    """
 
     def __init__(self, path: Path = JP_NAMES_PATH):
         raw = json.loads(path.read_text(encoding="utf-8"))
+        illegal = champions_illegal_ids()
         # category -> [(jp, value, norm_key, loose)]
         self._entries: dict[str, list[tuple]] = {}
         for cat, table in raw.items():
             rows = []
             for jp, val in table.items():
+                if (cat == "species" and illegal
+                        and isinstance(val, dict)
+                        and val.get("id") in illegal):
+                    continue
                 rows.append((jp, val, normalize(jp), loose_key(jp)))
             self._entries[cat] = rows
 
