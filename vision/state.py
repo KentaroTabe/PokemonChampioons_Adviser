@@ -220,6 +220,11 @@ class SideState:
                 p.types = list(new_types) if new_types else []
                 idx = cand
         if idx is None:
+            if len(self.party) >= 6:
+                # 満枠で置換候補も無い場合は7枠目を作らない (ロスターは
+                # 対戦中に6を超えない。2026-08-05接続テストで誤読由来の
+                # 7枠目が生えて表示を汚した)。現在のアクティブを維持する
+                return self.ensure_active()
             # 初登場 -> 一旦末尾に追加する (どの選出枠に対応するかは
             # link_active_to_party がタイプ照合で解決し、余剰枠を除去する)
             mon = PokemonState(species_ja=species_ja, species_id=species_id)

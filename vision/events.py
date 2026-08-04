@@ -420,6 +420,14 @@ class EventParser:
         if not sp:
             return False
         jp, sid, _ = sp
+        # 自分側の交代 (「相手の」プレフィックスなし) は登録済みチーム優先で
+        # 解決し直す。全種族ファジーだと誤読が近縁の別種に化けて別枠を作る
+        # (2026-08-05接続テスト: メタグロス誤読→メタングの7枠目が生えた)
+        if not re.search(r"相手|あいて", cleaned):
+            from vision.extractors import resolve_my_species
+            r = resolve_my_species(self.resolver, jp, cutoff=0.7)
+            if r:
+                jp, sid = r[0], r[1]
         if self.state.player.find_by_species(jp) is not None:
             side, side_name = self.state.player, "player"
         else:

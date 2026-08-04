@@ -264,6 +264,14 @@ class VisionPipeline:
         elif scene == "field_check" and heavy:
             extractors.extract_field_check(img, self.state, self.resolver)
 
+        if heavy:
+            # 自分側の静的情報 (タイプ=図鑑 / 持ち物・特性=登録) を補完する。
+            # 画面読みだけだと「種族判明済みなのにタイプ欄が空」が残る
+            try:
+                extractors.backfill_player_static(self.state, self.resolver)
+            except Exception:
+                pass
+
         # --- メッセージ / ポップアップ (HUDが消えるフィールドシーンのみ。
         #     HUD表示中はタイマー等の誤OCRを防ぐため読まない) ---
         if scene == "field":
