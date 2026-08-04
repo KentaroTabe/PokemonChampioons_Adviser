@@ -34,6 +34,31 @@ EFFECTIVENESS_MAP = [
 ]
 
 
+def resolve_my_species(resolver, name_text: str, cutoff: float = 0.72):
+    """自分側の種族名解決: 登録済みmy_teamの名前を優先する。
+
+    汎用のファジー解決は全種族が母集団のため、OCRの揺れで近縁の別種へ
+    飛ぶことがある (2026-08-05接続テスト: ゲッコウガ→ケイコウオ。
+    「ケイコウガ」のような誤読はケイコウオとの類似度の方が高くなる)。
+    自分側の画面に出るのは登録済みパーティだけなので、まず登録名と照合し、
+    十分近ければそれを採用する。登録が無い/遠い場合は従来の解決に落ちる。
+    """
+    try:
+        from advisor.my_team import registered_species_ja
+        names = registered_species_ja()
+        if names:
+            best = max(names, key=lambda n: difflib.SequenceMatcher(
+                None, name_text, n).ratio())
+            if difflib.SequenceMatcher(
+                    None, name_text, best).ratio() >= 0.55:
+                r = resolver.resolve_species(best, cutoff=0.9)
+                if r:
+                    return r
+    except Exception:
+        pass
+    return resolver.resolve_species(name_text, cutoff=cutoff)
+
+
 def _normalize_hint(text: str) -> Optional[str]:
     from vision.normalize import loose_key
     key = loose_key(text)
@@ -119,7 +144,7 @@ def extract_selection(img, state: BattleStateV2, resolver) -> None:
                                        allowlist=ocr.KATAKANA_ALLOWLIST)
         if not name_text:
             continue
-        sp = resolver.resolve_species(name_text, cutoff=0.72)
+        sp = resolve_my_species(resolver, name_text, cutoff=0.72)
         mon = PokemonState()
         if sp:
             mon.species_ja, mon.species_id = sp[0], sp[1]
@@ -603,7 +628,7 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
                                  allowlist=ocr.KATAKANA_ALLOWLIST)
     if my_name:
         me.display_name = my_name
-        sp = resolver.resolve_species(my_name, cutoff=0.8)
+        sp = resolve_my_species(resolver, my_name, cutoff=0.8)
         if sp:
             # 表示名=種族名のケース (ニックネーム未設定)
             idx = state.player.find_by_species(sp[0])

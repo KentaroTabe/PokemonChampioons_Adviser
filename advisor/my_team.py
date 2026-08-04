@@ -80,6 +80,16 @@ def _load() -> dict:
     return _CACHE
 
 
+def registered_species_ja() -> list:
+    """登録済みの種族名 (日本語) 一覧。
+
+    自分側の画面読み取りの解決候補として使う。全種族を母集団にした
+    ファジー照合はOCRの揺れで近縁の別種へ飛ぶことがある
+    (2026-08-05接続テスト: ゲッコウガ→ケイコウオ)。
+    """
+    return [k for k in _load().keys() if k]
+
+
 def get_my_build(species_ja: Optional[str]) -> Optional[dict]:
     """種族名 (日本語) の登録済みの型を返す。
 
