@@ -28,13 +28,40 @@ ARCHIVE_DIR = Path(__file__).resolve().parents[1] / "data" / "archive"
 _cache: dict = {}
 
 
+# プールとして採用する最小チーム数。シーズン切替直後のopendataはほぼ空で、
+# 「最新ファイル」を無条件に読むとプールが3チームに激減した (2026-08-05:
+# M-5開始2時間後の取得でベンチ・学習の相手が3チームになりかけた)
+MIN_POOL_TEAMS = 100
+# ベンチ基盤のピン止め。ここに書いたファイルがある限りそれを使い、
+# シーズンデータの蓄積でプールが黙って切り替わるのを防ぐ。
+# 基盤を切り替えるときは POOL_PIN を書き換え、training_changes.json に記録する
+PIN_PATH = ARCHIVE_DIR / "POOL_PIN"
+
+
 def _load_ladder_teams() -> list:
     """アーカイブ済みのpokedbオープンデータから上位構築を読み込む (レート順)"""
     files = sorted(ARCHIVE_DIR.glob("pokedb_s*_single_*.json.gz"))
     if not files:
         return []
-    with gzip.open(files[-1], "rt", encoding="utf-8") as f:
-        payload = json.load(f)
+    # 1. ピン止めがあれば最優先 (評価基準の固定)
+    try:
+        pinned = ARCHIVE_DIR / PIN_PATH.read_text(encoding="utf-8").strip()
+        if pinned.exists():
+            files = [pinned]
+    except OSError:
+        pass
+    # 2. 新しい順に、十分なチーム数を持つファイルを採用する
+    for f in reversed(files):
+        with gzip.open(f, "rt", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        teams = payload.get("teams", [])
+        if len(teams) >= MIN_POOL_TEAMS or len(files) == 1:
+            teams.sort(key=lambda t: -(t.get("rating_value") or 0))
+            return teams
+    # どれも閾値未満なら最大のものを使う (安全側)
+    best = max(files, key=lambda f: f.stat().st_size)
+    with gzip.open(best, "rt", encoding="utf-8") as fh:
+        payload = json.load(fh)
     teams = payload.get("teams", [])
     teams.sort(key=lambda t: -(t.get("rating_value") or 0))
     return teams
