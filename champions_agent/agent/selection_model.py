@@ -35,18 +35,45 @@ def _to_id(name) -> str:
     return re.sub(r"[^a-z0-9]", "", str(name).lower())
 
 
+# 学習時の埋め込みを固定するピンファイル。埋め込みは使用率DBから日次で
+# 再構築され、基底 (メタ上位20種) の構成が変わると座標の意味が変わる。
+# モデルは学習時の座標で重みを持つため、実行時に生きた埋め込みを読むと
+# データ更新のたびに壊れうる (2026-08-06: 共起データが疎なスナップショットで
+# 基底が変わり、配布選出が 0.609→0.442 に崩落した)。
+# train_selection が保存時に埋め込みのコピーをここへ置き、推論は常に
+# ピン側を読む (無ければ従来どおり生きた埋め込みへフォールバック)。
+EMB_PIN_PATH = MODELS_DIR / "selection_model_emb.json"
+
 _emb_cache: dict = {}
+_pinned_store: dict | None = None
+
+
+def _functional_store() -> dict:
+    """機能埋め込みの辞書 (ピン優先)"""
+    global _pinned_store
+    if _pinned_store is None:
+        store = {}
+        try:
+            import json
+            raw = json.loads(EMB_PIN_PATH.read_text(encoding="utf-8"))
+            store = (raw.get("functional") or {}).get("vectors") or {}
+        except Exception:
+            pass
+        if not store:
+            try:
+                from tools.species_embedding import load
+                store = (load().get("functional") or {}).get("vectors") or {}
+            except Exception:
+                store = {}
+        _pinned_store = store
+    return _pinned_store
 
 
 def _emb(species) -> np.ndarray:
     """種族の機能埋め込み (未収録はゼロ)"""
     sid = _to_id(species)
     if sid not in _emb_cache:
-        try:
-            from tools.species_embedding import vector
-            v = vector(sid, "functional")
-        except Exception:
-            v = None
+        v = _functional_store().get(sid)
         _emb_cache[sid] = (np.array(v, dtype=np.float32) if v
                            else np.zeros(EMB_DIM, dtype=np.float32))
     return _emb_cache[sid]
