@@ -71,6 +71,36 @@ class ModelPlayer(RandomPlayer):
         return self.policy.choose_order(battle)
 
 
+class EndgameHybridPlayer(ModelPlayer):
+    """通常はRL方策、終盤 (両陣営の残数合計≤3) だけ探索に切り替えるPlayer。
+
+    弱点分析 (2026-08-07, 3,000戦) で負けの49%が「相手残り1体まで
+    追い詰めての取り逃し」だった。終盤は型がほぼ判明しており、探索・
+    詰み計算の信頼性が最も高い局面。全局面探索は方策に大敗した
+    (policy 0.560 / search 0.326) が、終盤限定の切替は別仮説として
+    事前登録A/Bで測る (scripts/endgame_bench.sh)。
+    """
+
+    ENDGAME_TOTAL = 3   # 自分残数+相手残数 がこの値以下で探索へ
+
+    def choose_move(self, battle):
+        try:
+            my_alive = sum(1 for p in battle.team.values() if not p.fainted)
+            opp_fainted = sum(1 for p in battle.opponent_team.values()
+                              if p.fainted)
+            opp_alive = max(0, 3 - opp_fainted)
+            if my_alive + opp_alive <= self.ENDGAME_TOTAL:
+                from champions_agent.env.search_expert import decide
+                d = decide(battle, depth=2)
+                if d is not None:
+                    if d["kind"] == "move":
+                        return self.create_order(d["move"], mega=d["mega"])
+                    return self.create_order(d["pokemon"])
+        except Exception:
+            pass
+        return self.policy.choose_order(battle)
+
+
 class HybridPlayer(ModelPlayer):
     """探索 (深さ2) + RL価値の葉評価で行動選択するPlayer。
 
@@ -168,6 +198,8 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
     if agent in ("hybrid", "search"):
         cls = HybridPlayer
         extra["use_value"] = (agent == "hybrid")
+    elif agent == "endgame":
+        cls = EndgameHybridPlayer
     else:
         cls = ModelPlayer
     player1 = cls(
@@ -271,10 +303,11 @@ def main() -> None:
                          choices=["current", "best"],
                          help="current=学習中の最新 (進捗測定) / best=_best (配布版の実力測定)")
     parser.add_argument("--agent", type=str, default="policy",
-                         choices=["policy", "hybrid", "search"],
+                         choices=["policy", "hybrid", "search", "endgame"],
                          help="policy=RL方策単体 (既定・従来のベンチ) / "
-                              "hybrid=探索+RL価値の複合体 (配布相当) / "
-                              "search=葉評価なしの純探索 (切り分け用)")
+                              "hybrid=探索+RL価値の複合体 / "
+                              "search=葉評価なしの純探索 (切り分け用) / "
+                              "endgame=終盤のみ探索に切替 (詰め損ね対策)")
     parser.add_argument("--selection", type=str, default="matchup",
                          choices=["matchup", "model", "model2", "matrix"],
                          help="自分側の選出: matchup=相性 (既定) / "

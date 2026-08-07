@@ -315,6 +315,17 @@ def train(epochs: int = 300, lr: float = 1e-3, holdout: float = 0.2,
             return
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    # 学習に使った埋め込みをモデルと一緒にピン止めする。推論はピン側を
+    # 読むため、以後の埋め込み再構築 (使用率DBの日次更新) で座標が
+    # 変わってもモデルは壊れない
+    try:
+        import shutil
+        from champions_agent.agent.selection_model import EMB_PIN_PATH
+        from tools.species_embedding import CACHE as EMB_LIVE_PATH
+        shutil.copy(EMB_LIVE_PATH, EMB_PIN_PATH)
+        print(f"[train_selection] 埋め込みをピン止め: {EMB_PIN_PATH}")
+    except Exception as e:
+        print(f"  ⚠ 埋め込みのピン止めに失敗: {e}")
     if features == "v2":
         # v2は比較実験中の候補。v1の配布/汎用/微調整には触れない
         from champions_agent.agent.selection_features_v2 import (
