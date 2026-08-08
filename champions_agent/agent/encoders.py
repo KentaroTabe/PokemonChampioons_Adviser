@@ -834,6 +834,54 @@ def encode_battle(battle) -> np.ndarray:
         1.0 if opp is not None and "prankster" in _possible_abilities(opp) else 0.0,
     ], dtype=np.float32)
 
+    # ========== v7拡張: ダメージレース + 控えの種族値 ======================
+    # (docs/RL_V7_SET_ENCODER_DESIGN.md。中盤の交換効率を直接観測させる)
+    def _base_stats6(pokemon) -> np.ndarray:
+        v = np.zeros(6, dtype=np.float32)
+        try:
+            bs = pokemon.base_stats or {}
+            for k, key in enumerate(("hp", "atk", "def", "spa", "spd", "spe")):
+                v[k] = float(bs.get(key) or 0) / 255.0
+        except Exception:
+            pass
+        return v
+
+    race_vec = np.zeros(6, dtype=np.float32)
+    try:
+        my_hp_total = sum(_hp_frac(p) for p in battle.team.values())
+        seen = list(battle.opponent_team.values())
+        opp_hp_total = sum(_hp_frac(p) for p in seen) + max(0, 3 - len(seen))
+        my_alive = sum(1 for p in battle.team.values() if not p.fainted)
+        race_vec[:] = [my_hp_total / 3.0, opp_hp_total / 3.0,
+                       (my_hp_total - opp_hp_total + 3.0) / 6.0,
+                       my_alive / 3.0, opp_remaining / 3.0,
+                       (my_alive - opp_remaining + 3.0) / 6.0]
+    except Exception:
+        pass
+
+    opp_base_spe = 0.0
+    try:
+        opp_base_spe = float((opp.base_stats or {}).get("spe") or 0)
+    except Exception:
+        pass
+    own_bench_v7 = []
+    for i in range(2):
+        b = own_bench[i] if i < len(own_bench) else None
+        v = np.zeros(7, dtype=np.float32)
+        if b is not None:
+            v[:6] = _base_stats6(b)
+            try:
+                v[6] = 1.0 if float((b.base_stats or {}).get("spe") or 0) \
+                    > opp_base_spe else 0.0
+            except Exception:
+                pass
+        own_bench_v7.append(v)
+    opp_bench_v7 = []
+    for i in range(2):
+        b = opp_bench[i] if i < len(opp_bench) else None
+        opp_bench_v7.append(_base_stats6(b) if b is not None
+                            else np.zeros(6, dtype=np.float32))
+
     vec = np.concatenate([own_vec, opp_vec, opp_extra,
                           *own_bench_vecs, *opp_bench_vecs, opp_count_vec,
                           my_side, opp_side, field, speed_vec,
@@ -844,7 +892,9 @@ def encode_battle(battle) -> np.ndarray:
                           profile_vec, utility_vec,
                           field_remaining, bench_matchup,
                           special_vec, protect_vec,
-                          ability_vec]).astype(np.float32)
+                          ability_vec,
+                          race_vec, *own_bench_v7,
+                          *opp_bench_v7]).astype(np.float32)
 
     # 固定長を保証
     if len(vec) < BATTLE_OBS_DIM:

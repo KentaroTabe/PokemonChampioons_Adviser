@@ -266,7 +266,16 @@ class ChampionsSinglesEnv(SinglesEnv):
         # SinglesEnv(PokeEnv)は observation_spaces を自動定義しないため、
         # embed_battle() が返す固定長ベクトルに合わせて明示的に定義する。
         # (SingleAgentWrapper が __init__ 時に observation_spaces を参照するため必須)
-        obs_space = Box(low=-np.inf, high=np.inf, shape=(BATTLE_OBS_DIM,), dtype=np.float32)
+        #
+        # TRAIN_OBS=v7 で新観測 (420次元) を使う。既定は v6 (388) —
+        # v7ブロックは末尾追記なので、切り詰めれば正確にv6になる。
+        # ⚠ 既定をv7にしてはいけない: 本番の388チェックポイントのresumeが
+        # 観測空間不一致で「非互換→退避→新規学習」になり方策が消える
+        self._obs_dim = (BATTLE_OBS_DIM
+                         if os.environ.get("TRAIN_OBS", "v6") == "v7"
+                         else 388)
+        obs_space = Box(low=-np.inf, high=np.inf, shape=(self._obs_dim,),
+                        dtype=np.float32)
         self.observation_spaces = {agent: obs_space for agent in self.possible_agents}
         # 選出はRLの行動空間 (26次元) の外で決まるため、環境側の両プレイヤーに
         # 明示的な選出を入れる (既定のランダム選出はノイズ源)。
@@ -284,10 +293,14 @@ class ChampionsSinglesEnv(SinglesEnv):
         技 (威力/相性/PP/STAB)・ランク・控え・設置技/壁・天候/フィールド・
         素早さ比較まで含む観測 (agent/encoders.py の encode_battle)。
         """
+        # BattlePolicy が非バインドで呼ぶ (self=BattlePolicy) ため、
+        # _obs_dim が無い呼び出し元ではフル次元を返す (推論側は
+        # _adapt_obs がモデルの期待次元へ合わせる)
+        dim = getattr(self, "_obs_dim", encoders.BATTLE_OBS_DIM)
         try:
-            return encoders.encode_battle(battle)
+            return encoders.encode_battle(battle)[:dim]
         except Exception:
-            return np.zeros(BATTLE_OBS_DIM, dtype=np.float32)
+            return np.zeros(dim, dtype=np.float32)
 
     @staticmethod
     def action_to_order(action, battle, fake: bool = False, strict: bool = True):

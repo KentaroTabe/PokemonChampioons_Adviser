@@ -39,7 +39,7 @@ STATUS_MAP = {"burn": "brn", "paralysis": "par", "sleep": "slp",
               "freeze": "frz", "poison": "psn", "toxic": "tox"}
 BOOST_KEYS = ["atk", "def", "spa", "spd", "spe", "acc", "eva"]
 BASE_KEYS = ["hp", "atk", "def", "spa", "spd", "spe"]
-N_MOVE_SLOTS, MOVE_FEAT_DIM, OBS_DIM = 4, 9, 388  # v5拡張 (v1=227の末尾追記)
+N_MOVE_SLOTS, MOVE_FEAT_DIM, OBS_DIM = 4, 9, 420  # v7拡張 (v1=227の末尾追記)
 MOVE_EFFECT_DIM = 8
 VOLATILE_EFFECTS = ["confusion", "leech_seed", "substitute", "taunt",
                     "encore", "yawn"]
@@ -717,6 +717,42 @@ def encode_state(state: dict, my_spe_actual: Optional[float] = None) -> Optional
         1.0 if "prankster" in _possible_abilities_dict(opp) else 0.0,
     ], dtype=np.float32)
 
+    # ========== v7拡張 (encoders と同義・同並び): レース + 控え種族値 ======
+    def _stats255(p: Optional[dict]) -> np.ndarray:
+        v = np.zeros(6, dtype=np.float32)
+        sp = get_dex().species((p or {}).get("species_id"))
+        if sp:
+            for i, k in enumerate(("hp", "atk", "def", "spa", "spd", "spe")):
+                v[i] = float(sp["baseStats"].get(k) or 0) / 255.0
+        return v
+
+    race_vec = np.zeros(6, dtype=np.float32)
+    try:
+        my_hp_total = sum(_hp_frac(p) for p in picked[:3])
+        opp_seen = [p for p in op.get("party", [])
+                    if p.get("species_id") and p.get("hp_percent") is not None]
+        opp_hp_total = sum(_hp_frac(p) for p in opp_seen) \
+            + max(0, 3 - len(opp_seen))
+        my_alive = sum(1 for p in picked[:3] if p.get("status") != "fainted")
+        race_vec[:] = [my_hp_total / 3.0, min(opp_hp_total, 3.0) / 3.0,
+                       (my_hp_total - min(opp_hp_total, 3.0) + 3.0) / 6.0,
+                       my_alive / 3.0, min(opp_remaining, 3) / 3.0,
+                       (my_alive - min(opp_remaining, 3) + 3.0) / 6.0]
+    except Exception:
+        pass
+
+    own_bench_v7 = []
+    for i in range(2):
+        b = own_bench[i] if i < len(own_bench) else None
+        v = np.zeros(7, dtype=np.float32)
+        if b is not None:
+            v[:6] = _stats255(b)
+            v[6] = 1.0 if v[5] * 255.0 > opp_base_spe else 0.0
+        own_bench_v7.append(v)
+    opp_bench_v7 = [
+        _stats255(opp_bench[i]) if i < len(opp_bench)
+        else np.zeros(6, dtype=np.float32) for i in range(2)]
+
     vec = np.concatenate([own_vec, opp_vec, opp_extra,
                           *own_bench_vecs, *opp_bench_vecs, opp_count,
                           _side_vec(my), _side_vec(op),
@@ -728,7 +764,9 @@ def encode_state(state: dict, my_spe_actual: Optional[float] = None) -> Optional
                           profile_vec, utility_vec,
                           field_remaining, bench_matchup,
                           special_vec, protect_vec,
-                          ability_vec]).astype(np.float32)
+                          ability_vec,
+                          race_vec, *own_bench_v7,
+                          *opp_bench_v7]).astype(np.float32)
     if len(vec) < OBS_DIM:
         vec = np.concatenate([vec, np.zeros(OBS_DIM - len(vec), dtype=np.float32)])
     return vec[:OBS_DIM]

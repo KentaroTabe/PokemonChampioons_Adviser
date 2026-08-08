@@ -117,8 +117,20 @@ def train(total_timesteps: int = 10_000, battle_format: str = TRAINING_BATTLE_FO
     lr = float(os.environ.get("TRAIN_LR", "3e-4"))
     ent_coef = float(os.environ.get("TRAIN_ENT_COEF", "0.01"))
     width = int(os.environ.get("TRAIN_NET_WIDTH", "512"))
+    # TRAIN_ARCH=set: パーティをエンティティ集合として扱う特徴抽出器
+    # (docs/RL_V7_SET_ENCODER_DESIGN.md)。既定は従来の平坦MLP
+    if os.environ.get("TRAIN_ARCH", "mlp") == "set":
+        if os.environ.get("TRAIN_OBS", "v6") != "v7":
+            raise SystemExit(
+                "TRAIN_ARCH=set は TRAIN_OBS=v7 とセットで指定してください "
+                "(エンティティ分解は420次元の観測レイアウト前提)")
+        from champions_agent.agent.set_encoder import set_policy_kwargs
+        pk = set_policy_kwargs(features_dim=width)
+        print(f"[train_battle] set encoder構成で学習 (features={width})")
+    else:
+        pk = {"net_arch": [width, width]}
     ppo_kwargs = {"learning_rate": lr, "ent_coef": ent_coef,
-                  "policy_kwargs": {"net_arch": [width, width]}}
+                  "policy_kwargs": pk}
     if n_envs > 1:
         from stable_baselines3.common.vec_env import SubprocVecEnv
         env = SubprocVecEnv(

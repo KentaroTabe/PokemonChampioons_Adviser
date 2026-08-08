@@ -71,8 +71,93 @@ _EXTRA_DIM_V5 = 2
 #     リジェネレーター (特性5位: アクティブが持ちか、交代サイクルの誘因) ---
 _EXTRA_DIM_V6 = 4
 
+# --- v7拡張: ダメージレース + 控えの種族値 (docs/RL_V7_SET_ENCODER_DESIGN.md)
+# 弱点分析 (2026-08-07: 負けの49%が中盤の交換効率由来) への対応:
+# レース6 = [自HP計/3, 相手HP計/3(未視認=満タン扱い), HP差, 自残/3, 相残/3, 残数差]
+# 自控え2 x (種族値6/255 + 対面素早さ比較1) = 14
+# 相手控え2 x 種族値6/255 (視認済みのみ) = 12
+_EXTRA_DIM_V7 = 6 + 2 * 7 + 2 * 6  # = 32
+
 BATTLE_OBS_DIM = (_OBS_DIM_V1 + _EXTRA_DIM_V2 + _EXTRA_DIM_V3
-                  + _EXTRA_DIM_V4 + _EXTRA_DIM_V5 + _EXTRA_DIM_V6)  # = 388
+                  + _EXTRA_DIM_V4 + _EXTRA_DIM_V5 + _EXTRA_DIM_V6
+                  + _EXTRA_DIM_V7)  # = 420
+
+# ==============================================================================
+# 観測ブロックのオフセット表 (set encoder用)
+# ==============================================================================
+# encode_battle の連結順と完全に一致させる。手書きのスライスを散らかすと
+# v8で必ず壊れるため、エンティティ分解はこの表からのみ導出する。
+# 合計が BATTLE_OBS_DIM と一致することを test_rl_bridge が検証する。
+OBS_PARTS = [
+    # --- v1 ---
+    ("own_active", _OWN_ACTIVE_DIM),
+    ("opp_active", 18 + 6 + 7 + 1 + 7),
+    ("opp_extra", 2),
+    ("own_bench0", 20), ("own_bench1", 20),
+    ("opp_bench0", 21), ("opp_bench1", 21),
+    ("opp_count", 1),
+    ("my_side", 8), ("opp_side", 8), ("field", 10),
+    ("speed", 2),
+    # --- v2 ---
+    ("opp_moves", N_MOVE_SLOTS * MOVE_FEAT_DIM),
+    ("own_vol", 6), ("opp_vol", 6),
+    ("mega", 3),
+    ("own_item", N_ITEM_CATS), ("opp_item", N_ITEM_CATS),
+    ("misc", 2),
+    ("bench_tactics", 6),
+    # --- v3 ---
+    ("own_move_effects", 4 * 8), ("opp_move_effects", 4 * 8),
+    ("profile", 4), ("utility", 4),
+    ("field_remaining", 2), ("bench_matchup", 4),
+    # --- v4/v5/v6 ---
+    ("special", 6), ("protect", 2), ("ability", 4),
+    # --- v7 ---
+    ("race", 6),
+    ("own_bench0_v7", 7), ("own_bench1_v7", 7),
+    ("opp_bench0_v7", 6), ("opp_bench1_v7", 6),
+]
+
+# エンティティ (ポケモン) ごとのブロック割当。混在ブロック (bench_tactics等の
+# 複数体をまたぐもの) はグローバル扱い
+ENTITY_PARTS = {
+    "own_active": ["own_active", "own_vol", "own_item",
+                   "own_move_effects", "utility"],
+    "opp_active": ["opp_active", "opp_extra", "opp_moves", "opp_vol",
+                   "opp_item", "opp_move_effects"],
+    "own_bench0": ["own_bench0", "own_bench0_v7"],
+    "own_bench1": ["own_bench1", "own_bench1_v7"],
+    "opp_bench0": ["opp_bench0", "opp_bench0_v7"],
+    "opp_bench1": ["opp_bench1", "opp_bench1_v7"],
+}
+
+
+def obs_part_slices() -> dict:
+    """ブロック名 -> (開始, 終了) のオフセット表"""
+    out, off = {}, 0
+    for name, dim in OBS_PARTS:
+        out[name] = (off, off + dim)
+        off += dim
+    return out
+
+
+def entity_index_groups() -> tuple:
+    """set encoder用: (エンティティ名 -> インデックス列, グローバルのインデックス列)"""
+    slices = obs_part_slices()
+    assigned = set()
+    groups = {}
+    for ent, names in ENTITY_PARTS.items():
+        idx = []
+        for n in names:
+            s, e = slices[n]
+            idx.extend(range(s, e))
+            assigned.add(n)
+        groups[ent] = idx
+    global_idx = []
+    for name, _dim in OBS_PARTS:
+        if name not in assigned:
+            s, e = slices[name]
+            global_idx.extend(range(s, e))
+    return groups, global_idx
 
 # --- 選出方策用の旧エンコーダ次元 (encoders.encode_own_pokemon 等) ---
 POKEMON_FEATURE_DIM = 64
