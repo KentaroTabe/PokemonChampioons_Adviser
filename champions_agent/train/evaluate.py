@@ -71,71 +71,12 @@ class ModelPlayer(RandomPlayer):
         return self.policy.choose_order(battle)
 
 
-class EndgameHybridPlayer(ModelPlayer):
-    """通常はRL方策、終盤 (両陣営の残数合計≤3) だけ探索に切り替えるPlayer。
-
-    弱点分析 (2026-08-07, 3,000戦) で負けの49%が「相手残り1体まで
-    追い詰めての取り逃し」だった。終盤は型がほぼ判明しており、探索・
-    詰み計算の信頼性が最も高い局面。全局面探索は方策に大敗した
-    (policy 0.560 / search 0.326) が、終盤限定の切替は別仮説として
-    事前登録A/Bで測る (scripts/endgame_bench.sh)。
-    """
-
-    ENDGAME_TOTAL = 3   # 自分残数+相手残数 がこの値以下で探索へ
-
-    def choose_move(self, battle):
-        try:
-            my_alive = sum(1 for p in battle.team.values() if not p.fainted)
-            opp_fainted = sum(1 for p in battle.opponent_team.values()
-                              if p.fainted)
-            opp_alive = max(0, 3 - opp_fainted)
-            if my_alive + opp_alive <= self.ENDGAME_TOTAL:
-                from champions_agent.env.search_expert import decide
-                d = decide(battle, depth=2)
-                if d is not None:
-                    if d["kind"] == "move":
-                        return self.create_order(d["move"], mega=d["mega"])
-                    return self.create_order(d["pokemon"])
-        except Exception:
-            pass
-        return self.policy.choose_order(battle)
-
-
-class HybridPlayer(ModelPlayer):
-    """探索 (深さ2) + RL価値の葉評価で行動選択するPlayer。
-
-    従来のベンチはRL方策単体を測っていたが、配布アドバイザーは探索との
-    複合体を提示する。複合体を測るためのベンチ経路。
-
-    葉評価のRL価値は advisor.rl_bridge 経由 (配布と同じ _best を読む)。
-    探索が行動を返せない局面 (情報不足など) はRL方策へフォールバック。
-
-    ⚠ 実測 (2026-07-31, 各1,000戦・同一相手列・_best):
-        policy 0.560 / hybrid 0.320 / search(葉評価なし) 0.326
-    「探索を主・方策を従」にするこの構成は方策単体より大幅に弱い。
-    原因は葉評価ではなく探索エンジン自体 (手書き評価の深さ2) が
-    方策に大きく劣ること。方策はBC後の自己対戦で教師 (探索) を
-    とうに超えている。複合で方策を超えたい場合は、方策を主にして
-    探索は限定的な役割 (確定勝ち筋の検出など) に絞る設計が必要。
-    """
-
-    def __init__(self, *args, depth: int = 2, use_value: bool = True,
-                 **kwargs):
-        super().__init__(*args, **kwargs)
-        self._depth = depth
-        self._use_value = use_value
-
-    def choose_move(self, battle):
-        from champions_agent.env.search_expert import decide
-        try:
-            d = decide(battle, depth=self._depth, use_value=self._use_value)
-        except Exception:
-            d = None
-        if d is None:
-            return self.policy.choose_order(battle)
-        if d["kind"] == "move":
-            return self.create_order(d["move"], mega=d["mega"])
-        return self.create_order(d["pokemon"])
+# 操縦の複合体ヒューリスティックは3案とも実測棄却され削除した (2026-08-08):
+#   探索主体hybrid   0.320 vs policy 0.560 (2026-08-02)
+#   純探索search     0.326 (同上・切り分け)
+#   終盤限定endgame  +0.006 (95%CI -0.008〜+0.019, δ=0.02未満で棄却)
+# 方策はBC後の自己対戦で教師 (探索) を超えており、どの局面でも
+# 探索へ切り替える利得は検出できなかった。経緯は docs/HEURISTICS_CATALOG.md
 
 
 async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
@@ -146,8 +87,7 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
                           checkpoint: str = "current",
                           selection: str = "matchup",
                           own_teams: str = "train",
-                          opp_seed: int | None = None,
-                          agent: str = "policy") -> dict:
+                          opp_seed: int | None = None) -> dict:
     """play_styleモデル vs (opponent_play_styleモデル or RandomPlayer) をn_battles戦させる。"""
     # 自分チーム: 以前は「生成チーム1個を全戦使い回し」(ConstantTeambuilder)
     # だったため、勝率がチームドローの当たり外れで±0.2以上振動し、方策の
@@ -191,25 +131,13 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
     # battle_against が返らなくなる (2026-07-27に夜間評価が5時間空転した実績。
     # 手動評価と学習ループの評価が同名だったのが原因)
     acc1, acc2 = _uniq_accounts()
-    # agent="hybrid": 探索+RL価値の複合体 (配布アドバイザー相当) を測る。
-    # agent="search": 葉評価なしの純探索 (価値関数の寄与の切り分け用)。
-    # 従来の "policy" はRL方策単体
-    extra = {}
-    if agent in ("hybrid", "search"):
-        cls = HybridPlayer
-        extra["use_value"] = (agent == "hybrid")
-    elif agent == "endgame":
-        cls = EndgameHybridPlayer
-    else:
-        cls = ModelPlayer
-    player1 = cls(
+    player1 = ModelPlayer(
         account_configuration=acc1,
         battle_format=battle_format,
         server_configuration=TrainingServerConfiguration,
         team=own_teambuilder,
         play_style=play_style,
         checkpoint=checkpoint,
-        **extra,
     )
 
     if opponent_kind == "benchmark":
@@ -270,7 +198,6 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
     result = {
         "play_style": play_style,
         "opponent": opponent_play_style or opponent_kind,
-        "agent": agent,
         "n_battles": n_battles,
         "wins": player1.n_won_battles,
         "win_rate": player1.n_won_battles / n_battles if n_battles else 0.0,
@@ -302,12 +229,6 @@ def main() -> None:
     parser.add_argument("--checkpoint", type=str, default="current",
                          choices=["current", "best"],
                          help="current=学習中の最新 (進捗測定) / best=_best (配布版の実力測定)")
-    parser.add_argument("--agent", type=str, default="policy",
-                         choices=["policy", "hybrid", "search", "endgame"],
-                         help="policy=RL方策単体 (既定・従来のベンチ) / "
-                              "hybrid=探索+RL価値の複合体 / "
-                              "search=葉評価なしの純探索 (切り分け用) / "
-                              "endgame=終盤のみ探索に切替 (詰め損ね対策)")
     parser.add_argument("--selection", type=str, default="matchup",
                          choices=["matchup", "model", "model2", "matrix"],
                          help="自分側の選出: matchup=相性 (既定) / "
@@ -335,7 +256,6 @@ def main() -> None:
         opponent_kind=args.opponent,
         checkpoint=args.checkpoint,
         opp_seed=args.opp_seed,
-        agent=args.agent,
         selection=args.selection,
     ))
     print(f"[evaluate] {result}")
@@ -343,10 +263,9 @@ def main() -> None:
     # 評価結果の保存: vs Random は opponent_pool の勝率ゲート判定、
     # vs benchmark は最良チェックポイント保持とプール抽選の重み付けに使う
     # (currentの測定のみ保存する。bestの再測定で昇格判定を汚さない。
-    #  hybrid等の複合体や選出モデルの測定は方策の学習進捗ではないので保存しない)
+    #  選出モデルの測定は方策の学習進捗ではないので保存しない)
     if (not args.opponent_play_style and args.checkpoint == "current"
-            and args.agent == "policy" and args.selection == "matchup"
-            and not args.no_save):
+            and args.selection == "matchup" and not args.no_save):
         import json
         from pathlib import Path
         log_dir = Path(__file__).resolve().parent / "logs"

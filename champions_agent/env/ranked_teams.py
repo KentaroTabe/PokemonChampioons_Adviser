@@ -186,46 +186,15 @@ except Exception:
     _PokeEnvTeambuilder = object
 
 
-def load_team_weights(path_str: str | None, n_teams: int) -> list | None:
-    """苦手カリキュラム用のチーム抽選重みを読む (H5)。
-
-    形式: {"weights": [float x n_teams]} (build_ranked_teamsの順に対応)。
-    長さ不一致・読取失敗は None (一様抽選のまま) — カリキュラムの不備で
-    学習を止めない。
-    """
-    if not path_str:
-        return None
-    try:
-        import json
-        raw = json.loads(Path(path_str).read_text(encoding="utf-8"))
-        w = [float(x) for x in raw.get("weights") or []]
-        if len(w) != n_teams or min(w) <= 0:
-            print(f"[ranked_teams] 重みを無視します (長さ{len(w)} != "
-                  f"{n_teams} または非正値)")
-            return None
-        return w
-    except Exception as e:
-        print(f"[ranked_teams] 重み読取失敗 (無視): {e}")
-        return None
-
-
 class RankedTeambuilder(_PokeEnvTeambuilder):
-    """バトルごとに上位構築からランダムに1チームを選ぶTeambuilder。
-
-    weights を渡すと重み付き抽選になる (苦手カリキュラム H5:
-    負率の高い相手構築を多めに引いて学習が苦手を潰しにいく)。
-    """
+    """バトルごとに上位構築からランダムに1チームを選ぶTeambuilder"""
 
     def __init__(self, top_n: int | None = None,
                  rng: random.Random | None = None,
-                 include_external: bool = True,
-                 weights: list | None = None):
+                 include_external: bool = True):
         self.teams = build_ranked_teams(top_n=top_n,
                                         include_external=include_external)
         self.rng = rng or random.Random()
-        self.weights = (list(weights)
-                        if weights and len(weights) == len(self.teams)
-                        else None)
         if not self.teams:
             raise RuntimeError(
                 "上位構築が読み込めません。champions_agent/data/archive/ に "
@@ -233,8 +202,5 @@ class RankedTeambuilder(_PokeEnvTeambuilder):
                 "(bash champions_agent/scripts/update_usage_db.sh で取得)")
 
     def yield_team(self) -> str:
-        if self.weights:
-            text = self.rng.choices(self.teams, weights=self.weights, k=1)[0]
-        else:
-            text = self.rng.choice(self.teams)
+        text = self.rng.choice(self.teams)
         return self.join_team(self.parse_showdown_team(text))

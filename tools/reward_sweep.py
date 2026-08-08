@@ -36,7 +36,9 @@ SRC_MODELS = REPO / "champions_agent" / "train" / "checkpoints"
 SWEEP_ROOT = REPO / "logs" / "reward_sweep"
 OPP_SEED = 20260730   # 全条件で同じ相手列を使うための固定シード
 
-# 比較する条件。scale/override は報酬、env は追加の環境変数 (学習のみ適用)
+# 比較する条件。scale/override は報酬、env は追加の環境変数 (学習のみ適用)。
+# curr (苦手カリキュラム H5) は実測棄却で削除 (2026-08-08: ko比 -0.012,
+# 95%CI -0.032〜+0.009, シード符号不一致)
 _KO = "hp_diff_weight=0.3,faint_bonus=4.0,fainted_penalty=4.0"
 ALL_VARIANTS = [
     {"name": "control", "scale": "0.15", "override": "",
@@ -47,11 +49,6 @@ ALL_VARIANTS = [
      "desc": "KO重視 (2026-07-31採用の現行)"},
     {"name": "shaped", "scale": "0.45", "override": "",
      "desc": "シェイピング強め"},
-    # H5 苦手カリキュラム: 報酬はkoのまま、相手構築の抽選を負率重みにする
-    {"name": "curr", "scale": "0.15", "override": _KO,
-     "env": {"OPP_TEAM_WEIGHTS": str(REPO / "logs" / "curriculum" /
-                                     "team_weights.json")},
-     "desc": "ko + 苦手カリキュラム (負率重み抽選)"},
 ]
 VARIANTS = list(ALL_VARIANTS)
 

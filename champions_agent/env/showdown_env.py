@@ -446,17 +446,11 @@ def make_training_env(battle_format: str = TRAINING_BATTLE_FORMAT,
 
     opp_team = opp_teambuilder
     try:
-        from champions_agent.env.ranked_teams import (
-            RankedTeambuilder, load_team_weights,
-        )
+        from champions_agent.env.ranked_teams import RankedTeambuilder
         # 上と同じ理由で上位60構築に固定。
-        # OPP_TEAM_WEIGHTS (H5 苦手カリキュラムのスイープ用) があれば
-        # 負率比例の重み付き抽選にする。未設定なら従来の一様抽選
-        _w = load_team_weights(os.environ.get("OPP_TEAM_WEIGHTS"), 60)
-        ranked_tb = RankedTeambuilder(top_n=60, rng=rng,
-                                      include_external=False, weights=_w)
-        if _w:
-            print("[showdown_env] 苦手カリキュラム: 相手構築を負率重みで抽選")
+        # 苦手カリキュラム (負率重み抽選, H5) はここに実装していたが
+        # 実測棄却で削除 (2026-08-08: ko比-0.012, 効果なし)
+        ranked_tb = RankedTeambuilder(top_n=60, rng=rng, include_external=False)
 
         class _MixedTeambuilder(ChampionsTeambuilder):
             def yield_team(self) -> str:
