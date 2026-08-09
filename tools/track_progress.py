@@ -24,7 +24,8 @@ OPP_SEED = "20260730"
 
 
 def _run_eval(battles: int, checkpoint: str, selection: str,
-              models_dir: str | None = None) -> dict | None:
+              models_dir: str | None = None,
+              opponent: str = "benchmark") -> dict | None:
     import os
     env = dict(os.environ)
     if models_dir:
@@ -32,7 +33,7 @@ def _run_eval(battles: int, checkpoint: str, selection: str,
     r = subprocess.run(
         [sys.executable, "-m", "champions_agent.train.evaluate",
          "--play-style", "balance", "--battles", str(battles),
-         "--opponent", "benchmark", "--checkpoint", checkpoint,
+         "--opponent", opponent, "--checkpoint", checkpoint,
          "--selection", selection, "--opp-seed", OPP_SEED, "--no-save"],
         cwd=REPO, env=env, capture_output=True, text=True)
     for line in r.stdout.splitlines():
@@ -57,6 +58,14 @@ def main() -> None:
         row[key] = round(r["win_rate"], 4) if r else None
         print(f"{key}: {row[key]}")
 
+    # 対エージェント軸 (第2の評価軸): 複数性格の_best巡回を相手にする。
+    # 対ヒューリスティクスの飽和・過適応と切り分けるための独立軸。
+    # 参照は凍結しない方針のため、使用した_bestの識別子も併記する
+    r = _run_eval(args.battles, "current", "matchup", opponent="agents")
+    row["vs_agents"] = round(r["win_rate"], 4) if r else None
+    row["agents_ref"] = (r or {}).get("reference_ids")
+    print(f"vs_agents: {row['vs_agents']} (参照: {row['agents_ref']})")
+
     # 新アーキ (v7+set encoder) の隔離学習が走っていれば同条件で定点測定
     # (docs/RL_V7_SET_ENCODER_DESIGN.md。判定は開始7日後の事前登録に従い、
     #  途中の値で結論は出さない)
@@ -79,10 +88,13 @@ def main() -> None:
     se = (0.25 / args.battles) ** 0.5
     print(f"\n履歴 (直近{len(rows[-7:])}件):")
     for r in rows[-7:]:
-        arch = (f" arch_v7={r['arch_v7']}"
-                if r.get("arch_v7") is not None else "")
+        extra = ""
+        if r.get("arch_v7") is not None:
+            extra += f" arch_v7={r['arch_v7']}"
+        if r.get("vs_agents") is not None:
+            extra += f" vs_agents={r['vs_agents']}"
         print(f"  {r['date']}  current={r.get('current_matchup')} "
-              f"best_model={r.get('best_model')}{arch}")
+              f"best_model={r.get('best_model')}{extra}")
     if len(vals) >= 3 and max(vals[1:]) <= vals[0] + se:
         print(f"⚠ 停滞の兆候: 直近2回が {vals[0]:.3f}+SE({se:.3f}) を超えていない。"
               "2日連続なら次の設計へ移る取り決め")

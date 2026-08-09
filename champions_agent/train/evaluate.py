@@ -71,6 +71,49 @@ class ModelPlayer(RandomPlayer):
         return self.policy.choose_order(battle)
 
 
+class MixedAgentsPlayer(RandomPlayer):
+    """複数性格 (balance/offense/cycle) の学習済み _best を対戦ごとに
+    巡回して使う対戦相手。
+
+    対エージェントベンチ (2026-08-10導入): 対ヒューリスティクスの単一軸では
+    「方策の停滞」と「相手が差を映さなくなった飽和」を区別できず、
+    ヒューリスティクスの癖への過適応も検出できない。操縦スタイルの多様な
+    エージェント群を第2の評価軸にする。参照は凍結せず各性格の _best に
+    追従する (ユーザー方針)。測定側は使用チェックポイントの識別子を
+    記録して参照の変化を追跡する (reference_ids())。
+    """
+
+    STYLES = ("balance", "offense", "cycle")
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        from champions_agent.agent.policy_battle import BattlePolicy
+        self._policies = {s: BattlePolicy(play_style=s) for s in self.STYLES}
+        self._assign: dict = {}
+
+    def _style_of(self, battle):
+        tag = battle.battle_tag
+        if tag not in self._assign:
+            # 対戦順で巡回 (均等かつ決定的。同一相手列のA/Bで再現される)
+            self._assign[tag] = self.STYLES[len(self._assign)
+                                            % len(self.STYLES)]
+        return self._assign[tag]
+
+    def choose_move(self, battle):
+        return self._policies[self._style_of(battle)].choose_order(battle)
+
+    @classmethod
+    def reference_ids(cls) -> dict:
+        """参照 (_best) の識別子。参照の入れ替わりを測定履歴から追える"""
+        import hashlib
+        out = {}
+        for s in cls.STYLES:
+            p = MODELS_DIR / f"battle_policy_{s}_best.zip"
+            out[s] = (hashlib.md5(p.read_bytes()).hexdigest()[:8]
+                      if p.exists() else None)
+        return out
+
+
 # 操縦の複合体ヒューリスティックは3案とも実測棄却され削除した (2026-08-08):
 #   探索主体hybrid   0.320 vs policy 0.560 (2026-08-02)
 #   純探索search     0.326 (同上・切り分け)
@@ -152,6 +195,19 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
         player2 = make_benchmark_player(battle_format=battle_format,
                                         team=team,
                                         account_configuration=acc2)
+    elif opponent_kind == "agents":
+        # 対エージェント軸: 複数性格の_bestが巡回で操縦する (第2の評価軸)。
+        # チームプールと選出は対ヒューリスティクス軸と同一条件
+        from champions_agent.env.ranked_teams import RankedTeambuilder
+        team = RankedTeambuilder(
+            top_n=60, include_external=False,
+            rng=random.Random(opp_seed) if opp_seed is not None else None)
+        player2 = MixedAgentsPlayer(
+            account_configuration=acc2,
+            battle_format=battle_format,
+            server_configuration=TrainingServerConfiguration,
+            team=team,
+        )
     elif opponent_play_style:
         opp_team = build_random_team_text(size=TRAINING_TEAM_SIZE, play_style=opponent_play_style)
         opp_teambuilder = ConstantTeambuilder(opp_team)
@@ -202,6 +258,9 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
         "wins": player1.n_won_battles,
         "win_rate": player1.n_won_battles / n_battles if n_battles else 0.0,
     }
+    if opponent_kind == "agents":
+        # 参照は凍結しない方針のため、どの_bestに対する測定かを記録する
+        result["reference_ids"] = MixedAgentsPlayer.reference_ids()
     return result
 
 
@@ -221,8 +280,9 @@ def main() -> None:
                          help="相手チームの並びを固定する。A/B比較で両条件に"
                               "同じ相手列を当てると差が読みやすくなる")
     parser.add_argument("--opponent", type=str, default="random",
-                         choices=["random", "benchmark"],
-                         help="benchmark=上位構築xヒューリスティクスの固定強敵")
+                         choices=["random", "benchmark", "agents"],
+                         help="benchmark=上位構築xヒューリスティクス / "
+                              "agents=複数性格の_best巡回 (第2の評価軸)")
     parser.add_argument("--timeout", type=int, default=0,
                          help="秒数を指定すると評価全体にタイムアウトをかける (ハング対策)")
     parser.add_argument("--format", type=str, default=TRAINING_BATTLE_FORMAT)
@@ -265,7 +325,8 @@ def main() -> None:
     # (currentの測定のみ保存する。bestの再測定で昇格判定を汚さない。
     #  選出モデルの測定は方策の学習進捗ではないので保存しない)
     if (not args.opponent_play_style and args.checkpoint == "current"
-            and args.selection == "matchup" and not args.no_save):
+            and args.selection == "matchup" and not args.no_save
+            and args.opponent in ("random", "benchmark")):
         import json
         from pathlib import Path
         log_dir = Path(__file__).resolve().parent / "logs"
