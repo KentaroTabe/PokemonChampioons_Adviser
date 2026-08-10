@@ -36,17 +36,19 @@ SRC_MODELS = REPO / "champions_agent" / "train" / "checkpoints"
 SWEEP_ROOT = REPO / "logs" / "reward_sweep"
 OPP_SEED = 20260730   # 全条件で同じ相手列を使うための固定シード
 
-# 比較する報酬設計。scale はシェイピング全体の強さ、override は報酬の「形」
+# 比較する条件。scale/override は報酬、env は追加の環境変数 (学習のみ適用)。
+# curr (苦手カリキュラム H5) は実測棄却で削除 (2026-08-08: ko比 -0.012,
+# 95%CI -0.032〜+0.009, シード符号不一致)
+_KO = "hp_diff_weight=0.3,faint_bonus=4.0,fainted_penalty=4.0"
 ALL_VARIANTS = [
     {"name": "control", "scale": "0.15", "override": "",
-     "desc": "現行設定 (auto_tuneが定着させた値)"},
+     "desc": "旧設定 (ko採用前の対照)"},
     {"name": "outcome", "scale": "0.0", "override": "",
      "desc": "勝敗のみ。盤面シェイピングを完全に切る"},
-    {"name": "ko", "scale": "0.15", "override":
-     "hp_diff_weight=0.3,faint_bonus=4.0,fainted_penalty=4.0",
-     "desc": "KO重視。HP削りの評価を下げ、落とす/落とされるを重く"},
+    {"name": "ko", "scale": "0.15", "override": _KO,
+     "desc": "KO重視 (2026-07-31採用の現行)"},
     {"name": "shaped", "scale": "0.45", "override": "",
-     "desc": "シェイピング強め (現行の3倍)"},
+     "desc": "シェイピング強め"},
 ]
 VARIANTS = list(ALL_VARIANTS)
 
@@ -160,6 +162,9 @@ def train_cmd(v: dict, style: str, steps: int, n_envs: int) -> subprocess.Popen:
     env["REWARD_SHAPE_SCALE"] = v["scale"]
     env["REWARD_OVERRIDE"] = v["override"]
     env["N_ENVS"] = str(n_envs)
+    env.pop("OPP_TEAM_WEIGHTS", None)   # 条件の指定だけを効かせる
+    for k, val in (v.get("env") or {}).items():
+        env[k] = val
     # 学習ループ側の設定は引き継がない (auto_env.sh は source しない)
     env["TRAIN_ENT_COEF"] = env.get("TRAIN_ENT_COEF", "0.03")
     env["TRAIN_LR"] = env.get("TRAIN_LR", "3e-4")
@@ -188,6 +193,7 @@ def evaluate(v: dict, style: str, battles: int) -> float:
     env["CHAMPIONS_MODELS_DIR"] = str(_seed_dir(v["name"]))
     env.pop("REWARD_OVERRIDE", None)      # 評価条件は全条件で共通にする
     env.pop("REWARD_SHAPE_SCALE", None)
+    env.pop("OPP_TEAM_WEIGHTS", None)     # 評価の相手は一様抽選で統一
     r = subprocess.run(
         [sys.executable, "-m", "champions_agent.train.evaluate",
          "--play-style", style, "--battles", str(battles),

@@ -172,21 +172,27 @@ class _DummyBattleEnv:
     def __new__(cls):
         import gymnasium as gym
         import numpy as np
+        import os
         from champions_agent.agent.spaces import BATTLE_OBS_DIM
+
+        # 実環境 (showdown_env) と同じ規則: TRAIN_OBS=v7 で420、既定は388。
+        # ここが実環境とずれると、BCで作ったモデルが学習再開時に
+        # 観測空間不一致で非互換扱いになる
+        dim = BATTLE_OBS_DIM if os.environ.get("TRAIN_OBS", "v6") == "v7" \
+            else 388
 
         class _E(gym.Env):
             observation_space = gym.spaces.Box(
-                low=-np.inf, high=np.inf, shape=(BATTLE_OBS_DIM,),
-                dtype=np.float32)
+                low=-np.inf, high=np.inf, shape=(dim,), dtype=np.float32)
             action_space = gym.spaces.Discrete(26)
 
             def reset(self, *a, **k):
                 import numpy as _np
-                return _np.zeros(BATTLE_OBS_DIM, dtype=_np.float32), {}
+                return _np.zeros(dim, dtype=_np.float32), {}
 
             def step(self, action):
                 import numpy as _np
-                return (_np.zeros(BATTLE_OBS_DIM, dtype=_np.float32),
+                return (_np.zeros(dim, dtype=_np.float32),
                         0.0, True, False, {})
 
         return _E()
@@ -199,8 +205,9 @@ def _load_or_create(style: str):
     from sb3_contrib import MaskablePPO
 
     width = int(os.environ.get("TRAIN_NET_WIDTH", "512"))
+    use_set = os.environ.get("TRAIN_ARCH", "mlp") == "set"
     ckpt = MODELS_DIR / f"battle_policy_{style}.zip"
-    if ckpt.exists():
+    if ckpt.exists() and not use_set:
         model = MaskablePPO.load(str(ckpt), device="cpu")
         try:
             actual = model.policy.mlp_extractor.policy_net[0].out_features
@@ -213,10 +220,17 @@ def _load_or_create(style: str):
         print(f"[bc_pretrain] ネット幅不一致 (既存{actual}≠希望{width}) → "
               f"新規{width}x{width}モデルをBC初期化します", flush=True)
     else:
-        print(f"[bc_pretrain] チェックポイントなし → 新規{width}x{width}"
-              "モデルをBC初期化します", flush=True)
+        arch = "set encoder" if use_set else f"{width}x{width}"
+        print(f"[bc_pretrain] 新規{arch}モデルをBC初期化します", flush=True)
     # verbose=1: 保存値が学習再開時に復元されるため、ここで0にすると
     # 以後の学習でSB3の進捗テーブルが出なくなる (ステップ数が追えない)
+    if use_set:
+        # v7観測+set encoderの生徒 (docs/RL_V7_SET_ENCODER_DESIGN.md)。
+        # 教師=旧388方策の蒸留は、v7がプレフィックス不変のため
+        # 収集時の420観測をそのまま使える (教師側は先頭388を読む)
+        from champions_agent.agent.set_encoder import set_policy_kwargs
+        return MaskablePPO("MlpPolicy", _DummyBattleEnv(), device="cpu",
+                           verbose=1, policy_kwargs=set_policy_kwargs(width))
     return MaskablePPO("MlpPolicy", _DummyBattleEnv(), device="cpu",
                        verbose=1,
                        policy_kwargs={"net_arch": [width, width]})
@@ -233,6 +247,14 @@ def finetune(style: str, data: dict, epochs: int, lr: float,
     optim = torch.optim.Adam(policy.parameters(), lr=lr)
 
     obs = torch.as_tensor(data["obs"])
+    # 収集はフル次元 (420) で行うため、生徒モデルの観測次元に合わせて
+    # 切り詰める (v7は末尾追記なので先頭スライスで意味が保たれる)
+    want = int(model.observation_space.shape[0])
+    if obs.shape[1] > want:
+        obs = obs[:, :want]
+    elif obs.shape[1] < want:
+        pad = torch.zeros(obs.shape[0], want - obs.shape[1])
+        obs = torch.cat([obs, pad], dim=1)
     mask = torch.as_tensor(data["mask"])
     act = torch.as_tensor(data["act"])
     n = len(act)
