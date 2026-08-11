@@ -74,9 +74,8 @@ class BattleLogger:
         self._prev_pick_key = None
         self._outcome_logged = False
         self._hp_seen_ts = 0.0   # 記録済みHP変化イベントの最終時刻
-        self._selection_streak = 0  # 選出画面が連続何フレーム続いているか
+        self._last_seq = None       # 前フレームの対戦世代番号 (battle_seq)
         self._opened_ts = 0.0       # 現在のログファイルを開いた時刻
-        self._battle_frames = 0     # command/move_selectの累計フレーム数
         self._last_zero = None      # 最後にHP0%を観測した側 (side, ts)
         self._last_switch = {}      # 各側の最後の交代時刻 {side: ts}
         self._rate_open = None      # この対戦に入る前のレート {"value","ts"}
@@ -86,7 +85,12 @@ class BattleLogger:
     def _open_new(self) -> None:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         name = time.strftime("battle_%Y%m%d_%H%M%S.jsonl")
-        self._file = self.log_dir / name
+        path = self.log_dir / name
+        n = 2
+        while path.exists():   # 同一秒内の回転でも別ファイルにする
+            path = self.log_dir / name.replace(".jsonl", f"_{n}.jsonl")
+            n += 1
+        self._file = path
         self._opened_ts = time.time()
         self._outcome_logged = False
         self._rate_open = self._rate_last   # この対戦に入る時点のレート
@@ -137,7 +141,6 @@ class BattleLogger:
         self._file = None
         self._prev_scene = None
         self._hp_seen_ts = 0.0
-        self._battle_frames = 0
         self._last_zero = None
         self._last_switch = {}
 
@@ -146,27 +149,18 @@ class BattleLogger:
         """毎フレーム呼び出し。シーン変化・イベント・勝敗を記録する"""
         scene = state.get("scene")
 
-        # 新しい対戦の開始検知: 選出画面に入った時点でファイルを切り替える。
-        # シーン分類は数フレーム揺れることがあるため、連続3フレーム選出画面が
-        # 続いた場合のみ回転する (揺れのたびにログが数秒単位で分割されていた)
-        if scene == "selection":
-            self._selection_streak += 1
-        else:
-            self._selection_streak = 0
-        # field/watch/battle_hudは選出画面の背景演出でも誤分類され得るため、
-        # 明確なUIを要求するコマンド系画面のみを「対戦があった」証拠とする
-        if scene in ("command", "move_select"):
-            self._battle_frames += 1
-
-        # 回転条件: 選出3フレーム連続 + 現ファイルが30秒以上経過 + 実際に
-        # 対戦シーンを含む。長い選出画面中の分類揺れによる再突入では、まだ
-        # 対戦が始まっていないので回転しない (実運用で30秒超の分割を観測)
-        # 対戦済みの証拠は累計5フレーム以上を要求する (選出画面の演出で
-        # commandが2フレーム誤分類されただけでは回転しない)
-        if (self._selection_streak == 3 and self._file is not None
-                and self._battle_frames >= 5
-                and time.time() - self._opened_ts >= 30.0):
-            self._finalize(state.get("outcome"))
+        # 新しい対戦の開始検知: パイプラインの reset_battle が上げる世代番号
+        # (battle_seq) の変化のみを根拠にファイルを切り替える。
+        # 以前はロガー側が独自の選出画面ストリークで分割しており、状態リセット
+        # と分割がズレて「1ファイルに複数対戦」「状態は別対戦のまま」が起きた
+        # (2026-08-11の実測)。分割の根拠を状態リセットと同一にする
+        seq = state.get("battle_seq")
+        if seq is not None:
+            if self._last_seq is None:
+                self._last_seq = seq   # 起動直後は基準を記録するだけ (回転しない)
+            elif seq != self._last_seq:
+                self._last_seq = seq
+                self._finalize(state.get("outcome"))
 
         if fired:
             # 原文はイベント化された行のみから対応付ける (イベント化されなかった

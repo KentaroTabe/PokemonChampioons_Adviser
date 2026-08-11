@@ -136,9 +136,88 @@ def test_evaluate_end_to_end():
     es = next(a for a in adv3["actions"] if a["id"] == "electroshot")
     assert es["score"] > 0, es
     print("test_move_seal_filter OK")
+
+    # アンコール: 直前技が判明していれば、その技以外は候補から実質除外
+    sealed = copy.deepcopy(state)
+    sealed["player"]["party"][0]["volatiles"] = ["encore"]
+    sealed["last_move"] = {"player": "dragonpulse"}
+    adv4 = evaluate(sealed)
+    es4 = next(a for a in adv4["actions"] if a["id"] == "electroshot")
+    assert es4["score"] <= -90, es4
+    assert "アンコール" in es4["reason"], es4
+    dp4 = next(a for a in adv4["actions"] if a["id"] == "dragonpulse")
+    assert dp4["score"] > 0, dp4
+    # 直前技が不明なら従来どおり注記のみ (候補は絞らない)
+    del sealed["last_move"]
+    adv5 = evaluate(sealed)
+    es5 = next(a for a in adv5["actions"] if a["id"] == "electroshot")
+    assert es5["score"] > 0, es5
+    print("test_encore_lock OK")
     print("--- アドバイス出力例 ---")
     from advisor.service import Advisor
     print(Advisor().format_advice(advice))
+
+
+def test_pivot_over_plain_switch():
+    """素の交代が最善のとき、無効化されない交代技が交代より上に来る"""
+    import copy
+    from advisor.engine import evaluate as _eval
+    state = {
+        "field": {"weather": None, "terrain": None, "trick_room": False},
+        "mega_used": {"player": False, "opponent": False},
+        "player": {
+            "active_index": 0, "tailwind": False,
+            "hazards": {"stealth_rock": False, "spikes": 0,
+                        "toxic_spikes": 0, "sticky_web": False},
+            "screens": {"reflect": False, "light_screen": False,
+                        "aurora_veil": False},
+            "party": [
+                # ハッサム vs リザードン: 相性最悪で交代が最善になる状況
+                {"species_id": "scizor", "species_ja": "ハッサム",
+                 "types": ["むし", "はがね"], "hp_percent": 100.0,
+                 "hp_current": 145, "hp_max": 145, "status": None,
+                 "boosts": {}, "ability_id": None, "item_id": None,
+                 "moves": [
+                     {"name_ja": "とんぼがえり", "move_id": "uturn",
+                      "pp": 20, "max_pp": 20, "effectiveness": "resist"},
+                     {"name_ja": "バレットパンチ", "move_id": "bulletpunch",
+                      "pp": 30, "max_pp": 30, "effectiveness": "resist"},
+                 ], "revealed_moves": []},
+                {"species_id": "garchomp", "species_ja": "ガブリアス",
+                 "types": ["ドラゴン", "じめん"], "hp_percent": 100.0,
+                 "hp_current": 183, "hp_max": 183, "status": None,
+                 "boosts": {}, "ability_id": None, "item_id": None,
+                 "moves": [], "revealed_moves": []},
+            ],
+        },
+        "opponent": {
+            "active_index": 0, "tailwind": False,
+            "hazards": {"stealth_rock": False, "spikes": 0,
+                        "toxic_spikes": 0, "sticky_web": False},
+            "screens": {"reflect": False, "light_screen": False,
+                        "aurora_veil": False},
+            "party": [
+                {"species_id": "charizard", "species_ja": "リザードン",
+                 "types": ["ほのお", "ひこう"], "hp_percent": 100.0,
+                 "hp_current": None, "hp_max": None, "status": None,
+                 "boosts": {}, "ability_id": None, "item_id": None,
+                 "moves": [], "revealed_moves": ["フレアドライブ"]},
+            ],
+        },
+    }
+    advice = _eval(state)
+    assert advice["ok"], advice
+    actions = advice["actions"]
+    idx = {a["id"]: i for i, a in enumerate(actions) if a.get("id")}
+    switch_idx = next(i for i, a in enumerate(actions)
+                      if a["kind"] == "switch")
+    # 交代が交代技より上に来ているなら、交代技の複合価値が働いていない
+    dump = [f"{a['kind']}:{a.get('id') or a['name']}={a['score']}"
+            for a in actions]
+    assert idx["uturn"] < switch_idx, dump
+    top = actions[idx["uturn"]]
+    assert "交代するならまずこの技" in top["reason"], dump
+    print("test_pivot_over_plain_switch OK")
 
 
 def _mini_state(my_mon, opp_mon):
@@ -212,4 +291,5 @@ if __name__ == "__main__":
     test_damage_sanity()
     test_weather_and_screens()
     test_evaluate_end_to_end()
+    test_pivot_over_plain_switch()
     test_priority_evaluation()

@@ -47,6 +47,12 @@ STATUS_MOVE_VALUE = {
 RECOVERY_MOVES = {"recover", "softboiled", "roost", "slackoff", "moonlight",
                   "synthesis", "morningsun", "shoreup", "strengthsap"}
 
+# 攻撃しつつ手持ちと入れ替わる交代技。素の交代が最善手のとき、これらが
+# 無効化されない限り「同じ交代先に無償で出しつつダメージを稼ぐ」分だけ
+# 常に優越する (接続テスト所感 2026-08-11: 素の交代を提案していた)
+PIVOT_MOVE_IDS = {"uturn", "voltswitch", "flipturn"}
+PIVOT_OVER_SWITCH_BONUS = 2.0   # 最善の交代スコアへの上乗せ (順位を上へ)
+
 _TYPE_JA2EN = None
 
 
@@ -285,6 +291,12 @@ def evaluate(state: dict, resolver=None) -> dict:
     pool = []
     if opp_view is not None:
         pool = opponent_move_pool(opp_p, opp_view, resolver)
+        # 相手がアンコール中で直前技が判明していれば、脅威はその技のみになる
+        opp_vols_ = {str(v).lower() for v in (opp_p.get("volatiles") or [])}
+        opp_locked = (state.get("last_move") or {}).get("opponent")
+        if "encore" in opp_vols_ and opp_locked and \
+                any(m == opp_locked for m, _ in pool):
+            pool = [(opp_locked, 100.0)]
         for mid, weight in pool:
             mv = dex.move(mid)
             if not mv:
@@ -346,11 +358,16 @@ def evaluate(state: dict, resolver=None) -> dict:
     # 自分の技の評価
     # ------------------------------------------------------------------
     # わざふうじ状態: ちょうはつ=変化技不可 / かなしばり=特定技不可 /
-    # アンコール=直前の技以外不可 (直前技は追跡不確実なため注記のみ)
+    # アンコール=直前の技以外不可 (直前技はイベントの last_move で解決。
+    # 未判明の場合のみ従来どおり注記に留める)
     my_vols = {str(v).lower() for v in (my_p.get("volatiles") or [])}
     disabled_ids = {v.split("_", 1)[1] for v in my_vols
                     if v.startswith("disable_")}
+    encore_locked = None
+    if "encore" in my_vols:
+        encore_locked = (state.get("last_move") or {}).get("player")
     can_ko_first = False   # 先に動いて倒せる技があるか (死に出し判定用)
+    move_type_mult = {}    # 攻撃技のタイプ相性倍率 (交代技の無効判定用)
     for slot in my_p.get("moves") or []:
         mid = slot.get("move_id")
         mv = dex.move(mid)
@@ -363,6 +380,11 @@ def evaluate(state: dict, resolver=None) -> dict:
             actions.append({"kind": "move", "id": mid, "name": name,
                             "score": -99.0,
                             "reason": "かなしばりで選べない"})
+            continue
+        if encore_locked and mid != encore_locked:
+            actions.append({"kind": "move", "id": mid, "name": name,
+                            "score": -99.0,
+                            "reason": "アンコール中は直前の技しか選べない"})
             continue
         if "taunt" in my_vols and (mv["category"] == "Status"
                                    or not mv["power"]):
@@ -409,6 +431,7 @@ def evaluate(state: dict, resolver=None) -> dict:
                 d = calc_damage(my_view, dummy, mid, my_field,
                                 override_type_mult=override)
             exp = d["avg"] * acc
+            move_type_mult[mid] = d["type_mult"]
 
             ko_prob = 0.0
             if d["min"] >= opp_hp_pct:
@@ -598,9 +621,33 @@ def evaluate(state: dict, resolver=None) -> dict:
     except Exception:
         pass
 
+    # 交代技の複合価値: 素の交代が最善のとき、無効化されない交代技があれば
+    # 「同じ交代を実現しつつダメージも入る」分だけ交代より優先する。
+    # 無効相性 (ボルトチェンジ→地面等) は交代自体が発生しないため対象外
+    try:
+        if actions and actions[0]["kind"] == "switch":
+            best_switch = actions[0]
+            for a in actions:
+                if (a["kind"] == "move" and a["id"] in PIVOT_MOVE_IDS
+                        and a["score"] > -90
+                        and move_type_mult.get(a["id"], 0) > 0):
+                    a["score"] = round(
+                        best_switch["score"] + PIVOT_OVER_SWITCH_BONUS, 1)
+                    a["reason"] += (f" / 交代するならまずこの技: ダメージを"
+                                    f"入れつつ {best_switch['name']} に引ける")
+            actions.sort(key=lambda a: -a["score"])
+    except Exception:
+        pass
+
     if "encore" in my_vols:
-        speed_note = ("アンコール中: 直前に使った技しか選べません。" +
-                      speed_note)
+        if encore_locked:
+            locked_ja = next((a["name"] for a in actions
+                              if a.get("id") == encore_locked), encore_locked)
+            speed_note = (f"アンコール中: {locked_ja} しか選べません "
+                          "(交代で解除)。" + speed_note)
+        else:
+            speed_note = ("アンコール中: 直前に使った技しか選べません。" +
+                          speed_note)
 
     # 死に出しプランニング (定説: 捨てる順番と無償降臨。HEURISTICS_CATALOG H2)
     # 「相手のKO圏の攻撃が先に来る」かつ「先に倒し返せない」= この場は
