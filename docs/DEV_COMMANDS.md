@@ -8,9 +8,26 @@
 | コマンド | 用途 |
 |---|---|
 | `bash scripts/start_all_nohup.sh` | 全常駐プロセスの一括起動 (稼働中はスキップ) |
-| `bash scripts/deploy.sh` | 更新の反映 (対戦中は自動中止、`--force`で強制) |
+| `bash scripts/deploy.sh` | 更新の反映 (対戦中は自動中止、`--force`で強制)。⚠ 停止中のアドバイザーは起動しない (意図的に止めている状態を尊重するため) |
 | `bash scripts/start_servers.sh` | 開発用フォアグラウンド起動 (Ctrl+Cで停止) |
 | `python -m tools.cleanup_logs --dry-run` | 不要ログ掃除の対象確認 (実行は引数なし) |
+
+## 接続テスト (実機で対戦しながらアドバイザーを検証する)
+
+| コマンド | 用途 |
+|---|---|
+| `bash scripts/start_connection_test.sh` | **開始**。Showdown確保 + アドバイザー(8000)/フロント(3000)起動 + セッション開始マーカー記録 |
+| `bash scripts/end_connection_test.sh` | **終了**。アドバイザー停止 + フレーム取りこぼし率 + 対戦サマリー + 一括監査 (sonnet 1回) |
+| `bash scripts/end_connection_test.sh --no-audit` | 終了処理のみ (API課金を避けたいとき) |
+| `bash scripts/deploy.sh --force` | テスト中に修正を反映する (対戦の合間に実行) |
+| `python -m tools.anomaly_report --last 10` | 誤認候補一覧 (ログ内矛盾のみ。フレーム未保存でも作れる) |
+
+- 学習ループは**止めない** (実測で影響なし: 平均95→102ms)。止めると30分で約30万ステップを失う。
+- 開始スクリプトは起動後に `DEBUG_DUMP_FRAMES=1` を実測確認する。これが無効だと
+  終了時の**視覚監査 (誤認一覧) が作れない** (2026-08-11に取りこぼした)。
+  警告が出たら `pkill -f "uvicorn server:app_asgi"` してから開始し直す。
+- フロントエンドURLは開始時に表示される (`http://<LAN IP>:3000`)。
+- チェックリスト: `docs/CONNECTION_TEST_CHECKLIST.md`
 
 ## launchd 常駐 (再起動後も自動復帰)
 
@@ -89,6 +106,7 @@ plist本体は `scripts/com.championsadviser.train.plist` (repo管理)。編集�
 | `python -m tools.audit_extraction [--battle <log>]` | 監査ペア一覧 (フレーム×抽出主張、対戦中フェーズ主体) |
 | `python -m tools.audit_subtask [--battle <log>] [--max-frames N]` | 1対戦の抽出監査をsonnetサブタスクで実行 → `logs/audit_reports/` |
 | `python -m tools.audit_session [--last N] [--budget 30]` | セッション一括監査: 全対戦横断で矛盾候補の機械検出+層化サンプリング→sonnet 1回 |
+| `python -m tools.anomaly_report [--last N]` | 誤認候補一覧 (ログ内矛盾のみ・フレーム不要・API課金なし)。視覚監査の代替ではない |
 
 監査サブタスクのモデルはsonnet固定 (2026-07-23実測: haikuは技名の取り違え・
 HP幻視があり監査に不適。根拠はtools/audit_subtask.pyのdocstring参照)。
