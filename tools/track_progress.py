@@ -66,15 +66,17 @@ def main() -> None:
     row["agents_ref"] = (r or {}).get("reference_ids")
     print(f"vs_agents: {row['vs_agents']} (参照: {row['agents_ref']})")
 
-    # 新アーキ (v7+set encoder) の隔離学習が走っていれば同条件で定点測定
-    # (docs/RL_V7_SET_ENCODER_DESIGN.md。判定は開始7日後の事前登録に従い、
-    #  途中の値で結論は出さない)
-    arch_dir = REPO / "logs" / "arch_v7" / "checkpoints"
-    if (arch_dir / "battle_policy_balance.zip").exists():
-        r = _run_eval(args.battles, "current", "matchup",
-                      models_dir=str(arch_dir))
-        row["arch_v7"] = round(r["win_rate"], 4) if r else None
-        print(f"arch_v7: {row['arch_v7']}")
+    # 新アーキ実験の隔離学習が走っていれば同条件で定点測定
+    # (docs/RL_V7_SET_ENCODER_DESIGN.md。判定は事前登録に従い、
+    #  途中の値で結論は出さない)。set encoderは8/14に無益性棄却済みのため、
+    # 現役の実験ディレクトリのみ測る
+    for key, sub in [("arch_v7mlp", "arch_v7mlp")]:
+        arch_dir = REPO / "logs" / sub / "checkpoints"
+        if (arch_dir / "battle_policy_balance.zip").exists():
+            r = _run_eval(args.battles, "current", "matchup",
+                          models_dir=str(arch_dir))
+            row[key] = round(r["win_rate"], 4) if r else None
+            print(f"{key}: {row[key]}")
 
     OUT.parent.mkdir(parents=True, exist_ok=True)
     with OUT.open("a", encoding="utf-8") as f:
@@ -89,10 +91,9 @@ def main() -> None:
     print(f"\n履歴 (直近{len(rows[-7:])}件):")
     for r in rows[-7:]:
         extra = ""
-        if r.get("arch_v7") is not None:
-            extra += f" arch_v7={r['arch_v7']}"
-        if r.get("vs_agents") is not None:
-            extra += f" vs_agents={r['vs_agents']}"
+        for k in ("arch_v7", "arch_v7mlp", "vs_agents"):
+            if r.get(k) is not None:
+                extra += f" {k}={r[k]}"
         print(f"  {r['date']}  current={r.get('current_matchup')} "
               f"best_model={r.get('best_model')}{extra}")
     if len(vals) >= 3 and max(vals[1:]) <= vals[0] + se:
