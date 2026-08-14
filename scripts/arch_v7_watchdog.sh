@@ -15,7 +15,7 @@ cd "$(dirname "$0")/.." || exit 1
 
 INTERVAL="${1:-300}"
 STALE_SEC="${2:-1800}"
-CKPT="logs/arch_v7/checkpoints/battle_policy_balance.zip"
+CKPT="${3:-logs/arch_v7/checkpoints}/battle_policy_balance.zip"
 
 while true; do
   sleep "$INTERVAL"
