@@ -77,7 +77,9 @@ CREATE TABLE IF NOT EXISTS usage_snapshot (
     format          TEXT NOT NULL,          -- 'gen9ou' 等
     rating_cutoff   INTEGER,                -- 集計に使われたレーティング下限
     source_month    TEXT,                   -- 集計対象月(例 '2026-06')
-    number_of_battles INTEGER,              -- 集計母数(対戦数)
+    number_of_battles INTEGER,              -- 集計母数。smogonは対戦数だが、
+                                            -- championsbattledata+pokedb では
+                                            -- pokedbの集計構築数が入る (note参照)
     source_url      TEXT,                   -- 取得元URL
     fetched_at      TEXT NOT NULL DEFAULT (datetime('now')),
     note            TEXT

@@ -14,6 +14,7 @@ import json
 import random
 from pathlib import Path
 
+from champions_agent.config import USAGE_MIN_RANKED_TEAMS
 from champions_agent.data import database as db
 from champions_agent.data.sources.pokedb_opendata import _species_id, _item_id
 from champions_agent.data.sources.name_mapping import to_showdown_name
@@ -30,8 +31,9 @@ _cache: dict = {}
 
 # プールとして採用する最小チーム数。シーズン切替直後のopendataはほぼ空で、
 # 「最新ファイル」を無条件に読むとプールが3チームに激減した (2026-08-05:
-# M-5開始2時間後の取得でベンチ・学習の相手が3チームになりかけた)
-MIN_POOL_TEAMS = 100
+# M-5開始2時間後の取得でベンチ・学習の相手が3チームになりかけた)。
+# 取得側 (data/sources/pokedb_opendata.py) の足切りと同じ値を使う。
+MIN_POOL_TEAMS = USAGE_MIN_RANKED_TEAMS
 # ベンチ基盤のピン止め。ここに書いたファイルがある限りそれを使い、
 # シーズンデータの蓄積でプールが黙って切り替わるのを防ぐ。
 # 基盤を切り替えるときは POOL_PIN を書き換え、training_changes.json に記録する
