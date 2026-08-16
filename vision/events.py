@@ -395,9 +395,15 @@ class EventParser:
         _PROTECT_IDS = ("protect", "detect", "banefulbunker", "spikyshield",
                         "kingsshield", "silktrap", "burningbulwark", "obstruct")
         for side in ("player", "opponent"):
+            # 交代・ひんしで直前技をクリア (アンコールの技固定も同時に切れる)
+            if any(f == f"switch_{side}" or f == "faint" and
+                   (self.state.last_faint or {}).get("side") == side
+                   for f in fired):
+                self.state.last_move.pop(side, None)
             moves_fired = [f for f in fired if f.startswith(f"move_{side}_")]
             if not moves_fired:
                 continue
+            self.state.last_move[side] = moves_fired[-1].split("_", 2)[2]
             if any(f.split("_", 2)[2] in _PROTECT_IDS for f in moves_fired):
                 self.state.protect_streak[side] = \
                     self.state.protect_streak.get(side, 0) + 1

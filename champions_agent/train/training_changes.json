@@ -2,6 +2,19 @@
   "_comment": "学習に影響する変更の記録。watch_training が推移グラフに赤い縦線として描画し、履歴表示にも差し込む。新しい変更を入れたら追記すること (at はローカル時刻 'YYYY-MM-DD HH:MM')。kind: net=ネット構成 / reward=報酬 / opponent=相手構成 / env=環境仕様 / eval=評価方法 / fix=不具合修正",
   "changes": [
     {
+      "at": "2026-08-16 19:41",
+      "kind": "fix",
+      "label": "使用率DBの復旧 (8/5〜8/16 は学習チームが実質14種に偏っていた)",
+      "detail": "8/5 21:42の日次更新が、公開直後で3構築しか無かったpokedbの新シーズン(M-4)を285構築のM-3から無条件に採用していた。その結果 pokemon_usage は234匹中14匹にしか実測値が付かず (残りはフロア値0.1)、meta_sets.weight で抽選する build_random_party の抽選シェアが上位14種で96.5% (正常時48.9%、シェア90%到達に必要な種族数 59→13) に偏った。学習チームは ranked 実構築50%+メタ生成50%の混合のため、11日間、学習分布の約半分が14種のミラー戦になっていた。評価側は POOL_PIN (s3 285構築) に守られており、この間ずっと訓練分布と評価分布がズレていた。teammate_usage は847→82行に減り、日次 evolve_daily.sh が毎回作り直す species_embedding の共起基底が118種→14種に縮小 (8/6の配布選出0.609→0.442の崩落と符合、tests/test_embedding_pin.py)。本日 s4 が222構築まで積み上がったのを確認して再取得し snapshot 7 を作成、抽選集中度は49.1%と正常値に復帰、埋め込みも共起111種で再生成した。⚠ meta_sets の技/持ち物/特性は snapshot 6→7 で234種すべて不変のため、ベンチ相手の中身は動いておらず評価基準は据え置き。変わったのは抽選重みのみ = 学習分布の正常化。再発防止として取得側 (data/sources/pokedb_opendata.py: 構築数が config.USAGE_MIN_RANKED_TEAMS=100 未満のシーズンは見送って前シーズンへ遡る) と ingest側 (薄い集計は使用率%/共起率の補完に使わない) に二重の足切りを入れ、env/ranked_teams.py の MIN_POOL_TEAMS も同じ設定値を参照するようにした (tests/test_usage_season_guard.py)"
+    },
+    {
+      "at": "2026-08-14 22:35",
+      "kind": "net",
+      "label": "Set Encoderを無益性棄却、v7観測+従来MLPの分解実験へ",
+      "detail": "8/14の事前登録足切り (参考値<0.45で棄却) が発動: arch_v7=0.226。累計約2,600万ステップの自己対戦でBC初期値(0.32)から上昇せず低下。事前登録済みの次実験として、同一条件 (BC蒸留・ko報酬・n_envs=2) で TRAIN_ARCH=mlp のみ変えた隔離学習を logs/arch_v7mlp で開始 — v7観測の寄与とアーキテクチャの寄与を分離する。set encoder側の検死は判定後に実施",
+      "isolated": true
+    },
+    {
       "at": "2026-08-09 02:10",
       "kind": "net",
       "label": "観測v7+Set Encoderの隔離学習を開始 (本番は不変)",

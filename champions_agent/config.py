@@ -65,6 +65,13 @@ USAGE_STATS_SOURCES = {
 USAGE_TARGET_FORMAT = "champions-singles"
 # Smogonフォールバック時のレーティング下限
 USAGE_MIN_RATING = 1500
+# pokedb オープンデータを「使える」と見なす最小構築数。
+# シーズン切替直後のopendataはほぼ空で、最新シーズンを無条件に採用すると
+# 使用率%・共起率が数構築から算出され壊れる (2026-08-05: 285構築のM-3から
+# 3構築のM-4へ黙って切り替わり、自己対戦のチーム抽選が実質14種に偏った)。
+# ingest側の足切りと、ベンチ用チームプール (env/ranked_teams.py) の
+# 足切りで同じ値を使う。
+USAGE_MIN_RANKED_TEAMS = 100
 
 
 @dataclass

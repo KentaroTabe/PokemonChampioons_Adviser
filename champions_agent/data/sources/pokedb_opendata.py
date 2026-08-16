@@ -23,6 +23,8 @@ from pathlib import Path
 
 import requests
 
+from champions_agent.config import USAGE_MIN_RANKED_TEAMS
+
 BASE_URL = "https://champs.pokedb.tokyo"
 ARCHIVE_DIR = Path(__file__).resolve().parent.parent / "archive"
 # 通常ブラウザ以外を弾く設定のため、一般的なUAを名乗る (公認DLルート)
@@ -69,12 +71,19 @@ def _item_id(ja_name: str) -> str:
 
 def fetch_ranked_teams(season_number: int | None = None,
                        rule: str = "single",
-                       archive: bool = True) -> tuple[dict, int]:
+                       archive: bool = True,
+                       min_teams: int = USAGE_MIN_RANKED_TEAMS) -> tuple[dict, int]:
     """公式オープンデータを取得する。season_number 省略時は最新から遡って探す。
 
-    戻り値: (JSONペイロード, 実際に取得できたシーズン番号)
+    シーズン開始直後のオープンデータは数構築しか載っていないため、
+    min_teams 未満のシーズンは見送って前シーズンへ遡る。どのシーズンも
+    満たさない場合は最も構築数が多かったものを返す (安全側)。
+    season_number を明示した場合は足切りせずそのシーズンを返す。
+
+    戻り値: (JSONペイロード, 実際に採用したシーズン番号)
     """
     candidates = [season_number] if season_number else list(range(12, 0, -1))
+    best: tuple[dict, int] | None = None   # 足切り未満しか無かった場合の保険
     last_err: Exception | None = None
     for n in candidates:
         if n is None:
@@ -86,17 +95,30 @@ def fetch_ranked_teams(season_number: int | None = None,
                 continue
             resp.raise_for_status()
             payload = resp.json()
-            if archive:
-                ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
-                path = ARCHIVE_DIR / f"pokedb_s{n}_{rule}_{date.today().isoformat()}.json.gz"
-                with gzip.open(path, "wt", encoding="utf-8") as f:
-                    json.dump(payload, f, ensure_ascii=False)
-                print(f"  [pokedb] 生データを保存: {path}")
-            return payload, n
         except Exception as e:  # ネットワークエラー等は次の候補を試さず即時報告
             last_err = e
             break
-    raise RuntimeError(f"pokedb opendata が取得できませんでした: {last_err or '404 (全シーズン)'}")
+
+        n_teams = len(payload.get("teams", []))
+        if best is None or n_teams > len(best[0].get("teams", [])):
+            best = (payload, n)
+        if season_number or n_teams >= min_teams:
+            break
+        print(f"  [pokedb] s{n} は{n_teams}構築のみ (最低{min_teams}) のため見送り、"
+              f"前シーズンを探します")
+
+    if best is None:
+        raise RuntimeError(
+            f"pokedb opendata が取得できませんでした: {last_err or '404 (全シーズン)'}")
+
+    payload, n = best
+    if archive:
+        ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+        path = ARCHIVE_DIR / f"pokedb_s{n}_{rule}_{date.today().isoformat()}.json.gz"
+        with gzip.open(path, "wt", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+        print(f"  [pokedb] 生データを保存: {path}")
+    return payload, n
 
 
 def aggregate_teams(payload: dict) -> dict:

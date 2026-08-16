@@ -315,6 +315,13 @@ class BattleStateV2:
         self.last_rate: Optional[dict] = None
         # 連続まもる使用回数 (成功率減衰の追跡。他の技で0にリセット)
         self.protect_streak = {"player": 0, "opponent": 0}
+        # 対戦の世代番号。reset_battle のたびに+1され、ログ分割の唯一の
+        # 根拠になる (分割条件を書く側が独自のシーン判定を持つと、リセットと
+        # 分割がズレて対戦ログが連結される事故が起きた: 2026-08-11)
+        self.battle_seq: int = 0
+        # 各側のアクティブが直前に使った技 {side: move_id}。
+        # アンコールの技固定の解決に使う。交代・ひんしでその側をクリア
+        self.last_move: dict = {}
 
     # --- イベントログ ---
     def log_event(self, source: str, text: str, event_id: Optional[str] = None,
@@ -338,8 +345,10 @@ class BattleStateV2:
     def reset_battle(self):
         """新しい対戦の開始 (選出画面検知時など) に呼ぶ"""
         keep_rate = self.last_rate   # レートは対戦を跨ぐ情報なので保持
+        next_seq = self.battle_seq + 1   # 世代番号も跨いで単調増加させる
         self.__init__()
         self.last_rate = keep_rate
+        self.battle_seq = next_seq
 
     def restore_from_dict(self, d: dict) -> None:
         """スナップショットからの復元 (サーバー再起動の対戦中リカバリ用)。
@@ -391,6 +400,8 @@ class BattleStateV2:
                                    {"player": 0, "opponent": 0})
         self.battle_active = bool(d.get("battle_active"))
         self.selection_picked = d.get("selection_picked")
+        self.battle_seq = int(d.get("battle_seq") or 0)
+        self.last_move = dict(d.get("last_move") or {})
 
     def to_dict(self):
         return {
@@ -407,4 +418,6 @@ class BattleStateV2:
             "events": self.events[-30:],
             "last_rate": self.last_rate,
             "protect_streak": dict(self.protect_streak),
+            "battle_seq": self.battle_seq,
+            "last_move": dict(self.last_move),
         }

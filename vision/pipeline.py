@@ -26,6 +26,14 @@ from vision.events import EventParser
 from vision.normalize import NameResolver
 from vision.state import BattleStateV2
 
+# ひんし観測からこの秒数以内の「選出画面」判定は死に出し画面とみなして
+# 却下する (last_faint は交代の着地で先にクリアされるため、実際の窓は
+# もっと短いことが多い。この値は取り逃し時の上限)
+DEATH_SWITCH_GUARD_SEC = 20.0
+# 選出以外のシーンがこのフレーム数連続したら選出画面の「訪問」を終了する
+# (選出中の演出による単発の誤分類では訪問を跨がない)
+SELECTION_LEAVE_FRAMES = 5
+
 
 class RegionStabilizer:
     """テキスト描画アニメーション完了 (数フレーム変化なし) を検知する。
@@ -87,6 +95,8 @@ class VisionPipeline:
         self._pending_scene = None  # シーン遷移の確定待ち (2フレーム連続で確定)
         self._pending_count = 0
         self._in_selection = False  # 選出画面に確定滞在中か (離脱は5フレーム要求)
+        self._sel_visit = False     # 確定選出画面の「訪問中」フラグ (再リセット防止)
+        self._sel_leave = 0         # 選出以外が連続したフレーム数 (訪問終了判定)
         self._sel_anchor: dict = {"ok": None, "ts": 0.0}  # 対戦中の選出アンカー確認
         self._resolution_seen = True  # 前回command以降にfield/standbyを見たか
         self._heavy_interval = {
@@ -218,9 +228,18 @@ class VisionPipeline:
 
             # 対戦中の「選出画面」検知は交代画面等の誤検知であることがある
             # (実戦でT3中にリセット+ログ分割が発生)。対戦中に選出画面と
-            # 認めるのは「選出完了/N/3」アンカーが実際に読めた場合のみ
+            # 認めるのは「選出完了/N/3」アンカーが実際に読めた場合のみ。
+            # さらに、ひんし直後は死に出し (次のポケモンを選ぶ) 画面である
+            # 可能性が高く、アンカーOCRの偶発通過で対戦中リセットが起きた
+            # (2026-08-11: これが battle_active を落とし、以降の対戦が
+            # 連結される連鎖の起点になった)。last_faint は交代で着地すると
+            # クリアされるため、本物の次対戦の選出画面には残らない
             if scene == "selection" and self.state.battle_active:
-                if not self._selection_anchor_ok(img):
+                lf = getattr(self.state, "last_faint", None)
+                in_death_switch = bool(
+                    lf and time.time() - lf.get("ts", 0)
+                    < DEATH_SWITCH_GUARD_SEC)
+                if in_death_switch or not self._selection_anchor_ok(img):
                     scene = prev_scene if prev_scene != "selection" else "field"
 
         self.state.scene = scene
@@ -234,11 +253,26 @@ class VisionPipeline:
             self._selection_streak = 0
         selection_confirmed = single_shot or self._selection_streak >= 3
 
-        # 新しい対戦の開始検知: バトル終了後に選出画面へ戻ったらリセット
-        if scene == "selection" and selection_confirmed and self.state.battle_active:
-            self.reset()
-            self._selection_streak = 3
-            self.state.scene = scene
+        # 新しい対戦の開始検知: 確定選出画面への「入場」で、状態に前の対戦の
+        # 内容が残っていればリセットする。
+        # 従来条件の battle_active は、対戦中の誤リセットで一度 False に
+        # なると本物の次選出でもリセットが走らず、以降の全対戦の状態とログが
+        # 連結され続けた (2026-08-11の実測: 1ファイルに約3試合)。
+        # turn>0 を「前の対戦が載っている」証拠として併用する。turn は選出
+        # 画面滞在中には増えないため、訪問エッジ判定 (_sel_visit) と合わせて
+        # 同一選出内での再リセット (抽出済みロスターの消去) は起きない
+        if scene == "selection":
+            self._sel_leave = 0
+            if selection_confirmed and not self._sel_visit:
+                self._sel_visit = True
+                if self.state.turn > 0 or self.state.battle_active:
+                    self.reset()
+                    self._selection_streak = 3
+                    self.state.scene = scene
+        else:
+            self._sel_leave += 1
+            if self._sel_visit and self._sel_leave >= SELECTION_LEAVE_FRAMES:
+                self._sel_visit = False
 
         # ターンカウント: 「前回のコマンド画面以降に行動解決 (field/standby) を
         # 観測した」場合のみ、コマンド画面復帰を新ターンとみなす。

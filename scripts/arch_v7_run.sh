@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# 新アーキテクチャ (観測v7 + Set Encoder) の隔離学習パイプライン。
+# 新アーキテクチャ (観測v7) の隔離学習パイプライン。
 # docs/RL_V7_SET_ENCODER_DESIGN.md の移行計画。本番には一切触れない。
-#   bash scripts/arch_v7_run.sh [ラウンド数] [1回のステップ数] [BC対戦数]
+#   bash scripts/arch_v7_run.sh [ラウンド数] [1回のステップ数] [BC対戦数] [DIR] [ARCH]
+#   ARCH: set (Set Encoder) / mlp (従来MLP。v7観測の寄与を分離する実験)
 #
 # 1. 本番の_bestと相手プールを隔離ディレクトリへ配布 (教師と対戦相手)
-# 2. BC蒸留: 現行方策(388)を教師に、v7観測(420)+set encoderの生徒を初期化
+# 2. BC蒸留: 現行方策(388)を教師に、v7観測(420)の生徒を初期化
 # 3. ko報酬・n_envs=2 で自己対戦を継続 (本番 n_envs=4 と並走)
-# 判定は開始7日後 (事前登録: 各10,000戦, δ=0.02)
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -14,11 +14,12 @@ ROUNDS="${1:-40}"
 STEPS="${2:-100000}"
 BC_BATTLES="${3:-400}"
 DIR="${4:-logs/arch_v7/checkpoints}"
+ARCH="${5:-set}"
 SRC="champions_agent/train/checkpoints"
 
 export CHAMPIONS_MODELS_DIR="$PWD/$DIR"
 export TRAIN_OBS=v7
-export TRAIN_ARCH=set
+export TRAIN_ARCH="$ARCH"
 export N_ENVS=2
 export REWARD_SHAPE_SCALE=0.15
 export REWARD_OVERRIDE="hp_diff_weight=0.3,faint_bonus=4.0,fainted_penalty=4.0"

@@ -1,7 +1,11 @@
-"""BattleLoggerのログ回転デバウンスの検証。
+"""BattleLoggerのログ回転の検証。
 
-選出画面のシーン分類が数フレーム揺れても、1対戦=1ファイルが保たれることを
-確認する (実運用で3秒間に3ファイル分割される事象が起きた)。
+回転の根拠は状態リセットの世代番号 (battle_seq) のみ。
+シーン分類の揺れでは決して回転しない。
+
+旧仕様 (ロガー独自の選出画面ストリークで回転) は 2026-08-11 の接続テストで
+「状態リセットと分割がズレて1ファイルに複数対戦が連結される」事故を起こした
+ため、battle_seq 連動に変更した (tests/test_session_split.py も参照)。
 
 使い方: python -m tests.test_battle_logger
 """
@@ -13,66 +17,39 @@ from pathlib import Path
 from battle_logger import BattleLogger
 
 
-def _state(scene):
+def _state(scene, seq=0):
     return {"scene": scene, "outcome": None, "turn": 1, "events": [],
             "field": {}, "selection_picked": None, "mega_used": {},
+            "battle_seq": seq,
             "player": {"active_index": None, "remaining": None, "hazards": {},
                        "party": []},
             "opponent": {"active_index": None, "remaining": None, "hazards": {},
                          "party": []}}
 
 
-def test_rotation_debounce():
+def test_rotation_follows_battle_seq():
     tmp = Path(tempfile.mkdtemp())
     try:
         lg = BattleLogger(log_dir=tmp)
-        # 対戦1開始 (選出3フレーム -> ファイル生成はwrite時)
         for _ in range(5):
             lg.on_frame(_state("selection"), [])
         lg.on_frame(_state("command"), ["move_player_surf"])
         first = lg._file
         assert first is not None
 
-        # 対戦中に選出画面へ1-2フレーム誤分類が混ざっても回転しない
-        for scene in ("selection", "field", "selection", "selection", "command"):
+        # シーン分類がどれだけ揺れても、seqが同じなら回転しない
+        for scene in ("selection", "field", "selection", "selection",
+                      "command", "selection", "selection", "selection"):
             lg.on_frame(_state(scene), [])
-        assert lg._file == first, "誤分類フレームでログが分割された"
+        assert lg._file == first, "seq不変でログが分割された"
 
-        # 開始直後 (30秒以内) は選出が3フレーム続いても回転しない
-        for _ in range(5):
-            lg.on_frame(_state("selection"), [])
-        assert lg._file == first, "30秒以内に回転した"
-
-        # 対戦済み証拠 (command/move_select 累計5フレーム以上) を満たす
-        for _ in range(5):
-            lg.on_frame(_state("command"), [])
-
-        # 30秒経過後の選出画面3連続で次の対戦として回転する
-        lg._opened_ts = time.time() - 31.0
-        lg._selection_streak = 0
-        time.sleep(1.1)   # ファイル名は秒解像度のため、同一秒内の再生成を避ける
-        for _ in range(3):
-            lg.on_frame(_state("selection"), [])
-        lg.on_frame(_state("selection"), [])
+        # 状態リセット (seq+1) で回転する
+        lg.on_frame(_state("selection", seq=1), [])
         assert lg._file is None or lg._file != first
-        lg.on_frame(_state("command"), ["move_player_surf"])
+        lg.on_frame(_state("command", seq=1), ["move_player_surf"])
         second = lg._file
         assert second != first, "新しい対戦でファイルが切り替わらない"
-
-        # 長い選出画面: 対戦フレームが5未満のファイルは30秒超でも回転しない
-        # (選出中の演出でcommandが2フレーム誤分類されるケースを含む)
-        lg._finalize(None)
-        for _ in range(5):
-            lg.on_frame(_state("selection"), [])
-        lg.on_frame(_state("command"), [])   # 誤分類2フレーム相当
-        lg.on_frame(_state("command"), [])
-        third = lg._file
-        lg._opened_ts = time.time() - 31.0
-        lg._selection_streak = 0
-        for _ in range(4):
-            lg.on_frame(_state("selection"), [])
-        assert lg._file == third, "選出画面のみのファイルが回転した"
-        print("test_rotation_debounce OK")
+        print("test_rotation_follows_battle_seq OK")
     finally:
         shutil.rmtree(tmp)
 
@@ -192,7 +169,7 @@ def test_outcome_inference_by_rate():
 
 
 if __name__ == "__main__":
-    test_rotation_debounce()
+    test_rotation_follows_battle_seq()
     test_outcome_inference()
     test_outcome_inference_by_rate()
     print("ALL OK")

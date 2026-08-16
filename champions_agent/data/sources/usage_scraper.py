@@ -18,7 +18,10 @@ from typing import Any
 
 import requests
 
-from champions_agent.config import USAGE_STATS_SOURCES, USAGE_TARGET_FORMAT, USAGE_MIN_RATING
+from champions_agent.config import (
+    USAGE_STATS_SOURCES, USAGE_TARGET_FORMAT, USAGE_MIN_RATING,
+    USAGE_MIN_RANKED_TEAMS,
+)
 from champions_agent.data.sources.name_mapping import (
     to_pokeapi_slug, normalize_move_name, normalize_item_name, normalize_ability_name,
 )
@@ -235,6 +238,15 @@ def fetch_champions_usage(fmt: str = "Singles", season: str | None = None,
     except Exception as e:
         print(f"  [warn] pokedb opendata 取得失敗 (補完なしで続行): {e}")
 
+    # 足切り: 構築数が少なすぎる集計から使用率%/共起率を作ると、
+    # 数構築に載った種族だけが極端な使用率を持つ壊れたスナップショットになる
+    # (fetch_ranked_teams 側でも遡るが、season_number 明示時や
+    #  全シーズンが薄い場合はここに届く)。補完なしとして扱う。
+    if agg is not None and agg["n_teams"] < USAGE_MIN_RANKED_TEAMS:
+        print(f"  [warn] pokedb の構築数が{agg['n_teams']}件 (最低{USAGE_MIN_RANKED_TEAMS}) のため、"
+              "使用率%/共起率の補完を見送ります")
+        agg = None
+
     usage = agg["usage"] if agg else {}
     teammates_all = agg["teammates"] if agg else {}
     items_supplement = agg["items"] if agg else {}
@@ -267,11 +279,14 @@ def fetch_champions_usage(fmt: str = "Singles", season: str | None = None,
         "month": cbd_meta.get("season"),
         "format": f"champions-{fmt.lower()}",
         "rating_cutoff": None,
+        # ここは対戦数ではなく「集計母数 = pokedbの上位構築数」を入れている
+        # (championsbattledataは対戦数を公開していない)。列名との差は note で補う。
         "number_of_battles": agg["n_teams"] if agg else None,
         "source": "championsbattledata+pokedb" if agg else "championsbattledata",
         "source_url": "https://championsbattledata.com/api",
         "note": ("usage%はpokedb上位構築の採用頻度、技/持ち物/特性/配分は"
                  "championsbattledata (ゲーム内バトルデータ由来)。"
+                 "number_of_battles は対戦数ではなくpokedbの集計構築数。"
                  "Credit: Battle data provided by Pokémon Champions Battle Data"),
     }
     return entries, meta
