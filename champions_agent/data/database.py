@@ -170,8 +170,19 @@ def bulk_insert(conn: sqlite3.Connection, table: str, columns: Sequence[str],
 
 
 def latest_snapshot_id(conn: sqlite3.Connection, source: str | None = None,
-                        fmt: str | None = None) -> int | None:
-    """最新のスナップショットIDを返す。source/fmt は指定時のみ絞り込む。"""
+                        fmt: str | None = None,
+                        require_meta: bool = True) -> int | None:
+    """最新のスナップショットIDを返す。source/fmt は指定時のみ絞り込む。
+
+    require_meta=True (既定) では meta_sets が生成済みのスナップショットだけを
+    対象にする。ingest のコミットから build_meta のコミットまでの数秒間、
+    新しいスナップショットは meta_sets が空であり、その窓を「最新」として
+    掴んだチーム生成は「候補数0 < パーティサイズ」で即死する
+    (2026-08-16: 使用率DB更新の最中に隔離学習がこの経路でハングした。
+    docs/incidents/reports/2026-08-16-isolated-training-hang.md)。
+    meta_sets を作る側 (build_meta / role_tagger) だけが require_meta=False で
+    生のままの最新スナップショットを見る。
+    """
     conditions, params = [], []
     if source:
         conditions.append("source = ?")
@@ -179,6 +190,9 @@ def latest_snapshot_id(conn: sqlite3.Connection, source: str | None = None,
     if fmt:
         conditions.append("format = ?")
         params.append(fmt)
+    if require_meta:
+        conditions.append(
+            "EXISTS (SELECT 1 FROM meta_sets m WHERE m.snapshot_id = usage_snapshot.id)")
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     row = conn.execute(
         f"""
