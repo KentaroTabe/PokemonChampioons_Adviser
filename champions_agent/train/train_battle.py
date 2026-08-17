@@ -202,6 +202,13 @@ def train(total_timesteps: int = 10_000, battle_format: str = TRAINING_BATTLE_FO
     _atomic_save(model, save_path)
     print(f"[train_battle] 学習済みモデルを保存しました: {save_path}")
 
+    # EMA更新 (振動対策の平均方策。失敗しても学習は成功扱いにする)
+    try:
+        from champions_agent.train.ema import update_ema
+        update_ema(play_style)
+    except Exception as e:
+        print(f"[train_battle] EMA更新に失敗 (学習は正常): {e}")
+
     env.close()
 
 

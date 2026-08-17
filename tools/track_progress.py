@@ -82,6 +82,15 @@ def main() -> None:
     row["h2h_balance_best"] = round(r["win_rate"], 4) if r else None
     print(f"h2h_balance_best: {row['h2h_balance_best']}")
 
+    # EMA平均方策の同指標 (振動対策の観察、train/ema.py)。currentのh2hが
+    # 短周期で振れても、平均方策は滑らかに動くはずという想定の検証
+    from champions_agent.config import MODELS_DIR
+    if (MODELS_DIR / "battle_policy_balance_ema.zip").exists():
+        r = _run_eval(1000, "ema", "matchup", opponent="agents",
+                      agents_style="balance")
+        row["ema_h2h"] = round(r["win_rate"], 4) if r else None
+        print(f"ema_h2h: {row['ema_h2h']}")
+
     # holdout ベンチ (P2, 週次=月曜のみ)。配布実力の下限の監視
     # (未学習構築の操縦。8/17実測 0.520 vs 学習構築 0.605)
     if time.localtime().tm_wday == 0:
@@ -124,7 +133,7 @@ def main() -> None:
     for r in rows[-7:]:
         extra = ""
         for k in ("arch_v7", "arch_v7mlp", "vs_agents",
-                  "h2h_balance_best", "holdout_benchmark"):
+                  "h2h_balance_best", "ema_h2h", "holdout_benchmark"):
             if r.get(k) is not None:
                 extra += f" {k}={r[k]}"
         print(f"  {r['date']}  current={r.get('current_matchup')} "

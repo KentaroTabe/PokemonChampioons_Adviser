@@ -70,6 +70,13 @@ class ModelPlayer(RandomPlayer):
             path = MODELS_DIR / f"battle_policy_{play_style}.zip"
             self.policy = BattlePolicy(model_path=path if path.exists()
                                        else None, play_style=play_style)
+        elif checkpoint == "ema":
+            # 振動対策のEMA平均方策 (train/ema.py)。未作成なら明示エラー
+            # (黙って別のチェックポイントを測る事故を防ぐ。incidents 1-1)
+            path = MODELS_DIR / f"battle_policy_{play_style}_ema.zip"
+            if not path.exists():
+                raise FileNotFoundError(f"EMAチェックポイントがありません: {path}")
+            self.policy = BattlePolicy(model_path=path, play_style=play_style)
         else:
             self.policy = BattlePolicy(play_style=play_style)
 
@@ -298,8 +305,9 @@ def main() -> None:
                          help="秒数を指定すると評価全体にタイムアウトをかける (ハング対策)")
     parser.add_argument("--format", type=str, default=TRAINING_BATTLE_FORMAT)
     parser.add_argument("--checkpoint", type=str, default="current",
-                         choices=["current", "best"],
-                         help="current=学習中の最新 (進捗測定) / best=_best (配布版の実力測定)")
+                         choices=["current", "best", "ema"],
+                         help="current=学習中の最新 (進捗測定) / best=_best (配布版の実力測定) / "
+                              "ema=EMA平均方策 (振動対策の観察用)")
     parser.add_argument("--selection", type=str, default="matchup",
                          choices=["matchup", "model", "model2", "matrix"],
                          help="自分側の選出: matchup=相性 (既定) / "
