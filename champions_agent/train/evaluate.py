@@ -6,6 +6,12 @@
 
 前提: ローカルでPokemon Showdownサーバーが起動していること。
 
+⚠ 並列実行の規律 (2026-08-18, docs/AXIS_GAP_ANALYSIS.md §2-1):
+  3本以上の評価を並列に走らせると水準が大きく歪む
+  (同一測定で 0.234 vs 単独 0.405 の実測差)。
+  - 水準の測定 (定点・certify 等) は必ず単独で走らせる
+  - A/B比較はペア同時 (2本) のみ。両アームが同条件なら差は有効
+
 使い方:
     python -m champions_agent.train.evaluate --play-style offense --battles 50
     python -m champions_agent.train.evaluate --play-style offense --opponent-play-style stall --battles 50

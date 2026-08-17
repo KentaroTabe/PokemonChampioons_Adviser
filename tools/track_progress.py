@@ -25,16 +25,23 @@ OPP_SEED = "20260730"
 
 def _run_eval(battles: int, checkpoint: str, selection: str,
               models_dir: str | None = None,
-              opponent: str = "benchmark") -> dict | None:
+              opponent: str = "benchmark",
+              agents_style: str | None = None,
+              own_teams: str | None = None) -> dict | None:
     import os
     env = dict(os.environ)
     if models_dir:
         env["CHAMPIONS_MODELS_DIR"] = models_dir
+    cmd = [sys.executable, "-m", "champions_agent.train.evaluate",
+           "--play-style", "balance", "--battles", str(battles),
+           "--opponent", opponent, "--checkpoint", checkpoint,
+           "--selection", selection, "--opp-seed", OPP_SEED, "--no-save"]
+    if agents_style:
+        cmd += ["--agents-style", agents_style]
+    if own_teams:
+        cmd += ["--own-teams", own_teams]
     r = subprocess.run(
-        [sys.executable, "-m", "champions_agent.train.evaluate",
-         "--play-style", "balance", "--battles", str(battles),
-         "--opponent", opponent, "--checkpoint", checkpoint,
-         "--selection", selection, "--opp-seed", OPP_SEED, "--no-save"],
+        cmd,
         cwd=REPO, env=env, capture_output=True, text=True)
     for line in r.stdout.splitlines():
         if line.startswith("[evaluate] "):
@@ -66,6 +73,30 @@ def main() -> None:
     row["agents_ref"] = (r or {}).get("reference_ids")
     print(f"vs_agents: {row['vs_agents']} (参照: {row['agents_ref']})")
 
+    # head-to-head vs balance_best (P2, 2026-08-18導入)。合算 vs_agents は
+    # 感度が高すぎ、ベンチは低すぎたため、中間の直接対戦を主指標にする
+    # (currentが配布 _best に 0.405 で負けていたのをベンチ軸は映せなかった。
+    #  docs/AXIS_GAP_ANALYSIS.md 所見A)
+    r = _run_eval(1000, "current", "matchup", opponent="agents",
+                  agents_style="balance")
+    row["h2h_balance_best"] = round(r["win_rate"], 4) if r else None
+    print(f"h2h_balance_best: {row['h2h_balance_best']}")
+
+    # holdout ベンチ (P2, 週次=月曜のみ)。配布実力の下限の監視
+    # (未学習構築の操縦。8/17実測 0.520 vs 学習構築 0.605)
+    if time.localtime().tm_wday == 0:
+        r = _run_eval(3000, "current", "matchup", opponent="benchmark",
+                      own_teams="holdout")
+        row["holdout_benchmark"] = round(r["win_rate"], 4) if r else None
+        print(f"holdout_benchmark: {row['holdout_benchmark']}")
+
+    # 週次アンカー保存 (P1/P2)。プールへ間隔を空けた過去世代を供給し、
+    # 過去時点の再測を可能にする
+    from champions_agent.train.opponent_pool import save_weekly_anchors
+    saved = save_weekly_anchors()
+    if saved:
+        print(f"週次アンカーを保存: {saved}")
+
     # 新アーキ実験の隔離学習が走っていれば同条件で定点測定
     # (docs/RL_V7_SET_ENCODER_DESIGN.md。判定は事前登録に従い、
     #  途中の値で結論は出さない)。set encoderは8/14に無益性棄却、
@@ -92,7 +123,8 @@ def main() -> None:
     print(f"\n履歴 (直近{len(rows[-7:])}件):")
     for r in rows[-7:]:
         extra = ""
-        for k in ("arch_v7", "arch_v7mlp", "vs_agents"):
+        for k in ("arch_v7", "arch_v7mlp", "vs_agents",
+                  "h2h_balance_best", "holdout_benchmark"):
             if r.get(k) is not None:
                 extra += f" {k}={r[k]}"
         print(f"  {r['date']}  current={r.get('current_matchup')} "

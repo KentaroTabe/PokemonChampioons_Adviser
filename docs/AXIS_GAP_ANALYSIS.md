@@ -119,7 +119,25 @@ _best 3本 (+今後は週1の間隔アンカー) をプール抽選に固定確�
 vs_agents 合算の今後の定点が 0.45 前後で安定するなら所見Bの仮説
 (上昇=汚染の産物) と整合。再上昇するなら別の機構を探す。
 
-## 5. 本解析で追加した測定手段
+## 5. 実施記録 (2026-08-18)
+
+P1〜P3 を実装した。
+
+- **P1**: `opponent_pool.py` に `EPSILON_ANCHOR=0.25` を追加。アンカー
+  (_best 3本 + `checkpoints/anchors/` の週次スナップショット) から一様抽選。
+  枠は selfplay プール分 (0.45→0.20) から捻出。次の学習サイクルから有効。
+  事前登録は training_changes.json 2026-08-18 01:25 のエントリを正とする
+- **P2**: 日次定点 (`tools/track_progress.py`) に h2h_balance_best (1,000戦)
+  を追加、holdout_benchmark (3,000戦) を月曜のみ追加、週次アンカー保存
+  (`save_weekly_anchors`、性格ごと4本保持) を組み込み。定点自体を launchd
+  (com.championsadviser.track-progress.plist、毎日21:50) で恒久化。
+  並列規律は evaluate.py の docstring に明記
+- **P3**: 追加コードなし (既存の vs_agents 定点の観察を継続)。
+  予測: 汚染仮説が正しければ 0.45 前後で安定する
+- 回帰テスト: `tests/test_anchor_pool.py` (抽選境界 / フォールバック /
+  アンカー枠の規模 / 週次保存の間隔と保持数)
+
+## 6. 本解析で追加した測定手段
 
 - `evaluate --agents-style balance|offense|cycle`: agents軸の単一性格分解
 - `evaluate --own-teams holdout`: 未学習構築での過学習検証

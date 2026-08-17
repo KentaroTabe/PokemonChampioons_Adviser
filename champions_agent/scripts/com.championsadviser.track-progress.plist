@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  日次の進捗定点 (tools.track_progress) を毎日 21:50 に実行する launchd 設定。
+  従来の定点時刻 (21:53前後) に合わせている。
+
+  インストール:
+    cp champions_agent/scripts/com.championsadviser.track-progress.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.championsadviser.track-progress.plist
+
+  アンインストール:
+    launchctl unload ~/Library/LaunchAgents/com.championsadviser.track-progress.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.championsadviser.track-progress</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/kenta/GitHub/PokemonChampioons_Adviser/champions_agent/scripts/track_progress_daily.sh</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>21</integer>
+        <key>Minute</key>
+        <integer>50</integer>
+    </dict>
+    <key>StandardErrorPath</key>
+    <string>/tmp/championsadviser-track-progress.err</string>
+</dict>
+</plist>
