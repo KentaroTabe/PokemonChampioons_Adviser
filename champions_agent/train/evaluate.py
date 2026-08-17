@@ -7,10 +7,11 @@
 前提: ローカルでPokemon Showdownサーバーが起動していること。
 
 ⚠ 並列実行の規律 (2026-08-18, docs/AXIS_GAP_ANALYSIS.md §2-1):
-  3本以上の評価を並列に走らせると水準が大きく歪む
-  (同一測定で 0.234 vs 単独 0.405 の実測差)。
   - 水準の測定 (定点・certify 等) は必ず単独で走らせる
   - A/B比較はペア同時 (2本) のみ。両アームが同条件なら差は有効
+  当初の根拠 (並列0.234 vs 単独0.405) は agents軸の1チーム使い回し欠陥
+  (incidents 2026-08-10) の交絡と判明したため「歪みの実証」ではないが、
+  負荷の影響を排除する予防措置として規律は維持する。
 
 使い方:
     python -m champions_agent.train.evaluate --play-style offense --battles 50
@@ -159,7 +160,12 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
     # 進歩が読めなかった。ベンチマーク評価では相手と同じ上位構築を毎戦
     # 引き直して等条件にする (方策の強さだけを測る。アドバイザーの実用途
     # =ユーザーの実チームを操縦する、とも整合)
-    if opponent_kind == "benchmark":
+    # agents軸も benchmark と同じ「毎戦引き直し」にする (2026-08-18修正)。
+    # 導入時 (8/10) にこの分岐へ入り損ね「生成チーム1個を全戦使い回し」に
+    # 落ちていたため、agents軸の全測定が1走行1チームのドロー運で±0.1以上
+    # 振れていた (凍結ネット同士の再測で0.373〜0.617を実測。
+    # docs/incidents/reports/2026-08-10-agents-axis-single-team-draw.md)
+    if opponent_kind in ("benchmark", "agents"):
         from champions_agent.env.ranked_teams import RankedTeambuilder
         if own_teams == "holdout":
             # 学習に使っていない構築だけで測る。ベンチの上昇が
