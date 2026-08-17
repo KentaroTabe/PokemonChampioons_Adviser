@@ -68,9 +68,10 @@ def main() -> None:
 
     # 新アーキ実験の隔離学習が走っていれば同条件で定点測定
     # (docs/RL_V7_SET_ENCODER_DESIGN.md。判定は事前登録に従い、
-    #  途中の値で結論は出さない)。set encoderは8/14に無益性棄却済みのため、
-    # 現役の実験ディレクトリのみ測る
-    for key, sub in [("arch_v7mlp", "arch_v7mlp")]:
+    #  途中の値で結論は出さない)。set encoderは8/14に無益性棄却、
+    # v7観測+MLPも8/17の本判定で棄却済み (観測v7は棚上げ)。
+    # 次の隔離実験を始めたら (キー名, logs配下のサブディレクトリ) を追加する
+    for key, sub in []:
         arch_dir = REPO / "logs" / sub / "checkpoints"
         if (arch_dir / "battle_policy_balance.zip").exists():
             r = _run_eval(args.battles, "current", "matchup",
