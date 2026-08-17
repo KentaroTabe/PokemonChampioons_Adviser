@@ -58,9 +58,21 @@ def test_update_initializes_by_copy():
     print("test_update_initializes_by_copy OK")
 
 
+def test_policy_load_failure_is_visible():
+    """モデル未ロードは stats に痕跡が残る (静かな全戦ランダム化の可視化)"""
+    from champions_agent.agent.policy_battle import BattlePolicy
+    p = BattlePolicy(model_path=Path(tempfile.mkdtemp()) / "missing.zip")
+    assert p.model is None
+    assert p.stats["load_failed"] == 1, p.stats
+    assert set(p.stats) == {"masked", "argmax_fallback",
+                            "random_fallback", "load_failed"}, p.stats
+    print("test_policy_load_failure_is_visible OK")
+
+
 if __name__ == "__main__":
     test_blend_math()
     test_blend_rejects_mismatch()
     test_tau_window_exceeds_oscillation_period()
     test_update_initializes_by_copy()
+    test_policy_load_failure_is_visible()
     print("\nALL OK")

@@ -105,6 +105,11 @@ class MixedAgentsPlayer(RandomPlayer):
         # 既定は従来どおり3性格巡回で、測定基準は変わらない
         self.styles = tuple(styles) if styles else self.STYLES
         self._policies = {s: BattlePolicy(play_style=s) for s in self.styles}
+        # 参照がロードできていなければ測定として無効 (ランダム行動の相手を
+        # _bestと思って測る事故を防ぐ。黙って別物を測った前歴: incidents 1-1)
+        broken = [s for s, p in self._policies.items() if p.model is None]
+        if broken:
+            raise RuntimeError(f"参照_bestをロードできません: {broken}")
         self._assign: dict = {}
 
     def _style_of(self, battle):
@@ -276,9 +281,16 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
         "wins": player1.n_won_battles,
         "win_rate": player1.n_won_battles / n_battles if n_battles else 0.0,
     }
+    # 方策の劣化内訳 (masked=正常 / argmax_fallback / random_fallback)。
+    # agents軸が同一条件で0.24振れた事象の観測用。random_fallback が
+    # 大きい測定は方策ではなくフォールバックを測っている
+    if hasattr(player1, "policy") and hasattr(player1.policy, "stats"):
+        result["own_fallbacks"] = dict(player1.policy.stats)
     if opponent_kind == "agents":
         # 参照は凍結しない方針のため、どの_bestに対する測定かを記録する
         result["reference_ids"] = MixedAgentsPlayer.reference_ids()
+        result["opp_fallbacks"] = {
+            s: dict(p.stats) for s, p in player2._policies.items()}
     return result
 
 
