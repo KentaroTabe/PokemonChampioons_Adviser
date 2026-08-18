@@ -46,6 +46,12 @@ source .venv/bin/activate 2>/dev/null
 python -m tools.analyze_battles --session --last 10 2>/dev/null \
   || echo "(対戦ログの集計に失敗。scripts/run_test.sh 環境を確認)"
 
+# 決定監査 (テストA: 助言の欠落/遅延/不一致と大失点の抽出。ローカル・無課金)
+echo ""
+echo "=== 決定監査 (テストAの合格判定) ==="
+python -m tools.decision_audit --session \
+  || echo "(決定監査に失敗。手動実行: python -m tools.decision_audit)"
+
 # セッション一括監査 (sonnet 1回。今回の全対戦を横断)
 if [ "${1:-}" = "--no-audit" ]; then
   echo ""

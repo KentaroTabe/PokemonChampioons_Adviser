@@ -158,6 +158,18 @@ def detect_move_pills(img) -> list:
     return [(ry0 + span * a / h, ry0 + span * b / h) for a, b in pills]
 
 
+# シーン種別の定数 (シーン名の唯一の源)。classify が返す文字列と一致する。
+# 下流 (battle_logger / tools) はこの定数を参照し、リテラルを直書きしない
+SCENE_SELECTION = "selection"
+SCENE_STANDBY = "standby"
+SCENE_COMMAND = "command"
+SCENE_MOVE_SELECT = "move_select"
+SCENE_WATCH = "watch"
+SCENE_BATTLE_HUD = "battle_hud"
+SCENE_FIELD = "field"
+SCENE_FIELD_CHECK = "field_check"
+
+
 def classify(img) -> dict:
     """シーンと根拠スコアを返す。{"scene": str, "scores": {...}}"""
     scores = {}
@@ -207,9 +219,18 @@ def classify(img) -> dict:
         return {"scene": "standby", "scores": scores}
 
     # --- 選出画面: 相手パーティパネル(赤) + 選出完了バー(紫) ---
+    # 自分側パネルは先頭2行のどちらかで判定する。カーソルが乗った行は
+    # ライム色にハイライトされ紫判定が失敗するため、単一行だけを見ると
+    # カーソルが先頭行にある間ずっと選出画面を取り逃す
+    # (2026-08-18 欠陥#9: 2/3選出済みの選出画面が field に誤分類され、
+    #  持ち物リストのOCRから item_player_marble の誤イベントまで発火した)。
+    # ライム (カーソル行) も選出行の証拠として加算する
     opp_panel = _crimson_ratio(crop(img, zones.SELECTION_OPP[0]["panel"]))
     complete_bar = _purple_ratio(crop(img, zones.SELECTION["complete_bar"]))
-    my_sel_panel = _purple_ratio(crop(img, zones.SELECTION_MY[0]["panel"]))
+    my_sel_panel = max(
+        _purple_ratio(crop(img, z["panel"]))
+        + _ratio_in_range(crop(img, z["panel"]), [30, 100, 120], [50, 255, 255])
+        for z in zones.SELECTION_MY[:2])
     scores["sel_opp_panel"] = round(opp_panel, 3)
     scores["sel_complete"] = round(complete_bar, 3)
     scores["sel_my_panel"] = round(my_sel_panel, 3)

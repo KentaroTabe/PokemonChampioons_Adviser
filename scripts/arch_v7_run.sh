@@ -16,6 +16,13 @@ BC_BATTLES="${3:-400}"
 DIR="${4:-logs/arch_v7/checkpoints}"
 ARCH="${5:-set}"
 SRC="champions_agent/train/checkpoints"
+# 1ラウンドの時間上限 (秒)。本番は tools.smoke_train の signal.alarm で
+# デッドロックを打ち切れるが、当初この隔離経路は train_battle 直呼びで
+# watchdog が無く、2026-08-16 に27時間ハングした
+# (docs/incidents/reports/2026-08-16-isolated-training-hang.md)。
+# 実測 17〜31分/ラウンド (100kステップ, n_envs=2) の約2〜3倍を既定にする。
+# 途中保存があるため打ち切ってもそのラウンドの進捗は失われない。
+ROUND_TIMEOUT="${ROUND_TIMEOUT:-3600}"
 
 export CHAMPIONS_MODELS_DIR="$PWD/$DIR"
 export TRAIN_OBS=v7
@@ -51,7 +58,10 @@ fi
 
 for i in $(seq 1 "$ROUNDS"); do
   echo "--- 自己対戦 第${i}/${ROUNDS}回 x ${STEPS}ステップ: $(date '+%m-%d %H:%M') ---"
-  .venv/bin/python -m champions_agent.train.train_battle \
-    --timesteps "$STEPS" --play-style balance --resume --n-envs "$N_ENVS"
+  # smoke_train 経由 = 本番と同じ watchdog (signal.alarm) 付きで学習する
+  .venv/bin/python -m tools.smoke_train \
+    --timesteps "$STEPS" --play-style balance --resume --n-envs "$N_ENVS" \
+    --timeout "$ROUND_TIMEOUT" \
+    || echo "--- 第${i}回 打ち切り/異常終了 (続行): $(date '+%m-%d %H:%M') ---"
 done
 echo "===== arch_v7 完了: $(date '+%m-%d %H:%M:%S') ====="

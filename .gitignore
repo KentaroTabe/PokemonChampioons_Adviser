@@ -26,8 +26,20 @@ champions_agent/data/archive/
 champions_agent/train/checkpoints/
 champions_agent/train/logs/
 
-# --- その他 ---
+# --- AIコーディングエージェント向けの指示・記録 (コミットしない) ---
 .clinerules
+CLAUDE.md
+.claude/
+
+# --- その他 ---
 
 # 対戦ログ (自動記録)
 logs/
+
+# ローカル参照用ドキュメント (GitHubには上げない)
+# docs/incidents/ は内部メモがローカル限定、正式なインシデントレポート
+# (docs/incidents/reports/) と書き方の規約 (README.md) だけを追跡する
+docs/incidents/*
+!docs/incidents/README.md
+!docs/incidents/reports/
+docs/training_policy_history.md

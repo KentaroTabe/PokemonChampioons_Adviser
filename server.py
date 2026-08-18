@@ -25,6 +25,20 @@ from fastapi import FastAPI
 
 from vision import ocr
 from vision.pipeline import VisionPipeline
+from vision.scenes import SCENE_SELECTION, SCENE_STANDBY
+
+
+def should_advise_selection(state: dict) -> bool:
+    """選出アドバイスを出してよい文脈か。
+
+    対戦中に standby/selection と誤分類されたフレームで選出提案が
+    表示されていた (2026-08-18 第3回テスト: turn進行中に計5回混入)。
+    対戦が確定して以降 (battle_active) は、パイプラインの対戦リセット
+    (選出3フレーム連続で battle_active が落ちる) を待ってから出す。
+    """
+    return (state.get("scene") in (SCENE_SELECTION, SCENE_STANDBY)
+            and not state.get("outcome")
+            and not state.get("battle_active"))
 from advisor.service import Advisor
 from battle_logger import BattleLogger
 
@@ -245,9 +259,9 @@ async def _handle_one_frame(sid, data):
             _team_advice_done = False
 
         # 選出画面: 選出進捗の判定と選出提案 (パーティ情報が変わった時だけ)。
-        # outcomeが残っている間は前試合の相手パーティを参照してしまうため、
-        # パイプラインの対戦リセット (選出3フレーム連続) を待つ
-        if state["scene"] in ("selection", "standby") and not state.get("outcome"):
+        # outcome/battle_active が残っている間は出さない (前試合の参照と、
+        # 対戦中の誤分類フレームでの選出提案混入の防止)
+        if should_advise_selection(state):
             sel_key = json.dumps([
                 state.get("selection_picked"),
                 [p.get("species_id") for p in state["player"]["party"]],
@@ -275,7 +289,11 @@ async def _handle_one_frame(sid, data):
                 advice["text"] = advisor.format_advice(advice)
                 battle_log.on_advice(advice, "battle")
                 await sio.emit('advice_update', advice, room=sid)
-                if advice.get("ok"):
+                if advice.get("provisional"):
+                    # 確定前: 次フレームで即再計算して安定を確認する
+                    # (キーを消さないと状態が動くまで10秒待ちになる)
+                    _last_advice_key = None
+                elif advice.get("ok"):
                     print("--- アドバイス ---")
                     print(advice["text"])
                 else:

@@ -90,12 +90,17 @@ def _read_pp(img, zone) -> Optional[tuple]:
 # ==============================================================================
 # 選出画面
 # ==============================================================================
-def _is_picked_panel(img, panel_zone) -> bool:
-    """選出済みパネルかどうか。
+def _is_picked_panel(img, panel_zone):
+    """選出済みパネルかどうか。True/False/None (判定不能) を返す。
 
     実画面の選出済み表示は「パネル左端の白いリボン+番号バッジ」
     (ライム色ハイライトはカーソル位置であって選出済みの印ではない —
     実フレーム検証 2026-07-20)。左端ストリップの白画素率で判定する。
+
+    ⚠ カーソルが乗った行はストリップごとライム色に染まり、白リボンが
+    検出できない (2026-08-18 欠陥#8: カーソル行の選出済みが False へ
+    巻き戻り、picked が1体目までしか取れなかった)。ライム優勢の行は
+    None (判定不能) を返し、呼び出し側が前回状態を維持する。
     """
     strip = {"x0": max(0.0, panel_zone["x0"] - 0.004),
              "y0": panel_zone["y0"] + 0.005,
@@ -103,10 +108,15 @@ def _is_picked_panel(img, panel_zone) -> bool:
              "y1": panel_zone["y1"] - 0.01}
     c = crop(img, strip)
     if c is None or c.size == 0:
-        return False
+        return None
     hsv = cv2.cvtColor(c, cv2.COLOR_BGR2HSV)
     white = cv2.inRange(hsv, np.array([0, 0, 180]), np.array([180, 60, 255]))
-    return cv2.countNonZero(white) / white.size > 0.25
+    if cv2.countNonZero(white) / white.size > 0.25:
+        return True
+    lime = cv2.inRange(hsv, _LIME_LOW, _LIME_HIGH)
+    if cv2.countNonZero(lime) / lime.size > 0.30:
+        return None   # カーソル行: リボンの有無を判定できない
+    return False
 
 
 def extract_selection(img, state: BattleStateV2, resolver) -> None:
@@ -123,15 +133,32 @@ def extract_selection(img, state: BattleStateV2, resolver) -> None:
     picked_count = 0
     for i, z in enumerate(zones.SELECTION_MY):
         picked = _is_picked_panel(img, z["panel"])
-        picked_count += int(picked)
-        if i < len(state.player.party):
-            mon = state.player.party[i]
-            if picked and not mon.is_picked:
+        mon = state.player.party[i] if i < len(state.player.party) else None
+        if picked is None:
+            # カーソル行など判定不能: 前回状態を維持する
+            picked_count += int(bool(mon and mon.is_picked))
+            continue
+        if mon is None:
+            picked_count += int(picked)
+            continue
+        if picked:
+            mon._unpick_streak = 0
+            if not mon.is_picked:
                 mon.pick_order = 1 + sum(
                     1 for p in state.player.party if p.is_picked)
-            elif not picked:
+            mon.is_picked = True
+        else:
+            # 解除は連続Falseで確定する。カーソルの光沢・演出の揺らぎで
+            # 白リボンが1フレーム読めないだけで選出済みが巻き戻っていた
+            # (2026-08-18 欠陥#8: True→False反転を実測)
+            streak = getattr(mon, "_unpick_streak", 0) + 1
+            mon._unpick_streak = streak
+            if mon.is_picked and streak < UNPICK_CONFIRM_FRAMES:
+                pass   # まだ解除を確定しない
+            else:
+                mon.is_picked = False
                 mon.pick_order = None
-            mon.is_picked = picked
+        picked_count += int(mon.is_picked)
     # OCRが読めなかった場合はハイライト数で補完
     if m is None and picked_count > 0:
         state.selection_picked = picked_count
@@ -192,6 +219,21 @@ def extract_selection(img, state: BattleStateV2, resolver) -> None:
 
 
 _MY_LEGAL_MAXES = None
+# 様子見画面の自分HP実数値で「0/xxx」を連続で読んだらひんし確定とみなす
+# 回数。1回では誤読 (ハイライト演出) と区別できず、faintメッセージ頼み
+# ではメッセージの取り逃しでHPが固着する (2026-08-18 接続テスト欠陥#6)。
+# 3回では画面滞在が短いと確定前に離脱する (2026-08-18 第2回テスト:
+# 交代メニュー滞在中に確定せずサザンドラのひんしを取り逃した) ため2回
+ZERO_READ_FAINT_COUNT = 2
+# 選出済みの解除を確定するのに必要な連続False回数。1フレームの読み損ね
+# (カーソルの光沢・演出) で選出済みが巻き戻らないように (欠陥#8)
+UNPICK_CONFIRM_FRAMES = 2
+# 相手HUD名の「ロスター事前分布つき再解決」の閾値。通常の0.85で解決できない
+# OCR揺れ (実測: オーロンゲ→「オーロング」= 類似度0.8) でも、判明済みの
+# 相手6体のいずれかに一致する場合のみ低い閾値で受け入れる。
+# 解決失敗が続くと ensure_active が満枠でlimbo行きになり、active=Noneの
+# まま助言が相手不明で劣化していた (2026-08-18 欠陥#10)
+OPP_ROSTER_RESOLVE_CUTOFF = 0.75
 
 
 def _my_legal_maxes():
@@ -326,6 +368,7 @@ def _set_hp(state: BattleStateV2, side_name: str, mon,
 
     def commit():
         mon.hp_percent = new
+        mon.hp_uncertain = False   # 新しい読みで「不明」印を解除
         if raw:
             mon.hp_current, mon.hp_max = raw
 
@@ -567,6 +610,27 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
     opp_name_verified = False
     if name_text:
         sp = resolver.resolve_species(name_text, cutoff=0.85)
+        if sp is None:
+            # ロスター事前分布つき再解決 (欠陥#10): 低い閾値でも、既に
+            # 判明している相手のいずれかに一致する場合だけ採用する
+            sp2 = resolver.resolve_species(name_text,
+                                           cutoff=OPP_ROSTER_RESOLVE_CUTOFF)
+            if sp2 and state.opponent.find_by_species(sp2[0]) is not None:
+                sp = sp2
+        if sp and state.opponent.party \
+                and state.opponent.find_by_species(sp[0]) is None:
+            # ロスターに無い「初登場種」は連続2回の一致で受け入れる。
+            # 1回の化け読みが幽霊スロットを作りactiveを乗っ取った
+            # (2026-08-18 第2回: 開幕直後に実在しないオーロンゲ9.8%が
+            #  slot0に出現し、以後の相手状態を汚染した)
+            pend = getattr(state.opponent, "_pending_new_species", None)
+            if pend != sp[0]:
+                state.opponent._pending_new_species = sp[0]
+                sp = None   # 今回のフレームでは採用しない
+            else:
+                state.opponent._pending_new_species = None
+        elif sp:
+            state.opponent._pending_new_species = None
         if sp:
             # 種族名がそのまま表示されている場合: 種族で枠を確定
             opp = state.opponent.switch_to_species(sp[0], sp[1])
@@ -636,6 +700,14 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
                     if sid not in cand_map or prob > cand_map[sid][0]:
                         cand_map[sid] = (prob, ja)
             cands = [(sid, prob, ja) for sid, (prob, ja) in cand_map.items()]
+            if not cands:
+                # 全枠の種族が判明済みなのに active に紐付かない場合
+                # (ニックネーム等でHUD名が解決できない)、「判明済みの6体の
+                # どれが場にいるか」をアイコンで選ぶ (欠陥#10: 従来は
+                # 未特定枠しか候補にせず、この状況で復旧経路が無かった)
+                cands = [(p.species_id, 0.5, p.species_ja)
+                         for p in state.opponent.party[:6]
+                         if p.species_id and p.species_ja]
             hit = identify_species_color(crop(img, zones.BATTLE["opp_icon"]), cands)
             if hit:
                 state.opponent.switch_to_species(hit[1], hit[0])
@@ -667,6 +739,13 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
         elif not opp_name_verified and opp.hp_percent is not None and \
                 abs(eff_pct - opp.hp_percent) > 15:
             pass   # 名前未読 + 大変化: 誤帰属の疑いが強いので見送る
+        elif not opp_name_verified and opp.hp_percent is not None and \
+                eff_pct > opp.hp_percent + 3.0:
+            # 名前未確認の「回復」は書かない。交代見逃し中に別個体の高いHPが
+            # 流れ込む形の誤帰属になる (2026-08-18 opus視覚監査:
+            # HUDはフラエッテ30%なのにオーロング23%→30%と記録)。
+            # 正当な回復は名前が照合できたフレームで反映される
+            pass
         else:
             _set_hp(state, "opponent", opp, pct=eff_pct)
 
@@ -681,6 +760,19 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
             # 表示名=種族名のケース (ニックネーム未設定)
             idx = state.player.find_by_species(sp[0])
             if idx is not None and idx != state.player.active_index:
+                # 交代イベントを見ていないのにHUD名で付け替わった =
+                # 交代 (と、その前のひんしの可能性) を取り逃した。
+                # 前のactiveの状態は「不明」として印を付け、交代候補の
+                # 推奨を抑える (2026-08-18 第2回: 取り逃したサザンドラの
+                # ひんしが100%のまま残り、交代候補として推奨され続けた)
+                prev = state.player.active()
+                if prev is not None and prev.status != "fainted" \
+                        and prev.species_ja and prev.species_ja != sp[0]:
+                    prev.hp_uncertain = True
+                    state.log_event(
+                        "system",
+                        f"交代見逃し: {prev.species_ja}の状態を不明扱い",
+                        event_id="missed_switch")
                 state.player.switch_to(idx)
                 me = state.player.party[idx]
             me.merge_species(sp[0], sp[1])
@@ -1475,6 +1567,32 @@ def _extract_watch_ability(img, state: BattleStateV2, resolver) -> None:
                             event_id=None)
 
 
+def extract_watch_side_columns(img, state: BattleStateV2, resolver) -> None:
+    """側柱のみの軽量抽出 (pipelineが非heavyフレームで毎回呼ぶ公開ラッパ)"""
+    _extract_watch_side_columns(img, state, resolver)
+
+
+def _accept_zero_hp_read(state, mon) -> bool:
+    """「0/xxx」読みをひんしとして受け入れてよいか (裏付け判定+カウンタ更新)。
+
+    裏付けの無い 0/xxx 読みでひんし確定しない。ハイライト演出等の誤読
+    1フレームで健在のポケモンが偽ひんし化し、以後の評価から消えた
+    (2026-08-04監査: 健在183/183のラグラージがT8のwatchで0%→fainted固定)。
+    裏付けは次のいずれか:
+     (a) faintイベント (「たおれた」メッセージ)
+     (b) 安定した連続ゼロ読み (ZERO_READ_FAINT_COUNT回)。faintメッセージ
+         自体を取り逃すと (2026-08-18 欠陥#6: ミミッキュの「たおれた」が
+         未イベント化) ひんしが反映されず、HPが直前値で固着して
+         技助言まで壊れるため
+    """
+    zero_n = getattr(mon, "_zero_read_count", 0) + 1
+    mon._zero_read_count = zero_n
+    lf = getattr(state, "last_faint", None)
+    if lf and lf.get("side") == "player":
+        return True
+    return zero_n >= ZERO_READ_FAINT_COUNT
+
+
 def _extract_watch_side_columns(img, state: BattleStateV2, resolver) -> None:
     # 左列: 自分の選出パーティのHP実数値
     for i, z in enumerate(zones.WATCH_MY[:3]):
@@ -1501,13 +1619,18 @@ def _extract_watch_side_columns(img, state: BattleStateV2, resolver) -> None:
             idx = len(state.player.party) - 1
         mon = state.player.party[idx]
         if frac[0] == 0 and mon.status != "fainted":
-            # 裏付けの無い 0/xxx 読みでひんし確定しない。ハイライト演出等の
-            # 誤読1フレームで健在のポケモンが偽ひんし化し、以後の評価から
-            # 消えた (2026-08-04監査: 健在183/183のラグラージがT8のwatchで
-            # 0%→fainted固定)。faintイベントの裏付けがある場合のみ通す
-            lf = getattr(state, "last_faint", None)
-            if not (lf and lf.get("side") == "player"):
+            if not _accept_zero_hp_read(state, mon):
                 continue
+            # 裏付けありのひんし: _set_hp の2回安定待ちを経ずに反映する
+            # (faintイベントか複数フレームのゼロ読みで既に裏付け済み)
+            mon.hp_percent = 0.0
+            mon.hp_current = 0
+            mon.hp_max = frac[1]
+            mon.status = "fainted"
+            mon.hp_uncertain = False
+            continue
+        if frac[0] > 0:
+            mon._zero_read_count = 0
         _set_hp(state, "player", mon, cur=frac[0], mx=frac[1])
         if frac[0] == 0 and mon.hp_current == 0:
             mon.status = "fainted"

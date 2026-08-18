@@ -37,10 +37,106 @@ EPSILON_HEURISTIC = 0.25  # 上位構築ヒューリスティクス相手を混�
 # 異なるため相手多様性として混入する (2026-07-24導入。heuristic 0.35→0.25
 # に減らして枠を捻出、selfplayプール枠は0.45)
 EPSILON_SEARCH = 0.20
+# 歴史的アンカー (_best 3本 + anchors/ の週次スナップショット) を相手に混ぜる
+# 確率。プールは「性格ごと最新5件 ≒ 直近2時間の自己コピー」しか持たず、
+# 古い戦略族への対応を忘れて 8/2 の _best に頭打ち 0.405 で負けていた
+# (2026-08-18 導入、docs/AXIS_GAP_ANALYSIS.md P1。事前登録:
+#  head-to-head vs 3_best 平均 0.43 → 7日で +0.10、ベンチ -0.02 以内で採用)。
+# 枠は selfplay プール分 (旧0.45) から捻出し、直近自己対戦は 0.20 に減る
+EPSILON_ANCHOR = 0.25
+ANCHORS_DIR = MODELS_DIR / "anchors"
+ANCHOR_INTERVAL_DAYS = 7   # 週次アンカー保存の間隔
+MAX_ANCHORS_PER_STYLE = 4  # anchors/ の性格ごと保持数 (_best は別枠で常時参照)
 RANKED_TEAM_PROB = 0.50   # 相手チームを上位構築の実物にする確率
 OWN_RANKED_TEAM_PROB = 0.50  # 自分チームを上位構築の実物にする確率
 # (生成チームだけで学習すると「上位構築を操縦する」経験が積めず、
 #  アドバイザーの実用途=ユーザーの実チームでの助言と分布がズレる)
+
+
+def anchor_paths(models_dir: Path = None) -> list:
+    """歴史的アンカーのファイル一覧: _best 3本 + anchors/ の週次スナップショット。
+
+    存在するものだけ返す (導入直後は _best のみ)。
+    """
+    base = Path(models_dir) if models_dir else MODELS_DIR
+    paths = []
+    for style in ("balance", "offense", "cycle"):
+        p = base / f"battle_policy_{style}_best.zip"
+        if p.exists():
+            paths.append(p)
+    anchors = base / "anchors"
+    if anchors.is_dir():
+        paths.extend(sorted(anchors.glob("*.zip")))
+    return paths
+
+
+def draw_opponent_kind(r: float, has_pool: bool, has_anchor: bool,
+                        epsilon_heuristic: float = EPSILON_HEURISTIC,
+                        epsilon_search: float = EPSILON_SEARCH,
+                        epsilon_random: float = EPSILON_RANDOM,
+                        epsilon_anchor: float = EPSILON_ANCHOR) -> str:
+    """一様乱数 r (0..1) から相手の種別を決める純粋関数。
+
+    'heuristic' / 'search' / 'random' / 'anchor' / 'pool' を返す。
+    アンカーが無い場合そのぶんは selfplay プールへ、プールも空なら
+    'random' へ落ちる (カリキュラム初期と同じ構成)。
+    """
+    t1 = epsilon_heuristic
+    t2 = t1 + epsilon_search
+    t3 = t2 + epsilon_random
+    t4 = t3 + epsilon_anchor
+    if r < t1:
+        return "heuristic"
+    if r < t2:
+        return "search"
+    if r < t3:
+        return "random"
+    if r < t4 and has_anchor:
+        return "anchor"
+    return "pool" if has_pool else "random"
+
+
+def save_weekly_anchors(today: str | None = None,
+                         models_dir: Path = None) -> list:
+    """current の週次アンカーを anchors/ へ保存する (P2、日次定点から呼ばれる)。
+
+    性格ごとに、最新アンカーが ANCHOR_INTERVAL_DAYS 日以上前 (または無い)
+    なら battle_policy_{style}.zip をコピーし、MAX_ANCHORS_PER_STYLE を
+    超えた古いものを削除する。戻り値: 保存したファイル名のリスト。
+
+    狙い: (1) プールに間隔を空けた過去世代を供給し忘却を防ぐ
+          (2) 過去時点の再測を可能にする (8/15 の vs_agents 0.618 は
+              スナップショット不在で検証不能だった)
+    """
+    from datetime import date, datetime
+    base = Path(models_dir) if models_dir else MODELS_DIR
+    anchors = base / "anchors"
+    anchors.mkdir(parents=True, exist_ok=True)
+    today_d = (datetime.strptime(today, "%Y%m%d").date() if today
+               else date.today())
+    saved = []
+    for style in ("balance", "offense", "cycle"):
+        src = base / f"battle_policy_{style}.zip"
+        if not src.exists():
+            continue
+        existing = sorted(anchors.glob(f"{style}_*.zip"))
+        if existing:
+            newest = existing[-1].stem.split("_")[-1]
+            try:
+                newest_d = datetime.strptime(newest, "%Y%m%d").date()
+                if (today_d - newest_d).days < ANCHOR_INTERVAL_DAYS:
+                    continue
+            except ValueError:
+                pass
+        dst = anchors / f"{style}_{today_d.strftime('%Y%m%d')}.zip"
+        if dst.exists():
+            continue
+        shutil.copy(src, dst)
+        saved.append(dst.name)
+        existing = sorted(anchors.glob(f"{style}_*.zip"))
+        for old in existing[:max(0, len(existing) - MAX_ANCHORS_PER_STYLE)]:
+            old.unlink(missing_ok=True)
+    return saved
 
 
 class OpponentPool:
@@ -136,30 +232,42 @@ def make_pool_opponent(pool: OpponentPool, epsilon_random: float = EPSILON_RANDO
             self._assign: dict = {}      # battle_tag -> "random"|"heuristic"|BattlePolicy
             self._policy_cache: dict = {}
 
+        def _load_policy(self, path):
+            """チェックポイントを方策としてロードする (失敗は None、キャッシュ付き)"""
+            if path is None:
+                return None
+            key = str(path)
+            if key not in self._policy_cache:
+                try:
+                    self._policy_cache[key] = BattlePolicy(model_path=path)
+                except Exception:
+                    self._policy_cache[key] = None
+            policy = self._policy_cache[key]
+            return policy if (policy is not None
+                              and policy.model is not None) else None
+
         def _policy_for(self, battle):
             tag = battle.battle_tag
             if tag not in self._assign:
-                r = random.random()
-                if r < epsilon_heuristic:
-                    self._assign[tag] = "heuristic"
-                elif r < epsilon_heuristic + epsilon_search:
-                    self._assign[tag] = "search"
-                elif r < epsilon_heuristic + epsilon_search + epsilon_random \
-                        or not self._pool.has_entries():
-                    self._assign[tag] = "random"
+                anchors = anchor_paths()
+                kind = draw_opponent_kind(
+                    random.random(),
+                    has_pool=self._pool.has_entries(),
+                    has_anchor=bool(anchors),
+                    epsilon_heuristic=epsilon_heuristic,
+                    epsilon_search=epsilon_search,
+                    epsilon_random=epsilon_random,
+                )
+                if kind == "anchor":
+                    # 歴史的アンカーは一様抽選 (プールの新世代優先と対照的に、
+                    # 古い戦略族を均等に当てて忘却を防ぐ)
+                    policy = self._load_policy(random.choice(anchors))
+                    self._assign[tag] = policy if policy else "heuristic"
+                elif kind == "pool":
+                    policy = self._load_policy(self._pool.sample())
+                    self._assign[tag] = policy if policy else "heuristic"
                 else:
-                    path = self._pool.sample()
-                    policy = None
-                    if path is not None:
-                        key = str(path)
-                        if key not in self._policy_cache:
-                            try:
-                                self._policy_cache[key] = BattlePolicy(model_path=path)
-                            except Exception:
-                                self._policy_cache[key] = None
-                        policy = self._policy_cache[key]
-                    self._assign[tag] = policy if (
-                        policy is not None and policy.model is not None) else "heuristic"
+                    self._assign[tag] = kind
                 if len(self._assign) > 50:
                     for k in list(self._assign.keys())[:-25]:
                         del self._assign[k]

@@ -285,6 +285,212 @@ def test_priority_evaluation():
     print("test_priority_evaluation OK")
 
 
+def test_fainted_active_switch_only():
+    """自分の場のポケモンがひんしなら技を評価せず交代先のみ提案する。
+
+    2026-08-18 接続テスト欠陥#1: 瀕死のムクホークのブレイブバードを
+    推奨し続けた (強制交代の決定に技助言が出た)。
+    """
+    from vision.normalize import NameResolver
+    resolver = NameResolver()
+    fainted = {"species_id": "staraptor", "species_ja": "ムクホーク",
+               "types": ["ノーマル", "ひこう"], "hp_percent": 0.0,
+               "hp_current": 0, "hp_max": 165, "status": "fainted",
+               "boosts": {},
+               "ability_id": None, "item_id": None,
+               "moves": [{"name_ja": "ブレイブバード", "move_id": "bravebird",
+                          "pp": 15, "max_pp": 15, "effectiveness": "neutral"}],
+               "revealed_moves": []}
+    bench = {"species_id": "hydreigon", "species_ja": "サザンドラ",
+             "types": ["あく", "ドラゴン"], "hp_percent": 100.0,
+             "hp_current": 169, "hp_max": 169, "status": None, "boosts": {},
+             "ability_id": None, "item_id": None,
+             "moves": [{"name_ja": "りゅうせいぐん", "move_id": "dracometeor",
+                        "pp": 8, "max_pp": 8, "effectiveness": "neutral"}],
+             "revealed_moves": []}
+    opp = {"species_id": "garchomp", "species_ja": "ガブリアス",
+           "types": ["ドラゴン", "じめん"], "hp_percent": 100.0,
+           "hp_current": None, "hp_max": None, "status": None, "boosts": {},
+           "ability_id": None, "item_id": None, "moves": [],
+           "revealed_moves": []}
+    state = _mini_state(fainted, opp)
+    state["player"]["party"] = [fainted, bench]
+    adv = evaluate(state, resolver)
+    assert adv["ok"], adv
+    kinds = {a["kind"] for a in adv["actions"]}
+    assert kinds == {"switch"}, adv["actions"]
+    assert adv["best"]["kind"] == "switch", adv["best"]
+    assert "ひんし" in adv["speed_note"], adv["speed_note"]
+    print("test_fainted_active_switch_only OK")
+
+
+def test_act_before_ko_discount():
+    """後手でKO圏の被弾が確定している局面では、先に動けない大技より
+    先制技が上に来る (2026-08-18 接続テスト欠陥#2)。
+
+    遅いミミッキュ vs 高速で抜群高火力のガブリアス (じしん判明):
+    非先制のじゃれつく (大ダメージ) は割引され、かげうちが最善になる。
+    """
+    from vision.normalize import NameResolver
+    resolver = NameResolver()
+    my = {"species_id": "mimikyu", "species_ja": "ミミッキュ",
+          "types": ["ゴースト", "フェアリー"], "hp_percent": 25.0,
+          "hp_current": 33, "hp_max": 131, "status": None, "boosts": {},
+          "ability_id": None, "item_id": None,
+          "moves": [
+              {"name_ja": "かげうち", "move_id": "shadowsneak",
+               "pp": 20, "max_pp": 20, "effectiveness": "neutral"},
+              {"name_ja": "じゃれつく", "move_id": "playrough",
+               "pp": 10, "max_pp": 10, "effectiveness": "super"},
+          ], "revealed_moves": []}
+    opp = {"species_id": "garchomp", "species_ja": "ガブリアス",
+           "types": ["ドラゴン", "じめん"], "hp_percent": 100.0,
+           "hp_current": None, "hp_max": None, "status": None, "boosts": {},
+           "ability_id": None, "item_id": None, "moves": [],
+           "revealed_moves": ["じしん"]}
+    adv = evaluate(_mini_state(my, opp), resolver)
+    sneak = next(a for a in adv["actions"] if a["id"] == "shadowsneak")
+    rough = next(a for a in adv["actions"] if a["id"] == "playrough")
+    assert "行動前に倒される見込み" in rough["reason"], rough
+    assert sneak["score"] > rough["score"], (sneak, rough)
+    print("test_act_before_ko_discount OK")
+
+
+def test_choice_lock():
+    """こだわり系を持って技を使った後は、直前の技以外を推奨しない (第2回#C)"""
+    from vision.normalize import NameResolver
+    resolver = NameResolver()
+    my = {"species_id": "staraptor", "species_ja": "ムクホーク",
+          "types": ["ノーマル", "ひこう"], "hp_percent": 100.0,
+          "hp_current": 161, "hp_max": 161, "status": None, "boosts": {},
+          "ability_id": None, "item_id": "choicescarf",
+          "moves": [
+              {"name_ja": "ブレイブバード", "move_id": "bravebird",
+               "pp": 15, "max_pp": 15, "effectiveness": "neutral"},
+              {"name_ja": "でんこうせっか", "move_id": "quickattack",
+               "pp": 20, "max_pp": 20, "effectiveness": "neutral"},
+          ], "revealed_moves": []}
+    opp = {"species_id": "garchomp", "species_ja": "ガブリアス",
+           "types": ["ドラゴン", "じめん"], "hp_percent": 100.0,
+           "hp_current": None, "hp_max": None, "status": None, "boosts": {},
+           "ability_id": None, "item_id": None, "moves": [],
+           "revealed_moves": []}
+    state = _mini_state(my, opp)
+    state["last_move"] = {"player": "bravebird", "opponent": None}
+    adv = evaluate(state, resolver)
+    qa = next(a for a in adv["actions"] if a["id"] == "quickattack")
+    assert qa["score"] == -99.0 and "こだわり" in qa["reason"], qa
+    bb = next(a for a in adv["actions"] if a["id"] == "bravebird")
+    assert bb["score"] > -90, bb
+    assert "こだわり中" in adv["speed_note"], adv["speed_note"]
+
+    # 交代直後 (last_moveなし) はロックされない
+    state2 = _mini_state(dict(my), opp)
+    adv2 = evaluate(state2, resolver)
+    qa2 = next(a for a in adv2["actions"] if a["id"] == "quickattack")
+    assert qa2["score"] > -90, qa2
+    print("test_choice_lock OK")
+
+
+def test_registered_moves_fallback():
+    """画面から技が未読取でも、my_team登録の技で行動評価する (第2回#A)"""
+    from vision.normalize import NameResolver
+    from advisor import my_team as mt
+    resolver = NameResolver()
+    my = {"species_id": "staraptor", "species_ja": "ムクホーク",
+          "types": ["ノーマル", "ひこう"], "hp_percent": 100.0,
+          "hp_current": 161, "hp_max": 161, "status": None, "boosts": {},
+          "ability_id": None, "item_id": None,
+          "moves": [], "revealed_moves": []}
+    opp = {"species_id": "garchomp", "species_ja": "ガブリアス",
+           "types": ["ドラゴン", "じめん"], "hp_percent": 100.0,
+           "hp_current": None, "hp_max": None, "status": None, "boosts": {},
+           "ability_id": None, "item_id": None, "moves": [],
+           "revealed_moves": []}
+    orig = mt.get_my_moves
+    mt.get_my_moves = lambda ja: (["ブレイブバード", "インファイト"]
+                                  if ja == "ムクホーク" else [])
+    try:
+        adv = evaluate(_mini_state(my, opp), resolver)
+    finally:
+        mt.get_my_moves = orig
+    ids = {a["id"] for a in adv["actions"] if a["kind"] == "move"}
+    assert "bravebird" in ids and "closecombat" in ids, ids
+    print("test_registered_moves_fallback OK")
+
+
+def test_rl_sees_registered_move_fallback():
+    """技未読取のフレームでは、RLヒントにも登録技フォールバックを見せる。
+
+    2026-08-18 第3回: stateの技が空だとRLの合法手が交代のみに縮退し、
+    RL確率が交代に集中→技画面を開いた瞬間に推奨が反転した。
+    """
+    from vision.normalize import NameResolver
+    from advisor import my_team as mt
+    from advisor import rl_bridge as rb
+    resolver = NameResolver()
+    my = {"species_id": "staraptor", "species_ja": "ムクホーク",
+          "types": ["ノーマル", "ひこう"], "hp_percent": 100.0,
+          "hp_current": 161, "hp_max": 161, "status": None, "boosts": {},
+          "ability_id": None, "item_id": None,
+          "moves": [], "revealed_moves": []}
+    opp = {"species_id": "garchomp", "species_ja": "ガブリアス",
+           "types": ["ドラゴン", "じめん"], "hp_percent": 100.0,
+           "hp_current": None, "hp_max": None, "status": None, "boosts": {},
+           "ability_id": None, "item_id": None, "moves": [],
+           "revealed_moves": []}
+    seen = {}
+
+    def fake_hint(state, my_spe_actual=None):
+        mi = state["player"]["active_index"]
+        seen["moves"] = [m.get("move_id") for m in
+                         (state["player"]["party"][mi].get("moves") or [])]
+        return None
+
+    orig_moves, orig_hint = mt.get_my_moves, rb.policy_hint
+    mt.get_my_moves = lambda ja: (["ブレイブバード"] if ja == "ムクホーク" else [])
+    rb.policy_hint = fake_hint
+    try:
+        state = _mini_state(my, opp)
+        evaluate(state, resolver)
+    finally:
+        mt.get_my_moves = orig_moves
+        rb.policy_hint = orig_hint
+    assert seen.get("moves") == ["bravebird"], seen
+    # 元のstateは汚染しない (浅いコピーへの注入)
+    assert my["moves"] == [], my["moves"]
+    print("test_rl_sees_registered_move_fallback OK")
+
+
+def test_uncertain_bench_switch_penalty():
+    """交代を見逃した (hp_uncertain) 控えへの交代は減点+警告する (第2回#E)"""
+    from vision.normalize import NameResolver
+    resolver = NameResolver()
+    my = {"species_id": "mimikyu", "species_ja": "ミミッキュ",
+          "types": ["ゴースト", "フェアリー"], "hp_percent": 100.0,
+          "hp_current": 131, "hp_max": 131, "status": None, "boosts": {},
+          "ability_id": None, "item_id": None,
+          "moves": [{"name_ja": "じゃれつく", "move_id": "playrough",
+                     "pp": 10, "max_pp": 10, "effectiveness": "neutral"}],
+          "revealed_moves": []}
+    bench = {"species_id": "hydreigon", "species_ja": "サザンドラ",
+             "types": ["あく", "ドラゴン"], "hp_percent": 100.0,
+             "hp_current": 169, "hp_max": 169, "status": None, "boosts": {},
+             "ability_id": None, "item_id": None, "moves": [],
+             "revealed_moves": [], "hp_uncertain": True}
+    opp = {"species_id": "garchomp", "species_ja": "ガブリアス",
+           "types": ["ドラゴン", "じめん"], "hp_percent": 100.0,
+           "hp_current": None, "hp_max": None, "status": None, "boosts": {},
+           "ability_id": None, "item_id": None, "moves": [],
+           "revealed_moves": []}
+    state = _mini_state(my, opp)
+    state["player"]["party"] = [my, bench]
+    adv = evaluate(state, resolver)
+    sw = next(a for a in adv["actions"] if a["kind"] == "switch")
+    assert "HP不明" in sw["reason"], sw
+    print("test_uncertain_bench_switch_penalty OK")
+
+
 if __name__ == "__main__":
     test_stats()
     test_type_chart()
@@ -293,3 +499,9 @@ if __name__ == "__main__":
     test_evaluate_end_to_end()
     test_pivot_over_plain_switch()
     test_priority_evaluation()
+    test_fainted_active_switch_only()
+    test_act_before_ko_discount()
+    test_choice_lock()
+    test_registered_moves_fallback()
+    test_rl_sees_registered_move_fallback()
+    test_uncertain_bench_switch_penalty()

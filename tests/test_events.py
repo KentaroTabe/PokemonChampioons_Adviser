@@ -75,6 +75,46 @@ def test_rank_change():
     print("test_rank_change OK")
 
 
+def test_multi_stat_rank_change():
+    """捨て台詞 (攻撃+特攻) や瞑想 (特攻+特防) は両ステータスに適用する。
+
+    2026-08-18 接続テスト欠陥#5: 最初の1ステータスで打ち切っており、
+    捨て台詞で boost_player_spa_-1 だけが発火した (atk側の欠落)。
+    """
+    state, p = new_parser()
+    p.parse("아나이뚜は リザードンを 繰り出した!")
+
+    # 捨て台詞: 自分側の攻撃と特攻が同時に下がる
+    fired = p.parse("ブリジュラスの 攻撃と 特攻が 下がった!")
+    assert any(f == "boost_player_atk_-1" for f in fired), fired
+    assert any(f == "boost_player_spa_-1" for f in fired), fired
+    me = state.player.party[0]
+    assert me.boosts["atk"] == -1 and me.boosts["spa"] == -1, me.boosts
+
+    # 瞑想: 相手側の特攻と特防が同時に上がる
+    fired = p.parse("相手の リザードンの 特攻と 特防が 上がった!")
+    assert any(f == "boost_opponent_spa_+1" for f in fired), fired
+    assert any(f == "boost_opponent_spd_+1" for f in fired), fired
+    om = state.opponent.active()
+    assert om.boosts["spa"] == 1 and om.boosts["spd"] == 1, om.boosts
+    print("test_multi_stat_rank_change OK")
+
+
+def test_type_change():
+    """「Xは こおりタイプに なった!」(変幻自在等) でタイプが差し替わる (第2回)"""
+    state, p = new_parser()
+    p.parse("아나이뚜は ゲッコウガを 繰り出した!")
+    fired = p.parse("相手の ゲッコウガは こおりタイプに なった!")
+    assert "type_change_opponent_ice" in fired, fired
+    om = state.opponent.active()
+    assert om.types == ["こおり"], om.types
+    # 別タイプへの再変化も追従する
+    fired = p.parse("相手の ゲッコウガは みずタイプに なった!")
+    assert "type_change_opponent_water" in fired, fired
+    assert om.types == ["みず"], om.types
+    print("test_type_change OK")
+
+
 def test_hazards_and_screens():
     state, p = new_parser()
     fired = p.parse("相手の 鋁鋼maxの ステルスロック!")
@@ -399,6 +439,8 @@ if __name__ == "__main__":
     test_weather_and_terrain()
     test_switch_and_mega()
     test_rank_change()
+    test_multi_stat_rank_change()
+    test_type_change()
     test_hazards_and_screens()
     test_status_and_volatile()
     test_move_seal_states()

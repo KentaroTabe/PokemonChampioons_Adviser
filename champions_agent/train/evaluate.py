@@ -6,6 +6,13 @@
 
 前提: ローカルでPokemon Showdownサーバーが起動していること。
 
+⚠ 並列実行の規律 (2026-08-18, docs/AXIS_GAP_ANALYSIS.md §2-1):
+  - 水準の測定 (定点・certify 等) は必ず単独で走らせる
+  - A/B比較はペア同時 (2本) のみ。両アームが同条件なら差は有効
+  当初の根拠 (並列0.234 vs 単独0.405) は agents軸の1チーム使い回し欠陥
+  (incidents 2026-08-10) の交絡と判明したため「歪みの実証」ではないが、
+  負荷の影響を排除する予防措置として規律は維持する。
+
 使い方:
     python -m champions_agent.train.evaluate --play-style offense --battles 50
     python -m champions_agent.train.evaluate --play-style offense --opponent-play-style stall --battles 50
@@ -64,6 +71,13 @@ class ModelPlayer(RandomPlayer):
             path = MODELS_DIR / f"battle_policy_{play_style}.zip"
             self.policy = BattlePolicy(model_path=path if path.exists()
                                        else None, play_style=play_style)
+        elif checkpoint == "ema":
+            # 振動対策のEMA平均方策 (train/ema.py)。未作成なら明示エラー
+            # (黙って別のチェックポイントを測る事故を防ぐ。incidents 1-1)
+            path = MODELS_DIR / f"battle_policy_{play_style}_ema.zip"
+            if not path.exists():
+                raise FileNotFoundError(f"EMAチェックポイントがありません: {path}")
+            self.policy = BattlePolicy(model_path=path, play_style=play_style)
         else:
             self.policy = BattlePolicy(play_style=play_style)
 
@@ -85,18 +99,26 @@ class MixedAgentsPlayer(RandomPlayer):
 
     STYLES = ("balance", "offense", "cycle")
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, styles: tuple | None = None, **kwargs):
         super().__init__(*args, **kwargs)
         from champions_agent.agent.policy_battle import BattlePolicy
-        self._policies = {s: BattlePolicy(play_style=s) for s in self.STYLES}
+        # styles で単一性格に絞れる (乖離解析: どの参照に勝てているかの分解)。
+        # 既定は従来どおり3性格巡回で、測定基準は変わらない
+        self.styles = tuple(styles) if styles else self.STYLES
+        self._policies = {s: BattlePolicy(play_style=s) for s in self.styles}
+        # 参照がロードできていなければ測定として無効 (ランダム行動の相手を
+        # _bestと思って測る事故を防ぐ。黙って別物を測った前歴: incidents 1-1)
+        broken = [s for s, p in self._policies.items() if p.model is None]
+        if broken:
+            raise RuntimeError(f"参照_bestをロードできません: {broken}")
         self._assign: dict = {}
 
     def _style_of(self, battle):
         tag = battle.battle_tag
         if tag not in self._assign:
             # 対戦順で巡回 (均等かつ決定的。同一相手列のA/Bで再現される)
-            self._assign[tag] = self.STYLES[len(self._assign)
-                                            % len(self.STYLES)]
+            self._assign[tag] = self.styles[len(self._assign)
+                                            % len(self.styles)]
         return self._assign[tag]
 
     def choose_move(self, battle):
@@ -130,6 +152,7 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
                           checkpoint: str = "current",
                           selection: str = "matchup",
                           own_teams: str = "train",
+                          agents_style: str | None = None,
                           opp_seed: int | None = None) -> dict:
     """play_styleモデル vs (opponent_play_styleモデル or RandomPlayer) をn_battles戦させる。"""
     # 自分チーム: 以前は「生成チーム1個を全戦使い回し」(ConstantTeambuilder)
@@ -137,7 +160,12 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
     # 進歩が読めなかった。ベンチマーク評価では相手と同じ上位構築を毎戦
     # 引き直して等条件にする (方策の強さだけを測る。アドバイザーの実用途
     # =ユーザーの実チームを操縦する、とも整合)
-    if opponent_kind == "benchmark":
+    # agents軸も benchmark と同じ「毎戦引き直し」にする (2026-08-18修正)。
+    # 導入時 (8/10) にこの分岐へ入り損ね「生成チーム1個を全戦使い回し」に
+    # 落ちていたため、agents軸の全測定が1走行1チームのドロー運で±0.1以上
+    # 振れていた (凍結ネット同士の再測で0.373〜0.617を実測。
+    # docs/incidents/reports/2026-08-10-agents-axis-single-team-draw.md)
+    if opponent_kind in ("benchmark", "agents"):
         from champions_agent.env.ranked_teams import RankedTeambuilder
         if own_teams == "holdout":
             # 学習に使っていない構築だけで測る。ベンチの上昇が
@@ -207,6 +235,7 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
             battle_format=battle_format,
             server_configuration=TrainingServerConfiguration,
             team=team,
+            styles=(agents_style,) if agents_style else None,
         )
     elif opponent_play_style:
         opp_team = build_random_team_text(size=TRAINING_TEAM_SIZE, play_style=opponent_play_style)
@@ -258,9 +287,16 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
         "wins": player1.n_won_battles,
         "win_rate": player1.n_won_battles / n_battles if n_battles else 0.0,
     }
+    # 方策の劣化内訳 (masked=正常 / argmax_fallback / random_fallback)。
+    # agents軸が同一条件で0.24振れた事象の観測用。random_fallback が
+    # 大きい測定は方策ではなくフォールバックを測っている
+    if hasattr(player1, "policy") and hasattr(player1.policy, "stats"):
+        result["own_fallbacks"] = dict(player1.policy.stats)
     if opponent_kind == "agents":
         # 参照は凍結しない方針のため、どの_bestに対する測定かを記録する
         result["reference_ids"] = MixedAgentsPlayer.reference_ids()
+        result["opp_fallbacks"] = {
+            s: dict(p.stats) for s, p in player2._policies.items()}
     return result
 
 
@@ -287,14 +323,24 @@ def main() -> None:
                          help="秒数を指定すると評価全体にタイムアウトをかける (ハング対策)")
     parser.add_argument("--format", type=str, default=TRAINING_BATTLE_FORMAT)
     parser.add_argument("--checkpoint", type=str, default="current",
-                         choices=["current", "best"],
-                         help="current=学習中の最新 (進捗測定) / best=_best (配布版の実力測定)")
+                         choices=["current", "best", "ema"],
+                         help="current=学習中の最新 (進捗測定) / best=_best (配布版の実力測定) / "
+                              "ema=EMA平均方策 (振動対策の観察用)")
     parser.add_argument("--selection", type=str, default="matchup",
                          choices=["matchup", "model", "model2", "matrix"],
                          help="自分側の選出: matchup=相性 (既定) / "
                               "model=選出モデルargmax / "
                               "model2=v2特徴量モデル (比較実験) / "
                               "matrix=読み合いの均衡解 (条件付きモデル)")
+    parser.add_argument("--agents-style", type=str, default=None,
+                         choices=list(MixedAgentsPlayer.STYLES),
+                         help="agents軸を単一性格の_bestに絞る (乖離解析用)。"
+                              "省略時は従来どおり3性格巡回")
+    parser.add_argument("--own-teams", type=str, default="train",
+                         choices=["train", "holdout"],
+                         help="benchmark軸の自分チーム: train=学習と同じ上位60構築 "
+                              "(既定) / holdout=学習に使っていない構築のみ "
+                              "(ヒューリスティクス/チームへの過学習検証)")
     args = parser.parse_args()
 
     if args.timeout > 0:
@@ -317,15 +363,19 @@ def main() -> None:
         checkpoint=args.checkpoint,
         opp_seed=args.opp_seed,
         selection=args.selection,
+        own_teams=args.own_teams,
+        agents_style=args.agents_style,
     ))
     print(f"[evaluate] {result}")
 
     # 評価結果の保存: vs Random は opponent_pool の勝率ゲート判定、
     # vs benchmark は最良チェックポイント保持とプール抽選の重み付けに使う
     # (currentの測定のみ保存する。bestの再測定で昇格判定を汚さない。
-    #  選出モデルの測定は方策の学習進捗ではないので保存しない)
+    #  選出モデルの測定は方策の学習進捗ではないので保存しない。
+    #  holdoutチームの測定は既存ベンチと土俵が違うので保存しない)
     if (not args.opponent_play_style and args.checkpoint == "current"
             and args.selection == "matchup" and not args.no_save
+            and args.own_teams == "train"
             and args.opponent in ("random", "benchmark")):
         import json
         from pathlib import Path

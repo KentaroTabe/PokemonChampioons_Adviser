@@ -30,6 +30,11 @@ class BattlePolicy:
     def __init__(self, model_path=None, play_style: str = DEFAULT_PLAY_STYLE):
         self.model = None
         self.play_style = play_style
+        # 劣化の計数 (2026-08-18導入)。agents軸の評価が同一条件で0.24振れる
+        # 事象があり、全段が黙って劣化する設計では原因を観測できなかった。
+        # 評価側 (evaluate.py) がこの内訳を結果に併記する
+        self.stats = {"masked": 0, "argmax_fallback": 0,
+                      "random_fallback": 0, "load_failed": 0}
         # 最良スナップショット (_best) があれば優先する。学習は振動するため
         # 最新チェックポイントが過去最良より弱いことがある (best_checkpoint.py)
         best = MODELS_DIR / f"battle_policy_{play_style}_best.zip"
@@ -47,6 +52,12 @@ class BattlePolicy:
                     self.model = PPO.load(str(path))
                 except Exception:
                     self.model = None
+        if self.model is None:
+            # ロード失敗/ファイル不在 = 以後の全手がランダム合法手になる。
+            # 静かに測定を汚染した前歴があるため必ず痕跡を残す
+            self.stats["load_failed"] = 1
+            print(f"[policy_battle] ⚠ モデル未ロード ({path})。"
+                  "全手がランダム合法手になります")
 
 
     def _adapt_obs(self, obs):
@@ -70,6 +81,7 @@ class BattlePolicy:
 
     def choose_order(self, battle: AbstractBattle) -> BattleOrder:
         if self.model is None:
+            self.stats["random_fallback"] += 1
             return self._choose_random_legal(battle)
 
         obs = ChampionsSinglesEnv.embed_battle(self, battle)  # type: ignore[arg-type]
@@ -77,14 +89,18 @@ class BattlePolicy:
         try:
             order = self._choose_masked(battle, obs)
             if order is not None:
+                self.stats["masked"] += 1
                 return order
         except Exception:
             pass
         # フォールバック: 素のargmax (無効ならさらにランダム合法手)
-        action, _ = self.model.predict(obs, deterministic=True)
         try:
-            return ChampionsSinglesEnv.action_to_order(action, battle, strict=False)
+            action, _ = self.model.predict(obs, deterministic=True)
+            order = ChampionsSinglesEnv.action_to_order(action, battle, strict=False)
+            self.stats["argmax_fallback"] += 1
+            return order
         except Exception:
+            self.stats["random_fallback"] += 1
             return self._choose_random_legal(battle)
 
     def _choose_masked(self, battle: AbstractBattle, obs):

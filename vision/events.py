@@ -357,11 +357,15 @@ class EventParser:
                 self._apply(ev, cleaned, source)
                 fired.append(ev["id"])
 
-        # 3. ランク変化
+        # 3. ランク変化 (複数ステータス同時変化はステータスごとに発火する)
         if not any(not f.startswith("switch") for f in fired):
-            rc = self._parse_rank_change(cleaned, norm, source)
-            if rc:
-                fired.append(rc)
+            fired.extend(self._parse_rank_change(cleaned, norm, source))
+
+        # 3.5 タイプ変化 (変幻自在/リベロ等):「Xは こおりタイプに なった!」
+        if not any(not f.startswith("switch") for f in fired):
+            tc = self._parse_type_change(cleaned, norm, source)
+            if tc:
+                fired.append(tc)
 
         # 4. 技使用 / 特性発動 ("{名前}の {技/特性}")
         # 相手の判明技の収集が重要なため、他イベントと複合したメッセージ
@@ -453,23 +457,63 @@ class EventParser:
         return True
 
     # --------------------------------------------------------------
-    def _parse_rank_change(self, cleaned: str, norm: str, source: str) -> Optional[str]:
-        stat = None
-        for jp, key in STAT_NAMES.items():
-            if loose_key(jp) in norm:
-                stat = key
-                break
-        if stat is None:
+    _TYPE_JA2EN = {
+        "ノーマル": "normal", "ほのお": "fire", "みず": "water",
+        "でんき": "electric", "くさ": "grass", "こおり": "ice",
+        "かくとう": "fighting", "どく": "poison", "じめん": "ground",
+        "ひこう": "flying", "エスパー": "psychic", "むし": "bug",
+        "いわ": "rock", "ゴースト": "ghost", "ドラゴン": "dragon",
+        "あく": "dark", "はがね": "steel", "フェアリー": "fairy",
+    }
+
+    def _parse_type_change(self, cleaned: str, norm: str,
+                           source: str) -> Optional[str]:
+        """「Xは <タイプ>タイプに なった!」(変幻自在/リベロ等) を検出し、
+        対象のタイプを差し替える (2026-08-18 接続テスト:
+        ゲッコウガのこおり化が状態に反映されず相性計算がズレた)。
+        """
+        if loose_key("タイプに") not in norm or \
+                not (loose_key("なった") in norm or loose_key("なつた") in norm):
             return None
+        found = None
+        for ja in self._TYPE_JA2EN:
+            if loose_key(ja + "タイプ") in norm:
+                found = ja
+                break
+        if found is None:
+            return None
+        side_name, side, mon = self._target_mon(cleaned, source)
+        event_id = f"type_change_{side_name}_{self._TYPE_JA2EN[found]}"
+        if self._dedup(event_id):
+            return None
+        mon.types = [found]
+        return event_id
+
+    def _parse_rank_change(self, cleaned: str, norm: str, source: str) -> list:
+        """ランク変化イベントの一覧を返す (無ければ空リスト)。
+
+        捨て台詞 (攻撃+特攻) や瞑想 (特攻+特防) など1メッセージで複数の
+        ステータスが動く技があるため、文中の全ステータス名に適用する
+        (2026-08-18 接続テスト: 最初の1つで打ち切っており片方を取り逃した)。
+        """
+        stats = []
+        for jp, key in STAT_NAMES.items():
+            if loose_key(jp) in norm and key not in stats:
+                stats.append(key)
+        if not stats:
+            return []
         for pat, delta in RANK_CHANGES:
             if loose_key(pat) in norm:
                 side_name, side, mon = self._target_mon(cleaned, source)
-                event_id = f"boost_{side_name}_{stat}_{delta:+d}"
-                if self._dedup(event_id):
-                    return None   # OCR揺れの再読でランクを二重適用しない
-                mon.set_boost(stat, delta)
-                return event_id
-        return None
+                fired = []
+                for stat in stats:
+                    event_id = f"boost_{side_name}_{stat}_{delta:+d}"
+                    if self._dedup(event_id):
+                        continue   # OCR揺れの再読でランクを二重適用しない
+                    mon.set_boost(stat, delta)
+                    fired.append(event_id)
+                return fired
+        return []
 
     # --------------------------------------------------------------
     def _parse_move_or_ability(self, cleaned: str, norm: str, source: str,

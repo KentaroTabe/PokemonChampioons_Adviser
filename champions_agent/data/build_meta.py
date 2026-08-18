@@ -34,7 +34,10 @@ def build_meta_sets(fmt: str = USAGE_TARGET_FORMAT, source: str | None = None) -
 
     """最新スナップショットからmeta_setsを再構築する。戻り値: 生成した行数。"""
     with db.get_connection() as conn:
-        snapshot_id = db.latest_snapshot_id(conn, source=source, fmt=fmt)
+        # require_meta=False: meta_sets を作る側なので、meta_sets が
+        # まだ無い出来たてのスナップショットを対象にする必要がある
+        snapshot_id = db.latest_snapshot_id(conn, source=source, fmt=fmt,
+                                            require_meta=False)
         if snapshot_id is None:
             raise RuntimeError(
                 f"usage_snapshot が見つかりません(source={source}, format={fmt})。"

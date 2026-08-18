@@ -52,6 +52,18 @@ RECOVERY_MOVES = {"recover", "softboiled", "roost", "slackoff", "moonlight",
 # 常に優越する (接続テスト所感 2026-08-11: 素の交代を提案していた)
 PIVOT_MOVE_IDS = {"uturn", "voltswitch", "flipturn"}
 PIVOT_OVER_SWITCH_BONUS = 2.0   # 最善の交代スコアへの上乗せ (順位を上へ)
+# こだわり系の持ち物 (技ロック)。ダメージ計算側は倍率のみ対応しており、
+# 「前のターンと別の技を推奨する」実害が出ていた (2026-08-18 接続テスト)
+CHOICE_ITEM_IDS = {"choicescarf", "choiceband", "choicespecs"}
+# 交代の取り逃しでHPが古い可能性のある控えへの交代スコア減点
+# (2026-08-18: ひんしを取り逃した個体が100%のまま交代候補に推奨された)
+UNCERTAIN_SWITCH_PENALTY = 15.0
+# 「行動前に倒される見込み」(素早さ負け or 相手のKO圏先制技) の局面で、
+# 先に動けない技のスコアに掛ける割引。ダメージ期待値はほぼ実現しないが、
+# 素早さ推定や相手の交代の可能性があるためゼロにはしない
+# (2026-08-18 接続テスト: 常に後手でKO圏なのに非先制の大技を推し続けた。
+#  従来の一律-12点では大技の素点に埋もれていた)
+ACT_BEFORE_KO_DISCOUNT = 0.25
 
 _TYPE_JA2EN = None
 
@@ -366,9 +378,34 @@ def evaluate(state: dict, resolver=None) -> dict:
     encore_locked = None
     if "encore" in my_vols:
         encore_locked = (state.get("last_move") or {}).get("player")
+    # こだわりロック: こだわり系を持って技を使った後は、交代するまで
+    # その技しか選べない (last_move は交代・ひんしでクリアされる)
+    choice_locked = None
+    if my_view.item in CHOICE_ITEM_IDS:
+        choice_locked = (state.get("last_move") or {}).get("player")
     can_ko_first = False   # 先に動いて倒せる技があるか (死に出し判定用)
     move_type_mult = {}    # 攻撃技のタイプ相性倍率 (交代技の無効判定用)
-    for slot in my_p.get("moves") or []:
+    # 自分の場のポケモンがひんしなら、この決定は「次を出す」しかない。
+    # 技を評価すると倒れた個体の技を推奨し続ける (2026-08-18 接続テスト:
+    # 瀕死のムクホークのブレイブバードを推奨し続けた)
+    my_fainted = (my_p.get("status") == "fainted"
+                  or (my_p.get("hp_percent") is not None
+                      and my_p["hp_percent"] <= 0))
+    # 技が画面から未読取でも、my_team登録の型があれば登録技で評価する
+    # (2026-08-18 接続テスト: 技選択画面を開くまで自分の技が不明のまま
+    #  助言していた。登録技はPP不明のまま扱う。画面読取が入れば上書きされる)
+    my_move_slots = list(my_p.get("moves") or [])
+    if not my_move_slots and not my_fainted and resolver is not None:
+        try:
+            from advisor.my_team import get_my_moves
+            for ja in get_my_moves(my_p.get("species_ja")):
+                mv_r = resolver.resolve(ja, "moves", cutoff=0.7)
+                if mv_r:
+                    my_move_slots.append(
+                        {"name_ja": mv_r[0], "move_id": mv_r[1], "pp": None})
+        except Exception:
+            pass
+    for slot in ([] if my_fainted else my_move_slots):
         mid = slot.get("move_id")
         mv = dex.move(mid)
         name = slot.get("name_ja") or mid or "不明な技"
@@ -386,6 +423,11 @@ def evaluate(state: dict, resolver=None) -> dict:
                             "score": -99.0,
                             "reason": "アンコール中は直前の技しか選べない"})
             continue
+        if choice_locked and mid != choice_locked:
+            actions.append({"kind": "move", "id": mid, "name": name,
+                            "score": -99.0,
+                            "reason": "こだわり中は直前の技しか選べない (交代で解除)"})
+            continue
         if "taunt" in my_vols and (mv["category"] == "Status"
                                    or not mv["power"]):
             actions.append({"kind": "move", "id": mid, "name": name,
@@ -396,6 +438,7 @@ def evaluate(state: dict, resolver=None) -> dict:
         acc = (mv["accuracy"] or 100) / 100.0
         reason_parts = []
         score = 0.0
+        act_discount = False   # 行動前に倒される見込み (RLブレンド後に割引)
 
         if mv["category"] == "Status" or not mv["power"]:
             desc, base_score = STATUS_MOVE_VALUE.get(mid, ("補助技", 8))
@@ -466,8 +509,13 @@ def evaluate(state: dict, resolver=None) -> dict:
                 reason_parts.append(
                     "倒せる圏内だが相手の先制技が先の可能性"
                     if mv_pri > 0 else "倒せる圏内だが相手が先手の可能性")
-            if threat_faces_me and mv_pri <= 0 and ko_prob < 0.5:
-                score -= 12.0
+            if threat_faces_me and not strikes_first:
+                # 先に動けない技は撃つ前に倒される見込みが高い。割引は
+                # RLブレンド後にまとめて適用する (act_discount フラグ)。
+                # 技スコアだけ割り引くと、修正前の方策で学習したRL事前分布が
+                # 「実行されない技」を上位へ復活させる
+                act_discount = True
+                reason_parts.append("行動前に倒される見込み (先制技/交代を優先)")
             if mid in ("suckerpunch", "thunderclap"):
                 reason_parts.append("相手が攻撃技以外 (交代/変化技) だと失敗")
 
@@ -479,13 +527,16 @@ def evaluate(state: dict, resolver=None) -> dict:
             reason_parts.insert(0, f"{dmg_txt} {eff_txt}")
             reason_parts += d["notes"]
 
-        actions.append({
+        action = {
             "kind": "move",
             "id": mid,
             "name": name,
             "score": round(score, 1),
             "reason": " / ".join(reason_parts),
-        })
+        }
+        if act_discount:
+            action["act_discount"] = True
+        actions.append(action)
 
     # ------------------------------------------------------------------
     # 交代の評価 (選出済みの3体に限る: 未選出への交代は提案できない)
@@ -541,6 +592,10 @@ def evaluate(state: dict, resolver=None) -> dict:
                   + f" / 交代後の打点 約{counter:.0f}%")
         if not survives:
             reason += " / 交代出しで倒される危険あり"
+        if p.get("hp_uncertain"):
+            # 交代を見逃した個体はHPが古い (ひんし済みの可能性すらある)
+            score -= UNCERTAIN_SWITCH_PENALTY
+            reason += " / ⚠HP不明 (交代の見逃しあり。実際は瀕死の可能性)"
 
         actions.append({
             "kind": "switch",
@@ -600,7 +655,17 @@ def evaluate(state: dict, resolver=None) -> dict:
     try:
         from advisor.rl_bridge import policy_hint
         from advisor.damage import effective_speed as _es2
-        rl_hint = policy_hint(state, my_spe_actual=_es2(my_view, my_field))
+        # 画面から技が未読取のフレームでは、RLにも登録技フォールバックを
+        # 見せる (state直参照のままだと合法手が「交代のみ」に縮退し、
+        # RL確率が交代に集中→技画面を開いた瞬間に推奨が反転した。
+        # 2026-08-18 第3回: command画面 交代RL100% → move_select 剣舞RL70%)
+        rl_state = state
+        if my_move_slots and not (my_p.get("moves") or []):
+            rl_party = list(my_state["party"])
+            rl_party[my_active_idx] = dict(my_p, moves=my_move_slots)
+            rl_state = dict(state,
+                            player=dict(my_state, party=rl_party))
+        rl_hint = policy_hint(rl_state, my_spe_actual=_es2(my_view, my_field))
         if rl_hint and rl_hint.get("top"):
             probs = {}
             for t in rl_hint["top"]:
@@ -620,6 +685,15 @@ def evaluate(state: dict, resolver=None) -> dict:
             actions.sort(key=lambda a: -a["score"])
     except Exception:
         pass
+
+    # 行動前に倒される見込みの技の割引 (RL補正も含めて掛ける)。
+    # RL方策は「先に動けない」文脈を学習しきれておらず、技スコアだけ
+    # 割り引くとRL事前分布が実行されない技を上位へ復活させるため、
+    # ブレンド後の合計に対して適用する
+    for a in actions:
+        if a.pop("act_discount", False):
+            a["score"] = round(a["score"] * ACT_BEFORE_KO_DISCOUNT, 1)
+    actions.sort(key=lambda a: -a["score"])
 
     # 交代技の複合価値: 素の交代が最善のとき、無効化されない交代技があれば
     # 「同じ交代を実現しつつダメージも入る」分だけ交代より優先する。
@@ -648,6 +722,11 @@ def evaluate(state: dict, resolver=None) -> dict:
         else:
             speed_note = ("アンコール中: 直前に使った技しか選べません。" +
                           speed_note)
+    if choice_locked:
+        locked_ja = next((a["name"] for a in actions
+                          if a.get("id") == choice_locked), choice_locked)
+        speed_note = (f"こだわり中: {locked_ja} しか選べません (交代で解除)。"
+                      + speed_note)
 
     # 死に出しプランニング (定説: 捨てる順番と無償降臨。HEURISTICS_CATALOG H2)
     # 「相手のKO圏の攻撃が先に来る」かつ「先に倒し返せない」= この場は
@@ -655,10 +734,14 @@ def evaluate(state: dict, resolver=None) -> dict:
     # 倒され、次を無償で出すプランを明示する。勝ち筋の個体は温存する
     sacrifice_note = ""
     try:
-        if threat_faces_me and not can_ko_first:
+        if threat_faces_me and not can_ko_first and not my_fainted:
             sacrifice_note = _sacrifice_note(actions, endgame)
     except Exception:
         pass
+
+    if my_fainted:
+        speed_note = ("ひんし: 交代先を選んでください (技は選べません)。"
+                      + speed_note)
 
     return {
         "ok": True,
