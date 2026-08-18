@@ -192,6 +192,10 @@ def extract_selection(img, state: BattleStateV2, resolver) -> None:
 
 
 _MY_LEGAL_MAXES = None
+# 様子見画面の自分HP実数値で「0/xxx」を連続で読んだらひんし確定とみなす
+# 回数。1回では誤読 (ハイライト演出) と区別できず、faintメッセージ頼み
+# ではメッセージの取り逃しでHPが固着する (2026-08-18 接続テスト欠陥#6)
+ZERO_READ_FAINT_COUNT = 3
 
 
 def _my_legal_maxes():
@@ -1475,6 +1479,27 @@ def _extract_watch_ability(img, state: BattleStateV2, resolver) -> None:
                             event_id=None)
 
 
+def _accept_zero_hp_read(state, mon) -> bool:
+    """「0/xxx」読みをひんしとして受け入れてよいか (裏付け判定+カウンタ更新)。
+
+    裏付けの無い 0/xxx 読みでひんし確定しない。ハイライト演出等の誤読
+    1フレームで健在のポケモンが偽ひんし化し、以後の評価から消えた
+    (2026-08-04監査: 健在183/183のラグラージがT8のwatchで0%→fainted固定)。
+    裏付けは次のいずれか:
+     (a) faintイベント (「たおれた」メッセージ)
+     (b) 安定した連続ゼロ読み (ZERO_READ_FAINT_COUNT回)。faintメッセージ
+         自体を取り逃すと (2026-08-18 欠陥#6: ミミッキュの「たおれた」が
+         未イベント化) ひんしが反映されず、HPが直前値で固着して
+         技助言まで壊れるため
+    """
+    zero_n = getattr(mon, "_zero_read_count", 0) + 1
+    mon._zero_read_count = zero_n
+    lf = getattr(state, "last_faint", None)
+    if lf and lf.get("side") == "player":
+        return True
+    return zero_n >= ZERO_READ_FAINT_COUNT
+
+
 def _extract_watch_side_columns(img, state: BattleStateV2, resolver) -> None:
     # 左列: 自分の選出パーティのHP実数値
     for i, z in enumerate(zones.WATCH_MY[:3]):
@@ -1501,13 +1526,17 @@ def _extract_watch_side_columns(img, state: BattleStateV2, resolver) -> None:
             idx = len(state.player.party) - 1
         mon = state.player.party[idx]
         if frac[0] == 0 and mon.status != "fainted":
-            # 裏付けの無い 0/xxx 読みでひんし確定しない。ハイライト演出等の
-            # 誤読1フレームで健在のポケモンが偽ひんし化し、以後の評価から
-            # 消えた (2026-08-04監査: 健在183/183のラグラージがT8のwatchで
-            # 0%→fainted固定)。faintイベントの裏付けがある場合のみ通す
-            lf = getattr(state, "last_faint", None)
-            if not (lf and lf.get("side") == "player"):
+            if not _accept_zero_hp_read(state, mon):
                 continue
+            # 裏付けありのひんし: _set_hp の2回安定待ちを経ずに反映する
+            # (faintイベントか複数フレームのゼロ読みで既に裏付け済み)
+            mon.hp_percent = 0.0
+            mon.hp_current = 0
+            mon.hp_max = frac[1]
+            mon.status = "fainted"
+            continue
+        if frac[0] > 0:
+            mon._zero_read_count = 0
         _set_hp(state, "player", mon, cur=frac[0], mx=frac[1])
         if frac[0] == 0 and mon.hp_current == 0:
             mon.status = "fainted"

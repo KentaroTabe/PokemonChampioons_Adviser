@@ -47,7 +47,42 @@ def test_normal_update_still_works():
     print("test_normal_update_still_works OK")
 
 
+def test_zero_read_faint_corroboration():
+    """0/xxx 読みのひんし裏付け (2026-08-18 欠陥#6)。
+
+    - faintイベントがあれば1回で受理 (従来どおり)
+    - faintイベントを取り逃しても、安定した連続ゼロ読みで受理
+      (実測: ミミッキュの「たおれた」が未イベント化しHP43%が固着した)
+    - 1〜2回のゼロ読みでは受理しない (2026-08-04 の偽ひんし対策を維持)
+    - 非ゼロ読みでカウンタはリセットされる
+    """
+    from vision.extractors import ZERO_READ_FAINT_COUNT, _accept_zero_hp_read
+
+    # faint裏付けあり → 即受理
+    state = BattleStateV2()
+    state.last_faint = {"side": "player", "ts": time.time()}
+    mon = PokemonState(species_ja="ミミッキュ", species_id="mimikyu")
+    assert _accept_zero_hp_read(state, mon) is True
+
+    # faint裏付けなし → 規定回数までは拒否、達したら受理
+    state2 = BattleStateV2()
+    mon2 = PokemonState(species_ja="ミミッキュ", species_id="mimikyu")
+    results = [_accept_zero_hp_read(state2, mon2)
+               for _ in range(ZERO_READ_FAINT_COUNT)]
+    assert results[:-1] == [False] * (ZERO_READ_FAINT_COUNT - 1), results
+    assert results[-1] is True, results
+
+    # 非ゼロ読みが挟まればリセット (呼び出し側が0に戻す想定の検証)
+    mon3 = PokemonState(species_ja="サザンドラ", species_id="hydreigon")
+    state3 = BattleStateV2()
+    assert _accept_zero_hp_read(state3, mon3) is False
+    mon3._zero_read_count = 0   # 非ゼロ読み時に呼び出し側が行うリセット
+    assert _accept_zero_hp_read(state3, mon3) is False
+    print("test_zero_read_faint_corroboration OK")
+
+
 if __name__ == "__main__":
     test_drain_animation_not_committed()
     test_normal_update_still_works()
+    test_zero_read_faint_corroboration()
     print("\nALL OK")
