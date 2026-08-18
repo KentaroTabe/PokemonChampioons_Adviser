@@ -33,6 +33,8 @@ from vision.scenes import (
 
 REPO = Path(__file__).resolve().parent.parent
 BATTLE_DIR = REPO / "logs" / "battles"
+# 接続テスト開始マーカー (analyze_battles と同じ運用。--session で参照)
+MARKER = REPO / "logs" / ".connection_test_start"
 
 # 助言の「遅い」判定 (決定画面が開いてから助言が出るまでの許容秒数)。
 # COMMANDの持ち時間内で「読む→操作する」余裕を残す値として設定。
@@ -330,10 +332,27 @@ def render_text(name: str, audit: dict, late_sec: float) -> str:
     return "\n".join(lines)
 
 
+def _session_start_ts() -> float | None:
+    """接続テスト開始マーカーの時刻 (無ければ None)"""
+    try:
+        return float(MARKER.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _files_since(files: list, since_ts: float) -> list:
+    return [f for f in files if Path(f).stat().st_mtime >= since_ts]
+
+
 def _pick_files(args) -> list:
     if args.battle:
         return [args.battle]
     files = sorted(glob.glob(str(BATTLE_DIR / "*.jsonl")))
+    if args.session:
+        ts = _session_start_ts()
+        if ts is not None:
+            return _files_since(files, ts)
+        # マーカーが無ければ今日分へフォールバック (下へ続く)
     if args.last:
         return files[-args.last:]
     today = time.strftime("%Y%m%d")
@@ -345,6 +364,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="テストA用の決定監査")
     ap.add_argument("--battle", default=None, help="対戦ログのパス")
     ap.add_argument("--last", type=int, default=None, help="直近N対戦")
+    ap.add_argument("--session", action="store_true",
+                    help="接続テスト開始マーカー以降の全対戦 "
+                         "(end_connection_test.sh が使う)")
     ap.add_argument("--late-sec", type=float, default=LATE_SEC)
     ap.add_argument("--heavy-swing", type=float, default=HEAVY_SWING)
     ap.add_argument("--json", action="store_true", help="機械可読出力")

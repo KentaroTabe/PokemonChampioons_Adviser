@@ -187,6 +187,22 @@ def test_lead_switch_is_not_a_battle_decision():
     print("test_lead_switch_is_not_a_battle_decision OK")
 
 
+def test_session_file_filter():
+    """--session はマーカー時刻以降の対戦ログだけを対象にする"""
+    import os
+    from tools import decision_audit as da
+    d = Path(tempfile.mkdtemp())
+    old = d / "battle_old.jsonl"
+    new = d / "battle_new.jsonl"
+    for p in (old, new):
+        p.write_text("{}\n", encoding="utf-8")
+    os.utime(old, (1000.0, 1000.0))
+    os.utime(new, (2000.0, 2000.0))
+    picked = da._files_since([str(old), str(new)], 1500.0)
+    assert picked == [str(new)], picked
+    print("test_session_file_filter OK")
+
+
 def test_render_and_file_e2e():
     recs = [
         _scene(100.0, SCENE_COMMAND),
@@ -217,5 +233,6 @@ if __name__ == "__main__":
     test_switch_agreement_uses_next_active()
     test_selection_audit()
     test_lead_switch_is_not_a_battle_decision()
+    test_session_file_filter()
     test_render_and_file_e2e()
     print("\nALL OK")
