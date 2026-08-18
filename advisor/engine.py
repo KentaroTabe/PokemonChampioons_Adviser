@@ -52,6 +52,12 @@ RECOVERY_MOVES = {"recover", "softboiled", "roost", "slackoff", "moonlight",
 # 常に優越する (接続テスト所感 2026-08-11: 素の交代を提案していた)
 PIVOT_MOVE_IDS = {"uturn", "voltswitch", "flipturn"}
 PIVOT_OVER_SWITCH_BONUS = 2.0   # 最善の交代スコアへの上乗せ (順位を上へ)
+# 「行動前に倒される見込み」(素早さ負け or 相手のKO圏先制技) の局面で、
+# 先に動けない技のスコアに掛ける割引。ダメージ期待値はほぼ実現しないが、
+# 素早さ推定や相手の交代の可能性があるためゼロにはしない
+# (2026-08-18 接続テスト: 常に後手でKO圏なのに非先制の大技を推し続けた。
+#  従来の一律-12点では大技の素点に埋もれていた)
+ACT_BEFORE_KO_DISCOUNT = 0.25
 
 _TYPE_JA2EN = None
 
@@ -368,7 +374,13 @@ def evaluate(state: dict, resolver=None) -> dict:
         encore_locked = (state.get("last_move") or {}).get("player")
     can_ko_first = False   # 先に動いて倒せる技があるか (死に出し判定用)
     move_type_mult = {}    # 攻撃技のタイプ相性倍率 (交代技の無効判定用)
-    for slot in my_p.get("moves") or []:
+    # 自分の場のポケモンがひんしなら、この決定は「次を出す」しかない。
+    # 技を評価すると倒れた個体の技を推奨し続ける (2026-08-18 接続テスト:
+    # 瀕死のムクホークのブレイブバードを推奨し続けた)
+    my_fainted = (my_p.get("status") == "fainted"
+                  or (my_p.get("hp_percent") is not None
+                      and my_p["hp_percent"] <= 0))
+    for slot in ([] if my_fainted else my_p.get("moves") or []):
         mid = slot.get("move_id")
         mv = dex.move(mid)
         name = slot.get("name_ja") or mid or "不明な技"
@@ -396,6 +408,7 @@ def evaluate(state: dict, resolver=None) -> dict:
         acc = (mv["accuracy"] or 100) / 100.0
         reason_parts = []
         score = 0.0
+        act_discount = False   # 行動前に倒される見込み (RLブレンド後に割引)
 
         if mv["category"] == "Status" or not mv["power"]:
             desc, base_score = STATUS_MOVE_VALUE.get(mid, ("補助技", 8))
@@ -466,8 +479,13 @@ def evaluate(state: dict, resolver=None) -> dict:
                 reason_parts.append(
                     "倒せる圏内だが相手の先制技が先の可能性"
                     if mv_pri > 0 else "倒せる圏内だが相手が先手の可能性")
-            if threat_faces_me and mv_pri <= 0 and ko_prob < 0.5:
-                score -= 12.0
+            if threat_faces_me and not strikes_first:
+                # 先に動けない技は撃つ前に倒される見込みが高い。割引は
+                # RLブレンド後にまとめて適用する (act_discount フラグ)。
+                # 技スコアだけ割り引くと、修正前の方策で学習したRL事前分布が
+                # 「実行されない技」を上位へ復活させる
+                act_discount = True
+                reason_parts.append("行動前に倒される見込み (先制技/交代を優先)")
             if mid in ("suckerpunch", "thunderclap"):
                 reason_parts.append("相手が攻撃技以外 (交代/変化技) だと失敗")
 
@@ -479,13 +497,16 @@ def evaluate(state: dict, resolver=None) -> dict:
             reason_parts.insert(0, f"{dmg_txt} {eff_txt}")
             reason_parts += d["notes"]
 
-        actions.append({
+        action = {
             "kind": "move",
             "id": mid,
             "name": name,
             "score": round(score, 1),
             "reason": " / ".join(reason_parts),
-        })
+        }
+        if act_discount:
+            action["act_discount"] = True
+        actions.append(action)
 
     # ------------------------------------------------------------------
     # 交代の評価 (選出済みの3体に限る: 未選出への交代は提案できない)
@@ -621,6 +642,15 @@ def evaluate(state: dict, resolver=None) -> dict:
     except Exception:
         pass
 
+    # 行動前に倒される見込みの技の割引 (RL補正も含めて掛ける)。
+    # RL方策は「先に動けない」文脈を学習しきれておらず、技スコアだけ
+    # 割り引くとRL事前分布が実行されない技を上位へ復活させるため、
+    # ブレンド後の合計に対して適用する
+    for a in actions:
+        if a.pop("act_discount", False):
+            a["score"] = round(a["score"] * ACT_BEFORE_KO_DISCOUNT, 1)
+    actions.sort(key=lambda a: -a["score"])
+
     # 交代技の複合価値: 素の交代が最善のとき、無効化されない交代技があれば
     # 「同じ交代を実現しつつダメージも入る」分だけ交代より優先する。
     # 無効相性 (ボルトチェンジ→地面等) は交代自体が発生しないため対象外
@@ -655,10 +685,14 @@ def evaluate(state: dict, resolver=None) -> dict:
     # 倒され、次を無償で出すプランを明示する。勝ち筋の個体は温存する
     sacrifice_note = ""
     try:
-        if threat_faces_me and not can_ko_first:
+        if threat_faces_me and not can_ko_first and not my_fainted:
             sacrifice_note = _sacrifice_note(actions, endgame)
     except Exception:
         pass
+
+    if my_fainted:
+        speed_note = ("ひんし: 交代先を選んでください (技は選べません)。"
+                      + speed_note)
 
     return {
         "ok": True,

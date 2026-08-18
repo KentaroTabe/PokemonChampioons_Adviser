@@ -285,6 +285,77 @@ def test_priority_evaluation():
     print("test_priority_evaluation OK")
 
 
+def test_fainted_active_switch_only():
+    """自分の場のポケモンがひんしなら技を評価せず交代先のみ提案する。
+
+    2026-08-18 接続テスト欠陥#1: 瀕死のムクホークのブレイブバードを
+    推奨し続けた (強制交代の決定に技助言が出た)。
+    """
+    from vision.normalize import NameResolver
+    resolver = NameResolver()
+    fainted = {"species_id": "staraptor", "species_ja": "ムクホーク",
+               "types": ["ノーマル", "ひこう"], "hp_percent": 0.0,
+               "hp_current": 0, "hp_max": 165, "status": "fainted",
+               "boosts": {},
+               "ability_id": None, "item_id": None,
+               "moves": [{"name_ja": "ブレイブバード", "move_id": "bravebird",
+                          "pp": 15, "max_pp": 15, "effectiveness": "neutral"}],
+               "revealed_moves": []}
+    bench = {"species_id": "hydreigon", "species_ja": "サザンドラ",
+             "types": ["あく", "ドラゴン"], "hp_percent": 100.0,
+             "hp_current": 169, "hp_max": 169, "status": None, "boosts": {},
+             "ability_id": None, "item_id": None,
+             "moves": [{"name_ja": "りゅうせいぐん", "move_id": "dracometeor",
+                        "pp": 8, "max_pp": 8, "effectiveness": "neutral"}],
+             "revealed_moves": []}
+    opp = {"species_id": "garchomp", "species_ja": "ガブリアス",
+           "types": ["ドラゴン", "じめん"], "hp_percent": 100.0,
+           "hp_current": None, "hp_max": None, "status": None, "boosts": {},
+           "ability_id": None, "item_id": None, "moves": [],
+           "revealed_moves": []}
+    state = _mini_state(fainted, opp)
+    state["player"]["party"] = [fainted, bench]
+    adv = evaluate(state, resolver)
+    assert adv["ok"], adv
+    kinds = {a["kind"] for a in adv["actions"]}
+    assert kinds == {"switch"}, adv["actions"]
+    assert adv["best"]["kind"] == "switch", adv["best"]
+    assert "ひんし" in adv["speed_note"], adv["speed_note"]
+    print("test_fainted_active_switch_only OK")
+
+
+def test_act_before_ko_discount():
+    """後手でKO圏の被弾が確定している局面では、先に動けない大技より
+    先制技が上に来る (2026-08-18 接続テスト欠陥#2)。
+
+    遅いミミッキュ vs 高速で抜群高火力のガブリアス (じしん判明):
+    非先制のじゃれつく (大ダメージ) は割引され、かげうちが最善になる。
+    """
+    from vision.normalize import NameResolver
+    resolver = NameResolver()
+    my = {"species_id": "mimikyu", "species_ja": "ミミッキュ",
+          "types": ["ゴースト", "フェアリー"], "hp_percent": 25.0,
+          "hp_current": 33, "hp_max": 131, "status": None, "boosts": {},
+          "ability_id": None, "item_id": None,
+          "moves": [
+              {"name_ja": "かげうち", "move_id": "shadowsneak",
+               "pp": 20, "max_pp": 20, "effectiveness": "neutral"},
+              {"name_ja": "じゃれつく", "move_id": "playrough",
+               "pp": 10, "max_pp": 10, "effectiveness": "super"},
+          ], "revealed_moves": []}
+    opp = {"species_id": "garchomp", "species_ja": "ガブリアス",
+           "types": ["ドラゴン", "じめん"], "hp_percent": 100.0,
+           "hp_current": None, "hp_max": None, "status": None, "boosts": {},
+           "ability_id": None, "item_id": None, "moves": [],
+           "revealed_moves": ["じしん"]}
+    adv = evaluate(_mini_state(my, opp), resolver)
+    sneak = next(a for a in adv["actions"] if a["id"] == "shadowsneak")
+    rough = next(a for a in adv["actions"] if a["id"] == "playrough")
+    assert "行動前に倒される見込み" in rough["reason"], rough
+    assert sneak["score"] > rough["score"], (sneak, rough)
+    print("test_act_before_ko_discount OK")
+
+
 if __name__ == "__main__":
     test_stats()
     test_type_chart()
@@ -293,3 +364,5 @@ if __name__ == "__main__":
     test_evaluate_end_to_end()
     test_pivot_over_plain_switch()
     test_priority_evaluation()
+    test_fainted_active_switch_only()
+    test_act_before_ko_discount()
