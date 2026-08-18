@@ -259,6 +259,26 @@ def test_selection_falls_back_to_observed_members():
     print("test_selection_falls_back_to_observed_members OK")
 
 
+def test_provisional_advice_is_not_displayed_history():
+    """確定前 (provisional) の助言はフロント未表示なので、
+    遅延測定にも一致判定の表示履歴にも数えない (第3回の安定化ゲート対応)"""
+    prov = _advice(101.0, best_id="surf", name="なみのり")
+    prov["advice"]["provisional"] = True
+    recs = [
+        _scene(100.0, SCENE_COMMAND),
+        prov,                                    # 確定前 (未表示)
+        _advice(105.0),                          # 確定 (じしん)
+        _scene(106.0, SCENE_FIELD),
+        _action_move(107.0, 1),                  # じしん実行
+    ]
+    a = audit_battle(recs)
+    d = a["decisions"][0]
+    assert d["agree"] is True, d                  # 確定助言とのみ突き合わせ
+    assert abs(d["latency"] - 5.0) < 0.01, d      # 遅延は確定助言の時刻まで
+    assert d.get("churn") is not True, d          # 未表示の揺れはchurnに数えない
+    print("test_provisional_advice_is_not_displayed_history OK")
+
+
 def test_session_file_filter():
     """--session はマーカー時刻以降の対戦ログだけを対象にする"""
     import os
@@ -308,6 +328,7 @@ if __name__ == "__main__":
     test_churn_followed_displayed_best_is_agreement()
     test_selection_uses_most_complete_pick_state()
     test_selection_falls_back_to_observed_members()
+    test_provisional_advice_is_not_displayed_history()
     test_session_file_filter()
     test_render_and_file_e2e()
     print("\nALL OK")

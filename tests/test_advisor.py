@@ -419,6 +419,49 @@ def test_registered_moves_fallback():
     print("test_registered_moves_fallback OK")
 
 
+def test_rl_sees_registered_move_fallback():
+    """技未読取のフレームでは、RLヒントにも登録技フォールバックを見せる。
+
+    2026-08-18 第3回: stateの技が空だとRLの合法手が交代のみに縮退し、
+    RL確率が交代に集中→技画面を開いた瞬間に推奨が反転した。
+    """
+    from vision.normalize import NameResolver
+    from advisor import my_team as mt
+    from advisor import rl_bridge as rb
+    resolver = NameResolver()
+    my = {"species_id": "staraptor", "species_ja": "ムクホーク",
+          "types": ["ノーマル", "ひこう"], "hp_percent": 100.0,
+          "hp_current": 161, "hp_max": 161, "status": None, "boosts": {},
+          "ability_id": None, "item_id": None,
+          "moves": [], "revealed_moves": []}
+    opp = {"species_id": "garchomp", "species_ja": "ガブリアス",
+           "types": ["ドラゴン", "じめん"], "hp_percent": 100.0,
+           "hp_current": None, "hp_max": None, "status": None, "boosts": {},
+           "ability_id": None, "item_id": None, "moves": [],
+           "revealed_moves": []}
+    seen = {}
+
+    def fake_hint(state, my_spe_actual=None):
+        mi = state["player"]["active_index"]
+        seen["moves"] = [m.get("move_id") for m in
+                         (state["player"]["party"][mi].get("moves") or [])]
+        return None
+
+    orig_moves, orig_hint = mt.get_my_moves, rb.policy_hint
+    mt.get_my_moves = lambda ja: (["ブレイブバード"] if ja == "ムクホーク" else [])
+    rb.policy_hint = fake_hint
+    try:
+        state = _mini_state(my, opp)
+        evaluate(state, resolver)
+    finally:
+        mt.get_my_moves = orig_moves
+        rb.policy_hint = orig_hint
+    assert seen.get("moves") == ["bravebird"], seen
+    # 元のstateは汚染しない (浅いコピーへの注入)
+    assert my["moves"] == [], my["moves"]
+    print("test_rl_sees_registered_move_fallback OK")
+
+
 def test_uncertain_bench_switch_penalty():
     """交代を見逃した (hp_uncertain) 控えへの交代は減点+警告する (第2回#E)"""
     from vision.normalize import NameResolver
@@ -460,4 +503,5 @@ if __name__ == "__main__":
     test_act_before_ko_discount()
     test_choice_lock()
     test_registered_moves_fallback()
+    test_rl_sees_registered_move_fallback()
     test_uncertain_bench_switch_penalty()

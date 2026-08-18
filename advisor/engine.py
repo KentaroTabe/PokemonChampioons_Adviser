@@ -655,7 +655,17 @@ def evaluate(state: dict, resolver=None) -> dict:
     try:
         from advisor.rl_bridge import policy_hint
         from advisor.damage import effective_speed as _es2
-        rl_hint = policy_hint(state, my_spe_actual=_es2(my_view, my_field))
+        # 画面から技が未読取のフレームでは、RLにも登録技フォールバックを
+        # 見せる (state直参照のままだと合法手が「交代のみ」に縮退し、
+        # RL確率が交代に集中→技画面を開いた瞬間に推奨が反転した。
+        # 2026-08-18 第3回: command画面 交代RL100% → move_select 剣舞RL70%)
+        rl_state = state
+        if my_move_slots and not (my_p.get("moves") or []):
+            rl_party = list(my_state["party"])
+            rl_party[my_active_idx] = dict(my_p, moves=my_move_slots)
+            rl_state = dict(state,
+                            player=dict(my_state, party=rl_party))
+        rl_hint = policy_hint(rl_state, my_spe_actual=_es2(my_view, my_field))
         if rl_hint and rl_hint.get("top"):
             probs = {}
             for t in rl_hint["top"]:

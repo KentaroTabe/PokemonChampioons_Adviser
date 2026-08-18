@@ -111,6 +111,34 @@ def test_advice_hysteresis():
     print("test_advice_hysteresis OK")
 
 
+def test_advice_stability_gate():
+    """推奨が連続2回一致するまで provisional、揺れ続けたら注記つきで出す (第3回)"""
+    from advisor.service import (STABLE_MAX_WAIT_SEC, apply_advice_stability)
+
+    def res(kind, mid):
+        best = {"kind": kind, "id": mid, "name": mid, "score": 50.0}
+        return {"ok": True, "actions": [best], "best": best, "speed_note": ""}
+
+    # 1回目 = 確定前
+    r1, h = apply_advice_stability(res("move", "a"), None, turn=1, now=100.0)
+    assert r1.get("provisional") is True, r1
+    # 2回目同じ = 確定
+    r2, h = apply_advice_stability(res("move", "a"), h, turn=1, now=100.3)
+    assert not r2.get("provisional"), r2
+    # 別のbestへ揺れる = また確定前
+    r3, h = apply_advice_stability(res("move", "b"), h, turn=1, now=100.6)
+    assert r3.get("provisional") is True, r3
+    # 制限時間を超えて揺れ続けたら、注記つきでそのまま出す
+    r4, h = apply_advice_stability(res("move", "c"), h, turn=1,
+                                   now=100.0 + STABLE_MAX_WAIT_SEC + 1.0)
+    assert not r4.get("provisional"), r4
+    assert "揺れています" in r4["speed_note"], r4["speed_note"]
+    # ターンが変われば新規判定 (1回目=確定前)
+    r5, h = apply_advice_stability(res("move", "c"), h, turn=2, now=200.0)
+    assert r5.get("provisional") is True, r5
+    print("test_advice_stability_gate OK")
+
+
 def test_basic_recommendation():
     state = make_state(picked=0)
     advice = advise_selection(state)
@@ -229,6 +257,7 @@ def test_partial_reads_do_not_crash():
 if __name__ == "__main__":
     test_hazard_setter_becomes_lead()
     test_advice_hysteresis()
+    test_advice_stability_gate()
     test_basic_recommendation()
     test_weather_synergy_and_mega_form()
     test_mega_form_evaluation()

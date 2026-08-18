@@ -214,6 +214,8 @@ def audit_battle(records: list, late_sec: float = LATE_SEC,
             continue
         if typ == "advice" and d.get("kind") == "battle":
             adv = d.get("advice") or {}
+            if adv.get("provisional"):
+                continue   # 確定前 (フロント未表示) の助言は表示履歴に数えない
             if adv.get("best") or adv.get("actions"):
                 pending = (d.get("t", 0), adv)
                 b = adv.get("best") or (adv.get("actions") or [{}])[0]

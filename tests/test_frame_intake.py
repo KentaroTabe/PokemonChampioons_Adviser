@@ -87,10 +87,27 @@ def test_busy_released_on_error():
     print("test_busy_released_on_error OK")
 
 
+def test_selection_advice_gate():
+    """対戦中 (battle_active) は選出/準備画面の誤分類フレームで
+    選出アドバイスを出さない (2026-08-18 第3回: turn進行中に5回混入)"""
+    import server as srv
+    ok = {"scene": "selection", "outcome": None, "battle_active": False}
+    assert srv.should_advise_selection(ok) is True
+    assert srv.should_advise_selection(dict(ok, scene="standby")) is True
+    # 対戦中の誤分類フレーム → 出さない
+    assert srv.should_advise_selection(dict(ok, battle_active=True)) is False
+    # 勝敗表示が残っている間 → 出さない (前試合の相手を参照してしまう)
+    assert srv.should_advise_selection(dict(ok, outcome="loss")) is False
+    # 対戦シーンでは元々出さない
+    assert srv.should_advise_selection(dict(ok, scene="command")) is False
+    print("test_selection_advice_gate OK")
+
+
 def main() -> None:
     test_processes_pending_after_busy()
     test_only_latest_is_kept()
     test_busy_released_on_error()
+    test_selection_advice_gate()
     print("ALL OK")
 
 

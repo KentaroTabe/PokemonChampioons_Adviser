@@ -20,6 +20,44 @@ from advisor.engine import evaluate
 # 大差の反転 (新情報でダメ計が変わった等) は通す
 HYSTERESIS_MARGIN = 6.0
 
+# 推奨の安定化ゲート: 同じ最善が連続 STABLE_CONSECUTIVE 回出るまでは
+# provisional (確定前) として出力を保留する (2026-08-18 第3回テスト:
+# 「アドバイスがコロコロ変わるので安定するまで出力待ちにして欲しい」)。
+# サーバーは provisional を受けたら次フレームで即再計算するため、
+# 追加遅延は実測1フレーム周期 (約0.3〜0.5秒)。
+# STABLE_MAX_WAIT_SEC を超えて揺れ続ける場合は、COMMANDタイマーを
+# 浪費しないよう揺れ注記つきでそのまま出す
+STABLE_CONSECUTIVE = 2
+STABLE_MAX_WAIT_SEC = 3.0
+
+
+def apply_advice_stability(result: dict, hist: Optional[dict], turn,
+                            now: Optional[float] = None):
+    """安定化ゲート (純粋関数)。戻り値: (result, 新しい hist)。
+
+    hist = {"turn", "key", "count", "since"}。同一ターン内で同じ best が
+    STABLE_CONSECUTIVE 回連続するまで result に provisional=True を付ける。
+    """
+    import time as _time
+    now = now if now is not None else _time.time()
+    if not result.get("ok") or not result.get("best"):
+        return result, hist
+    key = (result["best"]["kind"], result["best"].get("id"))
+    if not hist or hist.get("turn") != turn:
+        hist = {"turn": turn, "key": key, "count": 1, "since": now}
+    elif hist.get("key") == key:
+        hist = dict(hist, count=hist["count"] + 1)
+    else:
+        hist = dict(hist, key=key, count=1)
+    if hist["count"] < STABLE_CONSECUTIVE:
+        result = dict(result)
+        if now - hist["since"] < STABLE_MAX_WAIT_SEC:
+            result["provisional"] = True
+        else:
+            result["speed_note"] = ("⚠推奨が揺れています (情報更新中)。"
+                                    + (result.get("speed_note") or ""))
+    return result, hist
+
 
 def apply_advice_hysteresis(result: dict, last: Optional[dict],
                              turn, margin: float = HYSTERESIS_MARGIN):
@@ -52,6 +90,7 @@ class Advisor:
         # resolver は vision.normalize.NameResolver (省略時は遅延生成)
         self._resolver = resolver
         self._last_best: Optional[dict] = None
+        self._stab_hist: Optional[dict] = None
 
     @property
     def resolver(self):
@@ -84,6 +123,8 @@ class Advisor:
             result = evaluate(state_dict, self.resolver)
             result, self._last_best = apply_advice_hysteresis(
                 result, self._last_best, state_dict.get("turn"))
+            result, self._stab_hist = apply_advice_stability(
+                result, self._stab_hist, state_dict.get("turn"))
         except Exception as e:  # アドバイス失敗で本体を落とさない
             import traceback
             traceback.print_exc()
@@ -144,6 +185,10 @@ class Advisor:
             if advice.get("suggestion"):
                 text += f"\n  📱 {advice['suggestion']}"
             return text
+        if advice.get("provisional"):
+            # 安定化ゲート: 確定前の推奨は表示しない (コロコロ変わる対策)。
+            # サーバーが次フレームで再計算し、同じ推奨が続けば確定する
+            return "🔄 推奨を確定しています… (表示が安定するまで少々お待ちください)"
         lines = []
         if advice.get("best"):
             b = advice["best"]
