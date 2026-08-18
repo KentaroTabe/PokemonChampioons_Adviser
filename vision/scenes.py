@@ -158,6 +158,18 @@ def detect_move_pills(img) -> list:
     return [(ry0 + span * a / h, ry0 + span * b / h) for a, b in pills]
 
 
+# シーン種別の定数 (シーン名の唯一の源)。classify が返す文字列と一致する。
+# 下流 (battle_logger / tools) はこの定数を参照し、リテラルを直書きしない
+SCENE_SELECTION = "selection"
+SCENE_STANDBY = "standby"
+SCENE_COMMAND = "command"
+SCENE_MOVE_SELECT = "move_select"
+SCENE_WATCH = "watch"
+SCENE_BATTLE_HUD = "battle_hud"
+SCENE_FIELD = "field"
+SCENE_FIELD_CHECK = "field_check"
+
+
 def classify(img) -> dict:
     """シーンと根拠スコアを返す。{"scene": str, "scores": {...}}"""
     scores = {}
