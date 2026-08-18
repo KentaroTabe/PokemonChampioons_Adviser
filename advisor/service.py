@@ -13,11 +13,45 @@ from typing import Optional
 
 from advisor.engine import evaluate
 
+# 推奨のヒステリシス: 同一ターン内の再計算で、新しい最善が前回の最善を
+# この点差以上上回らない限り、前回の推奨を先頭に据え置く。
+# 状態更新のたびに推奨が入れ替わると追従できない (2026-08-18 接続テスト
+# 欠陥#3: 9決定中6件で決定中に推奨が反転、押下0.2秒後の反転も実測)。
+# 大差の反転 (新情報でダメ計が変わった等) は通す
+HYSTERESIS_MARGIN = 6.0
+
+
+def apply_advice_hysteresis(result: dict, last: Optional[dict],
+                             turn, margin: float = HYSTERESIS_MARGIN):
+    """前回bestの据え置き判定 (純粋関数)。
+
+    戻り値: (result, 新しい last)。last は {"turn", "kind", "id"}。
+    据え置いた場合は actions を並べ替え best を差し替える。
+    """
+    actions = result.get("actions") or []
+    if not result.get("ok") or not actions:
+        return result, last
+    best = actions[0]
+    if last and last.get("turn") == turn:
+        prev = next((a for a in actions
+                     if (a["kind"], a.get("id")) == (last["kind"], last["id"])),
+                    None)
+        if prev is not None and prev is not best and prev["score"] > -90 \
+                and best["score"] - prev["score"] < margin:
+            actions = [prev] + [a for a in actions if a is not prev]
+            result = dict(result)
+            result["actions"] = actions
+            result["best"] = prev
+            best = prev
+    new_last = {"turn": turn, "kind": best["kind"], "id": best.get("id")}
+    return result, new_last
+
 
 class Advisor:
     def __init__(self, resolver=None):
         # resolver は vision.normalize.NameResolver (省略時は遅延生成)
         self._resolver = resolver
+        self._last_best: Optional[dict] = None
 
     @property
     def resolver(self):
@@ -48,6 +82,8 @@ class Advisor:
     def advise(self, state_dict: dict) -> dict:
         try:
             result = evaluate(state_dict, self.resolver)
+            result, self._last_best = apply_advice_hysteresis(
+                result, self._last_best, state_dict.get("turn"))
         except Exception as e:  # アドバイス失敗で本体を落とさない
             import traceback
             traceback.print_exc()

@@ -104,6 +104,28 @@ MEGA_DUPLICATE_PENALTY = 0.6
 # ペリッパー+メガラグラージが選ばれる閾値は1.2、余裕を持たせて1.4)
 WEATHER_SYNERGY_BONUS = 1.4
 
+# 設置技持ちの先発ボーナス。設置は1ターン目に置けて初めて全交代に乗るため、
+# 後発に回すと価値が大きく目減りする (2026-08-18 接続テスト欠陥#4:
+# 設置役を後発に置いて働けない選出を提案した)。1対面ぶんの有利
+# (matchupスコア約1.0) に相当する重みで先発判定にのみ加える
+HAZARD_LEAD_BONUS = 1.0
+_HAZARD_MOVE_IDS = {"stealthrock", "spikes", "toxicspikes", "stickyweb"}
+_HAZARD_MOVE_JA = {"ステルスロック", "まきびし", "どくびし", "ねばねばネット"}
+
+
+def _own_hazard_setter(p: dict) -> bool:
+    """設置技持ちか (画面で判明した技 or my_team登録の型から判定)"""
+    for m in (p.get("moves") or []):
+        if (m.get("move_id") in _HAZARD_MOVE_IDS
+                or m.get("name_ja") in _HAZARD_MOVE_JA):
+            return True
+    try:
+        from advisor.my_team import get_my_build
+        b = get_my_build(p.get("species_ja")) or {}
+        return any(t in _HAZARD_MOVE_JA for t in (b.get("技") or []))
+    except Exception:
+        return False
+
 # 天候の設置特性と恩恵特性 (選出シナジー評価用)
 _WEATHER_SETTERS = {
     "drizzle": "rain", "drought": "sun",
@@ -273,6 +295,7 @@ def advise_selection(state: dict, resolver=None) -> dict:
             "types": my_types,
             "profile": _my_attack_profile(sid),
             "picked": p.get("is_picked", False),
+            "hazard_setter": _own_hazard_setter(p),
             "mega_holder": is_mega_holder,
             # メガ後の姿での評価用 (種族値/タイプ/特性が変わる)
             "mega_sid": mega_sid,
@@ -391,9 +414,11 @@ def advise_selection(state: dict, resolver=None) -> dict:
                 best = (total, combo, assignee)
 
     _, combo, mega_assignee = best
-    # 先発: 平均スコア最大
+    # 先発: 平均スコア最大 + 設置技持ちのボーナス (設置は初手に置けて
+    # 初めて全交代に乗る。欠陥#4: 設置役を後発に回していた)
     lead = max(combo, key=lambda m: sum(matrix[(m["index"], o["index"])]
-                                         for o in opps))
+                                         for o in opps)
+               + (HAZARD_LEAD_BONUS if m.get("hazard_setter") else 0.0))
     ordered = [lead] + [m for m in combo if m is not lead]
 
     # 理由文の生成: 各選出が誰に対して有利か
