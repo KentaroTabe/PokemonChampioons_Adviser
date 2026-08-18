@@ -90,12 +90,17 @@ def _read_pp(img, zone) -> Optional[tuple]:
 # ==============================================================================
 # 選出画面
 # ==============================================================================
-def _is_picked_panel(img, panel_zone) -> bool:
-    """選出済みパネルかどうか。
+def _is_picked_panel(img, panel_zone):
+    """選出済みパネルかどうか。True/False/None (判定不能) を返す。
 
     実画面の選出済み表示は「パネル左端の白いリボン+番号バッジ」
     (ライム色ハイライトはカーソル位置であって選出済みの印ではない —
     実フレーム検証 2026-07-20)。左端ストリップの白画素率で判定する。
+
+    ⚠ カーソルが乗った行はストリップごとライム色に染まり、白リボンが
+    検出できない (2026-08-18 欠陥#8: カーソル行の選出済みが False へ
+    巻き戻り、picked が1体目までしか取れなかった)。ライム優勢の行は
+    None (判定不能) を返し、呼び出し側が前回状態を維持する。
     """
     strip = {"x0": max(0.0, panel_zone["x0"] - 0.004),
              "y0": panel_zone["y0"] + 0.005,
@@ -103,10 +108,15 @@ def _is_picked_panel(img, panel_zone) -> bool:
              "y1": panel_zone["y1"] - 0.01}
     c = crop(img, strip)
     if c is None or c.size == 0:
-        return False
+        return None
     hsv = cv2.cvtColor(c, cv2.COLOR_BGR2HSV)
     white = cv2.inRange(hsv, np.array([0, 0, 180]), np.array([180, 60, 255]))
-    return cv2.countNonZero(white) / white.size > 0.25
+    if cv2.countNonZero(white) / white.size > 0.25:
+        return True
+    lime = cv2.inRange(hsv, _LIME_LOW, _LIME_HIGH)
+    if cv2.countNonZero(lime) / lime.size > 0.30:
+        return None   # カーソル行: リボンの有無を判定できない
+    return False
 
 
 def extract_selection(img, state: BattleStateV2, resolver) -> None:
@@ -123,15 +133,32 @@ def extract_selection(img, state: BattleStateV2, resolver) -> None:
     picked_count = 0
     for i, z in enumerate(zones.SELECTION_MY):
         picked = _is_picked_panel(img, z["panel"])
-        picked_count += int(picked)
-        if i < len(state.player.party):
-            mon = state.player.party[i]
-            if picked and not mon.is_picked:
+        mon = state.player.party[i] if i < len(state.player.party) else None
+        if picked is None:
+            # カーソル行など判定不能: 前回状態を維持する
+            picked_count += int(bool(mon and mon.is_picked))
+            continue
+        if mon is None:
+            picked_count += int(picked)
+            continue
+        if picked:
+            mon._unpick_streak = 0
+            if not mon.is_picked:
                 mon.pick_order = 1 + sum(
                     1 for p in state.player.party if p.is_picked)
-            elif not picked:
+            mon.is_picked = True
+        else:
+            # 解除は連続Falseで確定する。カーソルの光沢・演出の揺らぎで
+            # 白リボンが1フレーム読めないだけで選出済みが巻き戻っていた
+            # (2026-08-18 欠陥#8: True→False反転を実測)
+            streak = getattr(mon, "_unpick_streak", 0) + 1
+            mon._unpick_streak = streak
+            if mon.is_picked and streak < UNPICK_CONFIRM_FRAMES:
+                pass   # まだ解除を確定しない
+            else:
+                mon.is_picked = False
                 mon.pick_order = None
-            mon.is_picked = picked
+        picked_count += int(mon.is_picked)
     # OCRが読めなかった場合はハイライト数で補完
     if m is None and picked_count > 0:
         state.selection_picked = picked_count
@@ -196,6 +223,9 @@ _MY_LEGAL_MAXES = None
 # 回数。1回では誤読 (ハイライト演出) と区別できず、faintメッセージ頼み
 # ではメッセージの取り逃しでHPが固着する (2026-08-18 接続テスト欠陥#6)
 ZERO_READ_FAINT_COUNT = 3
+# 選出済みの解除を確定するのに必要な連続False回数。1フレームの読み損ね
+# (カーソルの光沢・演出) で選出済みが巻き戻らないように (欠陥#8)
+UNPICK_CONFIRM_FRAMES = 2
 
 
 def _my_legal_maxes():
@@ -671,6 +701,13 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
         elif not opp_name_verified and opp.hp_percent is not None and \
                 abs(eff_pct - opp.hp_percent) > 15:
             pass   # 名前未読 + 大変化: 誤帰属の疑いが強いので見送る
+        elif not opp_name_verified and opp.hp_percent is not None and \
+                eff_pct > opp.hp_percent + 3.0:
+            # 名前未確認の「回復」は書かない。交代見逃し中に別個体の高いHPが
+            # 流れ込む形の誤帰属になる (2026-08-18 opus視覚監査:
+            # HUDはフラエッテ30%なのにオーロング23%→30%と記録)。
+            # 正当な回復は名前が照合できたフレームで反映される
+            pass
         else:
             _set_hp(state, "opponent", opp, pct=eff_pct)
 

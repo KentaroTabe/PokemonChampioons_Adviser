@@ -67,6 +67,21 @@ def test_unread_name_blocks_large_change_only():
     print("test_unread_name_blocks_large_change_only OK")
 
 
+def test_unread_name_blocks_small_heal():
+    """名前未確認の小さな「回復」は誤帰属とみなして書かない (欠陥#7)。
+
+    2026-08-18 opus視覚監査: HUDはフラエッテ30%なのに、交代見逃しで
+    activeに残っていたオーロング23%へ +7% の回復として記録された。
+    減少方向の小変化 (削りダメージ) は従来どおり許容する。
+    """
+    st, mon = _state_with_opp("オーロンゲ", "grimmsnarl", 23.0)
+    for _ in range(3):
+        _run_hud(st, "", "30%")     # 名前未読 + 小さな回復 → 見送り
+        mon._hp_stable_since = 0.0
+    assert mon.hp_percent == 23.0, mon.hp_percent
+    print("test_unread_name_blocks_small_heal OK")
+
+
 def test_verified_name_updates_hp():
     st, mon = _state_with_opp("ドリュウズ", "excadrill", 33.0)
     for _ in range(3):
@@ -82,6 +97,7 @@ def test_verified_name_updates_hp():
 def main() -> None:
     test_mismatched_name_blocks_hp()
     test_unread_name_blocks_large_change_only()
+    test_unread_name_blocks_small_heal()
     test_verified_name_updates_hp()
     print("ALL OK")
 
