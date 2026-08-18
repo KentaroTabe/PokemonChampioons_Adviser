@@ -945,7 +945,7 @@ def resolve_move_owner(state: BattleStateV2, move_ids: set, resolver):
 
 def extract_move_select(img, state: BattleStateV2, resolver) -> None:
     me = state.player.ensure_active()
-    new_moves = []
+    new_moves, raw_rows = [], []
     for i, row in enumerate(detect_move_rows(img)):
         name_text = ocr.read_zone_text(img, row["name"], mode="panel")
         if not name_text:
@@ -963,25 +963,82 @@ def extract_move_select(img, state: BattleStateV2, resolver) -> None:
         if hint_text:
             slot.effectiveness = _normalize_hint(hint_text)
         new_moves.append(slot)
+        raw_rows.append((name_text, slot))
 
-    if new_moves:
-        # 技の所有者を登録技と照合し、activeの取り違えがあれば補正する
-        move_ids = {s.move_id for s in new_moves if s.move_id}
-        me, _fixed = resolve_move_owner(state, move_ids, resolver)
-        # 既知の技リストへマージ (PP等を更新)
-        existing = {m.move_id or m.name_ja: m for m in me.moves}
-        merged = []
-        for slot in new_moves:
-            key = slot.move_id or slot.name_ja
-            old = existing.get(key)
-            if old:
-                old.pp = slot.pp if slot.pp is not None else old.pp
-                old.max_pp = slot.max_pp or old.max_pp
-                old.effectiveness = slot.effectiveness or old.effectiveness
-                merged.append(old)
-            else:
-                merged.append(slot)
-        me.moves = merged
+    if not new_moves:
+        return
+    # 技の所有者を登録技と照合し、activeの取り違えがあれば補正する
+    move_ids = {s.move_id for s in new_moves if s.move_id}
+    me, _fixed = resolve_move_owner(state, move_ids, resolver)
+
+    # 登録済みの型がある場合、技の「同一性」は登録を正とし、OCRは
+    # PP/相性ヒントの突き合わせにのみ使う (2026-08-19 第4回テスト指摘:
+    # 「登録してあれば認識に頼らなくて良い」。8/11実測: OCR解決の誤りで
+    # ムクホークに bulkup / closecombat / upperhand / brickbreak が混入した)
+    if _apply_registered_move_authority(me, raw_rows, resolver, state):
+        return
+
+    # 未登録種: 従来どおりOCR結果をマージ (PP等を更新)
+    existing = {m.move_id or m.name_ja: m for m in me.moves}
+    merged = []
+    for slot in new_moves:
+        key = slot.move_id or slot.name_ja
+        old = existing.get(key)
+        if old:
+            old.pp = slot.pp if slot.pp is not None else old.pp
+            old.max_pp = slot.max_pp or old.max_pp
+            old.effectiveness = slot.effectiveness or old.effectiveness
+            merged.append(old)
+        else:
+            merged.append(slot)
+    me.moves = merged
+
+
+def _apply_registered_move_authority(me, raw_rows, resolver, state) -> bool:
+    """登録技を正として技リストを構成する。適用したら True。
+
+    OCR行は登録技への制限付き再解決 (resolve_restricted) でPP/ヒントを
+    対応付け、登録技のどれにも合わない行は誤読として捨てる。
+    """
+    from advisor.my_team import get_my_moves
+    reg_ja = get_my_moves(me.species_ja)
+    if not reg_ja:
+        return False
+    reg_slots, pool, by_id = [], set(), {}
+    existing = {m.move_id: m for m in (me.moves or []) if m.move_id}
+    for ja in reg_ja:
+        r = resolver.resolve(ja, "moves", cutoff=0.7)
+        if not r:
+            continue
+        slot = existing.get(r[1]) or MoveSlot(name_ja=r[0], move_id=r[1])
+        reg_slots.append(slot)
+        pool.add(r[1])
+        by_id[r[1]] = slot
+    if not reg_slots:
+        return False
+
+    unmatched = 0
+    for name_text, ocr_slot in raw_rows:
+        target = by_id.get(ocr_slot.move_id)
+        if target is None:
+            rp = resolver.resolve_restricted(name_text, "moves", pool,
+                                             cutoff=0.6)
+            target = by_id.get(rp[1]) if rp else None
+        if target is None:
+            unmatched += 1
+            continue   # 登録技のどれにも合わない行 = 誤読として捨てる
+        target.pp = ocr_slot.pp if ocr_slot.pp is not None else target.pp
+        target.max_pp = ocr_slot.max_pp or target.max_pp
+        target.effectiveness = ocr_slot.effectiveness or target.effectiveness
+    if unmatched >= 3:
+        # 画面の技が登録とほぼ全部違う = 型を変えた可能性。登録の更新
+        # (もっと見る画面) を促す (黙って捨て続けない)
+        state.log_event("system",
+                        f"{me.species_ja}の技が登録と大きく不一致 "
+                        "(型を変えた場合は「もっと見る」で再登録してください)",
+                        event_id="registered_moves_mismatch")
+    me.moves = reg_slots
+    return True
 
 
 # ==============================================================================
