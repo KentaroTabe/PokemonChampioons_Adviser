@@ -52,6 +52,12 @@ RECOVERY_MOVES = {"recover", "softboiled", "roost", "slackoff", "moonlight",
 # 常に優越する (接続テスト所感 2026-08-11: 素の交代を提案していた)
 PIVOT_MOVE_IDS = {"uturn", "voltswitch", "flipturn"}
 PIVOT_OVER_SWITCH_BONUS = 2.0   # 最善の交代スコアへの上乗せ (順位を上へ)
+# こだわり系の持ち物 (技ロック)。ダメージ計算側は倍率のみ対応しており、
+# 「前のターンと別の技を推奨する」実害が出ていた (2026-08-18 接続テスト)
+CHOICE_ITEM_IDS = {"choicescarf", "choiceband", "choicespecs"}
+# 交代の取り逃しでHPが古い可能性のある控えへの交代スコア減点
+# (2026-08-18: ひんしを取り逃した個体が100%のまま交代候補に推奨された)
+UNCERTAIN_SWITCH_PENALTY = 15.0
 # 「行動前に倒される見込み」(素早さ負け or 相手のKO圏先制技) の局面で、
 # 先に動けない技のスコアに掛ける割引。ダメージ期待値はほぼ実現しないが、
 # 素早さ推定や相手の交代の可能性があるためゼロにはしない
@@ -372,6 +378,11 @@ def evaluate(state: dict, resolver=None) -> dict:
     encore_locked = None
     if "encore" in my_vols:
         encore_locked = (state.get("last_move") or {}).get("player")
+    # こだわりロック: こだわり系を持って技を使った後は、交代するまで
+    # その技しか選べない (last_move は交代・ひんしでクリアされる)
+    choice_locked = None
+    if my_view.item in CHOICE_ITEM_IDS:
+        choice_locked = (state.get("last_move") or {}).get("player")
     can_ko_first = False   # 先に動いて倒せる技があるか (死に出し判定用)
     move_type_mult = {}    # 攻撃技のタイプ相性倍率 (交代技の無効判定用)
     # 自分の場のポケモンがひんしなら、この決定は「次を出す」しかない。
@@ -380,7 +391,21 @@ def evaluate(state: dict, resolver=None) -> dict:
     my_fainted = (my_p.get("status") == "fainted"
                   or (my_p.get("hp_percent") is not None
                       and my_p["hp_percent"] <= 0))
-    for slot in ([] if my_fainted else my_p.get("moves") or []):
+    # 技が画面から未読取でも、my_team登録の型があれば登録技で評価する
+    # (2026-08-18 接続テスト: 技選択画面を開くまで自分の技が不明のまま
+    #  助言していた。登録技はPP不明のまま扱う。画面読取が入れば上書きされる)
+    my_move_slots = list(my_p.get("moves") or [])
+    if not my_move_slots and not my_fainted and resolver is not None:
+        try:
+            from advisor.my_team import get_my_moves
+            for ja in get_my_moves(my_p.get("species_ja")):
+                mv_r = resolver.resolve(ja, "moves", cutoff=0.7)
+                if mv_r:
+                    my_move_slots.append(
+                        {"name_ja": mv_r[0], "move_id": mv_r[1], "pp": None})
+        except Exception:
+            pass
+    for slot in ([] if my_fainted else my_move_slots):
         mid = slot.get("move_id")
         mv = dex.move(mid)
         name = slot.get("name_ja") or mid or "不明な技"
@@ -397,6 +422,11 @@ def evaluate(state: dict, resolver=None) -> dict:
             actions.append({"kind": "move", "id": mid, "name": name,
                             "score": -99.0,
                             "reason": "アンコール中は直前の技しか選べない"})
+            continue
+        if choice_locked and mid != choice_locked:
+            actions.append({"kind": "move", "id": mid, "name": name,
+                            "score": -99.0,
+                            "reason": "こだわり中は直前の技しか選べない (交代で解除)"})
             continue
         if "taunt" in my_vols and (mv["category"] == "Status"
                                    or not mv["power"]):
@@ -562,6 +592,10 @@ def evaluate(state: dict, resolver=None) -> dict:
                   + f" / 交代後の打点 約{counter:.0f}%")
         if not survives:
             reason += " / 交代出しで倒される危険あり"
+        if p.get("hp_uncertain"):
+            # 交代を見逃した個体はHPが古い (ひんし済みの可能性すらある)
+            score -= UNCERTAIN_SWITCH_PENALTY
+            reason += " / ⚠HP不明 (交代の見逃しあり。実際は瀕死の可能性)"
 
         actions.append({
             "kind": "switch",
@@ -678,6 +712,11 @@ def evaluate(state: dict, resolver=None) -> dict:
         else:
             speed_note = ("アンコール中: 直前に使った技しか選べません。" +
                           speed_note)
+    if choice_locked:
+        locked_ja = next((a["name"] for a in actions
+                          if a.get("id") == choice_locked), choice_locked)
+        speed_note = (f"こだわり中: {locked_ja} しか選べません (交代で解除)。"
+                      + speed_note)
 
     # 死に出しプランニング (定説: 捨てる順番と無償降臨。HEURISTICS_CATALOG H2)
     # 「相手のKO圏の攻撃が先に来る」かつ「先に倒し返せない」= この場は

@@ -120,11 +120,40 @@ def _own_hazard_setter(p: dict) -> bool:
                 or m.get("name_ja") in _HAZARD_MOVE_JA):
             return True
     try:
-        from advisor.my_team import get_my_build
-        b = get_my_build(p.get("species_ja")) or {}
-        return any(t in _HAZARD_MOVE_JA for t in (b.get("技") or []))
+        # get_my_build は技を返さない (正規化で落とす) ため専用APIを使う
+        # (2026-08-18: b.get("技") が常にNoneで登録技の判定が死んでいた)
+        from advisor.my_team import get_my_moves
+        return any(t in _HAZARD_MOVE_JA for t in get_my_moves(p.get("species_ja")))
     except Exception:
         return False
+
+
+def _own_registered_moves(species_ja) -> list:
+    """my_team登録技の [(move_id, weight)] (選出評価の自分側で使用率予測より優先)。
+
+    2026-08-18 接続テスト: 自分側も使用率予測技で評価しており、
+    「登録済みの技を把握しないまま選出アドバイスする」状態だった。
+    """
+    try:
+        from advisor.my_team import get_my_moves
+        from vision.normalize import NameResolver
+        global _SEL_RESOLVER
+        names = get_my_moves(species_ja)
+        if not names:
+            return []
+        if _SEL_RESOLVER is None:
+            _SEL_RESOLVER = NameResolver()
+        out = []
+        for ja in names:
+            r = _SEL_RESOLVER.resolve(ja, "moves", cutoff=0.7)
+            if r:
+                out.append((r[1], 100.0))
+        return out
+    except Exception:
+        return []
+
+
+_SEL_RESOLVER = None
 
 # 天候の設置特性と恩恵特性 (選出シナジー評価用)
 _WEATHER_SETTERS = {
@@ -348,6 +377,10 @@ def advise_selection(state: dict, resolver=None) -> dict:
     # メガストーン持ちはメガ後の姿 (種族値/タイプ) でも行を作る
     def score_row(eval_sid, m):
         my_view, my_moves = get_view(eval_sid)
+        # 自分側は登録技を優先する (使用率予測技は実際の型と乖離し得る)
+        reg = _own_registered_moves(m.get("name"))
+        if reg:
+            my_moves = reg
         row = {}
         for o in opps:
             score = None
