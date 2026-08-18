@@ -226,6 +226,12 @@ ZERO_READ_FAINT_COUNT = 3
 # 選出済みの解除を確定するのに必要な連続False回数。1フレームの読み損ね
 # (カーソルの光沢・演出) で選出済みが巻き戻らないように (欠陥#8)
 UNPICK_CONFIRM_FRAMES = 2
+# 相手HUD名の「ロスター事前分布つき再解決」の閾値。通常の0.85で解決できない
+# OCR揺れ (実測: オーロンゲ→「オーロング」= 類似度0.8) でも、判明済みの
+# 相手6体のいずれかに一致する場合のみ低い閾値で受け入れる。
+# 解決失敗が続くと ensure_active が満枠でlimbo行きになり、active=Noneの
+# まま助言が相手不明で劣化していた (2026-08-18 欠陥#10)
+OPP_ROSTER_RESOLVE_CUTOFF = 0.75
 
 
 def _my_legal_maxes():
@@ -601,6 +607,13 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
     opp_name_verified = False
     if name_text:
         sp = resolver.resolve_species(name_text, cutoff=0.85)
+        if sp is None:
+            # ロスター事前分布つき再解決 (欠陥#10): 低い閾値でも、既に
+            # 判明している相手のいずれかに一致する場合だけ採用する
+            sp2 = resolver.resolve_species(name_text,
+                                           cutoff=OPP_ROSTER_RESOLVE_CUTOFF)
+            if sp2 and state.opponent.find_by_species(sp2[0]) is not None:
+                sp = sp2
         if sp:
             # 種族名がそのまま表示されている場合: 種族で枠を確定
             opp = state.opponent.switch_to_species(sp[0], sp[1])
@@ -670,6 +683,14 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
                     if sid not in cand_map or prob > cand_map[sid][0]:
                         cand_map[sid] = (prob, ja)
             cands = [(sid, prob, ja) for sid, (prob, ja) in cand_map.items()]
+            if not cands:
+                # 全枠の種族が判明済みなのに active に紐付かない場合
+                # (ニックネーム等でHUD名が解決できない)、「判明済みの6体の
+                # どれが場にいるか」をアイコンで選ぶ (欠陥#10: 従来は
+                # 未特定枠しか候補にせず、この状況で復旧経路が無かった)
+                cands = [(p.species_id, 0.5, p.species_ja)
+                         for p in state.opponent.party[:6]
+                         if p.species_id and p.species_ja]
             hit = identify_species_color(crop(img, zones.BATTLE["opp_icon"]), cands)
             if hit:
                 state.opponent.switch_to_species(hit[1], hit[0])

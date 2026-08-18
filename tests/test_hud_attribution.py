@@ -82,6 +82,37 @@ def test_unread_name_blocks_small_heal():
     print("test_unread_name_blocks_small_heal OK")
 
 
+def test_roster_prior_resolves_ocr_garble():
+    """判明済みロスターを事前分布に、OCR揺れのHUD名を低閾値で解決する (欠陥#10)。
+
+    実測: オーロンゲ→「オーロング」(類似度0.8) が通常閾値0.85で解決できず、
+    満枠のため ensure_active が limbo 行き → active=None のままHPが幽霊へ
+    流れ、助言が相手不明で劣化していた。
+    """
+    st = BattleStateV2()
+    for ja, sid in (("ガブリアス", "garchomp"), ("カイロス", "pinsir"),
+                    ("オーロンゲ", "grimmsnarl"), ("ギルガルド", "aegislash"),
+                    ("アシレーヌ", "primarina"), ("ライチュウ", "raichu")):
+        st.opponent.party.append(PokemonState(species_ja=ja, species_id=sid))
+    assert st.opponent.active_index is None
+    for _ in range(3):
+        _run_hud(st, "オーロング", "100%")
+        if st.opponent.active_index is not None:
+            st.opponent.active()._hp_stable_since = 0.0
+    assert st.opponent.active_index is not None, "limboに吸われた (欠陥#10再発)"
+    active = st.opponent.active()
+    assert active.species_ja == "オーロンゲ", active.species_ja
+    assert active.hp_percent == 100.0, active.hp_percent
+
+    # ロスターに居ない種族へは低閾値で飛びつかない (事前分布の意味)
+    st2, mon2 = _state_with_opp("ドリュウズ", "excadrill", 50.0)
+    for _ in range(2):
+        _run_hud(st2, "オーロング", "77%")
+    assert all(p.species_ja != "オーロンゲ" for p in st2.opponent.party), \
+        [p.species_ja for p in st2.opponent.party]
+    print("test_roster_prior_resolves_ocr_garble OK")
+
+
 def test_verified_name_updates_hp():
     st, mon = _state_with_opp("ドリュウズ", "excadrill", 33.0)
     for _ in range(3):
@@ -98,6 +129,7 @@ def main() -> None:
     test_mismatched_name_blocks_hp()
     test_unread_name_blocks_large_change_only()
     test_unread_name_blocks_small_heal()
+    test_roster_prior_resolves_ocr_garble()
     test_verified_name_updates_hp()
     print("ALL OK")
 
