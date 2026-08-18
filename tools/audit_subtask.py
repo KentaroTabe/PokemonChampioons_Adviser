@@ -9,12 +9,17 @@
 
 生成物: logs/audit_reports/<battle名>.md
 
-モデルは sonnet 固定 (2026-07-23 の実測評価による):
+モデルは opus 固定 (2026-08-18 の同一フレーム30枚での実測比較による):
   - haiku:  技名を別の実在技に取り違え (すてゼリフ→ステルスロック,
             ふいうち→おいうち)、非表示HUDのHP幻視、メッセージ見落とし、
             種族名の文字誤り多数 (ハラバリー→バタバリー等) — 監査には不適
-  - sonnet: 全HUD/技名/メッセージ正読、幻覚ゼロ、不確実な項目は
-            正直に低確度と報告 — 監査要件を満たす
+            (2026-07-23 評価)
+  - sonnet: 幻覚なしで主要な乖離 (HP誤帰属・ひんしHP固着・シーン誤判定)
+            は検出できるが、「相手active=Noneが7フレーム続く」
+            「自分activeがひんし個体を指す」等の系統的な状態欠落を見逃した
+  - opus:   sonnetの検出を全て包含し、上記2クラス+アイコン誤同定を追加検出。
+            フレーム間の相互参照 (「19秒前のフレームでは169/169」) と
+            確度の較正も明確に上。セッション1回の監査なのでコスト増は許容
 """
 from __future__ import annotations
 
@@ -28,7 +33,7 @@ from tools.audit_extraction import collect_pairs
 
 REPO = Path(__file__).resolve().parent.parent
 REPORT_DIR = REPO / "logs" / "audit_reports"
-MODEL = "claude-sonnet-5"
+MODEL = "claude-opus-5"
 
 PROMPT_HEADER = """\
 あなたはポケモンチャンピオンズ(Switch対戦ゲーム)の画面認識システムの監査員です。

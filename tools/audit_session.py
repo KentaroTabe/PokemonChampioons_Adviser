@@ -189,7 +189,9 @@ def build_prompt(chosen: list, anomaly_count: int) -> tuple:
     return PROMPT_HEADER + intro + "\n\n" + "\n\n".join(blocks), len(by_frame)
 
 
-def run(battles: list, budget: int, timeout: int) -> Path:
+def run(battles: list, budget: int, timeout: int,
+        model: str | None = None) -> Path:
+    model = model or MODEL
     per_battle = []
     total_anoms = 0
     for b in battles:
@@ -203,20 +205,21 @@ def run(battles: list, budget: int, timeout: int) -> Path:
     chosen = select_pairs(per_battle, budget)
     prompt, n_frames = build_prompt(chosen, total_anoms)
     print(f"[audit_session] 対戦{len(per_battle)}件 / 矛盾候補{total_anoms}件 / "
-          f"フレーム{n_frames}枚 (予算{budget}) を1回のsonnetで監査",
+          f"フレーム{n_frames}枚 (予算{budget}) を1回の{model}で監査",
           flush=True)
     t0 = time.time()
     res = subprocess.run(
-        ["claude", "-p", prompt, "--model", MODEL,
+        ["claude", "-p", prompt, "--model", model,
          "--allowedTools", "Read", "--max-turns", str(n_frames * 2 + 10)],
         capture_output=True, text=True, timeout=timeout, cwd=str(REPO))
     if res.returncode != 0:
         raise SystemExit(f"claude実行失敗: {res.stderr[-500:]}")
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    out = REPORT_DIR / f"session_{time.strftime('%Y%m%d_%H%M')}.md"
+    tag = "" if model == MODEL else f"_{model.split('-')[1]}"
+    out = REPORT_DIR / f"session_{time.strftime('%Y%m%d_%H%M')}{tag}.md"
     header = (f"# セッション一括監査 ({time.strftime('%Y-%m-%d %H:%M')})\n"
               f"- 対戦{len(per_battle)}件 / 機械検出の矛盾候補{total_anoms}件 / "
-              f"フレーム{n_frames}枚 / model={MODEL} / "
+              f"フレーム{n_frames}枚 / model={model} / "
               f"所要{time.time() - t0:.0f}s\n"
               f"- 対象: {', '.join(b for b, _, _ in per_battle)}\n\n")
     out.write_text(header + res.stdout, encoding="utf-8")
@@ -231,8 +234,11 @@ def main() -> None:
     ap.add_argument("--budget", type=int, default=30,
                     help="フレーム総予算")
     ap.add_argument("--timeout", type=int, default=1800)
+    ap.add_argument("--model", type=str, default=None,
+                    help="監査モデルの上書き (既定: audit_subtask.MODEL)")
     args = ap.parse_args()
-    report = run(session_battles(args.last), args.budget, args.timeout)
+    report = run(session_battles(args.last), args.budget, args.timeout,
+                 model=args.model)
     print(report.read_text(encoding="utf-8")[:2500])
 
 
