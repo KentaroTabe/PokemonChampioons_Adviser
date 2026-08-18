@@ -63,6 +63,9 @@ class PokemonState:
     hp_percent: Optional[float] = None  # 0-100
     hp_current: Optional[int] = None    # 自分側のみ実数値が見える
     hp_max: Optional[int] = None
+    # 交代の取り逃し等でHPが古い可能性がある印 (新しい読みで解除される)。
+    # 2026-08-18: ひんしを取り逃した個体が100%のまま交代候補に推奨された
+    hp_uncertain: bool = False
 
     # 状態
     status: Optional[str] = None        # MAJOR_STATUSES のいずれか / 'fainted' / None
@@ -360,6 +363,7 @@ class BattleStateV2:
             mon = PokemonState()
             for k in ("species_ja", "species_id", "display_name", "gender",
                       "types", "hp_percent", "hp_current", "hp_max",
+                      "hp_uncertain",
                       "status", "volatiles", "boosts", "ability_ja",
                       "ability_id", "item_ja", "item_id", "item_consumed",
                       "revealed_moves", "aliases", "is_mega", "is_active",

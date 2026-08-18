@@ -293,8 +293,15 @@ class VisionPipeline:
             extractors.extract_battle_hud(img, self.state, self.resolver)
             if scene == "move_select":
                 extractors.extract_move_select(img, self.state, self.resolver)
-        elif scene == "watch" and heavy:
-            extractors.extract_watch(img, self.state, self.resolver)
+        elif scene == "watch":
+            if heavy:
+                extractors.extract_watch(img, self.state, self.resolver)
+            else:
+                # 側柱 (自分HP実数値/相手HP%) は毎フレーム読む。交代メニューの
+                # 滞在は短く、1.5秒間隔ではひんしのゼロ読み確定 (2回) が
+                # 間に合わないことがある (2026-08-18 第2回テスト)
+                extractors.extract_watch_side_columns(
+                    img, self.state, self.resolver)
         elif scene == "field_check" and heavy:
             extractors.extract_field_check(img, self.state, self.resolver)
 

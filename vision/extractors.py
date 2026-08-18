@@ -221,8 +221,10 @@ def extract_selection(img, state: BattleStateV2, resolver) -> None:
 _MY_LEGAL_MAXES = None
 # 様子見画面の自分HP実数値で「0/xxx」を連続で読んだらひんし確定とみなす
 # 回数。1回では誤読 (ハイライト演出) と区別できず、faintメッセージ頼み
-# ではメッセージの取り逃しでHPが固着する (2026-08-18 接続テスト欠陥#6)
-ZERO_READ_FAINT_COUNT = 3
+# ではメッセージの取り逃しでHPが固着する (2026-08-18 接続テスト欠陥#6)。
+# 3回では画面滞在が短いと確定前に離脱する (2026-08-18 第2回テスト:
+# 交代メニュー滞在中に確定せずサザンドラのひんしを取り逃した) ため2回
+ZERO_READ_FAINT_COUNT = 2
 # 選出済みの解除を確定するのに必要な連続False回数。1フレームの読み損ね
 # (カーソルの光沢・演出) で選出済みが巻き戻らないように (欠陥#8)
 UNPICK_CONFIRM_FRAMES = 2
@@ -366,6 +368,7 @@ def _set_hp(state: BattleStateV2, side_name: str, mon,
 
     def commit():
         mon.hp_percent = new
+        mon.hp_uncertain = False   # 新しい読みで「不明」印を解除
         if raw:
             mon.hp_current, mon.hp_max = raw
 
@@ -614,6 +617,20 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
                                            cutoff=OPP_ROSTER_RESOLVE_CUTOFF)
             if sp2 and state.opponent.find_by_species(sp2[0]) is not None:
                 sp = sp2
+        if sp and state.opponent.party \
+                and state.opponent.find_by_species(sp[0]) is None:
+            # ロスターに無い「初登場種」は連続2回の一致で受け入れる。
+            # 1回の化け読みが幽霊スロットを作りactiveを乗っ取った
+            # (2026-08-18 第2回: 開幕直後に実在しないオーロンゲ9.8%が
+            #  slot0に出現し、以後の相手状態を汚染した)
+            pend = getattr(state.opponent, "_pending_new_species", None)
+            if pend != sp[0]:
+                state.opponent._pending_new_species = sp[0]
+                sp = None   # 今回のフレームでは採用しない
+            else:
+                state.opponent._pending_new_species = None
+        elif sp:
+            state.opponent._pending_new_species = None
         if sp:
             # 種族名がそのまま表示されている場合: 種族で枠を確定
             opp = state.opponent.switch_to_species(sp[0], sp[1])
@@ -743,6 +760,19 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
             # 表示名=種族名のケース (ニックネーム未設定)
             idx = state.player.find_by_species(sp[0])
             if idx is not None and idx != state.player.active_index:
+                # 交代イベントを見ていないのにHUD名で付け替わった =
+                # 交代 (と、その前のひんしの可能性) を取り逃した。
+                # 前のactiveの状態は「不明」として印を付け、交代候補の
+                # 推奨を抑える (2026-08-18 第2回: 取り逃したサザンドラの
+                # ひんしが100%のまま残り、交代候補として推奨され続けた)
+                prev = state.player.active()
+                if prev is not None and prev.status != "fainted" \
+                        and prev.species_ja and prev.species_ja != sp[0]:
+                    prev.hp_uncertain = True
+                    state.log_event(
+                        "system",
+                        f"交代見逃し: {prev.species_ja}の状態を不明扱い",
+                        event_id="missed_switch")
                 state.player.switch_to(idx)
                 me = state.player.party[idx]
             me.merge_species(sp[0], sp[1])
@@ -1537,6 +1567,11 @@ def _extract_watch_ability(img, state: BattleStateV2, resolver) -> None:
                             event_id=None)
 
 
+def extract_watch_side_columns(img, state: BattleStateV2, resolver) -> None:
+    """側柱のみの軽量抽出 (pipelineが非heavyフレームで毎回呼ぶ公開ラッパ)"""
+    _extract_watch_side_columns(img, state, resolver)
+
+
 def _accept_zero_hp_read(state, mon) -> bool:
     """「0/xxx」読みをひんしとして受け入れてよいか (裏付け判定+カウンタ更新)。
 
@@ -1592,6 +1627,7 @@ def _extract_watch_side_columns(img, state: BattleStateV2, resolver) -> None:
             mon.hp_current = 0
             mon.hp_max = frac[1]
             mon.status = "fainted"
+            mon.hp_uncertain = False
             continue
         if frac[0] > 0:
             mon._zero_read_count = 0

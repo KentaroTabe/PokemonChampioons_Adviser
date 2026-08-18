@@ -100,6 +100,21 @@ def test_multi_stat_rank_change():
     print("test_multi_stat_rank_change OK")
 
 
+def test_type_change():
+    """「Xは こおりタイプに なった!」(変幻自在等) でタイプが差し替わる (第2回)"""
+    state, p = new_parser()
+    p.parse("아나이뚜は ゲッコウガを 繰り出した!")
+    fired = p.parse("相手の ゲッコウガは こおりタイプに なった!")
+    assert "type_change_opponent_ice" in fired, fired
+    om = state.opponent.active()
+    assert om.types == ["こおり"], om.types
+    # 別タイプへの再変化も追従する
+    fired = p.parse("相手の ゲッコウガは みずタイプに なった!")
+    assert "type_change_opponent_water" in fired, fired
+    assert om.types == ["みず"], om.types
+    print("test_type_change OK")
+
+
 def test_hazards_and_screens():
     state, p = new_parser()
     fired = p.parse("相手の 鋁鋼maxの ステルスロック!")
@@ -425,6 +440,7 @@ if __name__ == "__main__":
     test_switch_and_mega()
     test_rank_change()
     test_multi_stat_rank_change()
+    test_type_change()
     test_hazards_and_screens()
     test_status_and_volatile()
     test_move_seal_states()

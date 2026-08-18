@@ -113,6 +113,64 @@ def test_roster_prior_resolves_ocr_garble():
     print("test_roster_prior_resolves_ocr_garble OK")
 
 
+def test_new_species_needs_two_reads():
+    """ロスターに無い初登場種は連続2回の一致で受け入れる (第2回: 幽霊スロット)。
+
+    1回の化けHUD読みが実在しないオーロンゲ9.8%の枠を作り、activeを
+    乗っ取って以後の相手状態を汚染した。
+    """
+    st = BattleStateV2()
+    for ja, sid in (("ジジーロン", "drampa"), ("ハラバリー", "bellibolt")):
+        st.opponent.party.append(PokemonState(species_ja=ja, species_id=sid))
+    st.opponent.active_index = 0
+
+    _run_hud(st, "オーロンゲ", "10%")   # 1回目: まだ受け入れない
+    assert all(p.species_ja != "オーロンゲ" for p in st.opponent.party), \
+        [p.species_ja for p in st.opponent.party]
+
+    _run_hud(st, "ジジーロン", "100%")  # 別種が読めたら保留はリセット
+    _run_hud(st, "オーロンゲ", "10%")   # 仕切り直しの1回目
+    assert all(p.species_ja != "オーロンゲ" for p in st.opponent.party)
+
+    _run_hud(st, "オーロンゲ", "10%")   # 連続2回目: 受け入れ (本物の初登場)
+    assert any(p.species_ja == "オーロンゲ" for p in st.opponent.party), \
+        [p.species_ja for p in st.opponent.party]
+    print("test_new_species_needs_two_reads OK")
+
+
+def test_missed_switch_marks_prev_uncertain():
+    """switchイベント無しでHUD名からactiveが替わったら、前のactiveを
+    HP不明としてマークする (第2回: 取り逃したひんしが100%のまま残った)"""
+    from vision import extractors
+    st = BattleStateV2()
+    prev = PokemonState(species_ja="サザンドラ", species_id="hydreigon")
+    prev.hp_percent = 100.0
+    nxt = PokemonState(species_ja="キラフロル", species_id="glimmora")
+    st.player.party.extend([prev, nxt])
+    st.player.active_index = 0
+
+    orig_read, orig_bar = ocr.read_zone_text, ocr.hp_bar_ratio
+
+    def fake_read(img, zone, **kw):
+        if zone is zones.BATTLE["my_name"]:
+            return "キラフロル"
+        return ""
+
+    ocr.read_zone_text = fake_read
+    ocr.hp_bar_ratio = lambda img: None
+    try:
+        img = np.zeros((720, 1280, 3), dtype=np.uint8)
+        from vision.normalize import NameResolver
+        extractors.extract_battle_hud(img, st, NameResolver())
+    finally:
+        ocr.read_zone_text = orig_read
+        ocr.hp_bar_ratio = orig_bar
+
+    assert st.player.active().species_ja == "キラフロル"
+    assert prev.hp_uncertain is True, "見逃し交代の前activeが不明化されていない"
+    print("test_missed_switch_marks_prev_uncertain OK")
+
+
 def test_verified_name_updates_hp():
     st, mon = _state_with_opp("ドリュウズ", "excadrill", 33.0)
     for _ in range(3):
@@ -130,6 +188,8 @@ def main() -> None:
     test_unread_name_blocks_large_change_only()
     test_unread_name_blocks_small_heal()
     test_roster_prior_resolves_ocr_garble()
+    test_new_species_needs_two_reads()
+    test_missed_switch_marks_prev_uncertain()
     test_verified_name_updates_hp()
     print("ALL OK")
 
