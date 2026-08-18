@@ -114,14 +114,15 @@ def _selection_audit(records: list) -> dict | None:
     lead_name = next((r.get("name") for r in final_rec["recommend"]
                       if r.get("lead")), rec_names[0] if rec_names else None)
 
-    # 実際の選出: 選出情報を持つ最後の scene レコードの picked フラグ
+    # 実際の選出: picked フラグが最も揃っている時点 (同数なら後の方) を使う。
+    # 選出途中 (1/3) のスナップショットと比較すると偽の不一致になる
     picked_idx = None
     for d in records:
         if d.get("type") != "scene":
             continue
         party = ((d.get("state") or {}).get("player") or {}).get("party") or []
         picked = [i for i, p in enumerate(party) if p.get("picked")]
-        if picked:
+        if picked and (picked_idx is None or len(picked) >= len(picked_idx)):
             picked_idx = picked
     # 実際の先発: 最初の switch_player の直後の自分active
     actual_lead = None
@@ -131,14 +132,43 @@ def _selection_audit(records: list) -> dict | None:
             actual_lead = ja
             break
 
-    members_match = (picked_idx is not None
-                     and sorted(picked_idx) == sorted(rec_idx))
+    # 実際に場に出た自分側の種族 (バトル中シーンのactiveの和名を順に収集)。
+    # 選出画面のpickedフラグは抽出が部分的なことがある (実測: 1体目までしか
+    # 取れず、しかも一度Trueに立った後Falseへ戻った) ため、picked が
+    # 揃っていない場合はこちらをグラウンドトゥルースにする
+    observed = []
+    for d in records:
+        if d.get("type") != "scene":
+            continue
+        pl = (d.get("state") or {}).get("player") or {}
+        idx, party = pl.get("active"), pl.get("party") or []
+        if idx is not None and 0 <= idx < len(party):
+            ja = party[idx].get("ja")
+            if ja and ja not in observed:
+                observed.append(ja)
+
+    if picked_idx is not None and len(picked_idx) == len(rec_idx):
+        members_match = sorted(picked_idx) == sorted(rec_idx)
+        members_basis = "picked"
+    elif observed:
+        if any(ja not in rec_names for ja in observed):
+            members_match = False       # 推奨外の種族が場に出た = 確実に逸脱
+        elif len(observed) >= len(rec_names):
+            members_match = True
+        else:
+            members_match = None        # 全員は確認できないが矛盾なし
+        members_basis = f"observed:{len(observed)}体"
+    else:
+        members_match = None
+        members_basis = "none"
     lead_match = (actual_lead is not None and lead_name is not None
                   and actual_lead == lead_name)
     return {
         "recommend_names": rec_names, "recommend_lead": lead_name,
         "picked_indexes": picked_idx, "actual_lead": actual_lead,
-        "members_match": members_match if picked_idx is not None else None,
+        "observed_members": observed,
+        "members_basis": members_basis,
+        "members_match": members_match,
         "lead_match": lead_match if actual_lead is not None else None,
     }
 
@@ -156,6 +186,7 @@ def audit_battle(records: list, late_sec: float = LATE_SEC,
     cur_open = None       # {"t": 開いた時刻, "first_adv": 最初の助言時刻}
     last_closed = None    # 同上 (fieldへ遷移した時点で退避)
     pending = None        # (t, advice) 最後に見た battle 助言
+    window_bests = []     # この決定の間に表示された best の履歴 (churn検出用)
     seen_decision_ctx = False   # command画面かbattle助言を一度でも見たか
     decisions = []
 
@@ -185,6 +216,8 @@ def audit_battle(records: list, late_sec: float = LATE_SEC,
             adv = d.get("advice") or {}
             if adv.get("best") or adv.get("actions"):
                 pending = (d.get("t", 0), adv)
+                b = adv.get("best") or (adv.get("actions") or [{}])[0]
+                window_bests.append((d.get("t", 0), b))
                 seen_decision_ctx = True
                 if cur_open is not None and cur_open["first_adv"] is None:
                     cur_open["first_adv"] = d.get("t")
@@ -212,6 +245,7 @@ def audit_battle(records: list, late_sec: float = LATE_SEC,
             decisions.append(row)
             cur_open = None
             last_closed = None
+            window_bests = []
             continue
 
         t_adv, adv = pending
@@ -225,18 +259,32 @@ def audit_battle(records: list, late_sec: float = LATE_SEC,
                          "name": best.get("name"), "score": best.get("score"),
                          "margin": margin}
 
-        # 一致判定 (review_battle と同じ規則)
-        if act[0] == "move":
-            agree = best.get("kind") == "move" and best.get("id") == act[1]
-        else:
+        # 一致判定。最後の助言だけでなく、この決定の間に表示された
+        # いずれかの best と一致すれば「追従できた」とみなす。
+        # 助言は状態更新のたびに再計算され、ボタンを押した後に反転する
+        # ことがある (実測: turn 1 でブレイブバードを6秒表示→押下後0.2秒で
+        # すてみタックルへ反転)。最後の1件とだけ比べると偽の不一致になる
+        def _matches(b) -> bool:
+            if act[0] == "move":
+                return b.get("kind") == "move" and b.get("id") == act[1]
+            return b.get("kind") == "switch" and \
+                (row.get("executed_id") is None
+                 or b.get("id") == row.get("executed_id"))
+
+        if act[0] != "move":
             sid, ja = _next_active_species(records, i + 1)
             row["executed_id"] = sid or row["executed_id"]
             row["executed_ja"] = ja
-            agree = best.get("kind") == "switch" and \
-                (sid is None or best.get("id") == sid)
-        row["agree"] = agree
-        if not agree:
+        distinct = {(b.get("kind"), b.get("id")) for _t, b in window_bests}
+        row["churn"] = len(distinct) > 1
+        agree_last = _matches(best)
+        agree_any = agree_last or any(_matches(b) for _t, b in window_bests)
+        row["agree"] = agree_any
+        if not agree_any:
             row["flags"].append("mismatch")
+        elif not agree_last:
+            # 押下後の反転に追従が食われたケース (欠陥ではないが要観察)
+            row["followed_earlier_best"] = True
 
         # 遅延 (決定画面が開いてから最初の助言まで)。開いている決定を優先し、
         # 無ければ直近に閉じた決定 (行動が解決シーンで記録されるケース)
@@ -257,6 +305,7 @@ def audit_battle(records: list, late_sec: float = LATE_SEC,
         pending = None
         cur_open = None
         last_closed = None
+        window_bests = []
 
     n = len(decisions)
     with_adv = [x for x in decisions if x.get("advice")]
@@ -270,6 +319,7 @@ def audit_battle(records: list, late_sec: float = LATE_SEC,
         "n_agree": len(agreed),
         "n_latency_known": len(lat_known),
         "n_timely": len(timely),
+        "n_churn": sum(1 for x in with_adv if x.get("churn")),
         "max_latency": max((x["latency"] for x in lat_known), default=None),
         "decisions": decisions,
         "selection": _selection_audit(records),
@@ -304,11 +354,16 @@ def render_text(name: str, audit: dict, late_sec: float) -> str:
                      f" / 最大遅延 {audit['max_latency']:.1f}秒")
     else:
         lines.append("  遅延: 決定画面の開始が捉えられず未計測")
+    if audit.get("n_churn"):
+        lines.append(f"  ⟳ 決定中に推奨が入れ替わった決定: {audit['n_churn']}件"
+                     " (追従テストの読みやすさに影響。多いなら要ヒステリシス)")
     sel = audit["selection"]
     if sel:
         mm = {True: "一致", False: "不一致", None: "確認不能"}[sel["members_match"]]
         lm = {True: "一致", False: "不一致", None: "確認不能"}[sel["lead_match"]]
-        lines.append(f"  選出: メンバー{mm} / 先発{lm} "
+        basis = sel.get("members_basis", "")
+        basis_note = f" [{basis}]" if basis and basis != "picked" else ""
+        lines.append(f"  選出: メンバー{mm}{basis_note} / 先発{lm} "
                      f"(推奨: {' / '.join(sel['recommend_names'])},"
                      f" 先発 {sel['recommend_lead']})")
     for x in audit["defects"]:

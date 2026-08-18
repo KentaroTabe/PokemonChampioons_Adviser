@@ -187,6 +187,78 @@ def test_lead_switch_is_not_a_battle_decision():
     print("test_lead_switch_is_not_a_battle_decision OK")
 
 
+def test_churn_followed_displayed_best_is_agreement():
+    """表示中に従った後、押下後に推奨が反転しても不一致にしない (churn計上)"""
+    recs = [
+        _scene(100.0, SCENE_COMMAND),
+        _advice(101.0, best_id="bravebird", name="ブレイブバード"),
+        _advice(107.0, best_id="doubleedge", name="すてみタックル"),  # 押下後の反転
+        _scene(107.2, SCENE_FIELD),
+        _action_move(110.0, 1, move_id="bravebird"),
+    ]
+    a = audit_battle(recs)
+    d = a["decisions"][0]
+    assert d["agree"] is True, d
+    assert d["churn"] is True and d.get("followed_earlier_best") is True, d
+    assert d["flags"] == [], d
+    assert a["n_churn"] == 1
+    # 窓のどのbestとも一致しない場合は従来どおり不一致
+    recs2 = recs[:-1] + [_action_move(110.0, 1, move_id="surf")]
+    a2 = audit_battle(recs2)
+    assert "mismatch" in a2["decisions"][0]["flags"], a2["decisions"][0]
+    print("test_churn_followed_displayed_best_is_agreement OK")
+
+
+def test_selection_uses_most_complete_pick_state():
+    """選出途中 (1/3) のスナップショットではなく、揃った時点と比較する"""
+    recs = [
+        {"type": "advice", "kind": "selection", "t": 50.0, "advice": {
+            "ok": True, "picked": 3, "done": True,
+            "recommend": [
+                {"index": 4, "name": "モン4", "lead": True},
+                {"index": 0, "name": "モン0", "lead": False},
+                {"index": 2, "name": "モン2", "lead": False}]}},
+        _scene(55.0, SCENE_SELECTION,
+               party_picked=[False, False, False, False, True, False]),  # 1/3
+        _scene(60.0, SCENE_SELECTION,
+               party_picked=[True, False, True, False, True, False]),    # 3/3
+    ]
+    a = audit_battle(recs)
+    assert a["selection"]["members_match"] is True, a["selection"]
+    print("test_selection_uses_most_complete_pick_state OK")
+
+
+def test_selection_falls_back_to_observed_members():
+    """pickedフラグが不完全なら、実際に場に出た種族で判定する"""
+    base = [
+        {"type": "advice", "kind": "selection", "t": 50.0, "advice": {
+            "ok": True, "picked": 1, "done": False,
+            "recommend": [
+                {"index": 4, "name": "モン4", "lead": True},
+                {"index": 0, "name": "モン0", "lead": False},
+                {"index": 2, "name": "モン2", "lead": False}]}},
+        # pickedは1体しか取れていない (実測の抽出欠け)
+        _scene(55.0, SCENE_SELECTION,
+               party_picked=[False, False, False, False, True, False]),
+    ]
+    # 場に出た3体が推奨と一致 → 一致 (basis=observed)
+    recs = base + [_scene(70.0, SCENE_FIELD, active=4),
+                   _scene(80.0, SCENE_FIELD, active=0),
+                   _scene(90.0, SCENE_FIELD, active=2)]
+    sel = audit_battle(recs)["selection"]
+    assert sel["members_match"] is True and "observed" in sel["members_basis"], sel
+    # 推奨外の種族が場に出た → 不一致
+    recs2 = base + [_scene(70.0, SCENE_FIELD, active=5)]
+    sel2 = audit_battle(recs2)["selection"]
+    assert sel2["members_match"] is False, sel2
+    # 2体しか確認できず矛盾なし → 確認不能 (None)
+    recs3 = base + [_scene(70.0, SCENE_FIELD, active=4),
+                    _scene(80.0, SCENE_FIELD, active=0)]
+    sel3 = audit_battle(recs3)["selection"]
+    assert sel3["members_match"] is None, sel3
+    print("test_selection_falls_back_to_observed_members OK")
+
+
 def test_session_file_filter():
     """--session はマーカー時刻以降の対戦ログだけを対象にする"""
     import os
@@ -233,6 +305,9 @@ if __name__ == "__main__":
     test_switch_agreement_uses_next_active()
     test_selection_audit()
     test_lead_switch_is_not_a_battle_decision()
+    test_churn_followed_displayed_best_is_agreement()
+    test_selection_uses_most_complete_pick_state()
+    test_selection_falls_back_to_observed_members()
     test_session_file_filter()
     test_render_and_file_e2e()
     print("\nALL OK")
