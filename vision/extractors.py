@@ -746,7 +746,21 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
             # HUDはフラエッテ30%なのにオーロング23%→30%と記録)。
             # 正当な回復は名前が照合できたフレームで反映される
             pass
+        elif eff_pct <= 1.0 and opp.status != "fainted" \
+                and (opp.hp_percent or 0) > 5.0:
+            # 生存個体の突然の0-1%読みはひんしの裏付け (faintイベント or
+            # 連続ゼロ読み) が揃うまで書かない。演出中の空バー誤読で
+            # 偽ひんし化し、タスキで1%残った個体も0%扱いになっていた
+            # (2026-08-19 opus監査: ドリュウズ/サザンドラ)
+            if _accept_zero_hp_read(state, opp, side_name="opponent"):
+                # 裏付け済み: _set_hp の2回安定待ちを経ずに反映
+                opp.hp_percent = eff_pct
+                opp.hp_uncertain = False
+                if eff_pct <= 0.5:
+                    opp.status = "fainted"
         else:
+            if eff_pct > 1.0:
+                opp._zero_read_count = 0
             _set_hp(state, "opponent", opp, pct=eff_pct)
 
     # --- 自分: 表示名 + HP実数 ---
@@ -1629,12 +1643,13 @@ def extract_watch_side_columns(img, state: BattleStateV2, resolver) -> None:
     _extract_watch_side_columns(img, state, resolver)
 
 
-def _accept_zero_hp_read(state, mon) -> bool:
-    """「0/xxx」読みをひんしとして受け入れてよいか (裏付け判定+カウンタ更新)。
+def _accept_zero_hp_read(state, mon, side_name: str = "player") -> bool:
+    """「HP0」読みをひんしとして受け入れてよいか (裏付け判定+カウンタ更新)。
 
-    裏付けの無い 0/xxx 読みでひんし確定しない。ハイライト演出等の誤読
+    裏付けの無い 0 読みでひんし確定しない。ハイライト演出等の誤読
     1フレームで健在のポケモンが偽ひんし化し、以後の評価から消えた
-    (2026-08-04監査: 健在183/183のラグラージがT8のwatchで0%→fainted固定)。
+    (2026-08-04監査: 健在183/183のラグラージがT8のwatchで0%→fainted固定。
+     2026-08-19 opus監査: 生存ドリュウズ100%が0%誤読で偽ひんし扱い)。
     裏付けは次のいずれか:
      (a) faintイベント (「たおれた」メッセージ)
      (b) 安定した連続ゼロ読み (ZERO_READ_FAINT_COUNT回)。faintメッセージ
@@ -1645,7 +1660,7 @@ def _accept_zero_hp_read(state, mon) -> bool:
     zero_n = getattr(mon, "_zero_read_count", 0) + 1
     mon._zero_read_count = zero_n
     lf = getattr(state, "last_faint", None)
-    if lf and lf.get("side") == "player":
+    if lf and lf.get("side") == side_name:
         return True
     return zero_n >= ZERO_READ_FAINT_COUNT
 
