@@ -67,14 +67,16 @@ def _make_env_fn(idx: int, battle_format: str, play_style: str,
 
     idxごとにseedをずらし、各サブプロセスが独立にShowdownへ接続する
     (poke-envのアカウント名は自動生成なので衝突しない)。
+
+    ⚠ ワーカー内で stable_baselines3 を import しないこと (torch ごと
+    読み込まれ、方策を持たないワーカーのRSSが1本あたり約210MB増える。
+    2026-08-19 メモリ枯渇対策で per-env Monitor を親側の VecMonitor に移行)。
     """
     def _init():
-        from stable_baselines3.common.monitor import Monitor
-        env = make_training_env(battle_format=battle_format,
-                                own_play_style=play_style,
-                                opp_play_style_pool=opp_play_style_pool,
-                                seed=RANDOM_SEED + idx * 1000)
-        return Monitor(env)
+        return make_training_env(battle_format=battle_format,
+                                 own_play_style=play_style,
+                                 opp_play_style_pool=opp_play_style_pool,
+                                 seed=RANDOM_SEED + idx * 1000)
     return _init
 
 
@@ -98,6 +100,12 @@ def train(total_timesteps: int = 10_000, battle_format: str = TRAINING_BATTLE_FO
     # クレジット割当が壊れるため、マスク学習が必須 (ROADMAP 9b)
     from sb3_contrib import MaskablePPO
     from stable_baselines3.common.monitor import Monitor
+
+    # CPUスレッド上限: 8コア中2コアを他用途に残す (メモリ枯渇対策の一環。
+    # スレッド数はメモリよりCPU競合対策。OMP側は tools/smoke_train.py で設定)
+    import torch
+    from champions_agent.config import TRAIN_TORCH_THREADS
+    torch.set_num_threads(TRAIN_TORCH_THREADS)
 
     # 並列環境: Showdown通信レイテンシが律速 (単一env≒140fps) なので、
     # 複数バトルを別プロセスで同時進行させて収集スループットを上げる。
@@ -132,11 +140,14 @@ def train(total_timesteps: int = 10_000, battle_format: str = TRAINING_BATTLE_FO
     ppo_kwargs = {"learning_rate": lr, "ent_coef": ent_coef,
                   "policy_kwargs": pk}
     if n_envs > 1:
-        from stable_baselines3.common.vec_env import SubprocVecEnv
-        env = SubprocVecEnv(
+        from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor
+        # エピソード統計 (info["episode"] の r/l/t) はワーカー側の Monitor
+        # ではなく親側の VecMonitor で付与する。値は同一で、ワーカーが
+        # SB3/torch を import せずに済む (メモリ枯渇対策 2026-08-19)
+        env = VecMonitor(SubprocVecEnv(
             [_make_env_fn(i, battle_format, play_style, opp_play_style_pool)
              for i in range(n_envs)],
-            start_method="spawn")
+            start_method="spawn"))
         # rollout長: 価値推定の安定化のため総サンプル4096/更新に拡大
         # (勝敗という遅延報酬の伝播には長めのロールアウトが効く)
         ppo_kwargs["n_steps"] = max(512, 4096 // n_envs)

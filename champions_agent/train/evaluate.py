@@ -301,6 +301,12 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
 
 
 def main() -> None:
+    # torch import (BattlePolicyのロード) 前に OpenMP スレッド数を制限する
+    # (8コア中2コアを他用途に残す。train側 tools/smoke_train.py と対)
+    import os
+    from champions_agent.config import TRAIN_TORCH_THREADS
+    os.environ.setdefault("OMP_NUM_THREADS", str(TRAIN_TORCH_THREADS))
+
     parser = argparse.ArgumentParser(description="学習済み戦闘方策の勝率評価")
     parser.add_argument("--play-style", type=str, default=DEFAULT_PLAY_STYLE,
                          choices=list(PLAY_STYLES.keys()))

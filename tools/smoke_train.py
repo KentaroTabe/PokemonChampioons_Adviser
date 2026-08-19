@@ -13,10 +13,15 @@ import signal
 import sys
 import time
 
-from champions_agent.config import TRAINING_BATTLE_FORMAT, DEFAULT_PLAY_STYLE
+from champions_agent.config import (
+    DEFAULT_PLAY_STYLE, TRAIN_TORCH_THREADS, TRAINING_BATTLE_FORMAT,
+)
 
 
 def main() -> None:
+    # torch import 前に OpenMP スレッド数を制限する (8コア中2コアを他用途に
+    # 残す)。torch側の set_num_threads は train_battle.train() で行う
+    os.environ.setdefault("OMP_NUM_THREADS", str(TRAIN_TORCH_THREADS))
     parser = argparse.ArgumentParser()
     parser.add_argument("--timesteps", type=int, default=2048)
     parser.add_argument("--play-style", type=str, default=DEFAULT_PLAY_STYLE)

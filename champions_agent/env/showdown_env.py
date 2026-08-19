@@ -45,6 +45,7 @@ from champions_agent.agent import encoders
 from champions_agent.agent.spaces import BATTLE_OBS_DIM
 from champions_agent.config import (
     DEFAULT_PLAY_STYLE, PLAY_STYLES, SHOWDOWN_PORT,
+    TRAIN_BATTLE_PRUNE_EVERY, TRAIN_BATTLE_PRUNE_KEEP,
     TRAINING_BATTLE_FORMAT, TRAINING_TEAM_SIZE,
 )
 from champions_agent.env.reward import get_reward_config
@@ -247,12 +248,62 @@ def apply_train_teampreview(player) -> None:
         apply_matchup_teampreview(player)
 
 
+def prune_finished_battles(players, keep: int) -> int:
+    """終了済みバトルを (新しい順に keep 件残して) 破棄する。戻り値は削除数。
+
+    poke-env の Player._battles は reset_battles() (close時のみ呼ばれる) まで
+    全対戦を保持し続け、Battleオブジェクト (ターンごとのイベント履歴を含む)
+    がプロセスRSSを対戦数に比例して押し上げる (2026-08-19 実測:
+    学習ワーカーが1スタイル実行内で数百MB単位の線形増加)。
+    エピソード完結型の学習は過去バトルを参照しないため挙動には影響しない。
+
+    ⚠ poke-env の勝敗カウンタ (n_won_battles 等) は _battles の走査で
+    実装されているため、勝率をカウンタから読む評価系 (train/evaluate.py)
+    にはこの関数を適用しないこと。
+    """
+    removed = 0
+    for pl in players:
+        if pl is None:
+            continue
+        battles = getattr(pl, "battles", None)
+        if not battles:
+            continue
+        # dict は挿入順 = 対戦の時系列。終了済みの古い方から削除する
+        finished = [tag for tag, b in list(battles.items())
+                    if getattr(b, "finished", False)]
+        drop = finished[:-keep] if keep > 0 else finished
+        for tag in drop:
+            battles.pop(tag, None)
+            removed += 1
+    return removed
+
+
 class MaskedSingleAgentWrapper(SingleAgentWrapper):
-    """SingleAgentWrapper + MaskablePPO用の action_masks() 提供"""
+    """SingleAgentWrapper + MaskablePPO用の action_masks() 提供。
+
+    あわせて poke-env が保持し続ける終了済みバトルを一定エピソードごとに
+    破棄する (プレイヤー3体: agent1 / agent2 / 相手プレイヤー)。
+    """
+
+    def __init__(self, env, opponent):
+        super().__init__(env, opponent)
+        self._resets_since_prune = 0
 
     def action_masks(self) -> np.ndarray:
         battle = getattr(self.env, "battle1", None)
         return compute_action_mask(battle)
+
+    def reset(self, *args, **kwargs):
+        out = super().reset(*args, **kwargs)
+        self._resets_since_prune += 1
+        if self._resets_since_prune >= TRAIN_BATTLE_PRUNE_EVERY:
+            self._resets_since_prune = 0
+            prune_finished_battles(
+                (getattr(self.env, "agent1", None),
+                 getattr(self.env, "agent2", None),
+                 self.opponent),
+                keep=TRAIN_BATTLE_PRUNE_KEEP)
+        return out
 
 
 class ChampionsSinglesEnv(SinglesEnv):

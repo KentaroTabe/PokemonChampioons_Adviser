@@ -2,6 +2,12 @@
   "_comment": "学習に影響する変更の記録。watch_training が推移グラフに赤い縦線として描画し、履歴表示にも差し込む。新しい変更を入れたら追記すること (at はローカル時刻 'YYYY-MM-DD HH:MM')。kind: net=ネット構成 / reward=報酬 / opponent=相手構成 / env=環境仕様 / eval=評価方法 / fix=不具合修正",
   "changes": [
     {
+      "at": "2026-08-20 00:00",
+      "kind": "env",
+      "label": "学習ワーカーのメモリ削減 (VecMonitor化・終了バトル破棄・スレッド上限6)",
+      "detail": "システムメモリ枯渇 (スワップ16.8/17.4GB・圧レベル警告) への対策。(1) SubprocVecEnvワーカー内のSB3 Monitorを親側VecMonitorへ移行 — 方策を持たないワーカーがtorch/SB3をimportしなくなり約210MB/本×4を削減。episode統計 (info['episode'] の r/l/t) は同値でPPOの学習数学は不変。(2) poke-envがcloseまで保持し続ける終了済みバトルを20エピソードごとに直近5件残して破棄 (ワーカーRSSの対戦数比例増の解消。勝敗カウンタを読む評価系には不適用)。(3) torch.set_num_threads=6 + OMP_NUM_THREADS=6 (8コア中2コアを他用途に温存。fpsが変わる可能性があるためベンチのスループット解釈に注意)。アルゴリズム・ハイパーパラメータの意味・バッファ容量・バッチサイズは一切変更していない"
+    },
+    {
       "at": "2026-08-18 02:05",
       "kind": "eval",
       "label": "agents軸の欠陥修正とP1ベースライン再登録 (旧vs_agents系列は比較不能)",

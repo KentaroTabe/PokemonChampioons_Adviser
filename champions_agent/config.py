@@ -102,6 +102,17 @@ DEFAULT_REGULATION = Regulation()
 RANDOM_SEED = int(TRAIN_SEED_OVERRIDE) if TRAIN_SEED_OVERRIDE else 42
 SELFPLAY_OPPONENT_POOL_SIZE = 50  # team_builder が保持する対戦相手チーム候補数
 
+# --- 学習時のリソース管理 (2026-08-19 メモリ枯渇対策) ---
+# poke-env の Player は対戦オブジェクト (ターンごとのイベント履歴を含む) を
+# close まで解放しないため、長時間学習ではプロセスRSSが対戦数に比例して増える。
+# エピソード完結型の学習は過去バトルを参照しないので、終了済みバトルを
+# 定期的に破棄する。何エピソードごとに掃除するか / 直近何件残すか。
+TRAIN_BATTLE_PRUNE_EVERY = int(os.environ.get("TRAIN_BATTLE_PRUNE_EVERY", "20"))
+TRAIN_BATTLE_PRUNE_KEEP = int(os.environ.get("TRAIN_BATTLE_PRUNE_KEEP", "5"))
+# torch のCPUスレッド数上限。8コア中2コアを他用途 (アドバイザー/他アプリ) に
+# 残す。OMP_NUM_THREADS の既定にも同じ値を使う (tools/smoke_train.py)。
+TRAIN_TORCH_THREADS = int(os.environ.get("TRAIN_TORCH_THREADS", "6"))
+
 
 @dataclass
 class PlayStyle:
