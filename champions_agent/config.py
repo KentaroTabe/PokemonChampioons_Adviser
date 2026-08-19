@@ -112,6 +112,11 @@ TRAIN_BATTLE_PRUNE_KEEP = int(os.environ.get("TRAIN_BATTLE_PRUNE_KEEP", "5"))
 # torch のCPUスレッド数上限。8コア中2コアを他用途 (アドバイザー/他アプリ) に
 # 残す。OMP_NUM_THREADS の既定にも同じ値を使う (tools/smoke_train.py)。
 TRAIN_TORCH_THREADS = int(os.environ.get("TRAIN_TORCH_THREADS", "6"))
+# 相手プール/アンカー方策のワーカー内キャッシュ上限 (LRU)。
+# 無上限だと pool 20 + anchor 6 の全世代 (展開後 約30-40MB/個) が
+# ワーカーごとに載り、最悪 ~0.9GB/ワーカーまで育つ (2026-08-20 実測)。
+# 抽選分布は変えず、オブジェクトの保持数だけを絞る。超過分は再ロード (~1秒)。
+TRAIN_OPP_POLICY_CACHE = int(os.environ.get("TRAIN_OPP_POLICY_CACHE", "3"))
 
 
 @dataclass

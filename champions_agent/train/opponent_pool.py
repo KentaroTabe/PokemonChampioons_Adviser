@@ -19,7 +19,7 @@ import shutil
 import time
 from pathlib import Path
 
-from champions_agent.config import MODELS_DIR
+from champions_agent.config import MODELS_DIR, TRAIN_OPP_POLICY_CACHE
 
 POOL_DIR = MODELS_DIR / "pool"
 STATE_PATH = POOL_DIR / "pool_state.json"
@@ -202,6 +202,34 @@ class OpponentPool:
         return POOL_DIR / chosen["file"]
 
 
+def lru_get_or_load(cache: dict, key, loader, cap: int):
+    """挿入順を参照順として使うLRUキャッシュの取得/ロード (純粋関数)。
+
+    dict は挿入順を保つため、ヒット時に pop→再挿入で末尾 (最新) へ動かし、
+    cap 超過時は先頭 (最古) から捨てる。loader はミス時のみ呼ばれる。
+    2026-08-20 メモリ枯渇対策: 相手方策キャッシュが無上限で、全世代の
+    torchモデルがワーカーごとに載っていた。
+    """
+    if key in cache:
+        cache[key] = cache.pop(key)
+    else:
+        cache[key] = loader()
+        while len(cache) > max(1, cap):
+            cache.pop(next(iter(cache)))
+    return cache[key]
+
+
+def prune_finished_assignments(assign: dict, battles: dict) -> None:
+    """終了済みバトルの相手割当を破棄する (純粋な辞書操作)。
+
+    割当が残っていると、キャッシュから追い出した方策オブジェクトが
+    参照で延命される。進行中バトルの割当は変えない (相手は不変)。
+    """
+    for tag in [t for t, b in list(battles.items())
+                if getattr(b, "finished", False)]:
+        assign.pop(tag, None)
+
+
 class PoolOpponentPlayer:
     """バトルごとにプールから方策を抽選して指す対戦相手プレイヤー。
 
@@ -233,16 +261,22 @@ def make_pool_opponent(pool: OpponentPool, epsilon_random: float = EPSILON_RANDO
             self._policy_cache: dict = {}
 
         def _load_policy(self, path):
-            """チェックポイントを方策としてロードする (失敗は None、キャッシュ付き)"""
+            """チェックポイントを方策としてロードする (失敗は None)。
+
+            キャッシュは LRU 上限つき (TRAIN_OPP_POLICY_CACHE)。抽選分布は
+            変えず保持数だけ絞る。追い出された世代は次回抽選時に再ロード。
+            """
             if path is None:
                 return None
-            key = str(path)
-            if key not in self._policy_cache:
+
+            def _loader():
                 try:
-                    self._policy_cache[key] = BattlePolicy(model_path=path)
+                    return BattlePolicy(model_path=path)
                 except Exception:
-                    self._policy_cache[key] = None
-            policy = self._policy_cache[key]
+                    return None
+
+            policy = lru_get_or_load(self._policy_cache, str(path),
+                                     _loader, cap=TRAIN_OPP_POLICY_CACHE)
             return policy if (policy is not None
                               and policy.model is not None) else None
 
@@ -268,6 +302,9 @@ def make_pool_opponent(pool: OpponentPool, epsilon_random: float = EPSILON_RANDO
                     self._assign[tag] = policy if policy else "heuristic"
                 else:
                     self._assign[tag] = kind
+                # 終了済みバトルの割当を掃除 (キャッシュから追い出した方策が
+                # 割当参照で延命されるのを防ぐ)。上限トリムは異常時の backstop
+                prune_finished_assignments(self._assign, self.battles)
                 if len(self._assign) > 50:
                     for k in list(self._assign.keys())[:-25]:
                         del self._assign[k]
