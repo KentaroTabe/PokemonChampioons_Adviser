@@ -192,6 +192,147 @@ def test_opponent_zero_read_needs_corroboration():
     print("test_opponent_zero_read_needs_corroboration OK")
 
 
+def test_opponent_zero_read_on_unknown_hp_needs_corroboration():
+    """HP未知 (登場直後) の相手への0%読みも裏付けが揃うまで書かない。
+
+    2026-08-20 第5回: 従来のガードは既知HP>5%の個体のみ対象で、
+    HP未知の新規スロットは登場演出中の空バー1フレームで0%が素通りし、
+    満タンのロトムがひんし扱いになった。
+    """
+    st = BattleStateV2()
+    mon = PokemonState(species_ja="ロトム", species_id="rotom",
+                       display_name="ロトム")
+    st.opponent.party.append(mon)
+    st.opponent.active_index = 0
+    assert mon.hp_percent is None
+    _run_hud(st, "ロトム", "0%")     # 1回目: 見送り
+    assert mon.hp_percent is None and mon.status != "fainted", \
+        (mon.hp_percent, mon.status)
+    _run_hud(st, "ロトム", "0%")     # 連続2回目: 受理
+    assert mon.hp_percent == 0.0 and mon.status == "fainted", \
+        (mon.hp_percent, mon.status)
+    print("test_opponent_zero_read_on_unknown_hp_needs_corroboration OK")
+
+
+def test_my_max_hp_adoption_after_consistent_reads():
+    """登録から計算した最大HPと食い違っても、バー割合と一致する同じ実測が
+    続けば実測を採用する (2026-08-20 第5回: ムクホーク 登録161 vs 実測181
+    で全読取が棄却されHPが100%固着 → 交代助言の被ダメ前提が崩れた)。"""
+    from vision import extractors
+    from vision.normalize import NameResolver
+
+    st = BattleStateV2()
+    mon = PokemonState(species_ja="ムクホーク", species_id="staraptor",
+                       display_name="ムクホーク")
+    mon.hp_percent = 100.0
+    st.player.party.append(mon)
+    st.player.active_index = 0
+
+    orig_read = ocr.read_zone_text
+    orig_bar = ocr.hp_bar_ratio
+    orig_expected = extractors._expected_my_max
+
+    def fake_read(img, zone, **kw):
+        if zone is zones.BATTLE["my_name"]:
+            return "ムクホーク"
+        if zone is zones.BATTLE["my_hp_text"]:
+            return "161/181"
+        return ""
+
+    ocr.read_zone_text = fake_read
+    ocr.hp_bar_ratio = lambda img: 161.0 / 181.0
+    extractors._expected_my_max = lambda m: 161   # 登録側が古い想定
+    try:
+        img = np.zeros((720, 1280, 3), dtype=np.uint8)
+        for i in range(extractors.MY_MAX_ADOPT_READS - 1):
+            extractors.extract_my_hud(img, st, NameResolver())
+            assert mon.hp_max != 181, f"{i + 1}回目で早期採用された"
+        extractors.extract_my_hud(img, st, NameResolver())  # 採用回
+        assert getattr(mon, "_my_max_adopted", None) == 181
+        assert mon.hp_max == 181 and mon.hp_current == 161, \
+            (mon.hp_current, mon.hp_max)
+        assert abs(mon.hp_percent - 89.0) < 1.0, mon.hp_percent
+        assert any("実測を採用" in e.get("text", "")
+                   for e in st.events), st.events[-3:]
+    finally:
+        ocr.read_zone_text = orig_read
+        ocr.hp_bar_ratio = orig_bar
+        extractors._expected_my_max = orig_expected
+    print("test_my_max_hp_adoption_after_consistent_reads OK")
+
+
+def test_my_max_mismatch_without_bar_agreement_is_discarded():
+    """バー割合と食い違う読み ("135/178"→"35/78"型の桁落ち) は採用しない"""
+    from vision import extractors
+    from vision.normalize import NameResolver
+
+    st = BattleStateV2()
+    mon = PokemonState(species_ja="ムクホーク", species_id="staraptor",
+                       display_name="ムクホーク")
+    mon.hp_percent = 100.0
+    st.player.party.append(mon)
+    st.player.active_index = 0
+
+    orig_read = ocr.read_zone_text
+    orig_bar = ocr.hp_bar_ratio
+    orig_expected = extractors._expected_my_max
+
+    def fake_read(img, zone, **kw):
+        if zone is zones.BATTLE["my_name"]:
+            return "ムクホーク"
+        if zone is zones.BATTLE["my_hp_text"]:
+            return "35/78"      # 桁落ち誤読 (実際は135/178=76%)
+        return ""
+
+    ocr.read_zone_text = fake_read
+    ocr.hp_bar_ratio = lambda img: 0.76   # バーは本当の割合を示す
+    extractors._expected_my_max = lambda m: 178
+    try:
+        img = np.zeros((720, 1280, 3), dtype=np.uint8)
+        for _ in range(extractors.MY_MAX_ADOPT_READS + 2):
+            extractors.extract_my_hud(img, st, NameResolver())
+        assert getattr(mon, "_my_max_adopted", None) is None
+        assert mon.hp_max != 78, mon.hp_max
+    finally:
+        ocr.read_zone_text = orig_read
+        ocr.hp_bar_ratio = orig_bar
+        extractors._expected_my_max = orig_expected
+    print("test_my_max_mismatch_without_bar_agreement_is_discarded OK")
+
+
+def test_field_check_skips_unresolved_or_foreign_species():
+    """場の状況抽出は、種族行が既存パーティに解決できない画面では
+    何も書かない (2026-08-20 第5回: 不参加のムクホークが生成され
+    161/161が混入。activeへのフォールバックも汚染源だった)。"""
+    from vision import extractors
+    from vision.normalize import NameResolver
+
+    st = BattleStateV2()
+    mon = PokemonState(species_ja="サザンドラ", species_id="hydreigon")
+    mon.hp_percent = 100.0
+    st.player.party.append(mon)
+    st.player.active_index = 0
+
+    orig_lines = ocr.apple_ocr_lines
+    orig_text = ocr.apple_ocr_text
+    # 画面はムクホーク (パーティ外) の詳細ページという想定
+    ocr.apple_ocr_lines = lambda img, scale=1.0: [
+        ("効果と場の状態", (0.5, 0.05, 0.8, 0.09)),
+        ("ムクホーク", (0.20, 0.22, 0.35, 0.26)),
+        ("0/159", (0.20, 0.28, 0.30, 0.32)),
+    ]
+    ocr.apple_ocr_text = lambda img, scale=1.0, langs=None: "0/159"
+    try:
+        img = np.zeros((720, 1280, 3), dtype=np.uint8)
+        extractors.extract_field_check(img, st, NameResolver())
+        assert len(st.player.party) == 1, [p.species_ja for p in st.player.party]
+        assert st.player.party[0].hp_percent == 100.0
+    finally:
+        ocr.apple_ocr_lines = orig_lines
+        ocr.apple_ocr_text = orig_text
+    print("test_field_check_skips_unresolved_or_foreign_species OK")
+
+
 def test_verified_name_updates_hp():
     st, mon = _state_with_opp("ドリュウズ", "excadrill", 33.0)
     for _ in range(3):
@@ -212,6 +353,10 @@ def main() -> None:
     test_new_species_needs_two_reads()
     test_missed_switch_marks_prev_uncertain()
     test_opponent_zero_read_needs_corroboration()
+    test_opponent_zero_read_on_unknown_hp_needs_corroboration()
+    test_my_max_hp_adoption_after_consistent_reads()
+    test_my_max_mismatch_without_bar_agreement_is_discarded()
+    test_field_check_skips_unresolved_or_foreign_species()
     test_verified_name_updates_hp()
     print("ALL OK")
 

@@ -78,6 +78,7 @@ class BattleLogger:
         self._opened_ts = 0.0       # 現在のログファイルを開いた時刻
         self._last_zero = None      # 最後にHP0%を観測した側 (side, ts)
         self._last_switch = {}      # 各側の最後の交代時刻 {side: ts}
+        self._fainted_last = (0, 0)  # 直前フレームの (自分, 相手) ひんし数
         self._rate_open = None      # この対戦に入る前のレート {"value","ts"}
         self._rate_last = None      # 直近観測レート (ファイルを跨いで保持)
 
@@ -118,14 +119,20 @@ class BattleLogger:
             if abs(delta) <= 60:   # 1戦の変動として妥当な範囲のみ (誤読対策)
                 return "win" if delta > 0 else "loss"
         # 2. 最後にHP0%を観測した側の負け (その後交代していない場合)
-        if not self._last_zero:
-            return None
-        side, ts = self._last_zero
-        if time.time() - ts > 180.0:
-            return None
-        if self._last_switch.get(side, 0.0) > ts:
-            return None   # 倒れた後に交代している = 対戦は続いていた
-        return "loss" if side == "player" else "win"
+        if self._last_zero:
+            side, ts = self._last_zero
+            if time.time() - ts <= 180.0 and \
+                    self._last_switch.get(side, 0.0) <= ts:
+                return "loss" if side == "player" else "win"
+        # 3. 選出3体のひんし数 (勝敗メッセージもレートもHP0イベントも
+        #    取れなかった場合の最終手段。リザルト画面を飛ばして次戦の選出へ
+        #    進むと unknown になっていた: 2026-08-20 第5回で9戦中6戦)
+        my_f, opp_f = self._fainted_last
+        if opp_f >= 3 and my_f < 3:
+            return "win"
+        if my_f >= 3 and opp_f < 3:
+            return "loss"
+        return None
 
     def _finalize(self, outcome: Optional[str]) -> None:
         if self._file is not None and not self._outcome_logged:
@@ -143,6 +150,7 @@ class BattleLogger:
         self._hp_seen_ts = 0.0
         self._last_zero = None
         self._last_switch = {}
+        self._fainted_last = (0, 0)
 
     # ------------------------------------------------------------------
     def on_frame(self, state: dict, fired: list) -> None:
@@ -223,6 +231,15 @@ class BattleLogger:
         if state.get("outcome") and not self._outcome_logged:
             self._write({"type": "outcome", "outcome": state["outcome"]})
             self._outcome_logged = True
+
+        # 勝敗推定用: 両側のひんし数を毎フレーム控える。ローテーションの
+        # フレームでは state が次戦へリセット済みのため、_finalize は
+        # ここで控えた「前フレーム = 前戦最終盤面」の値を参照する
+        self._fainted_last = (
+            sum(1 for p in state.get("player", {}).get("party", [])
+                if p.get("status") == "fainted"),
+            sum(1 for p in state.get("opponent", {}).get("party", [])
+                if p.get("status") == "fainted"))
 
     def on_advice(self, advice: dict, kind: str) -> None:
         slim = {k: v for k, v in advice.items() if k not in ("text",)}

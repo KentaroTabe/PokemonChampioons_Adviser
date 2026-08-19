@@ -289,10 +289,17 @@ class VisionPipeline:
 
         if scene == "selection" and heavy and selection_confirmed:
             extractors.extract_selection(img, self.state, self.resolver)
-        elif scene in ("command", "move_select", "battle_hud") and heavy:
-            extractors.extract_battle_hud(img, self.state, self.resolver)
-            if scene == "move_select":
-                extractors.extract_move_select(img, self.state, self.resolver)
+        elif scene in ("command", "move_select", "battle_hud"):
+            if heavy:
+                extractors.extract_battle_hud(img, self.state, self.resolver)
+                if scene == "move_select":
+                    extractors.extract_move_select(img, self.state,
+                                                   self.resolver)
+            else:
+                # 自分HPの実数はHUDに常時表示される。heavy間隔待ちだと
+                # 2回安定の確定まで実測60秒超かかり、古い自分HPのまま
+                # 交代助言が計算された (2026-08-20 第5回) ため毎フレーム読む
+                extractors.extract_my_hud(img, self.state, self.resolver)
         elif scene == "watch":
             if heavy:
                 extractors.extract_watch(img, self.state, self.resolver)

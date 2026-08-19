@@ -228,6 +228,13 @@ ZERO_READ_FAINT_COUNT = 2
 # 選出済みの解除を確定するのに必要な連続False回数。1フレームの読み損ね
 # (カーソルの光沢・演出) で選出済みが巻き戻らないように (欠陥#8)
 UNPICK_CONFIRM_FRAMES = 2
+# 自分の最大HPについて「登録から計算した理論値と食い違うが、HPバー割合とは
+# 一致する読み」が連続した場合に、実測側を採用するまでの回数。
+# 登録 (能力ポイント) が古いと理論値検証が全読取を棄却し続け、HPが
+# 100%のまま固着して交代助言の前提が崩れる (2026-08-20 第5回接続テスト:
+# ムクホーク 登録161 vs 実測181)。バー照合を課すことで、桁落ち誤読
+# ("135/178"→"35/78" は割合が大きくズレる) の再定着は防ぐ
+MY_MAX_ADOPT_READS = 3
 # 相手HUD名の「ロスター事前分布つき再解決」の閾値。通常の0.85で解決できない
 # OCR揺れ (実測: オーロンゲ→「オーロング」= 類似度0.8) でも、判明済みの
 # 相手6体のいずれかに一致する場合のみ低い閾値で受け入れる。
@@ -337,7 +344,9 @@ def _set_hp(state: BattleStateV2, side_name: str, mon,
         # 未登録種族 (チーム変更後にmy_team.json未更新) まで集合検証すると
         # 全読取が棄却されHPが取れなくなる (2026-07-23 監査で発見)
         if side_name == "player":
-            expected = _expected_my_max(mon)
+            # 実測採用済み (_my_max_adopted) の個体は登録理論値より実測を優先
+            expected = getattr(mon, "_my_max_adopted", None) or \
+                _expected_my_max(mon)
             if expected and mx != expected:
                 return
             if expected is None:
@@ -747,11 +756,13 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
             # 正当な回復は名前が照合できたフレームで反映される
             pass
         elif eff_pct <= 1.0 and opp.status != "fainted" \
-                and (opp.hp_percent or 0) > 5.0:
+                and (opp.hp_percent is None or opp.hp_percent > 5.0):
             # 生存個体の突然の0-1%読みはひんしの裏付け (faintイベント or
             # 連続ゼロ読み) が揃うまで書かない。演出中の空バー誤読で
             # 偽ひんし化し、タスキで1%残った個体も0%扱いになっていた
-            # (2026-08-19 opus監査: ドリュウズ/サザンドラ)
+            # (2026-08-19 opus監査: ドリュウズ/サザンドラ)。
+            # HP未知の個体も対象にする: 登場直後の演出中1フレームの空バーが
+            # 素通りし、満タンのロトムに0%が書かれた (2026-08-20 第5回)
             if _accept_zero_hp_read(state, opp, side_name="opponent"):
                 # 裏付け済み: _set_hp の2回安定待ちを経ずに反映
                 opp.hp_percent = eff_pct
@@ -763,7 +774,52 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
                 opp._zero_read_count = 0
             _set_hp(state, "opponent", opp, pct=eff_pct)
 
-    # --- 自分: 表示名 + HP実数 ---
+    # --- 自分: 表示名 + HP実数 (毎フレーム版 extract_my_hud に分離) ---
+    extract_my_hud(img, state, resolver)
+
+    # --- 特性が一意な種族 (単一特性/メガ) は確定値として自動設定 ---
+    # メガシンカ後は特性が変わるため、メガ前に判明していた特性
+    # (例: ラグラージのしめりけ) が残っていても固定特性で上書きする
+    from vision.abilities import fixed_ability
+    for side_name in ("player", "opponent"):
+        mon = state.side(side_name).active()
+        if mon is None or not mon.species_id:
+            continue
+        if mon.ability_id and not mon.is_mega:
+            continue
+        fa = fixed_ability(mon.species_id, is_mega=mon.is_mega,
+                           item_id=mon.item_id)
+        if fa and mon.ability_id != fa:
+            mon.ability_id = fa
+            mon.ability_ja = resolver.ja_of("abilities", fa) or fa
+
+    # --- 残数ボール (緑=残り。単調減少で更新しノイズに耐える) ---
+    for side_obj, zone_key in ((state.opponent, "opp_balls"),
+                                (state.player, "my_balls")):
+        count = ocr.count_pokeballs(crop(img, zones.BATTLE[zone_key]))
+        if count is not None and 1 <= count <= 3:
+            if side_obj.remaining is None or count <= side_obj.remaining:
+                side_obj.remaining = count
+
+    # --- COMMAND 残り秒数 ---
+    cmd = ocr.read_zone_text(img, zones.BATTLE["command_no"], mode="panel",
+                             allowlist="0123456789")
+    if cmd.isdigit():
+        val = int(cmd)
+        if 0 <= val <= 45:
+            state.command_no = val
+
+    state.battle_active = True
+
+
+def extract_my_hud(img, state: BattleStateV2, resolver) -> None:
+    """自分側HUD (表示名 + HP実数) の読取。
+
+    HUDは battle_hud だけでなく command / move_select でも常時表示される。
+    heavy間隔のみの読取だと2回安定の確定まで実測60秒超かかり、古いHPの
+    まま交代助言が計算された (2026-08-20 第5回: 実際62%のライチュウを
+    100%として被ダメ前提を計算) ため、pipelineが毎フレーム呼べる形に分離。
+    """
     me = state.player.ensure_active()
     my_name = ocr.read_zone_text(img, zones.BATTLE["my_name"], mode="panel",
                                  allowlist=ocr.KATAKANA_ALLOWLIST)
@@ -805,8 +861,8 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
         # なければ過去の読取値を使う。基準と食い違う読みは誤OCRとみなし、
         # 桁補正できれば現在値だけ更新、できなければ読み捨てる
         # (「135/178」→「35/78」のような一貫した桁落ちは多数決でも防げない)
-        known = _expected_my_max(me) or \
-            (me.hp_max if me.hp_max and me.hp_max >= 50 else None)
+        known = getattr(me, "_my_max_adopted", None) or _expected_my_max(me) \
+            or (me.hp_max if me.hp_max and me.hp_max >= 50 else None)
         legal = _my_legal_maxes()
         ok = True
         if known and mx != known:
@@ -815,11 +871,34 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
             if digits.endswith(ks) and digits[:-len(ks)].isdigit() \
                     and int(digits[:-len(ks)]) <= known:
                 cur = int(digits[:-len(ks)])
+                mx = known
             else:
-                # 桁落ちは現在値側も壊れていることが多い ("135/167"→"35/78")。
-                # 補正できない読みは捨て、基準と一致する読みだけを採用する
-                ok = False
-            mx = known
+                # 桁落ちは現在値側も壊れていることが多い ("135/167"→"35/78")
+                # ため原則は読み捨てる。ただしHPバー割合と一致する同じ最大HP
+                # の読みが続く場合は登録側が古い (最大HPは対戦中不変) と
+                # みなして実測を採用する (2026-08-20 第5回: ムクホーク
+                # 登録161 vs 実測181で全読取が棄却されHPが100%固着した)
+                bar_now = ocr.hp_bar_ratio(crop(img, zones.BATTLE["my_hp_bar"]))
+                counts = getattr(me, "_max_adopt_counts", None) or {}
+                if bar_now is not None and cur <= mx and \
+                        abs(cur / mx - bar_now) <= 0.15:
+                    counts[mx] = counts.get(mx, 0) + 1
+                else:
+                    counts[mx] = 0
+                me._max_adopt_counts = counts
+                if counts[mx] >= MY_MAX_ADOPT_READS:
+                    state.log_event(
+                        "system",
+                        f"{me.species_ja or me.display_name or '?'}: 登録から"
+                        f"計算した最大HP{known}と実測{mx}が不一致のため実測を"
+                        "採用します (能力ポイントの再登録を確認)",
+                        event_id=f"max_hp_mismatch_{me.species_id}")
+                    me._my_max_adopted = mx
+                    me.hp_current, me.hp_max, me.hp_percent = None, None, None
+                    known = mx
+                else:
+                    ok = False
+                    mx = known
         elif known is None and legal and mx not in legal:
             # 種族特定前でも、チーム全員の理論最大HP集合に無い読みは誤読
             # (「16/67」が特定前に素通りして定着する事故の防止)
@@ -836,40 +915,6 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
         # 過去に定着した誤った最大HPの掃除 (理論値と食い違えば読み直しに戻す)
         if known and me.hp_max and me.hp_max != known:
             me.hp_current, me.hp_max, me.hp_percent = None, None, None
-
-    # --- 特性が一意な種族 (単一特性/メガ) は確定値として自動設定 ---
-    # メガシンカ後は特性が変わるため、メガ前に判明していた特性
-    # (例: ラグラージのしめりけ) が残っていても固定特性で上書きする
-    from vision.abilities import fixed_ability
-    for side_name in ("player", "opponent"):
-        mon = state.side(side_name).active()
-        if mon is None or not mon.species_id:
-            continue
-        if mon.ability_id and not mon.is_mega:
-            continue
-        fa = fixed_ability(mon.species_id, is_mega=mon.is_mega,
-                           item_id=mon.item_id)
-        if fa and mon.ability_id != fa:
-            mon.ability_id = fa
-            mon.ability_ja = resolver.ja_of("abilities", fa) or fa
-
-    # --- 残数ボール (緑=残り。単調減少で更新しノイズに耐える) ---
-    for side_obj, zone_key in ((state.opponent, "opp_balls"),
-                                (state.player, "my_balls")):
-        count = ocr.count_pokeballs(crop(img, zones.BATTLE[zone_key]))
-        if count is not None and 1 <= count <= 3:
-            if side_obj.remaining is None or count <= side_obj.remaining:
-                side_obj.remaining = count
-
-    # --- COMMAND 残り秒数 ---
-    cmd = ocr.read_zone_text(img, zones.BATTLE["command_no"], mode="panel",
-                             allowlist="0123456789")
-    if cmd.isdigit():
-        val = int(cmd)
-        if 0 <= val <= 45:
-            state.command_no = val
-
-    state.battle_active = True
 
 
 # ==============================================================================
@@ -1143,6 +1188,11 @@ def extract_field_check(img, state: BattleStateV2, resolver) -> None:
     side = state.side(side_name)
 
     # --- 種族名 (左上、x<0.45 y<0.30 の日本語行) ---
+    # 解決できた既存パーティメンバーのみを対象にする。
+    # ⚠ ensure_active へのフォールバックや新規メンバー作成はしない:
+    # 手持ち一覧など想定外の画面がこの抽出へ流れ込んだとき、無関係な個体へ
+    # HP/ランクを書き込む (2026-08-20 第5回: 不参加のムクホークが party に
+    # 生成され161/161が混入。自分側HPの入れ替わり汚染の一因)
     mon = None
     for t, (x0, y0, x1, y1) in lines:
         if x0 < 0.45 and y0 < 0.30 and len(t) >= 3:
@@ -1151,13 +1201,9 @@ def extract_field_check(img, state: BattleStateV2, resolver) -> None:
                 idx = side.find_by_species(sp[0])
                 if idx is not None:
                     mon = side.party[idx]
-                else:
-                    mon = side.switch_to_species(sp[0], sp[1])
-                    link_active_to_party(state, side_name)
-                    mon = side.ensure_active()
                 break
     if mon is None:
-        mon = side.ensure_active()
+        return
 
     # --- HP ---
     # 斜体数字は日本語モードで崩れるため、行の領域をen-USで再OCRする。
