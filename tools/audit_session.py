@@ -91,7 +91,12 @@ def detect_anomalies(battle_log: str) -> list:
                             t - last_switch[side] > 20:
                         out.append((t, f"{side}:{ja} HP{prev[0]:.0f}%→"
                                        f"{hp:.0f}%へ急回復 (交代検出なし)"))
-                    if p.get("status") == "fainted" or hp <= 1:
+                    # ひんし扱いは状態が明示的に fainted の場合のみ。
+                    # hp<=1 だけで判定すると、きあいのタスキで1%残った
+                    # 生存個体や0%誤読の1フレームが「ひんし」になり、
+                    # その後の正常表示が「蘇生」矛盾として誤検出される
+                    # (2026-08-19 opus監査: ドリュウズ/サザンドラ/ウルガモス)
+                    if p.get("status") == "fainted":
                         fainted.add(key)
                     last_hp[key] = (hp, t)
     # 同種の連続検出は1件に圧縮する

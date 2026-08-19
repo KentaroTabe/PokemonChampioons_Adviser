@@ -430,18 +430,34 @@ class EventParser:
         if not sp:
             return False
         jp, sid, _ = sp
-        # 自分側の交代 (「相手の」プレフィックスなし) は登録済みチーム優先で
-        # 解決し直す。全種族ファジーだと誤読が近縁の別種に化けて別枠を作る
-        # (2026-08-05接続テスト: メタグロス誤読→メタングの7枠目が生えた)
-        if not re.search(r"相手|あいて", cleaned):
+        # 側の判定はメッセージ形式を最優先する。種族の所属だけで判定すると
+        # ミラーマッチ (相手も自分と同じ種族を使用) で相手の繰り出しが
+        # 自分側へ化け、activeの乗っ取りと「助言なしの自分交代」の誤記録を
+        # 生んだ (2026-08-19実測: 「RX78ー2はサザンドラを繰り出した」が
+        # switch_player として発火した)。表記の対応:
+        #   自分の繰り出し: 「ゆけっ!X!」(まれに「こちらはXを繰り出した」)
+        #   相手の繰り出し: 「(トレーナー名)は Xを繰り出した」
+        if re.search(r"相手|あいて", cleaned):
+            side_name = "opponent"
+        elif "ゆけつ" in norm or re.search(r"こちら", cleaned):
+            side_name = "player"
+        elif re.search(r"繰り出|くりだ", cleaned):
+            side_name = "opponent"   # トレーナー名形式は相手の繰り出し
+        elif self.state.player.find_by_species(jp) is not None:
+            side_name = "player"
+        else:
+            side_name = "opponent"
+        if side_name == "player":
+            # 自分側は登録済みチーム優先で解決し直す。全種族ファジーだと
+            # 誤読が近縁の別種に化けて別枠を作る (2026-08-05接続テスト:
+            # メタグロス誤読→メタングの7枠目が生えた)
             from vision.extractors import resolve_my_species
             r = resolve_my_species(self.resolver, jp, cutoff=0.7)
             if r:
                 jp, sid = r[0], r[1]
-        if self.state.player.find_by_species(jp) is not None:
-            side, side_name = self.state.player, "player"
+            side = self.state.player
         else:
-            side, side_name = self.state.opponent, "opponent"
+            side = self.state.opponent
         if self._dedup(f"switch_{side_name}_{sid}"):
             return True
         side.switch_to_species(jp, sid)
@@ -637,14 +653,15 @@ class EventParser:
                 return None
             if ab:
                 mon.ability_ja, mon.ability_id = ab[0], ab[1]
-                self._apply_ability_effect(ab[1], side_name)
+                self._apply_ability_effect(ab[1], side_name, mon=mon)
             else:
                 mon.item_ja, mon.item_id = it[0], it[1]
             return event_id
         return None
 
     # --------------------------------------------------------------
-    def _apply_ability_effect(self, ability_id: str, side_name: str):
+    def _apply_ability_effect(self, ability_id: str, side_name: str,
+                              mon=None):
         weather_map = {"drought": "sun", "drizzle": "rain",
                        "sandstream": "sandstorm", "snowwarning": "snow",
                        "orichalcumpulse": "sun"}
@@ -660,6 +677,18 @@ class EventParser:
         elif ability_id == "intimidate":
             other = "opponent" if side_name == "player" else "player"
             self.state.side(other).ensure_active().set_boost("atk", -1)
+        elif ability_id == "disguise":
+            # ばけのかわが剥がれると最大HPの1/8の定数ダメージ。HP読みの
+            # 合間に挟まると取り逃してHPが過大になる (2026-08-19 opus監査:
+            # ミミッキュ88%実表示を100%と主張、差はちょうど1/8)。
+            # モデル値として即時反映し、以後の実読みで上書きされる
+            target = mon if mon is not None \
+                else self.state.side(side_name).ensure_active()
+            if target.hp_percent is not None:
+                target.hp_percent = max(0.0, round(target.hp_percent - 12.5, 1))
+                if target.hp_current is not None and target.hp_max:
+                    target.hp_current = max(
+                        0, target.hp_current - round(target.hp_max / 8))
 
     def _apply_move_side_effect(self, move_id: str, user_side: str):
         target = "opponent" if user_side == "player" else "player"

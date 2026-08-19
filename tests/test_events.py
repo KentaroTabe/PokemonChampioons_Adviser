@@ -100,6 +100,43 @@ def test_multi_stat_rank_change():
     print("test_multi_stat_rank_change OK")
 
 
+def test_mirror_match_switch_side():
+    """ミラーマッチで相手の繰り出しが自分側に化けない (2026-08-19実測:
+    「RX78ー2はサザンドラを繰り出した」が switch_player になった)"""
+    state, p = new_parser()
+    fired = p.parse("ゆけっサザンドラ")           # 自分のサザンドラが場に出る
+    assert "switch_player" in fired, fired
+    my_idx = state.player.active_index
+
+    # 相手 (トレーナー名は化けている) も同種を繰り出す
+    fired = p.parse("RX78ー2はサザンドラを繰り出した")
+    assert "switch_opponent" in fired, fired
+    assert "switch_player" not in fired, fired
+    assert state.player.active_index == my_idx      # 自分側は不変
+    assert state.opponent.active() is not None
+    assert state.opponent.active().species_ja == "サザンドラ"
+
+    # 「ゆけっ」「こちらは」「相手は」の各形式は従来どおり
+    state2, p2 = new_parser()
+    assert "switch_player" in p2.parse("こちらはブリジュラスを繰り出した")
+    assert "switch_opponent" in p2.parse("相手はリザードンを繰り出した!")
+    print("test_mirror_match_switch_side OK")
+
+
+def test_disguise_bust_damage():
+    """ばけのかわ発動で最大HPの1/8を即時反映する (2026-08-19 opus監査:
+    88%実表示を100%と主張、差はちょうど1/8だった)"""
+    state, p = new_parser()
+    me = state.player.party[2]        # new_parser既定のミミッキュ
+    me.hp_percent, me.hp_current, me.hp_max = 100.0, 162, 162
+    state.player.active_index = 2
+    fired = p.parse("ミミッキュのばけのかわ", source="left_popup")
+    assert any(f.startswith("ability_player_disguise") for f in fired), fired
+    assert me.hp_percent == 87.5, me.hp_percent
+    assert me.hp_current == 162 - round(162 / 8), me.hp_current
+    print("test_disguise_bust_damage OK")
+
+
 def test_type_change():
     """「Xは こおりタイプに なった!」(変幻自在等) でタイプが差し替わる (第2回)"""
     state, p = new_parser()
@@ -440,6 +477,8 @@ if __name__ == "__main__":
     test_switch_and_mega()
     test_rank_change()
     test_multi_stat_rank_change()
+    test_mirror_match_switch_side()
+    test_disguise_bust_damage()
     test_type_change()
     test_hazards_and_screens()
     test_status_and_volatile()

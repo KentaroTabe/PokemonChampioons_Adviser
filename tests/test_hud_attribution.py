@@ -171,6 +171,27 @@ def test_missed_switch_marks_prev_uncertain():
     print("test_missed_switch_marks_prev_uncertain OK")
 
 
+def test_opponent_zero_read_needs_corroboration():
+    """生存中の相手の突然の0-1%読みは、連続2回まで書かない (2026-08-19:
+    演出中の空バー誤読で生存ドリュウズが偽ひんし化した)。
+    タスキで1%残った個体はひんし扱いにしない。"""
+    st, mon = _state_with_opp("ドリュウズ", "excadrill", 100.0)
+    _run_hud(st, "ドリュウズ", "0%")     # 1回目: 見送り
+    assert mon.hp_percent == 100.0 and mon.status != "fainted", \
+        (mon.hp_percent, mon.status)
+    _run_hud(st, "ドリュウズ", "0%")     # 連続2回目: ひんし確定
+    assert mon.hp_percent == 0.0 and mon.status == "fainted", \
+        (mon.hp_percent, mon.status)
+
+    # きあいのタスキの1%: 2連続で受理するがひんしにはしない
+    st2, mon2 = _state_with_opp("サザンドラ", "hydreigon", 100.0)
+    _run_hud(st2, "サザンドラ", "1%")
+    _run_hud(st2, "サザンドラ", "1%")
+    assert mon2.hp_percent == 1.0 and mon2.status != "fainted", \
+        (mon2.hp_percent, mon2.status)
+    print("test_opponent_zero_read_needs_corroboration OK")
+
+
 def test_verified_name_updates_hp():
     st, mon = _state_with_opp("ドリュウズ", "excadrill", 33.0)
     for _ in range(3):
@@ -190,6 +211,7 @@ def main() -> None:
     test_roster_prior_resolves_ocr_garble()
     test_new_species_needs_two_reads()
     test_missed_switch_marks_prev_uncertain()
+    test_opponent_zero_read_needs_corroboration()
     test_verified_name_updates_hp()
     print("ALL OK")
 
