@@ -64,6 +64,13 @@ UNCERTAIN_SWITCH_PENALTY = 15.0
 # (2026-08-18 接続テスト: 常に後手でKO圏なのに非先制の大技を推し続けた。
 #  従来の一律-12点では大技の素点に埋もれていた)
 ACT_BEFORE_KO_DISCOUNT = 0.25
+# KO圏 (最小ダメージ >= 残HP) では実効ダメージが残HPで頭打ちになり、
+# 同じKO圏の技どうしの順位がRLブレンドの揺らぎだけで決まっていた
+# (2026-08-20 第5回接続テスト: 残24%のライボルトへ 等倍53〜63% が
+#  RL52%で 抜群106〜125% を上回った)。HP誤読や想定外の耐久に備え、
+# 余剰ダメージ (突破余裕) を小さく加点して高火力側を上位に保つ
+KO_MARGIN_WEIGHT = 0.15
+KO_MARGIN_CAP = 20.0
 
 _TYPE_JA2EN = None
 
@@ -485,6 +492,10 @@ def evaluate(state: dict, resolver=None) -> dict:
 
             effective = min(exp, opp_hp_pct)
             score = effective + ko_prob * 40.0
+            if ko_prob > 0:
+                # 同じKO圏なら突破余裕 (余剰ダメージ) の大きい技を上位に
+                score += min(KO_MARGIN_CAP,
+                             KO_MARGIN_WEIGHT * max(0.0, exp - opp_hp_pct))
             mv_pri = mv["priority"] or 0
             # この技での実効先手: 優先度が相手のKO圏先制技を上回れば
             # 素早さ不問で先に動ける (しんそく+2 > かげうち+1 の撃ち合い等)

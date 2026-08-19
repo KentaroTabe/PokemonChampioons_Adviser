@@ -356,6 +356,48 @@ def test_act_before_ko_discount():
     print("test_act_before_ko_discount OK")
 
 
+def test_ko_margin_prefers_overkill():
+    """同じKO圏の技どうしでは突破余裕 (余剰ダメージ) の大きい技を上位にする。
+
+    2026-08-20 第5回接続テスト: 残24%のライボルト (でんき単) に対し、
+    実効ダメージが残HPで頭打ちになり、RLブレンドの揺らぎで
+    等倍エナジーボール(53〜63%)が抜群だいちのちから(106〜125%)を上回った。
+    RLの寄与を除いた素点で、抜群側が必ず上に来ることを確認する。
+    """
+    import os
+    from vision.normalize import NameResolver
+    resolver = NameResolver()
+    my = {"species_id": "glimmora", "species_ja": "キラフロル",
+          "types": ["いわ", "どく"], "hp_percent": 100.0,
+          "hp_current": 159, "hp_max": 159, "status": None, "boosts": {},
+          "ability_id": None, "item_id": None,
+          "moves": [
+              {"name_ja": "エナジーボール", "move_id": "energyball",
+               "pp": 10, "max_pp": 10, "effectiveness": "neutral"},
+              {"name_ja": "だいちのちから", "move_id": "earthpower",
+               "pp": 10, "max_pp": 10, "effectiveness": "super"},
+          ], "revealed_moves": []}
+    opp = {"species_id": "manectric", "species_ja": "ライボルト",
+           "types": ["でんき"], "hp_percent": 24.0,
+           "hp_current": None, "hp_max": None, "status": None, "boosts": {},
+           "ability_id": None, "item_id": None, "moves": [],
+           "revealed_moves": []}
+    prev = os.environ.get("RL_BLEND_WEIGHT")
+    os.environ["RL_BLEND_WEIGHT"] = "0"
+    try:
+        adv = evaluate(_mini_state(my, opp), resolver)
+    finally:
+        if prev is None:
+            os.environ.pop("RL_BLEND_WEIGHT", None)
+        else:
+            os.environ["RL_BLEND_WEIGHT"] = prev
+    ep = next(a for a in adv["actions"] if a["id"] == "earthpower")
+    eb = next(a for a in adv["actions"] if a["id"] == "energyball")
+    assert "抜群" in ep["reason"], ep
+    assert ep["score"] > eb["score"], (ep, eb)
+    print("test_ko_margin_prefers_overkill OK")
+
+
 def test_choice_lock():
     """こだわり系を持って技を使った後は、直前の技以外を推奨しない (第2回#C)"""
     from vision.normalize import NameResolver
@@ -501,6 +543,7 @@ if __name__ == "__main__":
     test_priority_evaluation()
     test_fainted_active_switch_only()
     test_act_before_ko_discount()
+    test_ko_margin_prefers_overkill()
     test_choice_lock()
     test_registered_moves_fallback()
     test_rl_sees_registered_move_fallback()
