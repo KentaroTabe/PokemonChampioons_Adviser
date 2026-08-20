@@ -396,52 +396,8 @@ async def get_my_team(sid, data=None):
         print(f"[server] get_my_teamエラー: {e}")
 
 
-_generating = False
-
-
-@sio.on('generate_team')
-async def generate_team(sid, data):
-    """コア軸から1からの構築を生成 (バックグラウンド、進捗を逐次配信)。
-
-    重い処理 (共起探索+実対戦評価で数分) のため、進捗を team_gen_progress で
-    流し、完了時に team_gen_result を配信する。多重起動は防止。
-    """
-    global _generating
-    if _generating:
-        await sio.emit('team_gen_progress',
-                       {"msg": "別の生成が実行中です"}, room=sid)
-        return
-    core = (data or {}).get("core", "").strip()
-    evaluate = bool((data or {}).get("evaluate", True))
-    if not core:
-        await sio.emit('team_gen_result',
-                       {"ok": False, "reason": "軸ポケモンを入力してください"},
-                       room=sid)
-        return
-    _generating = True
-    loop = asyncio.get_event_loop()
-
-    def _progress(msg):
-        # executorスレッドからemitするためcall_soon_threadsafeで戻す
-        loop.call_soon_threadsafe(
-            lambda: asyncio.ensure_future(
-                sio.emit('team_gen_progress', {"msg": msg}, room=sid)))
-
-    try:
-        from tools.generate_teams import generate_report
-        print(f"[server] 構築生成開始: {core} (evaluate={evaluate})")
-        result = await loop.run_in_executor(
-            None, lambda: generate_report(core, evaluate=evaluate,
-                                          progress=_progress))
-        await sio.emit('team_gen_result', result, room=sid)
-        print(f"[server] 構築生成完了: {core}")
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        await sio.emit('team_gen_result',
-                       {"ok": False, "reason": f"生成エラー: {e}"}, room=sid)
-    finally:
-        _generating = False
+# (旧「1からのパーティ提案」(generate_team) は 2026-08-20 に削除。
+#  後継はゲート付きの構築提案 run_team_proposal / tools/team_proposal.py)
 
 
 # ------------------------------------------------------------------
@@ -486,25 +442,31 @@ async def run_analysis(sid, data):
     await sio.emit('analysis_result', {"kind": kind, "text": text}, room=sid)
 
 
-def _analysis_progress_cb(sid):
+def _analysis_progress_cb(sid, event: str = 'analysis_progress'):
     loop = asyncio.get_event_loop()
 
     def _progress(msg):
         loop.call_soon_threadsafe(
             lambda: asyncio.ensure_future(
-                sio.emit('analysis_progress', {"msg": str(msg)}, room=sid)))
+                sio.emit(event, {"msg": str(msg)}, room=sid)))
     return _progress
 
 
-async def _run_heavy_analysis(sid, kind, coro_factory):
-    """実対戦を伴う重いジョブ (プレイブック/改善) の共通ランナー"""
+async def _run_heavy_analysis(sid, kind, coro_factory,
+                              progress_event: str = 'analysis_progress',
+                              result_event: str = 'analysis_result'):
+    """実対戦を伴う重いジョブ (プレイブック/改善/構築提案) の共通ランナー。
+
+    実対戦ジョブどうしの同時実行は Showdown と CPU を奪い合うため、
+    _analysis_busy を全ジョブで共有する。
+    """
     global _analysis_busy
     if _analysis_busy:
-        await sio.emit('analysis_progress',
-                       {"msg": "別の分析ジョブが実行中です"}, room=sid)
+        await sio.emit(progress_event,
+                       {"msg": "別の実対戦ジョブが実行中です"}, room=sid)
         return
     if _battle_in_progress():
-        await sio.emit('analysis_result',
+        await sio.emit(result_event,
                        {"kind": kind, "text": "対戦中のため実行できません "
                         "(フレーム解析と競合します)。対戦後に再実行してください"},
                        room=sid)
@@ -513,12 +475,12 @@ async def _run_heavy_analysis(sid, kind, coro_factory):
     try:
         text = await asyncio.get_event_loop().run_in_executor(
             None, lambda: asyncio.run(coro_factory()))
-        await sio.emit('analysis_result', {"kind": kind, "text": text},
+        await sio.emit(result_event, {"kind": kind, "text": text},
                        room=sid)
     except Exception as e:
         import traceback
         traceback.print_exc()
-        await sio.emit('analysis_result',
+        await sio.emit(result_event,
                        {"kind": kind, "text": f"実行エラー: {e}"}, room=sid)
     finally:
         _analysis_busy = False
@@ -540,6 +502,60 @@ async def run_playbook(sid, data):
         return result["md"]
 
     await _run_heavy_analysis(sid, "playbook", _job)
+
+
+@sio.on('check_team_proposal')
+async def check_team_proposal(sid, data):
+    """構築提案の運用条件チェック (軽量。提案は走らせない)"""
+    stage = int((data or {}).get("stage") or 1)
+
+    def _work():
+        from tools.team_proposal import (
+            evaluate_conditions, measure_inputs, render_report,
+        )
+        conds = evaluate_conditions(measure_inputs(stage, 40, 120), stage)
+        return render_report(conds, stage)
+
+    try:
+        text = await asyncio.get_event_loop().run_in_executor(None, _work)
+    except Exception as e:
+        text = f"条件チェックに失敗: {e}"
+    await sio.emit('team_proposal_result', {"kind": "check", "text": text},
+                   room=sid)
+
+
+@sio.on('run_team_proposal')
+async def run_team_proposal(sid, data):
+    """構築提案 (段階ゲート付き)。ボタン押下時のみ実行する。
+
+    段階1=現パーティから最大2枠入替 / 段階2=メタ全体からの一般提案。
+    実対戦評価+受入検定を含むため数十分かかることがある
+    (進捗は team_proposal_progress で逐次配信)。
+    """
+    from types import SimpleNamespace
+    stage = int((data or {}).get("stage") or 1)
+    progress = _analysis_progress_cb(sid, 'team_proposal_progress')
+    ns = SimpleNamespace(
+        population=int((data or {}).get("population") or 8),
+        generations=int((data or {}).get("generations") or 2),
+        battles=int((data or {}).get("battles") or 40),
+        concurrency=3, forecast_mix=0.3, archive_mix=0.2,
+        locked=(data or {}).get("locked") or None,
+        max_changes=int((data or {}).get("max_changes") or 2),
+        accept_battles=int((data or {}).get("accept_battles") or 120),
+        set_mut=0.5, seed=None)
+
+    async def _job():
+        from tools.team_proposal import run_proposal
+        res = await run_proposal(stage, ns, log=progress)
+        text = res["conditions_text"] + "\n\n" + res["summary"]
+        if res.get("path"):
+            text += f"\n保存: {res['path']}"
+        return text
+
+    await _run_heavy_analysis(sid, f"team_proposal_stage{stage}", _job,
+                              progress_event='team_proposal_progress',
+                              result_event='team_proposal_result')
 
 
 @sio.on('improve_team')
@@ -695,6 +711,25 @@ async def set_species(sid, data):
         species_id = data["species_id"]
         species_ja = data.get("species_ja") or species_id
         party = pipeline.state.opponent.party
+        # プルダウン描画から選択までの間に、対象枠が別フレームで自動確定
+        # されることがある (2026-08-20: 選んだのに反映されない一因)。
+        # 対象枠が既に別種族で確定済みなら、未確定枠へ付け替える。
+        # 同種族で確定済みなら何もしない (二重適用の防止)
+        if 0 <= idx < len(party) and party[idx].species_ja \
+                and party[idx].species_ja != species_ja:
+            alt = next((j for j, p in enumerate(party)
+                        if not p.species_ja), None)
+            print(f"[server] 手動確定: slot{idx}は{party[idx].species_ja}で"
+                  f"確定済みのため slot{alt} へ付け替え")
+            if alt is None:
+                pipeline.state.log_event(
+                    "manual",
+                    f"手動確定を無視: {species_ja} (空き枠なし・全枠確定済み)",
+                    event_id="species_manual_skip")
+                await sio.emit('state_update', pipeline.state.to_dict(),
+                               room=sid)
+                return
+            idx = alt
         if 0 <= idx < len(party):
             party[idx].merge_species(species_ja, species_id)
             # 直近の「HUD名不一致」で観測された別名をこの個体に紐づける

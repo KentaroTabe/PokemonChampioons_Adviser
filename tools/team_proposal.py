@@ -382,34 +382,70 @@ def _adoption_steps(in_dist: bool | None) -> list:
     return steps
 
 
-def propose(stage: int, ns: argparse.Namespace) -> int:
+def _summary_text(stage: int, payload: dict) -> str:
+    """CLI表示・フロントエンド表示で共用する結果サマリー"""
+    best = payload.get("best") or {}
+    lines = ["===== 構築提案 =====",
+             f"段階{stage} / 探索時の勝率 {best.get('fitness')}",
+             "", best.get("ja") or "(提案なし)"]
+    accept = payload.get("acceptance")
+    if accept:
+        mean, se = accept.get("mean"), accept.get("se")
+        if mean is not None:
+            lines.append("")
+            lines.append(
+                f"受入検定 (対応のある比較, n={accept.get('n')}): "
+                f"提案{accept.get('new_win_rate'):.3f} vs "
+                f"現行{accept.get('cur_win_rate'):.3f} / "
+                f"差 {mean:+.3f} ± {se:.3f}(SE)")
+        else:
+            lines.append("受入検定: 検定不能")
+        lines.append(f"判定: {accept.get('verdict')}")
+    lines.append("")
+    lines.append("採用する場合の手順:")
+    lines += [f"  {s}" for s in payload.get("adoption_steps") or []]
+    return "\n".join(lines)
+
+
+async def run_proposal(stage: int, ns: argparse.Namespace, log=None,
+                       force: bool = False) -> dict:
+    """構築提案の本体 (CLIとアドバイザーサーバーの両方から呼ばれる)。
+
+    返り値: {"code": 0|2|3, "conditions_text", "summary", "payload", "path"}
+      code 2 = 必須条件未達 / 3 = 実行時競合 (対戦中・PAUSE_TRAINING)
+    """
+    log = log or (lambda m: print(m, flush=True))
     conds = evaluate_conditions(
         measure_inputs(stage, ns.battles, ns.accept_battles), stage)
-    print(render_report(conds, stage))
-    if not hard_ok(conds) and not ns.force:
-        print("→ 必須条件が未達のため実行しません (--force で強行、結果は参考値)")
-        return 2
+    conds_text = render_report(conds, stage)
+    log(conds_text)
+    out = {"code": 0, "conditions_text": conds_text, "summary": "",
+           "payload": None, "path": None}
+    if not hard_ok(conds) and not force:
+        out["code"] = 2
+        out["summary"] = "必須条件が未達のため実行しません (--force で強行可)"
+        return out
 
-    # 実行時の競合回避 (学習中の対戦ログ・スイープの一時停止フラグ)
+    # 実行時の競合回避 (アドバイザーの対戦・スイープの一時停止フラグ)
     from tools.check_battle_active import battle_active
     if battle_active(3.0):
-        print("→ 対戦中のため実行しません (アドバイザーと競合させない)")
-        return 3
+        out["code"] = 3
+        out["summary"] = "対戦中のため実行しません (アドバイザーと競合させない)"
+        return out
     if (REPO / "logs" / "PAUSE_TRAINING").exists():
-        print("→ PAUSE_TRAINING があるため実行しません (測定系との競合回避)")
-        return 3
+        out["code"] = 3
+        out["summary"] = "PAUSE_TRAINING があるため実行しません (測定系との競合回避)"
+        return out
 
-    import asyncio
     from tools.evolve_teams import run as evolve_run
 
-    log = lambda m: print(m, flush=True)   # noqa: E731
     t0 = time.time()
-    result = asyncio.run(evolve_run(_evolve_args(stage, ns), log))
+    result = await evolve_run(_evolve_args(stage, ns), log)
 
     accept = None
     if ns.accept_battles > 0:
-        accept = asyncio.run(_acceptance_test(
-            result["best_text"], ns.accept_battles, log))
+        accept = await _acceptance_test(
+            result["best_text"], ns.accept_battles, log)
 
     in_dist = next((c.ok for c in conds if c.cid == "M2"), None)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -433,23 +469,20 @@ def propose(stage: int, ns: argparse.Namespace) -> int:
     out_json = OUT_DIR / f"proposal_{ts}.json"
     out_json.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
                         encoding="utf-8")
+    out["payload"] = payload
+    out["path"] = str(out_json)
+    out["summary"] = _summary_text(stage, payload)
+    return out
 
-    print("\n===== 構築提案 =====")
-    print(f"段階{stage} / 提案: {result.get('best_ja')} "
-          f"(探索時の勝率 {result.get('fitness')})")
-    if accept:
-        mean = accept.get("mean")
-        se = accept.get("se")
-        print(f"受入検定 (対応のある比較, n={accept.get('n')}): "
-              f"提案{accept.get('new_win_rate')} vs 現行{accept.get('cur_win_rate')} "
-              f"/ 差 {mean:+.3f} ± {se:.3f}(SE)" if mean is not None
-              else "受入検定: 検定不能")
-        print(f"判定: {accept.get('verdict')}")
-    print("採用する場合の手順:")
-    for s in payload["adoption_steps"]:
-        print(f"  {s}")
-    print(f"保存: {out_json}")
-    return 0
+
+def propose(stage: int, ns: argparse.Namespace) -> int:
+    import asyncio
+    res = asyncio.run(run_proposal(stage, ns, force=ns.force))
+    if res["summary"]:
+        print("\n" + res["summary"])
+    if res.get("path"):
+        print(f"保存: {res['path']}")
+    return res["code"]
 
 
 def main() -> None:

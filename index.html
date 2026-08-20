@@ -54,14 +54,19 @@
                 <h3>📊 パーティ診断 (試合終了時に自動更新)</h3>
                 <pre id="team-advice-text" style="white-space:pre-wrap;font-size:12px"></pre>
             </div>
-            <div class="panel" id="team-gen-panel">
-                <h3>🧪 1からのパーティ提案</h3>
-                <div style="font-size:11px;color:#89a;margin-bottom:6px">軸にするポケモンを入れて生成。共起データで6体を組み、実対戦で選抜します(数分)。</div>
-                <input list="tl-species" id="gen-core" placeholder="軸ポケモン (例: ガブリアス)" style="width:60%">
-                <label style="display:inline;font-size:11px;margin-left:8px"><input type="checkbox" id="gen-eval" checked style="width:auto"> 実対戦で選抜</label>
-                <button onclick="generateTeam()" id="gen-btn" style="margin-left:8px;background:#3567c9;color:#fff;border:none;border-radius:6px;padding:6px 14px;cursor:pointer">生成</button>
-                <div id="gen-progress" style="font-size:12px;color:#8ac;margin-top:8px;white-space:pre-wrap"></div>
-                <div id="gen-result" style="margin-top:8px"></div>
+            <div class="panel" id="team-proposal-panel">
+                <h3>🧭 構築提案</h3>
+                <div style="font-size:11px;color:#89a;margin-bottom:6px">実対戦評価+受入検定 (提案 vs 現行、同一相手列) つきの提案。ボタンを押したときだけ走ります (数十分かかることがあります)。設計: docs/TEAM_PROPOSAL_DESIGN.md</div>
+                <div style="margin-bottom:6px;font-size:11px">
+                    段階: <select id="tp-stage" style="font-size:11px;background:#223;color:#cde;border:1px solid #446;border-radius:4px">
+                        <option value="1" selected>1: 現パーティから2枠まで入替</option>
+                        <option value="2">2: メタ全体から一般提案</option></select>
+                    固定枠: <input id="tp-locked" placeholder="例: ミミッキュ,サザンドラ" style="width:170px;font-size:11px">
+                </div>
+                <button onclick="checkTeamProposal()" class="mini-btn">条件チェック</button>
+                <button onclick="runTeamProposal()" id="tp-btn" style="margin-left:8px;background:#3567c9;color:#fff;border:none;border-radius:6px;padding:6px 14px;cursor:pointer">提案を実行</button>
+                <div id="tp-progress" style="font-size:11px;color:#8ac;margin-top:8px;white-space:pre-wrap;max-height:90px;overflow-y:auto"></div>
+                <pre id="tp-result" style="white-space:pre-wrap;font-size:12px;max-height:420px;overflow-y:auto"></pre>
             </div>
             <div class="panel" id="analysis-panel">
                 <h3>📈 分析・コーチング</h3>
@@ -123,10 +128,30 @@
         const STATUS_JA = {poison: 'どく', toxic: 'もうどく', burn: 'やけど', paralysis: 'まひ',
                            sleep: 'ねむり', freeze: 'こおり', drowsy: 'ねむけ', fainted: 'ひんし'};
 
-        function setSpecies(i, val) {
+        function setSpecies(i, val, el) {
             if (!val) return;
             const [id, ja] = val.split('|');
             socket.emit('set_species', {index: i, species_id: id, species_ja: ja});
+            // 選択完了: 再描画の保留を解除し、確定を即座に反映させる
+            if (el && el.blur) el.blur();
+            releaseOppHold();
+        }
+
+        // --- 手動確定プルダウンの再描画保護 ---
+        // state_update (処理フレームごと) が相手欄を innerHTML で丸ごと
+        // 差し替えるため、開いている最中のプルダウンが破棄され「選んだのに
+        // 入らない」が頻発していた (2026-08-20修正)。SELECT操作中は相手欄の
+        // 再描画を保留し、選択完了/フォーカス喪失時に最新状態を反映する
+        let oppUiHold = 0;          // 0=保留なし / >0=保留開始時刻(ms)
+        let oppPendingState = null;
+        const OPP_HOLD_MAX_MS = 20000;   // 異常時の凍結防止 (タブ切替等)
+        function releaseOppHold() {
+            oppUiHold = 0;
+            if (oppPendingState) {
+                const s = oppPendingState;
+                oppPendingState = null;
+                renderOppParty(s);
+            }
         }
 
         // --- 分析・コーチング (敗因分析/環境/レビュー/プレイブック/改善) ---
@@ -230,43 +255,37 @@
             document.getElementById('team-advice-text').textContent = a.text;
         });
 
-        // --- 1からのパーティ提案 (バックグラウンド生成+進捗) ---
-        function generateTeam() {
-            const core = document.getElementById('gen-core').value.trim();
-            if (!core) { alert('軸ポケモンを入力してください'); return; }
-            const evaluate = document.getElementById('gen-eval').checked;
-            document.getElementById('gen-btn').disabled = true;
-            document.getElementById('gen-progress').textContent = '⏳ 生成を開始しています…';
-            document.getElementById('gen-result').innerHTML = '';
-            socket.emit('generate_team', {core, evaluate});
+        // --- 構築提案 (段階ゲート付き。ボタン押下時のみ実対戦評価を実行) ---
+        const tpProgress = document.getElementById('tp-progress');
+        const tpResult = document.getElementById('tp-result');
+        function tpParams() {
+            return {stage: +document.getElementById('tp-stage').value,
+                    locked: document.getElementById('tp-locked').value.trim()};
         }
-        socket.on('team_gen_progress', (p) => {
-            document.getElementById('gen-progress').textContent = '⏳ ' + p.msg;
+        function checkTeamProposal() {
+            tpResult.textContent = '';
+            tpProgress.textContent = '⏳ 運用条件を確認しています…';
+            socket.emit('check_team_proposal', tpParams());
+        }
+        function runTeamProposal() {
+            tpResult.textContent = '';
+            tpProgress.textContent =
+                '⏳ 構築提案を開始 (実対戦評価+受入検定。数十分かかることがあります)…\n';
+            document.getElementById('tp-btn').disabled = true;
+            socket.emit('run_team_proposal', tpParams());
+        }
+        socket.on('team_proposal_progress', (d) => {
+            const lines = (tpProgress.textContent + d.msg + '\n').split('\n');
+            tpProgress.textContent = lines.slice(-8).join('\n');
+            tpProgress.scrollTop = tpProgress.scrollHeight;
         });
-        socket.on('team_gen_result', (r) => {
-            document.getElementById('gen-btn').disabled = false;
-            const prog = document.getElementById('gen-progress');
-            const el = document.getElementById('gen-result');
-            if (!r.ok) { prog.textContent = '⚠ ' + (r.reason || '生成失敗'); return; }
-            prog.textContent = '✅ 生成完了';
-            let html = '<div style="font-size:12px;color:#89a">候補構築 (メタカバレッジ順):</div><ol style="font-size:12px;margin:4px 0">';
-            for (const c of r.candidates)
-                html += `<li>カバレッジ${Math.round(c.coverage*100)}%: ${c.names.join('・')}</li>`;
-            html += '</ol>';
-            if (r.best) {
-                html += `<div class="best" style="margin-top:6px">◎ 最有力 (実戦勝率${Math.round(r.best.win_rate*100)}%): <b>${r.best.names.join('・')}</b></div>`;
-                const w = r.best.weakness;
-                if (w && w.weak_mons && w.weak_mons.length) {
-                    html += '<div style="font-size:12px;color:#e99;margin-top:6px">⚠ 苦手なポケモン (対面が不利な順): '
-                        + w.weak_mons.map(m => `${m.name}(${m.margin>=0?'+':''}${m.margin})`).join(' / ') + '</div>';
-                    if (w.weak_teammates && w.weak_teammates.length)
-                        html += `<div style="font-size:12px;color:#e99">⚠ 苦手な構築の傾向: ${w.weak_teammates.join('・')} 軸</div>`;
-                }
-                const tt = r.best.team_text_ja || r.best.team_text;
-                if (tt)
-                    html += `<pre style="font-size:11px;background:#121826;padding:8px;border-radius:6px;overflow-x:auto">${tt}</pre>`;
-            }
-            el.innerHTML = html;
+        socket.on('team_proposal_result', (d) => {
+            tpProgress.textContent = '';
+            tpResult.textContent = d.text || '';
+            document.getElementById('tp-btn').disabled = false;
+        });
+        socket.on('disconnect', () => {
+            document.getElementById('tp-btn').disabled = false;
         });
 
         // --- 手動修正 (誤認識のユーザー訂正。修正はログに記録され分析に使う) ---
@@ -345,7 +364,7 @@
             if (side === 'opp' && !p.species_ja && p.candidates && p.candidates.length) {
                 const opts = p.candidates.map(c =>
                     `<option value="${c.id}|${c.ja}">${c.ja} (${c.pct}%)</option>`).join('');
-                picker = `<select onchange="setSpecies(${i}, this.value)"
+                picker = `<select onchange="setSpecies(${i}, this.value, this)"
                     style="margin-left:6px;font-size:11px;background:#223;color:#cde;border:1px solid #446;border-radius:4px">
                     <option value="">候補から確定…</option>${opts}</select>`;
             }
@@ -354,33 +373,8 @@
             return `<div class="${cls.join(' ')}">${i===activeIdx?'▶ ':''}${p.species_ja || p.display_name || '???'}${picker}${hp}${tags}${fixBtn}${moves}</div>`;
         }
 
-        socket.on('state_update', (s) => {
-            // レートは結果画面のOCRから取得 (勝敗推定にも使用)
-            const rate = s.last_rate && s.last_rate.value ? ` | レート${s.last_rate.value}` : '';
-            document.getElementById('scene-label').textContent = 'scene: ' + s.scene + rate;
-            const f = s.field || {};
-            const parts = [];
-            if (f.weather) parts.push(WEATHER_JA[f.weather] || f.weather);
-            if (f.terrain) parts.push(TERRAIN_JA[f.terrain] || f.terrain);
-            if (f.trick_room) parts.push('トリックルーム');
-            const hz = s.player && s.player.hazards;
-            if (hz && hz.stealth_rock) parts.push('自陣ステロ');
-            if (s.opponent && s.opponent.hazards && s.opponent.hazards.stealth_rock) parts.push('敵陣ステロ');
-            document.getElementById('field-label').textContent = parts.join(' / ') || '場: 通常';
-
-            // 自分のパーティ: 対戦中は選出3体 (白リボン追跡+登場済み) のみ表示
-            const inBattle = !['selection', 'standby', 'unknown'].includes(s.scene);
-            const myParty = s.player.party || [];
-            const picked = myParty.filter(p => p.is_picked).length;
-            const myShown = [];
-            myParty.forEach((p, i) => {
-                const appeared = i === s.player.active_index ||
-                    p.hp_percent != null || p.pick_order;
-                if (inBattle && picked >= 1 && !p.is_picked && !appeared) return;
-                myShown.push(renderMon(p, i, s.player.active_index, 'my'));
-            });
-            document.getElementById('my-party').innerHTML = myShown.join('');
-            // 相手のパーティ: 確定済みを先に、未確定枠は「予測 (あり得る順)」で表示
+        // 相手のパーティ欄の描画: 確定済みを先に、未確定枠は「予測 (あり得る順)」
+        function renderOppParty(s) {
             const oppParty = s.opponent.party || [];
             const confirmed = [], predicted = [];
             let unknownCount = 0;
@@ -408,7 +402,7 @@
                         .map(c => `${c.ja} ${c.pct}%`).join(' / ');
                     const types = (p.types || []).join('・');
                     const picker = (p.candidates && p.candidates.length) ?
-                        `<select onchange="setSpecies(${i}, this.value)" style="margin-left:6px;font-size:11px;background:#223;color:#cde;border:1px solid #446;border-radius:4px"><option value="">確定…</option>` +
+                        `<select onchange="setSpecies(${i}, this.value, this)" style="margin-left:6px;font-size:11px;background:#223;color:#cde;border:1px solid #446;border-radius:4px"><option value="">確定…</option>` +
                         p.candidates.map(c => `<option value="${c.id}|${c.ja}">${c.ja} (${c.pct}%)</option>`).join('') + '</select>' : '';
                     shown.push(`<div class="mon" style="opacity:.8"><b>${rank + 1}.</b> [${types}] ${cands || '候補なし'}${picker}</div>`);
                 });
@@ -420,6 +414,51 @@
             if (mism.length)
                 shown.push(`<div style="font-size:11px;color:#fa6">⚠ ${mism[0].text} — ✏️で種族を確定すると以後正しく帰属されます</div>`);
             document.getElementById('opp-party').innerHTML = shown.join('');
+        }
+
+        // プルダウン操作の検知 (再描画の保留開始/解除)。要素は毎回作り直される
+        // ため、コンテナへの委譲リスナーで拾う
+        const _oppPartyEl = document.getElementById('opp-party');
+        _oppPartyEl.addEventListener('focusin', (e) => {
+            if (e.target.tagName === 'SELECT') oppUiHold = Date.now();
+        });
+        _oppPartyEl.addEventListener('focusout', (e) => {
+            if (e.target.tagName === 'SELECT') releaseOppHold();
+        });
+
+        socket.on('state_update', (s) => {
+            // レートは結果画面のOCRから取得 (勝敗推定にも使用)
+            const rate = s.last_rate && s.last_rate.value ? ` | レート${s.last_rate.value}` : '';
+            document.getElementById('scene-label').textContent = 'scene: ' + s.scene + rate;
+            const f = s.field || {};
+            const parts = [];
+            if (f.weather) parts.push(WEATHER_JA[f.weather] || f.weather);
+            if (f.terrain) parts.push(TERRAIN_JA[f.terrain] || f.terrain);
+            if (f.trick_room) parts.push('トリックルーム');
+            const hz = s.player && s.player.hazards;
+            if (hz && hz.stealth_rock) parts.push('自陣ステロ');
+            if (s.opponent && s.opponent.hazards && s.opponent.hazards.stealth_rock) parts.push('敵陣ステロ');
+            document.getElementById('field-label').textContent = parts.join(' / ') || '場: 通常';
+
+            // 自分のパーティ: 対戦中は選出3体 (白リボン追跡+登場済み) のみ表示
+            const inBattle = !['selection', 'standby', 'unknown'].includes(s.scene);
+            const myParty = s.player.party || [];
+            const picked = myParty.filter(p => p.is_picked).length;
+            const myShown = [];
+            myParty.forEach((p, i) => {
+                const appeared = i === s.player.active_index ||
+                    p.hp_percent != null || p.pick_order;
+                if (inBattle && picked >= 1 && !p.is_picked && !appeared) return;
+                myShown.push(renderMon(p, i, s.player.active_index, 'my'));
+            });
+            document.getElementById('my-party').innerHTML = myShown.join('');
+            // 相手のパーティ: プルダウン操作中は再描画を保留する
+            if (oppUiHold && Date.now() - oppUiHold < OPP_HOLD_MAX_MS) {
+                oppPendingState = s;
+            } else {
+                oppUiHold = 0;
+                renderOppParty(s);
+            }
 
             // 誤表示削減: イベント化された行のみ表示 (OCRノイズの生ログは出さない)
             const evs = (s.events || []).filter(e => e.event);
