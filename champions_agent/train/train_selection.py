@@ -235,10 +235,12 @@ def train(epochs: int = 300, lr: float = 1e-3, holdout: float = 0.2,
         val_idx = np.array([i for i, k in enumerate(keys) if k in held])
         tr_idx = np.array([i for i, k in enumerate(keys) if k not in held])
         print(f"  検証は未知チーム {len(held)}種 ({len(val_idx)}件) で実施")
+        split_kind = "unseen_teams"   # 未知チーム分割 = 構成汎化の実測
     else:
         idx = rng.permutation(len(y))
         n_val = max(1, int(len(y) * holdout))
         val_idx, tr_idx = idx[:n_val], idx[n_val:]
+        split_kind = "random"
     Xtr = torch.from_numpy(X[tr_idx])
     ytr = torch.from_numpy(y[tr_idx]).unsqueeze(1)
     Xva = torch.from_numpy(X[val_idx])
@@ -353,13 +355,19 @@ def train(epochs: int = 300, lr: float = 1e-3, holdout: float = 0.2,
 
     torch.save(net.state_dict(), MODEL_PATH)
     # 学習に使ったチームを記録する。未学習のチームでは予測が外挿になるため、
-    # アドバイザー側で「参考値」と断って表示するのに使う
+    # アドバイザー側で「参考値」と断って表示するのに使う。
+    # val は未知チーム検証の実測 (構築提案の運用ゲート tools/team_proposal が
+    # 「モデルの構成汎化が測定済みか」を機械判定するのに使う)
     import json
+    import time as _time
     d = np.load(DATA_PATH)
     teams = sorted({tuple(sorted(str(s).lower() for s in t))
                     for t in d["team"]})
     META_PATH.write_text(json.dumps(
-        {"teams": [list(t) for t in teams], "n_samples": int(meta["n"])},
+        {"teams": [list(t) for t in teams], "n_samples": int(meta["n"]),
+         "val": {"mse": round(best_val, 5), "baseline_mse": round(base, 5),
+                 "gain_pct": round(gain, 2), "split": split_kind,
+                 "at": _time.strftime("%Y-%m-%d %H:%M")}},
         ensure_ascii=False), encoding="utf-8")
     print(f"[train_selection] 保存: {MODEL_PATH}")
 
