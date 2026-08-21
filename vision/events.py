@@ -291,12 +291,29 @@ class EventParser:
         side = self.state.side(side_name)
         norm = loose_key(cleaned)
         head = norm[:14]
+        matches = []
         for mon in side.party:
             for cand in (mon.species_ja, mon.display_name,
                          *(mon.aliases or [])):
                 ck = loose_key(cand) if cand else ""
                 if ck and len(ck) >= 3 and ck in head:
-                    return side_name, side, mon, True
+                    matches.append(mon)
+                    break
+        if matches:
+            # 同名フォーム (ロトム/ウォッシュロトム等) 対策: 一致した名前を
+            # 内包する同族スロットも候補へ加えたうえで、場に出ている個体を
+            # 優先する (2026-08-20 第5回持ち越し: 「相手のロトムはたおれた」
+            # がゲーム表示上は同名のウォッシュ個体でなく基本形スロットへ
+            # 誤帰属した)
+            keys = {loose_key(m.species_ja) for m in matches if m.species_ja}
+            for mon in side.party:
+                mk = loose_key(mon.species_ja) if mon.species_ja else ""
+                if mon not in matches and mk and \
+                        any(k and k in mk for k in keys):
+                    matches.append(mon)
+            act = side.active()
+            mon = act if act in matches else matches[0]
+            return side_name, side, mon, True
         # ファジー照合: プレフィックスを除いた先頭セグメント vs パーティ名
         seg = re.sub(r"^(相手の|あいての|.手の)", "", norm).split("の")[0][:8]
         if len(seg) >= 3:
@@ -624,15 +641,22 @@ class EventParser:
         name_key = loose_key(re.sub(r"^(相手の|あいての)", "", name_part))
         if len(name_key) < 3:
             return None, None
-        # 1. 両サイドのパーティから名前一致 (逆サイド誤りにも耐える)
+        # 1. 両サイドのパーティから名前一致 (逆サイド誤りにも耐える)。
+        #    同名フォームが複数一致する場合は場に出ている個体を優先
         for side_name in (default_side,
                           "opponent" if default_side == "player" else "player"):
-            for mon in self.state.side(side_name).party:
+            side_obj = self.state.side(side_name)
+            matches = []
+            for mon in side_obj.party:
                 for cand in (mon.species_ja, mon.display_name,
                              *(mon.aliases or [])):
                     ck = loose_key(cand) if cand else ""
                     if ck and len(ck) >= 3 and (ck in name_key or name_key in ck):
-                        return side_name, mon
+                        matches.append(mon)
+                        break
+            if matches:
+                act = side_obj.active()
+                return side_name, (act if act in matches else matches[0])
         # 2. 種族名として解決できるなら、未特定のアクティブ個体の特定に使う
         sp = self.resolver.resolve_species(name_part, cutoff=0.8)
         if sp:

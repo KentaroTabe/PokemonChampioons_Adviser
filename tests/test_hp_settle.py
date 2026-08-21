@@ -110,6 +110,7 @@ def test_field_hp_guards_attribution():
     from vision import extractors, ocr, scenes, zones
 
     state = BattleStateV2()
+    state.battle_active = True   # 対戦中 (終了後はfield読み自体を止める)
     mon = _mon(state)
     mon.hp_percent = 21.0
 
@@ -145,6 +146,14 @@ def test_field_hp_guards_attribution():
         extractors.extract_field_hp(img, state)
         time.sleep(0.65)
         extractors.extract_field_hp(img, state)
+        assert mon.hp_percent == 15.0, mon.hp_percent
+
+        # 対戦終了後 (battle_end_rank済み) はfield読みを止める
+        # (2026-08-21 第8回: リザルト画面の数値がHP変動として誤読された)
+        state.battle_active = False
+        reads["hp"] = "87%"
+        for _ in range(4):
+            extractors.extract_field_hp(img, state)
         assert mon.hp_percent == 15.0, mon.hp_percent
     finally:
         ocr.read_zone_text = orig_read

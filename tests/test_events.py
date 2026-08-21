@@ -232,6 +232,30 @@ def test_knockoff_removes_item():
     print("test_knockoff_removes_item OK")
 
 
+def test_rotom_form_faint_prefers_active():
+    """同名フォーム (ロトム/ウォッシュロトム) の帰属は場の個体を優先する。
+
+    2026-08-20 第5回持ち越し: 「相手のロトムはたおれた」が基本形スロットへ
+    誤帰属し、実際に倒れたウォッシュロトムが健在のまま残った。
+    """
+    state, p = new_parser()
+    base = state.opponent.party  # 既定の相手枠は流用せず追加する
+    from vision.state import PokemonState
+    rotom = PokemonState(species_ja="ロトム", species_id="rotom")
+    rotom.hp_percent = 100.0
+    wash = PokemonState(species_ja="ウォッシュロトム", species_id="rotomwash")
+    wash.hp_percent = 40.0
+    base.clear()
+    base.extend([rotom, wash])
+    state.opponent.active_index = 1   # 場に出ているのはウォッシュ
+
+    fired = p.parse("相手の ロトムは たおれた!")
+    assert "faint" in fired, fired
+    assert wash.status == "fainted", (wash.status, rotom.status)
+    assert rotom.status != "fainted", "基本形スロットへ誤帰属した"
+    print("test_rotom_form_faint_prefers_active OK")
+
+
 def test_pivot_switch_context_flag():
     """とんぼがえり系の使用で交代先選択フラグが立ち、交代完了で下りる (第8回)"""
     state, p = new_parser()
@@ -595,6 +619,7 @@ if __name__ == "__main__":
     test_type_change_survives_backfill()
     test_popup_item_containing_no()
     test_knockoff_removes_item()
+    test_rotom_form_faint_prefers_active()
     test_pivot_switch_context_flag()
     test_rank_screen_ends_battle()
     test_hazards_and_screens()

@@ -395,6 +395,92 @@ def test_watch_opp_zero_needs_corroboration():
     print("test_watch_opp_zero_needs_corroboration OK")
 
 
+def test_watch_my_team_update_needs_two_reads():
+    """能力タブからの my_team 自動更新は同一内容の2フレーム連続を要求する。
+
+    watchファミリー画面 (パーティ一覧等) の単発誤読が設定ファイルを
+    汚染しうるため (2026-08-21: 分類器での画面分離は困難と判断し、
+    書き込み側の裏付けで守る方針)。
+    """
+    from vision import extractors
+    from vision.normalize import NameResolver
+    import advisor.my_team as mt
+
+    st = BattleStateV2()
+    mon = PokemonState(species_ja="ブリジュラス", species_id="archaludon")
+    st.player.party.append(mon)
+    st.player.active_index = 0
+
+    calls = []
+    orig_update = mt.update_build
+    orig_read = ocr.read_zone_text
+    orig_reg = extractors._registered_move_ids
+    mt.update_build = lambda ja, patch: calls.append((ja, dict(patch))) or True
+    extractors._registered_move_ids = \
+        lambda ja, r: {"dragonpulse", "flashcannon"}
+
+    def fake_read(img, zone, **kw):
+        if zone is zones.WATCH["type_row"]:
+            return "はがね ドラゴン"
+        if zone is zones.WATCH["ability_value"]:
+            return "がんじょう"
+        if zone is zones.WATCH["item_value"]:
+            return "こだわりスカーフ"
+        for i, row in enumerate(zones.WATCH_MOVES):
+            if zone is row["name"]:
+                return ["りゅうのはどう", "ラスターカノン",
+                        "１０まんボルト", "りゅうせいぐん"][i]
+        return ""
+
+    ocr.read_zone_text = fake_read
+    try:
+        img = np.zeros((720, 1280, 3), dtype=np.uint8)
+        extractors._extract_watch_ability(img, st, NameResolver())
+        assert not calls, f"1回目で書き込まれた: {calls}"
+        extractors._extract_watch_ability(img, st, NameResolver())
+        assert len(calls) == 1 and calls[0][0] == "ブリジュラス", calls
+    finally:
+        mt.update_build = orig_update
+        ocr.read_zone_text = orig_read
+        extractors._registered_move_ids = orig_reg
+    print("test_watch_my_team_update_needs_two_reads OK")
+
+
+def test_hud_base_name_keeps_form_variant_active():
+    """HUD名は基本形表記のため、場のフォーム個体 (rotomwash) を
+    基本形スロットへ切り替えない (第5回持ち越しのロトム系同名混同)"""
+    st = BattleStateV2()
+    rotom = PokemonState(species_ja="ロトム", species_id="rotom")
+    rotom.hp_percent = 100.0
+    wash = PokemonState(species_ja="ウォッシュロトム", species_id="rotomwash",
+                        display_name="ロトム")
+    wash.hp_percent = 40.0
+    st.opponent.party.extend([rotom, wash])
+    st.opponent.active_index = 1
+    for _ in range(3):
+        _run_hud(st, "ロトム", "35%")
+        st.opponent.active()._hp_stable_since = 0.0
+    assert st.opponent.active_index == 1, "基本形スロットへ切り替わった"
+    assert wash.hp_percent == 35.0, wash.hp_percent
+    assert rotom.hp_percent == 100.0, rotom.hp_percent
+    print("test_hud_base_name_keeps_form_variant_active OK")
+
+
+def test_hud_mega_name_sets_mega_flag():
+    """HUD名がメガ形 (メガハッサム等) なら is_mega を立てて枠は維持する
+    (第6-7回持ち越しのメガ表記ファミリー: メガシンカ文言の取り逃し対策)"""
+    st = BattleStateV2()
+    mon = PokemonState(species_ja="ハッサム", species_id="scizor")
+    mon.hp_percent = 100.0
+    st.opponent.party.append(mon)
+    st.opponent.active_index = 0
+    _run_hud(st, "メガハッサム", "80%")
+    assert mon.is_mega is True, mon.is_mega
+    assert st.opponent.active_index == 0
+    assert len(st.opponent.party) == 1, [p.species_ja for p in st.opponent.party]
+    print("test_hud_mega_name_sets_mega_flag OK")
+
+
 def test_verified_name_updates_hp():
     st, mon = _state_with_opp("ドリュウズ", "excadrill", 33.0)
     for _ in range(3):
@@ -421,6 +507,9 @@ def main() -> None:
     test_field_check_skips_unresolved_or_foreign_species()
     test_field_check_reads_garbled_hazard_state()
     test_watch_opp_zero_needs_corroboration()
+    test_watch_my_team_update_needs_two_reads()
+    test_hud_base_name_keeps_form_variant_active()
+    test_hud_mega_name_sets_mega_flag()
     test_verified_name_updates_hp()
     print("ALL OK")
 

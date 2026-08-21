@@ -450,6 +450,12 @@ def extract_field_hp(img, state: BattleStateV2) -> None:
     HPを読み続けることで、技イベントとHP変化イベントを時系列で対応付ける。
     """
     from vision.scenes import _crimson_ratio, _hp_bar_pixels
+    # 対戦終了後 (battle_end_rank済み) は読まない: リザルト画面の数値が
+    # fieldに誤分類されたフレームからHP変動として誤読された
+    # (2026-08-21 第8回opus監査: ランク画面表示中に「ライチュウ100%→87%」)。
+    # 次の対戦はbattle_hud抽出がbattle_activeを立て直すので自己復帰する
+    if not state.battle_active:
+        return
     # HUDが表示されているかの軽量ゲート
     if _crimson_ratio(crop(img, zones.BATTLE["opp_banner"])) < 0.15:
         return
@@ -675,9 +681,29 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
         elif sp:
             state.opponent._pending_new_species = None
         if sp:
-            # 種族名がそのまま表示されている場合: 種族で枠を確定
-            opp = state.opponent.switch_to_species(sp[0], sp[1])
-            opp_name_verified = True
+            cur = state.opponent.active()
+            if cur is not None and cur.species_id and \
+                    cur.species_id != sp[1] and \
+                    cur.species_id.startswith(sp[1]):
+                # フォーム違い同名種 (ロトム系等): HUD表示は基本形名のため、
+                # 場のフォーム個体 (rotomwash等) を基本形スロットへ誤って
+                # 切り替えない (2026-08-20 第5回持ち越し: ひんし/HPが
+                # 別フォームの枠へ付いた)
+                opp = cur
+                opp_name_verified = True
+            elif cur is not None and cur.species_id and \
+                    sp[1] != cur.species_id and \
+                    sp[1].startswith(cur.species_id) and "mega" in sp[1]:
+                # HUD名がメガ形 (メガハッサム等): メガシンカ文言を取り逃して
+                # いても名前からメガ済みを検出する (第6-7回持ち越しの
+                # メガ表記ファミリー)。スロットは基本形のまま維持
+                cur.is_mega = True
+                opp = cur
+                opp_name_verified = True
+            else:
+                # 種族名がそのまま表示されている場合: 種族で枠を確定
+                opp = state.opponent.switch_to_species(sp[0], sp[1])
+                opp_name_verified = True
         elif opp is None or (opp.display_name and
                              opp.display_name != name_text and not opp.species_ja):
             # ニックネーム表示: 表示名で追跡
@@ -1709,16 +1735,24 @@ def _extract_watch_ability(img, state: BattleStateV2, resolver) -> None:
                 slot.effectiveness = prev.effectiveness
         me.moves = new_moves
 
-    # 自パーティ登録 (my_team) の自動更新: 技4つが読めた場合のみ技を保存
+    # 自パーティ登録 (my_team) の自動更新: 技4つが読めた場合のみ技を保存。
+    # ⚠ 同一内容が2フレーム連続で読めたときだけ書き込む: watchファミリーの
+    # 画面 (パーティ一覧等) の単発誤読・誤帰属が設定ファイルを汚染しうる
+    # (2026-08-21: 分類器でのつよさ/一覧の分離は特徴が共通で困難と判断し、
+    #  書き込み側の裏付けで守る方針にした)
     if build_species:
         from advisor.my_team import update_build
         patch = {"特性": ability_ja, "持ち物": item_ja}
         if len(new_moves) == 4:
             patch["技"] = [m.name_ja for m in new_moves]
-        if update_build(build_species, patch):
-            state.log_event("system",
-                            f"my_team更新: {build_species} (能力タブ)",
-                            event_id=None)
+        patch_key = (build_species, ability_ja, item_ja,
+                     tuple(patch.get("技") or ()))
+        if patch_key == getattr(state, "_last_watch_patch", None):
+            if update_build(build_species, patch):
+                state.log_event("system",
+                                f"my_team更新: {build_species} (能力タブ)",
+                                event_id=None)
+        state._last_watch_patch = patch_key
 
 
 def extract_watch_side_columns(img, state: BattleStateV2, resolver) -> None:
