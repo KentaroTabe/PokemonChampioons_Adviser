@@ -429,6 +429,15 @@ class EventParser:
             else:
                 self.state.protect_streak[side] = 0
 
+        # とんぼがえり系の交代先選択コンテキスト (engineが交代限定助言に使う)。
+        # 使用で立て、交代完了/対戦終了で下ろす (次ターン到達時は pipeline 側)
+        for f in fired:
+            if f.startswith("move_player_") and \
+                    f.split("move_player_", 1)[1] in self.PIVOT_SWITCH_MOVE_IDS:
+                self.state.pending_pivot_switch = True
+            elif f == "switch_player" or f.startswith("battle_"):
+                self.state.pending_pivot_switch = False
+
         self.state.log_event(source, cleaned, event_id=",".join(fired) or None)
         if fired:
             # 生テキストを残す: 「技の取りこぼし」「誤帰属」の事後調査は
@@ -436,6 +445,13 @@ class EventParser:
             # 原因か特定できなかった)
             print(f"[events] {','.join(fired)} <- {cleaned[:48]}")
         return fired
+
+    # 自分の交代先選択が発生する対面操作技 (使用後の助言を交代限定にする)
+    # ⚠ ボルトチェンジが無効化された等で交代が発生しないケースは、
+    #   次ターン到達 (pipelineのターン加算) でフラグが下りる
+    PIVOT_SWITCH_MOVE_IDS = frozenset({
+        "uturn", "voltswitch", "flipturn", "partingshot",
+        "batonpass", "shedtail", "chillyreception", "teleport"})
 
     # --------------------------------------------------------------
     def _parse_switch(self, cleaned: str, norm: str, fired: list) -> bool:

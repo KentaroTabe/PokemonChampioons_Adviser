@@ -129,7 +129,18 @@ def get_my_build(species_ja: Optional[str]) -> Optional[dict]:
 
 
 def has_build(species_ja: Optional[str]) -> bool:
-    return get_my_build(species_ja) is not None
+    """実質的な登録 (技 or 能力ポイント) があるか。
+
+    もっと見るの部分取り込みや種族シェルの自動作成で「全フィールドNone」の
+    空エントリができることがあり、空を登録済みと扱うと理論最大HP集合・
+    技権限などのガードが誤作動する (2026-08-21 第8回: パーティ追加直後の
+    マスカーニャが空登録になり、HP読取が全棄却されて認識不全に見えた)。
+    """
+    if not species_ja:
+        return False
+    entry = _load().get(species_ja) or {}
+    return bool((entry.get("技") or entry.get("moves"))
+                or (entry.get("能力ポイント") or entry.get("evs")))
 
 
 def nature_names_ja() -> list:

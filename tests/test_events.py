@@ -232,6 +232,24 @@ def test_knockoff_removes_item():
     print("test_knockoff_removes_item OK")
 
 
+def test_pivot_switch_context_flag():
+    """とんぼがえり系の使用で交代先選択フラグが立ち、交代完了で下りる (第8回)"""
+    state, p = new_parser()
+    assert state.pending_pivot_switch is False
+    fired = p.parse("ブリジュラスの とんぼがえり!")
+    assert "move_player_uturn" in fired, fired
+    assert state.pending_pivot_switch is True
+    fired = p.parse("ゆけっ! ライチュウ!")
+    assert "switch_player" in fired, fired
+    assert state.pending_pivot_switch is False
+
+    # 相手のとんぼがえりでは立たない
+    p.parse("相手は リザードンを 繰り出した!")
+    p.parse("相手の リザードンの とんぼがえり!")
+    assert state.pending_pivot_switch is False
+    print("test_pivot_switch_context_flag OK")
+
+
 def test_rank_screen_ends_battle():
     """ランク画面 (レート表示) を対戦終了のキーにする (第7回ユーザー提案)"""
     state, p = new_parser()
@@ -577,6 +595,7 @@ if __name__ == "__main__":
     test_type_change_survives_backfill()
     test_popup_item_containing_no()
     test_knockoff_removes_item()
+    test_pivot_switch_context_flag()
     test_rank_screen_ends_battle()
     test_hazards_and_screens()
     test_status_and_volatile()

@@ -322,6 +322,10 @@ class BattleStateV2:
         self.mega_used = {"player": False, "opponent": False}
         self.battle_active: bool = False
         self.outcome: Optional[str] = None    # win / loss (勝敗メッセージから)
+        # とんぼがえり系を自分が使用し、交代先の選択が保留中 (2026-08-21
+        # 第8回: この場面で技トップの助言が出ていた)。events が技使用で
+        # 立て、switch_player / 次ターン到達で下ろす。engineは交代限定で助言
+        self.pending_pivot_switch: bool = False
         self.events: list = []          # [{ts, source, text, event, target}]
         self.hp_max_votes: dict = {}    # (side, species) -> {最大HP読取値: 票数}
         self.last_texts = {"message": "", "left_popup": "", "right_popup": ""}
@@ -427,6 +431,7 @@ class BattleStateV2:
             "command_no": self.command_no,
             "battle_active": self.battle_active,
             "outcome": self.outcome,
+            "pending_pivot_switch": self.pending_pivot_switch,
             "field": self.field.to_dict(),
             "player": self.player.to_dict(),
             "opponent": self.opponent.to_dict(),

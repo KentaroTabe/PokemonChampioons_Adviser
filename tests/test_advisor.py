@@ -398,6 +398,76 @@ def test_ko_margin_prefers_overkill():
     print("test_ko_margin_prefers_overkill OK")
 
 
+def test_pivot_pending_switch_only():
+    """とんぼ交代の保留中は交代先のみを助言する (2026-08-21 第8回)"""
+    from vision.normalize import NameResolver
+    resolver = NameResolver()
+    my = {"species_id": "hydreigon", "species_ja": "サザンドラ",
+          "types": ["あく", "ドラゴン"], "hp_percent": 80.0,
+          "hp_current": None, "hp_max": None, "status": None, "boosts": {},
+          "ability_id": None, "item_id": None,
+          "moves": [{"name_ja": "あくのはどう", "move_id": "darkpulse",
+                     "pp": 15, "max_pp": 15, "effectiveness": "neutral"}],
+          "revealed_moves": []}
+    opp = {"species_id": "garchomp", "species_ja": "ガブリアス",
+           "types": ["ドラゴン", "じめん"], "hp_percent": 100.0,
+           "hp_current": None, "hp_max": None, "status": None, "boosts": {},
+           "ability_id": None, "item_id": None, "moves": [],
+           "revealed_moves": []}
+    bench = {"species_id": "raichu", "species_ja": "ライチュウ",
+             "types": ["でんき"], "hp_percent": 100.0,
+             "hp_current": None, "hp_max": None, "status": None,
+             "boosts": {}, "ability_id": None, "item_id": None,
+             "moves": [], "revealed_moves": []}
+    state = _mini_state(my, opp)
+    state["player"]["party"].append(bench)
+    state["pending_pivot_switch"] = True
+    adv = evaluate(state, resolver)
+    kinds = {a["kind"] for a in adv["actions"] if a["score"] > -90}
+    assert kinds == {"switch"}, adv["actions"]
+    assert "とんぼがえり系の交代先" in adv["speed_note"], adv["speed_note"]
+    print("test_pivot_pending_switch_only OK")
+
+
+def test_noguard_makes_low_accuracy_moves_reliable():
+    """ノーガード (自分側) では低命中技を必中として評価する (第8回:
+    チャンピオンズのライチュウ=ノーガード+でんじほう構成)"""
+    from vision.normalize import NameResolver
+    resolver = NameResolver()
+
+    def _raichu(ability):
+        return {"species_id": "raichu", "species_ja": "ライチュウ",
+                "types": ["でんき"], "hp_percent": 100.0,
+                "hp_current": 137, "hp_max": 137, "status": None,
+                "boosts": {}, "ability_id": ability, "item_id": None,
+                "moves": [{"name_ja": "でんじほう", "move_id": "zapcannon",
+                           "pp": 5, "max_pp": 5, "effectiveness": "neutral"}],
+                "revealed_moves": []}
+    opp = {"species_id": "gyarados", "species_ja": "ギャラドス",
+           "types": ["みず", "ひこう"], "hp_percent": 100.0,
+           "hp_current": None, "hp_max": None, "status": None, "boosts": {},
+           "ability_id": None, "item_id": None, "moves": [],
+           "revealed_moves": []}
+    import os
+    prev = os.environ.get("RL_BLEND_WEIGHT")
+    os.environ["RL_BLEND_WEIGHT"] = "0"
+    try:
+        adv_ng = evaluate(_mini_state(_raichu("noguard"), dict(opp)), resolver)
+        adv_lr = evaluate(_mini_state(_raichu("lightningrod"), dict(opp)),
+                          resolver)
+    finally:
+        if prev is None:
+            os.environ.pop("RL_BLEND_WEIGHT", None)
+        else:
+            os.environ["RL_BLEND_WEIGHT"] = prev
+    zc_ng = next(a for a in adv_ng["actions"] if a["id"] == "zapcannon")
+    zc_lr = next(a for a in adv_lr["actions"] if a["id"] == "zapcannon")
+    assert "命中50" not in zc_ng["reason"], zc_ng
+    assert "命中50" in zc_lr["reason"], zc_lr
+    assert zc_ng["score"] > zc_lr["score"], (zc_ng, zc_lr)
+    print("test_noguard_makes_low_accuracy_moves_reliable OK")
+
+
 def test_taunt_context_bonus():
     """挑発は相手の変化技傾向に比例して加点される (2026-08-21 第6回:
     受けのブラッキー相手でも素点15固定のため攻撃技に埋もれていた)。
@@ -595,6 +665,8 @@ if __name__ == "__main__":
     test_act_before_ko_discount()
     test_ko_margin_prefers_overkill()
     test_taunt_context_bonus()
+    test_pivot_pending_switch_only()
+    test_noguard_makes_low_accuracy_moves_reliable()
     test_choice_lock()
     test_registered_moves_fallback()
     test_rl_sees_registered_move_fallback()

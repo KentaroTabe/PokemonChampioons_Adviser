@@ -471,7 +471,7 @@ async def _run_heavy_analysis(sid, kind, coro_factory,
     _analysis_busy を全ジョブで共有する。
     """
     global _analysis_busy
-    if _analysis_busy:
+    if _analysis_busy or _proposal_running():
         await sio.emit(progress_event,
                        {"msg": "別の実対戦ジョブが実行中です"}, room=sid)
         return
@@ -534,38 +534,94 @@ async def check_team_proposal(sid, data):
                    room=sid)
 
 
+_proposal_proc = None
+
+
+def _proposal_running() -> bool:
+    return _proposal_proc is not None and _proposal_proc.poll() is None
+
+
 @sio.on('run_team_proposal')
 async def run_team_proposal(sid, data):
     """構築提案 (段階ゲート付き)。ボタン押下時のみ実行する。
 
     段階1=現パーティから最大2枠入替 / 段階2=メタ全体からの一般提案。
-    実対戦評価+受入検定を含むため数十分かかることがある
-    (進捗は team_proposal_progress で逐次配信)。
+    ⚠ 別プロセス (nohup相当) で実行する: サーバー内で実対戦評価を回すと
+    GILとCPUをフレーム解析と奪い合い、処理率が半減して対戦画面の認識が
+    崩れた (2026-08-21 第8回: 取りこぼし率54%→76%、決定の助言あり33%)。
+    進捗はログファイルのtailを team_proposal_progress で逐次配信する。
+    サーバーが再起動してもジョブは走り続ける (結果は logs/team_proposal/)。
     """
-    from types import SimpleNamespace
+    global _proposal_proc
     stage = int((data or {}).get("stage") or 1)
-    progress = _analysis_progress_cb(sid, 'team_proposal_progress')
-    ns = SimpleNamespace(
-        population=int((data or {}).get("population") or 8),
-        generations=int((data or {}).get("generations") or 2),
-        battles=int((data or {}).get("battles") or 40),
-        concurrency=3, forecast_mix=0.3, archive_mix=0.2,
-        locked=(data or {}).get("locked") or None,
-        max_changes=int((data or {}).get("max_changes") or 2),
-        accept_battles=int((data or {}).get("accept_battles") or 120),
-        set_mut=0.5, seed=None)
+    if _proposal_running() or _analysis_busy:
+        await sio.emit('team_proposal_progress',
+                       {"msg": "別の実対戦ジョブが実行中です"}, room=sid)
+        return
+    if _battle_in_progress():
+        await sio.emit('team_proposal_result',
+                       {"kind": "refused",
+                        "text": "対戦中のため実行できません。リザルト画面 "
+                                "(ランク表示) まで進めば数秒後に実行できます"},
+                       room=sid)
+        return
 
-    async def _job():
-        from tools.team_proposal import run_proposal
-        res = await run_proposal(stage, ns, log=progress)
-        text = res["conditions_text"] + "\n\n" + res["summary"]
-        if res.get("path"):
-            text += f"\n保存: {res['path']}"
-        return text
+    import subprocess
+    import sys as _sys
+    log_dir = Path("logs") / "team_proposal"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"run_{time.strftime('%Y%m%d_%H%M%S')}.log"
+    cmd = [_sys.executable, "-m", "tools.team_proposal", "--propose",
+           "--stage", str(stage),
+           "--population", str(int((data or {}).get("population") or 8)),
+           "--generations", str(int((data or {}).get("generations") or 2)),
+           "--battles", str(int((data or {}).get("battles") or 40)),
+           "--accept-battles",
+           str(int((data or {}).get("accept_battles") or 120)),
+           "--max-changes", str(int((data or {}).get("max_changes") or 2))]
+    locked = (data or {}).get("locked")
+    if locked:
+        cmd += ["--locked", locked]
+    with log_path.open("w") as lf:
+        _proposal_proc = subprocess.Popen(
+            cmd, stdout=lf, stderr=subprocess.STDOUT,
+            start_new_session=True)
+    print(f"[server] 構築提案を別プロセスで開始: pid={_proposal_proc.pid} "
+          f"log={log_path}")
+    asyncio.ensure_future(_watch_proposal(sid, _proposal_proc, log_path))
 
-    await _run_heavy_analysis(sid, f"team_proposal_stage{stage}", _job,
-                              progress_event='team_proposal_progress',
-                              result_event='team_proposal_result')
+
+async def _watch_proposal(sid, proc, log_path):
+    """提案サブプロセスのログをtailして進捗/結果を配信する"""
+    sent = 0
+    try:
+        while proc.poll() is None:
+            await asyncio.sleep(2.0)
+            try:
+                text = log_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if len(text) > sent:
+                new = text[sent:]
+                sent = len(text)
+                tail = [l for l in new.splitlines() if l.strip()][-3:]
+                for line in tail:
+                    await sio.emit('team_proposal_progress',
+                                   {"msg": line[:200]}, room=sid)
+        try:
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = "(ログを読めませんでした)"
+        # 結果表示: 条件チェック以降のサマリー部を抜粋 (末尾60行)
+        lines = [l for l in text.splitlines() if l.strip()]
+        await sio.emit('team_proposal_result',
+                       {"kind": "done", "text": "\n".join(lines[-60:])},
+                       room=sid)
+        print(f"[server] 構築提案プロセス終了: exit={proc.returncode}")
+    except Exception as e:
+        await sio.emit('team_proposal_result',
+                       {"kind": "error", "text": f"進捗監視エラー: {e} "
+                        f"(ジョブ自体は継続。結果: {log_path})"}, room=sid)
 
 
 @sio.on('improve_team')

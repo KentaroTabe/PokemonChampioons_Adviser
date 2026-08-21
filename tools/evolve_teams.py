@@ -287,6 +287,19 @@ def _apply_synergy_bias(team_text: str, idx: int, cands: list,
     return [w * (1.0 + s / hi) for w, s in zip(weights, scores)]
 
 
+def _alt_item(species_id: str, used_items: set) -> str | None:
+    """アイテムクローズで衝突したとき、その種族の使用率次点で未使用の
+    持ち物を返す (2026-08-21 第8回: 衝突時にNoneとし持ち物なしの
+    マスカーニャが提案された)。代替が無ければ None。"""
+    used = {_to_id(i) for i in used_items if i}
+    alts = (_usage_alternatives().get(species_id) or {}).get("items") or []
+    for name, _pct in sorted(alts, key=lambda x: -(x[1] or 0)):
+        cand = _sanitize_item(name)
+        if cand and _to_id(cand) not in used:
+            return cand
+    return None
+
+
 def mutate(team_text: str, pool_rows: list, rng: random.Random,
            constraint: "Constraint | None" = None) -> str:
     """1枠を使用率重み付きの別種族 (meta_setsの型) に入れ替える。
@@ -316,7 +329,8 @@ def mutate(team_text: str, pool_rows: list, rng: random.Random,
     used_items = {b.split(" @ ", 1)[1].split("\n")[0].strip()
                   for b in blocks[:idx] + blocks[idx + 1:] if " @ " in b}
     if item and _to_id(item) in {_to_id(i) for i in used_items}:
-        item = None   # アイテムクローズ
+        # アイテムクローズ: Noneではなく使用率次点の未使用品へ差し替える
+        item = _alt_item(_to_id(row["pokemon_name"]), used_items)
     new_set = PokemonSet(
         species=to_showdown_name(_sanitize_species(row["pokemon_name"])),
         ability=row["ability_name"], item=item,

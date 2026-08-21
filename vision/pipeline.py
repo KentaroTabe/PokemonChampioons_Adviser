@@ -283,6 +283,9 @@ class VisionPipeline:
         elif scene == "command" and self._resolution_seen:
             self._resolution_seen = False
             self.state.turn += 1
+            # 新ターンの行動選択に到達 = とんぼ交代の保留は解消済み
+            # (無効化されて交代が発生しなかったケースのフラグ滞留を防ぐ)
+            self.state.pending_pivot_switch = False
             self._tick_field_effects()
 
         heavy = self._should_run_heavy(scene, force=single_shot)

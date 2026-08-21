@@ -295,7 +295,10 @@ def _expected_my_max(mon):
         from advisor.my_team import get_my_build
         from advisor.dex import get_dex, calc_hp
         build = get_my_build(mon.species_ja)
-        if not build:
+        # 能力ポイント未登録 (空エントリ含む) は理論値を出さない。EV0で
+        # 計算すると実際の最大HPと食い違い、全読取が棄却される
+        # (2026-08-21 第8回: 追加直後のマスカーニャで発生)
+        if not build or not build.get("ev"):
             return None
         sp = get_dex().species(mon.species_id)
         if not sp:

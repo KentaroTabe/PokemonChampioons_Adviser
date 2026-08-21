@@ -146,6 +146,59 @@ def test_evolve_args_stage_semantics():
     print("test_evolve_args_stage_semantics OK")
 
 
+def test_mutate_item_clause_uses_alternative():
+    """種族入替時のアイテムクローズ衝突は None ではなく使用率次点へ差し替える
+    (2026-08-21 第8回: 持ち物なしのマスカーニャが提案された)"""
+    import random
+
+    import tools.evolve_teams as ev
+
+    # どちらのスロットが入れ替わっても残る側が choicescarf を持つ
+    # (= 新セットのscarfは必ず衝突する) 構成にして決定的にする
+    team = ("Mimikyu @ choicescarf\nLevel: 50\n- playrough\n\n"
+            "Staraptor @ choicescarf\nLevel: 50\n- bravebird")
+    row = {"pokemon_name": "meowscarada", "item_name": "choicescarf",
+           "ability_name": "protean", "tera_type": None, "nature": "jolly",
+           "evs": "0/32/0/0/0/32", "weight": 10.0,
+           "move1": "flowertrick", "move2": "knockoff",
+           "move3": "uturn", "move4": "tripleaxel"}
+    prev = ev._usage_cache
+    ev._usage_cache = {"meowscarada": {
+        "moves": [], "spreads": [],
+        "items": [("choicescarf", 40.0), ("focussash", 30.0)]}}
+    try:
+        out = ev.mutate(team, [row], random.Random(0))
+        blk = next(b for b in out.split("\n\n") if "eowscarada" in b)
+        head = blk.split("\n")[0]
+        assert " @ " in head, f"持ち物なしで生成された: {head}"
+        item = head.split(" @ ")[1].strip().lower().replace(" ", "")
+        assert item == "focussash", head   # scarf衝突→次点の未使用品
+    finally:
+        ev._usage_cache = prev
+    print("test_mutate_item_clause_uses_alternative OK")
+
+
+def test_has_build_requires_substance():
+    """空エントリ (全None) は登録済み扱いにしない (第8回: マスカーニャ)"""
+    import advisor.my_team as mt
+
+    orig = mt._load
+    mt._load = lambda: {
+        "空": {"特性": None, "持ち物": None, "技": None},
+        "技のみ": {"技": ["じゃれつく"]},
+        "配分のみ": {"能力ポイント": {"h": 1}},
+    }
+    try:
+        assert mt.has_build("空") is False
+        assert mt.has_build("技のみ") is True
+        assert mt.has_build("配分のみ") is True
+        assert mt.has_build("未登録") is False
+        assert mt.has_build(None) is False
+    finally:
+        mt._load = orig
+    print("test_has_build_requires_substance OK")
+
+
 def main() -> None:
     test_stage1_all_hard_pass()
     test_stage1_blocks_on_stale_usage_and_missing_party()
@@ -156,6 +209,8 @@ def main() -> None:
     test_paired_verdict()
     test_render_report_marks()
     test_evolve_args_stage_semantics()
+    test_mutate_item_clause_uses_alternative()
+    test_has_build_requires_substance()
     print("\nALL OK")
 
 

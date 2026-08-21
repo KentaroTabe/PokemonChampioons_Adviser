@@ -81,6 +81,19 @@ TAUNT_STATUS_BONUS_MAX = 35.0
 _TYPE_JA2EN = None
 
 
+def _eff_accuracy(mv: dict, atk_ability, def_ability) -> float:
+    """実効命中率。ノーガード (攻守どちらが持っても必中) を反映する。
+
+    チャンピオンズのライチュウ等はノーガード+低命中高威力 (でんじほう/
+    きあいだま) が成立する (2026-08-21 第8回: 登録特性ノーガードでも
+    命中50として減点していた)。
+    """
+    if "noguard" in {str(atk_ability or "").lower(),
+                     str(def_ability or "").lower()}:
+        return 1.0
+    return (mv["accuracy"] or 100) / 100.0
+
+
 def type_ja2en() -> dict:
     global _TYPE_JA2EN
     if _TYPE_JA2EN is None:
@@ -331,7 +344,7 @@ def evaluate(state: dict, resolver=None) -> dict:
             if not mv:
                 continue
             d = calc_damage(opp_view, my_view, mid, opp_field)
-            acc = (mv["accuracy"] or 100) / 100.0
+            acc = _eff_accuracy(mv, opp_view.ability, my_view.ability)
             exp = d["avg"] * acc
             if d["avg"] > 0:
                 threats.append({
@@ -420,11 +433,16 @@ def evaluate(state: dict, resolver=None) -> dict:
     my_fainted = (my_p.get("status") == "fainted"
                   or (my_p.get("hp_percent") is not None
                       and my_p["hp_percent"] <= 0))
+    # とんぼがえり系の使用後は「交代先を選ぶ」決定 (2026-08-21 第8回:
+    # 交代先選択の場面で技トップの助言が出て役に立たなかった)。
+    # フラグは vision 側 (events) が技使用で立て、交代完了/次ターンで下ろす
+    pivot_pending = bool(state.get("pending_pivot_switch")) and not my_fainted
+    switch_only = my_fainted or pivot_pending
     # 技が画面から未読取でも、my_team登録の型があれば登録技で評価する
     # (2026-08-18 接続テスト: 技選択画面を開くまで自分の技が不明のまま
     #  助言していた。登録技はPP不明のまま扱う。画面読取が入れば上書きされる)
     my_move_slots = list(my_p.get("moves") or [])
-    if not my_move_slots and not my_fainted and resolver is not None:
+    if not my_move_slots and not switch_only and resolver is not None:
         try:
             from advisor.my_team import get_my_moves
             for ja in get_my_moves(my_p.get("species_ja")):
@@ -434,7 +452,7 @@ def evaluate(state: dict, resolver=None) -> dict:
                         {"name_ja": mv_r[0], "move_id": mv_r[1], "pp": None})
         except Exception:
             pass
-    for slot in ([] if my_fainted else my_move_slots):
+    for slot in ([] if switch_only else my_move_slots):
         mid = slot.get("move_id")
         mv = dex.move(mid)
         name = slot.get("name_ja") or mid or "不明な技"
@@ -464,7 +482,9 @@ def evaluate(state: dict, resolver=None) -> dict:
                             "reason": "ちょうはつ中は変化技を選べない"})
             continue
 
-        acc = (mv["accuracy"] or 100) / 100.0
+        acc = _eff_accuracy(
+            mv, my_view.ability,
+            opp_view.ability if opp_view is not None else None)
         reason_parts = []
         score = 0.0
         act_discount = False   # 行動前に倒される見込み (RLブレンド後に割引)
@@ -784,6 +804,9 @@ def evaluate(state: dict, resolver=None) -> dict:
 
     if my_fainted:
         speed_note = ("ひんし: 交代先を選んでください (技は選べません)。"
+                      + speed_note)
+    elif pivot_pending:
+        speed_note = ("とんぼがえり系の交代先を選ぶ場面です。"
                       + speed_note)
 
     return {
