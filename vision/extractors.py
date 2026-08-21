@@ -566,7 +566,8 @@ def backfill_player_static(state: BattleStateV2, resolver) -> None:
             build = None
         if not build:
             continue
-        if not p.item_id and build.get("item_ja"):
+        if not p.item_id and not p.item_removed and build.get("item_ja"):
+            # item_removed (はたきおとす被弾) 中は登録から復活させない
             it = resolver.resolve(build["item_ja"], "items", cutoff=0.9)
             if it:
                 p.item_ja, p.item_id = it[0], it[1]

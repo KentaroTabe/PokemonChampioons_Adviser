@@ -67,6 +67,26 @@ def test_undecided_stays_unknown():
     print("test_undecided_stays_unknown OK")
 
 
+def test_rank_key_finalizes_outcome_immediately():
+    """ランク画面イベント (battle_end_rank) で勝敗を即時確定する (第7回提案)。
+
+    ローテーションを待たず、終局時点のひんし数で推定できる。
+    その後のローテーションで二重記録しない。
+    """
+    log_dir = Path(tempfile.mkdtemp())
+    lg = BattleLogger(log_dir=log_dir)
+    lg.on_frame(_frame(1, 0, 0), [])
+    lg.on_frame(_frame(1, 1, 3), [])                      # 終局盤面
+    lg.on_frame(_frame(1, 1, 3), ["battle_end_rank"])     # ランク画面
+    recs = _read_outcomes(log_dir)
+    assert len(recs) == 1 and recs[0]["outcome"] == "win" \
+        and recs[0].get("inferred") is True, recs
+    lg.on_frame(_frame(2, 0, 0, "selection"), [])         # 次戦へ回転
+    recs2 = _read_outcomes(log_dir)
+    assert len(recs2) == 1, recs2                          # 二重記録なし
+    print("test_rank_key_finalizes_outcome_immediately OK")
+
+
 def test_explicit_outcome_wins_over_inference():
     """battle_lose 等で outcome が確定していれば推定は使わない"""
     log_dir = Path(tempfile.mkdtemp())
@@ -83,6 +103,7 @@ def main() -> None:
     test_opponent_all_fainted_infers_win()
     test_player_all_fainted_infers_loss()
     test_undecided_stays_unknown()
+    test_rank_key_finalizes_outcome_immediately()
     test_explicit_outcome_wins_over_inference()
     print("\nALL OK")
 

@@ -344,6 +344,15 @@ class EventParser:
                 if 500 <= val <= 4000:   # ありえない値 (誤読) は捨てる
                     self.state.last_rate = {"value": val,
                                             "ts": round(time.time(), 2)}
+            # ランク画面は対戦終了後に必ず表示される。勝敗文言を取り逃して
+            # いても、ここを対戦終了のキーにする (2026-08-21 ユーザー提案)。
+            # battle_logger はこのイベントで勝敗レコードを即時確定する
+            # (次戦の選出まで待つとひんし数等の終局情報が失われる)
+            if self.state.battle_active and not self._dedup("battle_end_rank"):
+                self.state.battle_active = False
+                self.state.log_event("system", "ランク画面を検出 (対戦終了)",
+                                     event_id="battle_end_rank")
+                return ["battle_end_rank"]
             self.state.log_event(source, cleaned, event_id=None)
             return []
 
@@ -366,6 +375,12 @@ class EventParser:
             tc = self._parse_type_change(cleaned, norm, source)
             if tc:
                 fired.append(tc)
+
+        # 3.6 はたきおとす:「AはBの<持ち物>をはたきおとした!」→ Bの持ち物を喪失
+        if not any(not f.startswith("switch") for f in fired):
+            ko = self._parse_knockoff(cleaned, norm)
+            if ko:
+                fired.append(ko)
 
         # 4. 技使用 / 特性発動 ("{名前}の {技/特性}")
         # 相手の判明技の収集が重要なため、他イベントと複合したメッセージ
@@ -611,14 +626,62 @@ class EventParser:
                 return default_side, active
         return None, None
 
+    def _parse_knockoff(self, cleaned: str, norm: str) -> Optional[str]:
+        """「AはBの<持ち物>をはたきおとした!」: Bの持ち物を失わせる。
+
+        以後の登録バックフィル・使用率予測での復活は item_removed が抑止する
+        (2026-08-21 第7回: はたき後も持ち物を保持したまま計算していた)。
+        """
+        if loose_key("はたきおとした") not in norm and "はたき落とした" not in cleaned:
+            return None
+        body = re.sub(r"[!!]+$", "", cleaned)
+        m = re.search(r"(.+?)を(?:はたき|叩き)", body)
+        if not m:
+            return None
+        prefix = m.group(1)
+        # 攻撃側「Aは」を取り除き、持ち主側「(相手の)Bの<持ち物>」だけを見る
+        am = re.search(r"は(.+)$", prefix)
+        owner_part = am.group(1) if am else prefix
+        positions = [i.start() for i in re.finditer("の", owner_part)]
+        best = None   # (score, pos, item)
+        for pos in positions:
+            tail = owner_part[pos + 1:]
+            if len(normalize(tail)) < 2:
+                continue
+            it = self.resolver.resolve(tail, "items", cutoff=0.7)
+            if it and (best is None or it[2] > best[0]):
+                best = (it[2], pos, it)
+        if best is None:
+            return None
+        _, pos, it = best
+        default_side = "opponent" if re.search(r"相手|あいて",
+                                               owner_part[:pos]) else "player"
+        side_name, mon = self._popup_mon(owner_part[:pos], default_side)
+        if mon is None:
+            return None
+        event_id = f"knockoff_{side_name}_{it[1]}"
+        if self._dedup(event_id):
+            return None
+        mon.item_ja, mon.item_id = None, None
+        mon.item_removed = True
+        return event_id
+
     def _parse_popup(self, cleaned: str, source: str) -> Optional[str]:
-        """ポップアップ「{名前}の {特性 or 持ち物}」: 特性優先、次に持ち物"""
+        """ポップアップ「{名前}の {特性 or 持ち物}」: 特性優先、次に持ち物。
+
+        「の」の分割位置は**全候補を試して最高スコアの解決を採用**する。
+        従来は最後の「の」から順に「最初に解決できた候補」を採用しており、
+        名前自体に「の」を含む持ち物が壊れた (2026-08-21 第7回:
+        「ミミッキュのいのちのたま」→ 末尾分割「たま」→ ビーだま(marble)
+        に誤解決し、いのちのたま(完全一致)が選ばれなかった)。
+        """
         body = re.sub(r"[!!]+$", "", cleaned)
         positions = [m.start() for m in re.finditer("の", body)]
         if not positions:
             return None
         default_side = self._target_side(cleaned, source)
-        for pos in reversed(positions):
+        best = None   # (score, pos, ab, it)
+        for pos in positions:
             tail = body[pos + 1:]
             if len(normalize(tail)) < 2:
                 continue
@@ -626,6 +689,13 @@ class EventParser:
             it = None if ab else self.resolver.resolve(tail, "items", cutoff=0.75)
             if not ab and not it:
                 continue
+            score = (ab or it)[2]
+            if best is None or score > best[0]:
+                best = (score, pos, ab, it)
+        if best is None:
+            return None
+        for pos, ab, it in ((best[1], best[2], best[3]),):
+            tail = body[pos + 1:]
             # 技名としての一致が上回る場合は特性/持ち物ではない
             # (「どくびし」が特性どくしゅ/持ち物どくけしに曖昧マッチする等)。
             # 技の効果適用はメッセージ側の解析に任せ、ここでは何もしない

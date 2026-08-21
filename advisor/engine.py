@@ -227,10 +227,11 @@ def opponent_move_pool(opp_state: dict, opp_view: MonView, resolver) -> list:
         for t in opp_view.types:
             if t in generic:
                 pool[generic[t]] = 50.0
-    # 予測特性/持ち物を反映
+    # 予測特性/持ち物を反映 (はたきおとす被弾後は持ち物を予測で復活させない)
     if not opp_view.ability and pred["abilities"]:
         opp_view.ability = pred["abilities"][0][0]
-    if not opp_view.item and pred["items"]:
+    if not opp_view.item and not opp_state.get("item_removed") \
+            and pred["items"]:
         opp_view.item = pred["items"][0][0]
     return list(pool.items())
 
@@ -288,7 +289,8 @@ def evaluate(state: dict, resolver=None) -> dict:
             if guess and guess["n_obs"] >= 1 and guess["prob"] >= 0.25:
                 opp_view.ev = dict(guess["evs"])
                 opp_view.nature = _nature_mult(guess["nature"])
-                if not opp_view.item and guess["item"]:
+                if not opp_view.item and not opp_p.get("item_removed") \
+                        and guess["item"]:
                     opp_view.item = guess["item"]
                 opp_spread_note = f"相手の型推定: {guess['summary']}"
             # 先後観測の実効素早さ範囲は確度に関係なく反映する

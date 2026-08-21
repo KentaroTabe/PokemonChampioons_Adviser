@@ -95,6 +95,10 @@ class PokemonState:
     # (2026-08-21: マスカーニャの変幻自在が数秒で図鑑タイプに戻されていた)。
     # タイプ変化は交代で戻るため、交代アウトでフラグを解除し以後は図鑑で正す
     type_changed: bool = False
+    # はたきおとす等で持ち物を失った (対戦中は復活しない)。True の間は
+    # 登録バックフィル・使用率予測による持ち物の再設定を抑止する
+    # (2026-08-21 第7回: はたき後も持ち物を保持したまま計算していた)
+    item_removed: bool = False
 
     def merge_species(self, species_ja: str, species_id: Optional[str]):
         self.species_ja = species_ja

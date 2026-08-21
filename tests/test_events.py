@@ -182,6 +182,70 @@ def test_type_change_survives_backfill():
     print("test_type_change_survives_backfill OK")
 
 
+def test_popup_item_containing_no():
+    """「の」を含む持ち物名のポップアップは最高スコアの分割で解決する。
+
+    2026-08-21 第7回: 「ミミッキュのいのちのたま」が最後の「の」分割
+    (「たま」) で ビーだま(marble) に誤解決していた。完全一致の
+    いのちのたま が選ばれること。
+    """
+    state, p = new_parser()
+    state.player.active_index = 2   # 既定パーティのミミッキュ
+    fired = p.parse("ミミッキュの いのちのたま", source="left_popup")
+    assert "item_player_lifeorb" in fired, fired
+    me = state.player.party[2]
+    assert me.item_id == "lifeorb", me.item_id
+    print("test_popup_item_containing_no OK")
+
+
+def test_knockoff_removes_item():
+    """はたきおとすで持ち物を失い、以後バックフィルで復活しない (第7回)"""
+    from vision import extractors
+    from vision.normalize import NameResolver
+    import advisor.my_team as my_team_mod
+
+    state, p = new_parser()
+    me = state.player.party[2]          # ミミッキュ
+    me.item_ja, me.item_id = "いのちのたま", "lifeorb"
+    fired = p.parse("相手の サーフゴーは ミミッキュの いのちのたまを はたきおとした!")
+    assert "knockoff_player_lifeorb" in fired, fired
+    assert me.item_id is None and me.item_ja is None
+    assert me.item_removed is True
+
+    # 登録バックフィルでも復活しない
+    orig = my_team_mod.get_my_build
+    my_team_mod.get_my_build = lambda ja: {"item_ja": "いのちのたま"} \
+        if ja == "ミミッキュ" else None
+    try:
+        extractors.backfill_player_static(state, NameResolver())
+        assert me.item_id is None, "item_removed中に登録から復活した"
+    finally:
+        my_team_mod.get_my_build = orig
+
+    # 相手側: 自分がはたきおとした場合
+    p.parse("相手は ハラバリーを 繰り出した!")
+    om = state.opponent.active()
+    om.item_ja, om.item_id = "ラムのみ", "lumberry"
+    fired = p.parse("ムクホークは 相手の ハラバリーの ラムのみを はたきおとした!")
+    assert "knockoff_opponent_lumberry" in fired, fired
+    assert om.item_id is None and om.item_removed is True
+    print("test_knockoff_removes_item OK")
+
+
+def test_rank_screen_ends_battle():
+    """ランク画面 (レート表示) を対戦終了のキーにする (第7回ユーザー提案)"""
+    state, p = new_parser()
+    state.battle_active = True
+    fired = p.parse("ランクIV レート1602")
+    assert fired == ["battle_end_rank"], fired
+    assert state.battle_active is False
+    assert state.last_rate and state.last_rate["value"] == 1602
+    # 同一対戦内では再発火しない
+    fired2 = p.parse("ランクIV レート1602 ボール級")
+    assert fired2 == [], fired2
+    print("test_rank_screen_ends_battle OK")
+
+
 def test_hazards_and_screens():
     state, p = new_parser()
     fired = p.parse("相手の 鋁鋼maxの ステルスロック!")
@@ -511,6 +575,9 @@ if __name__ == "__main__":
     test_disguise_bust_damage()
     test_type_change()
     test_type_change_survives_backfill()
+    test_popup_item_containing_no()
+    test_knockoff_removes_item()
+    test_rank_screen_ends_battle()
     test_hazards_and_screens()
     test_status_and_volatile()
     test_move_seal_states()

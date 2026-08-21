@@ -170,6 +170,18 @@ class BattleLogger:
                 self._last_seq = seq
                 self._finalize(state.get("outcome"))
 
+        # レート観測 (結果画面の表示から)。値が変わった時のみ記録する。
+        # ⚠ fired の処理より先に更新する: battle_end_rank (ランク画面での
+        # 対戦終了確定) と同一フレームで捕捉されたレートを、勝敗推定
+        # (_infer_outcome のレート増減) が同フレーム内で参照できるように
+        lr = state.get("last_rate")
+        if lr and (self._rate_last is None
+                   or lr["value"] != self._rate_last["value"]):
+            self._write({"type": "rate", "value": lr["value"]})
+            self._rate_last = dict(lr)
+        elif lr and self._rate_last and lr["ts"] > self._rate_last["ts"]:
+            self._rate_last = dict(lr)   # 同値の再観測でも時刻は進める
+
         if fired:
             # 原文はイベント化された行のみから対応付ける (イベント化されなかった
             # ログ行が混ざると原文と発火IDの対応がズレる: 実測「Oncwn」等)
@@ -182,15 +194,18 @@ class BattleLogger:
             for f in fired:
                 if f.startswith("switch_"):
                     self._last_switch[f.split("_")[1]] = time.time()
-
-        # レート観測 (結果画面の表示から)。値が変わった時のみ記録する
-        lr = state.get("last_rate")
-        if lr and (self._rate_last is None
-                   or lr["value"] != self._rate_last["value"]):
-            self._write({"type": "rate", "value": lr["value"]})
-            self._rate_last = dict(lr)
-        elif lr and self._rate_last and lr["ts"] > self._rate_last["ts"]:
-            self._rate_last = dict(lr)   # 同値の再観測でも時刻は進める
+            # ランク画面 = 対戦終了のキー (2026-08-21 ユーザー提案)。
+            # 終局時点のひんし数・レート増減が揃っているここで勝敗を確定する
+            # (次戦の選出まで待つと状態がリセットされ推定材料が失われる)
+            if "battle_end_rank" in fired and not self._outcome_logged:
+                outcome = state.get("outcome")
+                inferred = None if outcome else self._infer_outcome()
+                rec = {"type": "outcome",
+                       "outcome": outcome or inferred or "unknown"}
+                if not outcome and inferred:
+                    rec["inferred"] = True
+                self._write(rec)
+                self._outcome_logged = True
 
         # HP変化 (extractorsの_set_hpがsource="hp"でstate.eventsに積む) を
         # 専用レコードで記録し、技イベントとのダメージ対応付けを可能にする。
