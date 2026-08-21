@@ -199,6 +199,29 @@ def test_has_build_requires_substance():
     print("test_has_build_requires_substance OK")
 
 
+def test_latest_selection_roster_reads_newest_log():
+    """現在の6体の推定は直近対戦ログの選出ロスターを最優先する (2026-08-22:
+    パーティ変更直後、技登録の有無による推定が旧構成へ引きずられ、
+    選出データ収集が旧構成で走った)"""
+    import json
+    import tempfile
+    import time
+    from pathlib import Path
+
+    from tools.evaluate_team import _latest_selection_roster
+
+    d = Path(tempfile.mkdtemp())
+    rec = {"type": "scene", "scene": "selection", "t": time.time(),
+           "state": {"player": {"party": [
+               {"ja": n} for n in ("ア", "イ", "ウ", "エ", "オ", "カ")]}}}
+    (d / "battle_20990101_000000.jsonl").write_text(
+        json.dumps(rec, ensure_ascii=False) + "\n", encoding="utf-8")
+    assert _latest_selection_roster(log_dir=d) == \
+        ["ア", "イ", "ウ", "エ", "オ", "カ"]
+    assert _latest_selection_roster(log_dir=Path(tempfile.mkdtemp())) == []
+    print("test_latest_selection_roster_reads_newest_log OK")
+
+
 def main() -> None:
     test_stage1_all_hard_pass()
     test_stage1_blocks_on_stale_usage_and_missing_party()
@@ -211,6 +234,7 @@ def main() -> None:
     test_evolve_args_stage_semantics()
     test_mutate_item_clause_uses_alternative()
     test_has_build_requires_substance()
+    test_latest_selection_roster_reads_newest_log()
     print("\nALL OK")
 
 

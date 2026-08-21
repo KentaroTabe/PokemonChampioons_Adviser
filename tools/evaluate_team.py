@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import re
 import sys
+from pathlib import Path
 
 from champions_agent.data import database as db
 from champions_agent.env.team_builder import (
@@ -179,19 +180,57 @@ def team_text_to_ja(team_text: str) -> str:
     return "\n\n".join(out_blocks)
 
 
+def _latest_selection_roster(log_dir=None) -> list:
+    """直近の対戦ログの選出画面レコードから自分の6体 (日本語名) を返す。
+
+    パーティ変更直後は「選出履歴」や「技登録の有無」による推定が旧構成に
+    引きずられる (2026-08-22実測: マスカーニャの登録が空のため、推定6体に
+    旧メンバーのキラフロルが選ばれ、選出データ収集が旧構成で走った)。
+    選出画面のロスターは実際に使っている6体そのものなので最優先する。
+    """
+    import glob as _glob
+    import json as _json
+    base = Path(log_dir) if log_dir else \
+        Path(__file__).resolve().parent.parent / "logs" / "battles"
+    files = sorted(_glob.glob(str(base / "battle_*.jsonl")), reverse=True)
+    for path in files[:5]:
+        try:
+            with open(path, encoding="utf-8") as f:
+                roster = None
+                for line in f:
+                    r = _json.loads(line)
+                    if r.get("type") != "scene" or \
+                            r.get("scene") != "selection":
+                        continue
+                    party = ((r.get("state") or {}).get("player") or {}) \
+                        .get("party") or []
+                    names = [p.get("ja") for p in party if p.get("ja")]
+                    if len(names) == 6:
+                        roster = names   # 同一対戦内の最後の選出画面を採用
+                if roster:
+                    return roster
+        except (OSError, _json.JSONDecodeError):
+            continue
+    return []
+
+
 def current_team_entries() -> dict:
     """my_team.json から「現在のパーティ6体」ぶんのエントリを選ぶ。
 
     もっと見る自動登録の蓄積で7体以上残ることがある (旧チームは型ライブラリ
     として保持する仕様)。7体以上のままチーム化するとShowdownに拒否され、
     開始しない対戦を待ち続けてハングする (2026-07-26実測: 9体で発生)。
-    直近の対戦ログの自選出に登場した種族→技登録済み→登録順、の優先で絞る。
+    直近対戦ログの選出ロスター→自選出に登場した種族→技登録済み→登録順、
+    の優先で絞る。
     """
     from advisor.my_team import _load
     team = _load()
     if len(team) <= 6:
         return dict(team)
     order = []
+    for ja in _latest_selection_roster():
+        if ja in team and ja not in order:
+            order.append(ja)
     try:
         from tools.analyze_battles import load_battles
         for b in reversed(load_battles(last=20)):
