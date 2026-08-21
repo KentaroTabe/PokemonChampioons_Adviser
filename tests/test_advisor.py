@@ -398,6 +398,56 @@ def test_ko_margin_prefers_overkill():
     print("test_ko_margin_prefers_overkill OK")
 
 
+def test_taunt_context_bonus():
+    """挑発は相手の変化技傾向に比例して加点される (2026-08-21 第6回:
+    受けのブラッキー相手でも素点15固定のため攻撃技に埋もれていた)。
+    攻撃技主体の相手には従来どおり低いまま。"""
+    import os
+    from vision.normalize import NameResolver
+    resolver = NameResolver()
+    my = {"species_id": "hydreigon", "species_ja": "サザンドラ",
+          "types": ["あく", "ドラゴン"], "hp_percent": 100.0,
+          "hp_current": 169, "hp_max": 169, "status": None, "boosts": {},
+          "ability_id": None, "item_id": None,
+          "moves": [
+              {"name_ja": "ちょうはつ", "move_id": "taunt",
+               "pp": 20, "max_pp": 20, "effectiveness": None},
+              {"name_ja": "あくのはどう", "move_id": "darkpulse",
+               "pp": 15, "max_pp": 15, "effectiveness": "neutral"},
+          ], "revealed_moves": []}
+    # 受け型 (判明技が変化技3/4): 挑発に文脈加点が乗る
+    wall = {"species_id": "umbreon", "species_ja": "ブラッキー",
+            "types": ["あく"], "hp_percent": 100.0,
+            "hp_current": None, "hp_max": None, "status": None, "boosts": {},
+            "ability_id": None, "item_id": None, "moves": [],
+            "revealed_moves": ["つきのひかり", "どくどく", "まもる"]}
+    prev = os.environ.get("RL_BLEND_WEIGHT")
+    os.environ["RL_BLEND_WEIGHT"] = "0"
+    try:
+        adv = evaluate(_mini_state(my, wall), resolver)
+        tnt = next(a for a in adv["actions"] if a["id"] == "taunt")
+        assert "変化技主体" in tnt["reason"], tnt
+        assert tnt["score"] >= 30, tnt
+
+        # 攻撃主体 (判明技が攻撃3): 加点なし
+        sweeper = {"species_id": "garchomp", "species_ja": "ガブリアス",
+                   "types": ["ドラゴン", "じめん"], "hp_percent": 100.0,
+                   "hp_current": None, "hp_max": None, "status": None,
+                   "boosts": {}, "ability_id": None, "item_id": None,
+                   "moves": [], "revealed_moves":
+                       ["じしん", "げきりん", "ストーンエッジ"]}
+        adv2 = evaluate(_mini_state(dict(my), sweeper), resolver)
+        tnt2 = next(a for a in adv2["actions"] if a["id"] == "taunt")
+        assert "変化技主体" not in tnt2["reason"], tnt2
+        assert tnt2["score"] < 30, tnt2
+    finally:
+        if prev is None:
+            os.environ.pop("RL_BLEND_WEIGHT", None)
+        else:
+            os.environ["RL_BLEND_WEIGHT"] = prev
+    print("test_taunt_context_bonus OK")
+
+
 def test_choice_lock():
     """こだわり系を持って技を使った後は、直前の技以外を推奨しない (第2回#C)"""
     from vision.normalize import NameResolver
@@ -544,6 +594,7 @@ if __name__ == "__main__":
     test_fainted_active_switch_only()
     test_act_before_ko_discount()
     test_ko_margin_prefers_overkill()
+    test_taunt_context_bonus()
     test_choice_lock()
     test_registered_moves_fallback()
     test_rl_sees_registered_move_fallback()

@@ -152,6 +152,36 @@ def test_type_change():
     print("test_type_change OK")
 
 
+def test_type_change_survives_backfill():
+    """観測したタイプ変化は図鑑タイプの自動訂正 (backfill) に潰されない。
+
+    2026-08-21 第6回: マスカーニャの変幻自在で変わったタイプが、毎heavy
+    フレームの backfill_player_static により数秒で図鑑タイプへ戻されていた。
+    交代で元に戻るため、交代アウト後は従来どおり図鑑で正す。
+    """
+    from vision import extractors
+    from vision.normalize import NameResolver
+
+    state, p = new_parser()
+    p.parse("相手は マスカーニャを 繰り出した!")
+    om = state.opponent.active()
+    assert om.species_ja == "マスカーニャ", om.species_ja
+    fired = p.parse("相手の マスカーニャは みずタイプに なった!")
+    assert "type_change_opponent_water" in fired, fired
+    assert om.types == ["みず"] and om.type_changed is True
+
+    r = NameResolver()
+    extractors.backfill_player_static(state, r)
+    assert om.types == ["みず"], f"backfillが観測タイプを潰した: {om.types}"
+
+    # 交代アウトでフラグ解除 → 次のbackfillで図鑑タイプに戻る
+    om.reset_on_switch_out()
+    assert om.type_changed is False
+    extractors.backfill_player_static(state, r)
+    assert set(om.types) == {"くさ", "あく"}, om.types
+    print("test_type_change_survives_backfill OK")
+
+
 def test_hazards_and_screens():
     state, p = new_parser()
     fired = p.parse("相手の 鋁鋼maxの ステルスロック!")
@@ -480,6 +510,7 @@ if __name__ == "__main__":
     test_mirror_match_switch_side()
     test_disguise_bust_damage()
     test_type_change()
+    test_type_change_survives_backfill()
     test_hazards_and_screens()
     test_status_and_volatile()
     test_move_seal_states()

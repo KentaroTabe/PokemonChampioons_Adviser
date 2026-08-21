@@ -503,6 +503,9 @@ class EventParser:
         if self._dedup(event_id):
             return None
         mon.types = [found]
+        # 図鑑タイプによる自動訂正 (backfill) を抑止する。交代で解除される
+        # (2026-08-21: 変幻自在の変化が数秒で図鑑タイプに戻されていた)
+        mon.type_changed = True
         return event_id
 
     def _parse_rank_change(self, cleaned: str, norm: str, source: str) -> list:

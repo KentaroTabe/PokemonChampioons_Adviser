@@ -515,14 +515,17 @@ def backfill_player_static(state: BattleStateV2, resolver) -> None:
       アイコン由来のタイプを図鑑で正す処理が無かった)
     - 持ち物/特性 (自分側のみ): 画面から読めていなければ my_team 登録から補完
     """
+    # type_changed (へんげんじざい/みずびたし等の観測) 中は図鑑訂正を抑止。
+    # タイプ変化は交代で戻り、reset_on_switch_out がフラグを解除するので
+    # 以後のフレームで図鑑タイプに正される (2026-08-21 マスカーニャで実測)
     for p in state.opponent.party:
-        if not p.species_id:
+        if not p.species_id or p.type_changed:
             continue
         t = _species_types_ja(p.species_id)
         if t and set(p.types or []) != set(t):
             p.types = t
     for p in state.player.party:
-        if not p.species_id:
+        if not p.species_id or p.type_changed:
             continue
         t = _species_types_ja(p.species_id)
         if t and set(p.types or []) != set(t):

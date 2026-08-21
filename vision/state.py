@@ -90,6 +90,11 @@ class PokemonState:
     is_picked: bool = False          # 選出画面で選出済み (左端の白リボン)
     pick_order: Optional[int] = None  # 選出順 (1=先発。リボン出現順で推定)
     last_seen_ts: float = 0.0
+    # 対戦中のタイプ変化 (へんげんじざい/みずびたし等) を観測済みか。
+    # True の間は図鑑タイプによる自動訂正 (backfill) を抑止する
+    # (2026-08-21: マスカーニャの変幻自在が数秒で図鑑タイプに戻されていた)。
+    # タイプ変化は交代で戻るため、交代アウトでフラグを解除し以後は図鑑で正す
+    type_changed: bool = False
 
     def merge_species(self, species_ja: str, species_id: Optional[str]):
         self.species_ja = species_ja
@@ -106,6 +111,9 @@ class PokemonState:
         keep = {"leechseed"}  # やどりぎも交代で消えるが表記簡略化のため消す
         self.volatiles = []
         self.is_active = False
+        # タイプ変化は交代で元に戻る。フラグを解除すると次のbackfillが
+        # 図鑑タイプへ正してくれる (typesをここで直接触ると図鑑参照が要る)
+        self.type_changed = False
 
     def to_dict(self):
         d = asdict(self)

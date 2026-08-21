@@ -426,9 +426,12 @@ async def run_proposal(stage: int, ns: argparse.Namespace, log=None,
         out["summary"] = "必須条件が未達のため実行しません (--force で強行可)"
         return out
 
-    # 実行時の競合回避 (アドバイザーの対戦・スイープの一時停止フラグ)
+    # 実行時の競合回避 (アドバイザーの対戦・スイープの一時停止フラグ)。
+    # 窓は1分: 3分だと接続テスト中の対戦の合間 (対戦間隔<3分) に一度も
+    # 実行できない (2026-08-21 第6回)。対戦ログは対戦シーンでのみ進むため
+    # 1分静かなら対戦中ではないと判断できる
     from tools.check_battle_active import battle_active
-    if battle_active(3.0):
+    if battle_active(1.0):
         out["code"] = 3
         out["summary"] = "対戦中のため実行しません (アドバイザーと競合させない)"
         return out

@@ -71,6 +71,12 @@ ACT_BEFORE_KO_DISCOUNT = 0.25
 # 余剰ダメージ (突破余裕) を小さく加点して高火力側を上位に保つ
 KO_MARGIN_WEIGHT = 0.15
 KO_MARGIN_CAP = 20.0
+# 挑発の文脈加点: 相手の技プール (判明+使用率予測) に占める変化技の
+# 重み比率に比例して加点する。素点15固定では受け/起点作りの相手でも
+# 攻撃技に埋もれ、RLが78-84%で挑発を推しても順位が上がらなかった
+# (2026-08-21 第6回接続テスト: ブラッキー相手に挑発が3位のまま。
+#  ユーザーは助言に逆らって挑発を使い、それが正解だった)
+TAUNT_STATUS_BONUS_MAX = 35.0
 
 _TYPE_JA2EN = None
 
@@ -299,6 +305,8 @@ def evaluate(state: dict, resolver=None) -> dict:
     actions = []
     threats = []
     speed_note = ""
+    opp_status_ratio = 0.0   # 相手の技プールに占める変化技の重み比率
+    opp_taunted = False      # 相手が挑発中 (重ねる価値なし)
 
     # ------------------------------------------------------------------
     # 相手からの脅威 (相手の技候補ごとの被ダメージ)
@@ -333,6 +341,18 @@ def evaluate(state: dict, resolver=None) -> dict:
                     opp_best_dmg = exp
                     opp_best_move = mid
         threats.sort(key=lambda t: -t["dmg_avg"])
+        # 相手の変化技傾向 (挑発の価値算定用)。プール重みは判明技=100、
+        # 未判明は使用率×減衰なので、そのまま傾向の重み付き比率になる
+        tot_w = stat_w = 0.0
+        for mid, w in pool:
+            mv_ = dex.move(mid)
+            if not mv_:
+                continue
+            tot_w += w
+            if mv_["category"] == "Status" or not mv_["power"]:
+                stat_w += w
+        opp_status_ratio = (stat_w / tot_w) if tot_w > 0 else 0.0
+        opp_taunted = "taunt" in opp_vols_
 
         # 4枠モデルの説明文 (判明 k/4 + 残り枠の推定)
         revealed_ja = opp_p.get("revealed_moves") or []
@@ -455,6 +475,16 @@ def evaluate(state: dict, resolver=None) -> dict:
                 missing = 100.0 - my_hp_pct
                 score = min(45.0, missing * 0.6)
                 reason_parts.append(f"残りHP{my_hp_pct:.0f}%からの回復")
+            if mid == "taunt":
+                if opp_taunted:
+                    score = 4.0
+                    reason_parts.append("相手は挑発中 (重ねても効果なし)")
+                elif opp_status_ratio > 0:
+                    score += TAUNT_STATUS_BONUS_MAX * opp_status_ratio
+                    if opp_status_ratio >= 0.3:
+                        reason_parts.append(
+                            f"相手は変化技主体の見込み ({opp_status_ratio:.0%})"
+                            " — 回復/積み/設置を止められる")
             if mid == "stealthrock" and opp_state["hazards"]["stealth_rock"]:
                 score = 2.0
                 reason_parts.append("既に設置済み")

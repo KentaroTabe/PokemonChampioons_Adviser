@@ -404,14 +404,24 @@ async def get_my_team(sid, data=None):
 # 分析・コーチング (敗因分析 / 環境 / レビュー / プレイブック / 改善)
 # ------------------------------------------------------------------
 _analysis_busy = False
-_ANALYSIS_GUARD_SCENES = ("selection", "standby", "command", "move_select",
-                          "watch", "field_check", "battle_hud", "field")
 
 
 def _battle_in_progress() -> bool:
-    """対戦中は重い分析ジョブを実行しない (フレーム解析と競合するため)"""
-    return (time.time() - _last_frame_ts < 60 and
-            pipeline.state.scene in _ANALYSIS_GUARD_SCENES)
+    """対戦中は重い分析ジョブ (構築提案/改善/プレイブック) を実行しない。
+
+    旧判定「フレーム受信中 + シーンが対戦系」は誤検知が多く、メニュー画面が
+    field 等に分類されてキャプチャ中は常に対戦中扱いになり、構築提案が
+    一度も実行できなかった (2026-08-21 第6回接続テスト)。
+    対戦ログの記録内容 (events/hp や command 等の対戦シグナルのみ。
+    メニュー誤分類で出続ける advice は含まない) で判定する。
+    直近60秒に対戦シグナルが無ければ対戦中ではない
+    """
+    try:
+        from tools.check_battle_active import battle_active
+        return battle_active(1.0)
+    except Exception:
+        # フォールバック: フレーム受信そのものが無ければ対戦中ではない
+        return time.time() - _last_frame_ts < 60
 
 
 @sio.on('run_analysis')
