@@ -333,6 +333,68 @@ def test_field_check_skips_unresolved_or_foreign_species():
     print("test_field_check_skips_unresolved_or_foreign_species OK")
 
 
+def test_field_check_reads_garbled_hazard_state():
+    """場の状況の「ステルスロック状態」はOCR化け (状要/状感) でも取り込む。
+
+    2026-08-21 第6回: 「ステルスロック状要」が『状態/状感を含む行』の
+    ゲートで弾かれ、自陣ステロが取得されず被ダメ予測が1/8ずれた。
+    """
+    from vision import extractors
+    from vision.normalize import NameResolver
+
+    st = BattleStateV2()
+    st.player.party.append(
+        PokemonState(species_ja="サザンドラ", species_id="hydreigon"))
+    st.player.active_index = 0
+
+    orig_lines = ocr.apple_ocr_lines
+    ocr.apple_ocr_lines = lambda img, scale=1.0: [
+        ("効果と場の状感", (0.52, 0.22, 0.63, 0.25)),
+        ("サザンドラ", (0.20, 0.22, 0.30, 0.26)),
+        ("ステルスロック状要", (0.53, 0.32, 0.68, 0.36)),
+    ]
+    try:
+        img = np.zeros((720, 1280, 3), dtype=np.uint8)
+        extractors.extract_field_check(img, st, NameResolver())
+        assert st.player.stealth_rock is True, "化けた状態行が弾かれた"
+    finally:
+        ocr.apple_ocr_lines = orig_lines
+    print("test_field_check_reads_garbled_hazard_state OK")
+
+
+def test_watch_opp_zero_needs_corroboration():
+    """相手一覧 (watch側柱) の0%書き込みにもHUDと同じ裏付けを要求する"""
+    from vision import extractors, spriteid
+    from vision.normalize import NameResolver
+
+    st = BattleStateV2()
+    mon = PokemonState(species_ja="ガブリアス", species_id="garchomp")
+    mon.hp_percent = 21.0
+    st.opponent.party.append(mon)
+    st.opponent.active_index = 0
+
+    orig_read = ocr.read_zone_text
+    orig_ident = spriteid.identify_species_color
+
+    def fake_read(img, zone, **kw):
+        allow = kw.get("allowlist") or ""
+        return "0%" if "%" in allow else ""
+
+    ocr.read_zone_text = fake_read
+    spriteid.identify_species_color = lambda crop_img, cands: (0.9, "ガブリアス")
+    try:
+        img = np.zeros((720, 1280, 3), dtype=np.uint8)
+        extractors.extract_watch_side_columns(img, st, NameResolver())
+        assert mon.hp_percent == 21.0, mon.hp_percent   # 1回目: 見送り
+        extractors.extract_watch_side_columns(img, st, NameResolver())
+        assert mon.hp_percent == 0.0 and mon.status == "fainted", \
+            (mon.hp_percent, mon.status)                # 2回目: 受理
+    finally:
+        ocr.read_zone_text = orig_read
+        spriteid.identify_species_color = orig_ident
+    print("test_watch_opp_zero_needs_corroboration OK")
+
+
 def test_verified_name_updates_hp():
     st, mon = _state_with_opp("ドリュウズ", "excadrill", 33.0)
     for _ in range(3):
@@ -357,6 +419,8 @@ def main() -> None:
     test_my_max_hp_adoption_after_consistent_reads()
     test_my_max_mismatch_without_bar_agreement_is_discarded()
     test_field_check_skips_unresolved_or_foreign_species()
+    test_field_check_reads_garbled_hazard_state()
+    test_watch_opp_zero_needs_corroboration()
     test_verified_name_updates_hp()
     print("ALL OK")
 

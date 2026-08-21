@@ -81,8 +81,83 @@ def test_zero_read_faint_corroboration():
     print("test_zero_read_faint_corroboration OK")
 
 
+def test_initial_zero_read_not_committed():
+    """HP未知の個体への初回0-3%読みは即コミットしない (2026-08-21 第6回:
+    登場直後のガブリアスに演出中の空バー0%が「初回は即反映」で
+    コミットされ、以後21%との往復が続いた)。"""
+    state = BattleStateV2()
+    mon = _mon(state)
+    assert mon.hp_percent is None
+    _set_hp(state, "opponent", mon, pct=0.0)
+    assert mon.hp_percent is None, mon.hp_percent
+    _set_hp(state, "opponent", mon, pct=1.4)
+    assert mon.hp_percent is None, mon.hp_percent
+    # 本物の読み (>3%) が来れば初回即反映は従来どおり
+    _set_hp(state, "opponent", mon, pct=21.0)
+    assert mon.hp_percent == 21.0, mon.hp_percent
+    print("test_initial_zero_read_not_committed OK")
+
+
+def test_field_hp_guards_attribution():
+    """fieldシーンの軽量HP読みにもHUDと同じ帰属ガード (2026-08-21 第6回:
+    名前照合なしで演出中の空バーが21%のガブリアスへ0%を書き続けた)。
+    - 名前が読めて不一致 → 書かない
+    - 名前未読 + 大変化(>15pt) or HP未知 → 書かない
+    - 名前一致 + 小変化 → 従来どおり _set_hp へ
+    """
+    import numpy as np
+
+    from vision import extractors, ocr, scenes, zones
+
+    state = BattleStateV2()
+    mon = _mon(state)
+    mon.hp_percent = 21.0
+
+    orig_read, orig_bar = ocr.read_zone_text, ocr.hp_bar_ratio
+    orig_crimson = scenes._crimson_ratio
+    orig_px = scenes._hp_bar_pixels
+    reads = {"name": "", "hp": "0%"}
+
+    def fake_read(img, zone, **kw):
+        if zone is zones.BATTLE["opp_name"]:
+            return reads["name"]
+        if zone is zones.BATTLE["opp_hp_text"]:
+            return reads["hp"]
+        return ""
+
+    ocr.read_zone_text = fake_read
+    ocr.hp_bar_ratio = lambda img: None
+    scenes._crimson_ratio = lambda img: 1.0    # HUDバナー表示中とみなす
+    scenes._hp_bar_pixels = lambda img: 0      # 自分側はスキップ
+    try:
+        img = np.zeros((720, 1280, 3), dtype=np.uint8)
+        for _ in range(6):   # 名前未読 + 0% (大変化) → 何度来ても書かない
+            extractors.extract_field_hp(img, state)
+        assert mon.hp_percent == 21.0, mon.hp_percent
+
+        reads["name"] = "ホゲホゲ"   # 名前不一致 → 書かない
+        for _ in range(6):
+            extractors.extract_field_hp(img, state)
+        assert mon.hp_percent == 21.0, mon.hp_percent
+
+        reads["name"] = "ガブリアス"  # 名前一致 + 小変化 → 通常経路で確定
+        reads["hp"] = "15%"
+        extractors.extract_field_hp(img, state)
+        time.sleep(0.65)
+        extractors.extract_field_hp(img, state)
+        assert mon.hp_percent == 15.0, mon.hp_percent
+    finally:
+        ocr.read_zone_text = orig_read
+        ocr.hp_bar_ratio = orig_bar
+        scenes._crimson_ratio = orig_crimson
+        scenes._hp_bar_pixels = orig_px
+    print("test_field_hp_guards_attribution OK")
+
+
 if __name__ == "__main__":
     test_drain_animation_not_committed()
     test_normal_update_still_works()
     test_zero_read_faint_corroboration()
+    test_initial_zero_read_not_committed()
+    test_field_hp_guards_attribution()
     print("\nALL OK")

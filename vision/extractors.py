@@ -384,6 +384,14 @@ def _set_hp(state: BattleStateV2, side_name: str, mon,
     last_read = getattr(mon, "_hp_last_read", None)
     mon._hp_last_read = new
     if old is None:
+        # 0-3%の初回読みは演出中の空バーの疑いが強く、即反映しない
+        # (2026-08-21 第6回: 登場直後のガブリアスに0%が即コミットされ、
+        #  以後21%との往復が続いた)。本物のひんしは faint イベント/
+        #  HUDのゼロ読み裏付け経路 (_accept_zero_hp_read) が確定させる
+        if new <= 3.0:
+            mon._hp_stable_count = 1
+            mon._hp_stable_since = time.time()
+            return
         # 初回は即反映 (アドバイスが値なしで止まらないように)
         commit()
         mon._hp_event_base = new
@@ -454,7 +462,26 @@ def extract_field_hp(img, state: BattleStateV2) -> None:
         elif pct is None and bar is not None:
             pct = round(bar * 100, 1)
         if pct is not None:
-            _set_hp(state, "opponent", opp, pct=pct)
+            # HUD経路と同じ帰属ガード (2026-08-21 第6回: 演出中の空バーが
+            # このパスから安定3回条件を満たし、21%のガブリアスへ0%を
+            # 再コミットし続けた)。名前が読めて不一致なら書かない。
+            # 名前が読めないフレームは大きな変化 (>15pt) を書かない
+            from vision.normalize import similarity
+            name_text = ocr.read_zone_text(
+                img, zones.BATTLE["opp_name"], mode="panel",
+                allowlist=ocr.KATAKANA_ALLOWLIST)
+            known_names = [n for n in (
+                [opp.species_ja, opp.display_name] +
+                list(getattr(opp, "aliases", []) or [])) if n]
+            if name_text and known_names and \
+                    max(similarity(name_text, n) for n in known_names) < 0.5:
+                pass    # 明確な名前不一致: 演出中の別表示とみなす
+            elif not name_text and (
+                    opp.hp_percent is None or
+                    abs(pct - opp.hp_percent) > 15):
+                pass    # 名前未読 + 大変化/HP未知: 誤帰属の疑いで見送る
+            else:
+                _set_hp(state, "opponent", opp, pct=pct)
 
     me = state.player.active()
     if me is not None and _hp_bar_pixels(crop(img, zones.BATTLE["my_hp_bar"])) > 30:
@@ -1304,7 +1331,10 @@ def extract_field_check(img, state: BattleStateV2, resolver) -> None:
     turn_re = _re.compile(r"([0-9])\s*/\s*([0-9])")
     for t, (x0, y0, x1, y1) in effect_lines:
         lk = loose_key(t)
-        if "状態" not in t and "状感" not in t and not turn_re.search(t):
+        # 「状態」の末尾はOCRで化けやすい (実測: 状感/状要)。「状」1文字で
+        # ゲートする (2026-08-21 第6回: 「ステルスロック状要」が弾かれ
+        # 自陣ステロが取得されず、自分HPの被ダメ予測が1/8ずれた)
+        if "状" not in t and not turn_re.search(t):
             continue
         # 同じ行 or 近い行のターン表記 n/m
         turns_left = None
@@ -1764,6 +1794,8 @@ def _extract_watch_side_columns(img, state: BattleStateV2, resolver) -> None:
     from vision.spriteid import identify_species_color
     cands = [(p.species_id, 0.5, p.species_ja)
              for p in state.opponent.party if p.species_id and p.species_ja]
+    seen_idx: set = set()   # 1個体は1行のみ (誤同定の重複行でゼロ読み裏付けが
+    #                         1フレーム内で複数回進むのを防ぐ)
     for i, z in enumerate(zones.WATCH_OPP):
         hp_text = ocr.read_zone_text(img, z["hp_text"], mode="panel",
                                      allowlist="0123456789%")
@@ -1778,4 +1810,21 @@ def _extract_watch_side_columns(img, state: BattleStateV2, resolver) -> None:
             continue
         idx2 = state.opponent.find_by_species(hit[1])
         if idx2 is not None:
-            state.opponent.party[idx2].hp_percent = float(pct)
+            if idx2 in seen_idx:
+                continue
+            seen_idx.add(idx2)
+            mon2 = state.opponent.party[idx2]
+            if pct <= 3.0 and mon2.status != "fainted":
+                # 生存個体への突然の0-3%読みは裏付け必須 (HUD経路と同じ。
+                # 2026-08-21 第6回: 相手一覧の誤読0%への防御を追加)
+                if not _accept_zero_hp_read(state, mon2,
+                                            side_name="opponent"):
+                    continue
+                mon2.hp_percent = float(pct)
+                mon2.hp_uncertain = False
+                if pct <= 0.5:
+                    mon2.status = "fainted"
+                continue
+            if pct > 3.0:
+                mon2._zero_read_count = 0
+            mon2.hp_percent = float(pct)
