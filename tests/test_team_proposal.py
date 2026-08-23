@@ -222,6 +222,36 @@ def test_latest_selection_roster_reads_newest_log():
     print("test_latest_selection_roster_reads_newest_log OK")
 
 
+def test_myteam_text_completes_missing_evs():
+    """能力ポイント未登録の種は使用率配分で補完する (2026-08-22:
+    0ポイントのままShowdownバリデーションに拒否され収集が全滅した)。
+    championsの spread 行は「性格のみ」と「配分のみ」が混在するため、
+    EVを持つ行と性格を持つ行を別々に最頻選択する。"""
+    import advisor.my_team as mt
+    import tools.evolve_teams as ev
+    from tools.evaluate_team import build_myteam_text
+
+    orig_load = mt._load
+    orig_cache = ev._usage_cache
+    mt._load = lambda: {"マスカーニャ": {}}
+    ev._usage_cache = {"meowscarada": {
+        "moves": [("flowertrick", 90.0), ("knockoff", 80.0),
+                  ("uturn", 70.0), ("tripleaxel", 60.0)],
+        "items": [],
+        "spreads": [("jolly", None, 57.7),          # 性格のみ (最頻)
+                    (None, "2/32/0/0/0/32", 40.0)]  # 配分のみ
+    }}
+    try:
+        text = build_myteam_text()
+        blk = next(b for b in text.split("\n\n") if "eowscarada" in b)
+        assert "EVs: 2 HP / 32 Atk / 32 Spe" in blk, blk
+        assert "Jolly Nature" in blk, blk
+    finally:
+        mt._load = orig_load
+        ev._usage_cache = orig_cache
+    print("test_myteam_text_completes_missing_evs OK")
+
+
 def main() -> None:
     test_stage1_all_hard_pass()
     test_stage1_blocks_on_stale_usage_and_missing_party()
@@ -235,6 +265,7 @@ def main() -> None:
     test_mutate_item_clause_uses_alternative()
     test_has_build_requires_substance()
     test_latest_selection_roster_reads_newest_log()
+    test_myteam_text_completes_missing_evs()
     print("\nALL OK")
 
 

@@ -307,12 +307,39 @@ def build_myteam_text() -> str:
         evs = " / ".join(f"{v} {ev_keys[str(k).lower()]}"
                          for k, v in pts.items()
                          if str(k).lower() in ev_keys)
+        nat = nature_en.get(entry.get("性格") or "")
+        if not evs:
+            # 能力ポイント未登録 (種族のみの最小エントリ等) は使用率の
+            # 最頻配分・性格で補完する。0ポイントのままだとShowdownの
+            # バリデーションでチームごと拒否される (2026-08-22実測:
+            # "Meowscarada has exactly 0 Stat Points" で収集が全滅した)
+            try:
+                from tools.evolve_teams import _evs_line, _usage_alternatives
+                spreads = (_usage_alternatives().get(_to_id(r[1])) or {}) \
+                    .get("spreads") or []
+                # championsスナップショットは「性格のみ (evs=None)」の行と
+                # 「配分のみ (nature=None)」の行が混在する。EVを持つ行と
+                # 性格を持つ行を、それぞれ使用率最頻で別々に選ぶ
+                # (単純なmaxだと性格のみの行を掴みEV補完に失敗した実測あり)
+                for s_nat, s_evs, _w in sorted(
+                        spreads, key=lambda x: -(x[2] or 0)):
+                    if not evs and s_evs:
+                        line = _evs_line(s_evs)
+                        if line:
+                            evs = line[len("EVs: "):]
+                    if not nat and s_nat:
+                        nat = str(s_nat).capitalize()
+                    if evs and nat:
+                        break
+                print(f"  ! {ja}: 能力ポイント未登録のため使用率最頻の"
+                      f"配分で補完 ({evs or '補完失敗'} / {nat or '性格なし'})")
+            except Exception as e:
+                print(f"  ! {ja}: 配分補完失敗 ({e})")
         lines = [f"{species} @ {item}" if item else species, "Level: 50"]
         if ability:
             lines.append(f"Ability: {ability}")
         if evs:
             lines.append(f"EVs: {evs}")
-        nat = nature_en.get(entry.get("性格") or "")
         if nat:
             lines.append(f"{nat} Nature")
         if not moves:
