@@ -23,6 +23,20 @@ OUT = REPO / "logs" / "progress_tracking.jsonl"
 OPP_SEED = "20260730"
 
 
+def deviation_sigma(prev_rate: float, cur_rate: float,
+                    n_prev: int, n_cur: int) -> float:
+    """2つの独立な勝率測定の差を、二項標準誤差の合成で正規化した値。
+
+    凍結参照 (_best) の定点がこれを超えて動くのは方策ではなく測定軸側の
+    変化のサイン (2026-08-19: meta_sets回転で11SEの段差を5日見逃した)。
+    """
+    var = (prev_rate * (1 - prev_rate) / n_prev
+           + cur_rate * (1 - cur_rate) / n_cur)
+    if var <= 0:
+        return 0.0
+    return abs(cur_rate - prev_rate) / var ** 0.5
+
+
 def _run_eval(battles: int, checkpoint: str, selection: str,
               models_dir: str | None = None,
               opponent: str = "benchmark",
@@ -118,6 +132,22 @@ def main() -> None:
                           models_dir=str(arch_dir))
             row[key] = round(r["win_rate"], 4) if r else None
             print(f"{key}: {row[key]}")
+
+    # 凍結参照の逸脱検知: _best は重みが変わらない限り同一シードの定点が
+    # 統計誤差内に収まるはず。大きく動いたら評価軸 (チーム中身) の変化を疑う
+    from champions_agent.config import FROZEN_REF_WARN_SIGMA
+    if OUT.exists() and row.get("best_model") is not None:
+        prev_rows = [json.loads(l) for l
+                     in OUT.read_text(encoding="utf-8").splitlines() if l.strip()]
+        if prev_rows and prev_rows[-1].get("best_model") is not None:
+            prev = prev_rows[-1]
+            sigma = deviation_sigma(prev["best_model"], row["best_model"],
+                                    prev.get("battles", 3000), args.battles)
+            if sigma >= FROZEN_REF_WARN_SIGMA:
+                print(f"⚠ 凍結参照 (_best) の定点が前回から {sigma:.1f}SE 動きました "
+                      f"({prev['best_model']} → {row['best_model']})。_best昇格が"
+                      "無いのに動いた場合、meta_setsのセット回転など評価軸側の"
+                      "変化を疑うこと (この日を跨ぐベンチ絶対値の比較は不可)")
 
     OUT.parent.mkdir(parents=True, exist_ok=True)
     with OUT.open("a", encoding="utf-8") as f:

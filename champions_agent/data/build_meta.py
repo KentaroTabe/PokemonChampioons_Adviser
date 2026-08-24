@@ -7,8 +7,57 @@ usage_snapshot(使用率統計)の最新スナップショットから、各ポ�
 """
 from __future__ import annotations
 
-from champions_agent.config import USAGE_TARGET_FORMAT
+from champions_agent.config import META_SET_CHANGE_WARN, USAGE_TARGET_FORMAT
 from champions_agent.data import database as db
+
+
+def count_substantive_changes(prev: dict, new: dict) -> int:
+    """2スナップショットのmeta_setsで「実質変化」した種の数を返す。
+
+    prev/new: pokemon_name -> (ability, item, nature, evs, 技のfrozenset)。
+    技の並び順だけの違いは変化に数えない (frozensetで吸収)。
+    評価軸のチーム中身はここから補完されるため、この数が大きい日は
+    ベンチ絶対値の前後比較が壊れる (2026-08-19 インシデント)。
+    """
+    return sum(1 for k in prev.keys() & new.keys() if prev[k] != new[k])
+
+
+def _set_signature_rows(conn, snapshot_id: int) -> dict:
+    rows = conn.execute(
+        """
+        SELECT pokemon_name, ability_name, item_name, nature, evs,
+               move1, move2, move3, move4
+        FROM meta_sets WHERE snapshot_id = ?
+        """,
+        (snapshot_id,),
+    ).fetchall()
+    return {
+        r["pokemon_name"]: (
+            r["ability_name"], r["item_name"], r["nature"], r["evs"],
+            frozenset(m for m in (r["move1"], r["move2"],
+                                  r["move3"], r["move4"]) if m),
+        )
+        for r in rows
+    }
+
+
+def _report_axis_drift(conn, snapshot_id: int) -> None:
+    """前スナップショットからのセット回転量を日次更新ログに残す。"""
+    prev_row = conn.execute(
+        "SELECT DISTINCT snapshot_id FROM meta_sets WHERE snapshot_id < ? "
+        "ORDER BY snapshot_id DESC LIMIT 1",
+        (snapshot_id,),
+    ).fetchone()
+    if prev_row is None:
+        return
+    prev_id = prev_row["snapshot_id"]
+    changed = count_substantive_changes(
+        _set_signature_rows(conn, prev_id),
+        _set_signature_rows(conn, snapshot_id))
+    mark = "⚠ " if changed >= META_SET_CHANGE_WARN else ""
+    print(f"[build_meta] {mark}実質セット変化: snapshot {prev_id}→{snapshot_id} "
+          f"で {changed}種 (警告閾値 {META_SET_CHANGE_WARN})。"
+          + ("この日を跨ぐベンチ絶対値の比較は不可" if mark else ""))
 
 
 def _top_n(conn, table: str, col: str, snapshot_id: int, pokemon_name: str, n: int) -> list[str]:
@@ -109,6 +158,7 @@ def build_meta_sets(fmt: str = USAGE_TARGET_FORMAT, source: str | None = None) -
             inserted += 1
 
         conn.commit()
+        _report_axis_drift(conn, snapshot_id)
 
     print(f"[build_meta] meta_sets 生成完了: snapshot_id={snapshot_id}, rows={inserted}")
     return inserted
