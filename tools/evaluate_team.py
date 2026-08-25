@@ -273,20 +273,42 @@ def build_myteam_text() -> str:
         if not r:
             continue
         species = to_showdown_name(_sanitize_species(r[1]))
+        try:
+            from advisor.sets import get_predictor
+            usage = get_predictor().predict(_to_id(r[1]))
+        except Exception:
+            usage = {"moves": [], "items": [], "abilities": []}
         item = None
         if entry.get("持ち物"):
             ri = resolver.resolve(entry["持ち物"], "items", cutoff=0.8)
             item = _sanitize_item(ri[1]) if ri else None
             if item in used_items:
                 item = None
-            if item:
-                used_items.add(item)
+        if not item:
+            # 持ち物未登録 (またはアイテムクローズ衝突) は使用率上位の
+            # 未使用品で補完する。持ち物なしは実戦で常に不利で、提案出力にも
+            # そのまま出てしまう (2026-08-25 第9回: 持ち物なしマスカーニャ)
+            for cand, _pct in usage.get("items") or []:
+                cand = _sanitize_item(cand)
+                if cand and cand not in used_items:
+                    item = cand
+                    print(f"  ! {ja}: 持ち物未登録のため使用率上位で補完 ({item})")
+                    break
+        if item:
+            used_items.add(item)
         ability = None
         if entry.get("特性"):
             ra = resolver.resolve(entry["特性"], "abilities", cutoff=0.8)
             ability = ra[1] if ra else None
         if not ability:
-            # 特性未登録は種族の代表特性で補完 (poke-envはability=None不可)
+            # 特性未登録は使用率最頻で補完する (poke-envはability=None不可)。
+            # 従来の「合法特性の五十音順先頭」はマスカーニャで しんりょく を
+            # 選び、一般的な へんげんじざい にならなかった (2026-08-25 第9回)
+            ab = next(iter(usage.get("abilities") or []), None)
+            if ab:
+                ability = ab[0]
+                print(f"  ! {ja}: 特性未登録のため使用率最頻で補完 ({ability})")
+        if not ability:
             from vision.abilities import _load_forms
             legal = _load_forms().get(_to_id(r[1]))
             ability = next(iter(sorted(legal))) if legal else "noability"
@@ -297,12 +319,9 @@ def build_myteam_text() -> str:
                 moves.append(rm[1])
         if not moves:
             # 技未登録は使用率上位4つで補完 (tackle代替はバリデーション不通過)
-            try:
-                from advisor.sets import get_predictor
-                moves = [m for m, _ in
-                         get_predictor().predict(_to_id(r[1]))["moves"][:4]]
-            except Exception as e:
-                print(f"  ! {ja}: 技補完失敗 ({e})")
+            moves = [m for m, _ in (usage.get("moves") or [])[:4]]
+            if not moves:
+                print(f"  ! {ja}: 技補完失敗 (使用率データなし)")
         pts = entry.get("能力ポイント") or {}
         evs = " / ".join(f"{v} {ev_keys[str(k).lower()]}"
                          for k, v in pts.items()

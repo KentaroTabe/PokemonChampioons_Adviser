@@ -252,6 +252,73 @@ def test_myteam_text_completes_missing_evs():
     print("test_myteam_text_completes_missing_evs OK")
 
 
+def test_myteam_text_completes_ability_and_item():
+    """特性・持ち物未登録は使用率最頻で補完する (2026-08-25 第9回:
+    特性が五十音順先頭の「しんりょく」になり、持ち物なしのまま提案された)"""
+    import advisor.my_team as mt
+    import advisor.sets as sets_mod
+    import tools.evolve_teams as ev
+    from tools.evaluate_team import build_myteam_text
+
+    class _Pred:
+        def predict(self, sid):
+            return {"moves": [("flowertrick", 90.0), ("knockoff", 80.0),
+                              ("uturn", 70.0), ("tripleaxel", 60.0)],
+                    "items": [("focussash", 40.0), ("choicescarf", 30.0)],
+                    "abilities": [("protean", 80.0), ("overgrow", 20.0)],
+                    "found": True}
+
+    orig_load, orig_pred = mt._load, sets_mod.get_predictor
+    orig_cache = ev._usage_cache
+    mt._load = lambda: {"マスカーニャ": {}}
+    sets_mod.get_predictor = lambda: _Pred()
+    ev._usage_cache = {"meowscarada": {
+        "moves": [], "items": [],
+        "spreads": [("jolly", "2/32/0/0/0/32", 57.7)]}}
+    try:
+        text = build_myteam_text()
+        blk = next(b for b in text.split("\n\n") if "eowscarada" in b)
+        head = blk.split("\n")[0]
+        assert " @ " in head and "ocussash" in head.lower(), \
+            f"持ち物が補完されていない: {head}"
+        assert "Ability: protean" in blk, blk
+    finally:
+        mt._load = orig_load
+        sets_mod.get_predictor = orig_pred
+        ev._usage_cache = orig_cache
+    print("test_myteam_text_completes_ability_and_item OK")
+
+
+def test_mutate_set_item_change_ignores_change_limit():
+    """種族の変更上限を使い切っていても持ち物は全枠変更できる
+    (2026-08-25 第9回指摘: 持ち物は2体縛りでも6体全ての変更を許可)"""
+    import random
+
+    import tools.evolve_teams as ev
+    from tools.evolve_teams import Constraint, mutate_set
+
+    seed = ("Mimikyu @ lifeorb\nLevel: 50\n- playrough\n\n"
+            "Staraptor @ choicescarf\nLevel: 50\n- bravebird")
+    # 2枠目が別種に置き換わり済み (max_changes=1 到達) → 種族・技・配分の
+    # 変異は置換済み枠に限られるが、持ち物はミミッキュ枠でも変わる
+    team = ("Mimikyu @ lifeorb\nLevel: 50\n- playrough\n\n"
+            "Garchomp @ choicescarf\nLevel: 50\n- earthquake")
+    c = Constraint(seed, [], 1)
+    assert c.mutable_slots(team) == [1], "前提: 変更可能枠は置換済みの1枠のみ"
+    prev = ev._usage_cache
+    # ミミッキュにだけitem候補を与える (他の変異は不発になる構成)
+    ev._usage_cache = {"mimikyu": {
+        "moves": [], "spreads": [], "items": [("redcard", 50.0)]}}
+    try:
+        out = mutate_set(team, random.Random(0), c)
+        head = out.split("\n\n")[0].split("\n")[0]
+        assert "redcard" in head.replace(" ", "").lower(), \
+            f"変更上限到達時にミミッキュの持ち物が変わらなかった: {head}"
+    finally:
+        ev._usage_cache = prev
+    print("test_mutate_set_item_change_ignores_change_limit OK")
+
+
 def main() -> None:
     test_stage1_all_hard_pass()
     test_stage1_blocks_on_stale_usage_and_missing_party()
@@ -266,6 +333,8 @@ def main() -> None:
     test_has_build_requires_substance()
     test_latest_selection_roster_reads_newest_log()
     test_myteam_text_completes_missing_evs()
+    test_myteam_text_completes_ability_and_item()
+    test_mutate_set_item_change_ignores_change_limit()
     print("\nALL OK")
 
 

@@ -438,25 +438,29 @@ def mutate_set(team_text: str, rng: random.Random,
 
     候補は使用率DBから使用率重みで引く (実際に使われている型の範囲)。
     種族が変わらないため Constraint の変更数 (種チームからの距離) は
-    増えない。固定枠は型もいじらない (ユーザーが実機で使うセットを
-    勝手に変えない) ため mutable_slots に従う。
+    増えない。技・配分は固定枠/変更上限に従う (ユーザーが実機で使う
+    セットを勝手に変えない) が、**持ち物だけは全6枠を変更可**とする:
+    実機での持ち物変更は付け替えるだけで再構築コストが無く、ユーザーも
+    全枠の変更を許可している (2026-08-25 第9回指摘)。
     """
     blocks = [b.strip() for b in team_text.strip().split("\n\n")]
     slots = (constraint.mutable_slots(team_text) if constraint
              else list(range(len(blocks))))
-    if not slots:
+    item_slots = list(range(len(blocks)))
+    if not slots and not item_slots:
         return team_text
     # 不発 (その種族の使用率データが無い等) のときは別の操作/別のスロットを
     # 試す。不発をそのまま返すとGAが同一個体を再評価して対戦数を無駄にする
     kinds = ["item", "move", "spread"]
     rng.shuffle(kinds)
     rng.shuffle(slots)
-    for idx in slots:
-        sid = _to_id(blocks[idx].split("\n")[0].split(" @ ")[0])
-        alt = _usage_alternatives().get(sid)
-        if not alt:
-            continue
-        for kind in kinds:
+    rng.shuffle(item_slots)
+    for kind in kinds:
+        for idx in (item_slots if kind == "item" else slots):
+            sid = _to_id(blocks[idx].split("\n")[0].split(" @ ")[0])
+            alt = _usage_alternatives().get(sid)
+            if not alt:
+                continue
             if kind == "item":
                 used = _team_items(blocks, idx)
                 cur = _to_id(_block_item(blocks[idx]) or "")
