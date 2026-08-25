@@ -314,6 +314,13 @@ class VisionPipeline:
                     img, self.state, self.resolver)
         elif scene == "field_check" and heavy:
             extractors.extract_field_check(img, self.state, self.resolver)
+        elif scene == scenes.SCENE_RESULT:
+            # リザルト画面は順位/レート行を直接OCRして終了検出に流す。
+            # 従来は field 誤分類時のメッセージ枠OCRに依存し、検出が決着から
+            # 約10秒遅れ (連戦の表示窓ぎりぎり) だった (2026-08-25 第9回)
+            fired += self._process_text_regions(img, [
+                ("message", zones.RESULT["rate_row"]),
+            ], single_shot)
 
         if heavy:
             # 自分側の静的情報 (タイプ=図鑑 / 持ち物・特性=登録) を補完する。

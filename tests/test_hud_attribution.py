@@ -395,6 +395,58 @@ def test_watch_opp_zero_needs_corroboration():
     print("test_watch_opp_zero_needs_corroboration OK")
 
 
+def test_watch_my_max_hp_species_bound():
+    """watch側柱の自分HP読みは、最大HPが種族として物理的にあり得る範囲
+    (図鑑種族値・EV0〜252) を外れたら棄却する (2026-08-25 第9回監査:
+    つよさ表示の誤分類フレームで max=353 (実153の桁誤読) が初回観測として
+    通り、マスカーニャに 153/353=43% が付いた)"""
+    from vision import extractors
+    from vision.extractors import _plausible_max_hp
+    from vision.normalize import NameResolver
+
+    # 単体: meowscarada (HP種族値76) の可能域は約151〜183。353は棄却
+    assert not _plausible_max_hp("meowscarada", 353)
+    assert _plausible_max_hp("meowscarada", 153)
+    assert _plausible_max_hp("staraptor", 181)   # 実測採用済みの正常値
+    assert _plausible_max_hp(None, 353)          # 種族不明は判定しない
+
+    # 経路: 側柱読みが 153/353 を返しても書き込まれない
+    st = BattleStateV2()
+    mon = PokemonState(species_ja="マスカーニャ", species_id="meowscarada")
+    st.player.party.append(mon)
+
+    orig_read = ocr.read_zone_text
+
+    def fake_read(img, zone, **kw):
+        allow = kw.get("allowlist") or ""
+        if "/" in allow:
+            return "153/353"
+        if "%" in allow:
+            return ""
+        return "マスカーニャ"
+
+    ocr.read_zone_text = fake_read
+    try:
+        img = np.zeros((720, 1280, 3), dtype=np.uint8)
+        extractors.extract_watch_side_columns(img, st, NameResolver())
+        assert mon.hp_percent is None, mon.hp_percent
+        # 正常な読み (153/153) は通る
+        def fake_read2(img, zone, **kw):
+            allow = kw.get("allowlist") or ""
+            if "/" in allow:
+                return "153/153"
+            if "%" in allow:
+                return ""
+            return "マスカーニャ"
+        ocr.read_zone_text = fake_read2
+        extractors.extract_watch_side_columns(img, st, NameResolver())
+        extractors.extract_watch_side_columns(img, st, NameResolver())
+        assert mon.hp_percent == 100.0, mon.hp_percent
+    finally:
+        ocr.read_zone_text = orig_read
+    print("test_watch_my_max_hp_species_bound OK")
+
+
 def test_watch_my_team_update_needs_two_reads():
     """能力タブからの my_team 自動更新は同一内容の2フレーム連続を要求する。
 
@@ -507,6 +559,7 @@ def main() -> None:
     test_field_check_skips_unresolved_or_foreign_species()
     test_field_check_reads_garbled_hazard_state()
     test_watch_opp_zero_needs_corroboration()
+    test_watch_my_max_hp_species_bound()
     test_watch_my_team_update_needs_two_reads()
     test_hud_base_name_keeps_form_variant_active()
     test_hud_mega_name_sets_mega_flag()

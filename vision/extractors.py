@@ -353,14 +353,19 @@ def _set_hp(state: BattleStateV2, side_name: str, mon,
             if expected and mx != expected:
                 return
             if expected is None:
-                legal = _my_legal_maxes()
-                try:
-                    from advisor.my_team import has_build
-                    registered = has_build(mon.species_ja)
-                except Exception:
-                    registered = False
-                if registered and legal and mx not in legal:
-                    return
+                # 理論値なし (能力ポイント未登録) の個体。従来は「登録済み
+                # (has_build) ならチーム全体の理論最大HP集合で検証」していたが、
+                # 技のみ自動登録された個体は本人の理論値が集合に無く、正しい
+                # 読みまで全棄却された (2026-08-25: watch取込後のマスカーニャで
+                # 153/153が棄却され続けた)。種族が判明していれば図鑑の物理
+                # 可能域で、未特定ならチーム集合で検証する
+                if mon.species_id is not None:
+                    if not _plausible_max_hp(mon.species_id, mx):
+                        return
+                else:
+                    legal = _my_legal_maxes()
+                    if legal and mx not in legal:
+                        return
         # 最大HPは種族ごとの多数決で確定する (「28/167」→「28/67」のような
         # 桁落ち誤読が50以上のガードを通過して定着するのを防ぐ)
         votes = state.hp_max_votes.setdefault((side_name, mon.species_ja), {})
@@ -959,10 +964,17 @@ def extract_my_hud(img, state: BattleStateV2, resolver) -> None:
                 else:
                     ok = False
                     mx = known
-        elif known is None and legal and mx not in legal:
-            # 種族特定前でも、チーム全員の理論最大HP集合に無い読みは誤読
-            # (「16/67」が特定前に素通りして定着する事故の防止)
-            ok = False
+        elif known is None:
+            if me.species_id is not None:
+                # 種族判明済み・理論値なし (能力ポイント未登録): 図鑑の物理
+                # 可能域で検証する。チーム理論値集合だと本人の値が含まれず
+                # 全読取が棄却される (2026-08-25: 技のみ自動登録のマスカーニャ)
+                if not _plausible_max_hp(me.species_id, mx):
+                    ok = False
+            elif legal and mx not in legal:
+                # 種族特定前は、チーム全員の理論最大HP集合に無い読みは誤読
+                # (「16/67」が特定前に素通りして定着する事故の防止)
+                ok = False
         # OCR分数とHPバーの塗り割合を照合する。イタリック数字の桁化けは
         # 基準最大HPとの突き合わせをすり抜ける ("111/162"→"16/162"=10%、
         # "162/162"→100% を実戦で観測)。バーとの乖離が大きい読みは棄却する
@@ -1782,6 +1794,28 @@ def _accept_zero_hp_read(state, mon, side_name: str = "player") -> bool:
     return zero_n >= ZERO_READ_FAINT_COUNT
 
 
+def _plausible_max_hp(species_id, mx) -> bool:
+    """最大HPの読みが種族として物理的にあり得る範囲かを図鑑から判定する。
+
+    Lv50・個体値31で努力値0〜252 (ゲームの物理上限) のHP範囲に、champions側の
+    種族値改変・丸め差への余裕±8を加えた域。つよさ表示の誤分類フレームで
+    max=353 (実153の桁誤読) が初回観測として素通りし、マスカーニャに
+    153/353=43% が付いた (2026-08-25 第9回監査・高確度乖離) 対策。
+    種族未特定・図鑑不明なら判定せず True (既存の他ガードに委ねる)
+    """
+    if not species_id or not mx:
+        return True
+    try:
+        from advisor.dex import calc_hp, get_dex
+        sp = get_dex().species(species_id)
+        base = ((sp or {}).get("baseStats") or {}).get("hp")
+    except Exception:
+        return True
+    if not base:
+        return True
+    return calc_hp(int(base), 0) - 8 <= mx <= calc_hp(int(base), 252) + 8
+
+
 def _extract_watch_side_columns(img, state: BattleStateV2, resolver) -> None:
     # 左列: 自分の選出パーティのHP実数値
     for i, z in enumerate(zones.WATCH_MY[:3]):
@@ -1807,6 +1841,8 @@ def _extract_watch_side_columns(img, state: BattleStateV2, resolver) -> None:
             state.player.party.append(mon)
             idx = len(state.player.party) - 1
         mon = state.player.party[idx]
+        if not _plausible_max_hp(mon.species_id, frac[1]):
+            continue
         if frac[0] == 0 and mon.status != "fainted":
             if not _accept_zero_hp_read(state, mon):
                 continue
