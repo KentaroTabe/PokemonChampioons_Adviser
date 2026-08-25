@@ -57,25 +57,37 @@ _model = None
 _model_tried = False
 
 
-def _load_model():
-    global _model, _model_tried
-    if _model_tried:
-        return _model
-    _model_tried = True
-    style = os.environ.get("RL_ADVICE_STYLE", "balance")
-    # 読み込み元の優先順は RL_POLICY_SOURCE で選ぶ (P5 EMA配布判定用。
-    # 既定 "best" = 従来どおり最良スナップショット優先。"ema" = EMA平均方策
-    # (train/ema.py) を優先。存在しない場合は次候補へ落ちる)
-    source = os.environ.get("RL_POLICY_SOURCE", "best")
-    order = {
+def _policy_candidates(style: str, source: str) -> list:
+    """RL方策ファイルの読み込み優先順 (存在しないものは次候補へ落ちる)。
+
+    ema: EMA平均方策を優先 (P5判定で配布に採用、2026-08-26)。
+    best: 最良スナップショット優先 (従来)。current: 学習中の最新のみ。
+    不明な指定は best 扱い (誤設定でも読み込みが止まらない安全側)
+    """
+    orders = {
         "ema": [f"battle_policy_{style}_ema.zip",
                 f"battle_policy_{style}_best.zip",
                 f"battle_policy_{style}.zip"],
         "best": [f"battle_policy_{style}_best.zip",
                  f"battle_policy_{style}.zip"],
         "current": [f"battle_policy_{style}.zip"],
-    }.get(source) or [f"battle_policy_{style}_best.zip",
-                      f"battle_policy_{style}.zip"]
+    }
+    return orders.get(source) or orders["best"]
+
+
+def _load_model():
+    global _model, _model_tried
+    if _model_tried:
+        return _model
+    _model_tried = True
+    style = os.environ.get("RL_ADVICE_STYLE", "balance")
+    # 読み込み元の優先順は RL_POLICY_SOURCE で選ぶ。既定は "ema":
+    # 2026-08-26 のP5事前登録判定で採用 (current/EMAを対に測る2ラウンド
+    # 18,000戦: EMA 0.628 vs current 0.601、差+0.027はゲート2SE=0.010の
+    # 5.3σ。P4分布変更の過渡でcurrentが揺れる間もEMAは安定 — 配布向きの
+    # 性質そのもの)。"best"=従来の最良スナップショット優先に戻せる
+    source = os.environ.get("RL_POLICY_SOURCE", "ema")
+    order = _policy_candidates(style, source)
     path = next((CKPT_DIR / n for n in order if (CKPT_DIR / n).exists()),
                 CKPT_DIR / order[-1])
     try:

@@ -13,6 +13,23 @@ def approx(a, b, tol):
     assert abs(a - b) <= tol, f"{a} != {b} (+-{tol})"
 
 
+def test_rl_policy_source_order():
+    """RL方策の読み込み優先順 (P5: 既定emaの採用と復帰経路の保証)"""
+    from advisor.rl_bridge import _policy_candidates
+    assert _policy_candidates("balance", "ema") == [
+        "battle_policy_balance_ema.zip",
+        "battle_policy_balance_best.zip",
+        "battle_policy_balance.zip"]
+    assert _policy_candidates("balance", "best")[0] == \
+        "battle_policy_balance_best.zip"
+    assert _policy_candidates("cycle", "current") == \
+        ["battle_policy_cycle.zip"]
+    # 誤設定は best 扱い (読み込みが止まらない安全側)
+    assert _policy_candidates("balance", "typo") == \
+        _policy_candidates("balance", "best")
+    print("test_rl_policy_source_order OK")
+
+
 def test_stats():
     # ガブリアス Lv50 個体値31 努力値0: HP実数値 183, 素早さ122 (無補正)
     dex = get_dex()
@@ -654,6 +671,7 @@ def test_uncertain_bench_switch_penalty():
 
 
 if __name__ == "__main__":
+    test_rl_policy_source_order()
     test_stats()
     test_type_chart()
     test_damage_sanity()
