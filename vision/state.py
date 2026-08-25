@@ -169,7 +169,8 @@ class SideState:
                 return self._limbo
         return mon
 
-    def find_by_species(self, species_ja: str) -> Optional[int]:
+    def find_by_species(self, species_ja: str,
+                        species_id: Optional[str] = None) -> Optional[int]:
         for i, p in enumerate(self.party):
             if p.species_ja == species_ja:
                 return i
@@ -186,6 +187,23 @@ class SideState:
         if want:
             for i, p in enumerate(self.party):
                 if base(p.species_ja) == want:
+                    return i
+        # 同名フォーム族フォールバック: ゲームのHUD表示はフォーム名を省く
+        # (ウォッシュロトムも「ロトム」と表示される) ため、素の名前の読みが
+        # 既存のフォーム個体の隣に別枠として生えないよう、名前の末尾一致
+        # + 図鑑IDの前方一致の両方を満たす枠へ寄せる (2026-08-25 第9回:
+        # rotomwash の隣に rotom が生え、タイプがゴースト/でんきで表示された)。
+        # ID前方一致を必須にするのは、コイル/レアコイルのような
+        # 「名前は末尾一致するが別種」の誤併合を防ぐため
+        if want and species_id and len(want) >= 3:
+            for i, p in enumerate(self.party):
+                pj = base(p.species_ja) or ""
+                pid = p.species_id or ""
+                if not pj or not pid or pj == want:
+                    continue
+                if not (pj.endswith(want) or want.endswith(pj)):
+                    continue
+                if pid.startswith(species_id) or species_id.startswith(pid):
                     return i
         return None
 
@@ -205,7 +223,7 @@ class SideState:
         self.party[index].is_active = True
 
     def switch_to_species(self, species_ja: str, species_id: Optional[str]) -> PokemonState:
-        idx = self.find_by_species(species_ja)
+        idx = self.find_by_species(species_ja, species_id)
         if idx is None and len(self.party) >= 6:
             # 満枠での「初登場」= 既存枠の視覚同定ミスが濃厚 (実測:
             # ラフレシアと誤同定した枠の実体がフシギバナで、appendにより
@@ -247,7 +265,13 @@ class SideState:
             idx = len(self.party) - 1
         self.switch_to(idx)
         mon = self.party[idx]
-        mon.merge_species(species_ja, species_id)
+        # 同族フォーム一致 (素の名前読みが具体フォーム枠へ寄せられた場合) は、
+        # 確定済みの具体フォーム (rotomwash等) を素形 (rotom) へ格下げしない
+        downgrade = (mon.species_id and species_id
+                     and mon.species_id != species_id
+                     and mon.species_id.startswith(species_id))
+        if not downgrade:
+            mon.merge_species(species_ja, species_id)
         return mon
 
     def prune_placeholders(self):

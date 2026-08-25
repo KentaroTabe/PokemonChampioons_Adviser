@@ -48,6 +48,40 @@ def get_dex() -> Dex:
     return _dex
 
 
+BOOST_MOVES_PATH = Path(__file__).resolve().parent / "data" / "boost_moves.json"
+
+
+@lru_cache(maxsize=1)
+def _boost_moves() -> dict:
+    try:
+        return json.loads(BOOST_MOVES_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def move_boost_effects(move_id: Optional[str]) -> Optional[dict]:
+    """技の確定的な能力ランク変化 (100%発動のみ)。
+
+    戻り値: {"self": {stat: delta}, "target": {stat: delta}} (該当なしはNone)。
+    データは advisor/data/boost_moves.json (確率発動の追加効果は含まない)。
+    """
+    if not move_id:
+        return None
+    data = _boost_moves()
+    self_eff = (data.get("self") or {}).get(move_id)
+    target_eff = (data.get("target") or {}).get(move_id)
+    if not self_eff and not target_eff:
+        return None
+    return {"self": self_eff or {}, "target": target_eff or {}}
+
+
+def switch_in_ability_effects(ability_id: Optional[str]) -> Optional[dict]:
+    """着地時に確定発動する特性の相手能力変化 (いかく等)。"""
+    if not ability_id:
+        return None
+    return (_boost_moves().get("ability_on_switch") or {}).get(ability_id)
+
+
 # ==============================================================================
 # ステータス計算 (Lv50 / 個体値31固定)
 # ==============================================================================

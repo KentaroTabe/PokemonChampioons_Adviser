@@ -355,12 +355,23 @@ class EventParser:
         # (勝敗メッセージのOCR取り逃しが6戦中2戦で発生。レートの増減は
         #  結果画面に必ず表示されるので、増=勝ち/減=負けの裏付けになる)
         if re.search(r"(ランク|らんく).{0,4}(レート|れーと)|レート\d{3,}|ボール級", cleaned):
-            rm = re.search(r"レート\s*(\d{3,5})", cleaned)
-            if rm:
-                val = int(rm.group(1))
+            # レートは cleaned ではなく raw_text から抽出する: ランク画面の表示は
+            # 「レート1626.580」の小数3桁形式で、正規化が小数点を落とすと
+            # 「1626580」→先頭5桁=16265 が妥当範囲外となり全戦で棄却されていた
+            # (2026-08-25 第9回: 8戦でレート観測0件、勝敗不明3戦の主因)
+            cands = []
+            m1 = re.search(r"レート\s*(\d{3,5}(?:[.,]\d{1,4})?)", raw_text)
+            if m1:
+                cands.append(float(m1.group(1).replace(",", ".")))
+            # 小数点がOCRで落ちて桁が連結された場合の救済 (整数部4桁まで)
+            m2 = re.search(r"レート(\d{3,4})", cleaned)
+            if m2:
+                cands.append(float(m2.group(1)))
+            for val in cands:
                 if 500 <= val <= 4000:   # ありえない値 (誤読) は捨てる
                     self.state.last_rate = {"value": val,
                                             "ts": round(time.time(), 2)}
+                    break
             # ランク画面は対戦終了後に必ず表示される。勝敗文言を取り逃して
             # いても、ここを対戦終了のキーにする (2026-08-21 ユーザー提案)。
             # battle_logger はこのイベントで勝敗レコードを即時確定する
@@ -508,9 +519,22 @@ class EventParser:
             side = self.state.opponent
         if self._dedup(f"switch_{side_name}_{sid}"):
             return True
-        side.switch_to_species(jp, sid)
+        mon = side.switch_to_species(jp, sid)
         from vision.extractors import link_active_to_party
         link_active_to_party(self.state, side_name)
+        # 確定特性の着地効果 (いかく等): 「〜のいかく!」「こうげきがさがった」
+        # のメッセージは演出中で取り逃しやすい (第9回: 捕捉0件) ため、
+        # 交代イベント時点で確定的に適用する。特性が確定している個体のみ
+        # (相手側の推定特性では適用しない — 誤適用の方が害が大きい)
+        from advisor.dex import switch_in_ability_effects
+        land = switch_in_ability_effects(mon.ability_id)
+        if land:
+            other_name = "opponent" if side_name == "player" else "player"
+            other = self.state.side(other_name).active()
+            if other is not None and other.status != "fainted":
+                for stat, delta in land.items():
+                    if not self._dedup(f"boost_{other_name}_{stat}_{delta:+d}"):
+                        other.set_boost(stat, delta)
         # 交代後の新しい個体に前の個体のひんし裏付けを誤適用しない
         # (実戦: マスカーニャひんし→メタグロス登場直後の空バー誤読1%が
         #  「ひんし裏付けあり」としてHPイベント化した)
@@ -629,7 +653,35 @@ class EventParser:
         if apply_effects:
             # 他イベントが既に発火している場合は場への効果を二重適用しない
             self._apply_move_side_effect(r[1], side_name)
+            self._apply_move_boosts(r[1], side_name, mon)
         return event_id
+
+    def _apply_move_boosts(self, move_id: str, user_side: str, user_mon):
+        """技の確定的な能力ランク変化 (100%発動のみ) を使用イベントで反映する。
+
+        能力変化メッセージは技演出中の短時間表示でフレーム取得から系統的に
+        漏れる (2026-08-25 第9回: 8対戦で捕捉0件、つるぎのまい・いかく含む)。
+        技の使用メッセージ自体は確実に取れるため、そこから決定的に反映し、
+        メッセージ読み (_parse_rank_change) と場の状況画面 (extract_field_check)
+        は補正役に回す。boost_* のdedupキーを登録しておき、直後にメッセージも
+        読めた場合の二重適用を防ぐ (3秒窓。次ターンの再使用は窓外で適用される)。
+        制約: 命中失敗・まもる時の対象側効果は誤適用になる (発生率は低く、
+        場の状況画面の実測値で上書き修正される)。
+        """
+        from advisor.dex import move_boost_effects
+        eff = move_boost_effects(move_id)
+        if not eff:
+            return
+        target_side = "opponent" if user_side == "player" else "player"
+        applies = [("self", user_side, user_mon),
+                   ("target", target_side, self.state.side(target_side).active())]
+        for scope, side_name, mon in applies:
+            if mon is None:
+                continue
+            for stat, delta in (eff.get(scope) or {}).items():
+                if self._dedup(f"boost_{side_name}_{stat}_{delta:+d}"):
+                    continue   # 直前にメッセージ経由で適用済み
+                mon.set_boost(stat, delta)
 
     def _popup_mon(self, name_part: str, default_side: str):
         """ポップアップの名前部分から帰属先の個体を決める。
@@ -908,6 +960,19 @@ class EventParser:
                 # メガ名でも照合できるよう別名に登録
                 if sp[0] not in (mon.aliases or []):
                     mon.aliases.append(sp[0])
+            else:
+                # メガ名がOCR崩れで解決できない場合 (「メガスコィラン」等、
+                # 2026-08-25 第9回で実測) は、対象個体の種族からメガフォルムを
+                # 導出する。X/Y両形態はメガストーンIDで判別し、判別できなければ
+                # species_id は変えない (is_megaフラグのみ。誤確定より未確定)
+                from vision.abilities import mega_form_id
+                mid = mega_form_id(mon.species_id, mon.item_id)
+                if mid:
+                    mon.species_id = mid
+                    if mon.species_ja:
+                        alias = f"メガ{mon.species_ja}"
+                        if alias not in (mon.aliases or []):
+                            mon.aliases.append(alias)
             # メガフォルムの特性は固定なので確定値として設定する
             from vision.abilities import fixed_ability
             fa = fixed_ability(mon.species_id, is_mega=True, item_id=mon.item_id)

@@ -590,10 +590,13 @@ def test_boost_survives_active_relink():
     p.parse("相手は ルカリオを 繰り出した!")
     fired = p.parse("相手の ルカリオの つるぎのまい!")
     assert any(f.startswith("move_opponent") for f in fired), fired
-    fired = p.parse("相手の ルカリオの こうげきが ぐーんとあがった!")
-    assert any(f.startswith("boost_opponent_atk") for f in fired), fired
     mon = state.opponent.active()
-    assert mon.boosts.get("atk", 0) >= 2, mon.boosts
+    # 2026-08-25 第9回以降: 確定ブーストは技イベント時点で即適用され、
+    # 直後のメッセージはdedupで二重適用されない (メッセージ取り逃し対策)
+    assert mon.boosts.get("atk", 0) == 2, mon.boosts
+    p.parse("相手の ルカリオの こうげきが ぐーんとあがった!")
+    assert mon.boosts.get("atk", 0) == 2, \
+        f"技+メッセージで二重適用された: {mon.boosts}"
 
     # HUD再読で生えた同種族のプレースホルダ (ブースト情報なし) をマージ
     ph = PokemonState()
@@ -606,6 +609,142 @@ def test_boost_survives_active_relink():
         f"マージでランク変化が消えた: {mon.boosts}"
     assert "つるぎのまい" in mon.revealed_moves, mon.revealed_moves
     print("test_boost_survives_active_relink OK")
+
+
+def test_boost_from_move_event():
+    """能力変化メッセージは技演出中の短時間表示で系統的に取り逃す
+    (2026-08-25 第9回: 8対戦で捕捉0件、つるぎのまい・いかく含む)。
+    技の使用イベントから確定分 (100%発動のみ) を即時反映する"""
+    state, p = new_parser()
+    state.player.active_index = 0
+    fired = p.parse("ブリジュラスの つるぎのまい!")
+    assert any(f.startswith("move_player") for f in fired), fired
+    mon = state.player.party[0]
+    assert mon.boosts["atk"] == 2, mon.boosts
+    # 対象側への確定デバフ (こごえるかぜ=相手の素早さ-1)
+    p.parse("相手は ルカリオを 繰り出した!")
+    opp = state.opponent.active()
+    p.parse("ブリジュラスの こごえるかぜ!")
+    assert opp.boosts["spe"] == -1, opp.boosts
+    # 確率発動の追加効果は適用しない (10まんボルトの麻痺等はランク変化なし)
+    p.parse("ブリジュラスの 10まんボルト!")
+    assert opp.boosts["spe"] == -1 and opp.boosts.get("atk", 0) == 0, opp.boosts
+    print("test_boost_from_move_event OK")
+
+
+def test_intimidate_applies_on_switch_event():
+    """いかくの着地効果を交代イベントで確定適用する (メッセージ非依存)。
+    特性が確定している個体のみ (推定特性では適用しない)"""
+    from vision.state import PokemonState
+    state, p = new_parser()
+    state.player.active_index = 0
+    state.opponent.party.append(PokemonState(
+        species_ja="ギャラドス", species_id="gyarados",
+        ability_id="intimidate", ability_ja="いかく"))
+    fired = p.parse("相手は ギャラドスを 繰り出した!")
+    assert any(f.startswith("switch_opponent") for f in fired), fired
+    assert state.player.party[0].boosts["atk"] == -1, \
+        state.player.party[0].boosts
+    # 特性未確定の交代では適用されない
+    state2, p2 = new_parser()
+    state2.player.active_index = 0
+    p2.parse("相手は ルカリオを 繰り出した!")
+    assert state2.player.party[0].boosts["atk"] == 0
+    print("test_intimidate_applies_on_switch_event OK")
+
+
+def test_mega_fallback_without_readable_name():
+    """メガ名がOCR崩れで読めない場合、対象個体の種族からメガフォルムを導出
+    (2026-08-25 第9回: 「メガスコィラン」でメガ種族値が反映されなかった)"""
+    state, p = new_parser()
+    p.parse("相手は バシャーモを 繰り出した!")
+    fired = p.parse("相手の バシャーモは メガシンカした!")
+    assert "mega_evolve" in fired, fired
+    mon = state.opponent.active()
+    assert mon.is_mega
+    assert mon.species_id == "blazikenmega", mon.species_id
+    assert "メガバシャーモ" in (mon.aliases or []), mon.aliases
+    print("test_mega_fallback_without_readable_name OK")
+
+
+def test_mega_form_id_derivation():
+    """基本形→メガフォルムIDの導出 (X/Yはストーンで判別、曖昧なら未確定)"""
+    from vision.abilities import fixed_ability, mega_form_id
+    assert mega_form_id("blaziken") == "blazikenmega"
+    assert mega_form_id("raichu") is None            # X/Y曖昧
+    assert mega_form_id("raichu", "raichunitey") == "raichumegay"
+    assert mega_form_id("raichu", "raichunitex") == "raichumegax"
+    assert mega_form_id("blazikenmega") is None      # 既にメガ
+    assert mega_form_id("yanmega") is None           # 自然名の誤爆なし
+    assert mega_form_id("pikachu") is None           # メガ形態なし
+    # X/Y形態IDでも特性が確定する (従来は endswith("mega") 判定が
+    # …megay を基本形と誤判し None を返していた)
+    assert fixed_ability("raichumegay", is_mega=True) == "noguard"
+    print("test_mega_form_id_derivation OK")
+
+
+def test_mega_survives_reswitch():
+    """メガ後に交代で下げて再登場しても species_id がメガのまま維持される
+    (従来は switch_to_species の merge が基本形IDへ戻していた)"""
+    state, p = new_parser()
+    p.parse("相手は バシャーモを 繰り出した!")
+    p.parse("相手の バシャーモは メガバシャーモに メガシンカした!")
+    mon = state.opponent.active()
+    assert mon.species_id == "blazikenmega", mon.species_id
+    p.parse("相手は ルカリオを 繰り出した!")
+    mon2 = state.opponent.switch_to_species("バシャーモ", "blaziken")
+    assert mon2 is mon
+    assert mon2.species_id == "blazikenmega", \
+        f"再登場でメガが基本形に戻った: {mon2.species_id}"
+    print("test_mega_survives_reswitch OK")
+
+
+def test_bare_form_read_merges_into_family_slot():
+    """素の「ロトム」読みが既存のウォッシュロトム枠へ併合され、別枠が
+    生えない (2026-08-25 第9回: rotomの別枠が生えタイプがゴースト/でんきで
+    表示された)。別種 (コイル/レアコイル) は併合しない"""
+    from vision.state import BattleStateV2, PokemonState
+    state = BattleStateV2()
+    state.opponent.party = [
+        PokemonState(species_ja="ウォッシュロトム", species_id="rotomwash",
+                     types=["でんき", "みず"]),
+        PokemonState(species_ja="ミミッキュ", species_id="mimikyu"),
+    ]
+    mon = state.opponent.switch_to_species("ロトム", "rotom")
+    assert mon is state.opponent.party[0], "別枠が生えた"
+    assert mon.species_id == "rotomwash", "具体フォームが素形へ格下げされた"
+    assert mon.species_ja == "ウォッシュロトム"
+    assert len(state.opponent.party) == 2
+    # 逆方向: 具体フォームの読みは素形枠を昇格させる
+    state2 = BattleStateV2()
+    state2.opponent.party = [
+        PokemonState(species_ja="ロトム", species_id="rotom")]
+    mon2 = state2.opponent.switch_to_species("ウォッシュロトム", "rotomwash")
+    assert mon2 is state2.opponent.party[0]
+    assert mon2.species_id == "rotomwash"
+    # 名前は末尾一致するが別種 → 併合しない
+    state3 = BattleStateV2()
+    state3.opponent.party = [
+        PokemonState(species_ja="レアコイル", species_id="magneton")]
+    mon3 = state3.opponent.switch_to_species("コイル", "magnemite")
+    assert mon3 is not state3.opponent.party[0]
+    print("test_bare_form_read_merges_into_family_slot OK")
+
+
+def test_rate_extraction_decimal_format():
+    """ランク画面の実表示「レート1626.580」(小数3桁) を抽出する (2026-08-25
+    第9回: 正規化が小数点を落とし 1626580→先頭5桁が範囲外で全戦棄却され、
+    レート観測0件・勝敗不明3戦の主因になった)"""
+    state, p = new_parser()
+    p.parse("マスターボール級 ランクIV レート1626.580")
+    assert state.last_rate and abs(state.last_rate["value"] - 1626.58) < 1e-6, \
+        state.last_rate
+    # 小数点がOCRで落ちて連結された場合も整数部を救済する
+    state2, p2 = new_parser()
+    p2.parse("ランクIV レート1626580")
+    assert state2.last_rate and int(state2.last_rate["value"]) == 1626, \
+        state2.last_rate
+    print("test_rate_extraction_decimal_format OK")
 
 
 if __name__ == "__main__":
@@ -638,4 +777,11 @@ if __name__ == "__main__":
     test_move_attribution_requires_name()
     test_mega_keeps_base_name_no_duplicate()
     test_forfeit_win()
+    test_boost_from_move_event()
+    test_intimidate_applies_on_switch_event()
+    test_mega_fallback_without_readable_name()
+    test_mega_form_id_derivation()
+    test_mega_survives_reswitch()
+    test_bare_form_read_merges_into_family_slot()
+    test_rate_extraction_decimal_format()
     print("\nALL OK")
