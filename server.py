@@ -521,6 +521,23 @@ async def run_playbook(sid, data):
     await _run_heavy_analysis(sid, "playbook", _job)
 
 
+@sio.on('get_my_team_detail')
+async def get_my_team_detail(sid, data):
+    """自分のポケモンの登録詳細と欠落項目を返す (2026-08-25 第9回後:
+    「もっと見る」で取り込んだ内容が登録済みか画面で確認したい、への対応)"""
+    def _work():
+        import advisor.my_team as mt
+        from tools.team_proposal import registration_gaps
+        entries = mt._load() or {}
+        return {"entries": entries, "gaps": registration_gaps(entries)}
+
+    try:
+        payload = await asyncio.get_event_loop().run_in_executor(None, _work)
+    except Exception as e:
+        payload = {"error": str(e)}
+    await sio.emit('my_team_detail', payload, room=sid)
+
+
 @sio.on('check_team_proposal')
 async def check_team_proposal(sid, data):
     """構築提案の運用条件チェック (軽量。提案は走らせない)"""

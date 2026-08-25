@@ -48,8 +48,9 @@
                 </details></div>
             <div class="panel"><h3>自分のパーティ
                 <button onclick="openTeamEditor()" style="float:right;font-size:11px;background:#356;color:#cde;border:1px solid #467;border-radius:4px;cursor:pointer">パーティ編集</button>
-            </h3><div id="my-party"></div></div>
-            <div class="panel"><h3>相手のパーティ</h3><div id="opp-party"></div></div>
+            </h3><div id="my-side-fx" style="margin-bottom:4px"></div><div id="my-party"></div>
+            <div id="my-detail" style="display:none;margin-top:6px;padding:8px;background:#1a2333;border:1px solid #446;border-radius:6px;font-size:12px"></div></div>
+            <div class="panel"><h3>相手のパーティ</h3><div id="opp-side-fx" style="margin-bottom:4px"></div><div id="opp-party"></div></div>
             <div class="panel" id="team-advice-panel" style="display:none">
                 <h3>📊 パーティ診断 (試合終了時に自動更新)</h3>
                 <pre id="team-advice-text" style="white-space:pre-wrap;font-size:12px"></pre>
@@ -384,7 +385,60 @@
             }
             const fixBtn = `<span style="cursor:pointer;opacity:.55;margin-left:6px" title="手動修正"
                 onclick="fixMon('${side === 'opp' ? 'opponent' : 'player'}', ${i})">✏️</span>`;
-            return `<div class="${cls.join(' ')}">${i===activeIdx?'▶ ':''}${p.species_ja || p.display_name || '???'}${picker}${hp}${tags}${fixBtn}${moves}</div>`;
+            // 自分側は名前クリックで登録詳細 (もっと見る画面の取込内容) を開閉
+            let nameHtml = p.species_ja || p.display_name || '???';
+            if (side === 'my' && p.species_ja) {
+                nameHtml = `<span style="cursor:pointer;text-decoration:underline dotted"
+                    title="クリックで登録詳細 (技/特性/持ち物/性格/能力ポイント)"
+                    onclick="toggleMyDetail('${p.species_ja}')">${nameHtml}</span>`;
+            }
+            return `<div class="${cls.join(' ')}">${i===activeIdx?'▶ ':''}${nameHtml}${picker}${hp}${tags}${fixBtn}${moves}</div>`;
+        }
+
+        // --- 自分のポケモンの登録詳細 (2026-08-25 第9回後: 登録が済んだか
+        //     画面で確認できない、という指摘への対応) ---
+        let myTeamDetail = null;    // {entries, gaps} サーバーから取得
+        let myDetailTarget = null;  // 表示中のポケモン名 (nullで非表示)
+        function toggleMyDetail(ja) {
+            myDetailTarget = (myDetailTarget === ja) ? null : ja;
+            if (myDetailTarget) socket.emit('get_my_team_detail', {});
+            renderMyDetail();
+        }
+        socket.on('my_team_detail', (d) => { myTeamDetail = d; renderMyDetail(); });
+        function renderMyDetail() {
+            const el = document.getElementById('my-detail');
+            if (!myDetailTarget) { el.style.display = 'none'; return; }
+            el.style.display = 'block';
+            if (!myTeamDetail) { el.textContent = '⏳ 登録情報を取得中…'; return; }
+            if (myTeamDetail.error) { el.textContent = '取得失敗: ' + myTeamDetail.error; return; }
+            const e = (myTeamDetail.entries || {})[myDetailTarget];
+            const gap = (myTeamDetail.gaps || {})[myDetailTarget];
+            const esc = (v) => String(v).replace(/[&<>"]/g, c =>
+                ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+            let head;
+            if (!e) head = `<span style="color:#f88">❌ 未登録</span>`;
+            else if (gap && gap.length) head =
+                `<span style="color:#fa6">⚠ 欠落: ${gap.map(esc).join(', ')}</span>`;
+            else head = `<span style="color:#7fa">✅ 登録完了</span>`;
+            const rows = [];
+            if (e) {
+                const pts = e['能力ポイント'] || e.evs || {};
+                const ptsText = Object.entries(pts)
+                    .map(([k, v]) => `${String(k).toUpperCase()}${v}`).join(' ') || '—';
+                rows.push(['特性', e['特性'] || '—'],
+                          ['持ち物', e['持ち物'] || '—'],
+                          ['性格', e['性格'] || '—'],
+                          ['能力ポイント', ptsText],
+                          ['技', (e['技'] || []).join(' / ') || '—']);
+            }
+            el.innerHTML =
+                `<b>${esc(myDetailTarget)}</b> ${head}` +
+                `<button onclick="socket.emit('get_my_team_detail', {})" style="float:right;font-size:11px;background:#356;color:#cde;border:1px solid #467;border-radius:4px;cursor:pointer">更新</button>` +
+                `<button onclick="toggleMyDetail('${esc(myDetailTarget)}')" style="float:right;margin-left:6px;font-size:11px;background:#533;color:#cde;border:1px solid #755;border-radius:4px;cursor:pointer">閉じる</button>` +
+                '<table style="margin-top:6px;font-size:12px">' +
+                rows.map(([k, v]) => `<tr><td style="color:#89a;padding-right:10px">${k}</td><td>${esc(v)}</td></tr>`).join('') +
+                '</table>' +
+                '<div style="color:#89a;font-size:11px;margin-top:6px">技・特性・持ち物は対戦中に「もっと見る」画面を開くと自動で取り込まれます。性格・能力ポイントは「パーティ編集」から入力してください</div>';
         }
 
         // 相手のパーティ欄の描画: 確定済みを先に、未確定枠は「予測 (あり得る順)」
@@ -449,10 +503,29 @@
             if (f.weather) parts.push(WEATHER_JA[f.weather] || f.weather);
             if (f.terrain) parts.push(TERRAIN_JA[f.terrain] || f.terrain);
             if (f.trick_room) parts.push('トリックルーム');
-            const hz = s.player && s.player.hazards;
-            if (hz && hz.stealth_rock) parts.push('自陣ステロ');
-            if (s.opponent && s.opponent.hazards && s.opponent.hazards.stealth_rock) parts.push('敵陣ステロ');
             document.getElementById('field-label').textContent = parts.join(' / ') || '場: 通常';
+            // 陣営ごとの場の効果 (壁・追い風・設置技) をパーティ欄の直上に
+            // 色付きチップで常設表示 (2026-08-25 第9回後: 壁の表示が
+            // わかりづらいという指摘。従来はステロのみ1行ラベルに混在)
+            const sideFxHtml = (sd) => {
+                if (!sd) return '';
+                const chips = [];
+                const chip = (label, bg) =>
+                    `<span class="tag" style="background:${bg};font-weight:bold">${label}</span>`;
+                const sc = sd.screens || {};
+                if (sc.reflect) chips.push(chip('リフレクター', '#b8860b'));
+                if (sc.light_screen) chips.push(chip('ひかりのかべ', '#2a6db5'));
+                if (sc.aurora_veil) chips.push(chip('オーロラベール', '#2aa6a0'));
+                if (sd.tailwind) chips.push(chip('おいかぜ', '#3d8b3d'));
+                const hz = sd.hazards || {};
+                if (hz.stealth_rock) chips.push(chip('ステルスロック', '#8a4a2b'));
+                if (hz.spikes) chips.push(chip(`まきびし×${hz.spikes}`, '#8a4a2b'));
+                if (hz.toxic_spikes) chips.push(chip(`どくびし×${hz.toxic_spikes}`, '#7a3a8a'));
+                if (hz.sticky_web) chips.push(chip('ねばねばネット', '#556b2f'));
+                return chips.join(' ');
+            };
+            document.getElementById('my-side-fx').innerHTML = sideFxHtml(s.player);
+            document.getElementById('opp-side-fx').innerHTML = sideFxHtml(s.opponent);
 
             // 自分のパーティ: 対戦中は選出3体 (白リボン追跡+登場済み) のみ表示
             const inBattle = !['selection', 'standby', 'unknown'].includes(s.scene);
