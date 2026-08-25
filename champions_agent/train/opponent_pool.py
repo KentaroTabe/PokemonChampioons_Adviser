@@ -38,12 +38,14 @@ EPSILON_HEURISTIC = 0.25  # 上位構築ヒューリスティクス相手を混�
 # に減らして枠を捻出、selfplayプール枠は0.45)
 EPSILON_SEARCH = 0.20
 # 歴史的アンカー (_best 3本 + anchors/ の週次スナップショット) を相手に混ぜる
-# 確率。プールは「性格ごと最新5件 ≒ 直近2時間の自己コピー」しか持たず、
-# 古い戦略族への対応を忘れて 8/2 の _best に頭打ち 0.405 で負けていた
-# (2026-08-18 導入、docs/AXIS_GAP_ANALYSIS.md P1。事前登録:
-#  head-to-head vs 3_best 平均 0.43 → 7日で +0.10、ベンチ -0.02 以内で採用)。
-# 枠は selfplay プール分 (旧0.45) から捻出し、直近自己対戦は 0.20 に減る
-EPSILON_ANCHOR = 0.25
+# 確率。2026-08-18 に 0.25 で導入 (docs/AXIS_GAP_ANALYSIS.md P1) したが、
+# 2026-08-25 の事前登録判定で棄却し 0 に戻した: 主要指標 h2h vs 3_best は
+# 0.514→0.606 (+0.092) でゲート +0.10 に未達 (2回測定18,000戦、詳細は
+# training_changes.json)。ベンチガードレールは +0.140 で通過 (害は無い) が、
+# 「通常学習を超える効果」の証明に届かなかった。selfplay プール枠は
+# 0.45 に復帰。抽選機構と週次アンカー保存 (P2 測定基盤) は残置し、
+# 再導入時はこの値を戻して新たに事前登録すること
+EPSILON_ANCHOR = 0.0
 ANCHORS_DIR = MODELS_DIR / "anchors"
 ANCHOR_INTERVAL_DAYS = 7   # 週次アンカー保存の間隔
 MAX_ANCHORS_PER_STYLE = 4  # anchors/ の性格ごと保持数 (_best は別枠で常時参照)
