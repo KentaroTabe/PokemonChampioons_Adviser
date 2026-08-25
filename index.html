@@ -367,7 +367,7 @@
                 const rng = (r[0] || r[1]) ? ` (${r[0] ? '>' + Math.round(r[0]) : ''}${r[0] && r[1] ? '·' : ''}${r[1] ? '<' + Math.round(r[1]) : ''})` : '';
                 tags += `<span class="tag" style="background:#357">S~${p.spe_est}${rng}</span>`;
             }
-            if (p.item_ja) tags += `<span class="tag">@${p.item_ja}</span>`;
+            if (p.item_ja) tags += `<span class="tag"${p.item_consumed ? ' style="opacity:.55;text-decoration:line-through"' : ''}>@${p.item_ja}${p.item_consumed ? '(消費)' : ''}</span>`;
             let moves = '';
             if (p.moves && p.moves.length)
                 moves = '<div style="font-size:11px;color:#8ac">' +

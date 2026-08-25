@@ -155,6 +155,13 @@ SIMPLE_EVENTS = [
 
     # --- メガシンカ ---
     {"id": "mega_evolve", "keywords": [["メガシンカ", "めかしんか"]], "action": "mega"},
+    # --- ふうせん (2026-08-25: 登場表示で持ち物を確定し、割れたら消費) ---
+    {"id": "balloon_float",
+     "keywords": [["ふうせん", "風船"], ["うかんている", "浮いている", "ういている"]],
+     "action": "item", "value": "ふうせん"},
+    {"id": "balloon_pop",
+     "keywords": [["ふうせん", "風船"], ["われた", "割れた", "はれつ"]],
+     "action": "balloon_pop"},
 
     # --- 勝敗 (「〜との勝負に勝った!」) ---
     {"id": "battle_win", "keywords": [["勝負", "しようふ"], ["勝った", "かつた"]],
@@ -830,17 +837,49 @@ class EventParser:
         return None
 
     def _apply_item_activation(self, item_id: str, mon) -> None:
-        """発動型アイテムのポップアップ観測時の効果適用。
+        """発動型アイテムのポップアップ/メッセージ観測時の効果適用。
 
-        しろいハーブ: 下がった能力ランクを元に戻して消費される。従来は
-        持ち物名の記録のみで復元も消費もされず、りゅうせいぐん・からをやぶる
-        使いの能力が下がったまま評価されていた (2026-08-25 第9回指摘)。
-        ポップアップは発動の瞬間に出るため、低下を取り逃していても消費は確定
+        従来は持ち物名の記録のみで、消費も効果 (回復・状態回復・ランク変化・
+        しろいハーブの復元) も反映されなかった (2026-08-25 第9回指摘 →
+        同日夜にしろいハーブ以外も網羅)。効果表は advisor/data/item_effects.json。
+        ポップアップは発動の瞬間に出るため、条件側を取り逃していても消費は確定。
+        パッシブな持ち物 (たべのこし等) は表に無く、何もしない
         """
-        if item_id == "whiteherb":
+        from advisor.dex import item_activation_effects
+        eff = item_activation_effects(item_id)
+        if not eff:
+            return
+        if eff.get("restore_lowered_stats"):
             for k, v in mon.boosts.items():
                 if v < 0:
                     mon.boosts[k] = 0
+        for stat, delta in (eff.get("boosts") or {}).items():
+            mon.set_boost(stat, delta)
+        hf = eff.get("heal_fraction")
+        if hf and mon.status != "fainted":
+            if mon.hp_percent is not None:
+                mon.hp_percent = min(100.0,
+                                     round(mon.hp_percent + hf * 100, 1))
+            if mon.hp_current is not None and mon.hp_max:
+                mon.hp_current = min(mon.hp_max,
+                                     mon.hp_current + round(mon.hp_max * hf))
+        flat = eff.get("heal_flat")
+        if flat and mon.status != "fainted" and \
+                mon.hp_current is not None and mon.hp_max:
+            mon.hp_current = min(mon.hp_max, mon.hp_current + flat)
+            mon.hp_percent = round(mon.hp_current / mon.hp_max * 100, 1)
+        cure = eff.get("cure_status")
+        if cure and mon.status and mon.status != "fainted":
+            if cure == "all" or mon.status == cure:
+                mon.status = None
+        cv = eff.get("cure_volatile")
+        if cv == "mental":
+            mon.volatiles = [v for v in mon.volatiles
+                             if v not in ("taunt", "encore")
+                             and not v.startswith("disable")]
+        elif cv:
+            mon.volatiles = [v for v in mon.volatiles if v != cv]
+        if eff.get("consume"):
             mon.item_consumed = True
 
     def _maybe_white_herb(self, side_name: str, mon) -> None:
@@ -1024,3 +1063,10 @@ class EventParser:
             if item:
                 mon.item_id = item[1]
                 self._apply_item_activation(item[1], mon)
+        elif action == "balloon_pop":
+            # 「◯◯のふうせんが割れた!」: 以後は地面技が当たる
+            _, _, mon = self._target_mon(cleaned, source)
+            if not mon.item_id:
+                mon.item_ja, mon.item_id = "ふうせん", "airballoon"
+            if mon.item_id == "airballoon":
+                mon.item_consumed = True

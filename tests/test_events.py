@@ -766,6 +766,65 @@ def test_white_herb_activation():
     print("test_white_herb_activation OK")
 
 
+def test_item_activation_effects():
+    """発動型の持ち物の効果表 (item_effects.json) の適用 (2026-08-25:
+    しろいハーブ以外の発動型も網羅する — ユーザー指示)。
+    発動観測で消費フラグと効果 (回復/状態回復/ランク変化) を反映する"""
+    # オボンのみ: 最大HP比25%回復+消費
+    state, p = new_parser()
+    state.player.active_index = 0
+    mon = state.player.party[0]
+    mon.hp_percent, mon.hp_current, mon.hp_max = 40.0, 60, 150
+    p.parse("ブリジュラスのオボンのみ", source="left_popup")
+    assert mon.hp_percent == 65.0 and mon.hp_current == 98, \
+        (mon.hp_percent, mon.hp_current)
+    assert mon.item_consumed
+    # ラムのみ: 状態異常の回復+消費
+    state2, p2 = new_parser()
+    state2.player.active_index = 0
+    mon2 = state2.player.party[0]
+    mon2.status = "par"
+    p2.parse("ブリジュラスのラムのみ", source="left_popup")
+    assert mon2.status is None and mon2.item_consumed, mon2.status
+    # じゃくてんほけん: 攻撃・特攻+2
+    state3, p3 = new_parser()
+    p3.parse("相手は ルカリオを 繰り出した!")
+    opp = state3.opponent.active()
+    p3.parse("相手のルカリオのじゃくてんほけん", source="right_popup")
+    assert opp.boosts["atk"] == 2 and opp.boosts["spa"] == 2, opp.boosts
+    assert opp.item_consumed
+    # メンタルハーブ: ちょうはつ解除+消費 (みがわり等は残す)
+    state4, p4 = new_parser()
+    state4.player.active_index = 0
+    mon4 = state4.player.party[0]
+    mon4.volatiles = ["taunt", "substitute"]
+    p4.parse("ブリジュラスのメンタルハーブ", source="left_popup")
+    assert mon4.volatiles == ["substitute"] and mon4.item_consumed, \
+        mon4.volatiles
+    # パッシブな持ち物 (たべのこし) は記録のみで消費しない
+    state5, p5 = new_parser()
+    state5.player.active_index = 0
+    mon5 = state5.player.party[0]
+    p5.parse("ブリジュラスのたべのこし", source="left_popup")
+    assert mon5.item_id == "leftovers" and not mon5.item_consumed
+    print("test_item_activation_effects OK")
+
+
+def test_air_balloon_float_and_pop():
+    """ふうせん: 登場時の浮遊表示で持ち物を確定し、割れたら消費扱いにする"""
+    state, p = new_parser()
+    p.parse("相手は ルカリオを 繰り出した!")
+    opp = state.opponent.active()
+    fired = p.parse("相手の ルカリオは ふうせんで うかんでいる!")
+    assert "balloon_float" in fired, fired
+    assert opp.item_id == "airballoon" and not opp.item_consumed, \
+        (opp.item_id, opp.item_consumed)
+    fired = p.parse("相手の ルカリオの ふうせんが 割れた!")
+    assert "balloon_pop" in fired, fired
+    assert opp.item_consumed
+    print("test_air_balloon_float_and_pop OK")
+
+
 def test_rate_extraction_decimal_format():
     """ランク画面の実表示「レート1626.580」(小数3桁) を抽出する (2026-08-25
     第9回: 正規化が小数点を落とし 1626580→先頭5桁が範囲外で全戦棄却され、
@@ -819,5 +878,7 @@ if __name__ == "__main__":
     test_mega_survives_reswitch()
     test_bare_form_read_merges_into_family_slot()
     test_white_herb_activation()
+    test_item_activation_effects()
+    test_air_balloon_float_and_pop()
     test_rate_extraction_decimal_format()
     print("\nALL OK")

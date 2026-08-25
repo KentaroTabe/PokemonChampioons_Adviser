@@ -82,6 +82,28 @@ def switch_in_ability_effects(ability_id: Optional[str]) -> Optional[dict]:
     return (_boost_moves().get("ability_on_switch") or {}).get(ability_id)
 
 
+ITEM_EFFECTS_PATH = Path(__file__).resolve().parent / "data" / "item_effects.json"
+
+
+@lru_cache(maxsize=1)
+def _item_effects() -> dict:
+    try:
+        return json.loads(ITEM_EFFECTS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def item_activation_effects(item_id: Optional[str]) -> Optional[dict]:
+    """発動型の持ち物の効果 (発動観測時に適用する内容)。
+
+    戻り値: {"consume", "heal_fraction", "boosts", ...} (該当なしはNone)。
+    データは advisor/data/item_effects.json。
+    """
+    if not item_id:
+        return None
+    return (_item_effects().get("activation") or {}).get(item_id)
+
+
 # ==============================================================================
 # ステータス計算 (Lv50 / 個体値31固定)
 # ==============================================================================
