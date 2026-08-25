@@ -137,6 +137,13 @@ def _advice_key(state: dict) -> str:
 async def connect(sid, environ):
     print(f"[server] フロントエンドが接続しました: {sid}")
     await sio.emit('state_update', pipeline.state.to_dict(), room=sid)
+    # 構築提案の実行中にページを開き直しても「作成中」表示が復元されるように
+    # (2026-08-25 第9回: 実行中である旨の表示が無いという指摘。進捗配信は
+    # 発行元のsid宛てだったため、リロード後の画面には何も出なかった)
+    if _proposal_running():
+        await sio.emit('team_proposal_progress',
+                       {"msg": "構築提案を実行中です (数十分かかることがあります)…",
+                        "running": True}, room=sid)
 
 
 @sio.on('send_frame')
@@ -571,7 +578,10 @@ async def run_team_proposal(sid, data):
     log_dir = Path("logs") / "team_proposal"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"run_{time.strftime('%Y%m%d_%H%M%S')}.log"
-    cmd = [_sys.executable, "-m", "tools.team_proposal", "--propose",
+    # -u: サブプロセスの標準出力をバッファさせない。バッファありだと世代
+    # 完了 (数分間隔) までログが書かれず、tail配信の「作成中」表示が
+    # 長時間沈黙する (2026-08-25 第9回)
+    cmd = [_sys.executable, "-u", "-m", "tools.team_proposal", "--propose",
            "--stage", str(stage),
            "--population", str(int((data or {}).get("population") or 8)),
            "--generations", str(int((data or {}).get("generations") or 2)),
@@ -596,7 +606,12 @@ async def run_team_proposal(sid, data):
 
 
 async def _watch_proposal(sid, proc, log_path):
-    """提案サブプロセスのログをtailして進捗/結果を配信する"""
+    """提案サブプロセスのログをtailして進捗/結果を配信する。
+
+    配信は全クライアント宛て (roomなし): 発行元sid宛てだとリロードや
+    別画面からは実行中であることが見えない (2026-08-25 第9回指摘)。
+    リロード直後の復元は connect ハンドラが行う。
+    """
     sent = 0
     try:
         while proc.poll() is None:
@@ -611,7 +626,7 @@ async def _watch_proposal(sid, proc, log_path):
                 tail = [l for l in new.splitlines() if l.strip()][-3:]
                 for line in tail:
                     await sio.emit('team_proposal_progress',
-                                   {"msg": line[:200]}, room=sid)
+                                   {"msg": line[:200], "running": True})
         try:
             text = log_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -619,13 +634,12 @@ async def _watch_proposal(sid, proc, log_path):
         # 結果表示: 条件チェック以降のサマリー部を抜粋 (末尾60行)
         lines = [l for l in text.splitlines() if l.strip()]
         await sio.emit('team_proposal_result',
-                       {"kind": "done", "text": "\n".join(lines[-60:])},
-                       room=sid)
+                       {"kind": "done", "text": "\n".join(lines[-60:])})
         print(f"[server] 構築提案プロセス終了: exit={proc.returncode}")
     except Exception as e:
         await sio.emit('team_proposal_result',
                        {"kind": "error", "text": f"進捗監視エラー: {e} "
-                        f"(ジョブ自体は継続。結果: {log_path})"}, room=sid)
+                        f"(ジョブ自体は継続。結果: {log_path})"})
 
 
 @sio.on('improve_team')

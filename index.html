@@ -286,6 +286,9 @@
                         Object.assign(tpParams(), {force: !!force}));
         }
         socket.on('team_proposal_progress', (d) => {
+            // running付き進捗はリロード後の画面にも届く (サーバー側broadcast)。
+            // 実行中はボタンを無効化して「作成中」を明示する
+            if (d.running) tpButtonsDisabled(true);
             const lines = (tpProgress.textContent + d.msg + '\n').split('\n');
             tpProgress.textContent = lines.slice(-8).join('\n');
             tpProgress.scrollTop = tpProgress.scrollHeight;
