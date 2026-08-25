@@ -603,6 +603,8 @@ class EventParser:
                         continue   # OCR揺れの再読でランクを二重適用しない
                     mon.set_boost(stat, delta)
                     fired.append(event_id)
+                if delta < 0:
+                    self._maybe_white_herb(side_name, mon)
                 return fired
         return []
 
@@ -682,6 +684,7 @@ class EventParser:
                 if self._dedup(f"boost_{side_name}_{stat}_{delta:+d}"):
                     continue   # 直前にメッセージ経由で適用済み
                 mon.set_boost(stat, delta)
+            self._maybe_white_herb(side_name, mon)
 
     def _popup_mon(self, name_part: str, default_side: str):
         """ポップアップの名前部分から帰属先の個体を決める。
@@ -821,8 +824,43 @@ class EventParser:
                 self._apply_ability_effect(ab[1], side_name, mon=mon)
             else:
                 mon.item_ja, mon.item_id = it[0], it[1]
+                if mon is not None:
+                    self._apply_item_activation(it[1], mon)
             return event_id
         return None
+
+    def _apply_item_activation(self, item_id: str, mon) -> None:
+        """発動型アイテムのポップアップ観測時の効果適用。
+
+        しろいハーブ: 下がった能力ランクを元に戻して消費される。従来は
+        持ち物名の記録のみで復元も消費もされず、りゅうせいぐん・からをやぶる
+        使いの能力が下がったまま評価されていた (2026-08-25 第9回指摘)。
+        ポップアップは発動の瞬間に出るため、低下を取り逃していても消費は確定
+        """
+        if item_id == "whiteherb":
+            for k, v in mon.boosts.items():
+                if v < 0:
+                    mon.boosts[k] = 0
+            mon.item_consumed = True
+
+    def _maybe_white_herb(self, side_name: str, mon) -> None:
+        """確定している持ち物がしろいハーブなら、能力低下の反映直後に発動を
+        推定適用する。発動ポップアップは演出中で取り逃しやすい (第9回までの
+        全対戦で発火2件のみ) が、持ち物が確定していれば発動は決定的"""
+        if mon is None or getattr(mon, "item_id", None) != "whiteherb":
+            return
+        if getattr(mon, "item_consumed", False) or \
+                getattr(mon, "item_removed", False):
+            return
+        if not any(v < 0 for v in mon.boosts.values()):
+            return
+        for k, v in mon.boosts.items():
+            if v < 0:
+                mon.boosts[k] = 0
+        mon.item_consumed = True
+        self.state.log_event("system",
+                             f"しろいハーブの発動を推定反映 ({side_name})",
+                             event_id=f"item_{side_name}_whiteherb_auto")
 
     # --------------------------------------------------------------
     def _apply_ability_effect(self, ability_id: str, side_name: str,
@@ -985,3 +1023,4 @@ class EventParser:
             item = self.resolver.resolve(ev["value"], "items", cutoff=0.9)
             if item:
                 mon.item_id = item[1]
+                self._apply_item_activation(item[1], mon)

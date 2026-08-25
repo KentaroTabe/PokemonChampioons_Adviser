@@ -731,6 +731,41 @@ def test_bare_form_read_merges_into_family_slot():
     print("test_bare_form_read_merges_into_family_slot OK")
 
 
+def test_white_herb_activation():
+    """しろいハーブ: (1)ポップアップ観測で低下復元+消費 (2)持ち物が確定
+    していれば低下適用の直後に推定発動 (発動ポップアップは演出中で取り逃し
+    やすく全対戦で発火2件のみ — 2026-08-25 第9回指摘。従来は持ち物名の
+    記録のみで復元も消費もされなかった) (3)非所持者は復元されない"""
+    # (1) ポップアップ経由
+    state, p = new_parser()
+    state.player.active_index = 0
+    mon = state.player.party[0]
+    mon.set_boost("atk", -2)
+    p.parse("ブリジュラスのしろいハーブ", source="left_popup")
+    assert mon.boosts["atk"] == 0, mon.boosts
+    assert mon.item_consumed
+    # (2) 確定持ち物からの推定発動: からをやぶる → 上昇は残し低下のみ復元
+    state2, p2 = new_parser()
+    state2.player.active_index = 0
+    mon2 = state2.player.party[0]
+    mon2.item_id, mon2.item_ja = "whiteherb", "しろいハーブ"
+    p2.parse("ブリジュラスの からをやぶる!")
+    assert mon2.boosts["atk"] == 2 and mon2.boosts["spe"] == 2, mon2.boosts
+    assert mon2.boosts["def"] == 0 and mon2.boosts["spd"] == 0, mon2.boosts
+    assert mon2.item_consumed
+    # 消費後は再発動しない (dedupの3秒窓はテスト用にクリア)
+    p2._recent_fired.clear()
+    p2.parse("ブリジュラスの ばかぢから!")
+    assert mon2.boosts["def"] == -1, mon2.boosts
+    # (3) 非所持者は低下がそのまま残る
+    state3, p3 = new_parser()
+    state3.player.active_index = 0
+    p3.parse("ブリジュラスの からをやぶる!")
+    assert state3.player.party[0].boosts["def"] == -1, \
+        state3.player.party[0].boosts
+    print("test_white_herb_activation OK")
+
+
 def test_rate_extraction_decimal_format():
     """ランク画面の実表示「レート1626.580」(小数3桁) を抽出する (2026-08-25
     第9回: 正規化が小数点を落とし 1626580→先頭5桁が範囲外で全戦棄却され、
@@ -783,5 +818,6 @@ if __name__ == "__main__":
     test_mega_form_id_derivation()
     test_mega_survives_reswitch()
     test_bare_form_read_merges_into_family_slot()
+    test_white_herb_activation()
     test_rate_extraction_decimal_format()
     print("\nALL OK")
