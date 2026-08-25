@@ -63,10 +63,21 @@ def _load_model():
         return _model
     _model_tried = True
     style = os.environ.get("RL_ADVICE_STYLE", "balance")
-    # 最良スナップショット (_best) を優先 (best_checkpoint.py が管理。
-    # 最新チェックポイントは学習の振動で過去最良より弱いことがある)
-    best = CKPT_DIR / f"battle_policy_{style}_best.zip"
-    path = best if best.exists() else CKPT_DIR / f"battle_policy_{style}.zip"
+    # 読み込み元の優先順は RL_POLICY_SOURCE で選ぶ (P5 EMA配布判定用。
+    # 既定 "best" = 従来どおり最良スナップショット優先。"ema" = EMA平均方策
+    # (train/ema.py) を優先。存在しない場合は次候補へ落ちる)
+    source = os.environ.get("RL_POLICY_SOURCE", "best")
+    order = {
+        "ema": [f"battle_policy_{style}_ema.zip",
+                f"battle_policy_{style}_best.zip",
+                f"battle_policy_{style}.zip"],
+        "best": [f"battle_policy_{style}_best.zip",
+                 f"battle_policy_{style}.zip"],
+        "current": [f"battle_policy_{style}.zip"],
+    }.get(source) or [f"battle_policy_{style}_best.zip",
+                      f"battle_policy_{style}.zip"]
+    path = next((CKPT_DIR / n for n in order if (CKPT_DIR / n).exists()),
+                CKPT_DIR / order[-1])
     try:
         from sb3_contrib import MaskablePPO
         _model = MaskablePPO.load(str(path), device="cpu")

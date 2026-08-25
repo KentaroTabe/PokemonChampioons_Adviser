@@ -60,13 +60,16 @@ def test_draw_fallbacks():
 def test_anchor_share_matches_registered_verdict():
     """アンカー枠の既定値が判定記録と一致している (設定退行の防止)。
 
-    2026-08-25 のP1事前登録判定で棄却 (+0.092 < ゲート+0.10) し 0 に戻した。
-    再導入するときは training_changes.json に事前登録した上でこのテストを
-    新しい意図値に更新すること (無断の値変更をここで検知する)
+    2026-08-25 のP1事前登録判定で棄却 (+0.092 < ゲート+0.10) しアンカーを
+    0 に戻し、登録済みの次候補 P4 として探索εを 0.20→0.30 に引き上げた
+    (selfplayプール枠は 0.35)。値を変えるときは training_changes.json に
+    事前登録した上でこのテストを新しい意図値に更新すること
+    (無断の値変更をここで検知する)
     """
     total = EPSILON_HEURISTIC + EPSILON_SEARCH + EPSILON_RANDOM + EPSILON_ANCHOR
     assert abs(EPSILON_ANCHOR - 0.0) < 1e-9, EPSILON_ANCHOR
-    assert abs(total - 0.55) < 1e-9, f"selfplayプール枠が0.45でない (合計{total})"
+    assert abs(EPSILON_SEARCH - 0.30) < 1e-9, EPSILON_SEARCH
+    assert abs(total - 0.65) < 1e-9, f"selfplayプール枠が0.35でない (合計{total})"
     print("test_anchor_share_matches_registered_verdict OK")
 
 
