@@ -64,7 +64,8 @@
                     固定枠: <input id="tp-locked" placeholder="例: ミミッキュ,サザンドラ" style="width:170px;font-size:11px">
                 </div>
                 <button onclick="checkTeamProposal()" class="mini-btn">条件チェック</button>
-                <button onclick="runTeamProposal()" id="tp-btn" style="margin-left:8px;background:#3567c9;color:#fff;border:none;border-radius:6px;padding:6px 14px;cursor:pointer">提案を実行</button>
+                <button onclick="runTeamProposal(false)" id="tp-btn" style="margin-left:8px;background:#3567c9;color:#fff;border:none;border-radius:6px;padding:6px 14px;cursor:pointer">提案</button>
+                <button onclick="runTeamProposal(true)" id="tp-force-btn" title="必須条件が未達でも実行する (未登録の型は使用率の代表構成で補完)" style="margin-left:6px;background:#8a4a2b;color:#fff;border:none;border-radius:6px;padding:6px 14px;cursor:pointer">強行</button>
                 <div id="tp-progress" style="font-size:11px;color:#8ac;margin-top:8px;white-space:pre-wrap;max-height:90px;overflow-y:auto"></div>
                 <pre id="tp-result" style="white-space:pre-wrap;font-size:12px;max-height:420px;overflow-y:auto"></pre>
             </div>
@@ -267,12 +268,22 @@
             tpProgress.textContent = '⏳ 運用条件を確認しています…';
             socket.emit('check_team_proposal', tpParams());
         }
-        function runTeamProposal() {
+        function tpButtonsDisabled(v) {
+            document.getElementById('tp-btn').disabled = v;
+            document.getElementById('tp-force-btn').disabled = v;
+        }
+        function runTeamProposal(force) {
+            if (force && !confirm(
+                '必須条件が未達でも提案を強行します。\n' +
+                '未登録ポケモンの型は使用率の代表構成で補完されます。\n' +
+                '実行しますか? (数十分かかることがあります)')) return;
             tpResult.textContent = '';
-            tpProgress.textContent =
-                '⏳ 構築提案を開始 (実対戦評価+受入検定。数十分かかることがあります)…\n';
-            document.getElementById('tp-btn').disabled = true;
-            socket.emit('run_team_proposal', tpParams());
+            tpProgress.textContent = force
+                ? '⏳ 構築提案を強行 (必須ゲートをスキップ)…\n'
+                : '⏳ 構築提案を開始 (実対戦評価+受入検定。数十分かかることがあります)…\n';
+            tpButtonsDisabled(true);
+            socket.emit('run_team_proposal',
+                        Object.assign(tpParams(), {force: !!force}));
         }
         socket.on('team_proposal_progress', (d) => {
             const lines = (tpProgress.textContent + d.msg + '\n').split('\n');
@@ -282,10 +293,10 @@
         socket.on('team_proposal_result', (d) => {
             tpProgress.textContent = '';
             tpResult.textContent = d.text || '';
-            document.getElementById('tp-btn').disabled = false;
+            tpButtonsDisabled(false);
         });
         socket.on('disconnect', () => {
-            document.getElementById('tp-btn').disabled = false;
+            tpButtonsDisabled(false);
         });
 
         // --- 手動修正 (誤認識のユーザー訂正。修正はログに記録され分析に使う) ---

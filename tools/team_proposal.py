@@ -423,7 +423,9 @@ async def run_proposal(stage: int, ns: argparse.Namespace, log=None,
            "payload": None, "path": None}
     if not hard_ok(conds) and not force:
         out["code"] = 2
-        out["summary"] = "必須条件が未達のため実行しません (--force で強行可)"
+        out["summary"] = ("必須条件が未達のため実行しません "
+                          "(強行ボタン / --force で強行可。未登録の型は"
+                          "使用率の代表構成で補完されます)")
         return out
 
     # 実行時の競合回避 (アドバイザーの対戦・スイープの一時停止フラグ)。

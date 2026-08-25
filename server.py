@@ -582,6 +582,10 @@ async def run_team_proposal(sid, data):
     locked = (data or {}).get("locked")
     if locked:
         cmd += ["--locked", locked]
+    # 強行 (必須ゲート未達でも実行)。対戦中ガードは対象外:
+    # あれは提案の質ではなく画面認識と測定の保護のため
+    if (data or {}).get("force"):
+        cmd += ["--force"]
     with log_path.open("w") as lf:
         _proposal_proc = subprocess.Popen(
             cmd, stdout=lf, stderr=subprocess.STDOUT,
