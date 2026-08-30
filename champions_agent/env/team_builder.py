@@ -276,13 +276,54 @@ def _sanitize_item(item: str | None) -> str | None:
     return item
 
 
+_SPECIES_ITEMS_CACHE: dict | None = None
+
+
+def _species_item_alternatives() -> dict:
+    """species_id -> [使用率降順のitem_id] (最新スナップショット、遅延ロード)"""
+    global _SPECIES_ITEMS_CACHE
+    if _SPECIES_ITEMS_CACHE is None:
+        out: dict = {}
+        try:
+            with db.get_connection() as conn:
+                snap = db.latest_snapshot_id(conn)
+                if snap:
+                    for r in conn.execute(
+                            """SELECT pokemon_name, item_name, usage_percent
+                               FROM item_usage WHERE snapshot_id = ?
+                               ORDER BY usage_percent DESC""", (snap,)):
+                        it = _sanitize_item(r["item_name"])
+                        if it:
+                            out.setdefault(str(r["pokemon_name"]), []).append(it)
+        except Exception:
+            pass
+        _SPECIES_ITEMS_CACHE = out
+    return _SPECIES_ITEMS_CACHE
+
+
+def _species_usage_key(species: str) -> str:
+    """PokemonSet.species (Showdown表示名) -> item_usage の pokemon_name キー"""
+    import re as _re
+    return _re.sub(r"[^a-z0-9]", "", (species or "").lower())
+
+
 def _enforce_item_clause(sets: list[PokemonSet], fallback_items: list[str] | None = None) -> None:
-    """Flat Rules (Item Clause = 1) のためチーム内のアイテム重複を解消する"""
+    """Flat Rules (Item Clause = 1) のためチーム内のアイテム重複を解消する。
+
+    衝突時はまず**その種族自身の使用率次点**から未使用品を選ぶ (実戦で
+    使われる型の範囲に収める)。種族の候補が尽きたときだけ全体人気の
+    フォールバックへ落とす (2026-08-30 第10回: 全体人気リストが先行して
+    いたため、オボンが衝突したカバルドンに種族の使用実績が無い
+    こだわりスカーフが充当された。種族次点は たべのこし 28.8% だった)
+    """
     candidates = (fallback_items or []) + _FALLBACK_ITEMS
+    per_species = _species_item_alternatives()
     used: set = set()
     for s in sets:
         if s.item and s.item in used:
-            s.item = next((f for f in candidates if f not in used), None)
+            own = per_species.get(_species_usage_key(s.species)) or []
+            s.item = next((f for f in own if f not in used),
+                          next((f for f in candidates if f not in used), None))
         if s.item:
             used.add(s.item)
 

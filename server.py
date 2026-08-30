@@ -648,10 +648,16 @@ async def _watch_proposal(sid, proc, log_path):
             text = log_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             text = "(ログを読めませんでした)"
-        # 結果表示: 条件チェック以降のサマリー部を抜粋 (末尾60行)
+        # 結果表示: 最終サマリーブロック (「===== 構築提案 =====」以降) を
+        # 丸ごと送る。末尾60行の固定切りだと6体分の一覧 (約72行) の先頭 =
+        # 1匹目の名前と持ち物が切り落とされた (2026-08-30 第10回指摘)。
+        # マーカーが無い場合 (ゲート不通過等) のみ末尾80行にフォールバック
         lines = [l for l in text.splitlines() if l.strip()]
+        marker = next((i for i, l in enumerate(lines)
+                       if "===== 構築提案 =====" in l), None)
+        shown = lines[marker:] if marker is not None else lines[-80:]
         await sio.emit('team_proposal_result',
-                       {"kind": "done", "text": "\n".join(lines[-60:])})
+                       {"kind": "done", "text": "\n".join(shown)})
         print(f"[server] 構築提案プロセス終了: exit={proc.returncode}")
     except Exception as e:
         await sio.emit('team_proposal_result',

@@ -319,6 +319,34 @@ def test_mutate_set_item_change_ignores_change_limit():
     print("test_mutate_set_item_change_ignores_change_limit OK")
 
 
+def test_item_clause_prefers_species_alternatives():
+    """アイテムクローズの衝突解消は、その種族自身の使用率次点を優先する
+    (2026-08-30 第10回: 全体人気リストが先行し、オボン衝突のカバルドンに
+    種族の使用実績が無いこだわりスカーフが充当された)"""
+    import champions_agent.env.team_builder as tb
+
+    def mk(species, item):
+        return tb.PokemonSet(species=species, ability="ab", item=item,
+                             tera_type=None, nature="bold", evs="32/0/32/0/0/0",
+                             moves=["m1", "m2", "m3", "m4"])
+
+    prev = tb._SPECIES_ITEMS_CACHE
+    tb._SPECIES_ITEMS_CACHE = {
+        "hippowdon": ["sitrusberry", "leftovers", "smoothrock"]}
+    try:
+        sets = [mk("Duraludon", "sitrusberry"), mk("Hippowdon", "sitrusberry")]
+        tb._enforce_item_clause(sets, ["choicescarf", "lifeorb"])
+        assert sets[1].item == "leftovers", \
+            f"種族次点でなく全体人気が充当された: {sets[1].item}"
+        # 種族データの無い種は従来どおり全体フォールバックへ落ちる
+        sets2 = [mk("Unknowna", "leftovers"), mk("Unknownb", "leftovers")]
+        tb._enforce_item_clause(sets2, ["choicescarf"])
+        assert sets2[1].item == "choicescarf", sets2[1].item
+    finally:
+        tb._SPECIES_ITEMS_CACHE = prev
+    print("test_item_clause_prefers_species_alternatives OK")
+
+
 def main() -> None:
     test_stage1_all_hard_pass()
     test_stage1_blocks_on_stale_usage_and_missing_party()
@@ -335,6 +363,7 @@ def main() -> None:
     test_myteam_text_completes_missing_evs()
     test_myteam_text_completes_ability_and_item()
     test_mutate_set_item_change_ignores_change_limit()
+    test_item_clause_prefers_species_alternatives()
     print("\nALL OK")
 
 
