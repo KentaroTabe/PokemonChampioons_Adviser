@@ -107,6 +107,7 @@ class VisionPipeline:
             "field_check": 1.5,
             "battle_hud": 2.5,
             "field_hp": 1.0,   # フィールドシーン中の軽量HP追跡 (疑似シーンキー)
+            "team_menu": 2.0,  # 対戦外のパーティ管理画面の型取込 (疑似シーンキー)
         }
 
     # ------------------------------------------------------------------
@@ -321,6 +322,17 @@ class VisionPipeline:
             fired += self._process_text_regions(img, [
                 ("message", zones.RESULT["rate_row"]),
             ], single_shot)
+
+        # パーティ管理画面 (対戦外) からの型登録取り込み (2026-08-30 要望)。
+        # ⚠ battle_active 中は一切走らせない: 対戦中のつよさ表示 (watch
+        # ファミリー) と混同して対戦状態を汚さないための分離。抽出自体も
+        # my_team への書き込み専用で、対戦状態には触れない
+        if not self.state.battle_active and \
+                self._should_run_heavy("team_menu", force=single_shot):
+            try:
+                extractors.extract_team_menu(img, self.state, self.resolver)
+            except Exception:
+                pass
 
         if heavy:
             # 自分側の静的情報 (タイプ=図鑑 / 持ち物・特性=登録) を補完する。

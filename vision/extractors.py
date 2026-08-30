@@ -119,6 +119,237 @@ def _is_picked_panel(img, panel_zone):
     return False
 
 
+_TM_STAT_LABELS = [("hp", "HP"), ("a", "こうげき"), ("b", "ぼうぎょ"),
+                   ("c", "とくこう"), ("d", "とくぼう"), ("s", "すばやさ")]
+
+
+def parse_team_menu_lines(lines: list) -> Optional[dict]:
+    """パーティ管理画面の右パネル行OCR結果を構造化する (純粋計算)。
+
+    lines: apple_ocr_lines の [(text, (x0,y0,x1,y1))] (パネル領域内の相対座標)。
+    行位置は画面バリアントで動くため、ラベル行とのy帯重なりで数値を対応付ける。
+    戻り値: {"name_texts", "stats": {key: (value|None, points)},
+             "move_texts", "ability_text"} / パネルでなければ None。
+    数値の欠落: 点数の「0」はOCRが拾わないことがあるため、ラベル行に点数が
+    無い場合は 0 とみなす (実数値との整合検証は呼び出し側が行う)
+    """
+    from vision.normalize import similarity
+
+    def band_overlap(a, b) -> bool:
+        return min(a[3], b[3]) - max(a[1], b[1]) > 0.5 * min(
+            a[3] - a[1], b[3] - b[1])
+
+    numeric = [(int(t), bb) for t, bb in lines
+               if t.strip().isdigit() and len(t.strip()) <= 3]
+
+    # ラベル照合は2パス: まず厳密包含、残りをファジー (既に割り当てた行は
+    # 除外)。とくこう/とくぼうは1字違いで、ファジーを先に走らせると先に
+    # 現れる方の行が両ラベルを取ってしまう (実フレームで c と d が同一行に
+    # 束ねられた)
+    label_rows: dict = {}
+    claimed: set = set()
+    for key, label in _TM_STAT_LABELS:
+        for idx, (t, bb) in enumerate(lines):
+            if idx not in claimed and label in t:
+                label_rows[key] = bb
+                claimed.add(idx)
+                break
+    for key, label in _TM_STAT_LABELS:
+        if key in label_rows:
+            continue
+        for idx, (t, bb) in enumerate(lines):
+            if idx in claimed:
+                continue
+            if similarity(t[-len(label):], label) >= 0.7:
+                label_rows[key] = bb
+                claimed.add(idx)
+                break
+
+    stats: dict = {}
+    stat_bands = []
+    for key, bb in label_rows.items():
+        val = pts = None
+        for n, nb in numeric:
+            if not band_overlap(bb, nb):
+                continue
+            cx = (nb[0] + nb[2]) / 2
+            if cx < 0.72:
+                val = n
+            elif cx > 0.78:
+                pts = n
+        stats[key] = (val, pts if pts is not None else 0)
+        stat_bands.append(bb)
+    if len(stats) < 4 or "hp" not in stats:
+        return None   # このパネルではない
+
+    stat_bottom = max(b[3] for b in stat_bands)
+    ability_texts = []
+    ability_band = None
+    for t, bb in lines:
+        if bb[1] <= stat_bottom:
+            continue
+        if similarity(t[:3], "特性") >= 0.5 and (bb[0] + bb[2]) / 2 < 0.5:
+            ability_band = bb
+            break
+    if ability_band:
+        for t, bb in lines:
+            if band_overlap(ability_band, bb) and bb[0] > ability_band[2] \
+                    and t not in ability_texts:
+                ability_texts.append(t)
+
+    # 技は行帯ごとにまとめる。複数スケールのOCRを統合すると同じ行が別の
+    # 崩れ方で複数回現れるため、帯グループ化して候補列にする
+    move_slots: list = []   # [(band, [候補テキスト])]
+    for t, bb in lines:
+        if bb[1] <= stat_bottom or (ability_band and bb[1] >= ability_band[1]):
+            continue
+        if t.strip().isdigit() or (bb[0] + bb[2]) / 2 > 0.7:
+            continue
+        for slot in move_slots:
+            if band_overlap(slot[0], bb):
+                if t not in slot[1]:
+                    slot[1].append(t)
+                break
+        else:
+            move_slots.append((bb, [t]))
+    move_slots.sort(key=lambda s: s[0][1])
+
+    name_texts = []
+    for t, bb in lines:
+        if bb[3] < min(b[1] for b in stat_bands) and bb[0] < 0.5 \
+                and not t.strip().isdigit() and t not in name_texts:
+            name_texts.append(t)
+    return {"name_texts": name_texts, "stats": stats,
+            "move_slots": [texts for _, texts in move_slots[:4]],
+            "ability_texts": ability_texts}
+
+
+def _validate_menu_stats(species_id, stats: dict):
+    """実数値と点数の整合を種族値から検証し、(能力ポイント, 性格) を返す。
+
+    各実数値は 中立計算値×{0.9, 1.0, 1.1} のいずれか±2% に一致するはず
+    (1点=8EV換算)。1つでも外れたら点数の読み落とし・誤読とみなし
+    (None, None) を返す — 誤った配分を登録するより登録しない方を選ぶ。
+    実数値が6つ全て読めていない場合も登録しない (値の無い行は点数の
+    読み落とし=0扱いを検証できないため。別フレームの完全な読みを待つ)。
+    性格は+と−がちょうど1つずつ検出できた場合のみ確定する
+    """
+    if any((stats.get(k) or (None, 0))[0] is None
+           for k in ("hp", "a", "b", "c", "d", "s")):
+        return None, None
+    try:
+        from advisor.dex import calc_hp, calc_stat, get_dex
+        base = ((get_dex().species(species_id) or {}).get("baseStats")) or {}
+    except Exception:
+        return None, None
+    if not base:
+        return None, None
+    plus, minus = [], []
+    for key, stat_key in (("a", "atk"), ("b", "def"), ("c", "spa"),
+                          ("d", "spd"), ("s", "spe")):
+        val, pts = stats.get(key) or (None, None)
+        if val is None:
+            continue
+        neutral = calc_stat(int(base[stat_key]), ev=(pts or 0) * 8)
+        r = val / neutral if neutral else 0
+        if 0.98 <= r <= 1.02:
+            continue
+        if 1.08 <= r <= 1.12:
+            plus.append(stat_key)
+        elif 0.88 <= r <= 0.92:
+            minus.append(stat_key)
+        else:
+            return None, None   # 帯の外 = 点数か実数値の誤読
+    hp_val, hp_pts = stats.get("hp") or (None, None)
+    if hp_val is not None:
+        expect = calc_hp(int(base["hp"]), ev=(hp_pts or 0) * 8)
+        if abs(hp_val - expect) > max(2, expect * 0.02):
+            return None, None
+    points = {k: (stats.get(k) or (None, 0))[1]
+              for k in ("hp", "a", "b", "c", "d", "s") if k in stats}
+    points = {("h" if k == "hp" else k): v for k, v in points.items() if v}
+    nature = None
+    if len(plus) == 1 and len(minus) == 1:
+        from advisor.my_team import _NATURES
+        for name, pair in _NATURES.items():
+            if pair == (plus[0], minus[0]) and not name.isascii():
+                nature = name
+                break
+    return points, nature
+
+
+def extract_team_menu(img, state: BattleStateV2, resolver) -> None:
+    """パーティ管理画面 (牧場/ボックス/チーム編成、対戦外) の右詳細パネル
+    から型登録 (my_team) を取り込む (2026-08-30 第10回後の要望)。
+
+    ⚠ 対戦中のつよさ表示 (watchファミリー) との分離:
+    - 呼び出し側 (pipeline) が battle_active=False のときのみ呼ぶ
+    - 書き込み先は my_team のみ。対戦状態 (party/HP等) には一切触れない
+    - ステータスラベル群が揃わないパネルは即返す (誤画面での空振り)
+    - 同一内容が2フレーム連続で読めたときだけ保存 (watch取込と同じ裏付け)
+    - 能力ポイントは実数値×種族値の整合検証を通った場合のみ登録
+    """
+    panel = crop(img, zones.TEAM_MENU["panel"])
+    if panel is None or panel.size == 0:
+        return
+    # OCRスケールで得手不得手が分かれる (2.0=小さな数字・特性名 / 2.5=技名。
+    # 実フレーム校正) ため、2スケールの行を統合してからパースする
+    lines = ocr.apple_ocr_lines(panel, scale=2.0) + \
+        ocr.apple_ocr_lines(panel, scale=2.5)
+    parsed = parse_team_menu_lines(lines)
+    if not parsed:
+        return
+    sp = None
+    for t in parsed["name_texts"]:
+        sp = resolver.resolve_species(t, cutoff=0.8)
+        if sp:
+            break
+    if not sp:
+        return
+
+    moves = []
+    for cands in parsed["move_slots"]:
+        for t in cands:
+            r = resolver.resolve(t, "moves", cutoff=0.72)
+            if r and r[0] not in moves:
+                moves.append(r[0])
+                break
+
+    ability_ja = None
+    for t in parsed["ability_texts"]:
+        ra = resolver.resolve(t, "abilities", cutoff=0.7)
+        if ra:
+            from vision.abilities import legal_abilities
+            legal = legal_abilities(sp[1])
+            if legal is None or ra[1] in legal:
+                ability_ja = ra[0]
+                break
+
+    points, nature = _validate_menu_stats(sp[1], parsed["stats"])
+
+    patch: dict = {}
+    if len(moves) == 4:
+        patch["技"] = moves
+    if points:
+        patch["能力ポイント"] = points
+    if nature:
+        patch["性格"] = nature
+    if ability_ja:
+        patch["特性"] = ability_ja
+    if not patch:
+        return
+
+    patch_key = (sp[0], tuple(sorted(
+        (k, str(v)) for k, v in patch.items())))
+    if patch_key == getattr(state, "_last_menu_patch", None):
+        from advisor.my_team import update_build
+        if update_build(sp[0], patch):
+            state.log_event("system",
+                            f"my_team更新: {sp[0]} (パーティ管理画面)",
+                            event_id=None)
+    state._last_menu_patch = patch_key
+
+
 def extract_selection(img, state: BattleStateV2, resolver) -> None:
     """選出画面から両パーティ・選出進捗を取得する (未確定の枠だけ処理)"""
     # --- 選出進捗「N/3」 ---
@@ -189,6 +420,33 @@ def extract_selection(img, state: BattleStateV2, resolver) -> None:
             state.player.party.append(PokemonState())
         if mon.species_ja or mon.display_name:
             state.player.party[i] = mon
+
+    # 選出画面の持ち物表示から my_team を更新する (2026-08-30 第10回後の要望:
+    # 対戦中に「もっと見る」を開かなくても持ち物が登録される)。名前は解決済み
+    # ロスターを使い、同一の一覧が2フレーム連続で読めたときのみ書き込む。
+    # 書き込み先は my_team のみで、対戦状態はここでは触らない (バックフィルが
+    # 登録から反映する)
+    pairs = []
+    for i, z in enumerate(zones.SELECTION_MY):
+        mon = state.player.party[i] if i < len(state.player.party) else None
+        if mon is None or not mon.species_ja:
+            continue
+        item_text = ocr.read_zone_text(img, z["item"], mode="panel",
+                                       val_min=150)
+        if not item_text:
+            continue
+        item = resolver.resolve(item_text, "items", cutoff=0.75)
+        if item:
+            pairs.append((mon.species_ja, item[0]))
+    sel_key = tuple(pairs)
+    if pairs and sel_key == getattr(state, "_last_selection_items", None):
+        from advisor.my_team import update_build
+        for ja, item_ja in pairs:
+            if update_build(ja, {"持ち物": item_ja}):
+                state.log_event("system",
+                                f"my_team更新: {ja} 持ち物={item_ja} (選出画面)",
+                                event_id=None)
+    state._last_selection_items = sel_key
 
     # 相手側: タイプアイコン (1〜2個) -> 使用率候補 -> スプライト照合で種族特定
     for i, z in enumerate(zones.SELECTION_OPP):
