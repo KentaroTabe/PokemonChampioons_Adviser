@@ -104,6 +104,13 @@ def item_activation_effects(item_id: Optional[str]) -> Optional[dict]:
     return (_item_effects().get("activation") or {}).get(item_id)
 
 
+def item_damaging_move_effects(item_id: Optional[str]) -> Optional[dict]:
+    """ダメージ技の使用時に確定発動する持ち物の効果 (いのちのたま反動等)。"""
+    if not item_id:
+        return None
+    return (_item_effects().get("on_damaging_move") or {}).get(item_id)
+
+
 # ==============================================================================
 # ステータス計算 (Lv50 / 個体値31固定)
 # ==============================================================================

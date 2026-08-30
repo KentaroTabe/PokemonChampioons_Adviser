@@ -825,6 +825,31 @@ def test_air_balloon_float_and_pop():
     print("test_air_balloon_float_and_pop OK")
 
 
+def test_life_orb_recoil_from_move_event():
+    """いのちのたま反動を技イベントから決定的に反映する (2026-08-30 第10回
+    監査: 反動メッセージの取り逃しでHPが10%過大のまま助言された)。
+    変化技・マジックガード・消費済みでは引かない"""
+    state, p = new_parser()
+    state.player.active_index = 0
+    mon = state.player.party[0]
+    mon.item_id, mon.item_ja = "lifeorb", "いのちのたま"
+    mon.hp_percent, mon.hp_current, mon.hp_max = 100.0, 162, 162
+    p.parse("ブリジュラスの りゅうのはどう!")   # ダメージ技 → -10%
+    assert mon.hp_percent == 90.0 and mon.hp_current == 146, \
+        (mon.hp_percent, mon.hp_current)
+    p.parse("ブリジュラスの つるぎのまい!")     # 変化技 → 反動なし
+    assert mon.hp_percent == 90.0, mon.hp_percent
+    # マジックガードは無反動
+    state2, p2 = new_parser()
+    state2.player.active_index = 0
+    mon2 = state2.player.party[0]
+    mon2.item_id, mon2.ability_id = "lifeorb", "magicguard"
+    mon2.hp_percent = 100.0
+    p2.parse("ブリジュラスの りゅうのはどう!")
+    assert mon2.hp_percent == 100.0, mon2.hp_percent
+    print("test_life_orb_recoil_from_move_event OK")
+
+
 def test_rate_extraction_decimal_format():
     """ランク画面の実表示「レート1626.580」(小数3桁) を抽出する (2026-08-25
     第9回: 正規化が小数点を落とし 1626580→先頭5桁が範囲外で全戦棄却され、
@@ -880,5 +905,6 @@ if __name__ == "__main__":
     test_white_herb_activation()
     test_item_activation_effects()
     test_air_balloon_float_and_pop()
+    test_life_orb_recoil_from_move_event()
     test_rate_extraction_decimal_format()
     print("\nALL OK")

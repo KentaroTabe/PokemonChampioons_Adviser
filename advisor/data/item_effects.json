@@ -1,5 +1,9 @@
 {
   "_comment": "発動型の持ち物の効果表 (発動ポップアップ/メッセージ観測時に適用)。consume=消費 (以後その持ち物の効果を仮定しない) / heal_fraction=最大HP比の回復 / heal_flat=固定値回復 / boosts=能力ランク変化 / cure_status=状態異常の回復 (all または特定) / cure_volatile=揮発状態の解除 (mental=ちょうはつ/アンコール/かなしばり系) / restore_lowered_stats=下がった能力を復元 (しろいハーブ)。パッシブな持ち物 (たべのこし・ゴツゴツメット・いのちのたま等) はポップアップが出ても効果適用が不要なため載せない。ふうせんは登場時の浮遊表示では消費せず、割れたメッセージ (balloon_pop) で消費する。2026-08-25 第9回後: しろいハーブ以外の発動型も網羅する (ユーザー指示)",
+  "on_damaging_move": {
+    "_comment": "ダメージ技の使用時に確定発動する持ち物 (self_hp_fraction=使用者の最大HP比の増減)。反動メッセージ「命が少し削られた!」は演出中で取り逃す (2026-08-30 第10回監査: ミミッキュ78%主張 vs 実65%、差は反動ぶん) ため技イベントから反映する。まもる/外れ時は誤適用になるが低頻度で、実読みが上書き修正する。マジックガード持ちには適用しない",
+    "lifeorb": {"self_hp_fraction": -0.1}
+  },
   "activation": {
     "whiteherb": {"consume": true, "restore_lowered_stats": true},
     "sitrusberry": {"consume": true, "heal_fraction": 0.25},

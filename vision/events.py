@@ -663,7 +663,37 @@ class EventParser:
             # 他イベントが既に発火している場合は場への効果を二重適用しない
             self._apply_move_side_effect(r[1], side_name)
             self._apply_move_boosts(r[1], side_name, mon)
+            self._apply_move_item_recoil(r[1], mon)
         return event_id
+
+    def _apply_move_item_recoil(self, move_id: str, mon) -> None:
+        """ダメージ技使用時に確定発動する持ち物 (いのちのたま反動) の反映。
+
+        反動メッセージ「命が少し削られた!」は演出中で取り逃す (2026-08-30
+        第10回監査: ミミッキュ78%主張 vs 実65%、差は反動ぶん)。持ち物が
+        確定していれば技イベントから決定的に引く。マジックガードは無反動。
+        まもる/外れ時は誤適用になるが、実読みが上書き修正する
+        """
+        if mon is None or getattr(mon, "item_consumed", False) or \
+                getattr(mon, "item_removed", False):
+            return
+        from advisor.dex import get_dex, item_damaging_move_effects
+        eff = item_damaging_move_effects(mon.item_id)
+        if not eff:
+            return
+        if (mon.ability_id or "") == "magicguard":
+            return
+        mv = get_dex().move(move_id)
+        if not mv or mv.get("category") == "Status":
+            return
+        frac = eff.get("self_hp_fraction") or 0.0
+        if not frac or mon.status == "fainted":
+            return
+        if mon.hp_percent is not None:
+            mon.hp_percent = max(0.0, round(mon.hp_percent + frac * 100, 1))
+        if mon.hp_current is not None and mon.hp_max:
+            mon.hp_current = max(
+                0, mon.hp_current + round(mon.hp_max * frac))
 
     def _apply_move_boosts(self, move_id: str, user_side: str, user_mon):
         """技の確定的な能力ランク変化 (100%発動のみ) を使用イベントで反映する。
