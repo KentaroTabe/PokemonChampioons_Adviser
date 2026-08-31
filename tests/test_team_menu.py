@@ -143,11 +143,110 @@ def test_selection_items_register_to_my_team():
     print("test_selection_items_register_to_my_team OK")
 
 
+def test_watch_roster_confirms_picks():
+    """交代メニュー (watch側柱) の3行=選出3体を正とし、やり直した選出画面の
+    白リボン残留フラグを下ろす (2026-08-31 第11回: 未参加のミミッキュへの
+    交代を推奨し続けた)"""
+    st = BattleStateV2()
+    names = [("ミミッキュ", "mimikyu"), ("ムクホーク", "staraptor"),
+             ("ペロリーム", "slurpuff"), ("キラフロル", "glimmora")]
+    st.player.party = [PokemonState(species_ja=j, species_id=i)
+                       for j, i in names]
+    st.player.party[0].is_picked = True   # やり直し選出の残留フラグ
+
+    orig_read = ocr.read_zone_text
+    rows = ["ムクホーク", "ペロリーム", "キラフロル"]
+
+    def fake_read(img, zone, **kw):
+        allow = kw.get("allowlist") or ""
+        for i, z in enumerate(zones.WATCH_MY[:3]):
+            if zone is z["name"]:
+                return rows[i]
+            if zone is z["hp"]:
+                return "150/150"
+        if "%" in allow:
+            return ""
+        return ""
+
+    ocr.read_zone_text = fake_read
+    try:
+        img = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        extractors.extract_watch_side_columns(img, st, resolver)
+        assert st.player.party[1].is_picked
+        assert st.player.party[2].is_picked
+        assert st.player.party[3].is_picked
+        assert not st.player.party[0].is_picked, \
+            "3体確定後もミミッキュの残留フラグが残った"
+        # 対戦リセットで確定集合が持ち越されない
+        st.reset_battle()
+        assert getattr(st, "_watch_roster_idx", None) == set()
+    finally:
+        ocr.read_zone_text = orig_read
+    print("test_watch_roster_confirms_picks OK")
+
+
+def test_selection_detail_ability_tab():
+    """選出画面の詳細オーバーレイ (能力タブ) から技/特性/持ち物を登録する
+    (2026-08-31 第11回: 選出中の詳細閲覧が登録されなかった)。
+    書き込みはmy_teamのみで、2フレーム裏付けを要求する"""
+    lines = [
+        ("じめん", (0.10, 0.10, 0.25, 0.16)),
+        ("じしん", (0.08, 0.25, 0.25, 0.31)),
+        ("12", (0.80, 0.25, 0.87, 0.31)),
+        ("あくび", (0.08, 0.35, 0.25, 0.41)),
+        ("12", (0.80, 0.35, 0.87, 0.41)),
+        ("ふきとばし", (0.08, 0.45, 0.30, 0.51)),
+        ("20", (0.80, 0.45, 0.87, 0.51)),
+        ("ステルスロック", (0.08, 0.55, 0.36, 0.61)),
+        ("20", (0.80, 0.55, 0.87, 0.61)),
+        ("特性", (0.15, 0.72, 0.25, 0.78)),
+        ("すなおこし", (0.45, 0.72, 0.70, 0.78)),
+        ("持ち物", (0.14, 0.84, 0.26, 0.90)),
+        ("オボンのみ", (0.45, 0.84, 0.68, 0.90)),
+    ]
+    parsed = extractors.parse_ability_tab_lines(lines)
+    assert parsed is not None
+    assert [c[0] for c in parsed["move_slots"]] == \
+        ["じしん", "あくび", "ふきとばし", "ステルスロック"], parsed
+    assert parsed["ability_texts"] == ["すなおこし"]
+    assert parsed["item_texts"] == ["オボンのみ"]
+
+    captured = []
+    orig_build = mt.update_build
+    orig_lines = ocr.apple_ocr_lines
+    orig_focus = extractors._selection_focused_row
+    mt.update_build = lambda ja, patch: captured.append((ja, patch)) or True
+    ocr.apple_ocr_lines = lambda bgr, scale=1.5, **kw: list(lines)
+    extractors._selection_focused_row = lambda img: 0
+    try:
+        st = BattleStateV2()
+        st.player.party = [
+            PokemonState(species_ja="カバルドン", species_id="hippowdon")]
+        img = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        extractors.extract_selection_detail(img, st, resolver)
+        assert captured == [], "1フレーム目で書き込まれた"
+        extractors.extract_selection_detail(img, st, resolver)
+        assert len(captured) == 1, captured
+        ja, patch = captured[0]
+        assert ja == "カバルドン"
+        assert patch["技"] == ["じしん", "あくび", "ふきとばし",
+                              "ステルスロック"], patch
+        assert patch["特性"] == "すなおこし" and patch["持ち物"] == "オボンのみ"
+        assert st.opponent.party == [], "対戦状態に書き込まれた"
+    finally:
+        mt.update_build = orig_build
+        ocr.apple_ocr_lines = orig_lines
+        extractors._selection_focused_row = orig_focus
+    print("test_selection_detail_ability_tab OK")
+
+
 def main() -> None:
     test_parse_team_menu_lines()
     test_validate_menu_stats()
     test_extract_team_menu_two_frame_guard()
     test_selection_items_register_to_my_team()
+    test_watch_roster_confirms_picks()
+    test_selection_detail_ability_tab()
     print("\nALL OK")
 
 

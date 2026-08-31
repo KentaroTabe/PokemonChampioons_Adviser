@@ -392,6 +392,10 @@ class BattleStateV2:
         self.__init__()
         self.last_rate = keep_rate
         self.battle_seq = next_seq
+        # __init__ の再実行では宣言外の臨時属性が消えない。位置ベースの
+        # ものは前の対戦の値が誤適用されるため明示的に破棄する
+        # (交代メニュー由来の選出確定 index 集合など)
+        self._watch_roster_idx = set()
 
     def restore_from_dict(self, d: dict) -> None:
         """スナップショットからの復元 (サーバー再起動の対戦中リカバリ用)。

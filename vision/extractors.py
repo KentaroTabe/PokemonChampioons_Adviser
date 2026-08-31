@@ -278,6 +278,147 @@ def _validate_menu_stats(species_id, stats: dict):
     return points, nature
 
 
+def parse_ability_tab_lines(lines: list) -> Optional[dict]:
+    """詳細オーバーレイ「能力」タブの行OCRを構造化する (純粋計算)。
+
+    技 (右にPP数字を伴う行)・特性・持ち物のピル行を取り出す。
+    特性/持ち物のラベルが両方無ければ None (このタブではない)。
+    """
+    from vision.normalize import similarity
+
+    def band_overlap(a, b) -> bool:
+        return min(a[3], b[3]) - max(a[1], b[1]) > 0.5 * min(
+            a[3] - a[1], b[3] - b[1])
+
+    ability_band = item_band = None
+    for t, bb in lines:
+        cx = (bb[0] + bb[2]) / 2
+        if cx >= 0.5 or len(t) > 5:
+            continue
+        if ability_band is None and similarity(t[:3], "特性") >= 0.5:
+            ability_band = bb
+        elif item_band is None and similarity(t[:4], "持ち物") >= 0.5:
+            item_band = bb
+    if ability_band is None or item_band is None:
+        return None
+
+    def band_value(band):
+        cands = []
+        for t, bb in lines:
+            if band_overlap(band, bb) and bb[0] > band[2] and t not in cands:
+                cands.append(t)
+        return cands
+
+    numeric = [(int(t), bb) for t, bb in lines
+               if t.strip().isdigit() and len(t.strip()) <= 2]
+    move_slots: list = []
+    top_limit = min(ability_band[1], item_band[1])
+    for t, bb in lines:
+        if bb[1] >= top_limit or t.strip().isdigit():
+            continue
+        if (bb[0] + bb[2]) / 2 > 0.6:
+            continue
+        # 同じ帯に PP らしき数字 (1〜48) を伴う行だけを技とみなす
+        # (タイプピルやタブ見出しを除外する)
+        if not any(band_overlap(bb, nb) and 1 <= n <= 48
+                   for n, nb in numeric):
+            continue
+        for slot in move_slots:
+            if band_overlap(slot[0], bb):
+                if t not in slot[1]:
+                    slot[1].append(t)
+                break
+        else:
+            move_slots.append((bb, [t]))
+    move_slots.sort(key=lambda s: s[0][1])
+    return {"move_slots": [texts for _, texts in move_slots[:4]],
+            "ability_texts": band_value(ability_band),
+            "item_texts": band_value(item_band)}
+
+
+def _selection_focused_row(img) -> Optional[int]:
+    """選出画面でカーソル (ライム色ハイライト) が乗っている自分側の行番号"""
+    best, best_ratio = None, 0.0
+    for i, z in enumerate(zones.SELECTION_MY):
+        c = crop(img, z["panel"])
+        if c is None or c.size == 0:
+            continue
+        hsv = cv2.cvtColor(c, cv2.COLOR_BGR2HSV)
+        lime = cv2.inRange(hsv, _LIME_LOW, _LIME_HIGH)
+        ratio = cv2.countNonZero(lime) / lime.size
+        if ratio > best_ratio:
+            best, best_ratio = i, ratio
+    return best if best_ratio > 0.30 else None
+
+
+def extract_selection_detail(img, state: BattleStateV2, resolver) -> None:
+    """選出画面の詳細オーバーレイ (つよさの表示) から型登録を取り込む
+    (2026-08-31 第11回: 選出中の詳細閲覧が battle_active ゲートで全停止し、
+    「対戦中と誤認して登録されない」と指摘された)。
+
+    対象は選出リストでライム色ハイライトされている自分のポケモン。
+    書き込み先は my_team のみで対戦状態には触れない (watch取込と同じ
+    2フレーム裏付け)。能力タブ=技/特性/持ち物、ステータスタブ=配分/性格
+    (実数値整合の検証つき) の両方に対応する
+    """
+    idx = _selection_focused_row(img)
+    if idx is None or idx >= len(state.player.party):
+        return
+    mon = state.player.party[idx]
+    if not mon.species_ja:
+        return
+    panel = crop(img, zones.SELECTION_DETAIL["panel"])
+    if panel is None or panel.size == 0:
+        return
+    lines = ocr.apple_ocr_lines(panel, scale=2.0) + \
+        ocr.apple_ocr_lines(panel, scale=2.5)
+
+    patch: dict = {}
+    stats_parsed = parse_team_menu_lines(lines)
+    if stats_parsed and mon.species_id:
+        points, nature = _validate_menu_stats(mon.species_id,
+                                              stats_parsed["stats"])
+        if points:
+            patch["能力ポイント"] = points
+        if nature:
+            patch["性格"] = nature
+    ab_tab = parse_ability_tab_lines(lines)
+    if ab_tab:
+        moves = []
+        for cands in ab_tab["move_slots"]:
+            for t in cands:
+                r = resolver.resolve(t, "moves", cutoff=0.72)
+                if r and r[0] not in moves:
+                    moves.append(r[0])
+                    break
+        if len(moves) == 4:
+            patch["技"] = moves
+        for t in ab_tab["ability_texts"]:
+            ra = resolver.resolve(t, "abilities", cutoff=0.7)
+            if ra:
+                from vision.abilities import legal_abilities
+                legal = legal_abilities(mon.species_id)
+                if legal is None or ra[1] in legal:
+                    patch["特性"] = ra[0]
+                    break
+        for t in ab_tab["item_texts"]:
+            ri = resolver.resolve(t, "items", cutoff=0.75)
+            if ri:
+                patch["持ち物"] = ri[0]
+                break
+    if not patch:
+        return
+    patch_key = (mon.species_ja, tuple(sorted(
+        (k, str(v)) for k, v in patch.items())))
+    if patch_key == getattr(state, "_last_seldetail_patch", None):
+        from advisor.my_team import update_build
+        if update_build(mon.species_ja, patch):
+            state.log_event("system",
+                            f"my_team更新: {mon.species_ja} (選出画面の詳細)",
+                            event_id=None)
+    state._last_seldetail_patch = patch_key
+
+
 def extract_team_menu(img, state: BattleStateV2, resolver) -> None:
     """パーティ管理画面 (牧場/ボックス/チーム編成、対戦外) の右詳細パネル
     から型登録 (my_team) を取り込む (2026-08-30 第10回後の要望)。
@@ -2099,6 +2240,19 @@ def _extract_watch_side_columns(img, state: BattleStateV2, resolver) -> None:
             state.player.party.append(mon)
             idx = len(state.player.party) - 1
         mon = state.player.party[idx]
+        # 交代メニューの左列に並ぶのは選出3体そのもの。名前が解決できた行を
+        # 選出確定として扱い、3体そろったら他の選出フラグを下ろす
+        # (2026-08-31 第11回: やり直した選出画面の白リボンで立った古い
+        #  is_picked が残留し、未参加のミミッキュへの交代を推奨し続けた)
+        mon.is_picked = True
+        roster = getattr(state, "_watch_roster_idx", None) or set()
+        roster.add(idx)
+        state._watch_roster_idx = roster
+        if len(roster) >= 3:
+            for j, q in enumerate(state.player.party):
+                if j not in roster and q.is_picked:
+                    q.is_picked = False
+                    q.pick_order = None
         if not _plausible_max_hp(mon.species_id, frac[1]):
             continue
         if frac[0] == 0 and mon.status != "fainted":

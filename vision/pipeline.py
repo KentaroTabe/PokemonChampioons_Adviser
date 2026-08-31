@@ -293,6 +293,14 @@ class VisionPipeline:
 
         if scene == "selection" and heavy and selection_confirmed:
             extractors.extract_selection(img, self.state, self.resolver)
+            # 選出中の詳細オーバーレイ (つよさの表示) からの型登録取り込み。
+            # battle_active中だがmy_teamへの書き込み専用で対戦状態には触れない
+            # (2026-08-31 第11回: 選出中の閲覧が登録されない指摘への対応)
+            try:
+                extractors.extract_selection_detail(img, self.state,
+                                                    self.resolver)
+            except Exception:
+                pass
         elif scene in ("command", "move_select", "battle_hud"):
             if heavy:
                 extractors.extract_battle_hud(img, self.state, self.resolver)
