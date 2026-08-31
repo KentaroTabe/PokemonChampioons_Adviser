@@ -868,6 +868,32 @@ def test_web_caught_is_not_a_move_use():
     print("test_web_caught_is_not_a_move_use OK")
 
 
+def test_form_correction_by_exclusive_move():
+    """排他技の観測で形態を訂正する (2026-08-30 第10回: ヒスイダイケンキが
+    素のダイケンキのまま評価された)。共有技では訂正しない。
+    メガ訂正と同様に species_ja は変えず id/タイプのみ更新"""
+    import advisor.sets as sets_mod
+    from vision.state import PokemonState
+
+    # 実DB: アクアカッターはヒスイダイケンキの排他技
+    assert sets_mod.exclusive_form_for_move("samurott", "aquacutter") == \
+        "samurotthisui"
+    # 共有技 (両ロトムが使う) では訂正しない
+    assert sets_mod.exclusive_form_for_move("rotom", "voltswitch") is None
+
+    state, p = new_parser()
+    state.opponent.party.append(PokemonState(
+        species_ja="ダイケンキ", species_id="samurott", types=["みず"]))
+    state.opponent.active_index = len(state.opponent.party) - 1
+    fired = p.parse("相手の ダイケンキの アクアカッター!")
+    assert any("aquacutter" in f for f in fired), fired
+    mon = state.opponent.active()
+    assert mon.species_id == "samurotthisui", mon.species_id
+    assert "あく" in (mon.types or []), mon.types   # みず/あく へ更新
+    assert mon.species_ja == "ダイケンキ", mon.species_ja  # HUD表示名は維持
+    print("test_form_correction_by_exclusive_move OK")
+
+
 def test_rate_extraction_decimal_format():
     """ランク画面の実表示「レート1626.580」(小数3桁) を抽出する (2026-08-25
     第9回: 正規化が小数点を落とし 1626580→先頭5桁が範囲外で全戦棄却され、
@@ -922,6 +948,7 @@ if __name__ == "__main__":
     test_bare_form_read_merges_into_family_slot()
     test_white_herb_activation()
     test_web_caught_is_not_a_move_use()
+    test_form_correction_by_exclusive_move()
     test_item_activation_effects()
     test_air_balloon_float_and_pop()
     test_life_orb_recoil_from_move_event()

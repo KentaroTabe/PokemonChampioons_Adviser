@@ -678,6 +678,7 @@ class EventParser:
         if side_name == "opponent" and name_matched \
                 and r[0] not in mon.revealed_moves:
             mon.revealed_moves.append(r[0])
+            self._maybe_correct_form(mon, r[1])
         if apply_effects:
             # 他イベントが既に発火している場合は場への効果を二重適用しない
             self._apply_move_side_effect(r[1], side_name)
@@ -713,6 +714,40 @@ class EventParser:
         if mon.hp_current is not None and mon.hp_max:
             mon.hp_current = max(
                 0, mon.hp_current + round(mon.hp_max * frac))
+
+    def _maybe_correct_form(self, mon, move_id: str) -> None:
+        """判明技が現形態に使用実績が無く、同族の別形態に限って実績がある
+        場合に形態を訂正する (2026-08-30 第10回: ヒスイダイケンキを素の
+        ダイケンキと解釈したまま、専用技アクアカッターの証拠を活かせず
+        タイプ・置換判定が狂った)。共有技では発動しない。
+        メガ訂正と同様、species_ja (HUD表示名) は変えず id/タイプのみ更新
+        """
+        if not mon.species_id or not move_id or mon.is_mega:
+            return
+        try:
+            from advisor.sets import exclusive_form_for_move
+            form = exclusive_form_for_move(mon.species_id, move_id)
+        except Exception:
+            return
+        if not form or form == mon.species_id:
+            return
+        old = mon.species_id
+        mon.species_id = form
+        from vision.state import _dex_types_ja_of
+        t = _dex_types_ja_of(form)
+        if t:
+            mon.types = list(t)
+        ja = None
+        try:
+            ja = self.resolver.ja_of("species", form)
+        except Exception:
+            pass
+        if ja and ja not in (mon.aliases or []):
+            mon.aliases.append(ja)
+        self.state.log_event(
+            "system",
+            f"判明技{move_id}は{form}の排他技のため形態を訂正 ({old}→{form})",
+            event_id=f"form_fix_{form}")
 
     def _apply_move_boosts(self, move_id: str, user_side: str, user_mon):
         """技の確定的な能力ランク変化 (100%発動のみ) を使用イベントで反映する。

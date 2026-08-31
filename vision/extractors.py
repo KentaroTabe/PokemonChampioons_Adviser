@@ -1258,12 +1258,25 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
             mon.ability_ja = resolver.ja_of("abilities", fa) or fa
 
     # --- 残数ボール (緑=残り。単調減少で更新しノイズに耐える) ---
-    for side_obj, zone_key in ((state.opponent, "opp_balls"),
-                                (state.player, "my_balls")):
+    for side_name2, zone_key in (("opponent", "opp_balls"),
+                                 ("player", "my_balls")):
+        side_obj = state.side(side_name2)
         count = ocr.count_pokeballs(crop(img, zones.BATTLE[zone_key]))
         if count is not None and 1 <= count <= 3:
             if side_obj.remaining is None or count <= side_obj.remaining:
-                side_obj.remaining = count
+                # 減少は2回連続で同じ値を読めたときのみ確定する (単発の
+                # 数え落としが単調減少ルールで固着し、ひんし照合まで
+                # 誤爆するのを防ぐ)
+                prev = getattr(side_obj, "_ball_pending", None)
+                if side_obj.remaining is None or count == side_obj.remaining \
+                        or prev == count:
+                    side_obj.remaining = count
+                    side_obj._ball_pending = None
+                    _reconcile_remaining_faints(state, side_name2)
+                else:
+                    side_obj._ball_pending = count
+            else:
+                side_obj._ball_pending = None
 
     # --- COMMAND 残り秒数 ---
     cmd = ocr.read_zone_text(img, zones.BATTLE["command_no"], mode="panel",
@@ -1274,6 +1287,45 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
             state.command_no = val
 
     state.battle_active = True
+
+
+def _reconcile_remaining_faints(state: BattleStateV2, side_name: str) -> None:
+    """ボール残数と既知のひんし数を突き合わせ、取り逃したひんしを補完する。
+
+    ひんしメッセージは演出中の短時間表示で系統的に取り逃す (第11回: 相手
+    カバルドンが54%固着、自分ムクホークが100%固着のまま敗北)。残数は
+    HUDに常時表示され信頼できるため、残数+既知ひんし < 選出3 のとき、
+    非アクティブでHPが低い順に不足分をひんし確定する。該当候補が無い
+    (どの個体か特定できない) 場合は無理に確定せず、ログにだけ残す
+    """
+    side = state.side(side_name)
+    if side.remaining is None:
+        return
+    fainted = sum(1 for p in side.party if p.status == "fainted")
+    deficit = 3 - side.remaining - fainted
+    if deficit <= 0:
+        return
+    active = side.active()
+    cands = sorted(
+        (p for p in side.party
+         if p is not active and p.status != "fainted"
+         and p.hp_percent is not None and p.hp_percent <= 15.0),
+        key=lambda p: p.hp_percent)
+    for p in cands[:deficit]:
+        p.status = "fainted"
+        p.hp_percent = 0.0
+        p.hp_current = 0
+        state.log_event(
+            "system",
+            f"残数ボールとの照合で{p.species_ja or '?'}をひんし確定 "
+            f"({side_name} 残{side.remaining})",
+            event_id=f"faint_reconcile_{side_name}")
+    if len(cands) < deficit:
+        state.log_event(
+            "system",
+            f"{side_name}の残数{side.remaining}に対しひんし{fainted}体のみ "
+            "(取り逃し疑い。個体は特定できず)",
+            event_id=f"faint_deficit_{side_name}")
 
 
 def extract_my_hud(img, state: BattleStateV2, resolver) -> None:

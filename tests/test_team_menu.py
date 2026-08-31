@@ -240,6 +240,57 @@ def test_selection_detail_ability_tab():
     print("test_selection_detail_ability_tab OK")
 
 
+def test_menu_message_gate():
+    """対戦文脈 (battle_active or 選出直後) の外では field シーンの
+    メッセージOCRを流さない (2026-08-31 体系対応: fieldに誤分類された
+    メニュー画面のテキストが誤イベントの主経路だった)"""
+    import time as _time
+
+    from vision.pipeline import VisionPipeline
+
+    p = VisionPipeline()
+    calls = []
+    p._process_text_regions = (
+        lambda img, regions, single: calls.append(len(regions)) or [])
+    img = np.zeros((1080, 1920, 3), dtype=np.uint8)   # 黒画面 → field 分類
+    p.process(img)
+    p.process(img)
+    assert calls == [], f"対戦文脈なしでメッセージOCRが走った: {calls}"
+    p._last_selection_ts = _time.time()   # 選出を見た直後の扱い
+    p.process(img)
+    assert calls, "選出直後なのにメッセージOCRが走らない"
+    print("test_menu_message_gate OK")
+
+
+def test_reconcile_remaining_faints():
+    """ボール残数と既知ひんし数の照合で、取り逃したひんしを補完する
+    (2026-08-31 第11回: 相手カバルドン54%固着・自分ムクホーク100%固着)。
+    低HPの非アクティブ個体のみ確定し、候補が無ければ確定しない"""
+    st = BattleStateV2()
+    a = PokemonState(species_ja="ペロリーム", species_id="slurpuff",
+                     hp_percent=0.0, status="fainted")
+    b = PokemonState(species_ja="カバルドン", species_id="hippowdon",
+                     hp_percent=8.0)
+    c = PokemonState(species_ja="キラフロル", species_id="glimmora",
+                     hp_percent=100.0, is_active=True)
+    st.opponent.party = [a, b, c]
+    st.opponent.active_index = 2
+    st.opponent.remaining = 1     # 実際は2体ひんし
+    extractors._reconcile_remaining_faints(st, "opponent")
+    assert b.status == "fainted" and b.hp_percent == 0.0, (b.status, b.hp_percent)
+    assert c.status != "fainted"  # アクティブは対象外
+    # 候補なし (全員高HP) は確定せずログのみ
+    st2 = BattleStateV2()
+    d = PokemonState(species_ja="A", hp_percent=90.0)
+    e = PokemonState(species_ja="B", hp_percent=80.0, is_active=True)
+    st2.opponent.party = [d, e]
+    st2.opponent.active_index = 1
+    st2.opponent.remaining = 1
+    extractors._reconcile_remaining_faints(st2, "opponent")
+    assert d.status is None, d.status
+    print("test_reconcile_remaining_faints OK")
+
+
 def main() -> None:
     test_parse_team_menu_lines()
     test_validate_menu_stats()
@@ -247,6 +298,8 @@ def main() -> None:
     test_selection_items_register_to_my_team()
     test_watch_roster_confirms_picks()
     test_selection_detail_ability_tab()
+    test_menu_message_gate()
+    test_reconcile_remaining_faints()
     print("\nALL OK")
 
 

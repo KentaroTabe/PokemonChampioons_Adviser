@@ -23,6 +23,37 @@ def _slug_to_id(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", name.lower())
 
 
+@lru_cache(maxsize=512)
+def exclusive_form_for_move(species_id: str, move_id: str,
+                            min_pct: float = 1.0) -> Optional[str]:
+    """move_id の使用実績が同族の別形態に限って存在する場合、その形態IDを返す。
+
+    判明技による形態訂正の証拠として使う (2026-08-30 第10回: ヒスイ
+    ダイケンキの専用技アクアカッターが観測されたのに素のダイケンキの
+    まま評価された)。現在の形態にも実績がある技 (共有技) や、複数形態が
+    使う技では None (訂正しない — 排他技のみを証拠と認める)。
+    """
+    if not species_id or not move_id:
+        return None
+    p = get_predictor()
+    conn = p._connect()
+    if conn is None or p._snapshot_id is None:
+        return None
+    with p._lock:
+        rows = conn.execute(
+            "SELECT pokemon_name, usage_percent FROM move_usage "
+            "WHERE snapshot_id=? AND move_name=?",
+            (p._snapshot_id, move_id)).fetchall()
+    users = {_slug_to_id(n): pct for n, pct in rows
+             if pct is not None and pct >= min_pct}
+    if species_id in users:
+        return None
+    fam = [n for n in users
+           if n != species_id
+           and (n.startswith(species_id) or species_id.startswith(n))]
+    return fam[0] if len(fam) == 1 else None
+
+
 class SetPredictor:
     def __init__(self, db_path: Path = DB_PATH):
         self.db_path = db_path

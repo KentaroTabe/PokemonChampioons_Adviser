@@ -352,7 +352,16 @@ class VisionPipeline:
 
         # --- メッセージ / ポップアップ (HUDが消えるフィールドシーンのみ。
         #     HUD表示中はタイマー等の誤OCRを防ぐため読まない) ---
-        if scene == "field":
+        # 対戦文脈ゲート: field 誤分類したメニュー画面 (お知らせ/ボックス/
+        # バトルメニュー等) のテキストをイベント解析に流さない (2026-08-31
+        # 体系対応: 誤イベント汚染の主経路だった)。対戦文脈 = battle_active
+        # または直近に選出画面を見た (開幕の繰り出しメッセージは
+        # battle_active が立つ前に流れるため選出からの猶予で拾う)
+        in_battle_context = self.state.battle_active or (
+            time.time() - getattr(self, "_last_selection_ts", 0.0) < 180.0)
+        if scene == "selection":
+            self._last_selection_ts = time.time()
+        if scene == "field" and in_battle_context:
             # 技アニメーション中のHP変化を追い、直前の技イベントとダメージを
             # 対応付けられるようにする (HUDバナー表示中のみ内部でOCRする)
             if self._should_run_heavy("field_hp", force=single_shot):
