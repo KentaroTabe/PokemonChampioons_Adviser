@@ -535,6 +535,48 @@ def test_taunt_context_bonus():
     print("test_taunt_context_bonus OK")
 
 
+def test_redundant_setup_discount():
+    """重ねられない設置技・場効果は既設置なら推奨しない (2026-08-31 第11回:
+    ねばねばネット設置済みのまま再設置を推奨し続けた)"""
+    import os
+    from vision.normalize import NameResolver
+    resolver = NameResolver()
+    my = {"species_id": "slurpuff", "species_ja": "ペロリーム",
+          "types": ["フェアリー"], "hp_percent": 100.0,
+          "hp_current": 160, "hp_max": 160, "status": None, "boosts": {},
+          "ability_id": None, "item_id": None,
+          "moves": [
+              {"name_ja": "ねばねばネット", "move_id": "stickyweb",
+               "pp": 20, "max_pp": 20, "effectiveness": None},
+              {"name_ja": "マジカルシャイン", "move_id": "dazzlinggleam",
+               "pp": 10, "max_pp": 10, "effectiveness": "neutral"},
+          ], "revealed_moves": []}
+    opp = {"species_id": "hippowdon", "species_ja": "カバルドン",
+           "types": ["じめん"], "hp_percent": 100.0,
+           "hp_current": None, "hp_max": None, "status": None, "boosts": {},
+           "ability_id": None, "item_id": None, "moves": [],
+           "revealed_moves": []}
+    prev = os.environ.get("RL_BLEND_WEIGHT")
+    os.environ["RL_BLEND_WEIGHT"] = "0"
+    try:
+        st = _mini_state(my, opp)
+        st["opponent"]["hazards"]["sticky_web"] = True
+        adv = evaluate(st, resolver)
+        web = next(a for a in adv["actions"] if a["id"] == "stickyweb")
+        assert web["score"] <= 5.0 and "設置済み" in web["reason"], web
+        # 未設置なら通常評価 (設置技ボーナスが付く)
+        st2 = _mini_state(dict(my), dict(opp))
+        adv2 = evaluate(st2, resolver)
+        web2 = next(a for a in adv2["actions"] if a["id"] == "stickyweb")
+        assert web2["score"] > 5.0, web2
+    finally:
+        if prev is None:
+            os.environ.pop("RL_BLEND_WEIGHT", None)
+        else:
+            os.environ["RL_BLEND_WEIGHT"] = prev
+    print("test_redundant_setup_discount OK")
+
+
 def test_choice_lock():
     """こだわり系を持って技を使った後は、直前の技以外を推奨しない (第2回#C)"""
     from vision.normalize import NameResolver
@@ -685,6 +727,7 @@ if __name__ == "__main__":
     test_taunt_context_bonus()
     test_pivot_pending_switch_only()
     test_noguard_makes_low_accuracy_moves_reliable()
+    test_redundant_setup_discount()
     test_choice_lock()
     test_registered_moves_fallback()
     test_rl_sees_registered_move_fallback()

@@ -850,6 +850,24 @@ def test_life_orb_recoil_from_move_event():
     print("test_life_orb_recoil_from_move_event OK")
 
 
+def test_web_caught_is_not_a_move_use():
+    """「〜はねばねばネットにひっかかった!」は技使用ではない (2026-08-31
+    第11回: 相手が網にかかるたび move_opponent_stickyweb が誤発火し、
+    判明技汚染と陣営誤りの設置適用が起きた)。被弾側の陣営のネット存在
+    確認として扱う"""
+    state, p = new_parser()
+    p.parse("相手は ルカリオを 繰り出した!")
+    opp = state.opponent.active()
+    fired = p.parse("相手の ルカリオは ねばねばネットに ひっかかった!")
+    assert not any(f.startswith("move_") for f in fired), fired
+    assert "web_caught" in fired, fired
+    assert state.opponent.sticky_web is True     # 被弾側=相手陣営に確認
+    assert state.player.sticky_web is False      # 自陣に誤適用しない
+    assert "ねばねばネット" not in (opp.revealed_moves or []), \
+        opp.revealed_moves
+    print("test_web_caught_is_not_a_move_use OK")
+
+
 def test_rate_extraction_decimal_format():
     """ランク画面の実表示「レート1626.580」(小数3桁) を抽出する (2026-08-25
     第9回: 正規化が小数点を落とし 1626580→先頭5桁が範囲外で全戦棄却され、
@@ -903,6 +921,7 @@ if __name__ == "__main__":
     test_mega_survives_reswitch()
     test_bare_form_read_merges_into_family_slot()
     test_white_herb_activation()
+    test_web_caught_is_not_a_move_use()
     test_item_activation_effects()
     test_air_balloon_float_and_pop()
     test_life_orb_recoil_from_move_event()

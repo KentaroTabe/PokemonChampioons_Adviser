@@ -510,6 +510,28 @@ def evaluate(state: dict, resolver=None) -> dict:
             if mid == "stealthrock" and opp_state["hazards"]["stealth_rock"]:
                 score = 2.0
                 reason_parts.append("既に設置済み")
+            # 重ねられない設置技・場効果は既設置なら推奨しない (2026-08-31
+            # 第11回: ねばねばネット設置済みのまま再設置を推奨し続けた)
+            if mid == "stickyweb" and opp_state["hazards"].get("sticky_web"):
+                score = 2.0
+                reason_parts.append("既に設置済み")
+            if mid == "spikes" and \
+                    opp_state["hazards"].get("spikes", 0) >= 3:
+                score = 2.0
+                reason_parts.append("まきびしは上限まで設置済み")
+            if mid == "toxicspikes" and \
+                    opp_state["hazards"].get("toxic_spikes", 0) >= 2:
+                score = 2.0
+                reason_parts.append("どくびしは上限まで設置済み")
+            _scr = my_state.get("screens") or {}
+            if (mid == "reflect" and _scr.get("reflect")) or \
+                    (mid == "lightscreen" and _scr.get("light_screen")) or \
+                    (mid == "auroraveil" and _scr.get("aurora_veil")):
+                score = 2.0
+                reason_parts.append("展開中 (重ねられない)")
+            if mid == "tailwind" and my_state.get("tailwind"):
+                score = 2.0
+                reason_parts.append("おいかぜは既に吹いている")
             if mid == "protect" and threat_faces_me:
                 score += 10
                 reason_parts.append("高火力を一度受け流せる")

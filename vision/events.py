@@ -155,6 +155,12 @@ SIMPLE_EVENTS = [
 
     # --- メガシンカ ---
     {"id": "mega_evolve", "keywords": [["メガシンカ", "めかしんか"]], "action": "mega"},
+    # --- ねばねばネットの被弾 (2026-08-31 第11回: 「〜はねばねばネットに
+    #     ひっかかった!」が技使用 move_*_stickyweb として誤発火し、設置側の
+    #     状態を乱した)。被弾側の陣営にネットが存在する確認として扱う ---
+    {"id": "web_caught",
+     "keywords": [["ねばねばネット", "ねはねはネット"], ["ひっかか", "引っかか"]],
+     "action": "hazard", "key": "sticky_web", "value": True},
     # --- ふうせん (2026-08-25: 登場表示で持ち物を確定し、割れたら消費) ---
     {"id": "balloon_float",
      "keywords": [["ふうせん", "風船"], ["うかんている", "浮いている", "ういている"]],
@@ -423,7 +429,14 @@ class EventParser:
         # 交代 (「〜を繰り出した」) は種族名が技に誤マッチしやすいので除外。
         # 効果切れ (「リフレクターがなくなった」等の *_end) は技の使用では
         # ないため除外 (壁切れメッセージが move_opponent_reflect を誤発火した)
-        if not any(f.startswith("switch") or f.endswith("_end") for f in fired):
+        # 「〜は…にひっかかった!」等の被弾/接触メッセージは技の使用ではない
+        # (2026-08-31 第11回: 相手が網にかかるたび複合文フォールバックが
+        #  ねばねばネットを技として拾い、判明技汚染と誤設置が起きた)
+        is_contact_msg = ("ひつかか" in norm or "ひっかか" in cleaned
+                          or "引っかか" in cleaned)
+        if not is_contact_msg and \
+                not any(f.startswith("switch") or f.endswith("_end")
+                        for f in fired):
             mu = self._parse_move_or_ability(cleaned, norm, source,
                                              apply_effects=not fired)
             if mu and mu not in fired:
@@ -619,6 +632,12 @@ class EventParser:
     def _parse_move_or_ability(self, cleaned: str, norm: str, source: str,
                                apply_effects: bool = True) -> Optional[str]:
         """「{名前}の {技 or 特性}!」形式。「の」区切り候補を右から試す"""
+        # 「〜は…にひっかかった!」等の被弾/接触メッセージは技の使用ではない
+        # (2026-08-31 第11回: 相手が網にかかるたび move_opponent_stickyweb が
+        #  誤発火し、陣営誤りの設置効果まで適用されていた)。
+        # norm は loose_key で「っ→つ」正規化されるため両形を見る
+        if "ひつかか" in norm or "ひっかか" in cleaned or "引っかか" in cleaned:
+            return None
         body = re.sub(r"[!!]+$", "", cleaned)
         positions = [m.start() for m in re.finditer("の", body)]
         if not positions:
