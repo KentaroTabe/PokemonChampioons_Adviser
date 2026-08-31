@@ -164,6 +164,12 @@ async def handle_frame(sid, data):
     if _busy:
         if _pending_frame is not None:
             dropped_counter += 1   # 保持中の1枚を上書き = 実質の破棄
+            # 破棄する1枚からメッセージ域だけ救出する (2026-08-31 設計変更:
+            # 処理落ちで消えるフレームの瞬間表示メッセージが取り逃しの
+            # 主因だった。軽量判定+退避で、OCRは後からパイプラインが消化)
+            _, dropped = _pending_frame
+            asyncio.get_event_loop().run_in_executor(
+                None, _rescue_dropped_frame, dropped)
         _pending_frame = (sid, data)
         return
     _busy = True
@@ -175,6 +181,17 @@ async def handle_frame(sid, data):
             await _handle_one_frame(pend_sid, pend_data)
     finally:
         _busy = False
+
+
+def _rescue_dropped_frame(data) -> None:
+    """破棄フレームのデコード+メッセージ域退避 (executorスレッドで実行)"""
+    try:
+        encoded = data.split(',')[1]
+        nparr = np.frombuffer(base64.b64decode(encoded), np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        pipeline.rescue_scan(img)
+    except Exception:
+        pass
 
 
 async def _handle_one_frame(sid, data):
@@ -215,8 +232,11 @@ async def _handle_one_frame(sid, data):
             _last_scene = state["scene"]
         if time.time() - _last_scene_log > 5:
             _last_scene_log = time.time()
+            rs = pipeline.rescue_stats
             print(f"[server] scene={state['scene']} 受信={frame_counter} "
-                  f"処理={processed_counter} 破棄={dropped_counter} events={len(state['events'])}")
+                  f"処理={processed_counter} 破棄={dropped_counter} "
+                  f"救出={rs['stashed']}/OCR{rs['ocr']}/発火{rs['events']} "
+                  f"events={len(state['events'])}")
 
         if fired:
             for f in fired:

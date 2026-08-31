@@ -91,6 +91,13 @@ class VisionPipeline:
         self._last_masks: dict = {}     # source -> 前回OCR時のマスク
         self._last_ocr_ts: dict = {}    # source -> 前回OCR時刻
         self._last_heavy = {}       # scene -> last heavy extraction time
+        # 破棄フレームからのメッセージ救出バッファ (2026-08-31 設計変更:
+        # 「キャプチャと処理の分離」。処理が追いつかず破棄されるフレームの
+        # メッセージ域だけを退避し、後から非同期にOCRして取り逃しを防ぐ)
+        from collections import deque
+        self._rescue_buf: deque = deque(maxlen=24)
+        self._rescue_last: dict = {}    # source -> (署名, 退避時刻)
+        self.rescue_stats = {"stashed": 0, "ocr": 0, "events": 0}
         self._selection_streak = 0  # 選出画面が連続何フレーム続いているか
         self._pending_scene = None  # シーン遷移の確定待ち (2フレーム連続で確定)
         self._pending_count = 0
@@ -150,6 +157,64 @@ class VisionPipeline:
                 f.trick_room, f.trick_room_turns = False, None
 
     # ------------------------------------------------------------------
+    def rescue_scan(self, img) -> None:
+        """破棄予定フレームからメッセージ域を退避する (受信側の軽量トリガー)。
+
+        1フレームあたり数msの文字有無判定 (outlined_text_mask はテキストが
+        無ければ None) のみを行い、文字があれば生クロップをリングバッファへ。
+        OCRは process() 側が非同期に消化する。処理落ちで破棄されるフレームに
+        しか呼ばれないため、平常時のコストはゼロ。対戦文脈外 (メニュー等) は
+        退避しない (誤分類メッセージの汚染防止と同じゲート)
+        """
+        if img is None or getattr(img, "size", 0) == 0:
+            return
+        if not (self.state.battle_active or
+                time.time() - getattr(self, "_last_selection_ts", 0.0) < 180.0):
+            return
+        for source, zone in (("message", zones.MESSAGE["text"]),
+                             ("left_popup", zones.MESSAGE["left_popup"]),
+                             ("right_popup", zones.MESSAGE["right_popup"])):
+            c = zones.crop(img, zone)
+            if c is None or c.size == 0:
+                continue
+            mask = ocr.outlined_text_mask(c)
+            if mask is None:
+                continue   # 縁取り文字なし
+            sig = round(float(mask.mean()), 1)
+            last = self._rescue_last.get(source)
+            now = time.time()
+            if last and last[0] == sig and now - last[1] < 0.4:
+                continue   # 同一表示の連続退避を抑制 (0.4秒ごとに1枚は許す)
+            self._rescue_last[source] = (sig, now)
+            self._rescue_buf.append((source, c.copy()))
+            self.rescue_stats["stashed"] += 1
+
+    def _drain_rescue(self, fired: list) -> None:
+        """退避済みクロップを少量ずつOCRしてイベント解析へ流す。
+
+        1回の process あたり最大3枚 (処理予算の保護)。バッファは
+        maxlen=24 で古い順に自然消滅する。テキスト単位・イベント単位の
+        dedup はパーサ側が持つため、同一メッセージの重複退避は無害
+        """
+        for _ in range(3):
+            try:
+                source, c = self._rescue_buf.popleft()
+            except IndexError:
+                return
+            self.rescue_stats["ocr"] += 1
+            try:
+                text = ocr.read_crop_direct(c)
+            except Exception:
+                continue
+            if not text:
+                continue
+            evs = self.parser.parse(text, source=source)
+            if evs:
+                self.rescue_stats["events"] += len(evs)
+                for e in evs:
+                    if e not in fired:
+                        fired.append(e)
+
     def _should_run_heavy(self, scene: str, force: bool) -> bool:
         if force:
             return True
@@ -374,6 +439,9 @@ class VisionPipeline:
                 ("left_popup", zones.MESSAGE["left_popup"]),
                 ("right_popup", zones.MESSAGE["right_popup"]),
             ], single_shot)
+
+        # 破棄フレームから救出したメッセージ域の消化 (rescue_scan 参照)
+        self._drain_rescue(fired)
 
         return self.state.to_dict(), fired
 
