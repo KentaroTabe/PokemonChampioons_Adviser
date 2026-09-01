@@ -24,6 +24,7 @@ TESTS=(
   test_hp_settle
   test_hud_attribution
   test_pokedb_forms
+  test_meta_snapshot_filter
 )
 
 fail=0

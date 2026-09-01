@@ -34,9 +34,17 @@ def _champions_filter(db) -> str:
     SmogonのSV (gen9ou) データはフォールバック用で、チャンピオンズに
     存在しないポケモンを含むため、診断/推定では混ぜない。
     チャンピオンズのスナップショットが無い場合のみ全データを使う。
+
+    集計母数 (number_of_battles = pokedbの構築数) が足切り未満の
+    スナップショットも除外する。3構築だけのスナップショット (2026-08-05
+    インシデントの残置) が MAX(usage_percent) 経由で「使用率66.7%の脅威」を
+    診断に混入させていたため (2026-09-02 フォルム修復時に発覚)。
     """
+    from champions_agent.config import USAGE_MIN_RANKED_TEAMS
     ids = [str(r[0]) for r in db.execute(
-        "SELECT id FROM usage_snapshot WHERE format LIKE 'champions%'")]
+        "SELECT id FROM usage_snapshot WHERE format LIKE 'champions%' "
+        "AND (number_of_battles IS NULL OR number_of_battles >= ?)",
+        (USAGE_MIN_RANKED_TEAMS,))]
     if not ids:
         return "1=1"
     return f"snapshot_id IN ({','.join(ids)})"
