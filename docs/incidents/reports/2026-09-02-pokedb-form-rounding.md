@@ -126,16 +126,21 @@ snapshot 22(2026-08-31、223構築)での補正前→補正後(実測):
 ## 7. 復旧手順
 
 ```
-bash scripts/run_test.sh test_pokedb_forms      # 修正の回帰テスト (6件全緑)
+bash scripts/run_test.sh test_pokedb_forms      # 修正の回帰テスト (7件全緑)
 bash scripts/repair_usage_forms.sh              # dry-run で差分確認
 bash scripts/repair_usage_forms.sh apply        # 過去スナップショット修復
 bash champions_agent/scripts/update_usage_db.sh # 修正コードで新スナップショット取得
 ```
 
-復旧確認(実測): 修復後の snapshot 22 相当の再集計で
-rotomwash 6.7% / rotomheat 1.8% / floetteeternal 9.9% / samurotthisui 5.4%、
-基本 rotom は使用率リストから消滅(擬似0.1%のみ)。
-トップ15(garchomp 48.9%〜)は補正前後で不変。
+復旧確認(実測、2026-09-02 04:26 実施):
+
+- 修復後の全スナップショット横断 MAX: rotom 0.1 / floette 0.1 / samurott 0.1
+  (幻の値は消滅)、rotomwash 6.73 / rotomheat 2.11
+- 修正コードによる新規 snapshot 23(223構築): 補正済みの値で取得成功。
+  セット回転検知が 67種の実質変化を警告(フォルム名の付け替わりを含む想定内)
+- 相手プール(`build_ranked_teams` top60): 修復後も 60構築を維持し、
+  rotomwash×5 / floetteeternal×8 / samurotthisui×6 を正しく含む
+  (フォールバック §8 により floetteeternal 入り構築の破棄はゼロ)
 
 ## 8. 恒久対策
 
@@ -143,7 +148,15 @@ rotomwash 6.7% / rotomheat 1.8% / floetteeternal 9.9% / samurotthisui 5.4%、
   対応表(種族固有/完全名/地方すがた接尾辞/ベース種扱いの4区分)
 - `_species_id()` がこの表でフォルムを解決。**表にない未知のフォルムは
   警告を出してベース種に丸める**(黙って丸めない)
-- 回帰テスト: `tests/test_pokedb_forms.py`(6件)。CIサブセット
+- 型フォールバック(`set_fallback`): championsbattledata がフォルムを分けない
+  種族(えいえんのはなフラエッテ等)は、ベース種名義の実測型を参照して
+  相手プールの構築破棄を防ぐ(`ranked_teams._to_team_text`)
+- 診断の母数足切り: 調査中に、3構築だけのスナップショット(8/5残置)が
+  MAX(usage_percent) 経由で「ダイケンキ66.7%」の幻の脅威を診断に混入させて
+  いたことも発覚。`_champions_filter` に集計母数の足切り
+  (`USAGE_MIN_RANKED_TEAMS`)を追加した
+- 回帰テスト: `tests/test_pokedb_forms.py`(7件)、
+  `tests/test_meta_snapshot_filter.py`(2件)。CIサブセット
   (`scripts/ci_tests.sh`)にも追加
 - 過去分の修復ツール: `tools/repair_usage_forms.py`(dry-run既定、
   アーカイブから決定論的に再集計)
@@ -161,13 +174,17 @@ rotomwash 6.7% / rotomheat 1.8% / floetteeternal 9.9% / samurotthisui 5.4%、
 
 **未対応(要観察)**:
 
-- **floetteeternal の型データ欠落**: championsbattledata はフラエッテを
-  フォルム分けしていないため、使用率は floetteeternal に付くが
-  `meta_sets` は floette 名義のまま。診断・相手構築の型解決で
-  この対応付けが必要(暫定: ベース名義の型を参照する運用)
+- **フォルム別ページの日次揺れ**: championsbattledata のフォルム別ページは
+  サンプルが薄い日があり、meta_sets の代表セットが日によって非整合な
+  組み合わせになる(実測: rotomwash の snap22 は
+  ハイドロポンプ/ボルチェン/おにび/10万の整合セット、snap23 は
+  トリック23%/放電6%/壁6%/悪巧み4%の寄せ集め)。低使用率種の
+  代表セットを使うときは技分布の水準を確認する運用とする
 - 図鑑(`advisor/data/dex.json` + patch)に basculegionf /
   taurospaldeacombat / taurospaldeablaze が未収録。`meta_top` は
   図鑑非収録種を診断から落とすため、これらは脅威リストに出ない
   (使用率0.5〜2.2%の低頻度種。ローカルShowdownは収録済みで対戦は可能)
 - 汚染期間(7/17〜9/2)の学習への影響は分離測定不能。修復後の相手分布変更は
-  セット回転と同様に評価軸を動かすため、`training_changes.json` に記録した
+  セット回転と同様に評価軸を動かすため、`training_changes.json` に記録した。
+  進行中だったP4判定の測定(9/2 02:34 round1)は修復前の軸で走ったため破棄し、
+  修復後の軸で round1 から再測定する
