@@ -66,31 +66,68 @@ def build_team_text(species_list: list) -> str:
         r = resolver.resolve_species(name, cutoff=0.8)
         wanted.append(_to_id(r[1] if r else name))
 
+    from champions_agent.data.build_meta import choose_coherent_spread
+
+    def _clause_alternative(conn, snapshot_id, name, used):
+        """使用率順で未使用の持ち物を返す (無ければNone)"""
+        for r in conn.execute(
+                "SELECT item_name FROM item_usage "
+                "WHERE snapshot_id=? AND pokemon_name=? "
+                "ORDER BY usage_percent DESC", (snapshot_id, name)):
+            alt = _sanitize_item(r["item_name"])
+            if alt and alt not in used:
+                return alt
+        return None
+
+    def _rederive_spread(conn, snapshot_id, name, moves, item):
+        """持ち物が変わった枠の (性格, 配分) を整合再導出する"""
+        natures = [(r["nature"], r["usage_percent"]) for r in conn.execute(
+            "SELECT nature, usage_percent FROM spread_usage "
+            "WHERE snapshot_id=? AND pokemon_name=? AND nature IS NOT NULL "
+            "ORDER BY usage_percent DESC", (snapshot_id, name))]
+        spreads = [(r["evs"], r["usage_percent"]) for r in conn.execute(
+            "SELECT evs, usage_percent FROM spread_usage "
+            "WHERE snapshot_id=? AND pokemon_name=? AND evs IS NOT NULL "
+            "ORDER BY usage_percent DESC", (snapshot_id, name))]
+        mv = [m for m in moves if m]
+        cats = [r["category"] for r in conn.execute(
+            f"SELECT category FROM moves WHERE name IN "
+            f"({','.join('?' * len(mv))})", mv)] if mv else []
+        return choose_coherent_spread(natures, spreads, cats, item)
+
+    sets, used_items, missing = [], set(), []
     with db.get_connection() as conn:
         snapshot_id = db.latest_snapshot_id(conn, fmt=USAGE_TARGET_FORMAT)
         pool = _fetch_meta_pool(conn, snapshot_id)
-    by_id = {}
-    for row in pool:
-        by_id.setdefault(_to_id(row["pokemon_name"]), row)
+        by_id = {}
+        for row in pool:
+            by_id.setdefault(_to_id(row["pokemon_name"]), row)
 
-    sets, used_items, missing = [], set(), []
-    for sid in wanted:
-        row = by_id.get(sid)
-        if row is None:
-            missing.append(sid)
-            continue
-        item = _sanitize_item(row["item_name"])
-        if item in used_items:   # アイテムクローズ
-            item = None
-        if item:
-            used_items.add(item)
-        sets.append(PokemonSet(
-            species=to_showdown_name(_sanitize_species(row["pokemon_name"])),
-            ability=row["ability_name"], item=item,
-            tera_type=row["tera_type"], nature=row["nature"],
-            evs=row["evs"],
-            moves=[row["move1"], row["move2"], row["move3"], row["move4"]],
-        ))
+        for sid in wanted:
+            row = by_id.get(sid)
+            if row is None:
+                missing.append(sid)
+                continue
+            moves = [row["move1"], row["move2"], row["move3"], row["move4"]]
+            item = _sanitize_item(row["item_name"])
+            nature, evs = row["nature"], row["evs"]
+            if item in used_items:   # アイテムクローズ: 未使用の実測上位へ
+                item = _clause_alternative(
+                    conn, snapshot_id, row["pokemon_name"], used_items)
+                if item:
+                    # 持ち物の系統が変わると型が縫い合わせになるため、
+                    # 性格/配分を新しい持ち物に整合させて選び直す
+                    nature, evs = _rederive_spread(
+                        conn, snapshot_id, row["pokemon_name"], moves, item)
+            if item:
+                used_items.add(item)
+            sets.append(PokemonSet(
+                species=to_showdown_name(_sanitize_species(row["pokemon_name"])),
+                ability=row["ability_name"], item=item,
+                tera_type=row["tera_type"], nature=nature,
+                evs=evs,
+                moves=moves,
+            ))
     if missing:
         raise RuntimeError(f"meta_setsに型がない種族: {missing}")
     return "\n\n".join(s.to_showdown_text() for s in sets)

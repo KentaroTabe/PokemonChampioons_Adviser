@@ -25,6 +25,7 @@ TESTS=(
   test_hud_attribution
   test_pokedb_forms
   test_meta_snapshot_filter
+  test_set_coherence
 )
 
 fail=0
