@@ -1,0 +1,34 @@
+{
+  "_comment": "pokedbオープンデータの form 表記 -> showdown ID の対応表。species_forms は『種族名|フォルム名』の複合キーで最優先。full_names はフォルム欄が完全な種族名になっているもの。suffix_forms は『◯◯のすがた』を ベースID+接尾辞 に写す。base_forms はベース種そのもの (見た目/デフォルト) と確認済みのフォルム名で、警告なしでベース種に丸める。未知のフォルムは警告を出してベース種に丸める。",
+  "species_forms": {
+    "フラエッテ|えいえんのはな": "floetteeternal",
+    "イダイトウ|メスのすがた": "basculegionf",
+    "ケンタロス|パルデアのすがた・コンバットしゅ": "taurospaldeacombat",
+    "ケンタロス|パルデアのすがた・ブレイズしゅ": "taurospaldeablaze",
+    "ケンタロス|パルデアのすがた・ウォーターしゅ": "taurospaldeaaqua",
+    "イルカマン|マイティフォルム": "palafinhero"
+  },
+  "full_names": {
+    "ウォッシュロトム": "rotomwash",
+    "ヒートロトム": "rotomheat",
+    "フロストロトム": "rotomfrost",
+    "カットロトム": "rotommow",
+    "スピンロトム": "rotomfan"
+  },
+  "suffix_forms": {
+    "アローラのすがた": "alola",
+    "ガラルのすがた": "galar",
+    "ヒスイのすがた": "hisui"
+  },
+  "base_forms": [
+    "ばけたすがた",
+    "シールドフォルム",
+    "オスのすがた",
+    "ナイーブフォルム",
+    "３びきかぞく",
+    "がんさくフォルム",
+    "ファンシーなもよう",
+    "ボンサクのすがた",
+    "まんぷくもよう"
+  ]
+}

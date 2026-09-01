@@ -23,6 +23,7 @@ TESTS=(
   test_rescue
   test_hp_settle
   test_hud_attribution
+  test_pokedb_forms
 )
 
 fail=0

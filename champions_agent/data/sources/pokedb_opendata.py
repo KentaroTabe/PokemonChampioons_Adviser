@@ -32,8 +32,11 @@ USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
               "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36")
 
 JP_NAMES_PATH = Path(__file__).resolve().parents[3] / "vision" / "data" / "jp_names.json"
+FORMS_PATH = Path(__file__).resolve().parent / "pokedb_forms.json"
 
 _jp_maps = None
+_form_maps = None
+_warned_forms: set = set()
 
 
 def _load_jp_maps() -> dict:
@@ -48,12 +51,40 @@ def _load_jp_maps() -> dict:
     return _jp_maps
 
 
+def _load_form_maps() -> dict:
+    """フォルム表記 -> showdown ID の対応表 (pokedb_forms.json)"""
+    global _form_maps
+    if _form_maps is None:
+        _form_maps = json.loads(FORMS_PATH.read_text(encoding="utf-8"))
+    return _form_maps
+
+
 def _species_id(ja_name: str, form: str = "") -> str:
-    """日本語種族名 -> showdown ID。フォーム表記は暫定でベース種に丸める"""
+    """日本語種族名+フォルム表記 -> showdown ID。
+
+    対戦上の実体が異なるフォルム (ウォッシュロトム、アローラのすがた等) は
+    pokedb_forms.json の対応表で専用IDへ写す。見た目/デフォルトのフォルムと
+    表に無い未知のフォルムはベース種に丸める (未知は一度だけ警告)。
+    かつて全フォルムを無条件にベース種へ丸めていたため、基本ロトム0構築の
+    環境で「rotom 8.5%」のような誤集計が生じていた (2026-09-02 修正)。
+    """
     maps = _load_jp_maps()
-    sid = maps["species"].get(ja_name)
-    if sid:
-        return sid
+    base = maps["species"].get(ja_name)
+    form = (form or "").strip()
+    if form:
+        fm = _load_form_maps()
+        sid = (fm["species_forms"].get(f"{ja_name}|{form}")
+               or fm["full_names"].get(form))
+        if sid:
+            return sid
+        suffix = fm["suffix_forms"].get(form)
+        if suffix and base:
+            return base + suffix
+        if form not in fm["base_forms"] and (ja_name, form) not in _warned_forms:
+            _warned_forms.add((ja_name, form))
+            print(f"  [pokedb] 未知のフォルム: {ja_name}/{form} → ベース種に丸めます")
+    if base:
+        return base
     # 未知の名前 (新ポケモン等) はスラッグ化した日本語のまま保持
     return re.sub(r"[^a-z0-9ぁ-んァ-ン一-龥ー]", "", ja_name.lower())
 
