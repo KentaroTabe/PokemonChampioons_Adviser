@@ -62,6 +62,16 @@ def test_unknown_form_rounds_to_base():
     print("test_unknown_form_rounds_to_base OK")
 
 
+def test_set_fallback_species():
+    """型データの無いフォルムはベース種名義の型を参照する
+    (cbdがフォルムを分けない種族への対応。相手プールの構築破棄を防ぐ)"""
+    from champions_agent.data.sources.pokedb_opendata import set_fallback_species
+    assert set_fallback_species("floetteeternal") == "floette"
+    assert set_fallback_species("basculegionf") == "basculegion"
+    assert set_fallback_species("rotomwash") is None   # 専用ページがある種は不要
+    print("test_set_fallback_species OK")
+
+
 if __name__ == "__main__":
     test_rotom_appliance_forms_resolve()
     test_base_rotom_stays_base()
@@ -69,3 +79,4 @@ if __name__ == "__main__":
     test_species_specific_forms()
     test_cosmetic_and_default_forms_round_to_base()
     test_unknown_form_rounds_to_base()
+    test_set_fallback_species()

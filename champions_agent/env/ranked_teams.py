@@ -16,7 +16,8 @@ from pathlib import Path
 
 from champions_agent.config import USAGE_MIN_RANKED_TEAMS
 from champions_agent.data import database as db
-from champions_agent.data.sources.pokedb_opendata import _species_id, _item_id
+from champions_agent.data.sources.pokedb_opendata import (
+    _species_id, _item_id, set_fallback_species)
 from champions_agent.data.sources.name_mapping import to_showdown_name
 from champions_agent.env.team_builder import (
     PokemonSet, _sanitize_species, _sanitize_item, _enforce_item_clause,
@@ -121,6 +122,12 @@ def _to_team_text(t: dict, meta: dict, team_size: int) -> str | None:
                 if cand in meta:
                     meta_row = meta[cand]
                     break
+        if meta_row is None:
+            # フォルム専用ページが無い種族 (えいえんのはなフラエッテ等) は
+            # ベース種名義の実測型を使う (pokedb_forms.json の set_fallback)
+            fb = set_fallback_species(sid)
+            if fb:
+                meta_row = meta.get(fb)
         if meta_row is None:
             continue
         base_key = _base_species_key(sid)

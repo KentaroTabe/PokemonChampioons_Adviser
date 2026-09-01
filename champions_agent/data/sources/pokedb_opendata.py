@@ -89,6 +89,11 @@ def _species_id(ja_name: str, form: str = "") -> str:
     return re.sub(r"[^a-z0-9ぁ-んァ-ン一-龥ー]", "", ja_name.lower())
 
 
+def set_fallback_species(sid: str) -> str | None:
+    """フォルム専用の型データが無いときに参照するベース種ID (無ければNone)"""
+    return _load_form_maps().get("set_fallback", {}).get(sid)
+
+
 def _item_id(ja_name: str) -> str:
     maps = _load_jp_maps()
     iid = maps["items"].get(ja_name)

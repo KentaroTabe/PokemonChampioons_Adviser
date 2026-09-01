@@ -20,6 +20,14 @@
     "ガラルのすがた": "galar",
     "ヒスイのすがた": "hisui"
   },
+  "set_fallback": {
+    "_comment": "フォルム専用の型データ (meta_sets) が無い場合に参照するベース種。championsbattledataがフォルムを分けない種族 (フラエッテ等) では、ベース種名義のページが実質そのフォルムの実測データになっている",
+    "floetteeternal": "floette",
+    "basculegionf": "basculegion",
+    "taurospaldeacombat": "tauros",
+    "taurospaldeablaze": "tauros",
+    "taurospaldeaaqua": "tauros"
+  },
   "base_forms": [
     "ばけたすがた",
     "シールドフォルム",
