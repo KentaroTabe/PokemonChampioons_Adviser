@@ -35,8 +35,12 @@ iPhone ─(USB)─ OBS 仮想カメラ ─ ブラウザ(index.html) ─ WebSocke
 ## 2. advisor/ — 行動アドバイス
 
 2025年のPokéAgent Challenge (NeurIPS) では**探索ベース (ダメージ計算+MCTS) の foul-play が
-強化学習 (Metamon) やLLMを上回った**ため、本システムも探索/期待値ベースを採用。
-(champions_agent/ の強化学習基盤は将来のセルフプレイ評価用に残置)
+強化学習 (Metamon) やLLMを上回った**ため、本システムも探索/期待値ベースを核に採用。
+その後、champions_agent/ の強化学習は「残置」から**融合**へ移行した:
+自己対戦で鍛えた方策の行動確率を助言スコアへブレンドし (`RL_BLEND_WEIGHT`)、
+配布に使う方策は事前登録実験 (P5, 2026-08-26: current/EMAの対測定 計18,000戦、
+差+0.027 z=5.3) で **EMA平均方策** に切り替えた。詳細な判断履歴は
+`champions_agent/train/training_changes.json` と README「設計判断」を参照。
 
 | モジュール | 役割 |
 |---|---|
