@@ -132,11 +132,20 @@ KATAKANA_ALLOWLIST = "".join(chr(c) for c in range(0x30A1, 0x30F7)) + "ー・2Z"
 def get_reader():
     global _reader
     if _reader is None:
-        import easyocr
+        try:
+            import easyocr
+        except ImportError:
+            # Apple Visionもeasyocrも無い環境 (CI等) ではOCRなしで劣化動作する。
+            # 呼び出し側は空文字を「読めなかった」として扱う設計のため安全
+            if _reader is not False:
+                print("[vision.ocr] OCRバックエンドなし (Vision/easyocr不在)。"
+                      "読取は常に空文字になります")
+            _reader = False
+            return None
         print("[vision.ocr] Loading EasyOCR model...")
         _reader = easyocr.Reader(["ja", "en"], gpu=True)
         print("[vision.ocr] EasyOCR model loaded.")
-    return _reader
+    return _reader or None
 
 
 def _pad_invert(mask, pad=20):
@@ -201,6 +210,8 @@ def read_crop_direct(crop_img, scale=2.0, allowlist: Optional[str] = None) -> st
     resized = cv2.resize(crop_img, None, fx=scale, fy=scale,
                          interpolation=cv2.INTER_CUBIC)
     reader = get_reader()
+    if reader is None:
+        return ""
     kwargs = {"detail": 0}
     if allowlist:
         kwargs["allowlist"] = allowlist
@@ -213,6 +224,8 @@ def read_text(processed, allowlist: Optional[str] = None) -> str:
     if processed is None:
         return ""
     reader = get_reader()
+    if reader is None:
+        return ""
     kwargs = {"detail": 0}
     if allowlist:
         kwargs["allowlist"] = allowlist

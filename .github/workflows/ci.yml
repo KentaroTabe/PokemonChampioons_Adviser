@@ -1,0 +1,31 @@
+# 純粋ロジックのテストサブセットをLinuxで回すCI。
+#
+# フルスイート (scripts/run_test.sh all) はローカル専用:
+# - 画像読取テストは Apple Vision OCR (macOS内蔵) に依存
+# - 一部テストは未コミットの実データ (使用率DB / RLチェックポイント /
+#   config/my_team.json / debug_frames) に依存
+# - 実対戦を伴うテストはローカルShowdown (8100) と長い実行時間が必要
+# CIで回すのは「モックとコミット済みデータで閉じるテスト」のみ
+# (対象は scripts/ci_tests.sh に列挙)。
+name: ci
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+      - name: Install minimal deps
+        run: pip install -r requirements-ci.txt
+      - name: Run logic test subset
+        run: bash scripts/ci_tests.sh python
