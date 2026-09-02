@@ -23,6 +23,20 @@ def _slug_to_id(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", name.lower())
 
 
+def _exclusive_form_from_users(species_id: str, users: dict) -> Optional[str]:
+    """技の使用者マップ {種族ID: 使用率} から排他形態を判定する純粋部分。
+
+    現在の形態にも実績がある技 (共有技) や、同族の複数形態が使う技では
+    None (訂正しない — 排他技のみを証拠と認める)。
+    """
+    if species_id in users:
+        return None
+    fam = [n for n in users
+           if n != species_id
+           and (n.startswith(species_id) or species_id.startswith(n))]
+    return fam[0] if len(fam) == 1 else None
+
+
 @lru_cache(maxsize=512)
 def exclusive_form_for_move(species_id: str, move_id: str,
                             min_pct: float = 1.0) -> Optional[str]:
@@ -30,8 +44,7 @@ def exclusive_form_for_move(species_id: str, move_id: str,
 
     判明技による形態訂正の証拠として使う (2026-08-30 第10回: ヒスイ
     ダイケンキの専用技アクアカッターが観測されたのに素のダイケンキの
-    まま評価された)。現在の形態にも実績がある技 (共有技) や、複数形態が
-    使う技では None (訂正しない — 排他技のみを証拠と認める)。
+    まま評価された)。
     """
     if not species_id or not move_id:
         return None
@@ -46,12 +59,7 @@ def exclusive_form_for_move(species_id: str, move_id: str,
             (p._snapshot_id, move_id)).fetchall()
     users = {_slug_to_id(n): pct for n, pct in rows
              if pct is not None and pct >= min_pct}
-    if species_id in users:
-        return None
-    fam = [n for n in users
-           if n != species_id
-           and (n.startswith(species_id) or species_id.startswith(n))]
-    return fam[0] if len(fam) == 1 else None
+    return _exclusive_form_from_users(species_id, users)
 
 
 class SetPredictor:

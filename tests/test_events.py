@@ -871,26 +871,43 @@ def test_web_caught_is_not_a_move_use():
 def test_form_correction_by_exclusive_move():
     """排他技の観測で形態を訂正する (2026-08-30 第10回: ヒスイダイケンキが
     素のダイケンキのまま評価された)。共有技では訂正しない。
-    メガ訂正と同様に species_ja は変えず id/タイプのみ更新"""
+    メガ訂正と同様に species_ja は変えず id/タイプのみ更新。
+
+    使用率DBは未コミットでCIには無いため、判定は純粋部分
+    (_exclusive_form_from_users) を実測値由来のfixtureで検証し、
+    パーサ経路はDB参照側をfixtureに差し替えて検証する
+    (2026-09-02: 実DB直参照だったのがCIで失敗した)。
+    """
     import advisor.sets as sets_mod
     from vision.state import PokemonState
 
-    # 実DB: アクアカッターはヒスイダイケンキの排他技
-    assert sets_mod.exclusive_form_for_move("samurott", "aquacutter") == \
-        "samurotthisui"
-    # 共有技 (両ロトムが使う) では訂正しない
-    assert sets_mod.exclusive_form_for_move("rotom", "voltswitch") is None
+    # アクアカッターはヒスイダイケンキの排他技 (fixtureはsnap24の実測構図)
+    assert sets_mod._exclusive_form_from_users(
+        "samurott", {"samurotthisui": 32.5}) == "samurotthisui"
+    # 共有技 (自形態にも実績がある) では訂正しない
+    assert sets_mod._exclusive_form_from_users(
+        "rotom", {"rotom": 53.5, "rotomwash": 30.0}) is None
+    # 同族の複数形態が使う技も証拠にしない
+    assert sets_mod._exclusive_form_from_users(
+        "rotom", {"rotomwash": 30.0, "rotomheat": 20.0}) is None
 
-    state, p = new_parser()
-    state.opponent.party.append(PokemonState(
-        species_ja="ダイケンキ", species_id="samurott", types=["みず"]))
-    state.opponent.active_index = len(state.opponent.party) - 1
-    fired = p.parse("相手の ダイケンキの アクアカッター!")
-    assert any("aquacutter" in f for f in fired), fired
-    mon = state.opponent.active()
-    assert mon.species_id == "samurotthisui", mon.species_id
-    assert "あく" in (mon.types or []), mon.types   # みず/あく へ更新
-    assert mon.species_ja == "ダイケンキ", mon.species_ja  # HUD表示名は維持
+    _FIXTURE = {("samurott", "aquacutter"): "samurotthisui"}
+    orig = sets_mod.exclusive_form_for_move
+    sets_mod.exclusive_form_for_move = \
+        lambda sid, mid, min_pct=1.0: _FIXTURE.get((sid, mid))
+    try:
+        state, p = new_parser()
+        state.opponent.party.append(PokemonState(
+            species_ja="ダイケンキ", species_id="samurott", types=["みず"]))
+        state.opponent.active_index = len(state.opponent.party) - 1
+        fired = p.parse("相手の ダイケンキの アクアカッター!")
+        assert any("aquacutter" in f for f in fired), fired
+        mon = state.opponent.active()
+        assert mon.species_id == "samurotthisui", mon.species_id
+        assert "あく" in (mon.types or []), mon.types   # みず/あく へ更新
+        assert mon.species_ja == "ダイケンキ", mon.species_ja  # HUD表示名は維持
+    finally:
+        sets_mod.exclusive_form_for_move = orig
     print("test_form_correction_by_exclusive_move OK")
 
 

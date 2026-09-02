@@ -228,12 +228,25 @@ def test_myteam_text_completes_missing_evs():
     championsの spread 行は「性格のみ」と「配分のみ」が混在するため、
     EVを持つ行と性格を持つ行を別々に最頻選択する。"""
     import advisor.my_team as mt
+    import advisor.sets as sets_mod
     import tools.evolve_teams as ev
     from tools.evaluate_team import build_myteam_text
 
+    class _Pred:
+        def predict(self, sid):
+            # 技補完は get_predictor 経由 (使用率DB)。CIにDBは無いため
+            # ここで供給する (2026-09-02: モック漏れでCIのみ失敗した)
+            return {"moves": [("flowertrick", 90.0), ("knockoff", 80.0),
+                              ("uturn", 70.0), ("tripleaxel", 60.0)],
+                    "items": [("focussash", 40.0)],
+                    "abilities": [("protean", 80.0)],
+                    "found": True}
+
     orig_load = mt._load
+    orig_pred = sets_mod.get_predictor
     orig_cache = ev._usage_cache
     mt._load = lambda: {"マスカーニャ": {}}
+    sets_mod.get_predictor = lambda: _Pred()
     ev._usage_cache = {"meowscarada": {
         "moves": [("flowertrick", 90.0), ("knockoff", 80.0),
                   ("uturn", 70.0), ("tripleaxel", 60.0)],
@@ -248,6 +261,7 @@ def test_myteam_text_completes_missing_evs():
         assert "Jolly Nature" in blk, blk
     finally:
         mt._load = orig_load
+        sets_mod.get_predictor = orig_pred
         ev._usage_cache = orig_cache
     print("test_myteam_text_completes_missing_evs OK")
 
