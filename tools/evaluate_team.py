@@ -89,11 +89,9 @@ def build_team_text(species_list: list) -> str:
             "SELECT evs, usage_percent FROM spread_usage "
             "WHERE snapshot_id=? AND pokemon_name=? AND evs IS NOT NULL "
             "ORDER BY usage_percent DESC", (snapshot_id, name))]
-        mv = [m for m in moves if m]
-        cats = [r["category"] for r in conn.execute(
-            f"SELECT category FROM moves WHERE name IN "
-            f"({','.join('?' * len(mv))})", mv)] if mv else []
-        return choose_coherent_spread(natures, spreads, cats, item)
+        from champions_agent.data.build_meta import move_categories
+        return choose_coherent_spread(
+            natures, spreads, move_categories(moves), item)
 
     sets, used_items, missing = [], set(), []
     with db.get_connection() as conn:

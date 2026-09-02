@@ -50,6 +50,25 @@ def test_nature_fits_offense_by_base_stats():
     print("test_nature_fits_offense_by_base_stats OK")
 
 
+def test_nature_fits_defense_over_bulk_spread():
+    """防御補正+無振りは、配分が攻撃的でなければ整合
+    (ずぶとい/のんきHP極振りメタモン、わんぱく+HD振りカバルドン等)。
+    攻撃的配分との組み合わせ (bold+CS) だけが不整合"""
+    assert nature_fits("relaxed", "32/0/0/0/0/0", [])       # H極振りメタモン
+    assert nature_fits("impish", "32/0/2/0/32/0", [])       # HD振りカバルドン
+    assert not nature_fits("bold", "2/0/0/32/0/32", [])     # CS極振りは不整合
+    print("test_nature_fits_defense_over_bulk_spread OK")
+
+
+def test_move_categories_uses_dex():
+    """技分類は図鑑から引く (DBのmovesテーブルは部分取り込みで欠落があり、
+    ハッサムの4技中3技が引けず例外規則が発火しなかった実測に基づく)"""
+    from champions_agent.data.build_meta import move_categories
+    cats = move_categories(["bulletpunch", "swordsdance", "uturn", "roost"])
+    assert cats == ["physical", "status", "physical", "status"], cats
+    print("test_move_categories_uses_dex OK")
+
+
 def test_nature_fits_permissive_when_unknown():
     """配分不明・無補正・未知の性格は棄却しない (実測値を残す)"""
     assert nature_fits(None, "2/0/0/32/0/32", [])
@@ -87,6 +106,17 @@ def test_offensive_spread_with_neutral_item_kept():
     print("test_offensive_spread_with_neutral_item_kept OK")
 
 
+def test_scarf_ditto_keeps_bulk_spread():
+    """攻撃技を持たない種はスカーフでも攻撃的配分に誘導しない
+    (へんしんメタモン: のんき+HP極振り+スカーフが実在型)"""
+    nature, evs = choose_coherent_spread(
+        [("relaxed", 40.0), ("serious", 10.0)],
+        [("32/0/0/0/0/0", 30.0), ("32/32/2/0/0/0", 5.0)],
+        ["status"], "choicescarf")
+    assert (nature, evs) == ("relaxed", "32/0/0/0/0/0")
+    print("test_scarf_ditto_keeps_bulk_spread OK")
+
+
 def test_fallback_when_no_pair_fits():
     """整合ペアが無ければ最多同士 (棄却しない)"""
     nature, evs = choose_coherent_spread(
@@ -99,8 +129,11 @@ if __name__ == "__main__":
     test_parse_points()
     test_nature_fits_rejects_chimera()
     test_nature_fits_offense_by_base_stats()
+    test_nature_fits_defense_over_bulk_spread()
+    test_move_categories_uses_dex()
     test_nature_fits_permissive_when_unknown()
     test_bulky_archetype_recovered()
     test_offensive_item_selects_offensive_archetype()
     test_offensive_spread_with_neutral_item_kept()
+    test_scarf_ditto_keeps_bulk_spread()
     test_fallback_when_no_pair_fits()

@@ -41,14 +41,41 @@ def parse_points(evs: str | None) -> dict | None:
         return None
 
 
+def _is_offensive_spread(evs: str | None) -> bool:
+    pts = parse_points(evs)
+    return bool(pts and (pts["atk"] >= SPREAD_OFFENSE_MIN_POINTS
+                         or pts["spa"] >= SPREAD_OFFENSE_MIN_POINTS))
+
+
+def move_categories(moves: list) -> list:
+    """技ID列 -> 分類 (physical/special/status) の列。
+
+    DBの moves テーブルは部分取り込みで欠落があるため図鑑を使う
+    (実測: ハッサムの4技中3技が引けず攻撃補正の例外が発火しなかった)。
+    """
+    from advisor.dex import get_dex
+    dex = get_dex()
+    out = []
+    for m in moves:
+        if not m:
+            continue
+        mv = dex.move(m)
+        if mv and mv.get("category"):
+            out.append(str(mv["category"]).lower())
+    return out
+
+
 def nature_fits(nature: str | None, evs: str | None,
                 move_categories: list) -> bool:
     """性格が配分・技構成と整合するか (純粋関数)。
 
     - 補正元 (下降) が投資されていたら不整合
-    - 補正先 (上昇) は NATURE_ALIGN_MIN_POINTS 以上の投資を要求。
-      ただし攻撃/特攻補正は該当分類の技があれば無振りでも整合
-      (種族値受けのいじっぱりハッサム等の実在型)。
+    - 攻撃/特攻補正: 投資があるか、該当分類の技があれば整合
+      (種族値受けのいじっぱりハッサム H32/A2/B32 等の実在型)
+    - 防御/特防補正: 投資があるか、配分が攻撃的でなければ整合
+      (ずぶとい+HP極振りメタモンのような「補正で片受け・振りで耐久」は実在。
+       不整合なのは ずぶとい+CS極振り のような攻撃配分との組み合わせだけ)
+    - 素早さ補正: 投資を要求
     - 配分不明・無補正性格は整合扱い (棄却する根拠がない)
     """
     if not nature:
@@ -68,13 +95,9 @@ def nature_fits(nature: str | None, evs: str | None,
         return True
     if plus == "spa" and "special" in move_categories:
         return True
+    if plus in ("def", "spd") and not _is_offensive_spread(evs):
+        return True
     return False
-
-
-def _is_offensive_spread(evs: str | None) -> bool:
-    pts = parse_points(evs)
-    return bool(pts and (pts["atk"] >= SPREAD_OFFENSE_MIN_POINTS
-                         or pts["spa"] >= SPREAD_OFFENSE_MIN_POINTS))
 
 
 def choose_coherent_spread(natures: list, spreads: list,
@@ -90,9 +113,13 @@ def choose_coherent_spread(natures: list, spreads: list,
     攻撃的持ち物 (OFFENSIVE_ITEM_IDS) のときは攻撃的配分
     (atk/spa >= SPREAD_OFFENSE_MIN_POINTS) に候補を絞る (絞って全滅なら解除)。
     整合ペアが無ければ最多同士 (棄却より実測値を残す方が安全)。
+    攻撃技を持たない種 (へんしんのみのメタモン等) は持ち物がスカーフでも
+    攻撃的配分に誘導しない。
     """
     spread_pool = spreads
-    if item and item in OFFENSIVE_ITEM_IDS:
+    has_damaging = ("physical" in move_categories
+                    or "special" in move_categories)
+    if item and item in OFFENSIVE_ITEM_IDS and has_damaging:
         offensive = [(v, u) for v, u in spreads if _is_offensive_spread(v)]
         if offensive:
             spread_pool = offensive
@@ -230,13 +257,8 @@ def build_meta_sets(fmt: str = USAGE_TARGET_FORMAT, source: str | None = None) -
                 WHERE snapshot_id = ? AND pokemon_name = ? AND evs IS NOT NULL
                 ORDER BY usage_percent DESC
                 """, (snapshot_id, name))]
-            move_categories = [r["category"] for r in conn.execute(
-                f"""
-                SELECT category FROM moves
-                WHERE name IN ({",".join("?" * len([m for m in moves if m]))})
-                """, [m for m in moves if m])] if any(moves) else []
             nature, evs = choose_coherent_spread(
-                natures, spreads, move_categories, item)
+                natures, spreads, move_categories(moves), item)
 
             usage_row = conn.execute(
                 """
