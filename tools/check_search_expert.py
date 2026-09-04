@@ -22,7 +22,7 @@ async def run(n_battles: int, depth: int, by: str = "recommended",
               opp_seed: int | None = None, json_out: str | None = None,
               skip_random: bool = False, opp_prior_mix: float = 0.0,
               sensor_noise: float = 0.0, sensor_q: float = 0.0,
-              sensor_delta: float = 0.25) -> None:
+              sensor_delta: float = 0.25, workers: int = 1) -> None:
     import json
     import random
     from poke_env import AccountConfiguration
@@ -47,7 +47,7 @@ async def run(n_battles: int, depth: int, by: str = "recommended",
                 d = decide(battle, depth=depth, by=by, use_value=use_value,
                            belief_k=belief_k, opp_prior_mix=opp_prior_mix,
                            sensor_noise=sensor_noise, sensor_q=sensor_q,
-                           sensor_delta=sensor_delta)
+                           sensor_delta=sensor_delta, search_workers=workers)
             except Exception as e:
                 stats["error"] += 1
                 stats.setdefault("last_error", repr(e))
@@ -110,7 +110,7 @@ async def run(n_battles: int, depth: int, by: str = "recommended",
             "use_value": use_value, "belief_k": belief_k,
             "opp_prior_mix": opp_prior_mix,
             "sensor_noise": sensor_noise, "sensor_q": sensor_q,
-            "sensor_delta": sensor_delta,
+            "sensor_delta": sensor_delta, "workers": workers,
             "opp_seed": opp_seed, "meta_snapshot": meta_pin,
             "latency_p50_ms": round(p50, 1), "latency_p95_ms": round(p95, 1),
             "stats": {k: v for k, v in stats.items() if k != "last_error"},
@@ -166,6 +166,8 @@ def main() -> None:
                     help="探索が持つ『表示より低いHP』世界の確率 (P8)")
     ap.add_argument("--sensor-delta", type=float, default=0.25,
                     help="その世界でのHP低下幅 (P8)")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="世界の並列実行数 (葉評価OFFのときのみ有効)")
     args = ap.parse_args()
     asyncio.run(run(args.battles, args.depth, args.by,
                     use_value=not args.no_value, belief_k=args.belief,
@@ -173,7 +175,7 @@ def main() -> None:
                     skip_random=args.skip_random,
                     opp_prior_mix=args.opp_prior_mix,
                     sensor_noise=args.sensor_noise, sensor_q=args.sensor_q,
-                    sensor_delta=args.sensor_delta))
+                    sensor_delta=args.sensor_delta, workers=args.workers))
 
 
 if __name__ == "__main__":

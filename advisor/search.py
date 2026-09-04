@@ -422,6 +422,38 @@ def _finalize(results: list, matrix) -> dict:
             "setup_bait": setup_bait}
 
 
+_POOL = None
+SEARCH_WORKERS = 1   # 世界の並列実行数 (1=逐次)。engine / search_expert が上書きする
+
+
+def _search_job(kwargs: dict) -> dict:
+    """プロセスプール用のジョブ (葉評価関数は渡せないため None 固定)"""
+    kwargs = dict(kwargs)
+    kwargs["leaf_value_fn"] = None
+    return search(**kwargs)
+
+
+def run_world_searches(jobs: list, workers: int = 1) -> list:
+    """世界ごとの search(**kwargs) をまとめて実行する (P7 レイテンシ条項)。
+
+    workers>1 かつ全ジョブが葉評価なし (leaf_value_fn=None) ならプロセスプールで
+    並列実行し、それ以外は逐次。並列化は各世界の結果を変えない (決定的)。
+    プールは初回に生成して使い回す (spawn の起動コストを毎回払わない)。
+    """
+    if workers <= 1 or len(jobs) <= 1 or any(j.get("leaf_value_fn") for j in jobs):
+        return [search(**j) for j in jobs]
+    global _POOL
+    from concurrent.futures import ProcessPoolExecutor
+    if _POOL is None:
+        _POOL = ProcessPoolExecutor(max_workers=workers)
+    try:
+        return list(_POOL.map(_search_job, jobs))
+    except Exception:
+        # プールが壊れた場合 (子プロセス死亡等) は逐次に戻す
+        _POOL = None
+        return [search(**j) for j in jobs]
+
+
 def sensor_worlds(me: SimSide, q: float, delta: float) -> list:
     """自分の表示HPが固着している可能性を世界に分ける (P8)。
 

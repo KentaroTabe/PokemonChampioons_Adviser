@@ -216,3 +216,39 @@ def test_displayed_hp_noise_is_sticky_and_seeded():
 if __name__ == "__main__":
     test_sensor_worlds_shape()
     test_displayed_hp_noise_is_sticky_and_seeded()
+
+
+# ---- 世界の並列実行 ---------------------------------------------------------
+def test_run_world_searches_parallel_matches_sequential():
+    """並列実行は逐次と同じ結果を返す (決定的)。葉評価つきは逐次に落ちる"""
+    from advisor.search import run_world_searches
+    from advisor.dex import get_dex
+    from advisor.damage import MonView
+    from advisor.search import SimSide
+    dex = get_dex()
+    def view(sid, hp=1.0):
+        sp = dex.species(sid)
+        return MonView(species_id=sid, types=sp["types"], base=sp["baseStats"],
+                       ev={"atk": 252, "spa": 252, "spe": 252}, nature={},
+                       hp_frac=hp)
+    me = SimSide(active=view("garchomp"), active_hp=1.0,
+                 bench=[(view("primarina"), 1.0)], stealth_rock=False)
+    jobs = []
+    for hp in (1.0, 0.6):
+        opp = SimSide(active=view("archaludon", hp), active_hp=hp,
+                      bench=[(view("scizor"), 1.0)], stealth_rock=False)
+        jobs.append(dict(me=me, opp=opp, my_moves=["earthquake", "scaleshot"],
+                         opp_move_pool=[("dracometeor", 1.0), ("flashcannon", 1.0)],
+                         depth=1))
+    seq = run_world_searches(jobs, workers=1)
+    par = run_world_searches(jobs, workers=2)
+    assert [[(a["label"], a["expected"]) for a in r["actions"]] for r in seq] == \
+        [[(a["label"], a["expected"]) for a in r["actions"]] for r in par]
+    # 葉評価つきのジョブは逐次で処理される (例外なく結果が返る)
+    jobs2 = [dict(j, leaf_value_fn=lambda m, o: 0.0) for j in jobs]
+    assert len(run_world_searches(jobs2, workers=2)) == 2
+    print("test_run_world_searches_parallel_matches_sequential OK")
+
+
+if __name__ == "__main__":
+    test_run_world_searches_parallel_matches_sequential()

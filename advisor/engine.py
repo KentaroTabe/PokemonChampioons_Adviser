@@ -118,6 +118,9 @@ BELIEF_MIN_WEIGHT = 0.02
 SENSOR_Q_DEFAULT = 0.0
 SENSOR_Q_UNCERTAIN = 0.0
 SENSOR_HP_DELTA = 0.25
+# 世界の並列実行数 (P7 レイテンシ条項の履行手段)。葉評価 (RL価値) を使う間は
+# 子プロセスへ渡せないため逐次に落ちる。1=逐次
+SEARCH_WORKERS = 1
 
 
 def build_mon_view(p: dict, resolver=None, side: str = "opponent") -> Optional[MonView]:
@@ -1042,14 +1045,17 @@ def _run_search(state, my_state, my_view, my_p, opp_state, opp_view,
     combos = [(w_m * w_o, me_m, view_o)
               for w_m, me_m in me_worlds for w_o, view_o in opp_worlds]
     if len(combos) > 1:
-        outs, ws = [], []
+        from advisor.search import run_world_searches
+        jobs, ws = [], []
         for w_c, me_c, view_o in combos:
             opp_k = SimSide(active=view_o, active_hp=opp.active_hp,
                             bench=opp.bench, stealth_rock=opp.stealth_rock)
-            outs.append(search(me_c, opp_k, my_moves, pool,
-                               my_field=my_field, opp_field=opp_field,
-                               leaf_value_fn=leaf_fn, wincon_sid=wincon_sid))
+            jobs.append(dict(me=me_c, opp=opp_k, my_moves=my_moves,
+                             opp_move_pool=pool, my_field=my_field,
+                             opp_field=opp_field, leaf_value_fn=leaf_fn,
+                             wincon_sid=wincon_sid))
             ws.append(w_c)
+        outs = run_world_searches(jobs, workers=SEARCH_WORKERS)
         result = aggregate_worlds(outs, ws, coverage=sum(ws))
     if result is None:
         result = search(me, opp, my_moves, pool,

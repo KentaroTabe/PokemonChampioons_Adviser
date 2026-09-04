@@ -290,7 +290,8 @@ def displayed_hp(battle, true_hp: float, noise: float) -> float:
 def decide(battle, depth: int = 1, by: str = "recommended",
            use_value: bool = False, belief_k: int = 0,
            opp_prior_mix: float = 0.0, sensor_noise: float = 0.0,
-           sensor_q: float = 0.0, sensor_delta: float = 0.25) -> Optional[dict]:
+           sensor_q: float = 0.0, sensor_delta: float = 0.25,
+           search_workers: int = 1) -> Optional[dict]:
     """探索で最善行動を選ぶ。
 
     返り値: {"kind": "move"|"switch", "move": Move|None, "mega": bool,
@@ -369,15 +370,18 @@ def decide(battle, depth: int = 1, by: str = "recommended",
               for w_m, me_m in me_worlds for w_o, view_o in opp_worlds]
     result = None
     if len(combos) > 1:
-        outs, ws = [], []
+        from advisor.search import run_world_searches
+        jobs, ws = [], []
         for w_c, me_c, view_o in combos:
             opp_k = SimSide(active=view_o, active_hp=opp.active_hp,
                             bench=opp.bench, stealth_rock=opp.stealth_rock)
-            outs.append(search(me_c, opp_k, my_moves, pool,
-                               my_field=my_field, opp_field=opp_field,
-                               depth=depth, leaf_value_fn=leaf_fn,
-                               opp_prior=opp_prior, prior_mix=opp_prior_mix))
+            jobs.append(dict(me=me_c, opp=opp_k, my_moves=my_moves,
+                             opp_move_pool=pool, my_field=my_field,
+                             opp_field=opp_field, depth=depth,
+                             leaf_value_fn=leaf_fn, opp_prior=opp_prior,
+                             prior_mix=opp_prior_mix))
             ws.append(w_c)
+        outs = run_world_searches(jobs, workers=search_workers)
         result = aggregate_worlds(outs, ws, coverage=sum(ws))
     if result is None:
         result = search(me, opp, my_moves, pool,
