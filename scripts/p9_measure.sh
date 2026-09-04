@@ -7,6 +7,11 @@
 #     bash scripts/p9_measure.sh 600 8 0.3 4      # A/B/C (P7 採用・P8 採用時)
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# RLモデルを測定開始時点にピン止め (腕の起動時刻差で後の腕が有利になるのを防ぐ、9/5)
+if [ -z "${CHAMPIONS_MODELS_DIR:-}" ]; then
+  export CHAMPIONS_MODELS_DIR="$(bash scripts/pin_models.sh)"
+  echo "[pin] CHAMPIONS_MODELS_DIR=$CHAMPIONS_MODELS_DIR"
+fi
 N="${1:-600}"; KC="${2:-0}"; Q="${3:-0.0}"; W="${4:-1}"
 SEED=20260904
 OUT=logs/p9_verdict

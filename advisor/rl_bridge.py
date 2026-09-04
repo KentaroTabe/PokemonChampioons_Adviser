@@ -27,8 +27,13 @@ import numpy as np
 
 from advisor.dex import get_dex
 
-CKPT_DIR = (Path(__file__).resolve().parent.parent
-            / "champions_agent" / "train" / "checkpoints")
+# 学習側 (champions_agent.config.MODELS_DIR) と同じく CHAMPIONS_MODELS_DIR で
+# 差し替えられる。測定で腕ごとに違う EMA を読まないようピン止めするため
+# (2026-09-05 P9': 起動時刻差で基準腕が 0.587→0.634 と動いた)。未設定なら本番の
+# チェックポイント
+CKPT_DIR = Path(os.environ.get("CHAMPIONS_MODELS_DIR")
+                or (Path(__file__).resolve().parent.parent
+                    / "champions_agent" / "train" / "checkpoints"))
 
 ALL_TYPES = ["normal", "fire", "water", "electric", "grass", "ice", "fighting",
              "poison", "ground", "flying", "psychic", "bug", "rock", "ghost",

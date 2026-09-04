@@ -4,6 +4,11 @@
 # 探索結果は現状の推奨に未統合のため、既定は --belief-k 0 (探索コストを省く)。
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# RLモデルを測定開始時点にピン止め (腕の起動時刻差で後の腕が有利になるのを防ぐ、9/5)
+if [ -z "${CHAMPIONS_MODELS_DIR:-}" ]; then
+  export CHAMPIONS_MODELS_DIR="$(bash scripts/pin_models.sh)"
+  echo "[pin] CHAMPIONS_MODELS_DIR=$CHAMPIONS_MODELS_DIR"
+fi
 N="${1:-100}"; K="${2:-0}"; shift 2 2>/dev/null || shift $# 
 SEED=20260904
 OUT=logs/advisor_verdict

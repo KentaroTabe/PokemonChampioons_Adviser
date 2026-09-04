@@ -4,6 +4,11 @@
 #   bash scripts/p7b_measure.sh [battles] [arm: current|updated|both] [workers]
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# RLモデルを測定開始時点にピン止め (腕の起動時刻差で後の腕が有利になるのを防ぐ、9/5)
+if [ -z "${CHAMPIONS_MODELS_DIR:-}" ]; then
+  export CHAMPIONS_MODELS_DIR="$(bash scripts/pin_models.sh)"
+  echo "[pin] CHAMPIONS_MODELS_DIR=$CHAMPIONS_MODELS_DIR"
+fi
 N="${1:-600}"; ARM="${2:-both}"; W="${3:-4}"
 SEED=20260904
 OUT=logs/p7b_verdict

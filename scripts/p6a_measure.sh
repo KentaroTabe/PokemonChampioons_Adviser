@@ -5,6 +5,11 @@
 # 探索プレイヤー depth=2、相手型は単一仮定 (K=0、P7の結果と独立に葉評価だけを測る)
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# RLモデルを測定開始時点にピン止め (腕の起動時刻差で後の腕が有利になるのを防ぐ、9/5)
+if [ -z "${CHAMPIONS_MODELS_DIR:-}" ]; then
+  export CHAMPIONS_MODELS_DIR="$(bash scripts/pin_models.sh)"
+  echo "[pin] CHAMPIONS_MODELS_DIR=$CHAMPIONS_MODELS_DIR"
+fi
 N="${1:-600}"
 SEED=20260904
 OUT=logs/p6a_verdict
