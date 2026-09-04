@@ -6,7 +6,7 @@
 # depth=2、RL価値の葉評価はOFF (P6-a で別途判定)、型は META_PIN の固定軸。
 set -euo pipefail
 cd "$(dirname "$0")/.."
-N="${1:-300}"
+N="${1:-600}"
 SEED=20260904
 OUT=logs/p7_verdict
 LOG="$OUT/p7_$(date +%Y%m%d_%H%M).log"

@@ -5,7 +5,7 @@
 # belief_k と葉評価は P7 / P6-a の判定結果の構成で固定して渡す。
 set -euo pipefail
 cd "$(dirname "$0")/.."
-N="${1:-300}"; K="${2:-0}"; VALUE="${3:-off}"
+N="${1:-600}"; K="${2:-0}"; VALUE="${3:-off}"
 SEED=20260904
 OUT=logs/p6b_verdict
 LOG="$OUT/p6b_$(date +%Y%m%d_%H%M).log"

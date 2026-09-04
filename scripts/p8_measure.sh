@@ -5,7 +5,7 @@
 #   bash scripts/p8_measure.sh [battles] [belief_k] [value:on|off] [prior_mix] [noise]
 set -euo pipefail
 cd "$(dirname "$0")/.."
-N="${1:-300}"; K="${2:-0}"; VALUE="${3:-off}"; MIX="${4:-0.0}"; NOISE="${5:-0.3}"
+N="${1:-600}"; K="${2:-0}"; VALUE="${3:-off}"; MIX="${4:-0.0}"; NOISE="${5:-0.3}"
 SEED=20260904
 OUT=logs/p8_verdict
 LOG="$OUT/p8_$(date +%Y%m%d_%H%M).log"

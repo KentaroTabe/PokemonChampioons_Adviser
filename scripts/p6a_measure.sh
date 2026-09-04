@@ -5,7 +5,7 @@
 # 探索プレイヤー depth=2、相手型は単一仮定 (K=0、P7の結果と独立に葉評価だけを測る)
 set -euo pipefail
 cd "$(dirname "$0")/.."
-N="${1:-300}"
+N="${1:-600}"
 SEED=20260904
 OUT=logs/p6a_verdict
 LOG="$OUT/p6a_$(date +%Y%m%d_%H%M).log"

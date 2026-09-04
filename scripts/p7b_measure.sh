@@ -4,7 +4,7 @@
 #   bash scripts/p7b_measure.sh [battles] [arm: current|updated|both] [workers]
 set -euo pipefail
 cd "$(dirname "$0")/.."
-N="${1:-300}"; ARM="${2:-both}"; W="${3:-4}"
+N="${1:-600}"; ARM="${2:-both}"; W="${3:-4}"
 SEED=20260904
 OUT=logs/p7b_verdict
 LOG="$OUT/p7b_$(date +%Y%m%d_%H%M)_${ARM}.log"
