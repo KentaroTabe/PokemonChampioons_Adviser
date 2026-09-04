@@ -56,17 +56,13 @@ trap cleanup EXIT
   echo "===== nightly training: $(date) ====="
   echo "timesteps=$TIMESTEPS styles=[$STYLES] port=$SHOWDOWN_PORT"
 
-  # Showdownが起動していなければ起動する
-  if ! lsof -nP -iTCP:"$SHOWDOWN_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-    echo "[nightly] Showdownをポート$SHOWDOWN_PORT で起動します"
-    # 出力を tee パイプへ流し込まないよう別ログへリダイレクトする。
-    # (nodeがパイプ書き込み側を握り続けると tee が EOF を得られず、
-    #  本体が done を出してもスクリプトが終了できずデッドロックする)
-    (cd pokemon-showdown && node pokemon-showdown start "$SHOWDOWN_PORT" --no-security) \
-      >>"$LOG_DIR/showdown_train.log" 2>&1 &
-    SHOWDOWN_PID=$!
-    STARTED_SHOWDOWN=1
-    sleep 10
+  # Showdownが起動していなければ「切り離して」起動する (scripts/ensure_showdown.sh)。
+  # 以前は本サイクルの子プロセスとして起動しており、学習ジョブの停止
+  # (launchctl bootout) でShowdownまで巻き添えになり、同時刻の日次evolveが
+  # 接続失敗で宙吊りになった (2026-09-02)。切り離せば学習の起動停止と独立になる
+  if ! bash "$REPO_ROOT/scripts/ensure_showdown.sh" "$SHOWDOWN_PORT"; then
+    echo "[nightly] Showdownを起動できないため中止します"
+    exit 1
   fi
 
   for style in $STYLES; do

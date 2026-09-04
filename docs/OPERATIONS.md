@@ -42,10 +42,18 @@ nohup node pokemon-showdown/pokemon-showdown start 8100 --no-security \
 
 ### 4. 連続学習ループ
 
+launchd (`com.championsadviser.train`, KeepAlive) で常駐させる。起動・停止は
+スクリプト経由で行う (launchctl 直叩きは 2026-09-02 に Showdown を巻き添えにした):
+
 ```bash
-nohup bash champions_agent/scripts/train_forever.sh \
-  > champions_agent/train/logs/train_forever_nohup.log 2>&1 & disown
+bash scripts/start_training.sh   # 登録 + 実測表示
+bash scripts/stop_training.sh    # 学習だけ止める (Showdown は残す)
+bash scripts/stop_training.sh showdown   # Showdown も止める (メモリ解放時)
 ```
+
+40分未満の一時停止なら `touch logs/PAUSE_TRAINING` でもよい
+(train_forever.sh が鮮度40分で自動解除する)。Showdown は
+`scripts/ensure_showdown.sh` で切り離し起動され、学習の停止に巻き込まれない。
 
 ## 更新の反映 (コード修正・最新学習チェックポイント)
 
@@ -75,8 +83,7 @@ pgrep -fl train_forever            # 学習ループ
 ```bash
 pkill -f "uvicorn server:app_asgi"
 pkill -f "http.server 3000"
-pkill -f train_forever   # 学習中のtrain_battleは次のループ境界で終了
-pkill -f "pokemon-showdown start"
+bash scripts/stop_training.sh showdown   # 学習 + Showdown
 ```
 
 ## 注意

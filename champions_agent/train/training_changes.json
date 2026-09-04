@@ -2,6 +2,13 @@
  "_comment": "学習に影響する変更の記録。watch_training が推移グラフに赤い縦線として描画し、履歴表示にも差し込む。新しい変更を入れたら追記すること (at はローカル時刻 'YYYY-MM-DD HH:MM')。kind: net=ネット構成 / reward=報酬 / opponent=相手構成 / env=環境仕様 / eval=評価方法 / fix=不具合修正",
  "changes": [
   {
+   "at": "2026-09-02 21:20",
+   "kind": "eval",
+   "label": "評価軸のmeta_setsピン導入 (META_PIN=24) — 定点・判定の基準を再起点化",
+   "detail": "cbd由来の型 (meta_sets) は日次で回転し、評価のチーム中身を動かして絶対値比較を壊してきた (8/19: 127種、8/25、9/2: 67種+整合規則9種)。ラダー構築は POOL_PIN (pokedb_s3_single_2026-07-17) で既に固定済みだったが型は最新を追っていた。champions_agent/data/archive/META_PIN に snapshot_id を書くと train/evaluate.py (benchmark/agents軸の自分・相手チーム) だけがその meta_sets を使う。学習 (train_battle/showdown_env) は最新を追い続ける(実環境への適応を優先)。今回 24 (9/2 06:31取得、フォルム修正済み・整合規則適用済み) に固定。◆影響: 9/3以降の日次定点 (track_progress のbench/h2h/ema_h2h) と今後の事前登録判定はこの固定軸上の値になり、9/2以前の値と絶対値比較できない (再基準化: 9/3の初回測定を新基準とする)。凍結参照逸脱警告 (FROZEN_REF_WARN_SIGMA) の参照値も9/3の値で取り直す。◆運用: ピンを動かすときは必ずここに記録し、同日に旧ピン・新ピンのペア測定を残す。評価結果の辞書に meta_snapshot を記録するようにした",
+   "isolated": false
+  },
+  {
    "at": "2026-09-02 18:00",
    "kind": "env_data",
    "label": "meta_sets整合規則を適用 (snapshot 24再生成、9種変化)",

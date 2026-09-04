@@ -27,6 +27,13 @@ if [ -f logs/PAUSE_TRAINING ]; then
   exit 0
 fi
 
+# Showdownが無いと接続失敗の例外後にプロセスだけ残る (2026-09-02: 学習停止中に
+# 13時の本ジョブが4.5時間宙吊り)。切り離し起動を試み、無理なら明示的に中止する
+if ! bash scripts/ensure_showdown.sh >> "$LOG" 2>&1; then
+  echo "[evolve_daily] Showdownを起動できないため中止: $(date)" >> "$LOG"
+  exit 1
+fi
+
 {
   echo "===== 進化探索 (日次): $(date) ====="
   # 埋め込みは使用率DBとメタに依存するので毎回作り直す (数秒)

@@ -165,6 +165,10 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
     # 落ちていたため、agents軸の全測定が1走行1チームのドロー運で±0.1以上
     # 振れていた (凍結ネット同士の再測で0.373〜0.617を実測。
     # docs/incidents/reports/2026-08-10-agents-axis-single-team-draw.md)
+    # 評価軸のピン: META_PIN があれば meta_sets をそのスナップショットに固定する
+    # (学習は最新を追う。cbd型の日次回転で評価軸が動くのを止める)
+    from champions_agent.env.ranked_teams import pinned_meta_snapshot_id
+    meta_pin = pinned_meta_snapshot_id()
     if opponent_kind in ("benchmark", "agents"):
         from champions_agent.env.ranked_teams import RankedTeambuilder
         if own_teams == "holdout":
@@ -172,8 +176,10 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
             # 「相手ヒューリスティクスへの過学習」でないかの検証用
             # (学習側は上位60構築に固定してあるので、それ以外が未学習)
             from champions_agent.env.ranked_teams import build_ranked_teams
-            all_teams = build_ranked_teams(include_external=False)
-            trained = set(build_ranked_teams(top_n=60, include_external=False))
+            all_teams = build_ranked_teams(include_external=False,
+                                           meta_snapshot_id=meta_pin)
+            trained = set(build_ranked_teams(top_n=60, include_external=False,
+                                             meta_snapshot_id=meta_pin))
             held = [t for t in all_teams if t not in trained]
             from poke_env.teambuilder import Teambuilder as _TB
 
@@ -190,7 +196,8 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
         else:
             # 評価基準を動かさないため上位60構築に固定 (make_benchmark_player と対)
             own_teambuilder = RankedTeambuilder(top_n=60,
-                                                include_external=False)
+                                                include_external=False,
+                                                meta_snapshot_id=meta_pin)
     else:
         own_team = build_random_team_text(size=TRAINING_TEAM_SIZE,
                                           play_style=play_style)
@@ -219,7 +226,8 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
         if opp_seed is not None:
             from champions_agent.env.ranked_teams import RankedTeambuilder
             team = RankedTeambuilder(top_n=60, include_external=False,
-                                     rng=random.Random(opp_seed))
+                                     rng=random.Random(opp_seed),
+                                     meta_snapshot_id=meta_pin)
         player2 = make_benchmark_player(battle_format=battle_format,
                                         team=team,
                                         account_configuration=acc2)
@@ -229,7 +237,8 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
         from champions_agent.env.ranked_teams import RankedTeambuilder
         team = RankedTeambuilder(
             top_n=60, include_external=False,
-            rng=random.Random(opp_seed) if opp_seed is not None else None)
+            rng=random.Random(opp_seed) if opp_seed is not None else None,
+            meta_snapshot_id=meta_pin)
         player2 = MixedAgentsPlayer(
             account_configuration=acc2,
             battle_format=battle_format,
@@ -286,6 +295,8 @@ async def run_evaluation(play_style: str = DEFAULT_PLAY_STYLE,
         "n_battles": n_battles,
         "wins": player1.n_won_battles,
         "win_rate": player1.n_won_battles / n_battles if n_battles else 0.0,
+        # 評価軸の記録: META_PIN があればその snapshot_id (無ければ最新)
+        "meta_snapshot": meta_pin if meta_pin is not None else "latest",
     }
     # 方策の劣化内訳 (masked=正常 / argmax_fallback / random_fallback)。
     # agents軸が同一条件で0.24振れた事象の観測用。random_fallback が

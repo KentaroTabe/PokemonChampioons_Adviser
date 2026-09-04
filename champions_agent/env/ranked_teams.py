@@ -39,6 +39,19 @@ MIN_POOL_TEAMS = USAGE_MIN_RANKED_TEAMS
 # シーズンデータの蓄積でプールが黙って切り替わるのを防ぐ。
 # 基盤を切り替えるときは POOL_PIN を書き換え、training_changes.json に記録する
 PIN_PATH = ARCHIVE_DIR / "POOL_PIN"
+# 評価側 meta_sets のピン止め (snapshot_id を1行で書く)。cbd由来の型は日次で
+# 回転し (2026-08-19: 127種、09-02: 67種)、評価軸のチーム中身を動かす。
+# 評価 (train/evaluate.py) だけがこのピンを読み、学習は最新を追い続ける。
+# ピンを動かすときは training_changes.json に記録する
+META_PIN_PATH = ARCHIVE_DIR / "META_PIN"
+
+
+def pinned_meta_snapshot_id() -> int | None:
+    """META_PIN があればその snapshot_id、無ければ None (=最新を使う)"""
+    try:
+        return int(META_PIN_PATH.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
 
 
 def _load_ladder_teams() -> list:
@@ -70,10 +83,12 @@ def _load_ladder_teams() -> list:
     return teams
 
 
-def _load_meta_sets() -> dict:
-    """species_id -> meta_sets行 (技/特性/性格/能力ポイント)"""
+def _load_meta_sets(snapshot_id: int | None = None) -> dict:
+    """species_id -> meta_sets行 (技/特性/性格/能力ポイント)。
+    snapshot_id を渡すとそのスナップショットに固定する (評価軸のピン)"""
     with db.get_connection() as conn:
-        snap = db.latest_snapshot_id(conn)
+        snap = (snapshot_id if snapshot_id is not None
+                else db.latest_snapshot_id(conn))
         if snap is None:
             return {}
         rows = conn.execute(
@@ -153,7 +168,8 @@ def _to_team_text(t: dict, meta: dict, team_size: int) -> str | None:
 
 
 def build_ranked_teams(top_n: int | None = None, team_size: int = 6,
-                       include_external: bool = True) -> list:
+                       include_external: bool = True,
+                       meta_snapshot_id: int | None = None) -> list:
     """構築プールのチームテキスト一覧を作る。
 
     - 種族と持ち物: ラダー構築 / 取り込んだ外部構築そのまま
@@ -163,11 +179,11 @@ def build_ranked_teams(top_n: int | None = None, team_size: int = 6,
     top_n はラダー構築側の上限 (None で全件)。外部構築は常に全件使う。
     選出モデルの汎化はチームの「種類」で頭打ちになるため、既定を全件にしている。
     """
-    key = (top_n, team_size, include_external)
+    key = (top_n, team_size, include_external, meta_snapshot_id)
     if key in _cache:
         return _cache[key]
 
-    meta = _load_meta_sets()
+    meta = _load_meta_sets(meta_snapshot_id)
     ladder = _load_ladder_teams()
     if top_n is not None:
         ladder = ladder[:top_n * 2]
@@ -200,9 +216,11 @@ class RankedTeambuilder(_PokeEnvTeambuilder):
 
     def __init__(self, top_n: int | None = None,
                  rng: random.Random | None = None,
-                 include_external: bool = True):
+                 include_external: bool = True,
+                 meta_snapshot_id: int | None = None):
         self.teams = build_ranked_teams(top_n=top_n,
-                                        include_external=include_external)
+                                        include_external=include_external,
+                                        meta_snapshot_id=meta_snapshot_id)
         self.rng = rng or random.Random()
         if not self.teams:
             raise RuntimeError(

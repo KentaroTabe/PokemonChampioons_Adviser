@@ -26,6 +26,7 @@ TESTS=(
   test_pokedb_forms
   test_meta_snapshot_filter
   test_set_coherence
+  test_meta_pin
 )
 
 fail=0
