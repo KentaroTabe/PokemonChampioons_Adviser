@@ -217,6 +217,18 @@ class SpreadEstimator:
             # 先後は追い風/こだわり等の未観測要因もあるためソフトに更新
             h["logw"] += math.log(1.0 if consistent else 0.2)
 
+    def observe_item(self, item_id: Optional[str]) -> None:
+        """持ち物の判明 (発動/はたき落とし/表示) で、別の持ち物の仮説を実質除外する"""
+        if not item_id or not self.hyps:
+            return
+        iid = str(item_id).replace("-", "").replace(" ", "").lower()
+        if not any((h["item"] or "") == iid for h in self.hyps):
+            return   # 仮説に無い持ち物なら情報として使えない (全滅を避ける)
+        self.n_obs += 1
+        for h in self.hyps:
+            if (h["item"] or "") != iid:
+                h["logw"] += math.log(1e-6)
+
     def observe_choice_lock(self) -> None:
         """同一技の3連続使用を観測 -> こだわり系持ち物の仮説を強める"""
         if self._choice_locked or not self.hyps:

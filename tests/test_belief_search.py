@@ -320,3 +320,71 @@ def test_run_world_searches_with_leaf_ctx():
 
 if __name__ == "__main__":
     test_run_world_searches_with_leaf_ctx()
+
+
+# ---- P7': 観測更新つき多世界 (先後・被ダメージ・持ち物) --------------------
+def test_observe_item_prunes_other_items():
+    est = _estimator_with([math.log(0.5), math.log(0.3), math.log(0.2)])
+    est.hyps[0]["item"], est.hyps[1]["item"], est.hyps[2]["item"] = \
+        "choicescarf", "focussash", "choicescarf"
+    est.observe_item("focussash")
+    top = est.top_k(3)
+    assert top[0]["item"] == "focussash" and top[0]["weight"] > 0.99
+    # 仮説に無い持ち物は情報として使わない (全滅させない)
+    before = [h["logw"] for h in est.hyps]
+    est.observe_item("leftovers")
+    assert [h["logw"] for h in est.hyps] == before
+    print("test_observe_item_prunes_other_items OK")
+
+
+def test_update_estimator_from_events():
+    """直前ターンのイベントから先後・被ダメージ・持ち物の観測を推定器へ流す"""
+    from types import SimpleNamespace as NS
+    from champions_agent.env.search_expert import (
+        _parse_hp, update_estimator_from_events)
+    from advisor.dex import get_dex
+    from advisor.damage import MonView
+    assert _parse_hp("45/100") == 0.45 and _parse_hp("0 fnt") == 0.0
+    assert _parse_hp("123/200 brn") == 0.615 and _parse_hp("???") is None
+
+    sp = get_dex().species("garchomp")
+    my = MonView(species_id="metagross", types=["Steel", "Psychic"],
+                 base=get_dex().species("metagross")["baseStats"],
+                 ev={"atk": 252, "spe": 252}, nature={}, hp_frac=1.0)
+    opp = MonView(species_id="garchomp", types=sp["types"], base=sp["baseStats"],
+                  ev={"atk": 252}, nature={}, hp_frac=0.55, item="focussash")
+
+    calls = []
+
+    class _Est:
+        hyps = [1]
+        def observe_speed(self, opp_first, my_spe, opp_state, rain=False):
+            calls.append(("speed", opp_first, rain))
+        def observe_damage(self, attacker, defender_is_hyp, move_id, pct, opp_state, fieldv=None):
+            calls.append(("damage", move_id, round(pct, 1)))
+        def observe_item(self, item):
+            calls.append(("item", item))
+
+    events = [["", "move", "p2a: Garchomp", "Earthquake", "p1a: Metagross"],
+              ["", "-damage", "p1a: Metagross", "60/100"],
+              ["", "move", "p1a: Metagross", "Ice Punch", "p2a: Garchomp"],
+              ["", "-damage", "p2a: Garchomp", "55/100"]]
+    battle = NS(turn=3, player_role="p1",
+                observations={2: NS(events=events)})
+    est = _Est()
+    est._opp_hp_before = 1.0          # 前回の決定時点の相手HP
+    update_estimator_from_events(est, battle, my, opp, None, None)
+    kinds = [c[0] for c in calls]
+    assert "speed" in kinds and calls[kinds.index("speed")][1] is True   # 相手が先
+    assert ("damage", "icepunch", 45.0) in calls, calls
+    assert ("item", "focussash") in calls
+    # 同じターンは二度処理しない
+    n = len(calls)
+    update_estimator_from_events(est, battle, my, opp, None, None)
+    assert len(calls) == n
+    print("test_update_estimator_from_events OK")
+
+
+if __name__ == "__main__":
+    test_observe_item_prunes_other_items()
+    test_update_estimator_from_events()
