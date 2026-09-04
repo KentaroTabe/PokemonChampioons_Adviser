@@ -99,7 +99,7 @@ champions_agent/ (自己対戦PPO・選出モデル・構築進化探索) ──
 |---|---|---|
 | 評価軸の回転 | **META_PIN + POOL_PIN で固定** (9/2)。ピン変更は training_changes に記録。学習側は 9/3: 34種、9/4: 63種の回転を実測 (評価側は不動) | ✅ (再基準化 9/4 記録済み) |
 | 絶対値ゲートの判定不能 | 次の事前登録から「同一窓の current−凍結アンカー差」を主要指標に | 🔜 |
-| 探索系レバーの枯渇 | P1/P4 棄却。次候補は RL構造 (v7 セットエンコーダ設計あり) を事前登録 | 🔜 |
+| 探索系レバーの枯渇 | P1/P4 棄却。次候補は**信念つき探索** (docs/BELIEF_SEARCH_PLAN.md: P7→P6→P8)。v7 set encoder は 8/14〜17 に棄却済み (誤って次候補と記載していたのを 9/4 訂正) | 🔜 |
 | 評価プロセスのメモリ (2.0GB/10,000戦) | 実測のみ。要求が出たら分割実行 | 👁 |
 | _best 昇格経路 | ピン導入後に再設計 (未着手) | 🔜 |
 
@@ -134,7 +134,7 @@ champions_agent/ (自己対戦PPO・選出モデル・構築進化探索) ──
 ## 5. 次のアクション (優先順)
 
 1. ~~9/3: ピン固定軸での初回定点を新基準として記録~~ → 9/4 に記録済み (2日平均: current_matchup 0.604 / h2h_balance_best 0.583 / ema_h2h 0.605)
-2. 次の介入の事前登録 (RL構造)。主要指標は「同一窓の current−凍結アンカー差」
+2. 次の介入の事前登録: P7 belief-weighted search (docs/BELIEF_SEARCH_PLAN.md)。主要指標は「同一窓の候補−基準差」。v7 set encoder は棄却済みで対象外
 3. 認識: 感度表順に自分HP固着の削減策を設計 → ノイズ注入シム評価
 4. 推奨構築の採用 (ゲーム内構築 → 画面で自動登録 → 選出学習の適応)
 5. 9/9 シーズン切替のランブック実行
@@ -152,6 +152,6 @@ champions_agent/ (自己対戦PPO・選出モデル・構築進化探索) ──
 | docs/CONNECTION_TEST_CHECKLIST.md | 接続テストの手順と各回の欠陥・採用 |
 | docs/OPERATIONS.md | 常駐プロセスの起動・停止 |
 | docs/AXIS_GAP_ANALYSIS.md | 測定軸の乖離解析と P1 の事前登録 |
-| docs/TOP_PLAYER_PLAN.md / RL_V7_SET_ENCODER_DESIGN.md | 中長期計画・次の RL 構造案 |
+| docs/TOP_PLAYER_PLAN.md / BELIEF_SEARCH_PLAN.md | 中長期計画・信念つき探索への転換計画 (RL_V7_SET_ENCODER_DESIGN.md は棄却記録) |
 | docs/VISION_LIB_EXTRACTION.md | vision層の切り出し計画 |
 | logs/build_search/final_team.json | 推奨構築と想定運用 |
