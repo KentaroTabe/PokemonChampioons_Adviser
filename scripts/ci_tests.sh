@@ -28,6 +28,7 @@ TESTS=(
   test_set_coherence
   test_meta_pin
   test_belief_search
+  test_advisor_player
 )
 
 fail=0
