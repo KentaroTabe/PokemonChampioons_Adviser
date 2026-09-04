@@ -252,3 +252,36 @@ def test_run_world_searches_parallel_matches_sequential():
 
 if __name__ == "__main__":
     test_run_world_searches_parallel_matches_sequential()
+
+
+# ---- P9: 探索値の助言スコア統合 --------------------------------------------
+def test_apply_search_blend_relative_to_best():
+    """探索の最善からの差を重みづけして加点 (最善は0、劣る行動は減点)。
+    探索に無い行動と選べない行動 (score<=-90) は不変"""
+    from advisor.engine import _apply_search_blend
+    actions = [
+        {"kind": "move", "id": "earthquake", "name": "じしん", "score": 50.0, "reason": ""},
+        {"kind": "move", "id": "protect", "name": "まもる", "score": 48.0, "reason": ""},
+        {"kind": "switch", "id": "primarina", "name": "アシレーヌ", "score": 40.0, "reason": ""},
+        {"kind": "move", "id": "sealed", "name": "封印", "score": -99.0, "reason": ""},
+        {"kind": "move", "id": "unknown", "name": "?", "score": 10.0, "reason": ""},
+    ]
+    search = [
+        {"kind": "move", "move_id": "earthquake", "label": "earthquake", "recommended": 0.2},
+        {"kind": "move", "move_id": "protect", "label": "protect", "recommended": 0.7},
+        {"kind": "switch", "bench_index": 0, "label": "交代:アシレーヌ", "recommended": 0.5},
+        {"kind": "move", "move_id": "sealed", "label": "sealed", "recommended": 0.9},
+    ]
+    _apply_search_blend(actions, search, 40.0)
+    by = {a["id"]: a for a in actions}
+    assert by["protect"]["score"] == 48.0 + 40 * (0.7 - 0.9)     # -8
+    assert by["earthquake"]["score"] == 50.0 + 40 * (0.2 - 0.9)  # -28
+    assert by["primarina"]["score"] == 40.0 + 40 * (0.5 - 0.9)   # -16
+    assert by["sealed"]["score"] == -99.0                        # 選べない行動は不変
+    assert by["unknown"]["score"] == 10.0                        # 探索に無い行動は不変
+    assert "探索-8" in by["protect"]["reason"]
+    print("test_apply_search_blend_relative_to_best OK")
+
+
+if __name__ == "__main__":
+    test_apply_search_blend_relative_to_best()

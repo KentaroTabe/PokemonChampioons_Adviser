@@ -33,7 +33,8 @@ class _RememberingTeambuilder:
 
 async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
               skip_random: bool, belief_k: int | None, sensor_q: float | None,
-              workers: int | None, no_rl_blend: bool) -> None:
+              workers: int | None, no_rl_blend: bool,
+              search_blend: float | None = None) -> None:
     from poke_env import AccountConfiguration
     from poke_env.player import RandomPlayer
     import advisor.engine as eng
@@ -51,6 +52,8 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
         eng.SEARCH_WORKERS = workers
     if no_rl_blend:
         os.environ["RL_BLEND_WEIGHT"] = "0"
+    if search_blend is not None:
+        eng.SEARCH_BLEND = search_blend
     meta_pin = pinned_meta_snapshot_id()
     stats: dict = {}
     latencies: list = []
@@ -81,6 +84,7 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
     p95 = lat[int(len(lat) * 0.95)] if lat else 0.0
     n_dec = stats.get("decide", 0) + stats.get("fallback", 0)
     print(f"=== 助言エンジン (belief_k={eng.BELIEF_K} sensor_q={eng.SENSOR_Q_DEFAULT} "
+          f"search_blend={eng.SEARCH_BLEND} "
           f"workers={eng.SEARCH_WORKERS} rl_blend={os.environ.get('RL_BLEND_WEIGHT', '25')} "
           f"meta={meta_pin or 'latest'}) vs ベンチマーク {n_battles}戦 ({dt:.0f}s) ===")
     print(f"勝率: {player.n_won_battles / n_battles:.2f}")
@@ -95,7 +99,7 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
             "n_battles": n_battles, "wins": player.n_won_battles,
             "win_rate": player.n_won_battles / n_battles, "outcomes": outcomes,
             "belief_k": eng.BELIEF_K, "sensor_q": eng.SENSOR_Q_DEFAULT,
-            "workers": eng.SEARCH_WORKERS,
+            "workers": eng.SEARCH_WORKERS, "search_blend": eng.SEARCH_BLEND,
             "rl_blend": os.environ.get("RL_BLEND_WEIGHT", "25"),
             "opp_seed": opp_seed, "meta_snapshot": meta_pin,
             "latency_p50_ms": round(p50, 1), "latency_p95_ms": round(p95, 1),
@@ -128,9 +132,12 @@ def main() -> None:
     ap.add_argument("--sensor-q", type=float, default=None)
     ap.add_argument("--workers", type=int, default=None)
     ap.add_argument("--no-rl-blend", action="store_true")
+    ap.add_argument("--search-blend", type=float, default=None,
+                    help="探索の推奨値をスコアへ統合する重み (P9)。0=無効")
     args = ap.parse_args()
     asyncio.run(run(args.battles, args.opp_seed, args.json, args.skip_random,
-                    args.belief_k, args.sensor_q, args.workers, args.no_rl_blend))
+                    args.belief_k, args.sensor_q, args.workers, args.no_rl_blend,
+                    search_blend=args.search_blend))
 
 
 if __name__ == "__main__":

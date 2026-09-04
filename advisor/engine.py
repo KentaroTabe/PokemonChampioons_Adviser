@@ -121,6 +121,9 @@ SENSOR_HP_DELTA = 0.25
 # 世界の並列実行数 (P7 レイテンシ条項の履行手段)。葉評価 (RL価値) を使う間は
 # 子プロセスへ渡せないため逐次に落ちる。1=逐次
 SEARCH_WORKERS = 1
+# 探索の推奨値を行動スコアへ統合する重み (P9、事前登録 2026-09-04 20:30)。
+# score += SEARCH_BLEND × (rec_a − max_rec)。0 で無効 (従来: 択評価は表示のみ)
+SEARCH_BLEND = 0.0
 
 
 def build_mon_view(p: dict, resolver=None, side: str = "opponent") -> Optional[MonView]:
@@ -748,6 +751,11 @@ def evaluate(state: dict, resolver=None) -> dict:
         import traceback
         traceback.print_exc()
 
+    # P9: 探索の推奨値 (最善からの差) をスコアへ統合する。既定 0 で無効
+    if SEARCH_BLEND > 0 and gtheory and gtheory.get("actions"):
+        _apply_search_blend(actions, gtheory["actions"], SEARCH_BLEND)
+        actions.sort(key=lambda a: -a["score"])
+
     # RL学習済み方策 (行動分布+局面価値)。表示に加えて、
     # 行動スコアへ確率をブレンドし推奨順位にも反映する
     rl_hint = None
@@ -973,6 +981,37 @@ def _run_endgame(my_state, opp_state, resolver) -> str:
     n_unknown = max(0, (opp_state.get("remaining") or len(opp_mons))
                     - len(opp_mons))
     return endgame_note(matchup_matrix(my_mons, opp_mons), n_unknown)
+
+
+def _apply_search_blend(actions: list, search_actions: list,
+                        weight: float) -> None:
+    """探索の推奨値の最善からの差を行動スコアに加える (P9、純粋計算)。
+
+    技は move_id、交代は「交代:<名前>」ラベルで対応付ける。探索に無い行動と
+    選べない行動 (score <= -90) は変更しない。
+    """
+    if not actions or not search_actions:
+        return
+    rec = {}
+    for sa in search_actions:
+        if sa.get("kind") == "move" and sa.get("move_id"):
+            rec[("move", sa["move_id"])] = sa["recommended"]
+        elif sa.get("kind") == "switch":
+            rec[("switch", str(sa.get("label", "")).split(":", 1)[-1])] = \
+                sa["recommended"]
+    if not rec:
+        return
+    best = max(rec.values())
+    for a in actions:
+        if a.get("score", 0) <= -90:
+            continue
+        key = ("move", a.get("id")) if a["kind"] == "move" \
+            else ("switch", a.get("name"))
+        if key in rec:
+            delta = weight * (rec[key] - best)
+            if delta:
+                a["score"] = round(a["score"] + delta, 1)
+                a["reason"] = (a.get("reason") or "") + f" / 探索{delta:+.0f}"
 
 
 def _hp_frac_of(p: dict) -> float:
