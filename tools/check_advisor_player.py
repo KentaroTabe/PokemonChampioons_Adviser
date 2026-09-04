@@ -18,17 +18,23 @@ from pathlib import Path
 from champions_agent.config import TRAINING_BATTLE_FORMAT
 
 
-class _RememberingTeambuilder:
-    """RankedTeambuilder をラップし、直近に出したチームテキストを覚える"""
+def _remembering_teambuilder(inner):
+    """RankedTeambuilder をラップし、直近に出したチームテキストを覚える
+    (poke-env の Player は Teambuilder 派生でないと受理しないため、
+    import を遅延させてクラスを作る)"""
+    from poke_env.teambuilder import Teambuilder
 
-    def __init__(self, inner):
-        self.inner = inner
-        self.last_text = None
+    class _Remembering(Teambuilder):
+        def __init__(self):
+            self.inner = inner
+            self.last_text = None
 
-    def yield_team(self):
-        text = self.inner.rng.choice(self.inner.teams)
-        self.last_text = text
-        return self.inner.join_team(self.inner.parse_showdown_team(text))
+        def yield_team(self):
+            text = self.inner.rng.choice(self.inner.teams)
+            self.last_text = text
+            return self.join_team(self.parse_showdown_team(text))
+
+    return _Remembering()
 
 
 async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
@@ -58,7 +64,7 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
     stats: dict = {}
     latencies: list = []
     uid = os.getpid() % 100000
-    own_tb = _RememberingTeambuilder(RankedTeambuilder(
+    own_tb = _remembering_teambuilder(RankedTeambuilder(
         rng=random.Random(opp_seed + 1) if opp_seed is not None else None,
         meta_snapshot_id=meta_pin))
     player = make_advisor_player(
