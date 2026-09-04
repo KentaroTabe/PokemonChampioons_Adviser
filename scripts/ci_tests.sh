@@ -29,6 +29,7 @@ TESTS=(
   test_meta_pin
   test_belief_search
   test_advisor_player
+  test_hp_freshness
 )
 
 fail=0
