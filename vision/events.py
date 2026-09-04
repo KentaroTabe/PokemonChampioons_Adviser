@@ -226,6 +226,11 @@ def _match_keywords(norm: str, groups: list) -> bool:
     return True
 
 
+# 技イベントからの期待ダメージ反映 (決定的反映層、2026-09-05)。False で無効
+ESTIMATE_DAMAGE_ON_MOVE = True
+ESTIMATE_HP_FLOOR = 1.0   # 推定値の下限 (%)
+
+
 class EventParser:
     def __init__(self, state: BattleStateV2, resolver):
         self.state = state
@@ -684,7 +689,43 @@ class EventParser:
             self._apply_move_side_effect(r[1], side_name)
             self._apply_move_boosts(r[1], side_name, mon)
             self._apply_move_item_recoil(r[1], mon)
+            self._apply_expected_damage(r[1], side_name)
         return event_id
+
+    def _apply_expected_damage(self, move_id: str, user_side: str) -> None:
+        """攻撃技イベントで防御側アクティブのHPを期待ダメージぶん決定的に減らす。
+
+        HPバーが表示されない/読めない時間帯の被弾はHPが固着し、決定再生の
+        推奨反転率で最大の要因 (自分HP固着 52.9%)、シムの雑音注入でも −0.070 と
+        害が大きかった (2026-09-04/05)。技イベント (取れる情報源) から
+        ダメージ計算の平均×命中率を引いておき、実読みが来れば上書きする
+        (hp_estimated=True の間は推定値)。まもる/外れ/身代わりは過大評価に
+        なるが、次の実読みが修正する。
+        """
+        if not ESTIMATE_DAMAGE_ON_MOVE:
+            return
+        other = "opponent" if user_side == "player" else "player"
+        defender = self.state.side(other).active()
+        if defender is None or defender.status == "fainted" \
+                or defender.hp_percent is None:
+            return
+        try:
+            from advisor.hp_estimate import expected_damage_pct
+            pct = expected_damage_pct(self.state.to_dict(), user_side,
+                                      move_id, self.resolver)
+        except Exception:
+            return
+        if not pct:
+            return
+        # 推定でKOは宣言しない (ひんしは faint メッセージ/ゼロ読みの担当)。
+        # 0 まで落とすと後続の実読みが「別個体の出現」として棄却され得る
+        new = max(ESTIMATE_HP_FLOOR, round(defender.hp_percent - pct, 1))
+        if new >= defender.hp_percent:
+            return
+        defender.hp_percent = new
+        if defender.hp_current is not None and defender.hp_max:
+            defender.hp_current = max(0, round(defender.hp_max * new / 100.0))
+        defender.hp_estimated = True
 
     def _apply_move_item_recoil(self, move_id: str, mon) -> None:
         """ダメージ技使用時に確定発動する持ち物 (いのちのたま反動) の反映。

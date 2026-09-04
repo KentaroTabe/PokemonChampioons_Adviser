@@ -66,6 +66,10 @@ class PokemonState:
     # 交代の取り逃し等でHPが古い可能性がある印 (新しい読みで解除される)。
     # 2026-08-18: ひんしを取り逃した個体が100%のまま交代候補に推奨された
     hp_uncertain: bool = False
+    # HPの鮮度 (2026-09-05): 最後に実読みで確定した時刻と、技イベントからの
+    # 期待ダメージで推定した値かどうか (実読みが来れば False に戻る)
+    hp_read_ts: Optional[float] = None
+    hp_estimated: bool = False
 
     # 状態
     status: Optional[str] = None        # MAJOR_STATUSES のいずれか / 'fainted' / None
@@ -407,7 +411,7 @@ class BattleStateV2:
             mon = PokemonState()
             for k in ("species_ja", "species_id", "display_name", "gender",
                       "types", "hp_percent", "hp_current", "hp_max",
-                      "hp_uncertain",
+                      "hp_uncertain", "hp_read_ts", "hp_estimated",
                       "status", "volatiles", "boosts", "ability_ja",
                       "ability_id", "item_ja", "item_id", "item_consumed",
                       "revealed_moves", "aliases", "is_mega", "is_active",

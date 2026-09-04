@@ -785,6 +785,8 @@ def _set_hp(state: BattleStateV2, side_name: str, mon,
     def commit():
         mon.hp_percent = new
         mon.hp_uncertain = False   # 新しい読みで「不明」印を解除
+        mon.hp_estimated = False   # 技イベント由来の推定値を実読みで上書き
+        mon.hp_read_ts = time.time()
         if raw:
             mon.hp_current, mon.hp_max = raw
 

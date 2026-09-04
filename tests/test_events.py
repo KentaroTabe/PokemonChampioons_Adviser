@@ -971,3 +971,49 @@ if __name__ == "__main__":
     test_life_orb_recoil_from_move_event()
     test_rate_extraction_decimal_format()
     print("\nALL OK")
+
+
+def test_expected_damage_applied_on_move_event():
+    """攻撃技イベントで防御側アクティブのHPを期待ダメージぶん決定的に減らす
+    (表示の無い時間帯の被弾でHPが固着する問題への対策、2026-09-05)。
+    実読みが来れば上書きされ推定印が消える。変化技では減らない"""
+    from vision.state import PokemonState
+    from vision.extractors import _set_hp
+    state, p = new_parser()
+    state.player.active_index = 0
+    me = state.player.party[0]
+    me.hp_percent = 100.0
+    state.opponent.party.append(PokemonState(
+        species_ja="ガブリアス", species_id="garchomp",
+        types=["ドラゴン", "じめん"], hp_percent=100.0))
+    state.opponent.active_index = len(state.opponent.party) - 1
+    opp = state.opponent.active()
+
+    fired = p.parse("相手の ガブリアスの じしん!")
+    assert any("earthquake" in f for f in fired), fired
+    assert me.hp_percent < 100.0 and me.hp_estimated is True, \
+        (me.hp_percent, me.hp_estimated)
+    assert opp.hp_percent == 100.0            # 攻撃側は不変
+
+    # 自分の攻撃技で相手側も減る
+    fired = p.parse("ブリジュラスの りゅうのはどう!")
+    assert any("dragonpulse" in f for f in fired), fired
+    assert opp.hp_percent < 100.0 and opp.hp_estimated is True, opp.hp_percent
+
+    # 実読みで上書きされ、推定印が消えて鮮度時刻が入る
+    # (確定条件は「同値2回かつ0.6秒以上安定」なので安定開始時刻を進める)
+    _set_hp(state, "player", me, pct=71.0)
+    me._hp_stable_since -= 1.0
+    _set_hp(state, "player", me, pct=71.0)
+    assert me.hp_percent == 71.0 and me.hp_estimated is False, \
+        (me.hp_percent, me.hp_estimated)
+    assert me.hp_read_ts is not None
+
+    # 変化技では減らない
+    p.parse("相手の ガブリアスの つるぎのまい!")
+    assert me.hp_percent == 71.0 and me.hp_estimated is False
+    print("test_expected_damage_applied_on_move_event OK")
+
+
+if __name__ == "__main__":
+    test_expected_damage_applied_on_move_event()
