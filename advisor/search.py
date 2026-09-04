@@ -266,8 +266,16 @@ def _my_actions(me: SimSide, my_moves: list) -> list:
     return acts
 
 
-def _opp_actions(opp: SimSide, opp_move_pool: list) -> list:
-    """相手の行動候補。技は予測プール、交代はベンチ全員 (重みは控えめ)"""
+def _opp_actions(opp: SimSide, opp_move_pool: list,
+                 opp_prior: Optional[dict] = None,
+                 prior_mix: float = 0.0) -> list:
+    """相手の行動候補。技は予測プール、交代はベンチ全員 (重みは控えめ)。
+
+    opp_prior (P6-b): {"move:<id>": p, "switch:<bench_index>": p} の事前分布
+    (自己対戦方策が相手の立場で出す確率)。prior_mix=λ で
+    p = (1-λ)·使用率由来 + λ·事前分布 に混ぜ、合計1に正規化する。
+    事前分布に無い候補は λ 側が 0 (使用率側だけが残る)。
+    """
     total = sum(w for _, w in opp_move_pool) or 1.0
     acts = [Action("move", move_id=m, label=m, prob=0.85 * w / total)
             for m, w in opp_move_pool]
@@ -278,6 +286,15 @@ def _opp_actions(opp: SimSide, opp_move_pool: list) -> list:
                            prob=0.15 / len(alive)))
     if not any(a.kind == "switch" for a in acts):
         # 交代先がない場合は技の重みを正規化し直す
+        s = sum(a.prob for a in acts) or 1.0
+        for a in acts:
+            a.prob /= s
+    if opp_prior and prior_mix > 0:
+        lam = max(0.0, min(1.0, prior_mix))
+        for a in acts:
+            key = (f"move:{a.move_id}" if a.kind == "move"
+                   else f"switch:{a.bench_index}")
+            a.prob = (1 - lam) * a.prob + lam * float(opp_prior.get(key, 0.0))
         s = sum(a.prob for a in acts) or 1.0
         for a in acts:
             a.prob /= s
@@ -320,18 +337,22 @@ def search(me: SimSide, opp: SimSide, my_moves: list, opp_move_pool: list,
            opp_field: Optional[FieldView] = None,
            depth: int = 2,
            leaf_value_fn=None,
-           wincon_sid: Optional[str] = None) -> dict:
+           wincon_sid: Optional[str] = None,
+           opp_prior: Optional[dict] = None,
+           prior_mix: float = 0.0) -> dict:
     """利得行列を構築し、行動ごとの期待値/保証値/択リスクを返す。
 
     my_moves: 自分の技ID列。opp_move_pool: [(move_id, weight)]。
     wincon_sid: 勝ち筋 (endgame検出) の種族ID。指定すると葉評価に
         その個体のHP残存ボーナスを加え、勝ち筋を消耗させる行動を
         相対的に下げる (定説「勝ち筋は大切に扱う」)。
+    opp_prior / prior_mix (P6-b): 根の相手行動分布に混ぜる事前分布と混合率。
+        1手読み (_position_value) の相手分布は使用率のみ (コスト優先)。
     戻り値 {"actions": [{label, kind, expected, worst, worst_reply,
                           recommended, risky}], "matrix": {...}}
     """
     my_acts = _my_actions(me, my_moves)
-    opp_acts = _opp_actions(opp, opp_move_pool)
+    opp_acts = _opp_actions(opp, opp_move_pool, opp_prior, prior_mix)
     if not my_acts or not opp_acts:
         return {"actions": [], "matrix": None}
 

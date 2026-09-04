@@ -263,7 +263,8 @@ def _belief_views(opp_view, species: str, k: int) -> list:
 
 
 def decide(battle, depth: int = 1, by: str = "recommended",
-           use_value: bool = False, belief_k: int = 0) -> Optional[dict]:
+           use_value: bool = False, belief_k: int = 0,
+           opp_prior_mix: float = 0.0) -> Optional[dict]:
     """探索で最善行動を選ぶ。
 
     返り値: {"kind": "move"|"switch", "move": Move|None, "mega": bool,
@@ -278,6 +279,9 @@ def decide(battle, depth: int = 1, by: str = "recommended",
     belief_k: 相手型の仮説数 (P7)。0=従来の単一仮定、1=最尤仮説、
         2以上=多世界探索 (仮説重みで統合)。学習の相手としては既定0
         (訓練分布を変えない)。診断 (check_search_expert --belief) で使う
+    opp_prior_mix: 相手行動の事前分布の混合率 λ (P6-b)。0 で使用率のみ。
+        自己対戦方策 (rl_bridge.policy_of_sim) を相手の立場で評価し、
+        根の相手行動分布に (1-λ)·使用率 + λ·方策 で混ぜる
     """
     active = battle.active_pokemon
     opp_active = battle.opponent_active_pokemon
@@ -314,6 +318,16 @@ def decide(battle, depth: int = 1, by: str = "recommended",
 
     opp_field = _field_view(battle, battle.opponent_side_conditions)
     pool = _opp_move_pool(opp_active)
+    # P6-b: 相手行動の事前分布 (相手を me に置いた自己対戦方策の行動分布)
+    opp_prior = None
+    if opp_prior_mix > 0:
+        try:
+            from advisor.rl_bridge import policy_of_sim
+            opp_prior = policy_of_sim(opp, me, [m for m, _ in pool][:4],
+                                      opp_field,
+                                      turn=getattr(battle, "turn", None) or 5)
+        except Exception:
+            opp_prior = None
     result = None
     worlds = _belief_views(opp_view, opp_active.species, belief_k)
     if worlds:
@@ -324,13 +338,15 @@ def decide(battle, depth: int = 1, by: str = "recommended",
                             bench=opp.bench, stealth_rock=opp.stealth_rock)
             outs.append(search(me, opp_k, my_moves, pool,
                                my_field=my_field, opp_field=opp_field,
-                               depth=depth, leaf_value_fn=leaf_fn))
+                               depth=depth, leaf_value_fn=leaf_fn,
+                               opp_prior=opp_prior, prior_mix=opp_prior_mix))
             ws.append(w_k)
         result = aggregate_worlds(outs, ws, coverage=sum(ws))
     if result is None:
         result = search(me, opp, my_moves, pool,
                         my_field=my_field, opp_field=opp_field,
-                        depth=depth, leaf_value_fn=leaf_fn)
+                        depth=depth, leaf_value_fn=leaf_fn,
+                        opp_prior=opp_prior, prior_mix=opp_prior_mix)
 
     switchable = {p.species for p in (battle.available_switches or [])}
     team_order = list(battle.team.values())[:6]

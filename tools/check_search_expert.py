@@ -20,7 +20,7 @@ from champions_agent.config import TRAINING_BATTLE_FORMAT
 async def run(n_battles: int, depth: int, by: str = "recommended",
               use_value: bool = True, belief_k: int = 0,
               opp_seed: int | None = None, json_out: str | None = None,
-              skip_random: bool = False) -> None:
+              skip_random: bool = False, opp_prior_mix: float = 0.0) -> None:
     import json
     import random
     from poke_env import AccountConfiguration
@@ -43,7 +43,7 @@ async def run(n_battles: int, depth: int, by: str = "recommended",
             t0 = time.perf_counter()
             try:
                 d = decide(battle, depth=depth, by=by, use_value=use_value,
-                           belief_k=belief_k)
+                           belief_k=belief_k, opp_prior_mix=opp_prior_mix)
             except Exception as e:
                 stats["error"] += 1
                 stats.setdefault("last_error", repr(e))
@@ -92,7 +92,8 @@ async def run(n_battles: int, depth: int, by: str = "recommended",
     p50 = lat_sorted[len(lat_sorted) // 2] if lat_sorted else 0.0
     p95 = lat_sorted[int(len(lat_sorted) * 0.95)] if lat_sorted else 0.0
     print(f"=== 探索エキスパート (depth={depth} by={by} belief_k={belief_k} "
-          f"value={'on' if use_value else 'off'} meta={meta_pin or 'latest'}) "
+          f"value={'on' if use_value else 'off'} prior_mix={opp_prior_mix} "
+          f"meta={meta_pin or 'latest'}) "
           f"vs ベンチマーク {n_battles}戦 ({dt:.0f}s) ===")
     print(f"勝率: {expert.n_won_battles / n_battles:.2f}")
     print(f"探索レイテンシ: p50 {p50:.0f}ms / p95 {p95:.0f}ms ({len(latencies)}決定)")
@@ -103,6 +104,7 @@ async def run(n_battles: int, depth: int, by: str = "recommended",
             "win_rate": expert.n_won_battles / n_battles,
             "outcomes": outcomes, "depth": depth, "by": by,
             "use_value": use_value, "belief_k": belief_k,
+            "opp_prior_mix": opp_prior_mix,
             "opp_seed": opp_seed, "meta_snapshot": meta_pin,
             "latency_p50_ms": round(p50, 1), "latency_p95_ms": round(p95, 1),
             "stats": {k: v for k, v in stats.items() if k != "last_error"},
@@ -150,11 +152,14 @@ def main() -> None:
     ap.add_argument("--json", default=None, help="結果の保存先")
     ap.add_argument("--skip-random", action="store_true",
                     help="RandomPlayer の基準線を省略 (時間短縮)")
+    ap.add_argument("--opp-prior-mix", type=float, default=0.0,
+                    help="相手行動の事前分布の混合率 λ (P6-b): 0=使用率のみ")
     args = ap.parse_args()
     asyncio.run(run(args.battles, args.depth, args.by,
                     use_value=not args.no_value, belief_k=args.belief,
                     opp_seed=args.opp_seed, json_out=args.json,
-                    skip_random=args.skip_random))
+                    skip_random=args.skip_random,
+                    opp_prior_mix=args.opp_prior_mix))
 
 
 if __name__ == "__main__":

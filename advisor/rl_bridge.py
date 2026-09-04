@@ -827,6 +827,86 @@ def _legal_actions(state: dict) -> list:
     return out
 
 
+def _sim_state(me, opp, my_moves: list, fieldv=None, turn: int = 5) -> dict:
+    """SimSide対 -> encode_state が読める最小限の状態辞書。
+
+    party の並びは [active] + bench (bench_index = party index - 1)。
+    value_of_sim (葉評価) と policy_of_sim (行動分布) が共用する。
+    """
+    def party_of(side, active_moves=None):
+        entries = [{
+            "species_id": side.active.species_id,
+            "hp_percent": max(0.0, side.active_hp) * 100.0,
+            "status": side.active.status,
+            "boosts": side.active.boosts or {},
+            "moves": [{"move_id": m} for m in (active_moves or [])],
+        }]
+        for v, hp in side.bench:
+            entries.append({"species_id": v.species_id,
+                            "hp_percent": max(0.0, hp) * 100.0,
+                            "status": "fainted" if hp <= 0 else None})
+        return entries
+
+    return {
+        "turn": turn,
+        "field": {"weather": getattr(fieldv, "weather", None),
+                  "terrain": getattr(fieldv, "terrain", None),
+                  "trick_room": bool(getattr(fieldv, "trick_room", False))},
+        "mega_used": {},
+        "player": {"active_index": 0,
+                   "remaining": me.alive_count(),
+                   "hazards": {"stealth_rock": me.stealth_rock},
+                   "screens": {},
+                   "party": party_of(me, my_moves)},
+        "opponent": {"active_index": 0,
+                     "remaining": opp.alive_count(),
+                     "hazards": {"stealth_rock": opp.stealth_rock},
+                     "screens": {},
+                     "party": party_of(opp)},
+    }
+
+
+def policy_of_sim(me, opp, my_moves: list, fieldv=None,
+                  turn: int = 5) -> Optional[dict]:
+    """SimSide対から、me 側の行動分布を {"move:<id>": p, "switch:<bench_index>": p}
+    で返す (合法手で正規化、メガ技は同じ技に合算)。
+
+    P6-b: 探索の相手行動候補の事前分布に使う。相手を me に置いて呼ぶと
+    「自己対戦方策が相手の立場で選ぶ確率」になる (相手の未判明技は
+    予測プールの技を渡す)。モデルが無ければ None。
+    """
+    model = _load_model()
+    if model is None:
+        return None
+    state = _sim_state(me, opp, my_moves, fieldv, turn)
+    from advisor.damage import effective_speed
+    obs = encode_state(state, my_spe_actual=effective_speed(me.active, fieldv))
+    if obs is None:
+        return None
+    obs = _adapt_obs(model, obs)
+    legal = _legal_actions(state)
+    if not legal:
+        return None
+    import torch
+    obs_t, _ = model.policy.obs_to_tensor(obs[None, :])
+    with torch.no_grad():
+        dist = model.policy.get_distribution(obs_t)
+        probs = dist.distribution.probs.detach().cpu().numpy()[0]
+    out: dict = {}
+    for idx, _label, _kind in legal:
+        p = float(probs[idx])
+        if idx < 6:
+            key = f"switch:{idx - 1}"
+        else:
+            mi = (idx - 6) % 4
+            if mi >= len(my_moves):
+                continue
+            key = f"move:{my_moves[mi]}"
+        out[key] = out.get(key, 0.0) + p
+    total = sum(out.values()) or 1.0
+    return {k: round(v / total, 4) for k, v in out.items()}
+
+
 def value_of_sim(me, opp, my_moves: list, fieldv=None,
                  turn: int = 5) -> Optional[float]:
     """探索の葉ノード (SimSide対) をRL価値関数で評価する [-1,1]。
