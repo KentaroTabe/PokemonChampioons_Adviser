@@ -336,18 +336,16 @@ def decide(battle, depth: int = 1, by: str = "recommended",
     my_moves = list(available.keys())[:4]
     my_field = _field_view(battle, battle.side_conditions)
 
-    # RL価値関数の葉評価ブレンド (アドバイザーの_run_searchと同じ構成)
-    leaf_fn = None
+    # RL価値関数の葉評価ブレンド (アドバイザーの_run_searchと同じ構成)。
+    # 並列実行のため文脈 (leaf_ctx) も持つ
+    leaf_fn, leaf_ctx = None, None
     if use_value and depth >= 2:
-        try:
-            from advisor.rl_bridge import _load_model, value_of_sim
-            if _load_model() is not None:
-                turn = getattr(battle, "turn", None) or 5
-
-                def leaf_fn(m2, o2):
-                    return value_of_sim(m2, o2, my_moves, my_field, turn=turn)
-        except Exception:
-            leaf_fn = None
+        from advisor.search import make_rl_leaf_fn
+        leaf_ctx = {"my_moves": my_moves, "field": my_field,
+                    "turn": getattr(battle, "turn", None) or 5}
+        leaf_fn = make_rl_leaf_fn(leaf_ctx)
+        if leaf_fn is None:
+            leaf_ctx = None
 
     opp_field = _field_view(battle, battle.opponent_side_conditions)
     pool = _opp_move_pool(opp_active)
@@ -378,7 +376,7 @@ def decide(battle, depth: int = 1, by: str = "recommended",
             jobs.append(dict(me=me_c, opp=opp_k, my_moves=my_moves,
                              opp_move_pool=pool, my_field=my_field,
                              opp_field=opp_field, depth=depth,
-                             leaf_value_fn=leaf_fn, opp_prior=opp_prior,
+                             leaf_ctx=leaf_ctx, opp_prior=opp_prior,
                              prior_mix=opp_prior_mix))
             ws.append(w_c)
         outs = run_world_searches(jobs, workers=search_workers)

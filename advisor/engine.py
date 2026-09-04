@@ -1059,17 +1059,14 @@ def _run_search(state, my_state, my_view, my_p, opp_state, opp_view,
                       opp_state["party"][opp_state["active_index"]]),
                   bench=bench_of(opp_state, "opponent"),
                   stealth_rock=bool(opp_state.get("hazards", {}).get("stealth_rock")))
-    # RL価値関数を葉評価にブレンド (学習結果の反映)。使えない環境ではNone
-    leaf_fn = None
-    try:
-        from advisor.rl_bridge import value_of_sim, _load_model
-        if _load_model() is not None:
-            turn = state.get("turn") or 5
-
-            def leaf_fn(m2, o2):
-                return value_of_sim(m2, o2, my_moves, my_field, turn=turn)
-    except Exception:
-        leaf_fn = None
+    # RL価値関数を葉評価にブレンド (学習結果の反映)。使えない環境ではNone。
+    # 並列実行のため関数でなく文脈 (leaf_ctx) も持ち、ワーカー側で再構成する
+    from advisor.search import make_rl_leaf_fn
+    leaf_ctx = {"my_moves": my_moves, "field": my_field,
+                "turn": state.get("turn") or 5}
+    leaf_fn = make_rl_leaf_fn(leaf_ctx)
+    if leaf_fn is None:
+        leaf_ctx = None
 
     import time as _time
     t0 = _time.perf_counter()
@@ -1091,7 +1088,7 @@ def _run_search(state, my_state, my_view, my_p, opp_state, opp_view,
                             bench=opp.bench, stealth_rock=opp.stealth_rock)
             jobs.append(dict(me=me_c, opp=opp_k, my_moves=my_moves,
                              opp_move_pool=pool, my_field=my_field,
-                             opp_field=opp_field, leaf_value_fn=leaf_fn,
+                             opp_field=opp_field, leaf_ctx=leaf_ctx,
                              wincon_sid=wincon_sid))
             ws.append(w_c)
         outs = run_world_searches(jobs, workers=SEARCH_WORKERS)

@@ -426,22 +426,54 @@ _POOL = None
 SEARCH_WORKERS = 1   # 世界の並列実行数 (1=逐次)。engine / search_expert が上書きする
 
 
+def make_rl_leaf_fn(leaf_ctx: Optional[dict]):
+    """leaf_ctx {"my_moves","field","turn"} から RL価値の葉評価関数を作る。
+    モデルが無ければ None (ワーカー側でも呼べるようモジュール関数にしてある)"""
+    if not leaf_ctx:
+        return None
+    try:
+        from advisor.rl_bridge import value_of_sim, _load_model
+        if _load_model() is None:
+            return None
+    except Exception:
+        return None
+    my_moves = leaf_ctx.get("my_moves") or []
+    fieldv = leaf_ctx.get("field")
+    turn = leaf_ctx.get("turn") or 5
+
+    def leaf_fn(m2, o2):
+        return value_of_sim(m2, o2, my_moves, fieldv, turn=turn)
+
+    return leaf_fn
+
+
 def _search_job(kwargs: dict) -> dict:
-    """プロセスプール用のジョブ (葉評価関数は渡せないため None 固定)"""
+    """プロセスプール用のジョブ。葉評価は関数でなく leaf_ctx で受け取り、
+    ワーカー側でモデルを読んで再構成する (各ワーカーは初回に一度だけ読む)"""
     kwargs = dict(kwargs)
-    kwargs["leaf_value_fn"] = None
+    leaf_ctx = kwargs.pop("leaf_ctx", None)
+    kwargs["leaf_value_fn"] = make_rl_leaf_fn(leaf_ctx)
     return search(**kwargs)
 
 
 def run_world_searches(jobs: list, workers: int = 1) -> list:
     """世界ごとの search(**kwargs) をまとめて実行する (P7 レイテンシ条項)。
 
-    workers>1 かつ全ジョブが葉評価なし (leaf_value_fn=None) ならプロセスプールで
+    ジョブは search の引数辞書。葉評価は "leaf_value_fn" (関数、逐次のみ) か
+    "leaf_ctx" ({"my_moves","field","turn"}、並列可) のどちらかで渡す。
+    workers>1 かつ全ジョブが leaf_value_fn を持たなければプロセスプールで
     並列実行し、それ以外は逐次。並列化は各世界の結果を変えない (決定的)。
     プールは初回に生成して使い回す (spawn の起動コストを毎回払わない)。
     """
+    def _seq(j):
+        j = dict(j)
+        ctx = j.pop("leaf_ctx", None)
+        if j.get("leaf_value_fn") is None and ctx:
+            j["leaf_value_fn"] = make_rl_leaf_fn(ctx)
+        return search(**j)
+
     if workers <= 1 or len(jobs) <= 1 or any(j.get("leaf_value_fn") for j in jobs):
-        return [search(**j) for j in jobs]
+        return [_seq(j) for j in jobs]
     global _POOL
     from concurrent.futures import ProcessPoolExecutor
     if _POOL is None:
@@ -451,7 +483,7 @@ def run_world_searches(jobs: list, workers: int = 1) -> list:
     except Exception:
         # プールが壊れた場合 (子プロセス死亡等) は逐次に戻す
         _POOL = None
-        return [search(**j) for j in jobs]
+        return [_seq(j) for j in jobs]
 
 
 def sensor_worlds(me: SimSide, q: float, delta: float) -> list:

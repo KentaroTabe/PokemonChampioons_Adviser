@@ -285,3 +285,38 @@ def test_apply_search_blend_relative_to_best():
 
 if __name__ == "__main__":
     test_apply_search_blend_relative_to_best()
+
+
+def test_run_world_searches_with_leaf_ctx():
+    """leaf_ctx (葉評価の文脈) つきジョブは並列でも実行でき、逐次と一致する。
+    RLモデルが無い環境 (CI) では葉評価なしとして両者とも同じ結果になる"""
+    from advisor.search import run_world_searches, make_rl_leaf_fn
+    from advisor.dex import get_dex
+    from advisor.damage import MonView
+    from advisor.search import SimSide
+    dex = get_dex()
+    def view(sid, hp=1.0):
+        sp = dex.species(sid)
+        return MonView(species_id=sid, types=sp["types"], base=sp["baseStats"],
+                       ev={"atk": 252, "spa": 252, "spe": 252}, nature={},
+                       hp_frac=hp)
+    me = SimSide(active=view("garchomp"), active_hp=1.0,
+                 bench=[(view("primarina"), 1.0)], stealth_rock=False)
+    ctx = {"my_moves": ["earthquake", "scaleshot"], "field": None, "turn": 3}
+    jobs = []
+    for hp in (1.0, 0.6):
+        opp = SimSide(active=view("archaludon", hp), active_hp=hp,
+                      bench=[(view("scizor"), 1.0)], stealth_rock=False)
+        jobs.append(dict(me=me, opp=opp, my_moves=ctx["my_moves"],
+                         opp_move_pool=[("dracometeor", 1.0), ("flashcannon", 1.0)],
+                         depth=2, leaf_ctx=ctx))
+    seq = run_world_searches(jobs, workers=1)
+    par = run_world_searches(jobs, workers=2)
+    key = lambda r: [(a["label"], a["expected"]) for a in r["actions"]]
+    assert [key(r) for r in seq] == [key(r) for r in par]
+    assert make_rl_leaf_fn(None) is None
+    print("test_run_world_searches_with_leaf_ctx OK")
+
+
+if __name__ == "__main__":
+    test_run_world_searches_with_leaf_ctx()
