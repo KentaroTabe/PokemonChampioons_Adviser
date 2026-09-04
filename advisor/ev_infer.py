@@ -297,6 +297,28 @@ class SpreadEstimator:
         }
 
 
+    def top_k(self, k: int, min_weight: float = 0.0) -> list:
+        """重み上位k仮説を [{"nature","evs","item","weight"}] で返す (P7)。
+
+        weight は全仮説で正規化した事後確率 (上位kの和 = 被覆率)。
+        min_weight 未満の仮説は、1つ以上返せていれば刈り込む。
+        観測が無ければ使用率由来の事前分布そのもの。
+        """
+        if not self.hyps or k <= 0:
+            return []
+        mx = max(h["logw"] for h in self.hyps)
+        ws = [math.exp(h["logw"] - mx) for h in self.hyps]
+        total = sum(ws) or 1.0
+        ranked = sorted(zip(self.hyps, ws), key=lambda pr: -pr[1])
+        out = []
+        for h, w in ranked[:k]:
+            wn = w / total
+            if wn < min_weight and out:
+                break
+            out.append({"nature": h["nature"], "evs": h["evs"],
+                        "item": h["item"], "weight": round(wn, 4)})
+        return out
+
     def speed_estimate(self, opp_state: Optional[dict] = None) -> Optional[dict]:
         """最良仮説の実効素早さを観測レンジでクランプした推定値。
 
@@ -346,6 +368,14 @@ class SpreadTracker:
     def best_for(self, species_id: Optional[str]) -> Optional[dict]:
         est = self._est.get(species_id)
         return est.best() if est else None
+
+    def hypotheses_for(self, species_id: Optional[str], k: int,
+                       min_weight: float = 0.0) -> list:
+        """多世界探索 (P7) 用: 種族の重み上位k仮説。推定器が無ければ
+        事前分布 (使用率由来) の推定器を作って返す"""
+        if not species_id:
+            return []
+        return self.estimator(species_id).top_k(k, min_weight)
 
     # ------------------------------------------------------------------
     def on_frame(self, state: dict, fired: list) -> None:

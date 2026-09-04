@@ -107,6 +107,11 @@ def type_ja2en() -> dict:
 # 状態辞書 -> ビュー構築
 # ==============================================================================
 OFFENSIVE_EV = {"atk": 252, "spa": 252, "spe": 252}
+# 多世界探索 (P7、事前登録 2026-09-04 19:40): 相手型の仮説分布の重み上位
+# BELIEF_K 仮説それぞれで探索し、仮説重みで統合する。0 で点推定 (従来)。
+# BELIEF_MIN_WEIGHT 未満の仮説は刈り込む (レイテンシ対策)
+BELIEF_K = 8
+BELIEF_MIN_WEIGHT = 0.02
 
 
 def build_mon_view(p: dict, resolver=None, side: str = "opponent") -> Optional[MonView]:
@@ -1018,14 +1023,66 @@ def _run_search(state, my_state, my_view, my_p, opp_state, opp_view,
     except Exception:
         leaf_fn = None
 
-    result = search(me, opp, my_moves, pool,
-                    my_field=my_field, opp_field=opp_field,
-                    leaf_value_fn=leaf_fn, wincon_sid=wincon_sid)
+    import time as _time
+    t0 = _time.perf_counter()
+    result = None
+    worlds = _belief_worlds(opp_view, opp_state["party"][opp_state["active_index"]])
+    if worlds:
+        from advisor.search import aggregate_worlds
+        outs, ws = [], []
+        for w_k, view_k in worlds:
+            opp_k = SimSide(active=view_k, active_hp=opp.active_hp,
+                            bench=opp.bench, stealth_rock=opp.stealth_rock)
+            outs.append(search(me, opp_k, my_moves, pool,
+                               my_field=my_field, opp_field=opp_field,
+                               leaf_value_fn=leaf_fn, wincon_sid=wincon_sid))
+            ws.append(w_k)
+        result = aggregate_worlds(outs, ws, coverage=sum(ws))
+    if result is None:
+        result = search(me, opp, my_moves, pool,
+                        my_field=my_field, opp_field=opp_field,
+                        leaf_value_fn=leaf_fn, wincon_sid=wincon_sid)
+    result["search_ms"] = round((_time.perf_counter() - t0) * 1000, 1)
     # 表示用の要約 (上位3行動)
     lines = []
     for a in result["actions"][:3]:
         mark = " ⚠択リスク" if a["risky"] else ""
         lines.append(f"{a['label']}: 期待{a['expected']:+.2f} "
                      f"保証{a['worst']:+.2f} (最悪応手: {a['worst_reply']}){mark}")
+    b = result.get("belief")
+    if b:
+        lines.append(f"型仮説{b['k']}件 (被覆{b['coverage']:.0%}) "
+                     f"安定度{b['stability']:.0%} / 探索{result['search_ms']:.0f}ms")
+    else:
+        lines.append(f"探索{result['search_ms']:.0f}ms (点推定)")
     result["summary_lines"] = lines
     return result
+
+
+def _belief_worlds(opp_view, opp_p: dict) -> list:
+    """相手型の仮説分布から探索する世界 [(重み, MonView)] を作る (P7)。
+
+    BELIEF_K=0、推定器が無い、仮説が1つ以下 (点推定と同じ) なら空を返し、
+    呼び出し側は従来の単一探索に落ちる。仮説の持ち物は、持ち物が未判明で
+    はたき落とされてもいない場合にだけ適用する (MAP経路と同じ規則)。
+    """
+    if BELIEF_K <= 0 or opp_view is None:
+        return []
+    try:
+        from advisor.ev_infer import get_tracker, _nature_mult
+        hyps = get_tracker().hypotheses_for(opp_view.species_id, BELIEF_K,
+                                            BELIEF_MIN_WEIGHT)
+    except Exception:
+        return []
+    if len(hyps) < 2:
+        return []
+    import copy as _copy
+    worlds = []
+    for h in hyps:
+        v = _copy.copy(opp_view)
+        v.ev = dict(h["evs"])
+        v.nature = _nature_mult(h["nature"])
+        if not opp_view.item and not opp_p.get("item_removed") and h["item"]:
+            v.item = h["item"]
+        worlds.append((h["weight"], v))
+    return worlds

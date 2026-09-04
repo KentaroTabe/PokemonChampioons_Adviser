@@ -4,6 +4,16 @@
 """
 from __future__ import annotations
 
+import os
+
+# エンジン規則 (交代技の複合価値・割引・ゲート等) の検証を、学習で日々変わる
+# RL方策のブレンドから切り離す。2026-09-04: EMA方策の変動で
+# test_pivot_over_plain_switch が「バレットパンチ60.7 vs 交代59.1」の僅差で
+# 落ちた (K=0/8 どちらでも同一、RL_BLEND_WEIGHT=0 で全緑)。RLの読み込みや
+# 行動分布の提示 (policy_hint) は引き続き検証される (ブレンド重みのみ0)
+os.environ.setdefault("RL_BLEND_WEIGHT", "0")
+
+
 from advisor.dex import get_dex, calc_hp, calc_stat
 from advisor.damage import MonView, FieldView, calc_damage
 from advisor.engine import evaluate

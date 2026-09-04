@@ -27,6 +27,7 @@ TESTS=(
   test_meta_snapshot_filter
   test_set_coherence
   test_meta_pin
+  test_belief_search
 )
 
 fail=0

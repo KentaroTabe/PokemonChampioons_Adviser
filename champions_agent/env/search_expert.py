@@ -232,8 +232,38 @@ def search_options(battle, depth: int = 1,
                   depth=depth)
 
 
+_est_cache: dict = {}
+
+
+def _belief_views(opp_view, species: str, k: int) -> list:
+    """相手型の事前分布 (使用率由来) の上位k仮説で [(重み, MonView)] を作る。
+
+    シムでは対戦中の観測更新は行わない (事前分布のみ)。k=1 は最尤仮説
+    (MAP) 1つ、k=0 は従来の攻撃系252振り単一仮定 (呼び出し側で分岐)。
+    持ち物は未判明のときだけ仮説の値を使う。
+    """
+    if k <= 0 or opp_view is None or not species:
+        return []
+    from advisor.ev_infer import SpreadEstimator, _nature_mult
+    est = _est_cache.get(species)
+    if est is None:
+        est = SpreadEstimator(species)
+        _est_cache[species] = est
+    hyps = est.top_k(k)
+    import copy as _copy
+    worlds = []
+    for h in hyps:
+        v = _copy.copy(opp_view)
+        v.ev = dict(h["evs"])
+        v.nature = _nature_mult(h["nature"])
+        if not opp_view.item and h["item"]:
+            v.item = h["item"]
+        worlds.append((h["weight"], v))
+    return worlds
+
+
 def decide(battle, depth: int = 1, by: str = "recommended",
-           use_value: bool = False) -> Optional[dict]:
+           use_value: bool = False, belief_k: int = 0) -> Optional[dict]:
     """探索で最善行動を選ぶ。
 
     返り値: {"kind": "move"|"switch", "move": Move|None, "mega": bool,
@@ -245,6 +275,9 @@ def decide(battle, depth: int = 1, by: str = "recommended",
         効果が参照する _best に依存し不安定なため既定はOFF
         (2026-07-26は0.41→0.64と改善、2026-07-27は0.44→0.34と劣化)。
         有効化する場合は check_search_expert --no-value との比較必須
+    belief_k: 相手型の仮説数 (P7)。0=従来の単一仮定、1=最尤仮説、
+        2以上=多世界探索 (仮説重みで統合)。学習の相手としては既定0
+        (訓練分布を変えない)。診断 (check_search_expert --belief) で使う
     """
     active = battle.active_pokemon
     opp_active = battle.opponent_active_pokemon
@@ -279,11 +312,25 @@ def decide(battle, depth: int = 1, by: str = "recommended",
         except Exception:
             leaf_fn = None
 
-    result = search(me, opp, my_moves, _opp_move_pool(opp_active),
-                    my_field=my_field,
-                    opp_field=_field_view(battle,
-                                          battle.opponent_side_conditions),
-                    depth=depth, leaf_value_fn=leaf_fn)
+    opp_field = _field_view(battle, battle.opponent_side_conditions)
+    pool = _opp_move_pool(opp_active)
+    result = None
+    worlds = _belief_views(opp_view, opp_active.species, belief_k)
+    if worlds:
+        from advisor.search import aggregate_worlds
+        outs, ws = [], []
+        for w_k, view_k in worlds:
+            opp_k = SimSide(active=view_k, active_hp=opp.active_hp,
+                            bench=opp.bench, stealth_rock=opp.stealth_rock)
+            outs.append(search(me, opp_k, my_moves, pool,
+                               my_field=my_field, opp_field=opp_field,
+                               depth=depth, leaf_value_fn=leaf_fn))
+            ws.append(w_k)
+        result = aggregate_worlds(outs, ws, coverage=sum(ws))
+    if result is None:
+        result = search(me, opp, my_moves, pool,
+                        my_field=my_field, opp_field=opp_field,
+                        depth=depth, leaf_value_fn=leaf_fn)
 
     switchable = {p.species for p in (battle.available_switches or [])}
     team_order = list(battle.team.values())[:6]

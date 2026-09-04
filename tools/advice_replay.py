@@ -318,7 +318,13 @@ def main() -> None:
     ap.add_argument("--logs", type=int, default=12,
                     help="対象にする直近の対戦ログ数")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--belief-k", type=int, default=None,
+                    help="エンジンの相手型仮説数を上書き (P7比較用: 0=点推定, 8=多世界)")
     args = ap.parse_args()
+    if args.belief_k is not None:
+        import advisor.engine as _eng
+        _eng.BELIEF_K = args.belief_k
+        print(f"[replay] BELIEF_K={args.belief_k}")
     paths = sorted(LOG_DIR.glob("battle_*.jsonl"))[-args.logs:]
     out = Path(args.out) if args.out else \
         OUT_DIR / f"replay_{time.strftime('%Y%m%d_%H%M')}.json"

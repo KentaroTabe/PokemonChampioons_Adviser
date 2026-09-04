@@ -375,8 +375,16 @@ def search(me: SimSide, opp: SimSide, my_moves: list, opp_move_pool: list,
             "risky": (expected - worst) > 0.35,
         })
 
-    # 状況依存のリスク調整: 局面評価 (=最善手の期待値) で保証値の重みを
-    # 変えてから推奨順を決める。優勢なら択を避け、劣勢なら賭ける
+    return _finalize(results, matrix)
+
+
+def _finalize(results: list, matrix) -> dict:
+    """行動ごとの期待値/保証値から推奨値・順位・起点警告を決める。
+
+    search() と aggregate_worlds() (多世界統合) が同じ規則を使うために分離。
+    状況依存のリスク調整: 局面評価 (=最善手の期待値) で保証値の重みを
+    変えてから推奨順を決める。優勢なら択を避け、劣勢なら賭ける
+    """
     position = max(r["expected"] for r in results)
     w = dynamic_risk_weight(position)
     for r in results:
@@ -391,3 +399,64 @@ def search(me: SimSide, opp: SimSide, my_moves: list, opp_move_pool: list,
     return {"actions": results, "matrix": matrix,
             "risk_weight": round(w, 3), "position": round(position, 3),
             "setup_bait": setup_bait}
+
+
+def aggregate_worlds(world_results: list, weights: list,
+                     coverage: Optional[float] = None) -> Optional[dict]:
+    """相手型の仮説 (世界) ごとの search() 結果を仮説重みで統合する (P7)。
+
+    - 期待値/保証値: 各世界の値の重み平均 (その行動が現れた世界で正規化)
+    - 推奨値・順位: 統合後の値に _finalize と同じ規則を適用
+    - support: その行動が世界内で最善 (recommended 首位) だった重みの和
+    - expected_var: 期待値の重み付き分散 (仮説間のばらつき = 型依存の度合い)
+    - belief.stability: 統合後の最善が各世界でも最善だった重みの和
+    - matrix/最悪応手: 最も重い世界のもの / 全世界で最も低い応手
+    coverage は呼び出し側が渡す「採用した仮説の重みの総和」(刈り込み前の
+    分布に対する被覆率)。None なら重みの和。
+    """
+    pairs = [(r, w) for r, w in zip(world_results, weights)
+             if r and r.get("actions")]
+    if not pairs:
+        return None
+    total = sum(w for _, w in pairs) or 1.0
+    pairs = [(r, w / total) for r, w in pairs]
+    merged: dict = {}
+    for r, w in pairs:
+        top_label = r["actions"][0]["label"]
+        for a in r["actions"]:
+            m = merged.setdefault(a["label"], {
+                "label": a["label"], "kind": a["kind"],
+                "move_id": a.get("move_id"),
+                "bench_index": a.get("bench_index"),
+                "_exp": 0.0, "_wor": 0.0, "_sq": 0.0, "_w": 0.0,
+                "support": 0.0, "worst_reply": None, "_worst_val": 9.9})
+            m["_exp"] += w * a["expected"]
+            m["_wor"] += w * a["worst"]
+            m["_sq"] += w * a["expected"] ** 2
+            m["_w"] += w
+            if a["label"] == top_label:
+                m["support"] += w
+            if a["worst"] < m["_worst_val"]:
+                m["_worst_val"] = a["worst"]
+                m["worst_reply"] = a.get("worst_reply")
+    results = []
+    for m in merged.values():
+        wsum = m.pop("_w") or 1.0
+        exp = m.pop("_exp") / wsum
+        wor = m.pop("_wor") / wsum
+        var = max(0.0, m.pop("_sq") / wsum - exp ** 2)
+        m.pop("_worst_val")
+        m.update({"expected": round(exp, 3), "worst": round(wor, 3),
+                  "expected_var": round(var, 4),
+                  "support": round(m["support"], 3),
+                  "risky": (exp - wor) > 0.35})
+        results.append(m)
+    heaviest = max(pairs, key=lambda pr: pr[1])[0]
+    out = _finalize(results, heaviest.get("matrix"))
+    best_label = out["actions"][0]["label"]
+    out["belief"] = {
+        "k": len(pairs),
+        "coverage": round(coverage if coverage is not None else total, 3),
+        "stability": round(merged[best_label]["support"], 3),
+    }
+    return out
