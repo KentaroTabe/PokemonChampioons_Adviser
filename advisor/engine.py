@@ -109,8 +109,11 @@ def type_ja2en() -> dict:
 OFFENSIVE_EV = {"atk": 252, "spa": 252, "spe": 252}
 # 多世界探索 (P7、事前登録 2026-09-04 19:40): 相手型の仮説分布の重み上位
 # BELIEF_K 仮説それぞれで探索し、仮説重みで統合する。0 で点推定 (従来)。
-# BELIEF_MIN_WEIGHT 未満の仮説は刈り込む (レイテンシ対策)
-BELIEF_K = 8
+# BELIEF_MIN_WEIGHT 未満の仮説は刈り込む (レイテンシ対策)。
+# 2026-09-04 22:35 判定で棄却し 0 に戻した: 探索プレイヤー各300戦・同一相手列で
+# 単一仮定 0.413 / 最尤仮説 0.367 / 多世界K=8 0.380 (belief−current −0.033±0.036)。
+# 実装は残置 (advice_replay --belief-k / check_search_expert --belief で再測定可)
+BELIEF_K = 0
 BELIEF_MIN_WEIGHT = 0.02
 # センサ世界 (P8): 自分アクティブの表示HPが固着している確率 q と、その世界での
 # HP低下幅。hp_uncertain (交代取り逃し等) が立った個体は高い q を使う。
