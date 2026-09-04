@@ -20,7 +20,9 @@ from champions_agent.config import TRAINING_BATTLE_FORMAT
 async def run(n_battles: int, depth: int, by: str = "recommended",
               use_value: bool = True, belief_k: int = 0,
               opp_seed: int | None = None, json_out: str | None = None,
-              skip_random: bool = False, opp_prior_mix: float = 0.0) -> None:
+              skip_random: bool = False, opp_prior_mix: float = 0.0,
+              sensor_noise: float = 0.0, sensor_q: float = 0.0,
+              sensor_delta: float = 0.25) -> None:
     import json
     import random
     from poke_env import AccountConfiguration
@@ -43,7 +45,9 @@ async def run(n_battles: int, depth: int, by: str = "recommended",
             t0 = time.perf_counter()
             try:
                 d = decide(battle, depth=depth, by=by, use_value=use_value,
-                           belief_k=belief_k, opp_prior_mix=opp_prior_mix)
+                           belief_k=belief_k, opp_prior_mix=opp_prior_mix,
+                           sensor_noise=sensor_noise, sensor_q=sensor_q,
+                           sensor_delta=sensor_delta)
             except Exception as e:
                 stats["error"] += 1
                 stats.setdefault("last_error", repr(e))
@@ -105,6 +109,8 @@ async def run(n_battles: int, depth: int, by: str = "recommended",
             "outcomes": outcomes, "depth": depth, "by": by,
             "use_value": use_value, "belief_k": belief_k,
             "opp_prior_mix": opp_prior_mix,
+            "sensor_noise": sensor_noise, "sensor_q": sensor_q,
+            "sensor_delta": sensor_delta,
             "opp_seed": opp_seed, "meta_snapshot": meta_pin,
             "latency_p50_ms": round(p50, 1), "latency_p95_ms": round(p95, 1),
             "stats": {k: v for k, v in stats.items() if k != "last_error"},
@@ -154,12 +160,20 @@ def main() -> None:
                     help="RandomPlayer の基準線を省略 (時間短縮)")
     ap.add_argument("--opp-prior-mix", type=float, default=0.0,
                     help="相手行動の事前分布の混合率 λ (P6-b): 0=使用率のみ")
+    ap.add_argument("--sensor-noise", type=float, default=0.0,
+                    help="自分表示HPの固着確率 (P8 雑音注入)")
+    ap.add_argument("--sensor-q", type=float, default=0.0,
+                    help="探索が持つ『表示より低いHP』世界の確率 (P8)")
+    ap.add_argument("--sensor-delta", type=float, default=0.25,
+                    help="その世界でのHP低下幅 (P8)")
     args = ap.parse_args()
     asyncio.run(run(args.battles, args.depth, args.by,
                     use_value=not args.no_value, belief_k=args.belief,
                     opp_seed=args.opp_seed, json_out=args.json,
                     skip_random=args.skip_random,
-                    opp_prior_mix=args.opp_prior_mix))
+                    opp_prior_mix=args.opp_prior_mix,
+                    sensor_noise=args.sensor_noise, sensor_q=args.sensor_q,
+                    sensor_delta=args.sensor_delta))
 
 
 if __name__ == "__main__":

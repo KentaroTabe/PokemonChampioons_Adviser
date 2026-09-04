@@ -112,6 +112,12 @@ OFFENSIVE_EV = {"atk": 252, "spa": 252, "spe": 252}
 # BELIEF_MIN_WEIGHT 未満の仮説は刈り込む (レイテンシ対策)
 BELIEF_K = 8
 BELIEF_MIN_WEIGHT = 0.02
+# センサ世界 (P8): 自分アクティブの表示HPが固着している確率 q と、その世界での
+# HP低下幅。hp_uncertain (交代取り逃し等) が立った個体は高い q を使う。
+# 既定 0 = 無効 (P8 の事前登録判定で採用されるまで助言経路は変えない)
+SENSOR_Q_DEFAULT = 0.0
+SENSOR_Q_UNCERTAIN = 0.0
+SENSOR_HP_DELTA = 0.25
 
 
 def build_mon_view(p: dict, resolver=None, side: str = "opponent") -> Optional[MonView]:
@@ -1026,17 +1032,24 @@ def _run_search(state, my_state, my_view, my_p, opp_state, opp_view,
     import time as _time
     t0 = _time.perf_counter()
     result = None
-    worlds = _belief_worlds(opp_view, opp_state["party"][opp_state["active_index"]])
-    if worlds:
-        from advisor.search import aggregate_worlds
+    # 世界の積: 相手型の仮説 (P7) × 自分HPのセンサ世界 (P8)
+    from advisor.search import aggregate_worlds, sensor_worlds
+    opp_worlds = _belief_worlds(
+        opp_view, opp_state["party"][opp_state["active_index"]]) \
+        or [(1.0, opp_view)]
+    q = SENSOR_Q_UNCERTAIN if my_p.get("hp_uncertain") else SENSOR_Q_DEFAULT
+    me_worlds = sensor_worlds(me, q, SENSOR_HP_DELTA)
+    combos = [(w_m * w_o, me_m, view_o)
+              for w_m, me_m in me_worlds for w_o, view_o in opp_worlds]
+    if len(combos) > 1:
         outs, ws = [], []
-        for w_k, view_k in worlds:
-            opp_k = SimSide(active=view_k, active_hp=opp.active_hp,
+        for w_c, me_c, view_o in combos:
+            opp_k = SimSide(active=view_o, active_hp=opp.active_hp,
                             bench=opp.bench, stealth_rock=opp.stealth_rock)
-            outs.append(search(me, opp_k, my_moves, pool,
+            outs.append(search(me_c, opp_k, my_moves, pool,
                                my_field=my_field, opp_field=opp_field,
                                leaf_value_fn=leaf_fn, wincon_sid=wincon_sid))
-            ws.append(w_k)
+            ws.append(w_c)
         result = aggregate_worlds(outs, ws, coverage=sum(ws))
     if result is None:
         result = search(me, opp, my_moves, pool,

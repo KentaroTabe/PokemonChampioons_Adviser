@@ -69,9 +69,20 @@
   深さ拡張とセットで検討。
 
 ### P8 — sensor-aware search
-- 状態に信頼度 (HP幅、技観測確率、選出確度) を持たせ、**反転率の高いフィールドだけ分岐**する
-  (decision-aware expansion。感度表: 自分HP固着 28.1% / 相手判明技消失 23.9% / 相手HP固着 20.7%)。
-- 測定: 決定再生の摂動下の反転率と、シム内ノイズ注入 (HP±5%、技欠落) 下の勝率。P7 完了後に設計する。
+- 方針: 状態に信頼度を持たせ、**反転率の高いフィールドだけ分岐**する (decision-aware expansion)。
+  最新の決定再生 (9/4、36決定点) では **自分HP固着 52.9%** が突出しているため、第一弾は
+  「自分アクティブのHP」だけを対象にする。
+- 実装 (2026-09-04): `search.sensor_worlds(me, q, delta)` — 確率 q で「表示より delta 低いHP」の
+  世界を持ち、P7 の相手型世界との積を `aggregate_worlds` で統合する。エンジン側は
+  `SENSOR_Q_DEFAULT` / `SENSOR_Q_UNCERTAIN` (hp_uncertain が立った個体) / `SENSOR_HP_DELTA` で
+  制御し、既定 0 (判定まで助言経路は不変)。状態側に HP の鮮度時刻は無く、あるのは
+  `hp_uncertain` フラグ (交代取り逃し時) のみ — 鮮度時刻の追加は P8 採用後の課題。
+- 測定 (`scripts/p8_measure.sh`): シムで表示HPの固着ノイズを注入 (`displayed_hp`、確率 noise で
+  前回表示のまま。対戦タグで種付けし腕間で近い雑音系列)。4腕・同一相手列・各300戦:
+  noise下 unaware (q=0) / noise下 aware (q=noise) / 雑音なし unaware / 雑音なし aware。
+- 判定: 雑音下の aware−unaware の95%CI下限 > 0 (頑健性の利得) かつ 雑音なしの
+  aware−unaware の95%CI上限 > −0.03 (ヘッジの代償が小さい) で採用。K・葉評価・λ は
+  P7/P6 の判定結果の構成で固定。決定再生の反転率 (自分HP固着) は副次指標。
 
 ### 蒸留 (Metamon の代替)
 - 探索教師→方策蒸留は `train/bc_pretrain --teacher search` として基盤がある。ただし教師 (探索) が

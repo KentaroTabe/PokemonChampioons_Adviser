@@ -262,9 +262,35 @@ def _belief_views(opp_view, species: str, k: int) -> list:
     return worlds
 
 
+_shown_hp: dict = {}     # battle_tag -> (rng, 表示HP)  (P8 ノイズ注入)
+
+
+def displayed_hp(battle, true_hp: float, noise: float) -> float:
+    """自分アクティブの「表示HP」を返す (P8 センサ雑音の注入)。
+
+    noise>0 のとき、各決定で確率 noise で前回の表示のまま固着させる
+    (画面の更新取り逃しを模す)。乱数は対戦タグで決定的に種付けし、
+    同じ相手列の別腕で近い雑音系列になるようにする。0 なら真値。
+    """
+    if noise <= 0:
+        return true_hp
+    import random as _random
+    tag = getattr(battle, "battle_tag", "") or ""
+    ent = _shown_hp.get(tag)
+    if ent is None:
+        ent = [_random.Random(sum(map(ord, tag)) & 0xFFFF), true_hp]
+        _shown_hp[tag] = ent
+    rng, shown = ent
+    if rng.random() < noise and shown is not None:
+        return shown            # 固着: 前回表示のまま
+    ent[1] = true_hp
+    return true_hp
+
+
 def decide(battle, depth: int = 1, by: str = "recommended",
            use_value: bool = False, belief_k: int = 0,
-           opp_prior_mix: float = 0.0) -> Optional[dict]:
+           opp_prior_mix: float = 0.0, sensor_noise: float = 0.0,
+           sensor_q: float = 0.0, sensor_delta: float = 0.25) -> Optional[dict]:
     """探索で最善行動を選ぶ。
 
     返り値: {"kind": "move"|"switch", "move": Move|None, "mega": bool,
@@ -282,6 +308,9 @@ def decide(battle, depth: int = 1, by: str = "recommended",
     opp_prior_mix: 相手行動の事前分布の混合率 λ (P6-b)。0 で使用率のみ。
         自己対戦方策 (rl_bridge.policy_of_sim) を相手の立場で評価し、
         根の相手行動分布に (1-λ)·使用率 + λ·方策 で混ぜる
+    sensor_noise / sensor_q / sensor_delta (P8): 自分アクティブの表示HPを
+        確率 sensor_noise で固着させる雑音を注入し、探索は確率 sensor_q で
+        「表示より sensor_delta 低い」世界も持って統合する。
     """
     active = battle.active_pokemon
     opp_active = battle.opponent_active_pokemon
@@ -293,7 +322,10 @@ def decide(battle, depth: int = 1, by: str = "recommended",
 
     my_bench, my_bench_mons = _bench(battle.team.values(), active, own=True)
     opp_bench, _ = _bench(battle.opponent_team.values(), opp_active)
-    me = SimSide(active=my_view, active_hp=my_view.hp_frac, bench=my_bench,
+    # P8: 表示HPの固着ノイズ (探索が見る自分HPを真値から乖離させる)
+    shown = displayed_hp(battle, my_view.hp_frac, sensor_noise)
+    my_view.hp_frac = shown
+    me = SimSide(active=my_view, active_hp=shown, bench=my_bench,
                  stealth_rock="STEALTH_ROCK" in _names(battle.side_conditions))
     opp = SimSide(active=opp_view, active_hp=opp_view.hp_frac, bench=opp_bench,
                   stealth_rock="STEALTH_ROCK" in
@@ -328,19 +360,24 @@ def decide(battle, depth: int = 1, by: str = "recommended",
                                       turn=getattr(battle, "turn", None) or 5)
         except Exception:
             opp_prior = None
+    # 世界の積: 相手型の仮説 (P7) × 自分HPのセンサ世界 (P8)
+    from advisor.search import aggregate_worlds, sensor_worlds
+    opp_worlds = _belief_views(opp_view, opp_active.species, belief_k) \
+        or [(1.0, opp_view)]
+    me_worlds = sensor_worlds(me, sensor_q, sensor_delta)
+    combos = [(w_m * w_o, me_m, view_o)
+              for w_m, me_m in me_worlds for w_o, view_o in opp_worlds]
     result = None
-    worlds = _belief_views(opp_view, opp_active.species, belief_k)
-    if worlds:
-        from advisor.search import aggregate_worlds
+    if len(combos) > 1:
         outs, ws = [], []
-        for w_k, view_k in worlds:
-            opp_k = SimSide(active=view_k, active_hp=opp.active_hp,
+        for w_c, me_c, view_o in combos:
+            opp_k = SimSide(active=view_o, active_hp=opp.active_hp,
                             bench=opp.bench, stealth_rock=opp.stealth_rock)
-            outs.append(search(me, opp_k, my_moves, pool,
+            outs.append(search(me_c, opp_k, my_moves, pool,
                                my_field=my_field, opp_field=opp_field,
                                depth=depth, leaf_value_fn=leaf_fn,
                                opp_prior=opp_prior, prior_mix=opp_prior_mix))
-            ws.append(w_k)
+            ws.append(w_c)
         result = aggregate_worlds(outs, ws, coverage=sum(ws))
     if result is None:
         result = search(me, opp, my_moves, pool,

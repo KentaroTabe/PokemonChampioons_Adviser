@@ -166,3 +166,53 @@ def test_opp_prior_missing_keys_keep_usage_side():
 if __name__ == "__main__":
     test_opp_prior_mix_math()
     test_opp_prior_missing_keys_keep_usage_side()
+
+
+# ---- P8: 自分HPのセンサ世界 -------------------------------------------------
+def test_sensor_worlds_shape():
+    """q=0 で無効、q>0 で (1-q, そのまま) と (q, HPを delta 下げた世界)"""
+    from advisor.search import sensor_worlds
+    from advisor.dex import get_dex
+    from advisor.damage import MonView
+    from advisor.search import SimSide
+    sp = get_dex().species("garchomp")
+    v = MonView(species_id="garchomp", types=sp["types"], base=sp["baseStats"],
+                ev={"atk": 252}, nature={}, hp_frac=0.6)
+    me = SimSide(active=v, active_hp=0.6, bench=[], stealth_rock=False)
+    assert sensor_worlds(me, 0.0, 0.25) == [(1.0, me)]
+    ws = sensor_worlds(me, 0.3, 0.25)
+    assert len(ws) == 2 and math.isclose(ws[0][0], 0.7) and ws[1][0] == 0.3
+    assert ws[0][1] is me
+    assert math.isclose(ws[1][1].active_hp, 0.35, abs_tol=1e-6)
+    assert math.isclose(ws[1][1].active.hp_frac, 0.35, abs_tol=1e-6)
+    assert me.active.hp_frac == 0.6        # 元の世界は不変
+    # 低HPの下限
+    me2 = SimSide(active=v, active_hp=0.1, bench=[], stealth_rock=False)
+    assert math.isclose(sensor_worlds(me2, 0.5, 0.25)[1][1].active_hp, 0.02)
+    print("test_sensor_worlds_shape OK")
+
+
+def test_displayed_hp_noise_is_sticky_and_seeded():
+    """雑音注入: noise=0 で真値、noise=1 で初回以降は固着、同じタグで再現"""
+    from champions_agent.env.search_expert import displayed_hp, _shown_hp
+
+    class _B:
+        battle_tag = "battle-test-p8"
+
+    _shown_hp.clear()
+    assert displayed_hp(_B(), 0.9, 0.0) == 0.9
+    _shown_hp.clear()
+    assert displayed_hp(_B(), 0.9, 1.0) == 0.9      # 初回は真値
+    assert displayed_hp(_B(), 0.5, 1.0) == 0.9      # 以後は固着
+    _shown_hp.clear()
+    seq1 = [displayed_hp(_B(), hp, 0.5) for hp in (1.0, 0.8, 0.6, 0.4, 0.2)]
+    _shown_hp.clear()
+    seq2 = [displayed_hp(_B(), hp, 0.5) for hp in (1.0, 0.8, 0.6, 0.4, 0.2)]
+    assert seq1 == seq2                              # 種付けで再現
+    _shown_hp.clear()
+    print("test_displayed_hp_noise_is_sticky_and_seeded OK")
+
+
+if __name__ == "__main__":
+    test_sensor_worlds_shape()
+    test_displayed_hp_noise_is_sticky_and_seeded()

@@ -422,6 +422,24 @@ def _finalize(results: list, matrix) -> dict:
             "setup_bait": setup_bait}
 
 
+def sensor_worlds(me: SimSide, q: float, delta: float) -> list:
+    """自分の表示HPが固着している可能性を世界に分ける (P8)。
+
+    [(1-q, そのまま), (q, 自分アクティブのHPを delta だけ低く見た世界)]。
+    表示が古い (実際はもっと削られている) 側だけを持つ: 決定再生の感度表で
+    最大の反転要因 (自分HP固着 52.9%) は「表示より実HPが低い」向きのため。
+    q<=0 なら [(1.0, me)] (無効)。
+    """
+    if q <= 0 or me.active_hp <= 0:
+        return [(1.0, me)]
+    import copy as _copy
+    low = max(0.02, me.active_hp - delta)
+    view = _copy.copy(me.active)
+    view.hp_frac = low
+    hedged = replace(me, active=view, active_hp=low)
+    return [(1.0 - q, me), (q, hedged)]
+
+
 def aggregate_worlds(world_results: list, weights: list,
                      coverage: Optional[float] = None) -> Optional[dict]:
     """相手型の仮説 (世界) ごとの search() 結果を仮説重みで統合する (P7)。
