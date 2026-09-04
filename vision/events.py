@@ -226,8 +226,11 @@ def _match_keywords(norm: str, groups: list) -> bool:
     return True
 
 
-# 技イベントからの期待ダメージ反映 (決定的反映層、2026-09-05)。False で無効
-ESTIMATE_DAMAGE_ON_MOVE = True
+# 技イベントからの期待ダメージ反映 (決定的反映層、2026-09-05)。
+# P10 (シムの表示固着ノイズ 0.3 下、各600戦) で 推定あり 0.535 vs なし 0.568 (−0.033±0.026) と
+# 益が無かったため既定 False。実戦の固着頻度 (hp_read_ts / hp_estimated) を接続テストで
+# 実測してから、バー非表示時に限定した設計で再登録する
+ESTIMATE_DAMAGE_ON_MOVE = False
 ESTIMATE_HP_FLOOR = 1.0   # 推定値の下限 (%)
 
 

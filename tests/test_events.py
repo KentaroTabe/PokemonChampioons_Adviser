@@ -979,6 +979,9 @@ def test_expected_damage_applied_on_move_event():
     実読みが来れば上書きされ推定印が消える。変化技では減らない"""
     from vision.state import PokemonState
     from vision.extractors import _set_hp
+    import vision.events as ev_mod
+    orig_flag = ev_mod.ESTIMATE_DAMAGE_ON_MOVE
+    ev_mod.ESTIMATE_DAMAGE_ON_MOVE = True   # 機構の検証 (既定は P10 棄却で False)
     state, p = new_parser()
     state.player.active_index = 0
     me = state.player.party[0]
@@ -1012,6 +1015,11 @@ def test_expected_damage_applied_on_move_event():
     # 変化技では減らない
     p.parse("相手の ガブリアスの つるぎのまい!")
     assert me.hp_percent == 71.0 and me.hp_estimated is False
+    # 既定 (False) では減らない
+    ev_mod.ESTIMATE_DAMAGE_ON_MOVE = False
+    p.parse("相手の ガブリアスの げきりん!")
+    assert me.hp_percent == 71.0 and me.hp_estimated is False
+    ev_mod.ESTIMATE_DAMAGE_ON_MOVE = orig_flag
     print("test_expected_damage_applied_on_move_event OK")
 
 
