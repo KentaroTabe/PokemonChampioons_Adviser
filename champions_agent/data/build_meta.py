@@ -8,8 +8,9 @@ usage_snapshot(使用率統計)の最新スナップショットから、各ポ�
 from __future__ import annotations
 
 from champions_agent.config import (
-    META_SET_CHANGE_WARN, NATURE_ALIGN_MIN_POINTS, OFFENSIVE_ITEM_IDS,
-    SPREAD_OFFENSE_MIN_POINTS, USAGE_TARGET_FORMAT)
+    META_SET_CHANGE_WARN, META_THIN_LOG_MIN_USAGE, META_THIN_MOVE_PCT,
+    NATURE_ALIGN_MIN_POINTS,
+    OFFENSIVE_ITEM_IDS, SPREAD_OFFENSE_MIN_POINTS, USAGE_TARGET_FORMAT)
 from champions_agent.data import database as db
 
 # 性格 -> (補正先, 補正元)。無補正性格は含めない (整合チェック不要)
@@ -186,6 +187,36 @@ def _report_axis_drift(conn, snapshot_id: int) -> None:
           + ("この日を跨ぐベンチ絶対値の比較は不可" if mark else ""))
 
 
+def is_thin_moveset(max_move_pct: float | None,
+                    threshold: float = META_THIN_MOVE_PCT) -> bool:
+    """最多技の採用率が閾値未満なら技データが薄い (純粋関数)"""
+    return (max_move_pct or 0.0) < threshold
+
+
+def carry_forward_row(conn, pokemon_name: str, snapshot_id: int,
+                      threshold: float = META_THIN_MOVE_PCT):
+    """直近の『技データが健全な』スナップショットの meta_sets 行を返す (無ければ None)。
+
+    snapshot_id より前のスナップショットを新しい順に見て、その種の最多技採用率が
+    閾値以上で meta_sets 行を持つものを採用する。
+    """
+    rows = conn.execute(
+        """SELECT m.snapshot_id, m.ability_name, m.item_name, m.nature, m.evs,
+                  m.move1, m.move2, m.move3, m.move4
+           FROM meta_sets m
+           WHERE m.pokemon_name = ? AND m.snapshot_id < ? AND m.move1 IS NOT NULL
+           ORDER BY m.snapshot_id DESC LIMIT 10""",
+        (pokemon_name, snapshot_id)).fetchall()
+    for r in rows:
+        mx = conn.execute(
+            "SELECT MAX(usage_percent) FROM move_usage "
+            "WHERE snapshot_id = ? AND pokemon_name = ?",
+            (r[0], pokemon_name)).fetchone()[0]
+        if not is_thin_moveset(mx, threshold):
+            return r
+    return None
+
+
 def _top_n(conn, table: str, col: str, snapshot_id: int, pokemon_name: str, n: int) -> list[str]:
     rows = conn.execute(
         f"""
@@ -205,14 +236,20 @@ def _top1(conn, table: str, col: str, snapshot_id: int, pokemon_name: str) -> st
     return names[0] if names else None
 
 
-def build_meta_sets(fmt: str = USAGE_TARGET_FORMAT, source: str | None = None) -> int:
+def build_meta_sets(fmt: str = USAGE_TARGET_FORMAT, source: str | None = None,
+                    snapshot_id: int | None = None) -> int:
+    """スナップショット (既定: 最新) から meta_sets を再構築する。戻り値: 生成した行数。
 
-    """最新スナップショットからmeta_setsを再構築する。戻り値: 生成した行数。"""
+    snapshot_id を指定すると過去スナップショットを作り直す (技データ欠落の修復用、
+    tools/repair_meta_thin.py)。評価軸に使っているスナップショット (META_PIN) を
+    作り直すと軸が動くので、呼び出し側で除外すること。
+    """
     with db.get_connection() as conn:
         # require_meta=False: meta_sets を作る側なので、meta_sets が
         # まだ無い出来たてのスナップショットを対象にする必要がある
-        snapshot_id = db.latest_snapshot_id(conn, source=source, fmt=fmt,
-                                            require_meta=False)
+        if snapshot_id is None:
+            snapshot_id = db.latest_snapshot_id(conn, source=source, fmt=fmt,
+                                                require_meta=False)
         if snapshot_id is None:
             raise RuntimeError(
                 f"usage_snapshot が見つかりません(source={source}, format={fmt})。"
@@ -230,8 +267,36 @@ def build_meta_sets(fmt: str = USAGE_TARGET_FORMAT, source: str | None = None) -
         ).fetchall()
 
         inserted = 0
+        carried = 0
+        carried_major = []
         for row in pokemon_rows:
             name = row["pokemon_name"]
+
+            # 技データが薄い種 (主要技の欠落) は直近の健全な型を引き継ぐ
+            mx = conn.execute(
+                "SELECT MAX(usage_percent) FROM move_usage "
+                "WHERE snapshot_id = ? AND pokemon_name = ?",
+                (snapshot_id, name)).fetchone()[0]
+            if is_thin_moveset(mx):
+                prev = carry_forward_row(conn, name, snapshot_id)
+                if prev is not None:
+                    usage_row = conn.execute(
+                        "SELECT usage_percent FROM pokemon_usage "
+                        "WHERE snapshot_id = ? AND pokemon_name = ?",
+                        (snapshot_id, name)).fetchone()
+                    conn.execute(
+                        """INSERT INTO meta_sets
+                            (snapshot_id, pokemon_name, ability_name, item_name,
+                             tera_type, nature, evs, move1, move2, move3, move4, weight)
+                           VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)""",
+                        (snapshot_id, name, prev[1], prev[2], prev[3], prev[4],
+                         prev[5], prev[6], prev[7], prev[8],
+                         usage_row["usage_percent"] if usage_row else 0.0))
+                    inserted += 1
+                    carried += 1
+                    if usage_row and usage_row["usage_percent"] >= META_THIN_LOG_MIN_USAGE:
+                        carried_major.append(f"{name}({prev[0]})")
+                    continue
 
             ability = _top1(conn, "ability_usage", "ability_name", snapshot_id, name)
             item = _top1(conn, "item_usage", "item_name", snapshot_id, name)
@@ -281,6 +346,10 @@ def build_meta_sets(fmt: str = USAGE_TARGET_FORMAT, source: str | None = None) -
             )
             inserted += 1
 
+        if carried:
+            print(f"[build_meta] 技データが薄い {carried}種 は直近の健全な型を引き継ぎ "
+                  f"(閾値 {META_THIN_MOVE_PCT:.0f}%)。使用率{META_THIN_LOG_MIN_USAGE:.0f}%以上: "
+                  + (", ".join(carried_major) if carried_major else "なし"))
         conn.commit()
         _report_axis_drift(conn, snapshot_id)
 

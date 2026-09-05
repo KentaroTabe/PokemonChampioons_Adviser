@@ -2,6 +2,20 @@
  "_comment": "学習に影響する変更の記録。watch_training が推移グラフに赤い縦線として描画し、履歴表示にも差し込む。新しい変更を入れたら追記すること (at はローカル時刻 'YYYY-MM-DD HH:MM')。kind: net=ネット構成 / reward=報酬 / opponent=相手構成 / env=環境仕様 / eval=評価方法 / fix=不具合修正",
  "changes": [
   {
+   "at": "2026-09-05 19:00",
+   "kind": "env",
+   "label": "予定: 2026-09-09 11:00 JST レギュレーションM-C 切替 — 測定基準の切断点",
+   "detail": "公式告知 (news.pokemon-home.com/ja/page/816.html, pokemon.com 9/2): M-C は 9/9 11:00 〜 12/2 10:59 JST。M-A/M-B のポケモンは全て継続 + 新規24種 (公表例: ゴリランダー, セグレイブ, メガボーマンダ, メガグソクムシャ, メガセグレイブ, メガアブソルZ, メガガブリアスZ, メガルカリオZ。完全リストは未公表)。基本則の変更は告知なし。◆シミュレータ: 上流 smogon/pokemon-showdown (9/2 時点) に M-C フォーマット無し → 上流対応まで学習は M-B 内容 (gen9championsbssregmb) のまま継続。対応後に scripts/showdown_update.sh → TRAINING_BATTLE_FORMAT 切替 → dex/jp_names 更新。◆評価軸: 切替後のベンチ・h2h は旧レギュの値と比較不能。POOL_PIN/META_PIN は 新シーズン opendata が USAGE_MIN_RANKED_TEAMS (100) を超えた日に一度だけ更新し、前後のベンチ値を両方記録して再基準化する。best_checkpoint --reset も同時に実施。手順は docs/REGULATION_CHANGE_RUNBOOK.md の 2026-09-05 節",
+   "isolated": false
+  },
+  {
+   "at": "2026-09-05 18:40",
+   "kind": "env_data",
+   "label": "cbd 技上位行欠落 (8/19〜) の保護: 薄い種は直近の健全な型を引き継ぐ。snapshot 27 で47種置換",
+   "detail": "championsbattledata の書き出しが 2026-08-18 18:12Z 生成分から日替わりの 26〜48種で 技の 1〜5 位の行を落としており (6〜10 位だけ残る)、build_meta が残りの最多で代表型を組んでいた (例: カバルドン まもる/ほえる/こおりのキバ/ストーンエッジ)。上位30種では毎日 2〜5 種が該当し、8/19 のベンチ軸段差 (127種変化のうち 46種) の根本原因でもある。9/5 に build_meta へ引き継ぎ保護 (最多技 < META_THIN_MOVE_PCT=40% なら直近 10 スナップショット内の健全な型を引き継ぐ) を導入し、最新 snapshot 27 を再生成 (47種置換、上位30種: カバルドン/マスカーニャ/イダイトウ/アーマーガア/クチート)。過去 9〜26 も tools/repair_meta_thin で作り直した。◆学習への影響: 学習は最新 meta_sets を追うため、9/5 18:40 以降の相手プールで上位種の寄せ集め型が消える (8/19〜9/5 の学習分布の歪みは未測定)。◆評価軸: META_PIN=24 は据え置き (ギャラドス/サーフゴー/ウォッシュロトム/ガルーラの寄せ集め型が残る)。9/2〜9/5 の腕の比較は同一軸なので有効。9/9 の再基準化で保護つきスナップショットへピンを移す。詳細: docs/incidents/reports/2026-08-19-cbd-missing-top-move-rows.md。回帰テスト: tests/test_meta_thin_guard.py",
+   "isolated": false
+  },
+  {
    "at": "2026-09-05 04:10",
    "kind": "advisor",
    "label": "P9'判定: 棄却 (最終) — 各1,500戦で統合なし 0.634 vs 統合あり 0.627 (−0.007±0.017)。第1回の+0.05はEMA更新の時刻差が正体",

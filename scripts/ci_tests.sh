@@ -30,6 +30,7 @@ TESTS=(
   test_belief_search
   test_advisor_player
   test_hp_freshness
+  test_meta_thin_guard
 )
 
 fail=0

@@ -122,7 +122,7 @@ docs/CONNECTION_TEST_CHECKLIST.md と docs/incidents/ を参照。
 | pokedbフォルム丸め (ウォッシュロトム→基本ロトム等、7/17〜9/2) | フォルム対応表 + 過去20スナップショット再集計 + 型フォールバック。docs/incidents/reports/2026-09-02-pokedb-form-rounding.md | ✅ (test_pokedb_forms) |
 | 母数不足スナップショットのMAX汚染 (3構築のダイケンキ66.7%) | 診断側で母数足切り (USAGE_MIN_RANKED_TEAMS) | ✅ (test_meta_snapshot_filter) |
 | 型のキメラ合成 (ずぶとい+CS極振り+スカーフ) | 整合ペアの使用率積最大化 + 攻撃的持ち物→攻撃配分 + 図鑑分類。9/2 適用で9種是正 | ✅ (test_set_coherence) |
-| cbdフォルム別ページの日次揺れ (低使用率種の代表セットが非整合な寄せ集めになる日がある) | 低使用率種の型を使うときは技分布の水準を確認する運用 | 👁 (観察条件: 提案・診断で不自然な技構成が出たら分布を見る) |
+| cbd の技上位行欠落 (8/19〜: 日替わりの26〜48種で技1〜5位の行が落ち、上位種でも日に2〜5種が「まもる/ほえる」型の寄せ集めになる。8/19 のベンチ軸段差の根本原因) | build_meta の引き継ぎ保護 (最多技 < META_THIN_MOVE_PCT なら直近の健全な型を引き継ぐ) + snapshot 27 再生成 + 過去 9〜26 修復 (tools/repair_meta_thin)。docs/incidents/reports/2026-08-19-cbd-missing-top-move-rows.md | ✅ (test_meta_thin_guard)。**META_PIN=24 の評価軸には寄せ集め型4種 (ギャラドス/サーフゴー/ウォッシュロトム/ガルーラ) が残る → 9/9 再基準化で解消** |
 | 図鑑に basculegionf / taurospaldea* が未収録 | meta_top が図鑑非収録種を落とす (使用率0.5〜2.2%の低頻度種) | 👁 |
 
 ## G. 運用
