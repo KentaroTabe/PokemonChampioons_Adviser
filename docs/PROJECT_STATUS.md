@@ -183,5 +183,5 @@ round1 300戦 + round2 600戦の併合): ドドゲザン 0.754 / ガブリアス
 | docs/AXIS_GAP_ANALYSIS.md | 測定軸の乖離解析と P1 の事前登録 |
 | docs/TOP_PLAYER_PLAN.md / BELIEF_SEARCH_PLAN.md | 中長期計画・信念つき探索への転換計画 (RL_V7_SET_ENCODER_DESIGN.md は棄却記録) |
 | docs/VISION_LIB_EXTRACTION.md | vision層の切り出し計画 |
-| docs/TEAM_BUILDING_PLAN.md | 構築提案の方針転換案 v2 (9/6、レビュー反映): Claude Code 主導・S0〜S11、評価の三層化 (dev/validation/holdout)、助言操縦の successive halving、選出適応後に holdout |
+| docs/TEAM_BUILDING_PLAN.md | 構築提案の方針転換案 v3 (9/6、レビュー2件反映): Team × 専用選出モデルの共同最適化、相手系統の4階層 (SEARCH/SELECTION/HOLDOUT/STRESS)、confidence racing と4状態判定、Final Build Package |
 | logs/build_search/final_team.json | 推奨構築と想定運用 |

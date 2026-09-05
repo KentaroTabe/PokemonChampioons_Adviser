@@ -1,342 +1,383 @@
-# パーティ構築提案の方針転換案 v2 — Claude Code 主導・粒度別サブプロセス・評価の三層化
+# パーティ構築提案の方針転換案 v3 — Team × 専用助言方策の共同最適化
 
-作成: 2026-09-06 (v1)。改訂: 2026-09-06 (v2、外部レビューを反映。変更点は §10)。
-対象: 「構築はフロントではなく Claude Code のチャットで行い、裏で Opus / Sonnet / Haiku が粒度に応じた
-サブプロセスとして走る」方針転換の評価と、採用する場合の具体設計。
+作成: 2026-09-06 (v1)。改訂: v2 (外部レビュー1、評価の三層化)、**v3 (外部レビュー2、共同最適化と4階層評価)**。
+変更履歴は §12。v3 は「実装コストを無視した完成形」のレビューを土台に、**このプロジェクトの実コストで
+実現できる形**に落としたもの。理想形からの意図的な縮小は理由つきで明記する (§2.3, §8)。
 
 ---
 
 ## 0. 結論
 
-**採用。ただし評価設計 (S6〜S11) を先に直す。** 目的関数を「強い構築」から
-**「この助言システムを使うユーザーが勝ちやすい構築」** に置き直す点が核で、これは v1 と同じ。
-v2 で変えたのは、その目的関数を**最初から最後まで一貫して使い、かつ評価系への過適合を防ぐ**ための構造。
+**採用。ただし対象を「パーティ」から「パーティ + そのパーティ専用に適応した助言方策」に変える。**
 
-責任分離 (不変):
+最終成果物は `final_team.json` ではなく **Final Build Package** (チーム + 適応済み選出モデル + 選出パターン +
+対面行列 + 評価 + 頑健性 + 系譜 + manifest) になる (§6.4)。
+
+責任分離 (完成形):
 
 ```
-LLM        探索空間を賢く絞る (コンセプト・候補選抜・修正仮説・説明)
-ルール      間違ってはいけないことを保証する (所持・合法性・クローズ・整合・数値)
-シミュレータ 強いかどうかを決める (助言エンジン操縦の対応差)
-holdout    自分自身を騙していないことを確認する (最後に一度だけ使う相手集合)
+LLM         仮説生成・意味理解・説明 (コンセプト、修正仮説、記事)
+Search      候補生成 (コンセプト別・多様性保存ビーム、型の列挙)
+Rules       正しさ・合法性の保証 (所持・合法性・クローズ・整合・数値)
+Learning    チームごとの助言方策の適応 (選出モデル)
+Simulator   実験 (助言操縦の対戦)
+Statistics  比較・脱落・採否 (対応差・実用差 ε・confidence racing)
+Holdout     自己欺瞞の防止 (封印した相手集合で一度だけ)
 ```
 
-v2 の必須変更 (レビューの 4 点、いずれも採用):
+一言で: **LLM に最適解を考えさせるのではなく、LLM に探索仮説を大量に作らせ、ルールで合法な探索空間に
+閉じ込め、実際に配布する助言方策との組み合わせを未見の相手で競わせて決めるシステム。**
 
-1. **S6 をヒューリスティック順位付けから、助言操縦の多段評価 (successive halving) へ。**
-   移行の根拠が「素の強さと助言操縦の順位が一致しない」ことなので、絞り込みに別の指標を使うと
-   本評価に到達する前に真の最適解を捨てる。素の強さは**頑健性の副指標**として残す (§2.1)。
-2. **評価用の相手集合を dev / validation / holdout の三層に分ける。** 改修ループ (S8) が同じ相手列で
-   回ると、その相手列に強くなっただけの構築を「環境に強い」と誤認する (§2.2)。
-3. **選出学習の適応 (S9) を最終測定 (S10) より前に置く。** 測ったシステムと渡すシステムを同一にする。
-   実装上も、現行の測定 (check_advisor_player) は選出に `teampreview_order` (ヒューリスティック) を使い、
-   実際の助言が使う選出モデル (`selection_model.predict_best`) を使っていない。**測定の選出方策を
-   実助言と一致させる**ことも同時に行う (§2.4)。
-4. **「LLM 出力は id 限定」を「機械が意思決定に使うフィールドだけ構造化・検証対象、自然言語は表示専用」に
-   再定義する** (§4.2)。
-
-プロジェクト事情による読み替え: チャンピオンズにテラスタルは無い (メガシンカのみ、1 試合 1 回)。
-レビューの `tera_required` は **`mega_required` (メガ枠を要求するか / メガ石の競合)** に置き換える。
+v3 で v2 から変えた最重要点は 1 つ: **選出適応を最後に一度 (S9) ではなく、候補比較の段階から
+「Team + 候補専用の助言方策」を不可分の個体として扱う** (§2)。9/5 の実測で「素の強さと助言操縦の
+順位が一致しない」ことが示されたが、同じ理屈で「汎用の助言方策で測った順位」と「専用に適応した
+助言方策で測った順位」も一致しない可能性があり、後者こそユーザーが実際に得る値である。
 
 ---
 
-## 1. 現行の実態 (v1 §1 の要約)
+## 1. 現行の実態 (要約)
 
-- 入口: フロントの「構築提案」パネル → 別プロセス `tools.team_proposal --propose` (進化探索、実対戦評価、受入検定)。
-- 評価器: ローカル Showdown、両サイド同一方策 (ヒューリスティック / RL)。**助言エンジンは操縦しない。**
-- 診断: `tools/team_report` (1v1 行列・素早さ・耐久・共起補完)、`advisor/team_advice` (試合後アドバイス)。
-- 直近の実運用 (v3.1): 候補生成 → 助言操縦 300+600 戦 → 対応差 → Claude が想定運用。使い捨てスクリプトで実施。
-- 実測 (9/5): 素の強さ (ヒューリスティック操縦) ドドゲザン 0.713 / サザンドラ 0.600 / カバルドン 0.483 に対し、
-  助言操縦 (併合900戦) 0.754 / 0.742 / 0.713。順位も差の大きさも一致しない。
+- 入口: フロントの「構築提案」→ 別プロセス `tools.team_proposal --propose` (進化探索、両サイド同一方策の実対戦、受入検定)。
+- 助言エンジンは操縦しない。直近の v3.1 決定は候補生成 → 助言操縦 300+600 戦 → 対応差 → Claude の想定運用、を使い捨てスクリプトで実施。
+- 助言操縦の測定 (`tools/check_advisor_player`) は選出に `teampreview_order` (タイプ相性のヒューリスティック) を使い、
+  実助言の選出 (`advisor/selection.advise_selection` → `selection_model.predict_best`) と一致していない。
+- 選出モデルはチーム固有: 実際に使うチームで `scripts/collect_selection.sh 2 2500 myteam` (Showdown 実対戦、
+  50% ランダム選出で探索) → `train_selection` で微調整しないと汎化しない (2026-07-29 実測、train_selection.py 冒頭表)。
 
 ---
 
-## 2. 評価設計 (v2 の中心)
+## 2. 最適化対象と目的関数
 
-### 2.1 目的関数と副指標
+### 2.1 定義
 
-| 種別 | 指標 | 使い方 |
+```
+π_T = Adapt(π_0, T, D_search)          T 用に適応した助言方策
+T*  = argmax_T  E_{O ~ M} [ P(win | T, π_T, O) ]
+```
+
+T はパーティ、π_0 は汎用の助言方策、D_search は適応に使う相手集合 (§3)、M は現在の環境分布。
+成果物は (T*, π_T*) のペア。
+
+### 2.2 このプロジェクトで「適応 (Adapt)」が意味するもの
+
+| 助言方策の構成要素 | 現状 | 候補ごとの適応 | v3 の扱い |
+|---|---|---|---|
+| 選出 (3体選び) | 選出モデル (勝率回帰、チーム固有) + 相性フォールバック | **可能・安価**: 候補チーム固定で 5,000 戦収集 → 微調整。1 候補 10〜20 分の見込み (実績: 多チーム収集 49,000 件 / 30 分から推定、要実測) | **候補ごとに適応する** (S7) |
+| 行動 (技・交代) | ダメージ計算エンジン + RL 方策のブレンド (RL は自己対戦で学ぶ汎用方策、EMA 更新) | 理論上は可能だが、チームごとの RL 微調整は数時間規模で、ツールも未整備 | **汎用のまま** (ピン固定)。意図的な縮小。候補間で共通なので比較の公平性は保たれる |
+| 探索・信念 (BELIEF_K 等) | 既定 OFF (P7〜P10 で棄却) | 対象外 | 対象外 |
+
+つまり v3 の「候補専用の助言方策」= **汎用の行動方策 (ピン) + 候補専用に適応した選出モデル**。
+行動方策の適応は将来課題として §11 に残す。
+
+### 2.3 理想形からの縮小 (理由つき)
+
+| 完成形 (レビュー) | v3 | 理由 |
 |---|---|---|
-| Primary | **助言エンジン操縦の勝率** (advisor-as-player、固定チーム) | S6 の絞り込み、S7 の候補間比較、S10 の最終判定。すべて対応差 (§2.3) |
-| Guardrail | 素の強さ (ヒューリスティック / 標準操縦の勝率) | 参照パーティとの差が `BUILD_RAW_GUARD` (既定 −0.10) を下回る候補に「要注意」フラグ。助言エンジン固有の癖を悪用した構築の検出。**判定には使わない** |
-
-例: Advisor Δ +0.042 / Raw Δ −0.005 → 採用。Advisor Δ +0.042 / Raw Δ −0.158 → 要注意 (採用は可、報告に明記)。
-
-### 2.2 評価データの三層 (相手集合の分離)
-
-相手は POOL_PIN (上位実構築、現行 60 構築を抽選) から引く。これを**順位を交互配分**して 3 つの互いに素な
-集合に分ける (強さの分布を揃えるため。ハッシュ分割より偏らない):
-
-```
-順位 1,4,7,…  → dev        (探索・改修用。S6 / S8 で何度使ってもよい)
-順位 2,5,8,…  → validation (候補間比較用。S7。敗因を見て直接チューニングしない)
-順位 3,6,9,…  → holdout    (最終判定。S10 で run につき一度だけ使う)
-```
-
-実装: `RankedTeambuilder(split="dev"|"val"|"holdout", n_splits=3, top_n=BUILD_POOL_TOP_N)`。
-`BUILD_POOL_TOP_N` は既定 120 (各 40 構築。現行の top 60 では各 20 で多様性が足りない)。
-シードも層ごとに分ける (`BUILD_SEEDS = {"dev": [..], "val": [..], "holdout": [..]}`、run ごとに記録)。
-
-ルール:
-- dev は S6 の各ラウンドと S8 の再測定で使う。ラウンドごとにシードを変える (同じ 50 戦を見続けない)。
-- validation は S7 のみ。S8 の修正仮説は **dev の敗因統計**から作り、validation の敗因は見ない。
-- holdout は S10 で一度だけ。holdout で悪化なら「不採用 (要再設計)」とし、holdout を使い回して
-  再挑戦しない (次 run では別シードの holdout を使う)。
-
-### 2.3 対応差と実用差 ε、段階的サンプル数
-
-候補 A と参照 B を同一相手列・同一シードで戦わせ、対応差 Δ = W_A − W_B の信頼区間で判定する
-(現行 `paired_verdict` の拡張)。実用差 ε (`BUILD_EQUIV_EPS`、既定 0.02) を入れる:
-
-```
-CI 下限 > +ε          明確に改善
-CI 上限 < −ε          悪化
-CI が [−ε, +ε] に収まる  実用上同等 (これ以上戦数を増やさない)
-それ以外               判定不能 → 次の段階へ
-```
-
-段階的サンプル数 (adaptive): 100 → 300 → 600 → 1200。各段階の後に上の分類を行い、
-「明確」「悪化」「同等」のいずれかになった時点で止める。1200 でも判定不能なら「同等」として二次基準へ。
-(v1 の「300 → 判定不能なら 600 で終了」を置き換え。holdout が独立しているので途中の適応的評価は攻めてよい)
-
-### 2.4 測定系とユーザーに渡す系の同一性
-
-| 要素 | 現状 | v2 |
-|---|---|---|
-| 行動の方策 | 助言エンジン (damage-calc + RL blend)、RL はピン | 同じ。ピン dir を manifest に記録 |
-| 選出 (3体選び) | `teampreview_order` (ヒューリスティック) | **実助言と同じ `advise_selection` (選出モデル + 相性フォールバック)** を `--pick-policy advisor` で使う。既定を advisor にし、旧方式は比較用に残す |
-| 選出モデル | 採用後に適応 (S9 相当が最後) | **適応してから holdout (S10)** |
-| 相手 | top 60 をシードで抽選 | 三層分割 (§2.2) |
-
-### 2.5 共適応の管理
-
-「この構築の勝率」は構築だけの属性ではない。final_team.json と manifest.json に次を必ず持たせる:
-
-```json
-{"team_id": "...", "advisor_version": "<git commit>", "policy_checkpoint": "<pinned dir + sha256>",
- "selection_model": "<path + sha256>", "battle_engine_version": "<pokemon-showdown commit>",
- "ruleset": "gen9championsbssregmb", "meta_snapshot": 27, "pool_pin": "pokedb_s3_single_2026-07-17",
- "evaluation_dataset": {"split": "holdout", "top_n": 120, "n_splits": 3}, "seed_set": {"dev": [...], "val": [...], "holdout": [...]}}
-```
-
-助言エンジンや RL 方策を更新したら、採用中の構築を **同じ holdout 手順で再測定**し、差を記録する
-(訓練の日次定点と同じ扱い)。
+| 全候補に専用 Advisor | racing の第1ラウンド生存 (≤8) に専用選出モデル。第1ラウンドは汎用 (相性選出) で行う | 20 候補 × 20 分 = 7 時間は 1 run に対して重い。第1ラウンドの脱落は「明確に劣る」もののみ (racing、§4) なので取りこぼしは限定的 |
+| SEARCH 内 K-fold cross-fitting | SEARCH を A (適応用) / B (評価用) の固定 2 分割 | K 個の適応モデルを作るコストを避ける。漏洩防止 (「学習した相手に勝つ」) は 2 分割で達成できる |
+| 型の全列挙 (10^5 variants) | 型ライブラリ (代表型 + 使用率 5% 以上の技・持ち物の入替) の列挙 → 制約 → 評価関数 | 列挙は安いが評価 (ダメージ計算) が候補数に比例する。ライブラリ外の型は実戦で見ない |
+| 相手行動モデルの学習 | 対象外 | 単一ユーザーのログ規模 (数十戦/季) では学べない (§9) |
 
 ---
 
-## 3. 段の定義 (S0〜S11)
+## 3. 評価データ: 4 階層と系統単位の分割
 
-構築記事の構造 (コンセプト → 軸 → 相性補完・役割 → 調整 → 選出パターン → 試運転・改修) に写像する。
-外部の構築記事サイトの新規取得は CLAUDE.md により事前承認が要るため、記事本文はユーザーが貼る運用を既定とする。
+### 3.1 相手集合の系統化 (opponent family)
 
-| 段 | 名称 | 入力 → 出力 | 担当 | 評価セット |
-|---|---|---|---|---|
-| S0 | 依頼の正規化 (BuildSpec) | 自由文 / フォーム → `request.json` (所持・固定・除外・スタイル・予算・レギュ) | schema + Haiku (自由文のとき。チャットでは主セッション) | — |
-| S1 | 環境と対面特徴 | 使用率 DB・対戦ログ・レギュ → `meta_snapshot.json` (上位30種・代表型・共起・脅威・ローカルメタ・合法種)、`matchup_features.json` (§3.1) | ルール / データ | — |
-| S2 | コンセプト 3〜5 案 | request + 対面特徴 → `s02_concepts.json` (軸 2〜3 体・勝ち筋 enum・支援役割 enum・苦手) | **Opus** (候補は所持種 id に限定、特徴を根拠に) | — |
-| S3 | 多様な 6 体候補 | concepts → `s03_candidates.json` (コンセプトごとにビーム、多様性枠、計 15〜20 並び) | 探索 (ルール) + Sonnet 選抜 (候補外の種は選べない) | — |
-| S4 | 型候補列挙と制約充足 | candidates + 型ライブラリ → `s04_sets/*.txt` + `adjustments.json` | ルール (型ライブラリから列挙 → 評価関数 → 上位。合法性は Showdown validate-team) | — |
-| S5 | 選出・役割・仮想敵特徴 | sets → `s05_matchups.json` (対面特徴の並び版)、`selection_plan.json` (基本選出 / 対○○) | simulation + ルール → Sonnet 文章化 (表示専用) | — |
-| S6 | 粗→精の助言操縦評価 (successive halving) | 15〜20 並び → 50 戦 → 上位 8 → 200 戦 → 上位 3〜4 | **助言操縦** (対応差、参照 = 現行パーティ)。副指標として素の強さ 300 戦 | dev (ラウンドごとに別シード) |
-| S7 | validation で精密評価 | 上位 3〜4 + 参照 → adaptive 100→300→600→1200 | 測定 (対応差 + ε) | validation |
-| S8 | 敗因統計 → 修正仮説 → ≤2 枠改修 | dev の対戦記録 → `loss_stats.json` (機械) → Opus が仮説 ≤3 → 差し替え (系譜つき) → S4〜S7 を差し替え分のみ再実行。最大 2 反復 | LLM (仮説) + 測定 (検証) | dev (統計) / validation (再比較) |
-| S9 | 選出方策の適応 | 決定チームで collect_selection → train_selection (+5% ゲート、TEAM_PROPOSAL_DESIGN §4)。適応後のモデルを manifest に固定 | 学習 | — |
-| S10 | **holdout で最終測定** | 決定チーム (適応後の選出モデルで) + 参照 → adaptive、一度だけ | 測定 | holdout |
-| S11 | 成果物 | `final_team.json` (§2.5 の同一性情報つき)・`report.md` (構築記事形式)・my_team.json 登録・PROJECT_STATUS | ルール + Sonnet (記事) | — |
+POOL_PIN (上位実構築) の各チームを **系統 (family)** にまとめる: 種族集合の Jaccard 類似度が閾値以上
+(6 体中 4 体以上共通) かつメガ軸が同じなら同一系統。技だけ違う構築が別の階層に散る漏洩を防ぐ。
+系統ごとに `rank / usage / style (offense, cycle, stall, balance) / 主要種 / メガ軸` の属性を持たせ、
+**系統単位で層化分割** (group-stratified split) する。
 
-### 3.1 対面特徴 (S1): 1v1 行列を多面化する
+### 3.2 4 階層
 
-1v1 の勝敗だけでは「後投げできるか」「上から縛れるか」「起点にされるか」を落とす。脅威ごとに次の
-真偽値/数値を**ルールで**計算し (advisor/damage, endgame.duel, calc_stat, 技フラグ)、S2〜S8 で共通に使う:
+| 階層 | 用途 | 使い方の規則 | 目安 (top 200 → 系統化後) |
+|---|---|---|---|
+| SEARCH | 構築探索・改修・敗因統計・選出適応 | 何度使ってもよい。内部を A (適応用) / B (評価用) に固定分割し、適応した方策は B で測る | 50% |
+| SELECTION | 完成候補の比較 | 「A と B なら A」と選ぶのは可。**「A がこの相手に負けたから A を変える」は禁止** (訓練データ化するため) | 25% |
+| HOLDOUT | 最終確認 | **run につき一度だけ**。不合格なら「この run は失敗」で終了。holdout を見て修正しない。次 run は新しい Meta Snapshot か新しい封印 holdout を用意 | 20% |
+| STRESS | 頑健性 | 順位決定に使わない。分布外の相手 (外部取り込み構築・旧シーズン構築) と助言方策の揺らぎ (§4.4) | 5% + 外部構築 |
 
-```json
-{"my_id": "kingambit", "threat_id": "garchomp", "set_id": "garchomp#1",
- "lead": false, "switch_in": false, "revenge": true, "setup_stop": true, "speed_control": "slower",
- "hazard": "none", "status": "none", "mega_required": false, "resource_cost": "none",
- "evidence": {"dmg_taken_best": 0.71, "dmg_dealt_best": 0.62, "priority": "suckerpunch"}}
-```
-
-- lead: 対面から倒せる (先手 or 耐えて 2 発以内)。switch_in: 最大打点を受けて反撃で 2 発以内。
-- revenge: 上から or 先制技で削れた相手を落とす。setup_stop: 積み後 (+1/+2) の相手を止められる。
-- speed_control: faster / slower / tie (実数値、スカーフ考慮)。hazard: sets / removes / none。
-- status: 撒く変化技 (おにび/どく/眠り)。mega_required: メガシンカ時のみ成立。resource_cost: sash / berry / disguise / none。
-
-### 3.2 S3 の多様性
-
-単純な上位 N 保持はコアの相互作用 (60点+60点=95点) を捨てる。コンセプトごとに独立したビームを持ち、
-さらに `PLAY_STYLES` (offense / cycle / stall / balance) と「特定コア枠」で多様性枠を確保する
-(「最強候補 10」ではなく「性質の違う有望候補 10〜20」)。既存の進化探索 (evolve_teams) は候補源の一つとして残す。
-
-### 3.3 S8 の敗因統計 (機械が作る)
-
-LLM の敗因診断は文章生成であって因果分析ではない。先に機械が dev の対戦記録から統計を作り、
-LLM には「このデータを説明する修正仮説を最大 3 つ」だけ頼む:
-
-```
-loss_by_opponent_species / loss_by_opponent_lead / loss_by_archetype (相手構築のタグ)
-loss_by_our_lead / loss_by_our_selection (3体組)
-ko_source (誰に何で倒されたか) / unused_members (選出されない味方) / mega_timing (メガ使用/未使用と勝敗)
-```
-
-必要な実装: `tools/check_advisor_player --battle-log <jsonl>` で対戦単位の記録 (相手 6 体・自分の選出・先発・
-ひんし順・KO 元・メガ使用・ターン数・勝敗) を出す (現在は勝敗列のみ)。
-
-差し替えは系譜つき: `{"parent_team_id": "...", "changes": [{"out": "hydreigon", "in": "garchomp", "hypothesis": "..."}]}`。
-1 反復 ≤2 枠、最大 2 反復 (ablation に近い局所探索を保つ)。
+シードも階層ごとに分け、run の manifest に固定する。
 
 ---
 
-## 4. データ契約
+## 4. 統計的判定
 
-### 4.1 run ディレクトリ
+### 4.1 対応比較 (維持)
+
+候補 A・B・参照を **同一相手 × 同一シード** で走らせ、対応差 Δ = W_A − W_B を見る
+(相手の強弱と乱数のノイズが相殺される)。候補ごとの独立 1,000 戦より効率が良い。
+
+### 4.2 4 状態の判定 (実用差 ε = 0.02)
+
+```
+CI(Δ) 全体 > +ε            Improved
+CI(Δ) 全体 < −ε            Degraded
+CI(Δ) ⊂ [−ε, +ε]           Equivalent (統計的に有意でも実用上同等。これ以上戦数を増やさない)
+それ以外                    Uncertain → 追加測定
+```
+
+### 4.3 Confidence racing (固定の 20→8→4 はやめる)
+
+各候補を「現在の best」と対応比較し、Uncertain の間だけ追加測定する。戦数 100 → 300 → 600 → 1200 → 2400 は
+候補であって固定順ではない。Degraded になった候補は脱落、Improved なら best を更新。上限 `BUILD_MAX_BATTLES`
+(既定 2400) で打ち切り、そのときは Equivalent 扱い。多重比較で偽の Improved が出る危険は、SELECTION と HOLDOUT
+が別集合であることで抑える。
+
+### 4.4 頑健性 (STRESS): 素の強さより「助言方策への感度」
+
+最終候補を次の条件でも測る (STRESS 階層):
+
+```
+Advisor current (ピン) / Advisor previous checkpoint / 選出ノイズ +5%, +10% / 行動ノイズ (2位の手を確率 p で選ぶ)
+```
+
+例: current 60% / noisy 59% の A と、current 61% / noisy 48% の B なら、B は特定方策の癖を悪用している疑いが強い。
+素のヒューリスティック勝率は **diagnostic** (報告に載せるだけ) に格下げする。
+
+### 4.5 最終判定 (S12) の規則
+
+LLM は一切関与しない。Primary = 参照 (現行パーティ + その適応済み選出モデル) に対する ΔWR。
+
+```
+Improved   → 採用
+Equivalent → 二次指標でタイブレーク (catastrophic matchup 率 / 助言感度 / 選出の安定性 /
+              環境カバレッジ / ユーザー指定スタイルへの適合)。「こちらの方が綺麗」は入れない
+Degraded   → 不採用 (run 失敗)
+Uncertain  → 追加測定 (上限まで)
+```
+
+---
+
+## 5. 段の定義 (S0〜S13)
+
+| 段 | 内容 | 主担当 | 評価階層 |
+|---|---|---|---|
+| S0 | BuildSpec の正規化 (所持・固定・除外・スタイル・予算・レギュ) | rule + LLM (自由文のみ) | — |
+| S1 | Meta Snapshot の固定 (使用率 DB の健全スナップショット、ローカルメタ、合法種) | rule | — |
+| S2 | 相手系統の生成と 4 階層への分割、シード固定 | rule | — |
+| S3 | 脅威リストと **Interaction Matrix** (§6.2、連続値と資源コスト) | simulator (ダメージ計算・1v1) | — |
+| S4 | コンセプト系統を広く生成 (8〜20: offense / balance / bulky offense / cycle / setup / speed control / anti-meta / specific core …)。構造的に異なるものを残す | **Opus** (候補は所持種 id、根拠は行列) | — |
+| S5 | 6 体候補を多様性保存つきで探索 (コンセプト別ビーム + quota: best overall / offense / balance / anti-meta / alternative core / novelty)。Score に加えて候補間距離を見る | search + Sonnet 選抜 (候補外は選べない) | — |
+| S6 | 型候補の列挙と最適化 (ライブラリ × 合法な入替 → 役割制約 → ダメージ/素早さ/耐久の閾値 → 相乗制約 → 上位)。LLM は「この個体に speed control を担当させる」までで、型は探索器が決める | rule / search | — |
+| S7 | **候補ごとの選出モデル適応** (SEARCH-A で収集・微調整)。第1ラウンド生存 (≤8) が対象。適応前は相性選出で代用 | learning | SEARCH-A |
+| S8 | SEARCH-B で paired confidence racing (Team + 専用選出モデル として) | measurement | SEARCH-B |
+| S9 | 対戦記録 → 敗因統計 → LLM 修正仮説 (≤3) → **介入実験** (Variant A: 1 体変更 / B: 型だけ変更 / C: 選出方策だけ変更) を paired で比較し原因候補を確認。≤2 枠は同系統の改修、3 枠以上は新しいコンセプト系統として分岐 | rule + LLM + measurement | SEARCH |
+| S10 | 完成候補を SELECTION で比較 (見て選ぶのは可、見て直すのは不可) | measurement | SELECTION |
+| S11 | 勝者の選出モデルを SEARCH + SELECTION で再学習 (最終版を固定) | learning | SEARCH+SELECTION |
+| S12 | **封印 HOLDOUT で最終測定** + STRESS (§4.4、§4.5) | measurement | HOLDOUT / STRESS |
+| S13 | Final Build Package・説明記事・登録 | rule + LLM (記事は表示専用) | — |
+
+流れ: 探索 → そのチームを扱える選出方策を作る → Team × 方策として評価 → 改修 → 未見データで候補選択 →
+最終方策を学習 → 完全未使用データで一度だけ試験。
+
+---
+
+## 6. データ契約
+
+### 6.1 run ディレクトリ
 
 ```
 logs/build_search/runs/<run_id>/
-  manifest.json          git commit / prompt version / model version / simulator commit / advisor version /
-                         RNG seeds (dev/val/holdout) / dataset id (POOL_PIN, META_PIN, split) / schema version
-  request.json           S0
-  meta_snapshot.json     S1
-  matchup_features.json  S1
-  s02_concepts.json      S2
-  s03_candidates.json    S3
-  s04_sets/<k>.txt, adjustments.json   S4
-  s05_matchups.json, selection_plan.json  S5
-  evaluation/s06_r1.json, s06_r2.json, s07.json, s08_<iter>.json, s10_holdout.json
-  battles/<stage>_<k>.jsonl   対戦単位の記録
-  loss_stats.json        S8
-  lineage.json           S8 の系譜
-  llm/<stage>_<model>_<n>.json   prompt / response / 検証結果 / トークン数
-  final_team.json, report.md     S11
+  manifest.json           §6.4
+  request.json            S0
+  meta_snapshot.json      S1
+  opponent_families.json  S2 (系統・属性・階層割当・シード)
+  interaction_matrix.json S3
+  s04_concepts.json / s05_candidates.json / s06_sets/ / lineage.json
+  advisors/<candidate_id>/selection_model.*   S7, S11
+  battles/<stage>/<candidate_id>.jsonl        §6.3
+  evaluation/<stage>.json                      racing の履歴・4 状態
+  loss_stats.json / interventions.json         S9
+  robustness.json                              S12 STRESS
+  llm/<stage>_<model>_<n>.json                 prompt / response / 検証 / トークン数
+  final/                                       §6.4
 ```
 
-### 4.2 LLM 出力の規約 (authoritative と display の分離)
+### 6.2 Interaction Matrix (S3)
 
-機械が意思決定に使うフィールド (id・enum・構造化値) と、表示専用の自然言語を分ける。検証は前者だけに掛ける。
+covered / not covered の二値ではなく、**勝つためにどれだけ資源を要求するか**まで表す。
 
 ```json
-{"authoritative": {"core_ids": ["metagross", "kingambit"], "mega_id": "metagross",
-                   "win_condition": "setup_sweep", "support_roles": ["speed_control", "hazard_control"],
-                   "weak_to": ["garchomp", "annihilape"]},
- "display": {"explanation": "この2体を軸に…", "caveats": "…"}}
+{"my_id": "kingambit", "opponent": "garchomp#1",
+ "lead": 0.41, "switch_in": 0.22, "revenge": 0.88, "setup_stop": 0.70,
+ "speed_control": false, "hazard_pressure": 0.0, "status_pressure": 0.0,
+ "mega_required": false,
+ "resource_cost": {"hp": 0.62, "item": false, "mega": false}}
 ```
 
-検証器 (`validate.py`): (a) id の存在 (図鑑・使用率 DB)、(b) 所持、(c) 合法性、(d) クローズ、(e) enum の値域。
-不合格は理由つきで差し戻し (最大 2 回) → ルール既定値へフォールバック。
+値は代表型同士のダメージ計算と 1v1 (advisor/damage, endgame.duel, calc_stat) から機械的に出す
+(lead = 対面からの勝率、switch_in = 最大打点を受けてからの勝率、revenge = 削れた相手を上から/先制で落とせる度合い、
+setup_stop = +1/+2 の相手を止められる度合い、resource_cost.hp = 勝つのに失う HP 割合、item = タスキ/木の実を消費するか)。
+
+### 6.3 対戦記録 (勝敗だけでは足りない)
+
+測定用の対戦 (check_advisor_player) と接続テストの実戦の両方で、再現できるものはすべて残す:
+
+```
+battle_id, candidate_team_id, advisor_policy_id (行動方策ピン + 選出モデル id), opponent_team_id, opponent_family_id,
+battle_seed, policy_seed, team_preview (両者 6 体), our_selection, opponent_selection, lead (両者),
+turns[]: {state_before, advisor_recommendation (best + actions + スコア), executed_action, opponent_action, state_after},
+switch_events, ko_events (誰が何で誰を), status_events, resource_usage (タスキ/木の実/ばけのかわ), mega_usage (両者・ターン),
+win/loss, turn_count, remaining_members, termination_reason
+```
+
+これで後から助言側の問題 (推奨と結果の系統的なずれ) も解析できる。
+
+### 6.4 Final Build Package と manifest
+
+```
+final/
+  team.json                チーム (Showdown 形式 + 日本語表記 + 種族ID)
+  advisor_policy/          適応済み選出モデル (+ 行動方策ピンへの参照と sha256)
+  selection_patterns.json  基本選出 / 対○○ (S10 までの記録から機械生成、説明は表示専用)
+  matchup_matrix.json      Interaction Matrix の並び版
+  evaluation.json          racing / SELECTION / HOLDOUT の全結果 (対応差・CI・4 状態)
+  robustness.json          STRESS (方策の揺らぎ・分布外相手・素の強さ diagnostic)
+  lineage.json             親子関係・変更・仮説
+  build_report.md          構築記事形式 (Sonnet、表示専用)
+  manifest.json            git commit / build schema 版 / meta snapshot / opponent split と系統 / Showdown commit /
+                           行動方策 (モデル・チェックポイント sha256) / 選出モデル (同) / LLM モデルと prompt 版 /
+                           全シード / 評価プロトコル版
+```
+
+「この構築は強い」ではなく「この環境・この助言方策・この評価プロトコルでは、これだけ強かった」を再現可能な形で残す。
+助言方策や RL 方策を更新したら、採用中の Package を同じ HOLDOUT 手順で再測定し差を記録する。
+
+### 6.5 LLM 出力の規約 (v2 と同じ)
+
+機械が意思決定に使うフィールド (id・enum・構造化値) は `authoritative` に置き検証対象、自然言語は `display` (表示専用)。
+不合格は理由つきで差し戻し (最大 2 回) → ルール既定値。
 
 ---
 
-## 5. 実装構造
+## 7. 実装構造
 
 ```
 tools/team_build/
-  spec.py           S0: BuildSpec (schema)。自由文の構造化は llm.py 経由
-  meta_snapshot.py  S1: meta_snapshot.json
-  features.py       S1: 対面特徴 (§3.1、純粋関数。damage/endgame を使う)
-  concepts.py       S2: Opus 呼び出し + 検証
-  candidates.py     S3: コンセプト別ビーム + 多様性枠 + Sonnet 選抜
-  sets.py           S4: 型ライブラリ列挙 → 評価関数 → validate-team
-  matchups.py       S5: 並び版の対面特徴・相性選出 → 選出パターン (Sonnet は表示専用)
-  evaluate.py       S6/S7/S10: successive halving / adaptive / holdout。check_advisor_player を呼ぶ
-  verdict.py        対応差 + ε の分類 (純粋関数、paired_verdict の拡張)
-  loss_stats.py     S8: 対戦記録 → 敗因統計 (純粋関数)
-  repair.py         S8: 仮説 (Opus) → 差し替え (検証・系譜)
-  adapt.py          S9: collect_selection → train_selection のラッパー
-  report.py         S11: final_team.json / report.md / 登録
-  llm/provider.py   LLMProvider (抽象) — AgentToolProvider (チャット内、Agent ツール) / ClaudeCLIProvider (`claude -p --model`)
-  run.py            オーケストレータ: `python -m tools.team_build.run --request req.json [--from S4] [--to S7] [--llm headless]`
-scripts/team_build.sh
-.claude/skills/build-team/SKILL.md   チャット入口 (/build-team)
+  spec.py            S0        families.py        S2 (系統化・層化分割・シード)
+  meta_snapshot.py   S1        interaction.py     S3 (純粋関数中心)
+  concepts.py        S4 (Opus) candidates.py      S5 (多様性保存ビーム + Sonnet 選抜)
+  sets.py            S6        adapt.py           S7/S11 (collect_selection → train_selection のラッパー、候補ごと)
+  racing.py          S8/S10/S12 (confidence racing、4 状態、STRESS)
+  loss_stats.py      S9 (純粋関数)  interventions.py  S9 (仮説 → Variant A/B/C → paired)
+  package.py         S13 (Final Build Package、manifest、登録、記事)
+  battle_log.py      §6.3 の記録 (check_advisor_player から呼ぶ)
+  llm/provider.py    LLMProvider (AgentToolProvider / ClaudeCLIProvider)
+  run.py             オーケストレータ (`--from/--to`、`--llm headless`)
 ```
 
 既存ツールへの変更:
-- `tools/check_advisor_player`: `--pick-policy advisor|teampreview` (既定 advisor)、`--opp-split dev|val|holdout`、
-  `--battle-log <jsonl>`。
-- `champions_agent/env/ranked_teams.RankedTeambuilder`: `split` / `n_splits` (順位交互配分)。
-- `tools/team_proposal.paired_verdict`: ε つき分類へ拡張 (旧結果との互換のため旧関数は残す)。
-- `champions_agent/config.py`: `BUILD_EQUIV_EPS`, `BUILD_RAW_GUARD`, `BUILD_POOL_TOP_N`, `BUILD_STAGES = (100, 300, 600, 1200)`,
-  `BUILD_HALVING = ((20, 50), (8, 200), (4, 600))`, `BUILD_MAX_REPAIRS = 2`, `BUILD_MAX_CHANGES = 2`。
-- フロント (Phase 3): `run_team_build` (現行 `run_team_proposal` と同型: 別プロセス・ログ tail・対戦中ガード) と依頼フォーム。
+- `tools/check_advisor_player`: `--pick-policy advisor|teampreview` (既定 advisor)、`--selection-model <path>` (候補専用モデル)、
+  `--opp-split search-a|search-b|selection|holdout|stress`、`--battle-log <jsonl>`、`--pick-noise p`、`--action-noise p`、
+  `--models-dir` (行動方策ピン、既存の CHAMPIONS_MODELS_DIR)。
+- `champions_agent/env/ranked_teams`: 系統化と階層 (`split=`)、外部構築の STRESS 用取り込み。
+- `tools/collect_selection_data` / `train_selection`: `--team-file` で候補チーム固定、出力先を候補 id ごとに分ける。
+- `tools/team_proposal.paired_verdict`: 4 状態 + ε (旧関数は互換のため残す)。
+- `champions_agent/config.py`: `BUILD_EQUIV_EPS=0.02`, `BUILD_MAX_BATTLES=2400`, `BUILD_RACE_STEPS=(100,300,600,1200,2400)`,
+  `BUILD_FAMILY_JACCARD=0.5`, `BUILD_SPLIT=(0.5,0.25,0.2,0.05)`, `BUILD_MAX_CHANGES=2`, `BUILD_MAX_REPAIRS=2`,
+  `BUILD_ADAPT_BATTLES=5000`, `BUILD_STRESS_NOISE=(0.05,0.10)`。
+- フロント (Phase 3): `run_team_build` (現行 `run_team_proposal` と同型) と依頼フォーム。
 
 ---
 
-## 6. 品質ゲート
+## 8. コストと所要時間 (1 run、実測ベース)
 
-| ゲート | 内容 | 段 |
+助言操縦の測定は 5 並列で約 1 戦/秒 (9/5 実測)。学習ループと CPU を分け合う (構築中の一時停止は要承認)。
+
+| 段 | 内容 | 所要 |
 |---|---|---|
-| 所持 / 合法性 / クローズ / 型の整合 | v1 と同じ (ルール強制) | S2〜S8 |
-| 目的関数の一貫性 | 絞り込みも判定も助言操縦。素の強さは副指標のみ | S6/S7/S10 |
-| 三層分離 | dev で探索・改修、validation で比較、holdout は一度 | S6〜S10 |
-| 測定系の同一性 | 選出方策 = 実助言、RL ピン、適応後に holdout | S9/S10 |
-| 実用差 | ε 未満の差で戦数を増やさない | S6〜S10 |
-| 頑健性 | Raw Δ < BUILD_RAW_GUARD は要注意フラグ | S7/S10 |
-| 再現性 | manifest に commit / seeds / pins / model 版 / schema 版 | 全段 |
-| 監査 | LLM 全入出力・検証不合格履歴・トークン数 | 全段 |
+| S0〜S6 | ルール + LLM (Opus 1〜3 回、Sonnet 3〜5 回) | 10〜20 分 |
+| S8 r1 | 15〜20 候補 × 100 戦、汎用 (相性) 選出で racing | 25〜35 分 |
+| S7 | 生存 ≤8 候補の選出モデル適応 (5,000 戦収集 + 微調整、各 10〜20 分、2 並列) | 40〜80 分 |
+| S8 r2〜 | 生存候補 × 300〜1200 戦 (Uncertain の間だけ) | 40〜90 分 |
+| S9 | 介入実験 1 反復 (Variant A/B/C × paired 300〜600) | 40〜70 分 |
+| S10 | SELECTION で 3〜4 候補 + 参照 | 30〜60 分 |
+| S11 | 勝者の選出モデル再学習 | 15〜30 分 |
+| S12 | HOLDOUT + STRESS (方策 2 版 × ノイズ 3 条件、各 300) | 40〜80 分 |
+| 合計 | — | **4〜7 時間** (v2 の 2.5〜4 時間から増加。共同最適化と頑健性検査の代償) |
 
-テスト: features / verdict / loss_stats / validate / candidates の列挙は純粋関数として tests/ に追加 (LLM はモック)。
-測定を伴う統合は軽量テストと同列にしない。
+LLM は全体の 1 割未満。料金は llm/ のトークン数から実行時に算出する (本書では扱わない)。
 
 ---
 
-## 7. コストと所要時間 (1 run、実測ベースの見積もり)
+## 9. 利用ログの活用 — 単一ユーザー規模での現実解
 
-助言操縦の測定は 5 並列で約 1 戦/秒 (9/5 実測: 300 戦 × 5 本が 27 分)。学習ループと CPU を分け合う。
+レビュー2 後半は「利用者が増えて数万〜数十万試合のログが溜まる」前提で書かれている。本プロジェクトは
+単一ユーザー・ローカル運用で、実戦ログは接続テストの数戦〜数十戦/季 (logs/battles/*.jsonl、読み取り専用) である。
+その規模でも効くもの、効かないものを分ける。
 
-| 段 | 戦数 | 所要 |
+| 項目 | 規模の要件 | v3 での扱い |
 |---|---|---|
-| S6 r1: 20 並び × 50 戦 | 1,000 | 約 17 分 |
-| S6 r2: 8 × 200 | 1,600 | 約 27 分 |
-| S6 r3: 4 × 600 (または S7 に統合) | 2,400 | 約 40 分 |
-| S7: 4 + 参照、adaptive (平均 300〜600) | 1,500〜3,000 | 25〜50 分 |
-| S8: 1 反復 (差し替え分の S6/S7 再実行) | 1,000〜2,000 | 20〜35 分 |
-| S9: 選出適応 | — | 約 30 分 (実績: 49,000 件収集) |
-| S10: holdout (決定 + 参照、adaptive) | 600〜2,400 | 10〜40 分 |
-| 合計 | — | **2.5〜4 時間** (v1 の 1〜2.5 時間より長い。目的関数を一貫させた代償) |
+| ログの由来ラベル (organic / recommended / experiment) | 不要 | **今すぐ**: 実戦ログと測定ログに `source` と candidate/advisor id を付ける (自己強化ループの検出と補正の前提) |
+| 実際に当たった相手を評価分布に混ぜる (M_real) | 数十戦から可 (重みつき) | **S1**: ローカルメタを Meta Snapshot に含め、STRESS の相手に「実際に当たった構築」を入れる。順位決定には使わない (標本が小さい) |
+| ユーザーが助言に従わなかった手の反事実評価 (助言の系統的誤り) | 数百決定から可 | **既存の再生ハーネス** (advice_replay / decision_audit) で「助言 vs 実行」を探索器で再評価し、Q(実行) > Q(助言) の状態群を報告。ユーザー行動を模倣教師にはしない |
+| 相手の選出予測・行動モデルの学習 | 10^4 戦以上 | **対象外** (将来)。当面は使用率 DB の共起と相性選出で代用 |
+| 型推定 (Belief) の条件付き分布 | 10^3〜10^4 戦 | **対象外** (P7〜P10 で棄却済み。データが増えたら再検討) |
+| 次レギュレーションへの warm start | 不要 (構造の話) | **既に分離されている**: 行動方策 (RL、汎用) は継続、環境固有 (プール・埋め込み・選出モデル) は再収集 (REGULATION_CHANGE_RUNBOOK §5)。「Universal + Regulation adapter」の名前で manifest に明記 |
+| 環境ダイナミクス (数日後に増える構築) | 複数シーズンの履歴 | **対象外** (将来)。evolve_teams の `--forecast-mix` が原型 |
+| Active learning / 探索枠 (exploitation 90〜95%) | 多数ユーザー | **対象外**。単一ユーザーでは「通常利用」と「experimental build」を run の種別として分けるだけ |
+| 自己強化ループの補正 (importance weighting) | 多数ユーザー | **対象外**。単一ユーザーでは自分の推奨チームが「環境」に混ざらないので、由来ラベルだけで足りる |
 
-LLM: Opus 1〜3 回 (S2、S8)、Sonnet 3〜5 回 (S3、S5、S11)、Haiku 数回。全体の 1 割未満。
-料金は本書では扱わない (llm/ のトークン数から実行時に算出)。
-短縮策 (要ユーザー承認): 構築実行中は学習を一時停止 (`logs/PAUSE_TRAINING`、40 分で自動解除) して測定を速める。
+要点: ログの恩恵の中心は「LLM が賢くなる」ではなく **環境モデル・相手モデル・信念・選出/行動の価値** の精度であり、
+それが候補の順位付けを正確にする。単一ユーザー規模では **由来ラベル・ローカルメタ・反事実評価** の 3 つが現実解で、
+それ以外はログ量の閾値 (1,000 / 10,000 戦) を manifest に記録して将来判断する。
 
 ---
 
-## 8. 段階的導入 (評価設計を先に作る)
+## 10. 段階的導入
 
 | 段階 | 内容 | 成果 |
 |---|---|---|
-| Phase 0 (1 日) | **評価基盤**: 相手集合の三層分割、`--pick-policy advisor`、対戦単位の記録、ε つき対応差、manifest。v3.1 の使い捨てスクリプトの正式化 | 現行手順が再現可能かつ過適合しない形になる |
-| Phase 1 (2〜3 日) | S0/S1 (特徴含む)/S3 (ルール列挙)/S4/S6/S7/S10/S11 (ファイル) + `/build-team` スキル。S2 は主セッションが直接 | チャットで一気通貫 |
-| Phase 2 (2〜3 日) | S2/S8 を Opus、S3/S5/S11 を Sonnet のサブプロセスに (LLMProvider 経由)。S8 の敗因統計と系譜。S9 を組み込む | 説明つき提案と改修、holdout つき |
-| Phase 3 (1〜2 日) | フロントの依頼フォーム + ヘッドレス実行 + 結果表示。コスト上限 | 一発依頼の入口 |
+| Phase 0 (1〜2 日) | **評価基盤**: 相手系統化と 4 階層分割、`--pick-policy advisor` + `--selection-model`、対戦記録 (§6.3)、4 状態 racing、STRESS のノイズ注入、manifest、ログの由来ラベル。v3.1 の使い捨てスクリプトの正式化 | 現行手順が「Team × 方策」で再現可能かつ過適合しない形になる |
+| Phase 1 (2〜3 日) | S0/S1/S3/S5 (ルール列挙)/S6/S8/S10/S12/S13 + `/build-team` スキル。S4 は主セッションが直接。S7 は生存候補の選出適応 (adapt.py) | チャットで一気通貫の共同最適化 |
+| Phase 2 (2〜3 日) | S4/S9 を Opus、S5/S13 を Sonnet のサブプロセスに (LLMProvider)。S9 の介入実験 (Variant A/B/C)。系譜 | 説明つき提案と因果の切り分け |
+| Phase 3 (1〜2 日) | フロントの依頼フォーム + ヘッドレス実行 + Package の表示。コスト上限 | 一発依頼の入口 |
+| 将来 | 行動方策のチーム別適応、相手行動モデル、環境ダイナミクス (ログ閾値到達後) | — |
 
-M-C 切替 (9/9) との関係は v1 と同じ (環境データが薄い間は引き継ぎ保護、シミュレータは上流待ち)。
-
----
-
-## 9. 未決事項 (ユーザー判断)
-
-1. 実用差 ε (既定 0.02) と頑健性ガード (既定 −0.10) の値。
-2. 相手集合: top 120 を 3 分割 (各 40) でよいか。holdout で悪化した場合は「不採用・再設計」でよいか。
-3. 構築実行中に学習を一時停止してよいか (都度確認か、run ごとの既定にするか)。
-4. 1 run の LLM 予算 (呼び出し上限) と改修反復の上限 (既定 2)。
-5. 構築記事の参照は「ユーザーが本文を貼る」運用でよいか (外部取得は要承認)。
-6. 既存の進化探索 (evolve_teams) を S3 の候補源として残す (残す案)。
-7. 入口の優先順位: チャット (Phase 1) → フロント (Phase 3)。
+M-C 切替 (9/9) との関係: Phase 0〜1 は M-B データで作って検証できる。M-C の環境データが揃うまで S1 は旧シーズンの
+型を引き継ぐ。シミュレータの M-C 対応は上流待ち。
 
 ---
 
-## 10. v1 → v2 の変更履歴 (レビュー反映)
+## 11. 未決事項 (ユーザー判断)
 
-| レビュー指摘 | 反映 |
+1. 共同最適化の範囲: 選出モデルのみ (v3) でよいか。行動方策のチーム別適応は将来課題のままでよいか。
+2. 適応する候補数の上限 (既定: racing 第1ラウンド生存 ≤8) と 1 候補あたりの収集戦数 (既定 5,000)。
+3. 相手集合: top 200 を系統化して 50/25/20/5% でよいか。HOLDOUT 不合格は「run 失敗」で終了でよいか。
+4. 構築実行中の学習一時停止 (4〜7 時間の run では影響が大きい)。
+5. ε (0.02)、上限戦数 (2,400)、STRESS のノイズ (5%, 10%)。
+6. 1 run の LLM 予算、コンセプト数 (8〜20)、改修反復 (2)。
+7. 構築記事はユーザーが本文を貼る運用でよいか (外部取得は要承認)。
+8. 入口の優先順位: チャット (Phase 1) → フロント (Phase 3)。
+
+---
+
+## 12. 変更履歴
+
+### v2 → v3 (レビュー2 の反映)
+
+| 指摘 | 反映 |
 |---|---|
-| S6 のヒューリスティック順位付けは目的関数と矛盾 | 助言操縦の successive halving に変更 (§2.1, S6)。素の強さは頑健性の副指標に降格 |
-| S8 で評価セットが訓練データ化 | dev / validation / holdout の三層 (§2.2)。S8 は dev の統計だけを見る |
-| 選出学習の適応を最終測定の前に | S9 → S10 の順に変更。測定の選出方策も実助言と一致させる (§2.4、`--pick-policy advisor`) |
-| 「id 限定」の再定義 | authoritative / display の分離 (§4.2) |
-| 対応差の CI と実用差 ε | §2.3。adaptive 100→300→600→1200 |
-| 1v1 被覆行列は補助に留める | 多面的な対面特徴 (§3.1)。テラスはメガ要求に読み替え |
-| ビーム探索の多様性 | コンセプト別ビーム + スタイル/コア枠 (§3.2) |
-| 型はライブラリから選択 | S4 を「列挙 → 評価関数 → 上位」に明文化 |
-| 敗因帰属を LLM に信用させない | 機械の敗因統計 → LLM は仮説 ≤3 (§3.3)。対戦単位の記録を追加 |
-| ≤2 枠・2 反復と系譜 | 維持。lineage.json を追加 |
-| 共適応の管理 | manifest / final_team.json の同一性情報 (§2.5)。助言更新時の再測定 |
-| LLMProvider アダプタ | llm/provider.py |
-| manifest の徹底 | §4.1 |
+| 最適化対象を Team × Advisor に | §2。選出モデルを候補ごとに適応 (S7)、行動方策は汎用のまま (意図的縮小、§2.3) |
+| S9 選出適応を独立工程にしない | S7 (候補比較前) + S11 (勝者の再学習) に分割 |
+| 相手集合は系統単位で分割 | §3.1 (Jaccard + メガ軸、層化) |
+| 4 階層 (SEARCH / SELECTION / HOLDOUT / STRESS) と cross-fitting | §3.2。SEARCH は A/B 固定 2 分割 (K-fold は縮小) |
+| HOLDOUT 不合格時に修正しない | §3.2 (run 失敗で終了、次 run は新しい封印) |
+| 固定 halving → confidence racing | §4.3 |
+| 4 状態の判定と ε | §4.2 |
+| 素の強さより助言感度 | §4.4 (STRESS)。素の強さは diagnostic |
+| コンセプト 8〜20、多様性保存ビーム、型の列挙 | S4〜S6 |
+| Interaction Matrix (連続値・資源コスト) | §6.2 |
+| 仮説 → 介入 → 検証 (Variant A/B/C) | S9 |
+| ≤2 枠は改修、3 枠以上は新系統 | S9 |
+| 包括的な対戦記録 | §6.3 |
+| Final Build Package と manifest | §6.4 |
+| 利用ログの活用 | §9 (単一ユーザー規模に読み替え) |
+
+### v1 → v2 (レビュー1 の反映)
+
+S6 を助言操縦の多段評価に / 評価集合の三層化 / 選出適応後に holdout / LLM 出力の authoritative・display 分離 /
+対応差の CI と ε / 対面特徴の多面化 (テラス → メガ要求) / ビームの多様性 / 型はライブラリ選択 /
+敗因統計 → 仮説 / 系譜 / 共適応の manifest / LLMProvider。
