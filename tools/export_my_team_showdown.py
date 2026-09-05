@@ -35,6 +35,10 @@ def export_team() -> str:
     for ja, entry in current_team_entries().items():
         moves_ja = list(entry.get("技") or entry.get("moves") or [])
         sp = resolver.resolve_species(ja, cutoff=0.9)
+        # 手入力の「種族ID」(フォルム: ロトム→rotomwash 等) があればそれを書き出す
+        form_id = my_team.registered_species_id(ja)
+        if sp is not None and form_id:
+            sp = (sp[0], form_id) + tuple(sp[2:])
         if sp is None or len(moves_ja) < 4:
             skipped.append(ja)
             continue

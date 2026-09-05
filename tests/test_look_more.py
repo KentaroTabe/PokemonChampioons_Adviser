@@ -71,6 +71,9 @@ def main() -> None:
     tmp = Path(tempfile.mkdtemp()) / "my_team.json"
     my_team.CONFIG_PATH = tmp
     my_team._CACHE, my_team._CACHE_MTIME = None, -1.0
+    # 2026-09-06 ユーザー決定で画面からの自動登録は既定無効 (手入力ベース)。
+    # ここは読み取り経路そのものの回帰テストなので明示的に有効化する
+    my_team.AUTO_REGISTER_FROM_SCREEN = True
 
     from vision.pipeline import VisionPipeline
     pipe = VisionPipeline()
@@ -120,4 +123,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        from advisor import my_team as _mt
+        _mt.AUTO_REGISTER_FROM_SCREEN = False

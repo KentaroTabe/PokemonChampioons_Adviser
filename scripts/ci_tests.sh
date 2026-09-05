@@ -31,6 +31,7 @@ TESTS=(
   test_advisor_player
   test_hp_freshness
   test_meta_thin_guard
+  test_my_team_manual
 )
 
 fail=0

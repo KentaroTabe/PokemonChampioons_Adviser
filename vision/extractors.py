@@ -53,6 +53,13 @@ def resolve_my_species(resolver, name_text: str, cutoff: float = 0.72):
                     None, name_text, best).ratio() >= 0.55:
                 r = resolver.resolve_species(best, cutoff=0.9)
                 if r:
+                    # 登録エントリがフォルムの showdown id を持つならそれを使う
+                    # (HUD はフォルム名を省くため「ロトム」→ rotom に丸まる。
+                    #  手入力の「種族ID」: rotomwash で種族値・タイプを正しく引く)
+                    from advisor.my_team import registered_species_id
+                    sid = registered_species_id(r[0])
+                    if sid:
+                        r = (r[0], sid) + tuple(r[2:])
                     return r
     except Exception:
         pass
