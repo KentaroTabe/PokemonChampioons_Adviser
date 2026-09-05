@@ -18,6 +18,21 @@ from pathlib import Path
 from champions_agent.config import TRAINING_BATTLE_FORMAT
 
 
+def _constant_teambuilder(text: str):
+    """固定チームテキストを毎戦出す Teambuilder (last_text で型登録に使う)"""
+    from poke_env.teambuilder import Teambuilder
+
+    class _Const(Teambuilder):
+        def __init__(self):
+            self.last_text = text
+            self._packed = self.join_team(self.parse_showdown_team(text))
+
+        def yield_team(self):
+            return self._packed
+
+    return _Const()
+
+
 def _remembering_teambuilder(inner):
     """RankedTeambuilder をラップし、直近に出したチームテキストを覚える
     (poke-env の Player は Teambuilder 派生でないと受理しないため、
@@ -40,7 +55,8 @@ def _remembering_teambuilder(inner):
 async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
               skip_random: bool, belief_k: int | None, sensor_q: float | None,
               workers: int | None, no_rl_blend: bool,
-              search_blend: float | None = None) -> None:
+              search_blend: float | None = None,
+              team_file: str | None = None) -> None:
     from poke_env import AccountConfiguration
     from poke_env.player import RandomPlayer
     import advisor.engine as eng
@@ -64,9 +80,12 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
     stats: dict = {}
     latencies: list = []
     uid = os.getpid() % 100000
-    own_tb = _remembering_teambuilder(RankedTeambuilder(
-        rng=random.Random(opp_seed + 1) if opp_seed is not None else None,
-        meta_snapshot_id=meta_pin))
+    if team_file:
+        own_tb = _constant_teambuilder(Path(team_file).read_text(encoding="utf-8"))
+    else:
+        own_tb = _remembering_teambuilder(RankedTeambuilder(
+            rng=random.Random(opp_seed + 1) if opp_seed is not None else None,
+            meta_snapshot_id=meta_pin))
     player = make_advisor_player(
         team_source=own_tb, stats=stats, latencies=latencies,
         account_configuration=AccountConfiguration(f"ADv{uid}", None),
@@ -106,6 +125,7 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
             "win_rate": player.n_won_battles / n_battles, "outcomes": outcomes,
             "belief_k": eng.BELIEF_K, "sensor_q": eng.SENSOR_Q_DEFAULT,
             "workers": eng.SEARCH_WORKERS, "search_blend": eng.SEARCH_BLEND,
+            "team_file": team_file,
             "rl_blend": os.environ.get("RL_BLEND_WEIGHT", "25"),
             "opp_seed": opp_seed, "meta_snapshot": meta_pin,
             "latency_p50_ms": round(p50, 1), "latency_p95_ms": round(p95, 1),
@@ -140,10 +160,12 @@ def main() -> None:
     ap.add_argument("--no-rl-blend", action="store_true")
     ap.add_argument("--search-blend", type=float, default=None,
                     help="探索の推奨値をスコアへ統合する重み (P9)。0=無効")
+    ap.add_argument("--team-file", default=None,
+                    help="自分側を固定チーム (Showdownテキスト) にする (構築の操縦しやすさ測定)")
     args = ap.parse_args()
     asyncio.run(run(args.battles, args.opp_seed, args.json, args.skip_random,
                     args.belief_k, args.sensor_q, args.workers, args.no_rl_blend,
-                    search_blend=args.search_blend))
+                    search_blend=args.search_blend, team_file=args.team_file))
 
 
 if __name__ == "__main__":
