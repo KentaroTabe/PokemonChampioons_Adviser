@@ -227,6 +227,14 @@ def coverage_score(rows: dict) -> float:
 def rank_sets(candidates: list, threat_sets: dict) -> list:
     """各型候補を Interaction Matrix の被覆で採点して降順に返す (candidates は同一種族)"""
     from tools.team_build.interaction import matrix, view_from_set
+    # 代表型も常識フィルタにかける (代表型は各属性の最多を独立に貼り合わせたもので、
+    # こだわり系 + 積み/回復 のような不整合が残ることがある)。全滅なら元の候補をそのまま使う
+    sane = [c for c in candidates if not set_sanity(c)]
+    if sane:
+        for c in candidates:
+            if c not in sane:
+                c.notes.append("sanity:" + ";".join(set_sanity(c)))
+        candidates = sane
     scored = []
     for c in candidates:
         try:
