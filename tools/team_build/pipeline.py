@@ -1,13 +1,15 @@
 """測定段 (S7〜S13) のオーケストレーション。run.py から呼ぶ。
 
-S8a 全候補 (代理スコアで絞らない) を cheap adaptation (BUILD_SCREEN_ADAPT_BATTLES) してから screening racing
-    (参照も同じ予算で適応、SEARCH-B、脱落は伸び代 margin 込み)
-S7  生存候補 (Δ 順に max_candidates まで) の選出モデル適応 (SEARCH-A、収束まで)
-S8b 候補 × 選出方策 variant (fresh / generic) × 参照 (production 選出モデル) の racing (SEARCH-B、別 seed)。
-    候補ごとに variant を測定で選ぶ
+S8a 全候補 (代理スコアで絞らない) を cheap adaptation (BUILD_SCREEN_ADAPT_BATTLES) してから Team × PickVariant で
+    screening racing (variant = teampreview / generic / cheap、チームの実力 = variant の最善。参照も同じ variant の最善。
+    SEARCH fold B、脱落は伸び代 margin 込み)
+S7  生存チーム (最善 variant の Δ 順に max_candidates まで) の選出モデル適応 (SEARCH fold A、収束まで、checkpoint 保存)
+    → checkpoint は独立 fold V の実測勝率で選ぶ (val_mse では選ばない)
+S8b チーム × variant (teampreview / generic / fresh) × 参照の racing (fold B、別 seed)。チームごとに variant を測定で選ぶ
 S9  介入実験 (ルール mutation [+ LLM 仮説]、任意)
 S10 SELECTION で contenders を比較
-S11 勝者の選出モデルを SEARCH + SELECTION で再学習 (variant が fresh のとき)
+S11 (任意、既定 off) 勝者の選出モデルを SEARCH + SELECTION で再学習。checkpoint 選択の検証 fold が学習に入るため
+    既定では S7 の検証済み checkpoint をそのまま最終モデルにする
 S12 封印 HOLDOUT + STRESS + ablation
 S13 Final Build Package (registry に candidate)
 
@@ -23,9 +25,10 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
-from champions_agent.config import (BUILD_ADAPT_MIN_BATTLES, BUILD_EQUIV_EPS, BUILD_PICK_VARIANTS,
+from champions_agent.config import (BUILD_ADAPT_MIN_BATTLES, BUILD_ADAPT_VALIDATE_MAX_CKPTS, BUILD_ADAPT_VALIDATE_N,
+                                    BUILD_EQUIV_EPS, BUILD_FOLD_EVAL, BUILD_FOLD_VALIDATE, BUILD_PICK_VARIANTS,
                                     BUILD_RACE_DEFAULT_MAX, BUILD_RACE_STEPS, BUILD_SCREEN_ADAPT_BATTLES,
-                                    BUILD_SCREEN_MARGIN, BUILD_SCREEN_MAX, BUILD_SCREEN_STEPS)
+                                    BUILD_SCREEN_MARGIN, BUILD_SCREEN_MAX, BUILD_SCREEN_STEPS, BUILD_SCREEN_VARIANTS)
 from tools.team_build import ablation as AB
 from tools.team_build import adapt as AD
 from tools.team_build import holdout as HO
@@ -39,6 +42,7 @@ from tools.team_build.verdict import DEGRADED
 REPO = Path(__file__).resolve().parent.parent.parent
 VARIANT_SEP = "@"
 SCREEN_ADAPT_PARALLEL = 4     # cheap adaptation の同時実行数 (収集は 1 プロセス 1 戦ずつ)
+STOP_POINTS = ("s08a", "s08b")
 
 
 def _log(run_dir: Path, msg: str) -> None:
@@ -54,22 +58,21 @@ def pin_models() -> str:
 
 
 def reference_arm(run_dir: Path, models_dir: str) -> R.Arm:
-    """production の参照: 現在の my_team (config/my_team.json) + production 選出モデル
-    (登録チームが production の分布外なら実助言と同じく teampreview に落ちる)"""
+    """参照 = 現在の my_team (config/my_team.json)。選出方策は S8a で variant の最善を測って決める"""
     from tools.evaluate_team import build_myteam_text
-    from champions_agent.agent.selection_model import MODEL_PATH
     text = build_myteam_text()
     p = run_dir / "reference_team.txt"
     p.write_text(text, encoding="utf-8")
-    sel = str(MODEL_PATH) if Path(MODEL_PATH).exists() else None
-    return R.Arm("reference", p, sel, models_dir)
+    return R.Arm("reference", p, None, models_dir)
 
 
-def candidate_arms(run_dir: Path, models_dir: str, limit: Optional[int] = None) -> list:
+def candidate_arms(run_dir: Path, models_dir: str, limit: Optional[int] = None, ids: Optional[list] = None) -> list:
     sets = json.loads((run_dir / "s06_sets.json").read_text(encoding="utf-8"))
     arms = []
     for r in sets:
         if not r.get("ok"):
+            continue
+        if ids is not None and r["candidate_id"] not in ids:
             continue
         arms.append(R.Arm(r["candidate_id"], run_dir / "s06_sets" / f"{r['candidate_id']}.txt", None, models_dir))
     return arms[:limit] if limit else arms
@@ -83,7 +86,7 @@ def _write_stage(run_dir: Path, name: str, obj) -> None:
 
 # ------------------------------------------------------------------ 純粋関数 (テスト対象)
 def select_survivors(res8a: dict, max_candidates: Optional[int]) -> list:
-    """screening の生存候補 (脱落していない = degraded でない) を参照との Δ の降順に並べ、max_candidates まで返す"""
+    """(variant 無しの racing 結果向け) 脱落していない腕を参照との Δ の降順に並べ、max_candidates まで返す"""
     rows = []
     for a in res8a.get("arms", []):
         if a.get("eliminated_at") is not None or a.get("state") == DEGRADED:
@@ -105,21 +108,41 @@ def split_variant(arm_id: str) -> tuple:
     return arm_id, "fresh"
 
 
-def choose_variants(res8b: dict) -> dict:
-    """候補ごとに、脱落していない variant のうち参照との Δ が最大のものを選ぶ。
-    戻り値: {candidate_id: {"variant", "arm_id", "selection_model", "delta", "state"}}"""
+def choose_variants(res: dict) -> dict:
+    """チームごとに、脱落していない variant のうち参照との Δ が最大のものを選ぶ (Team × PickVariant の「最善」)。
+    戻り値: {team_id: {"variant", "arm_id", "selection_model", "pick_policy", "delta", "se", "state", "n"}}"""
     chosen = {}
-    for a in res8b.get("arms", []):
+    for a in res.get("arms", []):
         if a.get("eliminated_at") is not None or a.get("state") == DEGRADED:
             continue
-        d = (a.get("result") or {}).get("mean")
+        r = a.get("result") or {}
+        d = r.get("mean")
         if d is None:
             continue
         cid, v = split_variant(a["arm_id"])
         if cid not in chosen or d > chosen[cid]["delta"]:
             chosen[cid] = {"variant": v, "arm_id": a["arm_id"], "selection_model": a.get("selection_model"),
-                           "delta": d, "state": a.get("state")}
+                           "pick_policy": a.get("pick_policy") or ("teampreview" if v == "teampreview" else "advisor"),
+                           "delta": d, "se": r.get("se"), "state": a.get("state"), "n": a.get("n_done")}
     return chosen
+
+
+def team_survivors(chosen: dict, max_candidates: Optional[int]) -> list:
+    """choose_variants の結果を Δ の降順に並べ、max_candidates まで返す"""
+    ids = sorted(chosen, key=lambda c: -chosen[c]["delta"])
+    return ids[:max_candidates] if max_candidates else ids
+
+
+def best_by_win_rate(rows: dict, order: tuple) -> Optional[str]:
+    """{variant: win_rate} から最大のもの (同率は order の先頭寄り)"""
+    best, best_wr = None, None
+    for v in order:
+        wr = rows.get(v)
+        if wr is None:
+            continue
+        if best_wr is None or wr > best_wr:
+            best, best_wr = v, wr
+    return best
 
 
 # ------------------------------------------------------------------ 実行
@@ -140,6 +163,20 @@ def _screen_adapt_all(arms: list, split: Path, out_dir: Path, seed: int, n_battl
     return out
 
 
+def _variant_arm(base: R.Arm, variant: str, models: dict, generic_path: Optional[str]) -> Optional[R.Arm]:
+    """base (チーム) の選出方策 variant の腕。使えない variant は None"""
+    if variant == "teampreview":
+        return R.Arm(variant_arm_id(base.arm_id, variant), base.team_file, None, base.models_dir, pick_policy="teampreview")
+    if variant == "generic":
+        if not generic_path:
+            return None
+        return R.Arm(variant_arm_id(base.arm_id, variant), base.team_file, generic_path, base.models_dir, pick_policy="advisor")
+    model = models.get(base.arm_id)
+    if not model:
+        return None
+    return R.Arm(variant_arm_id(base.arm_id, variant), base.team_file, model, base.models_dir, pick_policy="advisor")
+
+
 def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, max_battles: int = BUILD_RACE_DEFAULT_MAX,
                     adapt_min: int = BUILD_ADAPT_MIN_BATTLES, adapt_chunk: int = AD.CHUNK, adapt_max: int = AD.MAX_BATTLES,
                     stress_n: int = ST.STRESS_BATTLES, ablation_n: int = AB.ABLATION_BATTLES, parallel: int = R.PARALLEL,
@@ -147,21 +184,35 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
                     llm_provider=None, adapt_action: bool = False, action_steps: int = AD.ACTION_CHUNK_STEPS,
                     action_eval: int = AD.ACTION_EVAL_BATTLES, screen_adapt: int = BUILD_SCREEN_ADAPT_BATTLES,
                     screen_margin: float = BUILD_SCREEN_MARGIN, screen_steps: tuple = BUILD_SCREEN_STEPS,
-                    screen_max: int = BUILD_SCREEN_MAX, variants: tuple = BUILD_PICK_VARIANTS) -> dict:
+                    screen_max: int = BUILD_SCREEN_MAX, screen_variants: tuple = BUILD_SCREEN_VARIANTS,
+                    variants: tuple = BUILD_PICK_VARIANTS, candidate_ids: Optional[list] = None,
+                    stop_after: Optional[str] = None, s08b_seed_offset: int = 1, s11: bool = False,
+                    validate_n: int = BUILD_ADAPT_VALIDATE_N, validate_max: int = BUILD_ADAPT_VALIDATE_MAX_CKPTS) -> dict:
     from champions_agent.agent.selection_model import GENERAL_MODEL_PATH
     log = lambda m: _log(run_dir, m)
     split = run_dir / "opponent_families.json"
     doc = json.loads(split.read_text(encoding="utf-8"))
+    n_folds = len(doc.get("search_folds") or [])
+    if n_folds <= max(BUILD_FOLD_EVAL, BUILD_FOLD_VALIDATE):
+        raise SystemExit(f"opponent_families.json の SEARCH fold が {n_folds} 個で足りない (評価 {BUILD_FOLD_EVAL} / "
+                         f"検証 {BUILD_FOLD_VALIDATE})。探索段を新しい seed でやり直す")
     models_dir = pin_models()
-    log(f"S7-13 measurement start: models_dir={models_dir}")
+    generic = str(GENERAL_MODEL_PATH) if Path(GENERAL_MODEL_PATH).exists() else None
+    log(f"S7-13 measurement start: models_dir={models_dir} generic={'ok' if generic else 'none'}")
     ref = reference_arm(run_dir, models_dir)
-    # 代理スコアでは絞らない (max_candidates は S7 で収束まで適応する数)
-    cands = candidate_arms(run_dir, models_dir, None)
+    # 代理スコアでは絞らない (max_candidates は S7 で収束まで適応するチーム数)
+    cands = candidate_arms(run_dir, models_dir, None, ids=candidate_ids)
     if not cands:
         raise SystemExit("合法な候補がありません (s06_sets.json)")
     summary = {"models_dir": models_dir, "reference": ref.to_dict(), "n_candidates": len(cands),
+               "candidate_ids": [a.arm_id for a in cands],
                "protocol": {"screen_adapt": screen_adapt, "screen_margin": screen_margin, "screen_steps": list(screen_steps),
-                            "screen_max": screen_max, "variants": list(variants), "max_candidates": max_candidates}}
+                            "screen_max": screen_max, "screen_variants": list(screen_variants),
+                            "variants": list(variants), "max_candidates": max_candidates,
+                            "fold_eval": BUILD_FOLD_EVAL, "fold_validate": BUILD_FOLD_VALIDATE,
+                            "validate_n": validate_n, "validate_max_ckpts": validate_max,
+                            "s08b_seed_offset": s08b_seed_offset, "s11": s11, "stop_after": stop_after}}
+    eval_dir = run_dir / "evaluation"
 
     # S8a-1: 全候補 + 参照を同じ予算で cheap adaptation
     log(f"S8a cheap adaptation: {len(cands)} 候補 + 参照 × {screen_adapt} 戦")
@@ -169,21 +220,41 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
                                       adapt_chunk, parallel, log)
     _write_stage(run_dir, "s08a_screen_models", screen_models)
 
-    # S8a-2: screening racing (脱落は margin 込み、短い段階)
-    arms8a = [R.Arm(a.arm_id, a.team_file, screen_models.get(a.arm_id), models_dir) for a in cands]
-    ref8a = R.Arm("reference", ref.team_file, screen_models.get("reference"), models_dir)
-    res8a = R.race(arms8a, ref8a, split, "search", seed, run_dir / "evaluation", stage="s08a_screen", fold=1,
+    # S8a-2: 参照の variant の最善 (同一相手列、screen_max 戦)
+    ref_variants = [a for a in (_variant_arm(ref, v, screen_models, generic) for v in screen_variants) if a]
+    R.measure_round(ref_variants, screen_max, 0, seed, split, "search", BUILD_FOLD_EVAL, eval_dir, "s08a_reference",
+                    parallel=parallel)
+    ref_wr = {split_variant(a.arm_id)[1]: (sum(a.outcomes) / len(a.outcomes) if a.outcomes else None) for a in ref_variants}
+    ref_variant = best_by_win_rate(ref_wr, screen_variants) or "teampreview"
+    ref_best = next(a for a in ref_variants if split_variant(a.arm_id)[1] == ref_variant)
+    summary["reference_variant"] = {"variant": ref_variant, "win_rates": ref_wr, "selection_model": ref_best.selection_model,
+                                    "pick_policy": ref_best.pick_policy}
+    log(f"S8a reference variant: {ref_variant} " + " ".join(f"{k}={v}" for k, v in ref_wr.items()))
+
+    def ref_arm(arm_id: str = "reference") -> R.Arm:
+        return R.Arm(arm_id, ref.team_file, ref_best.selection_model, models_dir, pick_policy=ref_best.pick_policy)
+
+    # S8a-3: screening racing (チーム × variant、脱落は margin 込み、短い段階)
+    arms8a = [a for c in cands for a in (_variant_arm(c, v, screen_models, generic) for v in screen_variants) if a]
+    res8a = R.race(arms8a, ref_arm(), split, "search", seed, eval_dir, stage="s08a_screen", fold=BUILD_FOLD_EVAL,
                    steps=screen_steps, max_battles=screen_max, eps=BUILD_EQUIV_EPS + screen_margin,
                    parallel=parallel, log=log)
-    all_survivors = select_survivors(res8a, None)
+    chosen8a = choose_variants(res8a)
+    all_survivors = team_survivors(chosen8a, None)
     survivors = all_survivors[:max_candidates] if max_candidates else all_survivors
     log(f"S8a survivors: {len(all_survivors)}/{len(cands)} (脱落 {len(cands) - len(all_survivors)})、"
-        f"S7 で適応する Δ 上位 {len(survivors)}: {survivors}")
+        f"S7 で適応する Δ 上位 {len(survivors)}: " +
+        ", ".join(f"{c}={chosen8a[c]['variant']}({chosen8a[c]['delta']:+.3f})" for c in survivors))
+    summary["s08a_variants"] = chosen8a
     summary["s08a_survivors"] = survivors
-    summary["s08a_eliminated"] = [a["arm_id"] for a in res8a["arms"] if a["arm_id"] not in all_survivors]
-    summary["s08a_capped"] = [c for c in all_survivors if c not in survivors]   # 生存したが適応枠に入らなかった候補
+    summary["s08a_eliminated"] = [a.arm_id for a in cands if a.arm_id not in chosen8a]
+    summary["s08a_capped"] = [c for c in all_survivors if c not in survivors]
+    if stop_after == "s08a":
+        summary["result"] = "stopped_after_s08a"
+        _write_stage(run_dir, "summary", summary)
+        return summary
 
-    # S7: 生存候補の選出モデル適応 (SEARCH-A、収束まで、チェックポイント保存)
+    # S7: 生存チームの選出モデル適応 (fold A、収束まで、checkpoint 保存) → 独立 fold V の実測で checkpoint を選ぶ
     adapted = {}
     for a in cands:
         if a.arm_id not in survivors:
@@ -191,52 +262,65 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
         r = AD.adapt_selection(a.arm_id, a.team_file, split, run_dir / "advisors", seed, min_battles=adapt_min,
                                chunk=adapt_chunk, max_battles=adapt_max, log=log, registry=registry,
                                keep_checkpoints=True)
+        ckpts = AD.checkpoints_from_history(r.get("history"))
+        if ckpts:
+            sel = AD.select_checkpoint(a.arm_id, a.team_file, ckpts, split, seed + 8, models_dir,
+                                       run_dir / "advisors" / a.arm_id / "validate", parallel=parallel, log=log,
+                                       fold=BUILD_FOLD_VALIDATE, n=validate_n, max_ckpts=validate_max)
+            r["validated"] = sel
+            if sel.get("chosen"):
+                r["model_last"] = r.get("model")
+                r["model"] = sel["chosen"]
+                if registry is not None and sel["chosen"] != r.get("model_last"):
+                    try:
+                        row = registry.register("selection_model", Path(sel["chosen"]),
+                                                meta={"candidate_id": a.arm_id, "n_battles": sel.get("chosen_n"),
+                                                      "validated": True, "fold": BUILD_FOLD_VALIDATE},
+                                                run_id=run_dir.name, status="candidate")
+                        r["artifact_id_validated"] = row["id"]
+                    except Exception as e:
+                        r["registry_error_validated"] = repr(e)
         adapted[a.arm_id] = r
     _write_stage(run_dir, "s07_adapt", adapted)
 
-    # S8b: 候補 × variant (fresh / generic) × 参照 (production)。variant は候補ごとに測定で選ぶ
+    # S8b: チーム × variant (teampreview / generic / fresh) × 参照 (variant の最善)。variant はチームごとに測定で選ぶ
+    fresh_models = {cid: r.get("model") for cid, r in adapted.items()}
     arms8b = []
     for a in cands:
         if a.arm_id not in adapted:
             continue
-        fresh = adapted[a.arm_id].get("model")
         for v in variants:
-            if v == "fresh":
-                if not fresh:
-                    continue
-                model = fresh
-            elif v == "generic":
-                if not Path(GENERAL_MODEL_PATH).exists():
-                    continue
-                model = str(GENERAL_MODEL_PATH)
-            else:
-                continue
-            arms8b.append(R.Arm(variant_arm_id(a.arm_id, v), a.team_file, model, models_dir))
-    res8b = R.race(arms8b, R.Arm("reference", ref.team_file, ref.selection_model, models_dir), split, "search", seed + 1,
-                   run_dir / "evaluation", stage="s08b_adapted", fold=1, steps=steps, max_battles=max_battles,
-                   parallel=parallel, log=log)
+            arm = _variant_arm(a, v, fresh_models, generic)
+            if arm:
+                arms8b.append(arm)
+    res8b = R.race(arms8b, ref_arm(), split, "search", seed + s08b_seed_offset, eval_dir, stage="s08b_adapted",
+                   fold=BUILD_FOLD_EVAL, steps=steps, max_battles=max_battles, parallel=parallel, log=log)
     chosen = choose_variants(res8b)
-    contenders = list(chosen)
+    contenders = team_survivors(chosen, None)
     summary["s08b_variants"] = chosen
     summary["s08b_contenders"] = contenders
-    log(f"S8b contenders: " + ", ".join(f"{c}={chosen[c]['variant']}({chosen[c]['delta']:+.3f})" for c in contenders))
+    log("S8b contenders: " + ", ".join(f"{c}={chosen[c]['variant']}({chosen[c]['delta']:+.3f})" for c in contenders))
+    if stop_after == "s08b":
+        summary["result"] = "stopped_after_s08b"
+        _write_stage(run_dir, "summary", summary)
+        return summary
 
     # S9: 介入実験 (ルール mutation、任意)
     if repairs > 0 and contenders:
         log("S9: 介入実験は run.py の --repairs で有効化。この版はルール mutation の記録のみ (検証は次版)")
         best_id = max(contenders, key=lambda cid: chosen[cid]["delta"])
         recs = []
-        bl = run_dir / "evaluation" / "battles" / f"s08b_adapted_{chosen[best_id]['arm_id']}.jsonl"
+        bl = eval_dir / "battles" / f"s08b_adapted_{chosen[best_id]['arm_id']}.jsonl"
         if bl.exists():
             recs = [json.loads(l) for l in bl.read_text(encoding="utf-8").splitlines() if l.strip()]
         st = loss_stats(recs)
         _write_stage(run_dir, "s09_loss_stats", st)
 
-    # S10: SELECTION で比較 (候補ごとに選んだ variant で)
+    # S10: SELECTION で比較 (チームごとに選んだ variant で)
     team_of = {a.arm_id: a.team_file for a in cands}
-    arms10 = [R.Arm(cid, team_of[cid], chosen[cid]["selection_model"], models_dir) for cid in contenders]
-    ref10 = R.Arm("reference", ref.team_file, ref.selection_model, models_dir)
-    res10 = R.race(arms10, ref10, split, "selection", seed + 2, run_dir / "evaluation", stage="s10",
+    arms10 = [R.Arm(cid, team_of[cid], chosen[cid]["selection_model"], models_dir, pick_policy=chosen[cid]["pick_policy"])
+              for cid in contenders]
+    res10 = R.race(arms10, ref_arm(), split, "selection", seed + 2, eval_dir, stage="s10",
                    steps=steps, max_battles=max_battles, parallel=parallel, log=log)
     finalists = R.contenders(res10)
     if not finalists:
@@ -249,17 +333,18 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
     summary["winner_variant"] = chosen[winner]["variant"]
     log(f"S10 winner: {winner} variant={chosen[winner]['variant']} (finalists {finalists})")
 
-    # S11: 勝者の選出モデルを SEARCH + SELECTION で再学習 (variant が fresh のとき。generic なら汎用基底のまま)
+    # S11 (任意): 勝者の選出モデルを SEARCH + SELECTION で再学習 (variant が fresh のとき)。既定 off
     win_arm = next(a for a in cands if a.arm_id == winner)
     final_model = chosen[winner]["selection_model"]
-    if chosen[winner]["variant"] == "fresh":
+    final_pick = chosen[winner]["pick_policy"]
+    if s11 and chosen[winner]["variant"] == "fresh":
         r11 = AD.adapt_selection(f"{winner}_final", win_arm.team_file, split, run_dir / "advisors", seed + 3,
                                  min_battles=adapt_min, chunk=adapt_chunk, max_battles=adapt_max, log=log,
                                  registry=registry, tiers=(("search", None), ("selection", None)))
         final_model = r11.get("model") or final_model
         _write_stage(run_dir, "s11_final_adapt", r11)
     else:
-        log(f"S11: 勝者の variant が {chosen[winner]['variant']} のため再学習は省略")
+        log(f"S11: 省略 (s11={s11}, variant={chosen[winner]['variant']}) → S7 の検証済みモデルを最終モデルにする")
 
     # S11b: 行動方策 adapter (任意、full プロファイル既定): 勝者チーム固定で短く微調整し、基底との対応差で採否
     final_models_dir = models_dir
@@ -272,18 +357,17 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
         log(f"S11b action adapter: use_adapted={ra.get('use_adapted')} ({ra.get('reason')})")
 
     # S12: 封印 HOLDOUT + STRESS + ablation
-    final_arm = R.Arm(winner, win_arm.team_file, final_model, final_models_dir)
-    ref12 = R.Arm("reference", ref.team_file, ref.selection_model, models_dir)
-    hold = HO.final_holdout(final_arm, ref12, split, doc["sealed_id"], run_dir, seed + 4,
+    final_arm = R.Arm(winner, win_arm.team_file, final_model, final_models_dir, pick_policy=final_pick)
+    hold = HO.final_holdout(final_arm, ref_arm(), split, doc["sealed_id"], run_dir, seed + 4,
                             candidate_key=f"{winner}:{Path(final_model or '').name}", steps=steps,
                             max_battles=max_battles, log=log, parallel=min(2, parallel))
     summary["holdout"] = hold
-    rob = ST.run_stress(final_arm, ref12, split, run_dir, seed + 5, n=stress_n, log=log, parallel=parallel)
+    rob = ST.run_stress(final_arm, ref_arm(), split, run_dir, seed + 5, n=stress_n, log=log, parallel=parallel)
     summary["robustness_worst"] = rob.get("worst_sensitivity_candidate")
     pop = ST.policy_population(run_dir / "advisors" / "population")
     # ablation の A1: adapter を採用したらそれ (action 効果 = adapter − 基底)、無ければ前世代のチェックポイント
     alt_dir = final_models_dir if final_models_dir != models_dir else pop.get("prev")
-    abl = AB.ablation_grid(win_arm.team_file, ref.team_file, final_model, ref.selection_model, models_dir,
+    abl = AB.ablation_grid(win_arm.team_file, ref.team_file, final_model, ref_best.selection_model, models_dir,
                            alt_dir, split, run_dir, seed + 6, n=ablation_n, log=log, parallel=parallel)
     summary["ablation"] = abl.get("effects")
 
@@ -294,7 +378,9 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
     _write_stage(run_dir, "summary", summary)
     pkg = build_package(run_dir, winner, win_arm.team_file, Path(final_model) if final_model else None, species,
                         registry=None, extra_manifest={"models_dir": final_models_dir, "base_models_dir": models_dir,
-                                                       "seed": seed, "pick_variant": chosen[winner]["variant"]})
+                                                       "seed": seed, "pick_variant": chosen[winner]["variant"],
+                                                       "pick_policy": final_pick,
+                                                       "reference_variant": ref_variant})
     # 記事 (表示専用): LLM があれば Sonnet、無ければテンプレート。registry 登録は記事を書いてから (Package の内容を固定)
     try:
         from tools.team_build.report import write_report

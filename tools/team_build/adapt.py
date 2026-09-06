@@ -18,11 +18,83 @@ from pathlib import Path
 from typing import Optional
 
 from champions_agent.config import (
-    BUILD_ADAPT_EPS_TRAIN, BUILD_ADAPT_MIN_BATTLES, BUILD_ADAPT_PATIENCE)
+    BUILD_ADAPT_EPS_TRAIN, BUILD_ADAPT_MIN_BATTLES, BUILD_ADAPT_PATIENCE, BUILD_ADAPT_VALIDATE_MAX_CKPTS,
+    BUILD_ADAPT_VALIDATE_N, BUILD_FOLD_ADAPT, BUILD_FOLD_VALIDATE)
 
 REPO = Path(__file__).resolve().parent.parent.parent
 CHUNK = 1000                 # 1 回の収集戦数 (config 化候補)
 MAX_BATTLES = 20000          # 収束しなくてもここで止める
+
+
+# ---------------------------------------------------------------------------
+# checkpoint 選択 (2026-09-07): val_mse は勝率を保証しない (learning curve で N=3000 の checkpoint が収束比 −0.17)。
+# 適応中に残した checkpoint を独立 fold (V) の同一相手列で測り、勝率で選ぶ
+# ---------------------------------------------------------------------------
+def pick_checkpoints_evenly(ckpts: dict, k: int) -> list:
+    """{N: path} から最初と最後を含めて等間隔に k 個の N を選ぶ (純粋)"""
+    ns = sorted(ckpts)
+    if k <= 0 or not ns:
+        return []
+    if len(ns) <= k:
+        return ns
+    if k == 1:
+        return [ns[-1]]
+    idx = sorted({round(i * (len(ns) - 1) / (k - 1)) for i in range(k)})
+    return [ns[i] for i in idx]
+
+
+def choose_best_checkpoint(results: dict) -> Optional[int]:
+    """{N: {"win_rate", "n"}} から勝率最大の N (同率なら大きい N = 学習の進んだ方)。無ければ None"""
+    rows = [(v.get("win_rate"), N) for N, v in results.items() if v and v.get("win_rate") is not None]
+    if not rows:
+        return None
+    rows.sort(key=lambda r: (r[0], r[1]))
+    return rows[-1][1]
+
+
+def checkpoints_from_history(history: list) -> dict:
+    """adapt_selection の history → {N: checkpoint path} (keep_checkpoints=True で残したもの)"""
+    out = {}
+    for rep in history or []:
+        if rep.get("checkpoint") and rep.get("n_battles"):
+            out[int(rep["n_battles"])] = rep["checkpoint"]
+    return out
+
+
+def select_checkpoint(candidate_id: str, team_file: Path, ckpts: dict, split_file: Path, seed: int, models_dir: str,
+                      out_dir: Path, parallel: int = 4, log=print, fold: int = BUILD_FOLD_VALIDATE,
+                      n: int = BUILD_ADAPT_VALIDATE_N, max_ckpts: int = BUILD_ADAPT_VALIDATE_MAX_CKPTS) -> dict:
+    """checkpoint を独立 fold の実測勝率で選ぶ (同一相手列、pick_policy advisor + その checkpoint)。
+    戻り値: {"chosen": path or None, "chosen_n", "results": {N: {"win_rate", "n"}}, "fold", "n", "candidates": [N...]}"""
+    from concurrent.futures import ThreadPoolExecutor
+    from tools.team_build import racing as R
+    picks = pick_checkpoints_evenly(ckpts, max_ckpts)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    jobs = []
+    for N in picks:
+        arm = R.Arm(f"{candidate_id}_n{N}", Path(team_file), str(ckpts[N]), models_dir, pick_policy="advisor")
+        out_json = out_dir / f"validate_{candidate_id}_n{N}_0_{n}.json"
+        cmd = R.measure_cmd(arm, n, 0, seed, Path(split_file), "search", fold, out_json,
+                            out_dir / "battles" / f"validate_{candidate_id}_n{N}.jsonl")
+        jobs.append((N, out_json, cmd, out_dir / f"validate_{candidate_id}_n{N}.log"))
+    results = {}
+    timeout = 180 + R.SEC_PER_BATTLE * n
+    with ThreadPoolExecutor(max_workers=max(1, parallel)) as ex:
+        futs = {ex.submit(R._run_one, cmd, log_path, timeout): (N, out_json) for N, out_json, cmd, log_path in jobs}
+        for fut in futs:
+            N, out_json = futs[fut]
+            rc = fut.result()
+            if rc == 0 and out_json.exists():
+                d = json.loads(out_json.read_text(encoding="utf-8"))
+                results[N] = {"win_rate": d.get("win_rate"), "n": d.get("n_battles")}
+            else:
+                log(f"[validate:{candidate_id}] n{N} failed rc={rc}")
+    best = choose_best_checkpoint(results)
+    log(f"[validate:{candidate_id}] fold={fold} n={n} " +
+        " ".join(f"n{N}={results[N]['win_rate']}" for N in sorted(results)) + f" → chosen n{best}")
+    return {"chosen": str(ckpts[best]) if best is not None else None, "chosen_n": best,
+            "results": {str(k): v for k, v in results.items()}, "fold": fold, "n": n, "candidates": picks}
 
 
 def _run(cmd: list, log_path: Path, timeout: int = 4 * 3600) -> int:
@@ -54,7 +126,7 @@ def adapt_selection(candidate_id: str, team_file: Path, split_file: Path, out_di
                     min_battles: int = BUILD_ADAPT_MIN_BATTLES, chunk: int = CHUNK,
                     patience: int = BUILD_ADAPT_PATIENCE, eps_train: float = BUILD_ADAPT_EPS_TRAIN,
                     max_battles: int = MAX_BATTLES, log=print, registry=None,
-                    tiers: tuple = (("search", 0),), keep_checkpoints: bool = False) -> dict:
+                    tiers: tuple = (("search", BUILD_FOLD_ADAPT),), keep_checkpoints: bool = False) -> dict:
     """候補 1 つの選出モデル適応。戻り値: {"model": path, "n_battles", "history", "stop_reason", "artifact_id"}
 
     tiers: 収集に使う (階層, fold) の列。chunk ごとに巡回する (S11 は SEARCH 全体 + SELECTION)。

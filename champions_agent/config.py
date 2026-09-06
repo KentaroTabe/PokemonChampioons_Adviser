@@ -220,7 +220,13 @@ BUILD_RACE_DEFAULT_MAX = 2400          # 通常候補の打ち切り。重要候
 # 相手系統: 種族集合の Jaccard がこれ以上 (6体中4体共通 = 4/8) で同一系統
 BUILD_FAMILY_JACCARD = 0.5
 BUILD_SPLIT_RATIOS = {"search": 0.5, "selection": 0.3, "holdout": 0.2}
-BUILD_SEARCH_FOLDS = 2                 # SEARCH 内の cross-fitting (A: 適応 / B: 評価)
+BUILD_SEARCH_FOLDS = 3                 # SEARCH 内の cross-fitting (A: 適応の収集 / B: 評価 / V: checkpoint 選択の検証)
+BUILD_FOLD_ADAPT, BUILD_FOLD_EVAL, BUILD_FOLD_VALIDATE = 0, 1, 2
+# S7 の checkpoint 選択 (2026-09-07 決定): val_mse ではなく独立 fold (V) の実測勝率で選ぶ。learning curve で
+# checkpoint の質が N でぶれ (収束比 −0.17 の落ち込み)、val_mse の停止が勝率を保証しなかった。
+# 200 戦の CI 半幅は ±0.07 で、大きな落ち込みを弾く目的 (小差の優劣は S8b の variant 比較に任せる)
+BUILD_ADAPT_VALIDATE_N = 200
+BUILD_ADAPT_VALIDATE_MAX_CKPTS = 4     # 検証する checkpoint 数 (最初と最後を含めて等間隔)
 BUILD_POOL_TOP_N = 200
 # 選出方策 ablation (teampreview / fresh adapted / production) の 1 条件あたりの戦数。
 # 対応差の CI 半幅は 100 戦 ±0.10、300 戦 ±0.06、1,000 戦 ±0.035 (実測の分散から)。
@@ -234,9 +240,12 @@ BUILD_SCREEN_ADAPT_BATTLES = 1000
 BUILD_SCREEN_MARGIN = 0.05
 BUILD_SCREEN_STEPS = (100, 300)
 BUILD_SCREEN_MAX = 300
-# S8b で候補ごとに測って選ぶ選出方策の variant (fresh=候補専用の収束モデル / generic=汎用基底)。
+# S8a / S8b は Team × PickVariant 評価 (2026-09-07 決定): チームの実力 = 選出方策 variant の最善。
+# S8a は teampreview / generic (汎用基底) / cheap (screening 用の短い適応)、S8b は teampreview / generic /
+# fresh (収束まで適応し、独立 fold の実測で選んだ checkpoint)。参照 (現行チーム) も同じ variant の最善で測る。
 # ablation: #0 は generic が fresh より +0.07、#3 は fresh が generic より +0.26 と候補で逆なので測定で選ぶ
-BUILD_PICK_VARIANTS = ("fresh", "generic")
+BUILD_SCREEN_VARIANTS = ("teampreview", "generic", "cheap")
+BUILD_PICK_VARIANTS = ("teampreview", "generic", "fresh")
 # 現行チーム (config/my_team.json の登録 6 体) を exploitation pool として候補に必ず入れる: 代理スコアの較正点 +
 # 近傍 (1 枠入替、入替枠を散らして上位) を BUILD_INCUMBENT_NEIGHBORS 並び。探索 (exploration) の quota とは別枠。
 # 現行と近傍の登録済み個体は登録の型 (持ち物・配分・技) をそのまま使う

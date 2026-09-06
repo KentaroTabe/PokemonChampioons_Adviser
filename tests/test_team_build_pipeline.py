@@ -41,6 +41,88 @@ def test_choose_variants_picks_best_non_degraded():
     print("test_choose_variants_picks_best_non_degraded OK")
 
 
+def test_choose_variants_team_x_pickvariant_and_survivors():
+    res = {"arms": [
+        {"arm_id": "L00@teampreview", "state": "degraded", "eliminated_at": None, "pick_policy": "teampreview",
+         "selection_model": None, "n_done": 100, "result": {"mean": -0.16, "se": 0.05}},
+        {"arm_id": "L00@generic", "state": "uncertain", "eliminated_at": None, "pick_policy": "advisor",
+         "selection_model": "g", "n_done": 300, "result": {"mean": -0.08, "se": 0.03}},
+        {"arm_id": "L00@cheap", "state": "degraded", "eliminated_at": 100, "pick_policy": "advisor",
+         "selection_model": "c0", "n_done": 100, "result": {"mean": -0.20, "se": 0.05}},
+        {"arm_id": "L03@teampreview", "state": "uncertain", "eliminated_at": None, "pick_policy": "teampreview",
+         "selection_model": None, "n_done": 300, "result": {"mean": -0.05, "se": 0.03}},
+        {"arm_id": "L03@cheap", "state": "equivalent", "eliminated_at": None, "pick_policy": "advisor",
+         "selection_model": "c3", "n_done": 300, "result": {"mean": +0.01, "se": 0.03}},
+        {"arm_id": "L09@teampreview", "state": "degraded", "eliminated_at": None, "pick_policy": "teampreview",
+         "selection_model": None, "n_done": 100, "result": {"mean": -0.30, "se": 0.05}},
+    ]}
+    chosen = P.choose_variants(res)
+    assert set(chosen) == {"L00", "L03"}, chosen                       # L09 は全 variant が degraded
+    assert chosen["L00"]["variant"] == "generic" and chosen["L00"]["pick_policy"] == "advisor"
+    assert chosen["L03"]["variant"] == "cheap" and chosen["L03"]["selection_model"] == "c3"
+    assert P.team_survivors(chosen, None) == ["L03", "L00"] and P.team_survivors(chosen, 1) == ["L03"]
+    assert P.best_by_win_rate({"teampreview": 0.85, "generic": 0.82, "cheap": 0.85}, ("teampreview", "generic", "cheap")) == "teampreview"
+    assert P.best_by_win_rate({"teampreview": None, "cheap": 0.7}, ("teampreview", "generic", "cheap")) == "cheap"
+    assert P.best_by_win_rate({}, ("teampreview",)) is None
+    print("test_choose_variants_team_x_pickvariant_and_survivors OK")
+
+
+def test_checkpoint_selection_helpers():
+    from tools.team_build import adapt as AD
+    ck = {5000: "a", 6000: "b", 7000: "c", 8000: "d", 9000: "e", 10000: "f", 11000: "g"}
+    assert AD.pick_checkpoints_evenly(ck, 4) == [5000, 7000, 9000, 11000]
+    assert AD.pick_checkpoints_evenly(ck, 2) == [5000, 11000]
+    assert AD.pick_checkpoints_evenly(ck, 1) == [11000]
+    assert AD.pick_checkpoints_evenly({5000: "a"}, 4) == [5000] and AD.pick_checkpoints_evenly({}, 4) == []
+    assert AD.choose_best_checkpoint({5000: {"win_rate": 0.70}, 9000: {"win_rate": 0.64}, 11000: {"win_rate": 0.70}}) == 11000
+    assert AD.choose_best_checkpoint({5000: {"win_rate": None}}) is None and AD.choose_best_checkpoint({}) is None
+    hist = [{"n_battles": 5000, "checkpoint": "p5"}, {"n_battles": 6000}, {"n_battles": 7000, "checkpoint": "p7"}]
+    assert AD.checkpoints_from_history(hist) == {5000: "p5", 7000: "p7"}
+    print("test_checkpoint_selection_helpers OK")
+
+
+def test_resolve_candidate_subset():
+    from tools.team_build.run import resolve_candidate_subset
+    rows = [{"candidate_id": "L00_INC", "ok": True, "tag": "incumbent", "score": 1.0},
+            {"candidate_id": "L01_INC", "ok": True, "tag": "incumbent_mut", "score": 1.1},
+            {"candidate_id": "L02_INC", "ok": True, "tag": "incumbent_mut", "score": 1.05},
+            {"candidate_id": "L03_C001", "ok": True, "tag": "best", "score": 1.3},
+            {"candidate_id": "L04_C002", "ok": False, "tag": "best", "score": 1.25},
+            {"candidate_id": "L05_C003", "ok": True, "tag": "coverage", "score": 1.2},
+            {"candidate_id": "L06_C004", "ok": True, "tag": "fill", "score": 0.9}]
+    assert resolve_candidate_subset(rows, None, None, False, 2) is None
+    assert resolve_candidate_subset(rows, "L05_C003,L03_C001", None, False, 2) == ["L05_C003", "L03_C001"]
+    # strata は探索候補 (現行枝を除く、合法のみ) のスコア順: 1=L03, 2=L05, 3=L06。範囲外は無視
+    assert resolve_candidate_subset(rows, None, "1,3,9", False, 2) == ["L03_C001", "L06_C004"]
+    assert resolve_candidate_subset(rows, None, "2", True, 1) == ["L05_C003", "L00_INC", "L01_INC"]
+    assert resolve_candidate_subset(rows, "L03_C001", "1", False, 0) == ["L03_C001"]      # 重複は除く
+    print("test_resolve_candidate_subset OK")
+
+
+def test_screen_margin_analysis():
+    from tools.team_build.screen_margin import analyze_margin, to_markdown
+    def arm(aid, mean, se, state="uncertain", n=300):
+        return {"arm_id": aid, "state": state, "eliminated_at": None, "n_done": n,
+                "result": {"mean": mean, "se": se, "ci_low": mean - 1.96 * se, "ci_high": mean + 1.96 * se}}
+    res8a = {"arms": [arm("A@teampreview", -0.16, 0.03, "degraded"), arm("A@cheap", -0.14, 0.03, "degraded"),
+                      arm("B@teampreview", -0.09, 0.03, "degraded"), arm("B@cheap", -0.07, 0.03),
+                      arm("C@cheap", -0.04, 0.03)]}
+    res8b = {"arms": [arm("A@fresh", -0.18, 0.03, "degraded"), arm("A@generic", -0.12, 0.03, "degraded"),
+                      arm("B@fresh", -0.02, 0.03), arm("C@fresh", +0.01, 0.03), arm("C@teampreview", -0.05, 0.03)]}
+    m = analyze_margin(res8a, res8b)
+    by = {r["team"]: r for r in m["teams"]}
+    assert m["n_teams"] == 3 and by["A"]["full_degraded"] and not by["B"]["full_degraded"]
+    assert abs(by["B"]["uplift"] - 0.05) < 1e-9 and by["B"]["variant_cheap"] == "cheap" and by["C"]["variant_full"] == "fresh"
+    # margin 0 では B (cheap 段 CI 上端 -0.011 > -0.02 なので残る) は誤脱落にならず、A は full でも劣るので誤脱落ではない
+    t0 = next(r for r in m["margin_table"] if r["margin"] == 0.0)
+    assert t0["false_drop"] == [] and t0["kept_but_degraded"] == []
+    assert m["order_cheap"] == ["C", "B", "A"] and m["order_full"] == ["C", "B", "A"] and m["reversals"] == []
+    assert m["suggested_margin_q90"] is not None
+    md = to_markdown(m)
+    assert "margin の目安" in md and "順位反転なし" in md
+    print("test_screen_margin_analysis OK")
+
+
 def test_surrogate_quality_metrics():
     from tools.team_build.review_run import spearman, surrogate_quality
     assert spearman([1, 2, 3, 4], [10, 20, 30, 40]) == 1.0
@@ -62,4 +144,8 @@ def test_surrogate_quality_metrics():
 if __name__ == "__main__":
     test_select_survivors_orders_and_caps()
     test_choose_variants_picks_best_non_degraded()
+    test_choose_variants_team_x_pickvariant_and_survivors()
+    test_checkpoint_selection_helpers()
+    test_resolve_candidate_subset()
+    test_screen_margin_analysis()
     test_surrogate_quality_metrics()

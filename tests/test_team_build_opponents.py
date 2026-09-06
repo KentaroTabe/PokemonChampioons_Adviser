@@ -55,7 +55,10 @@ def test_build_split_and_sequence():
         tiers = doc["tiers"]
         ids = tiers["search"] + tiers["selection"] + tiers["holdout"]
         assert len(ids) == len(set(ids)) == 40
-        assert sorted(doc["search_folds"][0] + doc["search_folds"][1]) == sorted(tiers["search"])
+        # fold は互いに素で SEARCH 全体を覆う (fold 数は config: 適応 / 評価 / 検証)
+        all_fold_ids = [t for f in doc["search_folds"] for t in f]
+        assert len(doc["search_folds"]) >= 2 and len(all_fold_ids) == len(set(all_fold_ids))
+        assert sorted(all_fold_ids) == sorted(tiers["search"])
         loaded = O.load_split(Path(d) / "opponent_families.json")
         assert O.tier_ids(loaded, "search", fold=0) == doc["search_folds"][0]
         seq1 = O.opponent_sequence(O.tier_ids(loaded, "selection"), 50, seed=11)

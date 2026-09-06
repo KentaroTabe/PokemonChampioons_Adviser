@@ -301,6 +301,19 @@ def main() -> None:
     ap.add_argument("--screen-margin", type=float, default=None, help="screening の脱落 margin (既定 config)")
     ap.add_argument("--screen-steps", default=None, help="screening の戦数段階 (例 100,300)")
     ap.add_argument("--screen-max", type=int, default=None)
+    ap.add_argument("--candidates", default=None, help="測定するチームを candidate_id のカンマ区切りで限定")
+    ap.add_argument("--strata", default=None,
+                    help="探索候補を S5 スコア順に並べた順位 (1 始まり) のカンマ区切りで限定 (例 1,2,5,10,20,40)")
+    ap.add_argument("--include-incumbent", action="store_true", help="--strata/--candidates に現行チームと近傍を加える")
+    ap.add_argument("--incumbent-neighbors", type=int, default=2, help="--include-incumbent で加える近傍の数")
+    ap.add_argument("--stop-after", choices=["s08a", "s08b"], default=None,
+                    help="この段で止める (ablation 拡張: S8a/S8b の結果だけ取る)")
+    ap.add_argument("--s08b-seed-offset", type=int, default=1,
+                    help="S8b の相手列 seed のオフセット (既定 1 = S8a と別の列。ablation 拡張では 0 で同一列)")
+    ap.add_argument("--s11", choices=["on", "off"], default="off",
+                    help="S11 (勝者の SEARCH+SELECTION 再学習)。既定 off = S7 の検証済み checkpoint を最終モデルにする")
+    ap.add_argument("--validate-n", type=int, default=None, help="S7 の checkpoint 検証の戦数 (既定 config)")
+    ap.add_argument("--validate-max", type=int, default=None, help="S7 で検証する checkpoint 数 (既定 config)")
     ap.add_argument("--repairs", type=int, default=0)
     ap.add_argument("--registry", default=None, help="registry のディレクトリ (既定 logs/registry)")
     ap.add_argument("--adapt-action", choices=["auto", "on", "off"], default="auto",
@@ -363,6 +376,40 @@ def main() -> None:
         _measure(run_dir, args)
 
 
+def resolve_candidate_subset(rows: list, candidates: Optional[str], strata: Optional[str],
+                             include_incumbent: bool, incumbent_neighbors: int) -> Optional[list]:
+    """測定するチームの部分集合を決める (純粋)。None なら全候補。
+
+    candidates: candidate_id のカンマ区切り。strata: 探索候補 (現行枝を除く) を S5 スコア順に並べた 1 始まりの順位の
+    カンマ区切り (例 1,2,5,10,20)。include_incumbent なら現行 + 近傍 (incumbent_neighbors 並び) を加える
+    """
+    if not candidates and not strata:
+        return None
+    ok_rows = [r for r in rows if r.get("ok")]
+    ids = []
+    if candidates:
+        ids += [c.strip() for c in candidates.split(",") if c.strip()]
+    if strata:
+        explore = sorted((r for r in ok_rows if (r.get("tag") or "") not in ("incumbent", "incumbent_mut")),
+                         key=lambda r: -(r.get("score") or 0.0))
+        for tok in strata.split(","):
+            tok = tok.strip()
+            if not tok:
+                continue
+            k = int(tok)
+            if 1 <= k <= len(explore):
+                ids.append(explore[k - 1]["candidate_id"])
+    if include_incumbent:
+        ids += [r["candidate_id"] for r in ok_rows if r.get("tag") == "incumbent"]
+        ids += [r["candidate_id"] for r in ok_rows if r.get("tag") == "incumbent_mut"][:max(0, incumbent_neighbors)]
+    seen, out = set(), []
+    for c in ids:
+        if c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
+
+
 def _measure(run_dir: Path, args) -> None:
     from champions_agent.config import (BUILD_ADAPT_MIN_BATTLES, BUILD_RACE_DEFAULT_MAX, BUILD_RACE_STEPS)
     from tools.team_build import ablation as AB, adapt as AD, racing as R, stress as ST
@@ -370,7 +417,13 @@ def _measure(run_dir: Path, args) -> None:
     from tools.team_build.registry import Registry
     steps = tuple(int(x) for x in args.race_steps.split(",")) if args.race_steps else BUILD_RACE_STEPS
     reg = Registry(Path(args.registry)) if args.registry else Registry()
-    from champions_agent.config import (BUILD_SCREEN_ADAPT_BATTLES, BUILD_SCREEN_MARGIN, BUILD_SCREEN_MAX,
+    rows = json.loads((run_dir / "s06_sets.json").read_text(encoding="utf-8"))
+    subset = resolve_candidate_subset(rows, args.candidates, args.strata,
+                                      args.include_incumbent, args.incumbent_neighbors)
+    if subset is not None:
+        log(run_dir, f"measure subset: {len(subset)} チーム {subset}")
+    from champions_agent.config import (BUILD_ADAPT_VALIDATE_MAX_CKPTS, BUILD_ADAPT_VALIDATE_N,
+                                        BUILD_SCREEN_ADAPT_BATTLES, BUILD_SCREEN_MARGIN, BUILD_SCREEN_MAX,
                                         BUILD_SCREEN_STEPS)
     pm = PROFILE_MEASURE.get(getattr(args, "profile", "full"), PROFILE_MEASURE["full"])
     for key in ("race_max", "stress_n", "ablation_n", "max_candidates", "screen_adapt"):
@@ -391,7 +444,10 @@ def _measure(run_dir: Path, args) -> None:
                     action_eval=args.action_eval or AD.ACTION_EVAL_BATTLES,
                     screen_adapt=args.screen_adapt or BUILD_SCREEN_ADAPT_BATTLES,
                     screen_margin=BUILD_SCREEN_MARGIN if args.screen_margin is None else args.screen_margin,
-                    screen_steps=screen_steps, screen_max=args.screen_max or BUILD_SCREEN_MAX)
+                    screen_steps=screen_steps, screen_max=args.screen_max or BUILD_SCREEN_MAX,
+                    candidate_ids=subset, stop_after=args.stop_after, s08b_seed_offset=args.s08b_seed_offset,
+                    s11=(args.s11 == "on"), validate_n=args.validate_n or BUILD_ADAPT_VALIDATE_N,
+                    validate_max=args.validate_max or BUILD_ADAPT_VALIDATE_MAX_CKPTS)
 
 
 if __name__ == "__main__":
