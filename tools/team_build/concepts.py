@@ -1,0 +1,160 @@
+"""コンセプト系統の生成 (S4): ルール生成の baseline + LLM の複数独立生成 → 重複除去・クラスタリング → coverage 停止。
+
+LLM は探索ヒューリスティックの一つ。出力は authoritative (id / enum) だけを検証して使い、display は表示専用
+(docs/TEAM_BUILDING_IMPLEMENTATION.md §10)。回数上限ではなく「新しい系統がほぼ出なくなったら」停止する。
+"""
+from __future__ import annotations
+
+import itertools
+import json
+from typing import Callable, Optional
+
+from tools.team_build.families import jaccard
+
+WIN_CONDITIONS = ("setup_sweep", "offense_trade", "cycle_pressure", "hazard_chip", "speed_control",
+                  "bulky_attrition", "priority_cleanup", "anti_meta")
+SUPPORT_ROLES = ("speed_control", "hazard_control", "priority", "pivot", "status", "bulk", "setup")
+STYLE_FRAMINGS = ("offense", "balance", "bulky_offense", "cycle", "setup", "speed_control", "anti_meta",
+                  "specific_core")
+CONCEPT_MIN_CORE, CONCEPT_MAX_CORE = 2, 3
+STOP_NEW_YIELD = 0.15      # 直近の生成で新系統の割合がこれ未満なら停止
+STOP_DUP_RATE = 0.7        # 重複率がこれ以上でも停止
+MAX_ROUNDS = 6
+
+
+def concept_key(core_ids: list) -> tuple:
+    return tuple(sorted(set(core_ids)))
+
+
+def validate_concepts(auth: dict, owned: set, legal: set, mega_capable: set) -> list:
+    """authoritative の検証: 問題の一覧 (空なら OK)"""
+    problems = []
+    items = auth.get("concepts")
+    if not isinstance(items, list) or not items:
+        return ["concepts が空 (配列で返す)"]
+    for i, c in enumerate(items):
+        core = c.get("core_ids") or []
+        if not (CONCEPT_MIN_CORE <= len(set(core)) <= CONCEPT_MAX_CORE):
+            problems.append(f"concepts[{i}]: core_ids は {CONCEPT_MIN_CORE}〜{CONCEPT_MAX_CORE} 体")
+        for sid in core:
+            if sid not in owned:
+                problems.append(f"concepts[{i}]: {sid} は所持にない (所持リストの id だけを使う)")
+            elif legal and sid not in legal:
+                problems.append(f"concepts[{i}]: {sid} は使用不可")
+        mega = c.get("mega_id")
+        if mega and (mega not in core or mega not in mega_capable):
+            problems.append(f"concepts[{i}]: mega_id {mega} は core に含まれメガ石を持てる種でなければならない")
+        if c.get("win_condition") not in WIN_CONDITIONS:
+            problems.append(f"concepts[{i}]: win_condition は {WIN_CONDITIONS} のいずれか")
+        for r in c.get("support_roles") or []:
+            if r not in SUPPORT_ROLES:
+                problems.append(f"concepts[{i}]: support_roles の値 {r} は {SUPPORT_ROLES} のいずれか")
+        for sid in c.get("weak_to") or []:
+            if legal and sid not in legal:
+                problems.append(f"concepts[{i}]: weak_to の {sid} は未知")
+    return problems
+
+
+def rule_baseline_concepts(feats: dict, threats: list, mega_capable: set, top_k: int = 8,
+                           favorites: Optional[list] = None) -> list:
+    """ルール生成: メガ候補/固定枠を軸に、被覆の補完が最大の相方 1〜2 体を付ける"""
+    fav = list(favorites or [])
+    anchors = [s for s in feats if (feats[s].mega or s in fav)] or list(feats)[:top_k]
+    out = []
+    for a in anchors[:top_k]:
+        fa = feats[a]
+        best = None
+        for b in feats:
+            if b == a:
+                continue
+            gain = sum(max(fa.coverage.get(t, 0.0), feats[b].coverage.get(t, 0.0)) for t in threats)
+            if best is None or gain > best[0]:
+                best = (gain, b)
+        core = [a] + ([best[1]] if best else [])
+        wc = "setup_sweep" if fa.roles.get("setup", 0) >= 1 else (
+            "priority_cleanup" if fa.roles.get("priority", 0) >= 1 else "offense_trade")
+        weak = sorted(threats, key=lambda t: max(feats[m].coverage.get(t, 0.0) for m in core))[:3]
+        out.append({"name": f"rule:{a}", "core_ids": core, "mega_id": a if fa.mega else None,
+                    "win_condition": wc, "support_roles": ["speed_control", "hazard_control"],
+                    "weak_to": weak, "source": "rule"})
+    return out
+
+
+def cluster_concepts(concepts: list, min_jaccard: float = 0.5) -> list:
+    """core の Jaccard で系統にまとめ、代表 (先に出た方) だけ残す。family_id と members 数を付ける"""
+    fams: list = []
+    for c in concepts:
+        key = set(c.get("core_ids") or [])
+        placed = False
+        for fam in fams:
+            if jaccard(key, set(fam["core_ids"])) >= min_jaccard:
+                fam["members"] += 1
+                fam.setdefault("aliases", []).append(c.get("name"))
+                placed = True
+                break
+        if not placed:
+            d = dict(c)
+            d["members"] = 1
+            d["family_id"] = f"C{len(fams) + 1:03d}"
+            fams.append(d)
+    return fams
+
+
+def generate_concepts(spec, feats: dict, threats: list, legal: set, mega_capable: set,
+                      provider=None, rounds: int = MAX_ROUNDS, per_round: int = 8,
+                      system_prompt: Optional[str] = None, log: Optional[Callable] = None) -> dict:
+    """ルール baseline + LLM 複数ラウンド (framing を変える) → クラスタリング。coverage で停止。
+    戻り値: {"families": [...], "raw": [...], "rounds": n, "stop_reason": str, "llm_calls": [...]}"""
+    owned = set(spec.owned)
+    raw = rule_baseline_concepts(feats, threats, mega_capable, favorites=spec.favorites)
+    fams = cluster_concepts(raw)
+    calls = []
+    stop_reason = "no_provider" if provider is None else "max_rounds"
+    if provider is not None:
+        payload_base = {
+            "task": "パーティのコンセプト系統を提案する",
+            "owned": sorted(owned), "favorites": spec.favorites, "banned": spec.banned, "style": spec.style,
+            "threats": threats,
+            "coverage": {s: {t: round(v, 2) for t, v in f.coverage.items()} for s, f in feats.items()},
+            "roles": {s: {k: round(v, 2) for k, v in f.roles.items() if v} for s, f in feats.items()},
+            "mega_capable": sorted(mega_capable & owned),
+            "enums": {"win_condition": WIN_CONDITIONS, "support_roles": SUPPORT_ROLES},
+            "output_schema": {"authoritative": {"concepts": [{"name": "str", "core_ids": ["id"], "mega_id": "id|null",
+                                                             "win_condition": "enum", "support_roles": ["enum"],
+                                                             "weak_to": ["id"]}]},
+                              "display": {"explanations": {"<name>": "str"}}},
+        }
+        for r in range(rounds):
+            framing = STYLE_FRAMINGS[r % len(STYLE_FRAMINGS)]
+            payload = dict(payload_base)
+            payload["framing"] = framing
+            payload["n"] = per_round
+            payload["already_found"] = [f["core_ids"] for f in fams]
+            payload["instruction"] = (f"framing={framing} の観点で、既出 (already_found) と core が 4/6 以上重ならない"
+                                      f"新しいコンセプトを {per_round} 個。core_ids は owned の id のみ。")
+            res = provider.call("s04_concepts", "opus", system_prompt or DEFAULT_SYSTEM, payload,
+                                validator=lambda a: validate_concepts(a, owned, legal, mega_capable))
+            calls.append({"round": r, "framing": framing, "ok": res["ok"], "attempts": res["attempts"],
+                          "problems": res.get("problems"), "record": res.get("record")})
+            if not res["ok"]:
+                continue
+            new_items = [dict(c, source=f"llm:{framing}") for c in res["authoritative"]["concepts"]]
+            before = len(fams)
+            fams = cluster_concepts([dict(f) for f in fams] + new_items)
+            gained = len(fams) - before
+            dup_rate = 1.0 - gained / max(1, len(new_items))
+            if log:
+                log(f"[concepts] round {r} framing={framing}: +{gained} 系統 (dup {dup_rate:.0%})")
+            if gained / max(1, len(new_items)) < STOP_NEW_YIELD or dup_rate >= STOP_DUP_RATE:
+                stop_reason = "coverage"
+                break
+    return {"families": fams, "rounds": len(calls), "stop_reason": stop_reason, "llm_calls": calls}
+
+
+DEFAULT_SYSTEM = (
+    "あなたはポケモンチャンピオンズ (Lv50、6体から3体選出、メガシンカは1試合1回) の構築コンセプトを提案する。"
+    "入力の owned (所持 id) と threats (脅威 id)、coverage (所持種が各脅威をどれだけ扱えるか 0..1)、roles を根拠に、"
+    "軸 2〜3 体 (core_ids) と勝ち筋 (win_condition)、支援役割 (support_roles)、苦手 (weak_to) を JSON で返す。"
+    "機械が使う値は authoritative に id / enum だけで書き、説明文は display に書く。"
+    "owned に無い id、存在しない技・持ち物、数値の指定は書かない。出力は JSON オブジェクト 1 つのみ。"
+)

@@ -22,6 +22,10 @@ class Dex:
         self._moves = raw["moves"]
         self._chart = raw["typechart"]
 
+    def species_ids(self) -> list:
+        """収録している種族 id の一覧 (構築システムの合法種集合などに使う)"""
+        return list(self._species.keys())
+
     def species(self, species_id: Optional[str]) -> Optional[dict]:
         if not species_id:
             return None

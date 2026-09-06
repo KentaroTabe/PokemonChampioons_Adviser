@@ -35,6 +35,10 @@ TESTS=(
   test_team_build_core
   test_team_build_opponents
   test_team_build_player
+  test_team_build_interaction
+  test_team_build_sets
+  test_team_build_candidates
+  test_team_build_concepts
 )
 
 fail=0
