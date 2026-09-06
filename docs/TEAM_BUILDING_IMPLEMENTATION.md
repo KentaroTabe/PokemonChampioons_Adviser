@@ -201,26 +201,69 @@ BuildSpec の objective で選ぶ (§6)。
 
 ---
 
-## 9. 判断すべき点
+## 9. 決定事項 (2026-09-06、ユーザー決定。レビュー4 を反映)
+
+作業ブランチ: `feature/team-build` (新機能のため本流から分離)。
 
 ### 目的関数・評価
-1. objective の既定を max_wr とし、stable / easy / favorites を BuildSpec で選ぶ形でよいか。
-2. 遵守モデル (full / high 90% / mixed 70% / expert 50%) の近似 (一定確率で 2 位の手か相性ヒューリスティック) でよいか。
-3. ε = 0.02、racing の上限 2,400 戦、STRESS ノイズ 5% / 10%、分割比 50 / 25 / 20 / 5% (top 200 を系統化)。
-4. holdout は「採用 / 不採用 / 同等 + ΔWR の CI」のみ返し、詳細は run 終了後にしか開かない運用でよいか。
-5. 実戦勝率を主指標に切り替える標本閾値 (既定 200 戦)。
+
+| # | 項目 | 決定 |
+|---|---|---|
+| 1 | objective | Primary = max E[WR]。`favorites` は **hard constraint**、`easy` は **遵守モデル込み WR**、`stable` は **E[WR] − λ·Risk** (下位 10% の状況の勝率を重視する CVaR 的評価)。UI では 4 種に見えるが内部では意味を区別 |
+| 2 | 遵守モデル | **Adherence と Deviation quality を別軸に**。full 100% / high 90% / mixed 70% は非遵守時 human-like policy (相性ヒューリスティック + ノイズ)、expert 50% は非遵守時 **strong search-like policy** (探索器の 2 位以内の手)。遵守確率は定数ではなく P(follow) = f(confidence gap, state, user type) (助言の 1 位と 2 位の差が小さいほど離反しやすい)。初期はパラメトリック擬似ユーザー、実ログが溜まったら離反行動から学習 |
+| 3 | ε / racing / split | ε = 0.02 維持。**戦数の絶対上限は置かない**: 必要な精度に達したら終了し、達しなければ Uncertain で終了できる (重要候補は 4,800 / 9,600 へ延長可)。分割は **SEARCH 50 / SELECTION 30 / HOLDOUT 20** (top 200 → 100 / 60 / 40、系統単位の層化)。**STRESS は分割ではなく別生成** (行動ノイズ 5% / 10%、過去チェックポイント、稀な系統、メタ遷移、相手方策の変化)。SEARCH 内部は cross-fitting |
+| 4 | holdout の返却 | 探索プロセスには **PASS / FAIL / INCONCLUSIVE** のみ、人には ΔWR と CI まで。相手別・敗因・battle log・弱い系統は run 終了まで封印。終了後に開いても**同じ holdout で同じ候補を修正 → 再評価しない**。holdout 自体を version 化し、同じ holdout に対して開発を続けない |
+| 5 | 実戦の主指標化 | 200 戦は **early real-world signal** に留める。Score = w_N · WR_real + (1 − w_N) · WR_synthetic で、有効標本と CI に応じて重みを増やす。実戦を強く効かせる条件: 有効標本 ≥ 1,000 かつ 95% CI 半幅 ≤ 3pt かつ主要系統の最低カバレッジ (二項近似: 200 戦 ±6.9pt、1,000 戦 ±3.1pt、2,400 戦 ±2.0pt) |
 
 ### 学習・昇格
-6. 共同最適化の範囲は選出モデルのみ (行動方策のチーム別適応は将来) でよいか。適応する候補数 ≤8、収集 5,000 戦。
-7. canary の戦数 (既定 20 戦の接続テスト) と、昇格を人手コマンドに限定する期間 (「数 run 問題なし」まで)。
-8. RL チェックポイントの production ピン切替も同じ status 遷移 (人手) に載せてよいか (学習ループ自体は現行どおり)。
-9. 自動ロールバックの範囲 (canary の取り消しのみ自動、production は人手)。
+
+| # | 項目 | 決定 |
+|---|---|---|
+| 6 | 共同最適化の範囲 | **行動方策もチーム条件付きにする**: π_action(s, TeamEmbedding) = Universal Action Policy + Team-specific lightweight adapter (汎用知識を共有し、チーム固有の勝ち筋だけ学ぶ。実装は汎用チェックポイントから自チーム固定で微調整、KL 正則化で忘却を防ぐ)。**適応する候補数は固定しない**: racing で「best である可能性がまだ十分残っている候補」を残す。**適応の停止は収束で決める**: 最低 5,000 戦、改善中は継続、3 評価連続で改善 < ε_train なら停止 (policy loss / value calibration / held-out WR / 方策変化量を監視) |
+| 7 | canary | 20 戦は **smoke canary** (crash なし / illegal action なし / 正しいチェックポイント読込 / ログ取得 / latency 正常) と明確化。性能判定には使わない。**昇格条件を明文化**: 独立した full run 3 回 + 全 gate PASS + 重大 regression 0 件 + 人手 approve |
+| 8 | production ピンの管理 | **Release bundle** (Team / PickPolicy / ActionPolicy / BeliefModel / OpponentModels / MetaSnapshot / Engine) を 1 つの不変単位にし、candidate → validation → canary → production → retired を **bundle 単位**で遷移。RL チェックポイントの production ピンも同じ status machine に載せる |
+| 9 | ロールバック | **Automatic emergency rollback** (hard invariant 違反: crash 率急上昇 / illegal action / model load failure / 助言不能 / latency 暴騰 / 勝率の明白な崩壊 → 即時自動) と **Human performance rollback** (統計的な性能低下 → alert + 人手判断) を分ける |
 
 ### 運用
-10. 4〜7 時間の full run 中に学習を一時停止してよいか (都度確認か、run の既定にするか)。
-11. LLM 予算 (Opus ≤3 / Sonnet ≤5 / Haiku 数回)、コンセプト数 8〜20、改修反復 2。
-12. 構築記事はユーザーが本文を貼る運用 (外部取得は要承認)。
-13. 入口はチャット先行 (M3)、フロントは M5。fast profile の暫定案をフロントで見せる価値があるか。
 
-### 将来枠 (今は決めない)
-14. 相手行動モデル・Belief の条件付き分布・active learning・多数ユーザー時の分布補正 (ログ閾値 1,000 / 10,000 戦到達後)。
+| # | 項目 | 決定 |
+|---|---|---|
+| 10 | run 中の学習 | **止めない**。run 開始時に RL チェックポイント / 選出モデル / Meta Snapshot / 相手データセット / Engine commit を全部不変にピンし、run はその凍結スナップショットで最後まで走る。学習停止が必要になるなら共有 mutable state があるということなので、そこを直す |
+| 11 | LLM 予算 | **回数上限は撤廃**し、**coverage で停止** (concept family coverage / diversity score / new concept yield / duplicate rate。新しい有望系統がほぼ出なくなったら停止)。コンセプト pool は 12〜30。**改修反復 2 回は維持** (dev への過適合防止)。3 回目以降は同じ branch の repair ではなく新しい concept branch |
+| 12 | 構築記事 | **記事なしで動く + あれば追加 evidence**。LLM で自然言語 → structured claims (Pokémon id / sets / roles / stated matchups / stated selection patterns) に変換し、ルール/シミュレーションで再検証。記事は真実ではなく候補生成のヒント |
+| 13 | 入口 | **チャットとフロントを最初から同じ BuildSpec API に載せる** (チャット = 複雑な制約や曖昧な希望、フロント = favorites / style / objective の構造入力)。fast profile は価値が高いので提供するが、結果の status を **draft / provisional / validated / production** で区別し、fast 結果を学習上の正式な推薦と同じ扱いにしない |
+| 14 | 将来枠 | **Opponent Action Model と Belief Model は初期完成形へ昇格** (synthetic prior + 既存の対戦方策集団から始める。Belief = SpreadEstimator + 較正測定、Opponent Action = 方策集団による相手事前分布 → 実ログで更新)。Active learning と多数ユーザー時の分布補正は後回し (1,000〜10,000 戦以降) |
+
+## 10. LLM の不安定性に左右されにくくする対策
+
+現設計で LLM が関与するのは BuildSpec 解析 / コンセプト生成 / 候補選抜の理由 / 敗因仮説 / 記事で、
+最終採否・合法性・勝率測定・racing は LLM を使わない。残るリスクは「LLM が間違ったものを採用する」ではなく
+**「LLM が良い候補を思いつかない」** (探索漏れ・改修漏れ) なので、候補生成を LLM 一系統に依存させない。
+
+| 対策 | 実装 |
+|---|---|
+| コンセプト生成を 1 回の出力に依存させない | 複数の独立生成 (seed / prompt framing / モデル系統) + **ルール生成の baseline concepts** の和集合 → 機械で重複除去・構造クラスタリング → distinct families。coverage 指標で停止 (§9-11) |
+| LLM が出せない領域は Search が作る | Candidate Sources を並列化: LLM concepts / Rule enumeration / Mutation / Crossover / Historical strong teams (上位実構築・過去 Package) / Novelty search。LLM は探索ヒューリスティックの一つ |
+| S8 (改修) も同じ | 機械統計 (loss statistics / matchup shifts / selection failures / action gaps / resource failures) → LLM 仮説 ≤N + **ルール側の mutation 候補** → 全部を実対戦で競わせる。診断が間違っていても測定で落ちるだけ |
+| BuildSpec 解析は二段階 | LLM 解析 → schema validation + constraint consistency checker。フィールドごとに **resolved / inferred / unknown** を持ち、LLM の推測とユーザーの明示指定を区別。unknown は既定値かユーザー確認 |
+| モデル更新への耐性 | manifest に provider / model exact version / prompt hash / schema version / sampling params / raw output を保存。Provider を変えたら **固定 BuildSpec セットで candidate-generation regression test** (指標は文章の一致ではなく concept diversity / valid candidate rate / downstream WR) |
+
+これにより「LLM が賢いからシステムが強い」ではなく **「LLM は探索を速くするが、正しさは測定系が保証する」** 構造になり、
+LLM が一時的に不安定でも「強い候補が多少効率悪く探索される」に留まる。
+
+## 11. 決定に伴う実装項目の追加 (§2 への差分)
+
+| 追加 / 変更 | 内容 |
+|---|---|
+| `adapt.py` | 選出モデルに加えて **行動方策の adapter** (`adapt_action`): 汎用チェックポイントから自チーム固定の自己対戦で微調整、KL 正則化、収束停止 (§9-6)。学習環境に「自チーム固定」オプションが必要 |
+| `user_model.py` | 遵守モデル (Adherence × Deviation quality、P(follow) = f(confidence gap, state, type)) |
+| `racing.py` | 上限撤廃 (精度到達で終了、Uncertain 終了可)、「best の可能性が残る候補」を残す脱落規則 |
+| `families.py` | 50 / 30 / 20 の 3 階層 + SEARCH 内 cross-fitting。STRESS は `stress.py` が別生成 |
+| `holdout.py` | PASS / FAIL / INCONCLUSIVE、holdout の version 化 |
+| `real_eval.py` | w_N による実戦/合成の重みづけ (§9-5) |
+| `registry.py` / `promote.py` | bundle 単位の status machine、昇格条件 (3 run + gate + regression 0 + approve)、emergency rollback の invariant 監視 (`invariants.py`) |
+| `concepts.py` | 多系統生成 + クラスタリング + coverage 停止。`sources.py` で Rule / Mutation / Crossover / Historical / Novelty の候補源 |
+| `articles.py` | 記事 → structured claims → 再検証 |
+| `spec.py` | 二段階解析 (resolved / inferred / unknown) |
+| `opponent_model.py` / `belief.py` | 方策集団による相手事前分布、SpreadEstimator の較正測定 (初期完成形) |
+| プロファイルの status | draft (fast) / provisional (medium) / validated (full) / production |
