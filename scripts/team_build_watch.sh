@@ -21,7 +21,9 @@ fi
 pattern='after [0-9]+:|round offset|S[0-9]+[- :]|verdict|holdout|\[adapt|\[ablation\]|measure jobs|done|Traceback|[Ee]rror|failed|完了|終了|FAIL|PASS|INCONCLUSIVE'
 tail -n 0 -F "$log" | grep -E --line-buffered "$pattern" &
 tail_pid=$!
-while pgrep -f "$proc" > /dev/null; do
+# "-m " を付けて python プロセスだけに一致させる (引数で渡した pattern が自分自身や
+# 呼び出し側シェルのコマンドラインにも含まれ、pgrep が自分に一致し続けて抜けなくなる)
+while pgrep -f -- "-m $proc" > /dev/null; do
   sleep 20
 done
 sleep 2
