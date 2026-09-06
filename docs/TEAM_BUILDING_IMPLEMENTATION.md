@@ -267,3 +267,9 @@ LLM が一時的に不安定でも「強い候補が多少効率悪く探索さ�
 | `spec.py` | 二段階解析 (resolved / inferred / unknown) |
 | `opponent_model.py` / `belief.py` | 方策集団による相手事前分布、SpreadEstimator の較正測定 (初期完成形) |
 | プロファイルの status | draft (fast) / provisional (medium) / validated (full) / production |
+
+## 12. 実装状況
+
+| 日付 | マイルストーン | 内容 |
+|---|---|---|
+| 2026-09-06 | M0 (評価基盤) | `tools/team_build/`: verdict (対応差の 4 状態、次の戦数、実戦重み w_N)、families (Jaccard + メガ軸の系統化、系統単位の層化分割 50/30/20、SEARCH の cross-fit、holdout 封印)、opponents (POOL_PIN 上位 200 の系統化と `opponent_families.json`、対応比較用の決定的な相手列、SequenceTeambuilder)、registry (不変台帳、candidate→validation→canary→production→retired、rollback)、manifest、battle_log (turn 単位の合成記録: 選出・先発・KO 元・交代・状態異常・道具消費・メガ)、user_model (遵守 × 離反の質)。`check_advisor_player` に `--pick-policy advisor` (実助言と同じ選出モデル、分布外は相性順に fallback) / `--selection-model` / `--opp-split FILE:TIER[:FOLD]` / `--battle-log` / `--pick-noise` / `--action-noise` / `--user-policy` / `--models-dir` / `--candidate-id`。実戦ログ (battle_logger) に由来ラベル (source / package_id / dataset_kind / data_quality)。テスト: test_team_build_core / _opponents / _player (CI サブセット)。煙試験: M-B データで 200 構築 → 155 系統 → 100/60/40、SELECTION 階層の相手列で 3 戦、記録の整合 (相手の選出 ⊆ 相手構築の種族) を確認 |

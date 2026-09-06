@@ -34,6 +34,7 @@ TESTS=(
   test_my_team_manual
   test_team_build_core
   test_team_build_opponents
+  test_team_build_player
 )
 
 fail=0

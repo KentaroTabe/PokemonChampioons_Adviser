@@ -43,11 +43,21 @@ def _events_of(battle) -> list:
     return out
 
 
+def _norm(ev: list) -> list:
+    """poke-env の split_message は '|move|p1a: X|...' を split した ['', 'move', ...] 形式。
+    先頭の空要素を落として ['move', ...] に揃える"""
+    ev = list(ev or [])
+    while ev and ev[0] == "":
+        ev = ev[1:]
+    return ev
+
+
 def summarize_events(events: list) -> dict:
     """faint / switch / status / item / mega をイベント列から拾う (壊れても空で返す)"""
     ko, sw, st, items, mega = [], [], [], [], []
     last_attacker: Optional[str] = None
     for turn, ev in events:
+        ev = _norm(ev)
         if not ev:
             continue
         tag = ev[0] if isinstance(ev[0], str) else ""
@@ -64,7 +74,9 @@ def summarize_events(events: list) -> dict:
                 st.append({"turn": turn, "target": ev[1], "status": ev[2]})
             elif tag in ("-enditem", "-item") and len(ev) > 2:
                 items.append({"turn": turn, "target": ev[1], "item": ev[2], "kind": tag})
-            elif tag in ("-mega", "detailschange") and len(ev) > 1:
+            elif tag == "-mega" and len(ev) > 1:
+                mega.append({"turn": turn, "target": ev[1]})
+            elif tag == "detailschange" and len(ev) > 2 and "mega" in str(ev[2]).lower():
                 mega.append({"turn": turn, "target": ev[1]})
         except Exception:
             continue
@@ -85,6 +97,12 @@ class BattleRecorder:
         self.family_of = family_of or {}
         self._turns: dict = {}
         self._t0: dict = {}
+        self._picks: dict = {}
+
+    def on_pick(self, battle, species_order: list) -> None:
+        """teampreview で送った順 (先頭 3 体が選出、先頭が先発)"""
+        tag = getattr(battle, "battle_tag", None) or id(battle)
+        self._picks[tag] = list(species_order)
 
     def on_decision(self, battle, state_summary: Optional[dict], advice: Optional[dict],
                     executed: Optional[dict], followed: Optional[bool] = None) -> None:
@@ -103,6 +121,9 @@ class BattleRecorder:
         team = getattr(battle, "team", {}) or {}
         opp = getattr(battle, "opponent_team", {}) or {}
         preview_opp = _species_list(getattr(battle, "teampreview_opponent_team", None))
+        picks = self._picks.pop(tag, None)
+        role = getattr(battle, "player_role", None) or "p1"
+        opp_role = "p2" if role == "p1" else "p1"
         record = {
             "schema_version": BUILD_SCHEMA_VERSION, "dataset_kind": "synthetic",
             "battle_id": str(tag), "candidate_team_id": self.candidate_team_id,
@@ -112,10 +133,12 @@ class BattleRecorder:
             "battle_seed": self.battle_seed, "policy_seed": self.policy_seed,
             "user_policy": self.user_policy,
             "team_preview": {"ours": sorted(_species_list(team)), "theirs": sorted(preview_opp)},
-            "our_selection": _species_list(team),
+            "our_selection": (picks[:3] if picks else _species_list(team)),
             "opponent_selection": _species_list(opp),
-            "lead": {"ours": _first_switch(events, "p1" if getattr(battle, "player_role", "p1") == "p1" else "p2"),
-                     "theirs": _first_switch(events, "p2" if getattr(battle, "player_role", "p1") == "p1" else "p1")},
+            "lead": {"ours": (picks[0] if picks else _first_switch(events, role)),
+                     "theirs": _first_switch(events, opp_role)},
+            "events_seen": len(events),
+            "observation_turns": len(getattr(battle, "observations", None) or {}),
             "turns": self._turns.pop(tag, []),
             "won": bool(getattr(battle, "won", False)),
             "turn_count": getattr(battle, "turn", None),
@@ -135,6 +158,7 @@ class BattleRecorder:
 
 def _first_switch(events: list, role: str) -> Optional[str]:
     for _turn, ev in events:
+        ev = _norm(ev)
         if ev and ev[0] in ("switch", "drag") and len(ev) > 1 and str(ev[1]).startswith(role):
             return ev[1]
     return None

@@ -12,6 +12,8 @@ evaluate() の best をそのまま行動にする。自分側の型 (能力ポ�
 from __future__ import annotations
 
 import re
+import random
+from pathlib import Path
 import time
 from typing import Optional
 
@@ -194,9 +196,82 @@ def choose_from_advice(battle, advice: dict) -> Optional[dict]:
     return None
 
 
+def pick_order_from_perm(perm, n: int) -> str:
+    """選出モデルの perm (自分 6 体の index 3 つ) → Showdown の /team 文字列 (残りは元の順で後ろに)"""
+    chosen = [int(i) for i in perm]
+    rest = [i for i in range(n) if i not in chosen]
+    return "/team " + "".join(str(i + 1) for i in chosen + rest)
+
+
+def advisor_pick_order(battle, selection_model_path=None) -> Optional[str]:
+    """実助言と同じ選出: 選出モデル (候補専用モデルか、既定モデルで分布内のとき)。使えなければ None"""
+    from champions_agent.agent import selection_model as sm
+    my = [p.species for p in battle.team.values()]
+    opp_src = getattr(battle, "teampreview_opponent_team", None) or battle.opponent_team.values()
+    opp = [p.species for p in opp_src]
+    if len(my) < 3 or not opp:
+        return None
+    if selection_model_path is None and not sm.is_in_distribution(my):
+        return None
+    path = Path(selection_model_path) if selection_model_path else sm.MODEL_PATH
+    scored = sm.score_all(my, opp, path)
+    if not scored:
+        return None
+    return pick_order_from_perm(scored[0][0], len(my))
+
+
+def apply_user_policy(advice: dict, user_policy: str, action_noise: float,
+                      rng) -> tuple:
+    """助言に遵守モデルと行動ノイズを適用し、(best を差し替えた助言, followed) を返す (純粋)。
+
+    - user_policy != full: tools.team_build.user_model.decide で従うか/離反するかを決める
+    - action_noise: 確率 p で 2 位の手 (STRESS 用)
+    """
+    actions = list((advice or {}).get("actions") or [])
+    if not advice or not advice.get("ok") or len(actions) < 2:
+        return advice, True
+    chosen, followed = actions[0], True
+    if user_policy and user_policy != "full":
+        from tools.team_build.user_model import decide
+        chosen, followed = decide(user_policy, advice, rng)
+        chosen = chosen or actions[0]
+    if action_noise > 0 and rng.random() < action_noise:
+        chosen, followed = actions[1], False
+    if chosen is actions[0]:
+        return advice, followed
+    adv = dict(advice)
+    adv["best"] = chosen
+    adv["actions"] = [chosen] + [a for a in actions if a is not chosen]
+    return adv, followed
+
+
+def _state_summary(battle) -> dict:
+    def side(mon):
+        if mon is None:
+            return None
+        return {"species": getattr(mon, "species", None),
+                "hp": round(float(getattr(mon, "current_hp_fraction", 0.0) or 0.0), 3),
+                "status": str(getattr(mon, "status", None) or "")}
+    return {"turn": getattr(battle, "turn", None),
+            "me": side(getattr(battle, "active_pokemon", None)),
+            "opp": side(getattr(battle, "opponent_active_pokemon", None)),
+            "can_mega": bool(getattr(battle, "can_mega_evolve", False))}
+
+
 def make_advisor_player(team_source=None, stats: Optional[dict] = None,
-                        latencies: Optional[list] = None, **player_kwargs):
+                        latencies: Optional[list] = None,
+                        pick_policy: str = "advisor", selection_model_path=None,
+                        pick_noise: float = 0.0, action_noise: float = 0.0,
+                        user_policy: str = "full", rng=None, recorder=None,
+                        opp_source=None, **player_kwargs):
     """助言エンジンで戦う poke-env Player を作る。
+
+    pick_policy: "advisor" = 実助言と同じ選出 (選出モデル、使えなければ相性順) /
+                 "teampreview" = 従来の相性順 (search_expert.teampreview_order)
+    selection_model_path: 候補専用の選出モデル (None なら既定モデルを分布内のときだけ使う)
+    pick_noise / action_noise: STRESS 用のノイズ (確率で乱択 / 2 位の手)
+    user_policy: full / high / mixed / expert (遵守モデル、tools.team_build.user_model)
+    recorder: tools.team_build.battle_log.BattleRecorder (対戦記録)。opp_source.last_id を相手 id に使う
 
     team_source: last_text 属性を持つ Teambuilder (自分側の型登録に使う)。
     stats / latencies: 診断用の集計先 (省略可)。
@@ -208,22 +283,36 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
     resolver = NameResolver()
     stats = stats if stats is not None else {}
     _install_build_hook()
+    rng = rng or random.Random(0)
 
     class _AdvisorPlayer(Player):
         def choose_move(self, battle):
             t0 = time.perf_counter()
+            advice, followed, d = None, True, None
             try:
                 text = getattr(team_source, "last_text", None)
                 if text and stats.get("_registered") != text:
                     register_team_text(text)
                     stats["_registered"] = text
                 state = battle_to_state(battle, resolver)
-                d = choose_from_advice(battle, evaluate(state, resolver)) \
-                    if state else None
+                if state:
+                    advice = evaluate(state, resolver)
+                    adv2, followed = apply_user_policy(advice, user_policy, action_noise, rng)
+                    d = choose_from_advice(battle, adv2)
+                    if not followed:
+                        stats["deviated"] = stats.get("deviated", 0) + 1
             except Exception as e:
                 stats["error"] = stats.get("error", 0) + 1
                 stats["last_error"] = repr(e)
                 d = None
+            if recorder is not None:
+                try:
+                    executed = None if d is None else {
+                        "kind": d["kind"],
+                        "id": (d["move"].id if d["kind"] == "move" else d["pokemon"].species)}
+                    recorder.on_decision(battle, _state_summary(battle), advice, executed, followed)
+                except Exception:
+                    pass
             if latencies is not None:
                 latencies.append((time.perf_counter() - t0) * 1000.0)
             if d is None:
@@ -236,9 +325,51 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
             return self.create_order(d["pokemon"])
 
         def teampreview(self, battle):
+            order = self._pick(battle)
+            if recorder is not None:
+                try:
+                    mons = list(battle.team.values())
+                    idx = [int(c) - 1 for c in order.replace("/team", "").strip()]
+                    recorder.on_pick(battle, [mons[i].species for i in idx if 0 <= i < len(mons)])
+                except Exception:
+                    pass
+            return order
+
+        def _pick(self, battle):
+            if pick_noise > 0 and rng.random() < pick_noise:
+                stats["pick_noise"] = stats.get("pick_noise", 0) + 1
+                return self.random_teampreview(battle)
+            if pick_policy == "advisor":
+                try:
+                    order = advisor_pick_order(battle, selection_model_path)
+                except Exception as e:
+                    stats["pick_error"] = stats.get("pick_error", 0) + 1
+                    stats["last_pick_error"] = repr(e)
+                    order = None
+                if order:
+                    stats["pick_model"] = stats.get("pick_model", 0) + 1
+                    return order
+                stats["pick_fallback"] = stats.get("pick_fallback", 0) + 1
             try:
                 return teampreview_order(battle)
             except Exception:
                 return self.random_teampreview(battle)
+
+        def _battle_finished_callback(self, battle):
+            super()._battle_finished_callback(battle)
+            if recorder is not None:
+                try:
+                    # 相手 id は「k 番目の対戦 = 相手列の k 番目」で引く (終了コールバックと次の
+                    # yield_team の順序は保証されないため last_id は使わない)
+                    k = stats.get("_finished", 0)
+                    stats["_finished"] = k + 1
+                    if hasattr(opp_source, "id_for_battle"):
+                        opp_id = opp_source.id_for_battle(k)
+                    else:
+                        opp_id = getattr(opp_source, "last_id", None)
+                    recorder.on_end(battle, opponent_team_id=opp_id)
+                except Exception as e:
+                    stats["record_error"] = stats.get("record_error", 0) + 1
+                    stats["last_record_error"] = repr(e)
 
     return _AdvisorPlayer(**player_kwargs)

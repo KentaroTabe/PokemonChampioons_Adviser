@@ -56,7 +56,11 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
               skip_random: bool, belief_k: int | None, sensor_q: float | None,
               workers: int | None, no_rl_blend: bool,
               search_blend: float | None = None,
-              team_file: str | None = None) -> None:
+              team_file: str | None = None,
+              pick_policy: str = "advisor", selection_model: str | None = None,
+              opp_split: str | None = None, battle_log: str | None = None,
+              pick_noise: float = 0.0, action_noise: float = 0.0,
+              user_policy: str = "full", candidate_id: str | None = None) -> None:
     from poke_env import AccountConfiguration
     from poke_env.player import RandomPlayer
     import advisor.engine as eng
@@ -86,17 +90,42 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
         own_tb = _remembering_teambuilder(RankedTeambuilder(
             rng=random.Random(opp_seed + 1) if opp_seed is not None else None,
             meta_snapshot_id=meta_pin))
+    # 相手列: --opp-split FILE:TIER[:FOLD] なら系統分割の階層から決定的な相手列 (対応比較用)、
+    # 無ければ従来どおり上位 60 構築からシードで抽選
+    opp_team, split_info, family_of = None, None, {}
+    if opp_split:
+        from tools.team_build.opponents import (
+            SequenceTeambuilder, load_split, opponent_sequence, tier_ids)
+        parts = opp_split.split(":")
+        doc = load_split(Path(parts[0]))
+        tier = parts[1] if len(parts) > 1 else "selection"
+        fold = int(parts[2]) if len(parts) > 2 else None
+        seq = opponent_sequence(tier_ids(doc, tier, fold), n_battles, opp_seed or 0)
+        opp_team = SequenceTeambuilder(seq, doc["texts"])
+        family_of = {tid: f["family_id"] for f in doc["families"] for tid in f["teams"]}
+        split_info = {"file": parts[0], "tier": tier, "fold": fold,
+                      "sealed_id": doc.get("sealed_id"), "run_id": doc.get("run_id")}
+    elif opp_seed is not None:
+        opp_team = RankedTeambuilder(top_n=60, include_external=False,
+                                     rng=random.Random(opp_seed),
+                                     meta_snapshot_id=meta_pin)
+    recorder = None
+    if battle_log:
+        from tools.team_build.battle_log import BattleRecorder
+        recorder = BattleRecorder(
+            Path(battle_log), candidate_team_id=candidate_id or (team_file or "ranked"),
+            advisor_policy_id=(f"rl:{os.environ.get('CHAMPIONS_MODELS_DIR', 'default')}"
+                               f"|sel:{selection_model or 'default'}"),
+            user_policy=user_policy, battle_seed=opp_seed, family_of=family_of)
     player = make_advisor_player(
         team_source=own_tb, stats=stats, latencies=latencies,
+        pick_policy=pick_policy, selection_model_path=selection_model,
+        pick_noise=pick_noise, action_noise=action_noise, user_policy=user_policy,
+        rng=random.Random((opp_seed or 0) + 7), recorder=recorder, opp_source=opp_team,
         account_configuration=AccountConfiguration(f"ADv{uid}", None),
         battle_format=TRAINING_BATTLE_FORMAT,
         server_configuration=TrainingServerConfiguration,
         team=own_tb)
-    opp_team = None
-    if opp_seed is not None:
-        opp_team = RankedTeambuilder(top_n=60, include_external=False,
-                                     rng=random.Random(opp_seed),
-                                     meta_snapshot_id=meta_pin)
     bench = make_benchmark_player(
         battle_format=TRAINING_BATTLE_FORMAT, team=opp_team,
         account_configuration=AccountConfiguration(f"ADo{uid}", None))
@@ -125,7 +154,11 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
             "win_rate": player.n_won_battles / n_battles, "outcomes": outcomes,
             "belief_k": eng.BELIEF_K, "sensor_q": eng.SENSOR_Q_DEFAULT,
             "workers": eng.SEARCH_WORKERS, "search_blend": eng.SEARCH_BLEND,
-            "team_file": team_file,
+            "team_file": team_file, "candidate_id": candidate_id,
+            "pick_policy": pick_policy, "selection_model": selection_model,
+            "opp_split": split_info, "battle_log": battle_log,
+            "pick_noise": pick_noise, "action_noise": action_noise, "user_policy": user_policy,
+            "models_dir": os.environ.get("CHAMPIONS_MODELS_DIR"),
             "rl_blend": os.environ.get("RL_BLEND_WEIGHT", "25"),
             "opp_seed": opp_seed, "meta_snapshot": meta_pin,
             "latency_p50_ms": round(p50, 1), "latency_p95_ms": round(p95, 1),
@@ -160,12 +193,32 @@ def main() -> None:
     ap.add_argument("--no-rl-blend", action="store_true")
     ap.add_argument("--search-blend", type=float, default=None,
                     help="探索の推奨値をスコアへ統合する重み (P9)。0=無効")
+    ap.add_argument("--pick-policy", choices=["advisor", "teampreview"], default="advisor",
+                    help="選出方策: advisor = 実助言と同じ選出モデル (既定) / teampreview = 相性順")
+    ap.add_argument("--selection-model", default=None, help="候補専用の選出モデル (.pt)")
+    ap.add_argument("--opp-split", default=None,
+                    help="相手列: opponent_families.json のパス:階層[:fold] (例 runs/x/opponent_families.json:selection)")
+    ap.add_argument("--battle-log", default=None, help="対戦記録 (JSONL) の出力先")
+    ap.add_argument("--pick-noise", type=float, default=0.0, help="STRESS: 選出を乱択する確率")
+    ap.add_argument("--action-noise", type=float, default=0.0, help="STRESS: 2位の手を選ぶ確率")
+    ap.add_argument("--user-policy", choices=["full", "high", "mixed", "expert"], default="full",
+                    help="遵守モデル (tools.team_build.user_model)")
+    ap.add_argument("--models-dir", default=None,
+                    help="行動方策 (RL) のピン dir。CHAMPIONS_MODELS_DIR に設定してから読み込む")
+    ap.add_argument("--candidate-id", default=None, help="対戦記録に付ける候補 id")
     ap.add_argument("--team-file", default=None,
                     help="自分側を固定チーム (Showdownテキスト) にする (構築の操縦しやすさ測定)")
     args = ap.parse_args()
+    if args.models_dir:
+        # rl_bridge は import 時に CHAMPIONS_MODELS_DIR を読むので、run (内部で import) の前に設定する
+        os.environ["CHAMPIONS_MODELS_DIR"] = str(Path(args.models_dir).resolve())
     asyncio.run(run(args.battles, args.opp_seed, args.json, args.skip_random,
                     args.belief_k, args.sensor_q, args.workers, args.no_rl_blend,
-                    search_blend=args.search_blend, team_file=args.team_file))
+                    search_blend=args.search_blend, team_file=args.team_file,
+                    pick_policy=args.pick_policy, selection_model=args.selection_model,
+                    opp_split=args.opp_split, battle_log=args.battle_log,
+                    pick_noise=args.pick_noise, action_noise=args.action_noise,
+                    user_policy=args.user_policy, candidate_id=args.candidate_id))
 
 
 if __name__ == "__main__":

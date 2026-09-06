@@ -80,6 +80,9 @@ def test_event_summary_and_records():
     ]
     s = summarize_events(events)
     assert s["ko_events"] == [{"turn": 3, "fainted": "p2a: Gengar", "by": "p1a: Garchomp", "move": "Earthquake"}]
+    # poke-env の split_message 形式 (先頭が空文字) でも同じ要約になる
+    s2 = summarize_events([(t, [""] + ev) for t, ev in events])
+    assert s2 == s, s2
     assert s["status_events"][0]["status"] == "brn"
     assert s["resource_usage"][0]["item"] == "Focus Sash"
     assert len(s["switch_events"]) == 2

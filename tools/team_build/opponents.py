@@ -143,8 +143,33 @@ class SequenceTeambuilder(_PokeEnvTeambuilder):
         self.i = 0
         self.last_id = None
 
+    def id_for_battle(self, k: int) -> str:
+        """k 番目 (0 始まり) の対戦の相手 id。対戦は逐次なので相手列の順と一致する"""
+        return self.sequence[k % len(self.sequence)]
+
     def yield_team(self) -> str:
         tid = self.sequence[self.i % len(self.sequence)]
         self.i += 1
         self.last_id = tid
         return self.join_team(self.parse_showdown_team(self.texts[tid]))
+
+
+def main() -> None:
+    """opponent_families.json を作る: python -m tools.team_build.opponents --run-id R --out DIR --seed N"""
+    import argparse
+    from champions_agent.env.ranked_teams import pinned_meta_snapshot_id
+    ap = argparse.ArgumentParser(description="相手構築の系統化と階層分割 (SEARCH/SELECTION/HOLDOUT)")
+    ap.add_argument("--run-id", required=True)
+    ap.add_argument("--out", required=True, help="出力ディレクトリ (opponent_families.json と sealed/)")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--top-n", type=int, default=BUILD_POOL_TOP_N)
+    args = ap.parse_args()
+    doc = build_split(args.run_id, Path(args.out), seed=args.seed, top_n=args.top_n,
+                      meta_snapshot_id=pinned_meta_snapshot_id())
+    print(f"[opponents] teams={doc['n_teams']} families={doc['n_families']} "
+          f"sealed={doc['sealed_id']} summary={doc['summary']}")
+    print(f"[opponents] 保存: {Path(args.out) / 'opponent_families.json'}")
+
+
+if __name__ == "__main__":
+    main()
