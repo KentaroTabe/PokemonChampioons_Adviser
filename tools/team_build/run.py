@@ -119,7 +119,12 @@ def stage_s5(run_dir: Path, spec: BuildSpec, fams: list, feats: dict, threats: l
     banned = set(spec.banned)
     all_lineups = []
     for fam in fams:
-        core = tuple(sorted(set(fam["core_ids"]) | set(spec.favorites)))
+        # 再利用した系統 (--reuse-concepts) や historical のコアには、今回の
+        # 除外種やプール外の種族が残ることがある → コアから外し、空なら捨てる
+        core_ids = [c for c in fam["core_ids"] if c in feats and c not in banned]
+        if not core_ids:
+            continue
+        core = tuple(sorted(set(core_ids) | set(spec.favorites)))
         if len(core) > 6:
             continue
         lineups = C.beam_complete(core, pool, feats, threats, spec.style, width=prof["width"],
