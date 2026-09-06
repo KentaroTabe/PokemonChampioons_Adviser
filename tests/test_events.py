@@ -1023,5 +1023,84 @@ def test_expected_damage_applied_on_move_event():
     print("test_expected_damage_applied_on_move_event OK")
 
 
+def _age_recent(p, seconds: float) -> None:
+    """dedup の記録時刻を seconds 秒だけ過去にずらす (再読までの時間経過を模擬)"""
+    for k in list(p._recent_fired):
+        p._recent_fired[k] -= seconds
+
+
+def test_rank_change_reread_after_window_not_doubled():
+    """同じランク変化メッセージの遅い再読 (OCR揺れで別テキスト) を二重適用しない。
+
+    2026-09-06 第12回: 「防御が上がった」→ 3.1 秒後「防御が上かった」、
+    「素早さが下かった」→ 5.9 秒後「素早さが下がった」が旧 3 秒窓を抜けて
+    +2 / -2 と記録された。窓内の再読は抑止し、1 ターン以上あと (窓外) の
+    正当な再発火は適用する。
+    """
+    from vision import events as ev_mod
+    state, p = new_parser()
+    p.parse("아나이뚜は リザードンを 繰り出した!")
+    om = state.opponent.active()
+    fired = p.parse("相手の リザードンの 防御が 上がった!")
+    assert "boost_opponent_def_+1" in fired, fired
+    assert om.boosts["def"] == 1, om.boosts
+    _age_recent(p, 5.9)
+    fired = p.parse("相手の リザードンの うき防御が 上かった!")
+    assert "boost_opponent_def_+1" not in fired, fired
+    assert om.boosts["def"] == 1, om.boosts
+    # 次ターン (窓外) の再使用は適用する
+    _age_recent(p, ev_mod.BOOST_DEDUP_SEC)
+    fired = p.parse("相手の リザードンの 防御が 上がった!")
+    assert "boost_opponent_def_+1" in fired, fired
+    assert om.boosts["def"] == 2, om.boosts
+
+    # 自分側の低下も同様 (素早さ -1 の再読)
+    fired = p.parse("ブリジュラスの 素早さが 下かった!")
+    assert "boost_player_spe_-1" in fired, fired
+    _age_recent(p, 5.9)
+    fired = p.parse("ブリジュラスの 素早さが 下がった!")
+    assert "boost_player_spe_-1" not in fired, fired
+    assert state.player.party[0].boosts["spe"] == -1, state.player.party[0].boosts
+    print("test_rank_change_reread_after_window_not_doubled OK")
+
+
+def test_move_boost_then_late_message_not_doubled():
+    """技使用イベントで反映した能力変化を、遅れて読めたメッセージで二重適用しない。
+
+    2026-09-06 第12回: めいそう使用の 6.8〜7.1 秒後に「特攻特防が上がった」が
+    読めて旧 3 秒窓を抜け、+2/+2 になった。
+    """
+    state, p = new_parser()
+    p.parse("아나이뚜は リザードンを 繰り出した!")
+    om = state.opponent.active()
+    fired = p.parse("相手の リザードンの めいそう!")
+    assert "move_opponent_calmmind" in fired, fired
+    assert om.boosts["spa"] == 1 and om.boosts["spd"] == 1, om.boosts
+    _age_recent(p, 7.1)
+    fired = p.parse("相手の リザードンの 特攻 特防が 上がった!")
+    assert not any(f.startswith("boost_") for f in fired), fired
+    assert om.boosts["spa"] == 1 and om.boosts["spd"] == 1, om.boosts
+    print("test_move_boost_then_late_message_not_doubled OK")
+
+
+def test_move_reread_after_window_not_refired():
+    """技使用メッセージの遅い再読 (実測 3〜7 秒後) を再発火させない。
+
+    2026-09-06 第12回: 「10まんボルト」が 4.8 秒後に「10まんポルト」と再読され
+    move_player_thunderbolt が二重発火した (期待ダメージの二重適用)。
+    """
+    state, p = new_parser()
+    p.parse("아나이뚜は リザードンを 繰り出した!")
+    fired = p.parse("ブリジュラスの 10まんボルト!")
+    assert "move_player_thunderbolt" in fired, fired
+    _age_recent(p, 4.8)
+    fired = p.parse("プリジュラスの 10まんポルト!")
+    assert "move_player_thunderbolt" not in fired, fired
+    print("test_move_reread_after_window_not_refired OK")
+
+
 if __name__ == "__main__":
     test_expected_damage_applied_on_move_event()
+    test_rank_change_reread_after_window_not_doubled()
+    test_move_boost_then_late_message_not_doubled()
+    test_move_reread_after_window_not_refired()

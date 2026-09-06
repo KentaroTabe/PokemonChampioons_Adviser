@@ -20,6 +20,20 @@ from typing import Optional
 from vision.normalize import loose_key, normalize
 from vision.state import BattleStateV2
 
+# 同一イベントIDの再発火を抑止する窓 (秒)。メッセージは表示中にフレーム
+# 間隔で繰り返し読まれ、OCR揺れで別テキストとして 3〜7 秒後に再解析される
+# (2026-09-06 第12回: 3.0 秒窓を 3.1〜7.1 秒後の再読が通過し、ランク変化・
+# 技使用・交代が二重発火した)。同じイベントが正当に連続する最短間隔は
+# 1 ターン (実測 30 秒以上) なので、その半分未満に取る。
+# 制約: 連続攻撃を受けたじきゅうりょく等の「同ターン内の正当な同一変化」は
+# 2 回目以降が抑止される (場の状況画面の実測値で上書き修正される)
+EVENT_DEDUP_SEC = 10.0
+# 能力ランク変化 (boost_*) は技使用イベントでの決定的反映 (_apply_move_boosts)
+# と、その後のメッセージ読みが同じキーを共有する。攻撃技の自己ランク低下
+# (ゴールドラッシュ等) はダメージ演出後にメッセージが出るため間隔が長い
+# (実測 9.9 秒) → 一般の窓より余裕を持たせる
+BOOST_DEDUP_SEC = 15.0
+
 # ==============================================================================
 # キーワードイベント定義
 # ==============================================================================
@@ -240,18 +254,19 @@ class EventParser:
         self.resolver = resolver
         self._recent_fired: dict = {}   # event_id -> 最終発火時刻
 
-    def _dedup(self, event_id: str) -> bool:
-        """同一イベントIDの3秒以内の再発火を抑止する。
+    def _dedup(self, event_id: str, window: float = EVENT_DEDUP_SEC) -> bool:
+        """同一イベントIDの window 秒以内の再発火を抑止する。
 
         同じメッセージがOCR揺れで微妙に異なるテキストとして複数回読まれると、
         テキスト単位のデデュープを通過して同じイベントが連発する
         (とんぼがえり×4等)。まきびし等は効果が二重適用されるため実害がある。
         再観測時は時刻を更新し、メッセージ表示が続く限り窓を延長する。
+        窓の根拠は EVENT_DEDUP_SEC / BOOST_DEDUP_SEC を参照。
         """
         now = time.time()
         last = self._recent_fired.get(event_id)
         self._recent_fired[event_id] = now
-        return last is not None and now - last < 3.0
+        return last is not None and now - last < window
 
     def _recently(self, event_id: str, window: float = 6.0) -> bool:
         """直近windowで発火済みか (タイムスタンプを更新しない参照専用)"""
@@ -561,7 +576,8 @@ class EventParser:
             other = self.state.side(other_name).active()
             if other is not None and other.status != "fainted":
                 for stat, delta in land.items():
-                    if not self._dedup(f"boost_{other_name}_{stat}_{delta:+d}"):
+                    if not self._dedup(f"boost_{other_name}_{stat}_{delta:+d}",
+                                       BOOST_DEDUP_SEC):
                         other.set_boost(stat, delta)
         # 交代後の新しい個体に前の個体のひんし裏付けを誤適用しない
         # (実戦: マスカーニャひんし→メタグロス登場直後の空バー誤読1%が
@@ -627,7 +643,7 @@ class EventParser:
                 fired = []
                 for stat in stats:
                     event_id = f"boost_{side_name}_{stat}_{delta:+d}"
-                    if self._dedup(event_id):
+                    if self._dedup(event_id, BOOST_DEDUP_SEC):
                         continue   # OCR揺れの再読でランクを二重適用しない
                     mon.set_boost(stat, delta)
                     fired.append(event_id)
@@ -801,7 +817,9 @@ class EventParser:
         技の使用メッセージ自体は確実に取れるため、そこから決定的に反映し、
         メッセージ読み (_parse_rank_change) と場の状況画面 (extract_field_check)
         は補正役に回す。boost_* のdedupキーを登録しておき、直後にメッセージも
-        読めた場合の二重適用を防ぐ (3秒窓。次ターンの再使用は窓外で適用される)。
+        読めた場合の二重適用を防ぐ (BOOST_DEDUP_SEC 窓。次ターンの再使用は
+        窓外で適用される。2026-09-06 第12回: めいそう使用の 6.8〜7.1 秒後に
+        読めたメッセージが旧 3 秒窓を抜けて +2/+2 になっていた)。
         制約: 命中失敗・まもる時の対象側効果は誤適用になる (発生率は低く、
         場の状況画面の実測値で上書き修正される)。
         """
@@ -816,7 +834,8 @@ class EventParser:
             if mon is None:
                 continue
             for stat, delta in (eff.get(scope) or {}).items():
-                if self._dedup(f"boost_{side_name}_{stat}_{delta:+d}"):
+                if self._dedup(f"boost_{side_name}_{stat}_{delta:+d}",
+                               BOOST_DEDUP_SEC):
                     continue   # 直前にメッセージ経由で適用済み
                 mon.set_boost(stat, delta)
             self._maybe_white_herb(side_name, mon)
