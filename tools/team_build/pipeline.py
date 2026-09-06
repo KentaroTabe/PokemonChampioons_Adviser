@@ -254,14 +254,21 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
         _write_stage(run_dir, "summary", summary)
         return summary
 
-    # S7: 生存チームの選出モデル適応 (fold A、収束まで、checkpoint 保存) → 独立 fold V の実測で checkpoint を選ぶ
+    # S7: 生存チームの選出モデル適応 (fold A、収束まで、checkpoint 保存) → 独立 fold V の実測で checkpoint を選ぶ。
+    # 適応は数チームを並列 (収集は 1 プロセスずつ)、検証は チームごとに checkpoint を並列に測る
+    to_adapt = [a for a in cands if a.arm_id in survivors]
+
+    def _adapt_one(a):
+        return a.arm_id, AD.adapt_selection(a.arm_id, a.team_file, split, run_dir / "advisors", seed,
+                                            min_battles=adapt_min, chunk=adapt_chunk, max_battles=adapt_max,
+                                            log=log, registry=registry, keep_checkpoints=True)
+
     adapted = {}
-    for a in cands:
-        if a.arm_id not in survivors:
-            continue
-        r = AD.adapt_selection(a.arm_id, a.team_file, split, run_dir / "advisors", seed, min_battles=adapt_min,
-                               chunk=adapt_chunk, max_battles=adapt_max, log=log, registry=registry,
-                               keep_checkpoints=True)
+    with ThreadPoolExecutor(max_workers=max(1, min(parallel, SCREEN_ADAPT_PARALLEL))) as ex:
+        for cid, r in ex.map(_adapt_one, to_adapt):
+            adapted[cid] = r
+    for a in to_adapt:
+        r = adapted[a.arm_id]
         ckpts = AD.checkpoints_from_history(r.get("history"))
         if ckpts:
             sel = AD.select_checkpoint(a.arm_id, a.team_file, ckpts, split, seed + 8, models_dir,
