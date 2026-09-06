@@ -48,6 +48,7 @@ TESTS=(
   test_team_build_articles
   test_team_build_report
   test_team_build_action_adapt
+  test_team_build_pick_ablation
 )
 
 fail=0
