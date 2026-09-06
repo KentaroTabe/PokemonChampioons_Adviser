@@ -113,6 +113,59 @@ def stage_s4(run_dir: Path, spec: BuildSpec, feats: dict, threats: list, legal: 
     return res["families"]
 
 
+def incumbent_branch(ids: list, pool: list, feats: dict, threats: list, style: str, banned: set, favorites: set,
+                     threat_weights: Optional[dict], n_neighbors: int) -> tuple:
+    """現行チーム (登録 6 体の id) とその近傍 (1 枠入替) を作る (純粋)。
+
+    戻り値: (現行の Lineup or None, 近傍の Lineup 列)。現行は全員が所持プールにあり除外に当たらないときだけ。
+    近傍は固定枠を入替えず、除外種を入れず、入替枠を散らして (枠ごとの最良を先に) スコア順に n_neighbors まで
+    """
+    ids = sorted(ids)
+    if len(ids) != 6 or any(s not in feats for s in ids):
+        return None, []
+    inc = None
+    if not (set(ids) & set(banned)):
+        sc, parts = C.lineup_score(tuple(ids), feats, threats, style, threat_weights=threat_weights)
+        inc = C.Lineup(tuple(ids), "INC", sc, parts, tag="incumbent")
+    per_slot = {}
+    banned_in = set(ids) & set(banned)      # 現行に除外種がいれば、その枠の入替だけが有効な近傍
+    for out_m in ids:
+        if out_m in favorites or (banned_in and out_m not in banned_in):
+            continue
+        for in_m in pool:
+            if in_m in ids or in_m in banned or in_m not in feats:
+                continue
+            new = tuple(sorted([in_m if m == out_m else m for m in ids]))
+            sc, parts = C.lineup_score(new, feats, threats, style, threat_weights=threat_weights)
+            per_slot.setdefault(out_m, []).append(C.Lineup(new, "INC", sc, parts, tag="incumbent_mut"))
+    for lst in per_slot.values():
+        lst.sort(key=lambda x: -x.score)
+    # 枠ごとの最良を先に (入替枠を散らす)、残りはスコア順
+    first = sorted((lst[0] for lst in per_slot.values() if lst), key=lambda x: -x.score)
+    rest = sorted((l for lst in per_slot.values() for l in lst[1:]), key=lambda x: -x.score)
+    neigh, seen = [], set()
+    for l in first + rest:
+        if l.members in seen:
+            continue
+        seen.add(l.members)
+        neigh.append(l)
+        if len(neigh) >= n_neighbors:
+            break
+    return inc, neigh
+
+
+def registered_team() -> tuple:
+    """config/my_team.json の登録チーム → (Showdown 本文, 種族 id 列, メガ軸の種族 id)。読めなければ ("", [], None)"""
+    try:
+        from tools.evaluate_team import build_myteam_text
+        from tools.team_build.opponents import parse_team_text
+        text = build_myteam_text()
+        ids, mega = parse_team_text(text)
+        return text, sorted(ids), mega
+    except Exception:
+        return "", [], None
+
+
 def stage_s5(run_dir: Path, spec: BuildSpec, fams: list, feats: dict, threats: list, prof: dict,
              threat_weights: Optional[dict] = None) -> list:
     pool = list(feats)
@@ -150,6 +203,16 @@ def stage_s5(run_dir: Path, spec: BuildSpec, fams: list, feats: dict, threats: l
         if all(C.distance(l.members, c.members) >= C.MIN_DISTANCE for c in chosen):
             l.tag = "fill"
             chosen.append(l)
+    # exploitation pool: 現行チーム (較正点) と近傍を quota とは別枠で必ず入れる (2026-09-07)
+    from champions_agent.config import BUILD_INCUMBENT_NEIGHBORS
+    _text, reg_ids, _mega = registered_team()
+    inc, neigh = incumbent_branch(reg_ids, pool, feats, threats, spec.style, banned, set(spec.favorites),
+                                  threat_weights, BUILD_INCUMBENT_NEIGHBORS) if reg_ids else (None, [])
+    existing = {tuple(l.members) for l in chosen}
+    branch = [l for l in ([inc] if inc else []) + neigh if tuple(l.members) not in existing]
+    chosen = branch + chosen
+    log(run_dir, f"S5 incumbent branch: 現行={'あり' if inc else 'なし (除外/プール外/未登録)'} 近傍={len(neigh)} "
+                 f"(登録 {len(reg_ids)} 体)")
     (run_dir / "s05_candidates.json").write_text(
         json.dumps({"n_generated": len(all_lineups), "lineups": [l.to_dict() for l in chosen]},
                    ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
@@ -164,6 +227,8 @@ def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv
     out_dir.mkdir(exist_ok=True)
     results = []
     concept_mega = concept_mega or {}
+    # 現行チームとその近傍: 登録済み個体は登録の型を使い、メガ枠は登録のメガに合わせる
+    reg_text, _reg_ids, reg_mega = registered_team()
     with db.get_connection() as conn:
         item_map = S.item_usage_map(conn, snapshot_id, sorted({m for l in lineups for m in l.members}))
         for idx, l in enumerate(lineups):
@@ -179,14 +244,23 @@ def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv
             if not team:
                 results.append({"index": idx, "members": list(l.members), "ok": False, "errors": ["型が無い種を含む"]})
                 continue
-            team = S.enforce_single_mega(team, alternatives, keep=concept_mega.get(l.concept))
+            is_inc = l.tag in ("incumbent", "incumbent_mut") and bool(reg_text)
+            keep_mega = (reg_mega if is_inc and reg_mega in l.members else None) or concept_mega.get(l.concept)
+            if is_inc:
+                # 登録個体を先頭に置き持ち物を登録に合わせる (クローズ解決で新規個体側が譲る)
+                team = S.prefer_registered(team, S.registered_items(reg_text))
+            team = S.enforce_single_mega(team, alternatives, keep=keep_mega)
             team = S.resolve_item_clause(team, item_map)
             text = S.to_showdown_text(team)
+            registered = []
+            if is_inc:
+                text, registered = S.splice_registered_sets(text, reg_text)
             ok, errs = S.validate_team_text(text, spec.regulation)
             cid = f"L{idx:02d}_{l.concept}"
             (out_dir / f"{cid}.txt").write_text(text, encoding="utf-8")
             results.append({"index": idx, "candidate_id": cid, "members": list(l.members), "ok": ok,
                             "errors": errs[:5], "tag": l.tag, "score": round(l.score, 4),
+                            "registered_sets": registered,
                             "sets": [{"species": c.species_id, "item": c.item, "nature": c.nature,
                                       "evs": c.evs, "moves": c.moves, "source": c.source,
                                       "coverage": round(c.score, 3), "notes": c.notes} for c in team]})

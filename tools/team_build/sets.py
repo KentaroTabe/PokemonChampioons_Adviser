@@ -203,6 +203,64 @@ def to_showdown_text(team: list, level: int = 50) -> str:
     return "\n\n".join(blocks) + "\n"
 
 
+def _block_species_id(block: str) -> str:
+    head = block.strip().splitlines()[0] if block.strip() else ""
+    name = head.partition("@")[0].strip()
+    return "".join(ch for ch in name.lower() if ch.isalnum())
+
+
+def team_blocks(text: str) -> list:
+    """Showdown 本文 → [(species_id, block_text)] (空行区切り)"""
+    out = []
+    for block in text.strip().split("\n\n"):
+        if block.strip():
+            out.append((_block_species_id(block), block.strip()))
+    return out
+
+
+def registered_items(registered_text: str) -> dict:
+    """登録チーム本文 → {species_id: item_id or None}"""
+    out = {}
+    for sid, block in team_blocks(registered_text):
+        item = block.splitlines()[0].partition("@")[2].strip()
+        out[sid] = "".join(ch for ch in item.lower() if ch.isalnum()) or None
+    return out
+
+
+def prefer_registered(team: list, reg_items: dict) -> list:
+    """登録済み個体を先頭に並べ、持ち物を登録のものにする (純粋)。
+
+    アイテムクローズの解決は後ろの個体が譲るので、登録個体の持ち物 (例: スカーフ) を守り、
+    新規に入る個体の側を差し替えさせる (近傍候補でスカーフ重複が不合法になった)
+    """
+    first, rest = [], []
+    for c in team:
+        if c.species_id in reg_items:
+            item = reg_items[c.species_id] or c.item
+            first.append(SetCandidate(c.species_id, c.ability, item, c.nature, c.evs, list(c.moves),
+                                      c.source, c.score, list(c.notes)))
+        else:
+            rest.append(c)
+    return first + rest
+
+
+def splice_registered_sets(text: str, registered_text: str) -> tuple:
+    """候補本文のうち、登録チーム (config/my_team) に同じ種族がいる個体を登録の型に差し替える (純粋)。
+
+    現行チームとその近傍 (1 枠入替) では、ユーザーが実際に使う型で測る方が忠実で、
+    メタの代表型に置き換えると「構築の差」に「型の差」が混ざる。戻り値: (本文, 差し替えた種族 id)
+    """
+    reg = {sid: block for sid, block in team_blocks(registered_text)}
+    blocks, replaced = [], []
+    for sid, block in team_blocks(text):
+        if sid in reg:
+            blocks.append(reg[sid])
+            replaced.append(sid)
+        else:
+            blocks.append(block)
+    return "\n\n".join(blocks) + "\n", replaced
+
+
 def validate_team_text(text: str, fmt: str, timeout: int = 60) -> tuple:
     """Showdown の validate-team で合法性を検査する。(ok, errors)"""
     try:

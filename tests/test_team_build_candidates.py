@@ -24,6 +24,32 @@ def _feats():
     return feats, threats
 
 
+def test_incumbent_branch():
+    """現行チーム (較正点) と近傍: 固定枠は入替えず、除外種を入れず、入替枠を散らして上位"""
+    from tools.team_build.run import incumbent_branch
+    feats, threats = _feats()
+    ids = ["a", "b", "c", "d", "e", "g"]
+    pool = list(feats)                      # 入替先は f, h
+    inc, neigh = incumbent_branch(ids, pool, feats, threats, "balance", banned={"f"}, favorites={"a"},
+                                  threat_weights=None, n_neighbors=3)
+    assert inc is not None and inc.tag == "incumbent" and inc.members == tuple(sorted(ids))
+    assert 1 <= len(neigh) <= 3
+    for l in neigh:
+        assert l.tag == "incumbent_mut" and l.concept == "INC"
+        assert "a" in l.members and "f" not in l.members and "h" in l.members     # 固定枠維持 / 除外なし / 入替先は h
+        assert len(set(l.members) ^ set(ids)) == 2                                   # 1 枠入替
+    # 入替枠が散っている (同じ枠の入替ばかりにならない)
+    out_slots = [next(iter(set(ids) - set(l.members))) for l in neigh]
+    assert len(set(out_slots)) == len(out_slots), out_slots
+    # 現行に除外種が含まれるときは現行そのものは候補にしない (近傍は作る)
+    inc2, neigh2 = incumbent_branch(ids, pool, feats, threats, "balance", banned={"e"}, favorites=set(),
+                                    threat_weights=None, n_neighbors=2)
+    assert inc2 is None and neigh2 and all("e" not in l.members for l in neigh2)
+    # 未登録 / プール外は空
+    assert incumbent_branch(["a", "b", "zz", "c", "d", "e"], pool, feats, threats, "balance", set(), set(), None, 2) == (None, [])
+    print("test_incumbent_branch OK")
+
+
 def test_scores_and_beam():
     feats, threats = _feats()
     # 脅威ごとに 最良 0.7 + 次善 0.3: 各脅威で 0.9 と 0.1 → 0.66
@@ -54,3 +80,4 @@ def test_scores_and_beam():
 
 if __name__ == "__main__":
     test_scores_and_beam()
+    test_incumbent_branch()

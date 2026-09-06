@@ -237,6 +237,10 @@ BUILD_SCREEN_MAX = 300
 # S8b で候補ごとに測って選ぶ選出方策の variant (fresh=候補専用の収束モデル / generic=汎用基底)。
 # ablation: #0 は generic が fresh より +0.07、#3 は fresh が generic より +0.26 と候補で逆なので測定で選ぶ
 BUILD_PICK_VARIANTS = ("fresh", "generic")
+# 現行チーム (config/my_team.json の登録 6 体) を exploitation pool として候補に必ず入れる: 代理スコアの較正点 +
+# 近傍 (1 枠入替、入替枠を散らして上位) を BUILD_INCUMBENT_NEIGHBORS 並び。探索 (exploration) の quota とは別枠。
+# 現行と近傍の登録済み個体は登録の型 (持ち物・配分・技) をそのまま使う
+BUILD_INCUMBENT_NEIGHBORS = 4
 # 候補ごとの適応 (選出モデル / 行動 adapter): 最低戦数と収束停止
 BUILD_ADAPT_MIN_BATTLES = 5000
 BUILD_ADAPT_PATIENCE = 3               # 連続でこの回数、改善 < BUILD_ADAPT_EPS_TRAIN なら停止
