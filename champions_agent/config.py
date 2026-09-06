@@ -206,15 +206,26 @@ DEFAULT_PLAY_STYLE = "balance"
 # --- パーティ構築システム (docs/TEAM_BUILDING_IMPLEMENTATION.md §9 の決定値、2026-09-06) ---
 # 対応差 (候補 − 参照) の判定: 実用差 ε の帯に CI が収まれば「実用上同等」
 BUILD_EQUIV_EPS = 0.02
-BUILD_CI_Z = 1.96                      # 95% 信頼区間
+BUILD_CI_Z = 1.96                      # 95% 信頼区間 (1 回だけ判定するとき: holdout、ablation)
 # 追加測定の戦数の目安 (絶対上限ではない。必要な精度に達したら終了、達しなければ Uncertain 終了)
 BUILD_RACE_STEPS = (100, 300, 600, 1200, 2400, 4800, 9600)
+# racing は同じ候補を段階ごとに繰り返し判定する (optional stopping)。段数 K に応じて判定の z を
+# 広げ、途中打ち切り込みで全体の α を保つ。pocock: Pocock 境界 (両側 α=0.05、Jennison & Turnbull
+# Table 2.1)、表に無い段数は bonferroni (α/K) で代用。none: 各段で BUILD_CI_Z (2026-09-06 以前の挙動)
+BUILD_RACE_LOOK_CORRECTION = "pocock"  # none / pocock / bonferroni
+BUILD_RACE_ALPHA = 0.05
+BUILD_RACE_POCOCK_Z = {1: 1.960, 2: 2.178, 3: 2.289, 4: 2.361, 5: 2.413,
+                       6: 2.453, 7: 2.485, 8: 2.512, 9: 2.535, 10: 2.555}
 BUILD_RACE_DEFAULT_MAX = 2400          # 通常候補の打ち切り。重要候補は延長可
 # 相手系統: 種族集合の Jaccard がこれ以上 (6体中4体共通 = 4/8) で同一系統
 BUILD_FAMILY_JACCARD = 0.5
 BUILD_SPLIT_RATIOS = {"search": 0.5, "selection": 0.3, "holdout": 0.2}
 BUILD_SEARCH_FOLDS = 2                 # SEARCH 内の cross-fitting (A: 適応 / B: 評価)
 BUILD_POOL_TOP_N = 200
+# 選出方策 ablation (teampreview / fresh adapted / production) の 1 条件あたりの戦数。
+# 対応差の CI 半幅は 100 戦 ±0.10、300 戦 ±0.06、1,000 戦 ±0.035 (実測の分散から)。
+# 300 戦で判別できるのは 10 pt 級の上げ幅と、12 pt 以上離れた候補対の順位反転まで
+BUILD_PICK_ABLATION_N = 300
 # 候補ごとの適応 (選出モデル / 行動 adapter): 最低戦数と収束停止
 BUILD_ADAPT_MIN_BATTLES = 5000
 BUILD_ADAPT_PATIENCE = 3               # 連続でこの回数、改善 < BUILD_ADAPT_EPS_TRAIN なら停止

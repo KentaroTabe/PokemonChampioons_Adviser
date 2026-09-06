@@ -15,10 +15,33 @@ from dataclasses import asdict, dataclass
 from typing import Optional, Sequence
 
 from champions_agent.config import (
-    BUILD_CI_Z, BUILD_EQUIV_EPS, BUILD_RACE_STEPS, BUILD_REAL_MAX_CI_HALFWIDTH,
-    BUILD_REAL_MIN_EFFECTIVE_N)
+    BUILD_CI_Z, BUILD_EQUIV_EPS, BUILD_RACE_ALPHA, BUILD_RACE_LOOK_CORRECTION, BUILD_RACE_POCOCK_Z,
+    BUILD_RACE_STEPS, BUILD_REAL_MAX_CI_HALFWIDTH, BUILD_REAL_MIN_EFFECTIVE_N)
 
 IMPROVED, EQUIVALENT, DEGRADED, UNCERTAIN = "improved", "equivalent", "degraded", "uncertain"
+
+
+def n_looks(steps: Sequence[int] = BUILD_RACE_STEPS, cap: Optional[int] = None) -> int:
+    """racing で判定する段数 K (cap 以下の戦数段階の数、cap が段階に無ければ cap 自体も 1 段)"""
+    looks = [s for s in steps if cap is None or s <= cap]
+    if cap is not None and cap not in looks and (not looks or cap > looks[-1]):
+        looks.append(cap)
+    return max(1, len(looks))
+
+
+def look_z(k: int, correction: str = BUILD_RACE_LOOK_CORRECTION, alpha: float = BUILD_RACE_ALPHA,
+           base_z: float = BUILD_CI_Z) -> float:
+    """K 回の途中判定 (optional stopping) で全体の α を保つための判定 z。
+
+    pocock: 各段で同じ境界 (Pocock)。表に無い K は bonferroni。none: base_z のまま。
+    K=1 (1 回だけ判定) は常に base_z
+    """
+    if k <= 1 or correction == "none":
+        return base_z
+    if correction == "pocock" and k in BUILD_RACE_POCOCK_Z:
+        return BUILD_RACE_POCOCK_Z[k]
+    from statistics import NormalDist
+    return NormalDist().inv_cdf(1.0 - alpha / (2.0 * k))
 
 
 @dataclass(frozen=True)

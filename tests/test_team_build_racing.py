@@ -55,9 +55,50 @@ def test_measure_cmd_flags():
     for flag in ("--opp-split split.json:search:1", "--opp-offset 300", "--selection-model m.pt",
                  "--models-dir pin", "--action-noise 0.1", "--candidate-id c1", "--pick-policy advisor"):
         assert flag in s, flag
+    # arm 固有の選出方策は round の指定より優先 (ablation で条件を混ぜて同時に回す)
+    arm2 = R.Arm("c2", Path("t.txt"), pick_policy="teampreview")
+    s2 = " ".join(R.measure_cmd(arm2, 100, 0, 5, Path("split.json"), "search", 1, Path("o.json"), Path("b.jsonl"),
+                                pick_policy="advisor"))
+    assert "--pick-policy teampreview" in s2 and "--pick-policy advisor" not in s2, s2
     print("test_measure_cmd_flags OK")
+
+
+def test_look_z_widens_with_looks():
+    """段階判定 (optional stopping) の z: 1 段は 1.96、段数が増えるほど広がり、表外は Bonferroni"""
+    from tools.team_build.verdict import look_z, n_looks
+    assert look_z(1) == 1.96
+    assert abs(look_z(3) - 2.289) < 1e-9          # Pocock K=3
+    assert look_z(3) < look_z(7) < look_z(12)     # 単調に広がる (K=12 は表外 → Bonferroni)
+    assert look_z(12) > 2.555                     # Bonferroni は Pocock 表の最大値より保守的
+    assert look_z(7, correction="none") == 1.96   # 旧挙動
+    assert abs(look_z(3, correction="bonferroni") - 2.394) < 1e-3
+    # 段数: cap 以下の段階数。medium (600) は 100/300/600 の 3 段、cap が段階に無ければ cap 自体が最終段
+    assert n_looks((100, 300, 600, 1200), cap=600) == 3
+    assert n_looks((100, 300, 600, 1200), cap=1200) == 4
+    assert n_looks((100, 300, 600, 1200), cap=800) == 4
+    assert n_looks((100, 300), cap=None) == 2
+    print("test_look_z_widens_with_looks OK")
+
+
+def test_race_uses_look_adjusted_z():
+    """racing の判定 z は段数に応じた値で、結果に記録される。境界候補は 1.96 なら落ちる差でも保留になる"""
+    rng = random.Random(11)
+    rates = {"ref": 0.60, "edge": 0.50}
+    R.measure_round = _stub_measure(rates, rng)
+    with tempfile.TemporaryDirectory() as d:
+        res = R.race([R.Arm("edge", Path("e.txt"))], R.Arm("ref", Path("r.txt")), Path("split.json"), "search", 1,
+                     Path(d), stage="t", steps=(100, 300, 600), max_battles=600, log=lambda m: None)
+    assert res["n_looks"] == 3 and abs(res["z"] - 2.289) < 1e-9, (res["n_looks"], res["z"])
+    arm = res["arms"][0]
+    assert arm["result"]["ci_low"] is not None
+    # CI 幅が z に比例している (se × z)
+    half = (arm["result"]["ci_high"] - arm["result"]["ci_low"]) / 2
+    assert abs(half - 2.289 * arm["result"]["se"]) < 1e-9, (half, arm["result"]["se"])
+    print("test_race_uses_look_adjusted_z OK")
 
 
 if __name__ == "__main__":
     test_race_eliminates_and_terminates()
     test_measure_cmd_flags()
+    test_look_z_widens_with_looks()
+    test_race_uses_look_adjusted_z()

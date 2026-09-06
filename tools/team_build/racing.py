@@ -20,7 +20,8 @@ from pathlib import Path
 from typing import Optional
 
 from champions_agent.config import BUILD_EQUIV_EPS, BUILD_RACE_DEFAULT_MAX, BUILD_RACE_STEPS
-from tools.team_build.verdict import (DEGRADED, EQUIVALENT, IMPROVED, UNCERTAIN, next_step, verdict4)
+from tools.team_build.verdict import (DEGRADED, EQUIVALENT, IMPROVED, UNCERTAIN, look_z, n_looks, next_step,
+                                      verdict4)
 
 REPO = Path(__file__).resolve().parent.parent.parent
 PARALLEL = 5                # 同時に回す測定プロセス数 (config 化候補)
@@ -33,6 +34,7 @@ class Arm:
     selection_model: Optional[str] = None
     models_dir: Optional[str] = None
     extra_args: list = field(default_factory=list)
+    pick_policy: Optional[str] = None      # arm 固有の選出方策 (None なら round の指定に従う)
     outcomes: list = field(default_factory=list)
     n_done: int = 0
     state: str = UNCERTAIN
@@ -42,7 +44,8 @@ class Arm:
 
     def to_dict(self) -> dict:
         return {"arm_id": self.arm_id, "team_file": str(self.team_file), "selection_model": self.selection_model,
-                "models_dir": self.models_dir, "extra_args": self.extra_args, "n_done": self.n_done,
+                "models_dir": self.models_dir, "extra_args": self.extra_args, "pick_policy": self.pick_policy,
+                "n_done": self.n_done,
                 "wins": int(sum(self.outcomes)), "win_rate": (sum(self.outcomes) / len(self.outcomes)) if self.outcomes else None,
                 "state": self.state, "result": self.result, "history": self.history,
                 "eliminated_at": self.eliminated_at}
@@ -53,7 +56,7 @@ def measure_cmd(arm: Arm, n: int, offset: int, seed: int, split_file: Path, tier
     cmd = [sys.executable, "-m", "tools.check_advisor_player", "--battles", str(n), "--opp-seed", str(seed),
            "--skip-random", "--belief-k", "0", "--team-file", str(arm.team_file),
            "--opp-split", f"{split_file}:{tier}" + (f":{fold}" if fold is not None else ""),
-           "--opp-offset", str(offset), "--pick-policy", pick_policy,
+           "--opp-offset", str(offset), "--pick-policy", arm.pick_policy or pick_policy,
            "--battle-log", str(battle_log), "--json", str(out_json), "--candidate-id", arm.arm_id]
     if arm.selection_model:
         cmd += ["--selection-model", arm.selection_model]
@@ -117,6 +120,10 @@ def race(candidates: list, reference: Arm, split_file: Path, tier: str, seed: in
     offset = 0
     t0 = time.time()
     rounds = []
+    # 段階ごとに同じ候補を判定し直す (optional stopping) ので、段数 K に応じた z を使う
+    k_looks = n_looks(steps, cap=max_battles)
+    z = look_z(k_looks)
+    log(f"[racing:{stage}] looks={k_looks} z={z:.3f} eps={eps}")
     while active:
         target = next_step(offset, steps, cap=max_battles)
         if target is None:
@@ -128,7 +135,7 @@ def race(candidates: list, reference: Arm, split_file: Path, tier: str, seed: in
         offset = target
         # 参照との対応差
         for arm in active:
-            r = verdict4(arm.outcomes, reference.outcomes, eps=eps)
+            r = verdict4(arm.outcomes, reference.outcomes, eps=eps, z=z)
             arm.result = r.to_dict()
             arm.state = r.state
         # best (参照との Δ が最大) に対する対応差で「可能性が残る候補」を判定
@@ -138,7 +145,7 @@ def race(candidates: list, reference: Arm, split_file: Path, tier: str, seed: in
             if arm is best:
                 still.append(arm)
                 continue
-            vb = verdict4(arm.outcomes, best.outcomes, eps=eps)
+            vb = verdict4(arm.outcomes, best.outcomes, eps=eps, z=z)
             if compare_to_best and vb.state == DEGRADED:
                 arm.eliminated_at = offset
                 arm.state = DEGRADED if arm.state == UNCERTAIN else arm.state
@@ -153,7 +160,7 @@ def race(candidates: list, reference: Arm, split_file: Path, tier: str, seed: in
             ", ".join(f"{a.arm_id}={a.state}({(a.result or {}).get('mean') or 0:+.3f})" for a in arms))
     result = {
         "stage": stage, "tier": tier, "fold": fold, "seed": seed, "eps": eps, "steps": list(steps),
-        "pick_policy": pick_policy,
+        "pick_policy": pick_policy, "n_looks": k_looks, "z": z,
         "max_battles": max_battles, "n_candidates_seen": len(arms), "elapsed_s": round(time.time() - t0, 1),
         "reference": reference.to_dict(), "arms": [a.to_dict() for a in arms], "rounds": rounds,
         "note": "探索時の最高値は期待勝率ではない (Winner's curse)。採否は holdout の結果だけで決める",
