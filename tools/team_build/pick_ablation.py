@@ -75,6 +75,29 @@ def reuse_outcomes(eval_dir: Path, stage: str, arm_id: str, n_max: int) -> list:
     return out[:n_max]
 
 
+def reuse_outcomes_multi(sources: list, arm_id: str, n_max: int) -> list:
+    """複数の (dir, stage) を順に辿り、offset が連続する範囲の勝敗列を連結する
+    (例: S8a の 0〜100 → ablation の追加 100〜300)"""
+    out = []
+    for eval_dir, stage in sources:
+        files = []
+        for p in Path(eval_dir).glob(f"{stage}_{arm_id}_*_*.json"):
+            parts = p.stem[len(f"{stage}_{arm_id}_"):].split("_")
+            if len(parts) == 2 and all(x.isdigit() for x in parts):
+                files.append((int(parts[0]), int(parts[1]), p))
+        for offset, n, p in sorted(files):
+            if offset != len(out):
+                continue
+            d = json.loads(p.read_text(encoding="utf-8"))
+            outs = [int(x) for x in d.get("outcomes") or []]
+            if len(outs) != n:
+                continue
+            out.extend(outs)
+            if len(out) >= n_max:
+                return out[:n_max]
+    return out[:n_max]
+
+
 # ------------------------------------------------------------------ 解析 (純粋)
 def _cell(outcomes: list, z: float) -> dict:
     n = len(outcomes)

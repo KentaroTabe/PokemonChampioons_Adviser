@@ -54,9 +54,13 @@ def adapt_selection(candidate_id: str, team_file: Path, split_file: Path, out_di
                     min_battles: int = BUILD_ADAPT_MIN_BATTLES, chunk: int = CHUNK,
                     patience: int = BUILD_ADAPT_PATIENCE, eps_train: float = BUILD_ADAPT_EPS_TRAIN,
                     max_battles: int = MAX_BATTLES, log=print, registry=None,
-                    tiers: tuple = (("search", 0),)) -> dict:
-    """tiers: 収集に使う (階層, fold) の列。chunk ごとに巡回する (S11 は SEARCH 全体 + SELECTION)"""
-    """候補 1 つの選出モデル適応。戻り値: {"model": path, "n_battles", "history", "stop_reason", "artifact_id"}"""
+                    tiers: tuple = (("search", 0),), keep_checkpoints: bool = False) -> dict:
+    """候補 1 つの選出モデル適応。戻り値: {"model": path, "n_battles", "history", "stop_reason", "artifact_id"}
+
+    tiers: 収集に使う (階層, fold) の列。chunk ごとに巡回する (S11 は SEARCH 全体 + SELECTION)。
+    keep_checkpoints: 学習のたびに selection_model_n{N}.pt を残す (learning curve の測定用)
+    """
+    import shutil
     out_dir = Path(out_dir) / candidate_id
     out_dir.mkdir(parents=True, exist_ok=True)
     data = out_dir / "selection_data.npz"
@@ -80,6 +84,10 @@ def adapt_selection(candidate_id: str, team_file: Path, split_file: Path, out_di
             stop_reason = "train_failed"
             break
         rep["n_battles"] = n_total
+        if keep_checkpoints and model.exists():
+            ckpt = out_dir / f"selection_model_n{n_total}.pt"
+            shutil.copyfile(model, ckpt)
+            rep["checkpoint"] = str(ckpt)
         history.append(rep)
         log(f"[adapt:{candidate_id}] n={n_total} val_mse={rep['val_mse']} gain={rep['gain_pct']:+.1f}%")
         if last_val is not None and (last_val - rep["val_mse"]) < eps_train * max(last_val, 1e-9):

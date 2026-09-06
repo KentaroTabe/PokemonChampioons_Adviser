@@ -84,7 +84,49 @@ def test_reuse_outcomes_contiguous_only():
     print("test_reuse_outcomes_contiguous_only OK")
 
 
+def test_reuse_outcomes_multi_across_stages():
+    """S8a の 0〜100 と ablation の追加 100〜300 (別 dir・別 stage) を連結する"""
+    with tempfile.TemporaryDirectory() as d:
+        ev, abl = Path(d) / "eval", Path(d) / "eval" / "pick_ablation"
+        abl.mkdir(parents=True)
+        (ev / "s08a_screen_L00_0_100.json").write_text(json.dumps({"outcomes": [1] * 100}), encoding="utf-8")
+        (abl / "abl_tp_L00_100_200.json").write_text(json.dumps({"outcomes": [0] * 200}), encoding="utf-8")
+        (abl / "abl_tp_L01_0_300.json").write_text(json.dumps({"outcomes": [1] * 300}), encoding="utf-8")
+        outs = PA.reuse_outcomes_multi([(ev, "s08a_screen"), (abl, "abl_tp")], "L00", 300)
+        assert len(outs) == 300 and sum(outs) == 100, (len(outs), sum(outs))
+        assert len(PA.reuse_outcomes_multi([(ev, "s08a_screen"), (abl, "abl_tp")], "L01", 300)) == 300
+        # 先頭が欠けていれば後段は繋がらない
+        assert PA.reuse_outcomes_multi([(abl, "abl_tp")], "L00", 300) == []
+    print("test_reuse_outcomes_multi_across_stages OK")
+
+
+def test_adapt_curve_analysis():
+    from tools.team_build import adapt_curve as AC
+    rng = random.Random(9)
+    shared = [rng.random() for _ in range(300)]
+    cands, points = ["A", "B"], [1000, 5000]
+    # A は 1,000 戦で既に収束値、B は 1,000 戦では低く 5,000 戦で逆転 (収束順位 B > A)
+    curve = {("A", 1000): _outs(rng, shared, 0.70), ("A", 5000): _outs(rng, shared, 0.71),
+             ("B", 1000): _outs(rng, shared, 0.50), ("B", 5000): _outs(rng, shared, 0.85)}
+    baseline = {("A", "teampreview"): _outs(rng, shared, 0.60), ("A", "fresh"): _outs(rng, shared, 0.71),
+                ("A", "generic"): _outs(rng, shared, 0.65),
+                ("B", "teampreview"): _outs(rng, shared, 0.55), ("B", "fresh"): _outs(rng, shared, 0.86),
+                ("B", "generic"): _outs(rng, shared, 0.50)}
+    a = AC.analyze_curve(curve, baseline, cands, points)
+    assert a["cells"]["B/n5000"]["n"] == 300 and a["cells"]["B/fresh"]["win_rate"] > 0.8
+    assert a["deltas"]["B/n1000"]["vs_fresh"]["state"] == "degraded"
+    assert a["deltas"]["B/n5000"]["vs_fresh"]["state"] in ("equivalent", "uncertain")
+    assert a["orders"]["fresh"] == ["B", "A"] and a["orders"]["n1000"] == ["A", "B"] and a["orders"]["n5000"] == ["B", "A"]
+    assert len(a["reversals"]["n1000"]) == 1 and a["reversals"]["n1000"][0]["resolved"] is True
+    assert a["reversals"]["n5000"] == []
+    md = AC.to_markdown(a, cands)
+    assert "n1000" in md and "反転 1 対" in md, md
+    print("test_adapt_curve_analysis OK")
+
+
 if __name__ == "__main__":
     test_analyze_uplift_and_reversal()
     test_analyze_partial_conditions()
     test_reuse_outcomes_contiguous_only()
+    test_reuse_outcomes_multi_across_stages()
+    test_adapt_curve_analysis()
