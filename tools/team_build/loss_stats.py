@@ -30,7 +30,8 @@ def _rate_table(counter: dict, min_n: int = 1) -> list:
         n = w + l
         if n >= min_n:
             rows.append({"key": k, "n": n, "wins": w, "losses": l, "loss_rate": round(l / n, 3)})
-    return sorted(rows, key=lambda r: (-r["losses"], -r["loss_rate"]))
+    # 同点の並びも決定的に (key の辞書順)。set の反復順は hash seed で変わるため呼び出し側も sorted を使う
+    return sorted(rows, key=lambda r: (-r["losses"], -r["loss_rate"], str(r["key"])))
 
 
 def loss_stats(records: list, our_species: Optional[list] = None) -> dict:
@@ -44,7 +45,7 @@ def loss_stats(records: list, our_species: Optional[list] = None) -> dict:
         won = bool(r.get("won"))
         n += 1
         turns.append(r.get("turn_count") or 0)
-        for sp in set(r.get("opponent_selection") or []):
+        for sp in sorted(set(r.get("opponent_selection") or [])):
             _wl(by_opp_sp, sp, won)
         _wl(by_opp_fam, r.get("opponent_family_id") or "?", won)
         lead = r.get("lead") or {}

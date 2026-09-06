@@ -17,7 +17,7 @@ def test_loss_stats():
     recs = [
         _rec(False, ["gengar", "garchomp", "gyarados"], ["kingambit", "primarina", "metagross"], "primarina", "p2a: Gengar",
              ko=[{"fainted": "p1a: Kingambit", "by": "p2a: Gengar", "move": "Shadow Ball"}], fam="F1"),
-        _rec(False, ["gengar", "hippowdon", "gyarados"], ["kingambit", "primarina", "rotomwash"], "primarina", "p2a: Gengar",
+        _rec(False, ["gengar", "hippowdon", "mimikyu"], ["kingambit", "primarina", "rotomwash"], "primarina", "p2a: Gengar",
              ko=[{"fainted": "p1a: Primarina", "by": "p2a: Gengar", "move": "Shadow Ball"}], fam="F2"),
         _rec(True, ["garchomp", "hippowdon", "mimikyu"], ["kingambit", "primarina", "metagross"], "kingambit", "p2a: Garchomp",
              ko=[{"fainted": "p2a: Garchomp", "by": "p1a: Kingambit", "move": "Sucker Punch"}], fam="F1",
