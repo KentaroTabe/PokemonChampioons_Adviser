@@ -137,18 +137,19 @@ except Exception:  # pragma: no cover - poke-env 無しの環境
 class SequenceTeambuilder(_PokeEnvTeambuilder):
     """相手列 (team_id の並び) の順にチームを出す。last_id で今出したチームが分かる"""
 
-    def __init__(self, sequence: list, texts: dict):
+    def __init__(self, sequence: list, texts: dict, offset: int = 0):
         self.sequence = list(sequence)
         self.texts = texts
+        self.offset = int(offset)
         self.i = 0
         self.last_id = None
 
     def id_for_battle(self, k: int) -> str:
         """k 番目 (0 始まり) の対戦の相手 id。対戦は逐次なので相手列の順と一致する"""
-        return self.sequence[k % len(self.sequence)]
+        return self.sequence[(self.offset + k) % len(self.sequence)]
 
     def yield_team(self) -> str:
-        tid = self.sequence[self.i % len(self.sequence)]
+        tid = self.sequence[(self.offset + self.i) % len(self.sequence)]
         self.i += 1
         self.last_id = tid
         return self.join_team(self.parse_showdown_team(self.texts[tid]))

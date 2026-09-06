@@ -60,7 +60,8 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
               pick_policy: str = "advisor", selection_model: str | None = None,
               opp_split: str | None = None, battle_log: str | None = None,
               pick_noise: float = 0.0, action_noise: float = 0.0,
-              user_policy: str = "full", candidate_id: str | None = None) -> None:
+              user_policy: str = "full", candidate_id: str | None = None,
+              opp_offset: int = 0) -> None:
     from poke_env import AccountConfiguration
     from poke_env.player import RandomPlayer
     import advisor.engine as eng
@@ -100,10 +101,11 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
         doc = load_split(Path(parts[0]))
         tier = parts[1] if len(parts) > 1 else "selection"
         fold = int(parts[2]) if len(parts) > 2 else None
-        seq = opponent_sequence(tier_ids(doc, tier, fold), n_battles, opp_seed or 0)
-        opp_team = SequenceTeambuilder(seq, doc["texts"])
+        # 相手列は「階層の全構築を seed で並べた列」を offset から n 戦ぶん使う (追加測定は続きから)
+        seq = opponent_sequence(tier_ids(doc, tier, fold), opp_offset + n_battles, opp_seed or 0)
+        opp_team = SequenceTeambuilder(seq, doc["texts"], offset=opp_offset)
         family_of = {tid: f["family_id"] for f in doc["families"] for tid in f["teams"]}
-        split_info = {"file": parts[0], "tier": tier, "fold": fold,
+        split_info = {"file": parts[0], "tier": tier, "fold": fold, "offset": opp_offset,
                       "sealed_id": doc.get("sealed_id"), "run_id": doc.get("run_id")}
     elif opp_seed is not None:
         opp_team = RankedTeambuilder(top_n=60, include_external=False,
@@ -206,6 +208,8 @@ def main() -> None:
     ap.add_argument("--models-dir", default=None,
                     help="行動方策 (RL) のピン dir。CHAMPIONS_MODELS_DIR に設定してから読み込む")
     ap.add_argument("--candidate-id", default=None, help="対戦記録に付ける候補 id")
+    ap.add_argument("--opp-offset", type=int, default=0,
+                    help="相手列の開始位置 (racing の追加測定で同じ相手列の続きを使う)")
     ap.add_argument("--team-file", default=None,
                     help="自分側を固定チーム (Showdownテキスト) にする (構築の操縦しやすさ測定)")
     args = ap.parse_args()
@@ -218,7 +222,8 @@ def main() -> None:
                     pick_policy=args.pick_policy, selection_model=args.selection_model,
                     opp_split=args.opp_split, battle_log=args.battle_log,
                     pick_noise=args.pick_noise, action_noise=args.action_noise,
-                    user_policy=args.user_policy, candidate_id=args.candidate_id))
+                    user_policy=args.user_policy, candidate_id=args.candidate_id,
+                    opp_offset=args.opp_offset))
 
 
 if __name__ == "__main__":

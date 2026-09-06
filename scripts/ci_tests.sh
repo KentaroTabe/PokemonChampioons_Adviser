@@ -39,6 +39,7 @@ TESTS=(
   test_team_build_sets
   test_team_build_candidates
   test_team_build_concepts
+  test_team_build_racing
 )
 
 fail=0

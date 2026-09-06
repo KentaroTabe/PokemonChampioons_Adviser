@@ -192,7 +192,10 @@ async def collect_paired(n_groups: int, group_size: int, style: str,
 
 
 async def collect(n_battles: int, explore: float, style: str,
-                  teams: str = "myteam") -> dict:
+                  teams: str = "myteam", team_text: str | None = None,
+                  opp_split: str | None = None, opp_seed: int = 0) -> dict:
+    """team_text: 自チームを Showdown 本文で固定 (構築システムの候補適応)。
+    opp_split: FILE:TIER[:FOLD] — 相手を系統分割の階層から決定的に引く (cross-fitting 用)"""
     import random
     import types
     from poke_env import AccountConfiguration
@@ -208,7 +211,9 @@ async def collect(n_battles: int, explore: float, style: str,
     from tools.evaluate_team import build_myteam_text
 
     records: dict = {}      # battle_tag -> {obs, emb, action}
-    if teams == "ranked":
+    if team_text:
+        own_teambuilder = ConstantTeambuilder(team_text)
+    elif teams == "ranked":
         # 他プレイヤーの実構築 (ラダー上位) を毎バトル引き直す。
         # 単一チームのデータだとモデルがそのチーム専用になるため、
         # 「チーム一般の選出判断」を学ぶには多数の構築が要る
@@ -263,9 +268,18 @@ async def collect(n_battles: int, explore: float, style: str,
     # 「相手構築の種類」は汎化の主因なので、収集時はここだけ広げる
     # (実戦では毎回違う相手に当たる。60種の相手しか見ないと条件付けを学べない)
     from champions_agent.env.ranked_teams import RankedTeambuilder
+    if opp_split:
+        from tools.team_build.opponents import SequenceTeambuilder, load_split, opponent_sequence, tier_ids
+        parts = opp_split.split(":")
+        doc = load_split(parts[0])
+        tier = parts[1] if len(parts) > 1 else "search"
+        fold = int(parts[2]) if len(parts) > 2 else None
+        opp_tb = SequenceTeambuilder(opponent_sequence(tier_ids(doc, tier, fold), n_battles, opp_seed), doc["texts"])
+    else:
+        opp_tb = RankedTeambuilder()
     opp = make_benchmark_player(
         battle_format=TRAINING_BATTLE_FORMAT,
-        team=RankedTeambuilder(),
+        team=opp_tb,
         account_configuration=AccountConfiguration(f"SelE{uid}", None))
     apply_matchup_teampreview(opp)
 
@@ -312,8 +326,12 @@ def _migrate(old, new: dict) -> dict:
     return out
 
 
-def _merge_save(new: dict) -> dict:
-    """既存データへ追記して保存する (収集を分割して積み増せる)"""
+def _merge_save(new: dict, out_path: Path | None = None) -> dict:
+    """既存データへ追記して保存する (収集を分割して積み増せる)。out_path で保存先を変えられる
+    (構築システムの候補ごとの適応データは production の selection_data.npz に混ぜない)"""
+    global OUT
+    if out_path is not None:
+        OUT = Path(out_path)
     OUT.parent.mkdir(parents=True, exist_ok=True)
     if OUT.exists():
         try:
@@ -407,6 +425,10 @@ def main() -> None:
     ap.add_argument("--teams", default="myteam", choices=["myteam", "ranked"],
                     help="myteam=自分の登録チーム固定 / ranked=他プレイヤーの実構築を毎回引き直す")
     ap.add_argument("--show", action="store_true", help="集計表示のみ")
+    ap.add_argument("--team-file", default=None, help="自チームを Showdown 本文で固定 (候補適応)")
+    ap.add_argument("--opp-split", default=None, help="相手: opponent_families.json のパス:階層[:fold]")
+    ap.add_argument("--opp-seed", type=int, default=0)
+    ap.add_argument("--out", default=None, help="保存先 npz (既定: production の selection_data.npz)")
     ap.add_argument("--paired", action="store_true",
                     help="対応のある収集: 同じ(自チーム,相手チーム)の組に対して"
                          "複数の選出を試す。選出間の差が相手の引き運に"
@@ -426,11 +448,13 @@ def main() -> None:
         data = asyncio.run(collect_paired(groups, args.group_size,
                                           args.style, args.teams))
     else:
+        team_text = Path(args.team_file).read_text(encoding="utf-8") if args.team_file else None
         data = asyncio.run(collect(args.battles, args.explore, args.style,
-                                   args.teams))
+                                   args.teams, team_text=team_text,
+                                   opp_split=args.opp_split, opp_seed=args.opp_seed))
     if not len(data["action"]):
         raise SystemExit("記録できたエピソードがありません")
-    merged = _merge_save(data)
+    merged = _merge_save(data, out_path=Path(args.out) if args.out else None)
     print(f"[collect_selection] 今回{len(data['action'])}件 / "
           f"累計{len(merged['action'])}件 ({time.time() - t0:.0f}s) → {OUT}")
     show()

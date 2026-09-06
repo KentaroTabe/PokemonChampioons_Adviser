@@ -395,6 +395,66 @@ def _report_top(net, X, y) -> None:
         print(f"  予測{pred[rank]:.2f} / {actual}  ★{names}")
 
 
+def adapt_candidate(data_path: Path, out_model: Path, base_model: Path = GENERAL_MODEL_PATH,
+                    lr: float = 1e-4, epochs: int = 200, holdout: float = 0.2,
+                    report_json: Path | None = None, seed: int = RANDOM_SEED) -> dict:
+    """構築システムの候補専用選出モデル (S7): 汎用モデルの重みを起点に、候補チームで集めた
+    データ (data_path、単一チーム) だけで微調整して out_model に保存する。production の
+    MODEL_PATH / GENERAL_MODEL_PATH / META_PATH には触れない。
+
+    戻り値 (report_json にも保存): n, val_mse, base_val_mse (微調整前), gain_pct, improved
+    """
+    import json
+    import torch
+    from torch.optim import Adam
+    torch.manual_seed(seed)
+    rng = np.random.default_rng(seed)
+    X, y, meta = load_dataset(Path(data_path))
+    n = len(y)
+    net = make_net()
+    if Path(base_model).exists():
+        net.load_state_dict(torch.load(base_model, map_location="cpu"))
+    idx = rng.permutation(n)
+    n_val = max(1, int(n * holdout))
+    va, tr = idx[:n_val], idx[n_val:]
+    Xt, yt = torch.from_numpy(X), torch.from_numpy(y).unsqueeze(-1)
+
+    def val_mse() -> float:
+        net.eval()
+        with torch.no_grad():
+            pred = torch.sigmoid(net(Xt[va]))
+            return float(((pred - yt[va]) ** 2).mean())
+
+    base_val = val_mse()
+    opt = Adam(net.parameters(), lr=lr)
+    best_val, best_state = base_val, {k: v.clone() for k, v in net.state_dict().items()}
+    for _ in range(epochs):
+        net.train()
+        perm = rng.permutation(tr)
+        for i in range(0, len(perm), 256):
+            b = perm[i:i + 256]
+            opt.zero_grad()
+            loss = torch.nn.functional.binary_cross_entropy_with_logits(net(Xt[b]), yt[b])
+            loss.backward()
+            opt.step()
+        v = val_mse()
+        if v < best_val:
+            best_val, best_state = v, {k: v_.clone() for k, v_ in net.state_dict().items()}
+    net.load_state_dict(best_state)
+    out_model = Path(out_model)
+    out_model.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(net.state_dict(), out_model)
+    gain = (base_val - best_val) / base_val * 100 if base_val > 0 else 0.0
+    rep = {"n": int(n), "n_train": int(len(tr)), "n_val": int(n_val), "base_val_mse": round(base_val, 5),
+           "val_mse": round(best_val, 5), "gain_pct": round(gain, 2), "improved": best_val < base_val,
+           "base_model": str(base_model), "out_model": str(out_model), "data": str(data_path),
+           "teams": int(meta.get("teams", 0))}
+    if report_json:
+        Path(report_json).write_text(json.dumps(rep, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    print(f"[adapt_candidate] n={n} val_mse {base_val:.4f} → {best_val:.4f} ({gain:+.1f}%) 保存: {out_model}")
+    return rep
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="選出モデルの学習")
     ap.add_argument("--epochs", type=int, default=300)
@@ -412,7 +472,14 @@ def main() -> None:
     ap.add_argument("--features", default="v1", choices=["v1", "v2"],
                     help="v2=型情報+メタ事前分布を加えた特徴量 (比較実験用。"
                          "保存先も selection_model_v2_general.pt に分離)")
+    ap.add_argument("--adapt-data", default=None, help="候補専用の適応: 候補データ npz")
+    ap.add_argument("--adapt-out", default=None, help="候補専用の適応: 保存先 .pt")
+    ap.add_argument("--adapt-report", default=None, help="候補専用の適応: 結果 JSON")
     args = ap.parse_args()
+    if args.adapt_data:
+        adapt_candidate(Path(args.adapt_data), Path(args.adapt_out), lr=args.lr / 10, epochs=args.epochs,
+                        holdout=args.holdout, report_json=Path(args.adapt_report) if args.adapt_report else None)
+        return
     train(args.epochs, args.lr, args.holdout, finetune=not args.no_finetune,
           pair_weight=args.pair_weight, force=args.force,
           cond_sel=args.cond_sel, features=args.features)
