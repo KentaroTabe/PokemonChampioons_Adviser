@@ -30,6 +30,12 @@ from tools.team_build.spec import (BuildSpec, legal_species_ids, load_spec, pars
 
 REPO = Path(__file__).resolve().parent.parent.parent
 RUNS_DIR = REPO / "logs" / "build_search" / "runs"
+# 測定段の規模 (§5 時間軸プロファイル): fast は探索のみ (draft)、medium は候補 Package (provisional)、full は validated
+PROFILE_MEASURE = {
+    "fast": {"race_max": 300, "stress_n": 100, "ablation_n": 100, "max_candidates": 6},
+    "medium": {"race_max": 600, "stress_n": 150, "ablation_n": 150, "max_candidates": 8},
+    "full": {"race_max": None, "stress_n": None, "ablation_n": None, "max_candidates": None},
+}
 PROFILE_DEFAULTS = {
     "fast": {"width": 6, "n_lineups": 8, "threats": 20, "quotas": {"best": 2, "coverage": 1, "roles": 1, "novelty": 1}},
     "medium": {"width": 8, "n_lineups": 16, "threats": 30, "quotas": {"best": 3, "coverage": 2, "roles": 2, "synergy": 1, "novelty": 2}},
@@ -207,6 +213,8 @@ def main() -> None:
     ap.add_argument("--max-candidates", type=int, default=None)
     ap.add_argument("--repairs", type=int, default=0)
     ap.add_argument("--registry", default=None, help="registry のディレクトリ (既定 logs/registry)")
+    ap.add_argument("--article-file", default=None,
+                    help="構築記事の本文 (ユーザーが貼ったもの)。LLM で structured claims にして軸の候補に加える (要 --llm headless)")
     args = ap.parse_args()
 
     run_dir = RUNS_DIR / args.run_id
@@ -232,6 +240,16 @@ def main() -> None:
     threats = list(tv.keys())
     threat_weights = {t["id"]: float(t.get("usage") or 0.0) for t in doc["top"] if t["id"] in tv}
     fams = stage_s4(run_dir, spec, feats, threats, legal, args.llm, threat_weights)
+    if args.article_file and args.llm == "headless":
+        try:
+            from tools.team_build.articles import claims_to_cores, extract_claims
+            from tools.team_build.llm.provider import ClaudeCLIProvider
+            claims = extract_claims(ClaudeCLIProvider(run_dir / "llm"), Path(args.article_file).read_text(encoding="utf-8"), legal)
+            cores = claims_to_cores(claims, set(feats))
+            fams = K.cluster_concepts([dict(f) for f in fams] + cores)
+            log(run_dir, f"S4 article: claims={len(claims)} cores={len(cores)} → families={len(fams)}")
+        except Exception as e:
+            log(run_dir, f"S4 article error: {e!r}")
     lineups = stage_s5(run_dir, spec, fams, feats, threats, prof, threat_weights)
     concept_mega = {f["family_id"]: f.get("mega_id") for f in fams}
     results = stage_s6(run_dir, spec, lineups, doc["snapshot"]["id"], tv, concept_mega)
@@ -254,6 +272,10 @@ def _measure(run_dir: Path, args) -> None:
     from tools.team_build.registry import Registry
     steps = tuple(int(x) for x in args.race_steps.split(",")) if args.race_steps else BUILD_RACE_STEPS
     reg = Registry(Path(args.registry)) if args.registry else Registry()
+    pm = PROFILE_MEASURE.get(getattr(args, "profile", "full"), PROFILE_MEASURE["full"])
+    for key in ("race_max", "stress_n", "ablation_n", "max_candidates"):
+        if getattr(args, key, None) is None and pm.get(key) is not None:
+            setattr(args, key, pm[key])
     provider = None
     if getattr(args, "llm", "none") == "headless":
         from tools.team_build.llm.provider import ClaudeCLIProvider
