@@ -60,6 +60,21 @@ def extract_json(text: str) -> Optional[dict]:
     return None
 
 
+def normalize_output(parsed) -> tuple:
+    """{"authoritative": {...}, "display": {...}} に揃える。モデルが authoritative を省いて最上位に値を置いたら、
+    display 以外を authoritative とみなす (寛容な正規化。検証は authoritative の中身に対して行う)"""
+    if not isinstance(parsed, dict):
+        return None, None
+    auth = parsed.get("authoritative")
+    disp = parsed.get("display")
+    if not isinstance(auth, dict) or not auth:
+        rest = {k: v for k, v in parsed.items() if k not in ("authoritative", "display")}
+        auth = rest if rest else (auth if isinstance(auth, dict) else None)
+    if disp is not None and not isinstance(disp, dict):
+        disp = {"text": disp}
+    return auth, disp
+
+
 class LLMProvider:
     name = "base"
 
@@ -88,8 +103,7 @@ class LLMProvider:
             except Exception as e:
                 res = {"text": "", "raw": None, "usage": {}, "error": repr(e)}
             parsed = extract_json(res.get("text") or "")
-            auth = (parsed or {}).get("authoritative") if isinstance(parsed, dict) else None
-            disp = (parsed or {}).get("display") if isinstance(parsed, dict) else None
+            auth, disp = normalize_output(parsed)
             problems = []
             if parsed is None:
                 problems.append("出力に JSON オブジェクトが見つからない")
