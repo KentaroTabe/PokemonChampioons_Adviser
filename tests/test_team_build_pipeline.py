@@ -41,6 +41,25 @@ def test_choose_variants_picks_best_non_degraded():
     print("test_choose_variants_picks_best_non_degraded OK")
 
 
+def test_surrogate_quality_metrics():
+    from tools.team_build.review_run import spearman, surrogate_quality
+    assert spearman([1, 2, 3, 4], [10, 20, 30, 40]) == 1.0
+    assert spearman([1, 2, 3, 4], [40, 30, 20, 10]) == -1.0
+    assert spearman([1, 2], [1, 2]) is None
+    sets = [{"candidate_id": c, "ok": True, "score": s} for c, s in
+            (("A", 1.3), ("B", 1.2), ("C", 1.1), ("D", 1.0), ("E", 0.9))] + [{"candidate_id": "X", "ok": False, "score": 2.0}]
+    # 代理順位 A > B > C > D > E、実測は D > C > B > A (E は未測定)
+    res = {"arms": [_arm("A", -0.26), _arm("B", -0.26), _arm("C", -0.12), _arm("D", -0.04), _arm("X", 0.5)]}
+    q = surrogate_quality(sets, res, k=2)
+    assert q["n"] == 4 and q["k"] == 2
+    assert q["spearman"] is not None and q["spearman"] < 0, q
+    assert q["precision_at_k"] == 0.0 and q["best_surrogate_rank"] == 4, q
+    assert abs(q["regret_at_k"] - 0.22) < 1e-9, q          # -0.04 − (−0.26)
+    assert surrogate_quality(sets, {"arms": []}) == {"n": 0}
+    print("test_surrogate_quality_metrics OK")
+
+
 if __name__ == "__main__":
     test_select_survivors_orders_and_caps()
     test_choose_variants_picks_best_non_degraded()
+    test_surrogate_quality_metrics()

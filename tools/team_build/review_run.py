@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 from pathlib import Path
 from typing import Optional
@@ -65,8 +66,74 @@ def stage_durations(run_log: Path) -> dict:
     return dict(sorted(out.items(), key=lambda kv: -kv[1])[:12])
 
 
+def _ranks(values: list) -> list:
+    """降順の平均順位 (同値は平均。最大値が 1)"""
+    order = sorted(range(len(values)), key=lambda i: -values[i])
+    ranks = [0.0] * len(values)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and values[order[j + 1]] == values[order[i]]:
+            j += 1
+        avg = (i + j) / 2 + 1
+        for t in range(i, j + 1):
+            ranks[order[t]] = avg
+        i = j + 1
+    return ranks
+
+
+def spearman(x: list, y: list):
+    n = len(x)
+    if n < 3:
+        return None
+    rx, ry = _ranks(list(x)), _ranks(list(y))
+    mx, my = sum(rx) / n, sum(ry) / n
+    cov = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
+    vx = sum((a - mx) ** 2 for a in rx)
+    vy = sum((b - my) ** 2 for b in ry)
+    if vx == 0 or vy == 0:
+        return None
+    return round(cov / math.sqrt(vx * vy), 4)
+
+
+def surrogate_quality(sets_rows: list, res8a: dict, k: int = 4) -> dict:
+    """S5 の代理スコアの順位が、S8a の実測 Δ (対 参照) の順位をどれだけ再現するか (純粋関数)。
+
+    Spearman ρ / Precision@k (代理上位 k のうち実測上位 k に入る数) / 実測最良の代理順位 /
+    Regret@k (実測最良 Δ − 代理上位 k の中の実測最良 Δ)。実測のある候補だけで計算する。
+    代理スコアで候補を絞る権限を与えるかは、この数値が run を跨いで安定してから判断する
+    """
+    score = {r["candidate_id"]: r.get("score") for r in (sets_rows or []) if r.get("ok")}
+    measured = {}
+    for a in (res8a or {}).get("arms", []):
+        d = (a.get("result") or {}).get("mean")
+        cid = a.get("arm_id")
+        if d is not None and cid in score and score[cid] is not None:
+            measured[cid] = d
+    ids = list(measured)
+    n = len(ids)
+    if n == 0:
+        return {"n": 0}
+    by_score = sorted(ids, key=lambda c: -score[c])
+    by_delta = sorted(ids, key=lambda c: -measured[c])
+    kk = min(k, n)
+    top_s, top_d = set(by_score[:kk]), set(by_delta[:kk])
+    best = by_delta[0]
+    regret = measured[best] - max(measured[c] for c in by_score[:kk])
+    return {"n": n, "k": kk, "spearman": spearman([score[c] for c in ids], [measured[c] for c in ids]),
+            "precision_at_k": round(len(top_s & top_d) / kk, 3), "best_surrogate_rank": by_score.index(best) + 1,
+            "regret_at_k": round(regret, 4), "order_surrogate": by_score, "order_measured": by_delta}
+
+
 def recommendations(review: dict) -> list:
     rec = []
+    sq = review.get("surrogate") or {}
+    if sq.get("n", 0) >= 3:
+        rho = sq.get("spearman")
+        weak = (rho is not None and rho < 0.3) or (sq.get("precision_at_k") is not None and sq["precision_at_k"] < 0.5)
+        rec.append(f"代理スコア (S5) の順位予測力: n={sq['n']} Spearman={rho} Precision@{sq['k']}={sq['precision_at_k']} "
+                   f"実測最良の代理順位={sq['best_surrogate_rank']} Regret@{sq['k']}={sq['regret_at_k']}"
+                   + (" → 弱い。代理スコアで候補を絞らない運用を維持し、S5 特徴の較正材料にする" if weak else ""))
     for st in review.get("racing", []):
         if st["n_arms"] and st["uncertain_at_cap"] / st["n_arms"] >= 0.5:
             rec.append(f"{st['stage']}: 半数以上が上限 {st['max_battles']} 戦で uncertain。上限の延長か ε の見直し (現在 {st['eps']}) を検討")
@@ -99,6 +166,8 @@ def review(run_id: str) -> dict:
             out["racing"].append(racing_summary(doc))
     out["holdout"] = _load(run / "evaluation" / "s12_holdout.json")
     out["adapt"] = _load(run / "evaluation" / "s07_adapt.json") or {}
+    out["surrogate"] = surrogate_quality(_load(run / "s06_sets.json") or [],
+                                         _load(run / "evaluation" / "s08a_screen.json") or {})
     out["split"] = {k: v for k, v in (_load(run / "opponent_families.json") or {}).items() if k in ("summary", "min_jaccard", "ratios", "n_teams", "n_families")}
     rob = _load(run / "evaluation" / "robustness.json")
     if rob:
