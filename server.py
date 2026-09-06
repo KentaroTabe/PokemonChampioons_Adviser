@@ -685,6 +685,111 @@ async def _watch_proposal(sid, proc, log_path):
                         f"(ジョブ自体は継続。結果: {log_path})"})
 
 
+_team_build_proc = None
+
+
+def _team_build_running() -> bool:
+    return _team_build_proc is not None and _team_build_proc.poll() is None
+
+
+@sio.on('run_team_build')
+async def run_team_build(sid, data):
+    """構築システム (docs/TEAM_BUILDING_IMPLEMENTATION.md) の一発依頼。フォームの構造入力を BuildSpec に渡し、
+    別プロセスで S0〜S13 (--stages all) を回す。進捗は run.log の tail、結果は evaluation/summary.json。"""
+    global _team_build_proc
+    if _team_build_running() or _proposal_running() or _analysis_busy:
+        await sio.emit('team_build_progress', {"msg": "別の実対戦ジョブが実行中です"}, room=sid)
+        return
+    if _battle_in_progress():
+        await sio.emit('team_build_result', {"kind": "refused", "text": "対戦中のため実行できません"}, room=sid)
+        return
+    import subprocess
+    import sys as _sys
+    d = data or {}
+    run_id = f"ui_{time.strftime('%Y%m%d_%H%M%S')}"
+    run_dir = Path("logs") / "build_search" / "runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    cmd = [_sys.executable, "-u", "-m", "tools.team_build.run", "--run-id", run_id,
+           "--favorites", str(d.get("favorites") or ""), "--banned", str(d.get("banned") or ""),
+           "--style", str(d.get("style") or "any"), "--objective", str(d.get("objective") or "max_wr"),
+           "--profile", str(d.get("profile") or "fast"), "--stages", str(d.get("stages") or "search"),
+           "--llm", "headless" if d.get("llm") else "none"]
+    log_path = run_dir / "nohup.log"
+    with log_path.open("w") as lf:
+        _team_build_proc = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT, start_new_session=True)
+    print(f"[server] 構築システムを別プロセスで開始: pid={_team_build_proc.pid} run={run_id}")
+    await sio.emit('team_build_progress', {"msg": f"run {run_id} を開始 ({cmd[-6]} / {cmd[-4]} / {cmd[-2]})", "running": True})
+    asyncio.ensure_future(_watch_team_build(_team_build_proc, run_dir))
+
+
+async def _watch_team_build(proc, run_dir: Path):
+    """run.log を tail して進捗を全クライアントへ配信し、終了時に summary を送る"""
+    log_path = run_dir / "run.log"
+    sent = 0
+    try:
+        while proc.poll() is None:
+            await asyncio.sleep(3.0)
+            try:
+                text = log_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if len(text) > sent:
+                new = text[sent:]
+                sent = len(text)
+                for line in [l for l in new.splitlines() if l.strip()][-3:]:
+                    await sio.emit('team_build_progress', {"msg": line[:200], "running": True})
+        result = _team_build_summary(run_dir)
+        result["exit"] = proc.returncode
+        await sio.emit('team_build_result', result)
+        print(f"[server] 構築システム終了: exit={proc.returncode} run={run_dir.name}")
+    except Exception as e:
+        await sio.emit('team_build_result', {"kind": "error", "text": f"進捗監視エラー: {e} (ジョブは継続。{run_dir})"})
+
+
+def _team_build_summary(run_dir: Path) -> dict:
+    """run の結果要約 (探索のみなら候補一覧、測定まで回したら holdout の verdict と Package)"""
+    import json as _json
+    out = {"kind": "done", "run_id": run_dir.name, "text": ""}
+    lines = []
+    try:
+        sets = _json.loads((run_dir / "s06_sets.json").read_text(encoding="utf-8"))
+        lines.append(f"候補 {sum(1 for r in sets if r.get('ok'))}/{len(sets)} 並びが合法")
+        for r in sets[:6]:
+            lines.append(f"  {r.get('candidate_id')}: " + " / ".join(
+                f"{st['species']}@{st['item']}" for st in r.get('sets') or []))
+    except Exception:
+        pass
+    try:
+        summ = _json.loads((run_dir / "evaluation" / "summary.json").read_text(encoding="utf-8"))
+        h = summ.get("holdout") or {}
+        lines.append(f"結果: {summ.get('result')} / 勝者 {summ.get('winner')} / holdout ΔWR={h.get('delta')} CI={h.get('ci')} n={h.get('n')}")
+        lines.append(f"ablation: {summ.get('ablation')} / STRESS 最悪感度: {summ.get('robustness_worst')}")
+        lines.append(f"Package: {(summ.get('package') or {}).get('artifact_id')} (status=candidate。採用は promote コマンドで)")
+        out["status"] = "validated" if summ.get("result") in ("PASS", "PASS_EQUIVALENT") else (summ.get("result") or "draft")
+    except Exception:
+        out["status"] = "draft (探索のみ、暫定)"
+    try:
+        rep = run_dir / "final" / "build_report.md"
+        if rep.exists():
+            lines.append("")
+            lines.append(rep.read_text(encoding="utf-8")[:3000])
+    except Exception:
+        pass
+    out["text"] = "\n".join(lines) or f"(結果なし: {run_dir}/run.log を確認)"
+    return out
+
+
+@sio.on('team_build_status')
+async def team_build_status(sid, data):
+    runs = sorted((Path("logs") / "build_search" / "runs").glob("*/run.log"), key=lambda p: p.stat().st_mtime)[-5:]
+    text = []
+    for p in runs:
+        tail = [l for l in p.read_text(encoding="utf-8", errors="replace").splitlines() if l.strip()][-1:]
+        text.append(f"{p.parent.name}: {tail[0][:120] if tail else ''}")
+    await sio.emit('team_build_result', {"kind": "status", "text": "\n".join(text) or "run なし",
+                                         "running": _team_build_running()}, room=sid)
+
+
 @sio.on('improve_team')
 async def improve_team(sid, data):
     """制約付きパーティ改善 (自チームを種にした進化探索)"""

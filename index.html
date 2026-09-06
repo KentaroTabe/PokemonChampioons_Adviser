@@ -70,6 +70,37 @@
                 <div id="tp-progress" style="font-size:11px;color:#8ac;margin-top:8px;white-space:pre-wrap;max-height:90px;overflow-y:auto"></div>
                 <pre id="tp-result" style="white-space:pre-wrap;font-size:12px;max-height:420px;overflow-y:auto"></pre>
             </div>
+            <div class="panel" id="team-build-panel">
+                <h3>🏗 構築システム (Team × 専用助言方策)</h3>
+                <div style="font-size:11px;color:#89a;margin-bottom:6px">条件を指定して依頼。探索 (数分) → 測定 (数時間、封印 holdout で採否)。結果は draft / provisional / validated で区別。採用は promote コマンド (人手)。</div>
+                <div style="margin-bottom:6px;font-size:11px">
+                    固定枠: <input id="tb-favorites" placeholder="例: ドドゲザン,メタグロス" style="width:170px;font-size:11px">
+                    除外: <input id="tb-banned" placeholder="例: ハッサム" style="width:120px;font-size:11px">
+                </div>
+                <div style="margin-bottom:6px;font-size:11px">
+                    目的: <select id="tb-objective" style="font-size:11px;background:#223;color:#cde;border:1px solid #446;border-radius:4px">
+                        <option value="max_wr" selected>max_wr (期待勝率)</option>
+                        <option value="stable">stable (下振れ重視)</option>
+                        <option value="easy">easy (遵守モデル込み)</option>
+                        <option value="favorites">favorites (固定枠優先)</option></select>
+                    スタイル: <select id="tb-style" style="font-size:11px;background:#223;color:#cde;border:1px solid #446;border-radius:4px">
+                        <option value="any" selected>指定なし</option><option value="offense">攻め</option><option value="balance">バランス</option>
+                        <option value="bulky_offense">耐久寄り攻め</option><option value="cycle">サイクル</option><option value="setup">積み</option>
+                        <option value="speed_control">速度操作</option><option value="anti_meta">環境対策</option><option value="stall">受け</option></select>
+                    規模: <select id="tb-profile" style="font-size:11px;background:#223;color:#cde;border:1px solid #446;border-radius:4px">
+                        <option value="fast" selected>fast (探索のみ数分、draft)</option>
+                        <option value="medium">medium (≤3h、provisional)</option>
+                        <option value="full">full (4〜7h、validated)</option></select>
+                </div>
+                <div style="margin-bottom:6px;font-size:11px">
+                    <label><input type="checkbox" id="tb-measure"> 測定まで回す (S7〜S13)</label>
+                    <label style="margin-left:10px"><input type="checkbox" id="tb-llm"> LLM でコンセプト生成 (Opus)</label>
+                </div>
+                <button onclick="runTeamBuild()" id="tb-btn" style="background:#3567c9;color:#fff;border:none;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer">依頼する</button>
+                <button onclick="socket.emit('team_build_status', {})" class="mini-btn" style="margin-left:8px">状態</button>
+                <div id="tb-progress" style="font-size:11px;color:#8ac;margin-top:8px;white-space:pre-wrap;max-height:90px;overflow-y:auto"></div>
+                <pre id="tb-result" style="white-space:pre-wrap;font-size:12px;max-height:420px;overflow-y:auto"></pre>
+            </div>
             <div class="panel" id="analysis-panel">
                 <h3>📈 分析・コーチング</h3>
                 <div style="margin-bottom:6px">
@@ -301,6 +332,38 @@
         });
         socket.on('disconnect', () => {
             tpButtonsDisabled(false);
+            document.getElementById('tb-btn').disabled = false;
+        });
+
+        // --- 構築システム (依頼フォーム。ロジックはサーバー側の別プロセス) ---
+        const tbProgress = document.getElementById('tb-progress');
+        const tbResult = document.getElementById('tb-result');
+        function runTeamBuild() {
+            const measure = document.getElementById('tb-measure').checked;
+            const profile = document.getElementById('tb-profile').value;
+            if (measure && !confirm('測定 (S7〜S13) まで回します。' + (profile === 'full' ? '4〜7 時間' : '最大数時間') +
+                                    'かかります。実行しますか?')) return;
+            tbResult.textContent = '';
+            tbProgress.textContent = '⏳ 構築システムを開始…\n';
+            document.getElementById('tb-btn').disabled = true;
+            socket.emit('run_team_build', {
+                favorites: document.getElementById('tb-favorites').value.trim(),
+                banned: document.getElementById('tb-banned').value.trim(),
+                objective: document.getElementById('tb-objective').value,
+                style: document.getElementById('tb-style').value,
+                profile: profile, stages: measure ? 'all' : 'search',
+                llm: document.getElementById('tb-llm').checked});
+        }
+        socket.on('team_build_progress', (d) => {
+            if (d.running) document.getElementById('tb-btn').disabled = true;
+            const lines = (tbProgress.textContent + d.msg + '\n').split('\n');
+            tbProgress.textContent = lines.slice(-8).join('\n');
+            tbProgress.scrollTop = tbProgress.scrollHeight;
+        });
+        socket.on('team_build_result', (d) => {
+            if (d.kind !== 'status') tbProgress.textContent = '';
+            tbResult.textContent = (d.status ? `[${d.status}] ` : '') + (d.text || '');
+            if (!d.running) document.getElementById('tb-btn').disabled = false;
         });
 
         // --- 手動修正 (誤認識のユーザー訂正。修正はログに記録され分析に使う) ---
