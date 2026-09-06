@@ -105,3 +105,101 @@ def adapt_selection(candidate_id: str, team_file: Path, split_file: Path, out_di
     (out_dir / "adapt_result.json").write_text(json.dumps(result, ensure_ascii=False, indent=1) + "\n",
                                                 encoding="utf-8")
     return result
+
+
+# ---------------------------------------------------------------------------
+# 行動方策の adapter (§9-6): 汎用 RL 方策を候補チーム固定の自己対戦で短く微調整する。
+# - 基底のピン dir を候補専用 dir にコピーし、CHAMPIONS_MODELS_DIR をそこへ向けて tools.smoke_train --resume
+#   --own-team-file を chunk ごとに回す (production のチェックポイントには触れない)
+# - 忘却対策: 小さい学習率 (TRAIN_LR)、更新幅の制限 (TRAIN_TARGET_KL)、EMA (基底の ema から始まる平均方策) を
+#   実際の推論に使う。SB3 の MaskablePPO には基底方策への KL 罰則が無いため、この 3 つで代替する
+# - 収束: chunk ごとに候補チームで「adapter vs 基底」を同一相手列 (SEARCH-B) で対応比較し、
+#   improved が出れば採用候補、patience 回連続で改善なしなら停止。採用は「基底に対して degraded でない」こと
+# ---------------------------------------------------------------------------
+ACTION_CHUNK_STEPS = 100_000      # 1 chunk の学習ステップ (実測 約 10k step/分)
+ACTION_EVAL_BATTLES = 100         # chunk ごとの対応比較の戦数
+ACTION_LR = "3e-5"                # 微調整の学習率 (新規学習 3e-4 の 1/10)
+ACTION_TARGET_KL = "0.02"
+
+
+def decide_action_adapt(history: list, eps_train: float = 0.0) -> dict:
+    """chunk ごとの対応差 (adapter − 基底) の履歴から採否を決める (純粋関数)。
+    history: [{"n_steps", "delta", "state"}]。最良の chunk が improved なら採用、それ以外は基底を維持"""
+    if not history:
+        return {"use_adapted": False, "best_index": None, "reason": "no_history"}
+    best_i = max(range(len(history)), key=lambda i: (history[i].get("delta") or -1.0))
+    best = history[best_i]
+    if best.get("state") == "improved" and (best.get("delta") or 0.0) > eps_train:
+        return {"use_adapted": True, "best_index": best_i, "reason": f"improved {best.get('delta'):+.3f}"}
+    return {"use_adapted": False, "best_index": best_i, "reason": f"not improved (best {best.get('state')} {best.get('delta')})"}
+
+
+def adapt_action(candidate_id: str, team_file: Path, base_models_dir: str, out_dir: Path, split_file: Path,
+                 seed: int, chunk_steps: int = ACTION_CHUNK_STEPS, min_chunks: int = 2, max_chunks: int = 6,
+                 patience: int = BUILD_ADAPT_PATIENCE, eval_battles: int = ACTION_EVAL_BATTLES,
+                 play_style: str = "balance", n_envs: int = 2, log=print, registry=None) -> dict:
+    """候補 1 つの行動方策 adapter。戻り値: {"models_dir": 採用する dir (adapter or 基底), "use_adapted", "history", ...}"""
+    import os
+    import shutil
+    from tools.team_build import racing as R
+    from tools.team_build.verdict import verdict4
+
+    out = Path(out_dir) / candidate_id / "action"
+    if out.exists():
+        shutil.rmtree(out)
+    shutil.copytree(base_models_dir, out)
+    # ピン dir は ema だけのことがある (pin_models.sh)。resume は current (battle_policy_<style>.zip) を読むので
+    # 無ければ ema を current の起点にする (基底 = 配布している平均方策)
+    cur, ema = out / f"battle_policy_{play_style}.zip", out / f"battle_policy_{play_style}_ema.zip"
+    if not cur.exists() and ema.exists():
+        shutil.copy2(ema, cur)
+    log_path = out / "adapt_action.log"
+    history, stale, best_delta = [], 0, None
+    t0 = time.time()
+    env = dict(os.environ, CHAMPIONS_MODELS_DIR=str(out), TRAIN_LR=ACTION_LR, TRAIN_TARGET_KL=ACTION_TARGET_KL)
+    for k in range(max_chunks):
+        cmd = [sys.executable, "-m", "tools.smoke_train", "--resume", "--timesteps", str(chunk_steps),
+               "--play-style", play_style, "--n-envs", str(n_envs), "--own-team-file", str(team_file),
+               "--timeout", str(int(chunk_steps / 10000 * 60 * 3) + 600)]
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as lf:
+            rc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, cwd=str(REPO), env=env,
+                                timeout=int(chunk_steps / 10000 * 60 * 3) + 900).returncode
+        if rc != 0:
+            history.append({"chunk": k, "error": f"train rc={rc}"})
+            break
+        # 対応比較: 同じ候補チームで adapter (out) vs 基底 (base_models_dir)
+        arms = [R.Arm(f"{candidate_id}_adapted", team_file, None, str(out)),
+                R.Arm(f"{candidate_id}_base", team_file, None, str(base_models_dir))]
+        R.measure_round(arms, eval_battles, k * eval_battles, seed, split_file, "search", 1, out / "eval",
+                        f"action_k{k}", parallel=2)
+        v = verdict4(arms[0].outcomes, arms[1].outcomes).to_dict()
+        rec = {"chunk": k, "n_steps": (k + 1) * chunk_steps, "delta": v.get("mean"), "state": v.get("state"),
+               "ci": [v.get("ci_low"), v.get("ci_high")], "wr_adapted": (sum(arms[0].outcomes) / len(arms[0].outcomes)) if arms[0].outcomes else None,
+               "wr_base": (sum(arms[1].outcomes) / len(arms[1].outcomes)) if arms[1].outcomes else None}
+        history.append(rec)
+        log(f"[adapt_action:{candidate_id}] chunk {k} steps={rec['n_steps']} Δ={rec['delta']} ({rec['state']})")
+        if best_delta is None or (rec["delta"] or -1) > best_delta + BUILD_ADAPT_EPS_TRAIN:
+            best_delta = rec["delta"] or -1
+            stale = 0
+            shutil.copytree(out, out.parent / "action_best", dirs_exist_ok=True)
+        else:
+            stale += 1
+        if k + 1 >= min_chunks and stale >= patience:
+            break
+    decision = decide_action_adapt([h for h in history if "delta" in h])
+    chosen = str(out.parent / "action_best") if decision["use_adapted"] and (out.parent / "action_best").exists() else str(base_models_dir)
+    result = {"candidate_id": candidate_id, "models_dir": chosen, "use_adapted": decision["use_adapted"],
+              "reason": decision["reason"], "history": history, "elapsed_s": round(time.time() - t0, 1),
+              "base_models_dir": str(base_models_dir), "artifact_id": None}
+    if registry is not None and decision["use_adapted"]:
+        try:
+            row = registry.register("rl_checkpoint", out.parent / "action_best",
+                                    meta={"candidate_id": candidate_id, "history": history[-1]},
+                                    run_id=Path(out_dir).parent.name, status="candidate")
+            result["artifact_id"] = row["id"]
+        except Exception as e:
+            result["registry_error"] = repr(e)
+    (out.parent / "adapt_action_result.json").write_text(json.dumps(result, ensure_ascii=False, indent=1) + "\n",
+                                                          encoding="utf-8")
+    return result

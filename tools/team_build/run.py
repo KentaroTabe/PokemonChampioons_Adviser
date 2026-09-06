@@ -219,6 +219,10 @@ def main() -> None:
     ap.add_argument("--max-candidates", type=int, default=None)
     ap.add_argument("--repairs", type=int, default=0)
     ap.add_argument("--registry", default=None, help="registry のディレクトリ (既定 logs/registry)")
+    ap.add_argument("--adapt-action", choices=["auto", "on", "off"], default="auto",
+                    help="行動方策 adapter (S11b)。auto = full プロファイルのみ")
+    ap.add_argument("--action-steps", type=int, default=None, help="adapter の 1 chunk 学習ステップ (既定 100k)")
+    ap.add_argument("--action-eval", type=int, default=None, help="adapter の chunk ごとの対応比較戦数 (既定 100)")
     ap.add_argument("--article-file", default=None,
                     help="構築記事の本文 (ユーザーが貼ったもの)。LLM で structured claims にして軸の候補に加える (要 --llm headless)")
     args = ap.parse_args()
@@ -294,7 +298,10 @@ def _measure(run_dir: Path, args) -> None:
                     adapt_min=args.adapt_min or BUILD_ADAPT_MIN_BATTLES, adapt_chunk=args.adapt_chunk or AD.CHUNK,
                     adapt_max=args.adapt_max or AD.MAX_BATTLES, stress_n=args.stress_n or ST.STRESS_BATTLES,
                     ablation_n=args.ablation_n or AB.ABLATION_BATTLES, parallel=args.parallel or R.PARALLEL,
-                    repairs=args.repairs, max_candidates=args.max_candidates, registry=reg, llm_provider=provider)
+                    repairs=args.repairs, max_candidates=args.max_candidates, registry=reg, llm_provider=provider,
+                    adapt_action=(args.adapt_action == "on" or (args.adapt_action == "auto" and args.profile == "full")),
+                    action_steps=args.action_steps or AD.ACTION_CHUNK_STEPS,
+                    action_eval=args.action_eval or AD.ACTION_EVAL_BATTLES)
 
 
 if __name__ == "__main__":

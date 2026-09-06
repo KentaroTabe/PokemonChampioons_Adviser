@@ -428,7 +428,8 @@ def make_training_env(battle_format: str = TRAINING_BATTLE_FORMAT,
                        opp_play_style_pool: list[str] | None = None,
                        team_size: int = TRAINING_TEAM_SIZE,
                        opponent_mode: str = "auto",
-                       seed: int | None = None):
+                       seed: int | None = None,
+                       own_team_text: str | None = None):
     """自己対戦(1体のRLエージェント vs ランダム/メタチームプレイヤー)用の環境を構築する。
 
     own_play_style: 学習対象エージェントの性格('offense'/'cycle'/'stall'/'balance')。
@@ -468,6 +469,10 @@ def make_training_env(battle_format: str = TRAINING_BATTLE_FORMAT,
                 size=team_size, play_style=own_play_style, rng=rng)
         except Exception as e:
             print(f"[showdown_env] 自分側の上位構築チームは無効 (メタ生成のみ): {e}")
+    if own_team_text:
+        # 構築システムの行動方策 adapter: 候補チームを固定して微調整する (メタ生成/上位構築の混合は使わない)
+        from poke_env.teambuilder import ConstantTeambuilder
+        own_teambuilder = ConstantTeambuilder(own_team_text)
     opp_teambuilder = ChampionsTeambuilder(size=team_size,
                                             style_pool=opp_play_style_pool,
                                             rng=rng) if use_meta_team else None

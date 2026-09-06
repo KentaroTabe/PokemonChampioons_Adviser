@@ -73,7 +73,8 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
                     adapt_min: int = BUILD_ADAPT_MIN_BATTLES, adapt_chunk: int = AD.CHUNK, adapt_max: int = AD.MAX_BATTLES,
                     stress_n: int = ST.STRESS_BATTLES, ablation_n: int = AB.ABLATION_BATTLES, parallel: int = R.PARALLEL,
                     repairs: int = 0, max_candidates: Optional[int] = None, registry: Optional[Registry] = None,
-                    llm_provider=None) -> dict:
+                    llm_provider=None, adapt_action: bool = False, action_steps: int = AD.ACTION_CHUNK_STEPS,
+                    action_eval: int = AD.ACTION_EVAL_BATTLES) -> dict:
     log = lambda m: _log(run_dir, m)
     split = run_dir / "opponent_families.json"
     doc = json.loads(split.read_text(encoding="utf-8"))
@@ -147,8 +148,18 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
     final_model = r11.get("model") or adapted[winner].get("model")
     _write_stage(run_dir, "s11_final_adapt", r11)
 
+    # S11b: 行動方策 adapter (任意、full プロファイル既定): 勝者チーム固定で短く微調整し、基底との対応差で採否
+    final_models_dir = models_dir
+    if adapt_action:
+        ra = AD.adapt_action(winner, win_arm.team_file, models_dir, run_dir / "advisors", split, seed + 7,
+                             chunk_steps=action_steps, eval_battles=action_eval, log=log, registry=registry)
+        final_models_dir = ra.get("models_dir") or models_dir
+        summary["action_adapter"] = {k: ra.get(k) for k in ("use_adapted", "reason", "elapsed_s", "artifact_id")}
+        _write_stage(run_dir, "s11b_action_adapt", ra)
+        log(f"S11b action adapter: use_adapted={ra.get('use_adapted')} ({ra.get('reason')})")
+
     # S12: 封印 HOLDOUT + STRESS + ablation
-    final_arm = R.Arm(winner, win_arm.team_file, final_model, models_dir)
+    final_arm = R.Arm(winner, win_arm.team_file, final_model, final_models_dir)
     ref12 = R.Arm("reference", ref.team_file, ref.selection_model, models_dir)
     hold = HO.final_holdout(final_arm, ref12, split, doc["sealed_id"], run_dir, seed + 4,
                             candidate_key=f"{winner}:{Path(final_model or '').name}", steps=steps,
@@ -157,8 +168,10 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
     rob = ST.run_stress(final_arm, ref12, split, run_dir, seed + 5, n=stress_n, log=log, parallel=parallel)
     summary["robustness_worst"] = rob.get("worst_sensitivity_candidate")
     pop = ST.policy_population(run_dir / "advisors" / "population")
+    # ablation の A1: adapter を採用したらそれ (action 効果 = adapter − 基底)、無ければ前世代のチェックポイント
+    alt_dir = final_models_dir if final_models_dir != models_dir else pop.get("prev")
     abl = AB.ablation_grid(win_arm.team_file, ref.team_file, final_model, ref.selection_model, models_dir,
-                           pop.get("prev"), split, run_dir, seed + 6, n=ablation_n, log=log, parallel=parallel)
+                           alt_dir, split, run_dir, seed + 6, n=ablation_n, log=log, parallel=parallel)
     summary["ablation"] = abl.get("effects")
 
     # S13: Package
@@ -167,7 +180,8 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
     summary["result"] = hold.get("verdict")
     _write_stage(run_dir, "summary", summary)
     pkg = build_package(run_dir, winner, win_arm.team_file, Path(final_model) if final_model else None, species,
-                        registry=None, extra_manifest={"models_dir": models_dir, "seed": seed})
+                        registry=None, extra_manifest={"models_dir": final_models_dir, "base_models_dir": models_dir,
+                                                       "seed": seed})
     # 記事 (表示専用): LLM があれば Sonnet、無ければテンプレート。registry 登録は記事を書いてから (Package の内容を固定)
     try:
         from tools.team_build.report import write_report

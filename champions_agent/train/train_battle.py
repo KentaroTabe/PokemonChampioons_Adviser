@@ -62,7 +62,7 @@ def _make_periodic_save(save_path: Path, every: int):
 
 
 def _make_env_fn(idx: int, battle_format: str, play_style: str,
-                 opp_play_style_pool):
+                 opp_play_style_pool, own_team_text: str | None = None):
     """SubprocVecEnv用のenv生成関数 (spawnでpickle可能なトップレベル定義)。
 
     idxごとにseedをずらし、各サブプロセスが独立にShowdownへ接続する
@@ -76,14 +76,16 @@ def _make_env_fn(idx: int, battle_format: str, play_style: str,
         return make_training_env(battle_format=battle_format,
                                  own_play_style=play_style,
                                  opp_play_style_pool=opp_play_style_pool,
-                                 seed=RANDOM_SEED + idx * 1000)
+                                 seed=RANDOM_SEED + idx * 1000,
+                                 own_team_text=own_team_text)
     return _init
 
 
 def train(total_timesteps: int = 10_000, battle_format: str = TRAINING_BATTLE_FORMAT,
           play_style: str = DEFAULT_PLAY_STYLE,
           opp_play_style_pool: list[str] | None = None,
-          resume: bool = False, n_envs: int = 1) -> None:
+          resume: bool = False, n_envs: int = 1,
+          own_team_text: str | None = None) -> None:
     """戦闘方策を性格(play_style)ごとに学習する。
 
     play_style: このモデル自身の性格('offense'/'cycle'/'stall'/'balance')。
@@ -139,13 +141,19 @@ def train(total_timesteps: int = 10_000, battle_format: str = TRAINING_BATTLE_FO
         pk = {"net_arch": [width, width]}
     ppo_kwargs = {"learning_rate": lr, "ent_coef": ent_coef,
                   "policy_kwargs": pk}
+    # 微調整 (構築システムの行動方策 adapter) 用: 1 更新あたりの KL を制限して基底方策からの逸脱を抑える
+    target_kl_env = os.environ.get("TRAIN_TARGET_KL")
+    if target_kl_env:
+        ppo_kwargs["target_kl"] = float(target_kl_env)
+    if own_team_text:
+        print("[train_battle] 自チーム固定で学習 (行動方策 adapter)")
     if n_envs > 1:
         from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor
         # エピソード統計 (info["episode"] の r/l/t) はワーカー側の Monitor
         # ではなく親側の VecMonitor で付与する。値は同一で、ワーカーが
         # SB3/torch を import せずに済む (メモリ枯渇対策 2026-08-19)
         env = VecMonitor(SubprocVecEnv(
-            [_make_env_fn(i, battle_format, play_style, opp_play_style_pool)
+            [_make_env_fn(i, battle_format, play_style, opp_play_style_pool, own_team_text)
              for i in range(n_envs)],
             start_method="spawn"))
         # rollout長: 価値推定の安定化のため総サンプル4096/更新に拡大
@@ -157,7 +165,7 @@ def train(total_timesteps: int = 10_000, battle_format: str = TRAINING_BATTLE_FO
         env = make_training_env(battle_format=battle_format,
                                 own_play_style=play_style,
                                 opp_play_style_pool=opp_play_style_pool,
-                                seed=RANDOM_SEED)
+                                seed=RANDOM_SEED, own_team_text=own_team_text)
         env = Monitor(env)
 
     save_path = MODELS_DIR / f"battle_policy_{play_style}.zip"
@@ -167,9 +175,10 @@ def train(total_timesteps: int = 10_000, battle_format: str = TRAINING_BATTLE_FO
         # custom_objectsでLR/entropyを上書きしないと保存時の値を引き継いで
         # しまい、ハイパーパラメータ変更が再開時に反映されない
         try:
-            model = MaskablePPO.load(
-                str(save_path), env=env,
-                custom_objects={"learning_rate": lr, "ent_coef": ent_coef})
+            custom = {"learning_rate": lr, "ent_coef": ent_coef}
+            if "target_kl" in ppo_kwargs:
+                custom["target_kl"] = ppo_kwargs["target_kl"]
+            model = MaskablePPO.load(str(save_path), env=env, custom_objects=custom)
             # ネット幅が希望と違う場合は新規学習へ (SB3のloadは保存時の
             # アーキテクチャを復元し、policy_kwargs指定を無視するため、
             # 観測次元が同じだと旧64x64のまま再開してしまう)

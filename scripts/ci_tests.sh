@@ -47,6 +47,7 @@ TESTS=(
   test_team_build_sources
   test_team_build_articles
   test_team_build_report
+  test_team_build_action_adapt
 )
 
 fail=0

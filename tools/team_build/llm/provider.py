@@ -151,13 +151,21 @@ class MockProvider(LLMProvider):
         return {"text": text, "raw": None, "usage": {"input_tokens": len(prompt) // 4, "output_tokens": len(text) // 4}}
 
 
+# claude CLI は既定でツール定義を system prompt に載せる (実測: 約 29k トークン/呼び出し、キャッシュ読み)。
+# 全ツールを disallow すると約 17k に減る (2026-09-06 実測)。--bare は OAuth が外れて使えない
+CLI_DISALLOWED_TOOLS = ("Bash,Read,Edit,Write,MultiEdit,Glob,Grep,LS,WebFetch,WebSearch,Task,Agent,NotebookEdit,"
+                        "NotebookRead,TodoWrite,Skill,KillShell,BashOutput,ExitPlanMode,EnterPlanMode,AskUserQuestion,"
+                        "SendMessage,ListAgents,Monitor,Workflow")
+
+
 class ClaudeCLIProvider(LLMProvider):
-    """claude CLI のヘッドレス実行 (tools/audit_subtask と同方式)。ツールは使わせない"""
+    """claude CLI のヘッドレス実行 (tools/audit_subtask と同方式)。ツールは使わせない (定義も載せない)"""
     name = "claude-cli"
 
     def complete(self, model, system, prompt, timeout=DEFAULT_TIMEOUT) -> dict:
         cmd = ["claude", "-p", prompt, "--model", model, "--output-format", "json",
-               "--system-prompt", system, "--max-turns", "1"]
+               "--system-prompt", system, "--max-turns", "1",
+               "--disallowedTools", CLI_DISALLOWED_TOOLS]
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=str(REPO))
         if res.returncode != 0:
             raise RuntimeError(f"claude 実行失敗 (rc={res.returncode}): {res.stderr[-400:]}")
