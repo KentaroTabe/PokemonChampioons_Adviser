@@ -201,3 +201,33 @@ PLAY_STYLES: dict[str, PlayStyle] = {
 
 DEFAULT_PLAY_STYLE = "balance"
 
+
+
+# --- パーティ構築システム (docs/TEAM_BUILDING_IMPLEMENTATION.md §9 の決定値、2026-09-06) ---
+# 対応差 (候補 − 参照) の判定: 実用差 ε の帯に CI が収まれば「実用上同等」
+BUILD_EQUIV_EPS = 0.02
+BUILD_CI_Z = 1.96                      # 95% 信頼区間
+# 追加測定の戦数の目安 (絶対上限ではない。必要な精度に達したら終了、達しなければ Uncertain 終了)
+BUILD_RACE_STEPS = (100, 300, 600, 1200, 2400, 4800, 9600)
+BUILD_RACE_DEFAULT_MAX = 2400          # 通常候補の打ち切り。重要候補は延長可
+# 相手系統: 種族集合の Jaccard がこれ以上 (6体中4体共通 = 4/8) で同一系統
+BUILD_FAMILY_JACCARD = 0.5
+BUILD_SPLIT_RATIOS = {"search": 0.5, "selection": 0.3, "holdout": 0.2}
+BUILD_SEARCH_FOLDS = 2                 # SEARCH 内の cross-fitting (A: 適応 / B: 評価)
+BUILD_POOL_TOP_N = 200
+# 候補ごとの適応 (選出モデル / 行動 adapter): 最低戦数と収束停止
+BUILD_ADAPT_MIN_BATTLES = 5000
+BUILD_ADAPT_PATIENCE = 3               # 連続でこの回数、改善 < BUILD_ADAPT_EPS_TRAIN なら停止
+BUILD_ADAPT_EPS_TRAIN = 0.01
+BUILD_MAX_REPAIRS = 2                  # 同じ系統の改修反復。3 回目以降は新しい concept branch
+BUILD_MAX_CHANGES = 2                  # 1 反復あたりの入替枠数。3 枠以上は新系統
+BUILD_STRESS_ACTION_NOISE = (0.05, 0.10)
+BUILD_SMOKE_CANARY_BATTLES = 20        # 性能判定には使わない (crash / illegal action / 読込 / ログ / latency)
+BUILD_PROMOTE_MIN_FULL_RUNS = 3        # 昇格条件: 独立 full run 3 回 + 全 gate PASS + 重大 regression 0 + 人手 approve
+# 実戦評価の重み w_N: 有効標本と CI 半幅で決める (200 戦は early signal に留める)
+BUILD_REAL_MIN_EFFECTIVE_N = 1000
+BUILD_REAL_MAX_CI_HALFWIDTH = 0.03
+# 遵守モデルの基準遵守率 (P(follow) は助言の 1 位と 2 位の差で変調する)
+BUILD_USER_MODELS = {"full": 1.0, "high": 0.9, "mixed": 0.7, "expert": 0.5}
+BUILD_SCHEMA_VERSION = "1"
+BUILD_PROTOCOL_VERSION = "1"

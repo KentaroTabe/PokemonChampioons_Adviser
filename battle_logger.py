@@ -66,6 +66,43 @@ def _compact_state(state: dict) -> dict:
     }
 
 
+EXPERIMENT_MARK = Path("logs") / ".experiment_package"   # 候補 Package の試用中はここに package_id
+
+
+def battle_source_labels() -> dict:
+    """{"source": organic|recommended|experiment, "package_id", "dataset_kind": "real",
+        "data_quality": "trusted"}。registry の production Package と現在の my_team を比べる"""
+    labels = {"source": "organic", "package_id": None,
+              "dataset_kind": "real", "data_quality": "trusted"}
+    try:
+        if EXPERIMENT_MARK.exists():
+            pid = EXPERIMENT_MARK.read_text(encoding="utf-8").strip()
+            if pid:
+                labels.update(source="experiment", package_id=pid)
+                return labels
+        from tools.team_build.registry import Registry
+        prod = Registry().production("package")
+        if prod:
+            want = set(prod.get("meta", {}).get("species") or [])
+            from tools.evaluate_team import current_team_entries
+            from advisor.my_team import registered_species_id
+            from vision.normalize import NameResolver
+            resolver = NameResolver()
+            have = set()
+            for ja in current_team_entries().keys():
+                sid = registered_species_id(ja)
+                if not sid:
+                    r = resolver.resolve_species(ja, cutoff=0.9)
+                    sid = r[1] if r else None
+                if sid:
+                    have.add(sid)
+            if want and want == have:
+                labels.update(source="recommended", package_id=prod["id"])
+    except Exception:
+        pass
+    return labels
+
+
 class BattleLogger:
     def __init__(self, log_dir: Path = LOG_DIR):
         self.log_dir = log_dir
@@ -96,6 +133,13 @@ class BattleLogger:
         self._outcome_logged = False
         self._rate_open = self._rate_last   # この対戦に入る時点のレート
         print(f"[battle_log] 新しい対戦ログ: {self._file.name}")
+        # 由来ラベル (2026-09-06 構築システムの安全装置): 実戦ログは dataset_kind=real。
+        # source は production Package の構築を使っていれば recommended、候補の試用なら
+        # experiment、それ以外は organic。学習ローダはこの行で実ログと合成ログを混ぜない
+        try:
+            self._write({"type": "session", **battle_source_labels()})
+        except Exception as e:      # ラベル付けの失敗で対戦ログを止めない
+            print(f"[battle_log] 由来ラベル付け失敗: {e}")
 
     def _write(self, record: dict) -> None:
         if self._file is None:
