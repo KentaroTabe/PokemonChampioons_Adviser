@@ -32,9 +32,10 @@ def _run(cmd: list, log_path: Path, timeout: int = 4 * 3600) -> int:
 
 
 def collect_chunk(team_file: Path, split_file: Path, out_npz: Path, n: int, seed: int, log_path: Path,
-                  explore: float = 0.5, fold: int = 0) -> int:
+                  explore: float = 0.5, fold: Optional[int] = 0, tier: str = "search") -> int:
+    spec = f"{split_file}:{tier}" + (f":{fold}" if fold is not None else "")
     cmd = [sys.executable, "-m", "tools.collect_selection_data", "--battles", str(n), "--explore", str(explore),
-           "--team-file", str(team_file), "--opp-split", f"{split_file}:search:{fold}", "--opp-seed", str(seed),
+           "--team-file", str(team_file), "--opp-split", spec, "--opp-seed", str(seed),
            "--out", str(out_npz)]
     return _run(cmd, log_path)
 
@@ -52,7 +53,9 @@ def train_candidate(data_npz: Path, out_model: Path, report_json: Path, log_path
 def adapt_selection(candidate_id: str, team_file: Path, split_file: Path, out_dir: Path, seed: int,
                     min_battles: int = BUILD_ADAPT_MIN_BATTLES, chunk: int = CHUNK,
                     patience: int = BUILD_ADAPT_PATIENCE, eps_train: float = BUILD_ADAPT_EPS_TRAIN,
-                    max_battles: int = MAX_BATTLES, log=print, registry=None) -> dict:
+                    max_battles: int = MAX_BATTLES, log=print, registry=None,
+                    tiers: tuple = (("search", 0),)) -> dict:
+    """tiers: 収集に使う (階層, fold) の列。chunk ごとに巡回する (S11 は SEARCH 全体 + SELECTION)"""
     """候補 1 つの選出モデル適応。戻り値: {"model": path, "n_battles", "history", "stop_reason", "artifact_id"}"""
     out_dir = Path(out_dir) / candidate_id
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -64,7 +67,8 @@ def adapt_selection(candidate_id: str, team_file: Path, split_file: Path, out_di
     stop_reason = "max_battles"
     t0 = time.time()
     while n_total < max_battles:
-        rc = collect_chunk(team_file, split_file, data, chunk, seed + len(history), log_path)
+        tier, fold = tiers[(n_total // chunk) % len(tiers)]
+        rc = collect_chunk(team_file, split_file, data, chunk, seed + n_total // chunk, log_path, fold=fold, tier=tier)
         if rc != 0:
             stop_reason = f"collect_failed(rc={rc})"
             break

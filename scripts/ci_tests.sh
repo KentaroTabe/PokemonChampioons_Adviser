@@ -40,6 +40,13 @@ TESTS=(
   test_team_build_candidates
   test_team_build_concepts
   test_team_build_racing
+  test_team_build_loss_stats
+  test_team_build_interventions
+  test_team_build_real_eval
+  test_team_build_invariants
+  test_team_build_sources
+  test_team_build_articles
+  test_team_build_report
 )
 
 fail=0

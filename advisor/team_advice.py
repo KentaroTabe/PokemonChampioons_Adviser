@@ -142,7 +142,9 @@ def _my_views(resolver, party_ja: list | None = None) -> list:
         r = resolver.resolve_species(ja, cutoff=0.9)
         if not r:
             continue
-        base_sid = r[1]
+        # 手入力の「種族ID」(フォルム) があればそれを使う (ロトム → rotomwash)
+        from advisor.my_team import registered_species_id
+        base_sid = registered_species_id(ja) or r[1]
         sid, sp = base_sid, get_dex().species(base_sid)
         b = get_my_build(ja)
         if not (sp and b):

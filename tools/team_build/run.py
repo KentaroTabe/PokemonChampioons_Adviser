@@ -88,9 +88,22 @@ def stage_s4(run_dir: Path, spec: BuildSpec, feats: dict, threats: list, legal: 
         provider = ClaudeCLIProvider(run_dir / "llm")
     res = K.generate_concepts(spec, feats, threats, legal, mega, provider=provider,
                               log=lambda m: log(run_dir, m), threat_weights=threat_weights)
+    # 候補源の多系統化: 上位実構築の所持部分集合 (historical) も軸として加える
+    try:
+        from tools.team_build.opponents import pool_teams
+        from tools.team_build.sources import historical_cores
+        teams, _ = pool_teams()
+        hist = historical_cores(teams, set(feats))
+        hist = [h for h in hist if not any(set(h["core_ids"]) <= set(spec.banned) for _ in [0])]
+        before = len(res["families"])
+        res["families"] = K.cluster_concepts([dict(f) for f in res["families"]] + hist)
+        res["historical_added"] = len(res["families"]) - before
+    except Exception as e:
+        res["historical_error"] = repr(e)
     (run_dir / "s04_concepts.json").write_text(
         json.dumps(res, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
-    log(run_dir, f"S4 concepts: families={len(res['families'])} rounds={res['rounds']} stop={res['stop_reason']}")
+    log(run_dir, f"S4 concepts: families={len(res['families'])} rounds={res['rounds']} stop={res['stop_reason']} "
+                 f"historical=+{res.get('historical_added', 0)}")
     return res["families"]
 
 
@@ -106,6 +119,14 @@ def stage_s5(run_dir: Path, spec: BuildSpec, fams: list, feats: dict, threats: l
         lineups = C.beam_complete(core, pool, feats, threats, spec.style, width=prof["width"],
                                   banned=banned, concept=fam["family_id"], threat_weights=threat_weights)
         all_lineups.extend(lineups)
+    # 探索の近傍 (mutation) と交差 (crossover) も候補に加える (LLM は探索ヒューリスティックの一つ)
+    try:
+        from tools.team_build.sources import crossovers, mutations
+        top = sorted(all_lineups, key=lambda l: -l.score)[:8]
+        all_lineups.extend(mutations(top, pool, feats, threats, spec.style, banned=banned))
+        all_lineups.extend(crossovers(top, feats, threats, spec.style))
+    except Exception as e:
+        log(run_dir, f"S5 sources error: {e!r}")
     chosen = C.select_with_quotas(all_lineups, prof["quotas"])
     rest = sorted((l for l in all_lineups if l not in chosen), key=lambda l: -l.score)
     for l in rest:
@@ -173,10 +194,26 @@ def main() -> None:
     ap.add_argument("--llm", choices=["none", "headless"], default="none")
     ap.add_argument("--top-n", type=int, default=BUILD_POOL_TOP_N)
     ap.add_argument("--seed", type=int, default=20260906)
+    ap.add_argument("--stages", choices=["search", "measure", "all"], default="search",
+                    help="search=S0〜S6 / measure=S7〜S13 (既存の run に対して) / all")
+    ap.add_argument("--race-steps", default=None, help="racing の戦数段階 (例 100,300,600)。既定は config")
+    ap.add_argument("--race-max", type=int, default=None)
+    ap.add_argument("--adapt-min", type=int, default=None)
+    ap.add_argument("--adapt-chunk", type=int, default=None)
+    ap.add_argument("--adapt-max", type=int, default=None)
+    ap.add_argument("--stress-n", type=int, default=None)
+    ap.add_argument("--ablation-n", type=int, default=None)
+    ap.add_argument("--parallel", type=int, default=None)
+    ap.add_argument("--max-candidates", type=int, default=None)
+    ap.add_argument("--repairs", type=int, default=0)
+    ap.add_argument("--registry", default=None, help="registry のディレクトリ (既定 logs/registry)")
     args = ap.parse_args()
 
     run_dir = RUNS_DIR / args.run_id
     run_dir.mkdir(parents=True, exist_ok=True)
+    if args.stages == "measure":
+        _measure(run_dir, args)
+        return
     legal = legal_species_ids()
     if args.spec:
         raw = json.loads(Path(args.spec).read_text(encoding="utf-8"))
@@ -205,7 +242,27 @@ def main() -> None:
                      "n_concepts": len(fams), "n_lineups": len(lineups),
                      "n_legal_lineups": sum(1 for r in results if r["ok"])})
     write_manifest(run_dir, manifest)
-    log(run_dir, "S0〜S6 完了。次: S7 適応 / S8 racing (M2)")
+    log(run_dir, "S0〜S6 完了")
+    if args.stages == "all":
+        _measure(run_dir, args)
+
+
+def _measure(run_dir: Path, args) -> None:
+    from champions_agent.config import (BUILD_ADAPT_MIN_BATTLES, BUILD_RACE_DEFAULT_MAX, BUILD_RACE_STEPS)
+    from tools.team_build import ablation as AB, adapt as AD, racing as R, stress as ST
+    from tools.team_build.pipeline import run_measurement
+    from tools.team_build.registry import Registry
+    steps = tuple(int(x) for x in args.race_steps.split(",")) if args.race_steps else BUILD_RACE_STEPS
+    reg = Registry(Path(args.registry)) if args.registry else Registry()
+    provider = None
+    if getattr(args, "llm", "none") == "headless":
+        from tools.team_build.llm.provider import ClaudeCLIProvider
+        provider = ClaudeCLIProvider(run_dir / "llm")
+    run_measurement(run_dir, args.seed, steps=steps, max_battles=args.race_max or BUILD_RACE_DEFAULT_MAX,
+                    adapt_min=args.adapt_min or BUILD_ADAPT_MIN_BATTLES, adapt_chunk=args.adapt_chunk or AD.CHUNK,
+                    adapt_max=args.adapt_max or AD.MAX_BATTLES, stress_n=args.stress_n or ST.STRESS_BATTLES,
+                    ablation_n=args.ablation_n or AB.ABLATION_BATTLES, parallel=args.parallel or R.PARALLEL,
+                    repairs=args.repairs, max_candidates=args.max_candidates, registry=reg, llm_provider=provider)
 
 
 if __name__ == "__main__":

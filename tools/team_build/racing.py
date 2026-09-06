@@ -66,15 +66,24 @@ def measure_cmd(arm: Arm, n: int, offset: int, seed: int, split_file: Path, tier
 def _run_one(cmd: list, log_path: Path, timeout: int) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as lf:
-        res = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, cwd=str(REPO), timeout=timeout)
+        try:
+            res = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, cwd=str(REPO), timeout=timeout)
+        except subprocess.TimeoutExpired:
+            lf.write(f"\n[racing] timeout {timeout}s\n")
+            return 124
     return res.returncode
 
 
+SEC_PER_BATTLE = 40         # subprocess timeout の見積もり (実測 5 並列で約 6 秒/戦 + 起動)
+
+
 def measure_round(arms: list, n: int, offset: int, seed: int, split_file: Path, tier: str, fold: Optional[int],
-                  out_dir: Path, stage: str, parallel: int = PARALLEL, timeout: int = 6 * 3600,
+                  out_dir: Path, stage: str, parallel: int = PARALLEL, timeout: Optional[int] = None,
                   pick_policy: str = "advisor") -> None:
-    """全 arm を同じ (offset, n) で回し、outcomes を追記する"""
+    """全 arm を同じ (offset, n) で回し、outcomes を追記する。timeout は戦数に比例 (未指定時)"""
     out_dir.mkdir(parents=True, exist_ok=True)
+    if timeout is None:
+        timeout = 180 + SEC_PER_BATTLE * n
     jobs = []
     for arm in arms:
         out_json = out_dir / f"{stage}_{arm.arm_id}_{offset}_{n}.json"
@@ -100,7 +109,8 @@ def measure_round(arms: list, n: int, offset: int, seed: int, split_file: Path, 
 def race(candidates: list, reference: Arm, split_file: Path, tier: str, seed: int, out_dir: Path,
          stage: str = "s08", fold: Optional[int] = None, steps: tuple = BUILD_RACE_STEPS,
          max_battles: int = BUILD_RACE_DEFAULT_MAX, eps: float = BUILD_EQUIV_EPS,
-         parallel: int = PARALLEL, log=print, compare_to_best: bool = True) -> dict:
+         parallel: int = PARALLEL, log=print, compare_to_best: bool = True,
+         pick_policy: str = "advisor") -> dict:
     """候補群 vs 参照の confidence racing。戻り値は evaluation/<stage>.json と同じ dict"""
     arms = list(candidates)
     active = list(arms)
@@ -114,7 +124,7 @@ def race(candidates: list, reference: Arm, split_file: Path, tier: str, seed: in
         n = target - offset
         log(f"[racing:{stage}] round offset={offset} n={n} arms={len(active)}+ref")
         measure_round(active + [reference], n, offset, seed, split_file, tier, fold, out_dir, stage,
-                      parallel=parallel)
+                      parallel=parallel, pick_policy=pick_policy)
         offset = target
         # 参照との対応差
         for arm in active:
@@ -143,6 +153,7 @@ def race(candidates: list, reference: Arm, split_file: Path, tier: str, seed: in
             ", ".join(f"{a.arm_id}={a.state}({(a.result or {}).get('mean') or 0:+.3f})" for a in arms))
     result = {
         "stage": stage, "tier": tier, "fold": fold, "seed": seed, "eps": eps, "steps": list(steps),
+        "pick_policy": pick_policy,
         "max_battles": max_battles, "n_candidates_seen": len(arms), "elapsed_s": round(time.time() - t0, 1),
         "reference": reference.to_dict(), "arms": [a.to_dict() for a in arms], "rounds": rounds,
         "note": "探索時の最高値は期待勝率ではない (Winner's curse)。採否は holdout の結果だけで決める",

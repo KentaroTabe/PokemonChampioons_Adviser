@@ -303,14 +303,17 @@ def build_myteam_text() -> str:
                  "おだやか": "Calm", "しんちょう": "Careful", "のんき": "Relaxed",
                  "なまいき": "Sassy", "ゆうかん": "Brave", "れいせい": "Quiet"}
     blocks, used_items = [], set()
+    from advisor.my_team import registered_species_id
     for ja, entry in team.items():
         r = resolver.resolve_species(ja, cutoff=0.85)
         if not r:
             continue
-        species = to_showdown_name(_sanitize_species(r[1]))
+        # 手入力の「種族ID」(フォルム: ロトム→rotomwash 等) があればそれを使う
+        sid = registered_species_id(ja) or r[1]
+        species = to_showdown_name(_sanitize_species(sid))
         try:
             from advisor.sets import get_predictor
-            usage = get_predictor().predict(_to_id(r[1]))
+            usage = get_predictor().predict(_to_id(sid))
         except Exception:
             usage = {"moves": [], "items": [], "abilities": []}
         item = None

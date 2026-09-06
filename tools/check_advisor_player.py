@@ -86,7 +86,16 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
     latencies: list = []
     uid = os.getpid() % 100000
     if team_file:
-        own_tb = _constant_teambuilder(Path(team_file).read_text(encoding="utf-8"))
+        team_text = Path(team_file).read_text(encoding="utf-8")
+        # 不正なチームだと Showdown が拒否し poke-env が対戦を待ち続けるので、先に合法性を検査して即終了する
+        try:
+            from tools.team_build.sets import validate_team_text
+            ok, errs = validate_team_text(team_text, TRAINING_BATTLE_FORMAT)
+        except Exception:
+            ok, errs = True, []
+        if not ok:
+            raise SystemExit(f"チーム本文が不正 (validate-team): {errs[:3]}")
+        own_tb = _constant_teambuilder(team_text)
     else:
         own_tb = _remembering_teambuilder(RankedTeambuilder(
             rng=random.Random(opp_seed + 1) if opp_seed is not None else None,
