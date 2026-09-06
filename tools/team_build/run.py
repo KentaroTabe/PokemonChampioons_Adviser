@@ -32,9 +32,9 @@ REPO = Path(__file__).resolve().parent.parent.parent
 RUNS_DIR = REPO / "logs" / "build_search" / "runs"
 # 測定段の規模 (§5 時間軸プロファイル): fast は探索のみ (draft)、medium は候補 Package (provisional)、full は validated
 PROFILE_MEASURE = {
-    "fast": {"race_max": 300, "stress_n": 100, "ablation_n": 100, "max_candidates": 6},
-    "medium": {"race_max": 600, "stress_n": 150, "ablation_n": 150, "max_candidates": 8},
-    "full": {"race_max": None, "stress_n": None, "ablation_n": None, "max_candidates": None},
+    "fast": {"race_max": 300, "stress_n": 100, "ablation_n": 100, "max_candidates": 6, "screen_adapt": 300},
+    "medium": {"race_max": 600, "stress_n": 150, "ablation_n": 150, "max_candidates": 8, "screen_adapt": None},
+    "full": {"race_max": None, "stress_n": None, "ablation_n": None, "max_candidates": None, "screen_adapt": None},
 }
 PROFILE_DEFAULTS = {
     "fast": {"width": 6, "n_lineups": 8, "threats": 20, "quotas": {"best": 2, "coverage": 1, "roles": 1, "novelty": 1}},
@@ -221,7 +221,12 @@ def main() -> None:
     ap.add_argument("--stress-n", type=int, default=None)
     ap.add_argument("--ablation-n", type=int, default=None)
     ap.add_argument("--parallel", type=int, default=None)
-    ap.add_argument("--max-candidates", type=int, default=None)
+    ap.add_argument("--max-candidates", type=int, default=None,
+                    help="S7 で収束まで適応する候補数 (screening 生存の Δ 上位)。screening 自体は全候補")
+    ap.add_argument("--screen-adapt", type=int, default=None, help="screening 用 cheap adaptation の戦数 (既定 config)")
+    ap.add_argument("--screen-margin", type=float, default=None, help="screening の脱落 margin (既定 config)")
+    ap.add_argument("--screen-steps", default=None, help="screening の戦数段階 (例 100,300)")
+    ap.add_argument("--screen-max", type=int, default=None)
     ap.add_argument("--repairs", type=int, default=0)
     ap.add_argument("--registry", default=None, help="registry のディレクトリ (既定 logs/registry)")
     ap.add_argument("--adapt-action", choices=["auto", "on", "off"], default="auto",
@@ -291,10 +296,13 @@ def _measure(run_dir: Path, args) -> None:
     from tools.team_build.registry import Registry
     steps = tuple(int(x) for x in args.race_steps.split(",")) if args.race_steps else BUILD_RACE_STEPS
     reg = Registry(Path(args.registry)) if args.registry else Registry()
+    from champions_agent.config import (BUILD_SCREEN_ADAPT_BATTLES, BUILD_SCREEN_MARGIN, BUILD_SCREEN_MAX,
+                                        BUILD_SCREEN_STEPS)
     pm = PROFILE_MEASURE.get(getattr(args, "profile", "full"), PROFILE_MEASURE["full"])
-    for key in ("race_max", "stress_n", "ablation_n", "max_candidates"):
+    for key in ("race_max", "stress_n", "ablation_n", "max_candidates", "screen_adapt"):
         if getattr(args, key, None) is None and pm.get(key) is not None:
             setattr(args, key, pm[key])
+    screen_steps = tuple(int(x) for x in args.screen_steps.split(",")) if args.screen_steps else BUILD_SCREEN_STEPS
     provider = None
     if getattr(args, "llm", "none") == "headless":
         from tools.team_build.llm.provider import ClaudeCLIProvider
@@ -306,7 +314,10 @@ def _measure(run_dir: Path, args) -> None:
                     repairs=args.repairs, max_candidates=args.max_candidates, registry=reg, llm_provider=provider,
                     adapt_action=(args.adapt_action == "on" or (args.adapt_action == "auto" and args.profile == "full")),
                     action_steps=args.action_steps or AD.ACTION_CHUNK_STEPS,
-                    action_eval=args.action_eval or AD.ACTION_EVAL_BATTLES)
+                    action_eval=args.action_eval or AD.ACTION_EVAL_BATTLES,
+                    screen_adapt=args.screen_adapt or BUILD_SCREEN_ADAPT_BATTLES,
+                    screen_margin=BUILD_SCREEN_MARGIN if args.screen_margin is None else args.screen_margin,
+                    screen_steps=screen_steps, screen_max=args.screen_max or BUILD_SCREEN_MAX)
 
 
 if __name__ == "__main__":

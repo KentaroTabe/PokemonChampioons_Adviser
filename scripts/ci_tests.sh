@@ -49,6 +49,7 @@ TESTS=(
   test_team_build_report
   test_team_build_action_adapt
   test_team_build_pick_ablation
+  test_team_build_pipeline
 )
 
 fail=0

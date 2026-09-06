@@ -226,6 +226,17 @@ BUILD_POOL_TOP_N = 200
 # 対応差の CI 半幅は 100 戦 ±0.10、300 戦 ±0.06、1,000 戦 ±0.035 (実測の分散から)。
 # 300 戦で判別できるのは 10 pt 級の上げ幅と、12 pt 以上離れた候補対の順位反転まで
 BUILD_PICK_ABLATION_N = 300
+# S8a screening (2026-09-07 決定、ablation + learning curve より): 代理スコアや未適応の測定では候補を落とさず、
+# 全候補を cheap adaptation (BUILD_SCREEN_ADAPT_BATTLES 戦の収集で 1 回学習) してから同一相手列で測る。
+# learning curve (3 候補): N=1000 の順位が収束後の順位と一致。ただし N=1000 は収束比 −0.04〜−0.09 なので、
+# 脱落は伸び代 margin 込み (CI 上端 + margin < −ε のときだけ)。margin は 3 候補の実測 (+0.05〜+0.10) の下側
+BUILD_SCREEN_ADAPT_BATTLES = 1000
+BUILD_SCREEN_MARGIN = 0.05
+BUILD_SCREEN_STEPS = (100, 300)
+BUILD_SCREEN_MAX = 300
+# S8b で候補ごとに測って選ぶ選出方策の variant (fresh=候補専用の収束モデル / generic=汎用基底)。
+# ablation: #0 は generic が fresh より +0.07、#3 は fresh が generic より +0.26 と候補で逆なので測定で選ぶ
+BUILD_PICK_VARIANTS = ("fresh", "generic")
 # 候補ごとの適応 (選出モデル / 行動 adapter): 最低戦数と収束停止
 BUILD_ADAPT_MIN_BATTLES = 5000
 BUILD_ADAPT_PATIENCE = 3               # 連続でこの回数、改善 < BUILD_ADAPT_EPS_TRAIN なら停止
