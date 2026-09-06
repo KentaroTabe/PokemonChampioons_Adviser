@@ -40,7 +40,8 @@ def test_rows_are_bounded_and_sensible():
     # アシレーヌ vs ガブリアス: フェアリー技で対面有利、切り返しもできる
     prow = I.interaction_row("primarina", primarina, pmoves, "garchomp", garchomp, gmoves, stones)
     assert prow["lead"] >= 0.5 and prow["revenge"] > 0.0, prow
-    assert I.coverage_value(prow) >= prow["lead"]
+    cv = I.coverage_value(prow)          # 対面 / 後投げ / 切り返しの加重平均 (飽和しない)
+    assert 0.0 <= cv <= 1.0 and cv <= max(prow["lead"], prow["switch_in"], prow["revenge"]), cv
     # メガ石の型はメガ後の種族で評価される
     meta, mmoves = I.view_from_set("metagross", _set("metagrossite", "adamant", "2/32/0/0/0/32",
                                                      ["bulletpunch", "psychicfangs", "earthquake", "icepunch"]))

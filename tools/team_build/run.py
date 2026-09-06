@@ -14,6 +14,7 @@ import json
 import random
 import time
 from pathlib import Path
+from typing import Optional
 
 from champions_agent.config import BUILD_POOL_TOP_N
 from champions_agent.data import database as db
@@ -79,21 +80,22 @@ def stage_s1_s3(run_dir: Path, spec: BuildSpec, prof: dict, seed: int, top_n: in
 
 
 def stage_s4(run_dir: Path, spec: BuildSpec, feats: dict, threats: list, legal: set,
-             llm_mode: str) -> list:
+             llm_mode: str, threat_weights: Optional[dict] = None) -> list:
     mega = mega_capable_ids(list(feats))
     provider = None
     if llm_mode == "headless":
         from tools.team_build.llm.provider import ClaudeCLIProvider
         provider = ClaudeCLIProvider(run_dir / "llm")
     res = K.generate_concepts(spec, feats, threats, legal, mega, provider=provider,
-                              log=lambda m: log(run_dir, m))
+                              log=lambda m: log(run_dir, m), threat_weights=threat_weights)
     (run_dir / "s04_concepts.json").write_text(
         json.dumps(res, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     log(run_dir, f"S4 concepts: families={len(res['families'])} rounds={res['rounds']} stop={res['stop_reason']}")
     return res["families"]
 
 
-def stage_s5(run_dir: Path, spec: BuildSpec, fams: list, feats: dict, threats: list, prof: dict) -> list:
+def stage_s5(run_dir: Path, spec: BuildSpec, fams: list, feats: dict, threats: list, prof: dict,
+             threat_weights: Optional[dict] = None) -> list:
     pool = list(feats)
     banned = set(spec.banned)
     all_lineups = []
@@ -102,14 +104,14 @@ def stage_s5(run_dir: Path, spec: BuildSpec, fams: list, feats: dict, threats: l
         if len(core) > 6:
             continue
         lineups = C.beam_complete(core, pool, feats, threats, spec.style, width=prof["width"],
-                                  banned=banned, concept=fam["family_id"])
+                                  banned=banned, concept=fam["family_id"], threat_weights=threat_weights)
         all_lineups.extend(lineups)
     chosen = C.select_with_quotas(all_lineups, prof["quotas"])
     rest = sorted((l for l in all_lineups if l not in chosen), key=lambda l: -l.score)
     for l in rest:
         if len(chosen) >= prof["n_lineups"]:
             break
-        if all(C.distance(l.members, c.members) >= 0.34 for c in chosen):
+        if all(C.distance(l.members, c.members) >= C.MIN_DISTANCE for c in chosen):
             l.tag = "fill"
             chosen.append(l)
     (run_dir / "s05_candidates.json").write_text(
@@ -119,25 +121,29 @@ def stage_s5(run_dir: Path, spec: BuildSpec, fams: list, feats: dict, threats: l
     return chosen
 
 
-def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv: dict) -> list:
-    """各並びの型を型ライブラリから決め、クローズと合法性を通した Showdown 本文を保存する"""
+def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv: dict,
+             concept_mega: Optional[dict] = None) -> list:
+    """各並びの型を型ライブラリから決め、メガ枠 1 体・クローズ・合法性を通した Showdown 本文を保存する"""
     out_dir = run_dir / "s06_sets"
     out_dir.mkdir(exist_ok=True)
     results = []
+    concept_mega = concept_mega or {}
     with db.get_connection() as conn:
         item_map = S.item_usage_map(conn, snapshot_id, sorted({m for l in lineups for m in l.members}))
         for idx, l in enumerate(lineups):
-            team = []
+            team, alternatives = [], {}
             for sid in l.members:
                 cands = S.enumerate_sets(conn, snapshot_id, sid)
                 if not cands:
                     team = []
                     break
                 ranked = S.rank_sets(cands, tv)
+                alternatives[sid] = ranked
                 team.append(ranked[0] if ranked else cands[0])
             if not team:
                 results.append({"index": idx, "members": list(l.members), "ok": False, "errors": ["型が無い種を含む"]})
                 continue
+            team = S.enforce_single_mega(team, alternatives, keep=concept_mega.get(l.concept))
             team = S.resolve_item_clause(team, item_map)
             text = S.to_showdown_text(team)
             ok, errs = S.validate_team_text(text, spec.regulation)
@@ -147,7 +153,7 @@ def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv
                             "errors": errs[:5], "tag": l.tag, "score": round(l.score, 4),
                             "sets": [{"species": c.species_id, "item": c.item, "nature": c.nature,
                                       "evs": c.evs, "moves": c.moves, "source": c.source,
-                                      "coverage": round(c.score, 3)} for c in team]})
+                                      "coverage": round(c.score, 3), "notes": c.notes} for c in team]})
     (run_dir / "s06_sets.json").write_text(json.dumps(results, ensure_ascii=False, indent=1) + "\n",
                                            encoding="utf-8")
     n_ok = sum(1 for r in results if r["ok"])
@@ -187,9 +193,11 @@ def main() -> None:
     spec = stage_s0(run_dir, spec, legal)
     doc, split, tv, feats = stage_s1_s3(run_dir, spec, prof, args.seed, args.top_n)
     threats = list(tv.keys())
-    fams = stage_s4(run_dir, spec, feats, threats, legal, args.llm)
-    lineups = stage_s5(run_dir, spec, fams, feats, threats, prof)
-    results = stage_s6(run_dir, spec, lineups, doc["snapshot"]["id"], tv)
+    threat_weights = {t["id"]: float(t.get("usage") or 0.0) for t in doc["top"] if t["id"] in tv}
+    fams = stage_s4(run_dir, spec, feats, threats, legal, args.llm, threat_weights)
+    lineups = stage_s5(run_dir, spec, fams, feats, threats, prof, threat_weights)
+    concept_mega = {f["family_id"]: f.get("mega_id") for f in fams}
+    results = stage_s6(run_dir, spec, lineups, doc["snapshot"]["id"], tv, concept_mega)
     from champions_agent.env.ranked_teams import pinned_meta_snapshot_id
     manifest.update({"meta_snapshot": doc["snapshot"]["id"], "meta_pin": pinned_meta_snapshot_id(),
                      "opponent_split": {"sealed_id": split["sealed_id"], "n_teams": split["n_teams"],

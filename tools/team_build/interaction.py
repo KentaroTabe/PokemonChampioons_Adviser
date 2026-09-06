@@ -150,10 +150,20 @@ def interaction_row(my_id: str, me: MonView, my_moves: list, opp_id: str, opp: M
     }
 
 
+COVERAGE_WEIGHTS = {"lead": 0.5, "switch_in": 0.3, "revenge": 0.2}
+
+
 def coverage_value(row: dict) -> float:
-    """1 行を「この脅威をどれだけ扱えるか」の 1 値に潰す (候補探索のスコア用)"""
-    vals = [v for v in (row.get("lead"), row.get("switch_in"), row.get("revenge")) if v is not None]
-    return max(vals) if vals else 0.0
+    """1 行を「この脅威をどれだけ扱えるか」の 1 値に潰す (候補探索のスコア用)。
+    max だと 6 体いれば誰かが 1.0 になり飽和するので、対面 / 後投げ / 切り返しの加重平均にする"""
+    tot, wsum = 0.0, 0.0
+    for k, w in COVERAGE_WEIGHTS.items():
+        v = row.get(k)
+        if v is None:
+            continue
+        tot += w * float(v)
+        wsum += w
+    return round(tot / wsum, 4) if wsum else 0.0
 
 
 def view_from_set(species_id: str, set_row: dict, level: int = 50) -> tuple:

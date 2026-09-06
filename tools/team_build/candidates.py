@@ -52,13 +52,22 @@ class Lineup:
                 "parts": {k: round(v, 4) for k, v in self.parts.items()}, "tag": self.tag}
 
 
-def team_coverage(members: tuple, feats: dict, threats: list) -> float:
+MIN_DISTANCE = 0.5     # 保持する候補同士は 6 体中 3 体以上違う
+
+
+def team_coverage(members: tuple, feats: dict, threats: list, weights: Optional[dict] = None) -> float:
+    """脅威ごとに「最良 0.7 + 次善 0.3」(1 体に依存しない厚み) を使用率で加重平均"""
     if not threats:
         return 0.0
-    tot = 0.0
+    w = weights or {}
+    tot, wsum = 0.0, 0.0
     for t in threats:
-        tot += max((feats[m].coverage.get(t, 0.0) for m in members if m in feats), default=0.0)
-    return tot / len(threats)
+        vals = sorted((feats[m].coverage.get(t, 0.0) for m in members if m in feats), reverse=True)
+        v = 0.7 * (vals[0] if vals else 0.0) + 0.3 * (vals[1] if len(vals) > 1 else 0.0)
+        wt = float(w.get(t, 1.0))
+        tot += wt * v
+        wsum += wt
+    return tot / wsum if wsum else 0.0
 
 
 def role_fulfillment(members: tuple, feats: dict, style: str) -> float:
@@ -101,11 +110,11 @@ def redundancy(members: tuple, feats: dict) -> float:
 
 
 def lineup_score(members: tuple, feats: dict, threats: list, style: str,
-                 weights: Optional[dict] = None) -> tuple:
+                 weights: Optional[dict] = None, threat_weights: Optional[dict] = None) -> tuple:
     w = {"coverage": 1.0, "roles": 0.5, "synergy": 0.3, "redundancy": 0.4}
     if weights:
         w.update(weights)
-    parts = {"coverage": team_coverage(members, feats, threats),
+    parts = {"coverage": team_coverage(members, feats, threats, threat_weights),
              "roles": role_fulfillment(members, feats, style),
              "synergy": synergy(members, feats),
              "redundancy": redundancy(members, feats)}
@@ -121,7 +130,8 @@ def distance(a: tuple, b: tuple) -> float:
 
 def beam_complete(core: tuple, pool: list, feats: dict, threats: list, style: str,
                   width: int = 8, team_size: int = 6, min_distance: float = 0.34,
-                  banned: Optional[set] = None, concept: str = "") -> list:
+                  banned: Optional[set] = None, concept: str = "",
+                  threat_weights: Optional[dict] = None, max_megas: int = 1) -> list:
     """core から team_size 体まで 1 体ずつ足すビーム探索。各段で候補間距離が min_distance 未満の
     重複 (5 体同じ等) を落として多様性を保つ。戻り値: [Lineup] (スコア降順)"""
     banned = banned or set()
@@ -129,13 +139,16 @@ def beam_complete(core: tuple, pool: list, feats: dict, threats: list, style: st
     while beam and len(beam[0]) < team_size:
         expanded = {}
         for members in beam:
+            n_mega = sum(1 for m in members if m in feats and feats[m].mega)
             for sid in pool:
                 if sid in members or sid in banned or sid not in feats:
                     continue
+                if feats[sid].mega and n_mega >= max_megas:
+                    continue          # メガ枠は 1 試合 1 回: 2 体目のメガ石は積まない
                 new = tuple(sorted(members + (sid,)))
                 if new in expanded:
                     continue
-                sc, parts = lineup_score(new, feats, threats, style)
+                sc, parts = lineup_score(new, feats, threats, style, threat_weights=threat_weights)
                 expanded[new] = (sc, parts)
         ranked = sorted(expanded.items(), key=lambda kv: -kv[1][0])
         kept: list = []
@@ -148,15 +161,22 @@ def beam_complete(core: tuple, pool: list, feats: dict, threats: list, style: st
         beam = kept
     out = []
     for members in beam:
-        sc, parts = lineup_score(members, feats, threats, style)
+        sc, parts = lineup_score(members, feats, threats, style, threat_weights=threat_weights)
         out.append(Lineup(members=members, concept=concept, score=sc, parts=parts))
     return sorted(out, key=lambda l: -l.score)
 
 
-def select_with_quotas(lineups: list, quotas: dict, min_distance: float = 0.34) -> list:
-    """quota ごとに最良を 1 つずつ採り (best overall / coverage / roles / synergy / novelty)、
-    既採用との距離が min_distance 未満なら次点へ。残りはスコア順で埋める"""
+def select_with_quotas(lineups: list, quotas: dict, min_distance: float = MIN_DISTANCE) -> list:
+    """まずコンセプト系統ごとの最良を 1 つずつ採り、次に quota (best overall / coverage / roles / synergy /
+    novelty)。既採用との距離が min_distance 未満なら次点へ (「性質の違う有望候補」を残す)"""
     chosen: list = []
+    best_by_concept: dict = {}
+    for l in sorted(lineups, key=lambda l: -l.score):
+        best_by_concept.setdefault(l.concept, l)
+    for l in best_by_concept.values():
+        if all(distance(l.members, c.members) >= min_distance for c in chosen):
+            l.tag = "concept"
+            chosen.append(l)
 
     def take(cands: list, tag: str) -> None:
         for l in cands:

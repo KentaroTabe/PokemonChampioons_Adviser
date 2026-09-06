@@ -26,7 +26,11 @@ def _feats():
 
 def test_scores_and_beam():
     feats, threats = _feats()
-    assert abs(C.team_coverage(("a", "b", "c", "d"), feats, threats) - 0.9) < 1e-9
+    # 脅威ごとに 最良 0.7 + 次善 0.3: 各脅威で 0.9 と 0.1 → 0.66
+    assert abs(C.team_coverage(("a", "b", "c", "d"), feats, threats) - 0.66) < 1e-9
+    # 使用率加重: t1 だけ重いと a の被覆が効く
+    assert C.team_coverage(("a",), feats, threats, {"t1": 10.0, "t2": 1.0, "t3": 1.0, "t4": 1.0}) > \
+        C.team_coverage(("a",), feats, threats)
     assert C.redundancy(("a", "f"), feats) > C.redundancy(("a", "b"), feats)      # メガ重複とタイプ重複
     assert C.synergy(("a", "b"), feats) == 0.6
     res = C.beam_complete(("a", "b"), list(feats), feats, threats, "balance", width=4)
@@ -39,7 +43,10 @@ def test_scores_and_beam():
         for j in range(i + 1, len(res)):
             assert C.distance(res[i].members, res[j].members) >= 0.34
     chosen = C.select_with_quotas(res, {"best": 1, "coverage": 1, "novelty": 1})
-    assert chosen and chosen[0].tag == "best" and len({c.members for c in chosen}) == len(chosen)
+    assert chosen and chosen[0].tag == "concept" and len({c.members for c in chosen}) == len(chosen)
+    for i in range(len(chosen)):
+        for j in range(i + 1, len(chosen)):
+            assert C.distance(chosen[i].members, chosen[j].members) >= C.MIN_DISTANCE
     assert abs(C.distance(("a", "b", "c"), ("a", "b", "c")) - 0.0) < 1e-9
     assert abs(C.distance(("a", "b"), ("c", "d")) - 1.0) < 1e-9
     print("test_scores_and_beam OK")

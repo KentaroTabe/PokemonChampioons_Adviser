@@ -56,27 +56,58 @@ def validate_concepts(auth: dict, owned: set, legal: set, mega_capable: set) -> 
 
 
 def rule_baseline_concepts(feats: dict, threats: list, mega_capable: set, top_k: int = 8,
-                           favorites: Optional[list] = None) -> list:
-    """ルール生成: メガ候補/固定枠を軸に、被覆の補完が最大の相方 1〜2 体を付ける"""
+                           favorites: Optional[list] = None, threat_weights: Optional[dict] = None) -> list:
+    """ルール生成: framing ごとに軸を選び、相方は「軸に対する被覆の増分」が最大の種 (相方の重複を避けて多様に)。
+    framing: favorites (固定枠) / mega (メガ候補) / offense (対面が強い) / bulky (後投げが強い) /
+             speed (上を取れる) / anti_meta (使用率上位 5 種への被覆)"""
     fav = list(favorites or [])
-    anchors = [s for s in feats if (feats[s].mega or s in fav)] or list(feats)[:top_k]
-    out = []
-    for a in anchors[:top_k]:
+    tw = threat_weights or {t: 1.0 for t in threats}
+    top5 = sorted(threats, key=lambda t: -tw.get(t, 0.0))[:5]
+
+    def wcov(sid: str, ts: list) -> float:
+        f = feats[sid]
+        return sum(tw.get(t, 1.0) * f.coverage.get(t, 0.0) for t in ts) / max(1e-9, sum(tw.get(t, 1.0) for t in ts))
+
+    anchors: list = []
+    for a in fav:
+        if a in feats:
+            anchors.append((a, "favorites"))
+    for a in sorted((s for s in feats if feats[s].mega), key=lambda s: -wcov(s, threats)):
+        anchors.append((a, "mega"))
+    ranked_all = sorted(feats, key=lambda s: -wcov(s, threats))
+    anchors.append((ranked_all[0], "offense"))
+    anchors.append((max(feats, key=lambda s: feats[s].roles.get("bulk", 0.0)), "bulky"))
+    anchors.append((max(feats, key=lambda s: feats[s].roles.get("speed", 0.0)), "speed"))
+    anchors.append((max(feats, key=lambda s: wcov(s, top5)), "anti_meta"))
+    used_partners: set = set()
+    out, seen = [], set()
+    for a, framing in anchors[: top_k + len(fav)]:
         fa = feats[a]
         best = None
         for b in feats:
             if b == a:
                 continue
-            gain = sum(max(fa.coverage.get(t, 0.0), feats[b].coverage.get(t, 0.0)) for t in threats)
+            gain = sum(tw.get(t, 1.0) * max(fa.coverage.get(t, 0.0), feats[b].coverage.get(t, 0.0)) for t in threats)
+            if b in used_partners:
+                gain *= 0.9       # 相方の使い回しを避けて多様にする
             if best is None or gain > best[0]:
                 best = (gain, b)
         core = [a] + ([best[1]] if best else [])
+        key = tuple(sorted(core))
+        if key in seen:
+            continue
+        seen.add(key)
+        if best:
+            used_partners.add(best[1])
         wc = "setup_sweep" if fa.roles.get("setup", 0) >= 1 else (
-            "priority_cleanup" if fa.roles.get("priority", 0) >= 1 else "offense_trade")
+            "priority_cleanup" if fa.roles.get("priority", 0) >= 1 else (
+                "bulky_attrition" if framing == "bulky" else (
+                    "speed_control" if framing == "speed" else (
+                        "anti_meta" if framing == "anti_meta" else "offense_trade"))))
         weak = sorted(threats, key=lambda t: max(feats[m].coverage.get(t, 0.0) for m in core))[:3]
-        out.append({"name": f"rule:{a}", "core_ids": core, "mega_id": a if fa.mega else None,
+        out.append({"name": f"rule:{framing}:{a}", "core_ids": core, "mega_id": a if fa.mega else None,
                     "win_condition": wc, "support_roles": ["speed_control", "hazard_control"],
-                    "weak_to": weak, "source": "rule"})
+                    "weak_to": weak, "source": f"rule:{framing}"})
     return out
 
 
@@ -102,11 +133,13 @@ def cluster_concepts(concepts: list, min_jaccard: float = 0.5) -> list:
 
 def generate_concepts(spec, feats: dict, threats: list, legal: set, mega_capable: set,
                       provider=None, rounds: int = MAX_ROUNDS, per_round: int = 8,
-                      system_prompt: Optional[str] = None, log: Optional[Callable] = None) -> dict:
+                      system_prompt: Optional[str] = None, log: Optional[Callable] = None,
+                      threat_weights: Optional[dict] = None) -> dict:
     """ルール baseline + LLM 複数ラウンド (framing を変える) → クラスタリング。coverage で停止。
     戻り値: {"families": [...], "raw": [...], "rounds": n, "stop_reason": str, "llm_calls": [...]}"""
     owned = set(spec.owned)
-    raw = rule_baseline_concepts(feats, threats, mega_capable, favorites=spec.favorites)
+    raw = rule_baseline_concepts(feats, threats, mega_capable, favorites=spec.favorites,
+                                 threat_weights=threat_weights)
     fams = cluster_concepts(raw)
     calls = []
     stop_reason = "no_provider" if provider is None else "max_rounds"
