@@ -175,10 +175,13 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
     res8a = R.race(arms8a, ref8a, split, "search", seed, run_dir / "evaluation", stage="s08a_screen", fold=1,
                    steps=screen_steps, max_battles=screen_max, eps=BUILD_EQUIV_EPS + screen_margin,
                    parallel=parallel, log=log)
-    survivors = select_survivors(res8a, max_candidates)
-    log(f"S8a survivors (Δ 順、最大 {max_candidates}): {survivors}")
+    all_survivors = select_survivors(res8a, None)
+    survivors = all_survivors[:max_candidates] if max_candidates else all_survivors
+    log(f"S8a survivors: {len(all_survivors)}/{len(cands)} (脱落 {len(cands) - len(all_survivors)})、"
+        f"S7 で適応する Δ 上位 {len(survivors)}: {survivors}")
     summary["s08a_survivors"] = survivors
-    summary["s08a_eliminated"] = [a["arm_id"] for a in res8a["arms"] if a["arm_id"] not in survivors]
+    summary["s08a_eliminated"] = [a["arm_id"] for a in res8a["arms"] if a["arm_id"] not in all_survivors]
+    summary["s08a_capped"] = [c for c in all_survivors if c not in survivors]   # 生存したが適応枠に入らなかった候補
 
     # S7: 生存候補の選出モデル適応 (SEARCH-A、収束まで、チェックポイント保存)
     adapted = {}
