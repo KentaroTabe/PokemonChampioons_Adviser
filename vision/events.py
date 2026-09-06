@@ -273,6 +273,16 @@ class EventParser:
         last = self._recent_fired.get(event_id)
         return last is not None and time.time() - last < window
 
+    def _recent_boost(self, side_name: str, stat: str, window: float,
+                      exclude: Optional[str] = None) -> bool:
+        """その側・その能力のランク変化 (段数を問わない) が window 内に反映済みか (参照専用)"""
+        now = time.time()
+        prefix = f"boost_{side_name}_{stat}_"
+        for key, ts in self._recent_fired.items():
+            if key != exclude and key.startswith(prefix) and now - ts < window:
+                return True
+        return False
+
     # --------------------------------------------------------------
     def _is_opponent_text(self, cleaned: str) -> Optional[bool]:
         norm = loose_key(cleaned)
@@ -640,11 +650,29 @@ class EventParser:
         for pat, delta in RANK_CHANGES:
             if loose_key(pat) in norm:
                 side_name, side, mon = self._target_mon(cleaned, source)
+                # 主語 (「相手の」/ 名前) が読めたか。読めない文は自陣に既定帰属される
+                explicit = source in ("left_popup", "right_popup") \
+                    or self._is_opponent_text(cleaned) is not None
+                other = "opponent" if side_name == "player" else "player"
                 fired = []
                 for stat in stats:
                     event_id = f"boost_{side_name}_{stat}_{delta:+d}"
-                    if self._dedup(event_id, BOOST_DEDUP_SEC):
-                        continue   # OCR揺れの再読でランクを二重適用しない
+                    if self._recently(event_id, BOOST_DEDUP_SEC):
+                        # OCR揺れの再読でランクを二重適用しない (再観測で窓を延長)
+                        self._recent_fired[event_id] = time.time()
+                        continue
+                    # 同じ側・同じ能力の変化が窓内に反映済み (技使用イベントの決定的反映等) なら、
+                    # メッセージ側の段数・向きの読み違いで上書きしない (2026-09-07 第14回:
+                    # インファイトの「特防が下がった」を「上がった」と誤読して +1 を重ねた)
+                    if self._recent_boost(side_name, stat, BOOST_DEDUP_SEC):
+                        continue
+                    # 主語を落とした文で、同じ変化が窓内に相手側へ反映済みなら、その残像
+                    # (演出中の遅い再読) とみなして自陣に付けない (第14回: 相手のからをやぶるの
+                    # 「攻撃 特攻 素早さがぐーんと上がった」が主語欠落で自分側に +2 ずつ付いた)。
+                    # 抑止した読みは登録しない (自陣の正当な同じ変化を後で受け付けるため)
+                    if not explicit and self._recently(f"boost_{other}_{stat}_{delta:+d}", BOOST_DEDUP_SEC):
+                        continue
+                    self._dedup(event_id, BOOST_DEDUP_SEC)
                     mon.set_boost(stat, delta)
                     fired.append(event_id)
                 if delta < 0:

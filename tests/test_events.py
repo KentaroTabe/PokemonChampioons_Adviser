@@ -1099,8 +1099,61 @@ def test_move_reread_after_window_not_refired():
     print("test_move_reread_after_window_not_refired OK")
 
 
+def test_subjectless_boost_echo_not_misattributed():
+    """主語を落としたランク変化文を、直前に相手側へ反映済みの変化の残像として自陣に付けない。
+
+    2026-09-07 第14回 (高負荷で OCR が荒れた): 相手のからをやぶる使用の 10 秒後に
+    「攻撃 特攻 素早さがぐーんと上がった」が「相手のカメックスの」を落として読まれ、
+    自分のアシレーヌに +2/+2/+2 が付いた。
+    """
+    state, p = new_parser()
+    p.parse("아나이뚜は リザードンを 繰り出した!")
+    om, me = state.opponent.active(), state.player.party[0]
+    fired = p.parse("相手の リザードンの からをやぶる!")
+    assert "move_opponent_shellsmash" in fired, fired
+    assert om.boosts["atk"] == 2 and om.boosts["spa"] == 2 and om.boosts["spe"] == 2, om.boosts
+    assert om.boosts["def"] == -1 and om.boosts["spd"] == -1, om.boosts
+    _age_recent(p, 10.0)
+    fired = p.parse("こうげき とくこう すばやさが ぐーんと上がった!")
+    assert not any(f.startswith("boost_player") for f in fired), fired
+    assert me.boosts["atk"] == 0 and me.boosts["spa"] == 0 and me.boosts["spe"] == 0, me.boosts
+    assert om.boosts["atk"] == 2 and om.boosts["spe"] == 2, om.boosts
+    # 主語つきの自陣の変化は、相手側に同じ変化があっても適用する
+    fired = p.parse("ブリジュラスの 素早さが ぐーんと上がった!")
+    assert "boost_player_spe_+2" in fired, fired
+    assert me.boosts["spe"] == 2, me.boosts
+    print("test_subjectless_boost_echo_not_misattributed OK")
+
+
+def test_message_conflicting_with_move_data_is_ignored():
+    """技使用イベントで反映済みの能力に対し、窓内のメッセージが段数・向きを変える読みなら無視する。
+
+    2026-09-07 第14回: インファイト (防御・特防 -1 を技データで反映) の 3 秒後に
+    「特防が下がった」を「上がった」と誤読し、特防に +1 が重なった。
+    """
+    state, p = new_parser()
+    p.parse("아나이뚜は リザードンを 繰り出した!")
+    om = state.opponent.active()
+    fired = p.parse("相手の リザードンの インファイト!")
+    assert "move_opponent_closecombat" in fired, fired
+    assert om.boosts["def"] == -1 and om.boosts["spd"] == -1, om.boosts
+    _age_recent(p, 3.0)
+    fired = p.parse("相手の リザードンの 特防が 上がった!")
+    assert "boost_opponent_spd_+1" not in fired, fired
+    assert om.boosts["spd"] == -1, om.boosts
+    # 窓外 (次ターン以降) の正当な変化は適用する (間に別メッセージが挟まる = 直前テキストの重複除外を通過)
+    _age_recent(p, 20.0)
+    p.parse("相手の リザードンの りゅうのはどう!")
+    fired = p.parse("相手の リザードンの 特防が 上がった!")
+    assert "boost_opponent_spd_+1" in fired, fired
+    assert om.boosts["spd"] == 0, om.boosts
+    print("test_message_conflicting_with_move_data_is_ignored OK")
+
+
 if __name__ == "__main__":
     test_expected_damage_applied_on_move_event()
     test_rank_change_reread_after_window_not_doubled()
     test_move_boost_then_late_message_not_doubled()
     test_move_reread_after_window_not_refired()
+    test_subjectless_boost_echo_not_misattributed()
+    test_message_conflicting_with_move_data_is_ignored()
