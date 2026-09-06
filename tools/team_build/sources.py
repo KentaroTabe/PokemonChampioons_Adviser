@@ -29,11 +29,13 @@ def historical_cores(pool_teams: list, owned: set, min_owned: int = 3, max_cores
 
 
 def mutations(lineups: list, pool: list, feats: dict, threats: list, style: str, k: int = 1,
-              banned: Optional[set] = None, seed: int = 0, per_lineup: int = 3) -> list:
-    """各並びから 1 体入替の近傍を作り、スコアの高い順に返す (candidates.lineup_score)"""
+              banned: Optional[set] = None, seed: int = 0, per_lineup: int = 3,
+              keep: Optional[set] = None) -> list:
+    """各並びから 1 体入替の近傍を作り、スコアの高い順に返す (candidates.lineup_score)。keep (固定枠) は入替えない"""
     from tools.team_build.candidates import Lineup, lineup_score
     rng = random.Random(seed)
     banned = banned or set()
+    keep = keep or set()
     out = []
     for l in lineups:
         members = list(l.members)
@@ -41,6 +43,8 @@ def mutations(lineups: list, pool: list, feats: dict, threats: list, style: str,
         rng.shuffle(cands)
         scored = []
         for out_m in members:
+            if out_m in keep:
+                continue
             for in_m in cands[:12]:
                 new = tuple(sorted([in_m if m == out_m else m for m in members]))
                 sc, parts = lineup_score(new, feats, threats, style)

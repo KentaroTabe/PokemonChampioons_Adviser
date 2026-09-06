@@ -129,10 +129,14 @@ def stage_s5(run_dir: Path, spec: BuildSpec, fams: list, feats: dict, threats: l
     try:
         from tools.team_build.sources import crossovers, mutations
         top = sorted(all_lineups, key=lambda l: -l.score)[:8]
-        all_lineups.extend(mutations(top, pool, feats, threats, spec.style, banned=banned))
+        all_lineups.extend(mutations(top, pool, feats, threats, spec.style, banned=banned, keep=set(spec.favorites)))
         all_lineups.extend(crossovers(top, feats, threats, spec.style))
     except Exception as e:
         log(run_dir, f"S5 sources error: {e!r}")
+    # 固定枠は hard constraint: mutation / crossover で落ちた並びは候補にしない
+    fav = set(spec.favorites)
+    if fav:
+        all_lineups = [l for l in all_lineups if fav <= set(l.members)]
     chosen = C.select_with_quotas(all_lineups, prof["quotas"])
     rest = sorted((l for l in all_lineups if l not in chosen), key=lambda l: -l.score)
     for l in rest:
@@ -202,6 +206,8 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=20260906)
     ap.add_argument("--stages", choices=["search", "measure", "all"], default="search",
                     help="search=S0〜S6 / measure=S7〜S13 (既存の run に対して) / all")
+    ap.add_argument("--reuse-concepts", action="store_true",
+                    help="既存の s04_concepts.json を再利用して S5〜S6 だけやり直す (LLM を呼ばない)")
     ap.add_argument("--race-steps", default=None, help="racing の戦数段階 (例 100,300,600)。既定は config")
     ap.add_argument("--race-max", type=int, default=None)
     ap.add_argument("--adapt-min", type=int, default=None)
@@ -239,8 +245,12 @@ def main() -> None:
     doc, split, tv, feats = stage_s1_s3(run_dir, spec, prof, args.seed, args.top_n)
     threats = list(tv.keys())
     threat_weights = {t["id"]: float(t.get("usage") or 0.0) for t in doc["top"] if t["id"] in tv}
-    fams = stage_s4(run_dir, spec, feats, threats, legal, args.llm, threat_weights)
-    if args.article_file and args.llm == "headless":
+    if args.reuse_concepts and (run_dir / "s04_concepts.json").exists():
+        fams = json.loads((run_dir / "s04_concepts.json").read_text(encoding="utf-8"))["families"]
+        log(run_dir, f"S4 concepts: 既存を再利用 families={len(fams)}")
+    else:
+        fams = stage_s4(run_dir, spec, feats, threats, legal, args.llm, threat_weights)
+    if args.article_file and args.llm == "headless" and not args.reuse_concepts:
         try:
             from tools.team_build.articles import claims_to_cores, extract_claims
             from tools.team_build.llm.provider import ClaudeCLIProvider
