@@ -290,11 +290,17 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
     # 適応は数チームを並列 (収集は 1 プロセスずつ)、検証は チームごとに checkpoint を並列に測る
     to_adapt = [a for a in cands if a.arm_id in survivors]
 
+    prev_s07 = (_load_json(eval_dir / "s07_adapt.json") or {}) if resume else {}
+
     def _adapt_one(a):
-        prev = _load_json(run_dir / "advisors" / a.arm_id / "adapt_result.json") if resume else None
+        # 前回の s07_adapt.json (検証結果込み) → 無ければ adapt_result.json (適応のみ) を再利用
+        prev = prev_s07.get(a.arm_id) if resume else None
+        if not (prev and prev.get("model") and Path(prev["model"]).exists()):
+            prev = _load_json(run_dir / "advisors" / a.arm_id / "adapt_result.json") if resume else None
         if prev and prev.get("model") and Path(prev["model"]).exists():
             prev["resumed"] = True
-            log(f"[adapt:{a.arm_id}] resume (adapt_result.json を再利用、n={prev.get('n_battles')})")
+            log(f"[adapt:{a.arm_id}] resume (n={prev.get('n_battles')}"
+                f"{', 検証済み' if (prev.get('validated') or {}).get('chosen') else ''})")
             return a.arm_id, prev
         try:
             return a.arm_id, AD.adapt_selection(a.arm_id, a.team_file, split, run_dir / "advisors", seed,
