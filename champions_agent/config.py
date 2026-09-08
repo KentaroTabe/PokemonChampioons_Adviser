@@ -269,4 +269,18 @@ BUILD_REAL_MAX_CI_HALFWIDTH = 0.03
 # 遵守モデルの基準遵守率 (P(follow) は助言の 1 位と 2 位の差で変調する)
 BUILD_USER_MODELS = {"full": 1.0, "high": 0.9, "mixed": 0.7, "expert": 0.5}
 BUILD_SCHEMA_VERSION = "1"
+
+# --- 接続テスト後の自パーティ改善案 (tools/party_improvements、2026-09-09) ---
+# 「動きづらさ」: 助言の最善手のスコアがこの値未満、または最善が交代だった決定を「圧力を受けた決定」と数える
+PARTY_IMPROVE_LOW_SCORE = 60.0
+PARTY_IMPROVE_MIN_DECISIONS = 2        # 相手個体ごとの圧力を出すのに必要な決定数
+PARTY_IMPROVE_TOP_PARTIES = 3          # 動きづらかった相手パーティの掲載数
+PARTY_IMPROVE_TOP_PROPOSALS = 3        # 1 枠入替の案の掲載数
+PARTY_IMPROVE_TOP_THREATS = 8          # 対策候補を出す相手個体の数 (難易度の重み × 圧力の順)
+# 概念タグ: 「先制技に弱い速い個体」= 素早さ種族値 ≥ FAST かつ 防御/特防の低い方 ≤ FRAIL (メガライチュウY: S130 / B55)
+PARTY_IMPROVE_FRAIL_FAST_SPE = 100
+PARTY_IMPROVE_FRAIL_FAST_DEF = 60
+PARTY_IMPROVE_SLOW_SPE = 50            # トリックルーム側の「遅い」
+# 相手の難易度の重み: 1 + 負け + 圧力を受けた決定の割合 (改善案の脅威重みに使う)
+PARTY_IMPROVE_LOSS_WEIGHT = 1.0
 BUILD_PROTOCOL_VERSION = "1"

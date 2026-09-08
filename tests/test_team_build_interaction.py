@@ -64,6 +64,18 @@ def test_points_conversion_and_matrix():
     print("test_points_conversion_and_matrix OK")
 
 
+def test_mega_stone_xy_maps_to_form():
+    """X/Y のメガ石は対応するフォルムで評価する (ライチュウナイトY → raichumegay。以前は megax に倒れていた)"""
+    y, _ = I.view_from_set("raichu", _set("raichunitey", "timid", "2/0/0/32/0/32", ["zapcannon"]))
+    x, _ = I.view_from_set("raichu", _set("raichunitex", "adamant", "2/32/0/0/0/32", ["voltt tackle".replace(" ", "")]))
+    assert y.species_id == "raichumegay" and y.base["spa"] == 160, (y.species_id, y.base)
+    assert x.species_id == "raichumegax" and x.base["atk"] == 135, (x.species_id, x.base)
+    m, _ = I.view_from_set("metagross", _set("metagrossite", "adamant", "2/32/0/0/0/32", ["bulletpunch"]))
+    assert m.species_id == "metagrossmega", m.species_id
+    print("test_mega_stone_xy_maps_to_form OK")
+
+
 if __name__ == "__main__":
     test_rows_are_bounded_and_sensible()
     test_points_conversion_and_matrix()
+    test_mega_stone_xy_maps_to_form()

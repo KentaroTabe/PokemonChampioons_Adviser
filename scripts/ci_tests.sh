@@ -50,6 +50,7 @@ TESTS=(
   test_team_build_action_adapt
   test_team_build_pick_ablation
   test_team_build_pipeline
+  test_party_improvements
 )
 
 fail=0
