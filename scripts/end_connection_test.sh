@@ -52,11 +52,12 @@ echo "=== 決定監査 (テストAの合格判定) ==="
 python -m tools.decision_audit --session \
   || echo "(決定監査に失敗。手動実行: python -m tools.decision_audit)"
 
-# 自パーティ改善案 (動きづらかった相手・相手の良い動き (概念) → 対策候補と 1 枠入替の案。相性行列の見積もり、未測定)
+# 自パーティ改善案: 動きづらかった相手・相手の良い動き (概念) を出し、現行 + 近傍の測定 run を起動する
+# (未測定の案は載せない。測定結果は python -m tools.party_improvements --report <run_id>)
 echo ""
-echo "=== 自パーティ改善案 (セッションの相手パーティから) ==="
-python -m tools.party_improvements --session 2>/dev/null \
-  || echo "(改善案の生成に失敗。手動実行: python -m tools.party_improvements --session)"
+echo "=== 自パーティ改善案 (セッションの相手パーティから。測定を起動) ==="
+python -m tools.party_improvements --session --measure 2>/dev/null \
+  || echo "(改善案の生成に失敗。手動実行: python -m tools.party_improvements --session --measure)"
 
 # セッション一括監査 (sonnet 1回。今回の全対戦を横断)
 if [ "${1:-}" = "--no-audit" ]; then

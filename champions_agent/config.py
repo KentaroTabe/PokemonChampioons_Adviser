@@ -277,10 +277,16 @@ PARTY_IMPROVE_MIN_DECISIONS = 2        # 相手個体ごとの圧力を出すの
 PARTY_IMPROVE_TOP_PARTIES = 3          # 動きづらかった相手パーティの掲載数
 PARTY_IMPROVE_TOP_PROPOSALS = 3        # 1 枠入替の案の掲載数
 PARTY_IMPROVE_TOP_THREATS = 8          # 対策候補を出す相手個体の数 (難易度の重み × 圧力の順)
+PARTY_IMPROVE_DEFAULT_LAST = 12        # --session でマーカーが無いとき (終了処理後) に見る直近の対戦数
 # 概念タグ: 「先制技に弱い速い個体」= 素早さ種族値 ≥ FAST かつ 防御/特防の低い方 ≤ FRAIL (メガライチュウY: S130 / B55)
 PARTY_IMPROVE_FRAIL_FAST_SPE = 100
 PARTY_IMPROVE_FRAIL_FAST_DEF = 60
 PARTY_IMPROVE_SLOW_SPE = 50            # トリックルーム側の「遅い」
 # 相手の難易度の重み: 1 + 負け + 圧力を受けた決定の割合 (改善案の脅威重みに使う)
 PARTY_IMPROVE_LOSS_WEIGHT = 1.0
+# 改善案の測定 (--measure): 現行 + 近傍 N 並びを構築システムの測定段 (S8a〜S13) に掛ける。
+# セッションの相手は脅威重みに 1 + BOOST × (正規化した難易度) を掛けて近傍の選び方に反映する
+PARTY_IMPROVE_MEASURE_NEIGHBORS = 3
+PARTY_IMPROVE_MEASURE_PROFILE = "medium"
+BUILD_SESSION_THREAT_BOOST = 2.0
 BUILD_PROTOCOL_VERSION = "1"

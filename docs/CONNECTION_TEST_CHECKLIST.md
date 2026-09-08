@@ -578,12 +578,15 @@ churn 6→1-2件、選出picked一致、ヒステリシス動作。
 - [ ] フレーム統計の取りこぼし率を確認する (改善前の基準は62%・3.8fps。
       これを下回っていれば取りこぼし対策が効いている)
 - [ ] 表示されたサマリーに今回の対戦が反映されている
-- [ ] **自パーティ改善案** (`tools.party_improvements --session`、2026-09-09 追加) を読む:
+- [ ] **自パーティ改善案** (`tools.party_improvements --session --measure`、2026-09-09 追加) を読む:
       動きづらかった相手パーティ (負け・助言の最善手が低スコア/交代に追い込まれた決定の割合) と
       相手の良い動き = 概念 (サイコフィールド + 先制技に弱い速い個体、トリックルーム、天候、設置の重ね、
-      積み、先制技コア、対面操作、状態異常、壁) → 構造的な弱点 (先制技依存) と対策候補・1 枠入替の案。
-      数値は相性行列の見積もりで **未測定の draft**。採否は構築システムの測定 (S8a/S8b、封印 holdout) で決める。
-      仮想パーティの検討は `python -m tools.party_improvements --opponents armarouge,raichu`。
+      積み、先制技コア、対面操作、状態異常、壁) → 構造的な弱点 (先制技依存)。
+      **未測定の入替案は載せない** (ユーザー決定 9/9)。終了処理が現行 + 近傍 3 並びの測定 run
+      (`improve_<時刻>`、S8a〜S13、数時間) を起動するので、終わったら
+      `python -m tools.party_improvements --report improve_<時刻>` で **6 体の型 (技・配分・性格・特性) つきの
+      パーティ** と実測 (Δ・CI・variant・封印 holdout の判定) を読む。構築 run の実行中は起動されない
+      (後で `--measure` を再実行)。仮想パーティの概念検討は `--opponents armarouge,raichu`。
       保存先 `logs/battle_analysis/improvements_*.md`
 - [ ] `logs/audit_reports/session_*.md` の乖離一覧を確認し、
       本物の抽出ミスがあれば控えておく (修正候補)。⚠矛盾候補は

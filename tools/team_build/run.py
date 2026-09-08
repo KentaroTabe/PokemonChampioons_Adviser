@@ -67,7 +67,8 @@ def stage_s0(run_dir: Path, spec: BuildSpec, legal: set) -> BuildSpec:
     return spec
 
 
-def stage_s1_s3(run_dir: Path, spec: BuildSpec, prof: dict, seed: int, top_n: int) -> tuple:
+def stage_s1_s3(run_dir: Path, spec: BuildSpec, prof: dict, seed: int, top_n: int,
+                extra_threats: Optional[list] = None) -> tuple:
     doc = build_snapshot()
     save_snapshot(doc, run_dir)
     log(run_dir, f"S1 meta snapshot id={doc['snapshot']['id']} top={len(doc['top'])} "
@@ -78,6 +79,24 @@ def stage_s1_s3(run_dir: Path, spec: BuildSpec, prof: dict, seed: int, top_n: in
     log(run_dir, f"S2 opponents: teams={split['n_teams']} families={split['n_families']} "
                  f"split={split['summary']} sealed={split['sealed_id']}")
     tv = threat_sets(doc, prof["threats"])
+    # セッションの相手など、脅威リストに無い種を代表型で足す (改善案の測定: 動きづらかった相手を脅威に含める)
+    added = []
+    if extra_threats:
+        from tools.team_build.interaction import view_from_set
+        with db.get_connection() as conn:
+            for sid in extra_threats:
+                if sid in tv:
+                    continue
+                rep = S.representative_set(conn, doc["snapshot"]["id"], sid)
+                if rep is None:
+                    continue
+                try:
+                    tv[sid] = view_from_set(sid, {"item": rep.item, "ability": rep.ability, "nature": rep.nature,
+                                                  "evs": rep.evs, "moves": list(rep.moves)})
+                    added.append(sid)
+                except Exception:
+                    continue
+        log(run_dir, f"S3 extra threats: +{len(added)} {added}")
     owned = [s for s in spec.owned if s not in set(spec.banned)]
     res = species_features(owned, doc, tv)
     save_features(res, run_dir)
@@ -167,10 +186,23 @@ def registered_team() -> tuple:
 
 
 def stage_s5(run_dir: Path, spec: BuildSpec, fams: list, feats: dict, threats: list, prof: dict,
-             threat_weights: Optional[dict] = None) -> list:
+             threat_weights: Optional[dict] = None, only_incumbent: bool = False,
+             n_neighbors: Optional[int] = None) -> list:
     pool = list(feats)
     banned = set(spec.banned)
     all_lineups = []
+    if only_incumbent:
+        # 改善案の測定: 探索はせず、現行チーム + 近傍 (セッションの相手を重みに含めた被覆で選ぶ) だけを候補にする
+        from champions_agent.config import BUILD_INCUMBENT_NEIGHBORS
+        _text, reg_ids, _mega = registered_team()
+        inc, neigh = incumbent_branch(reg_ids, pool, feats, threats, spec.style, banned, set(spec.favorites),
+                                      threat_weights, n_neighbors or BUILD_INCUMBENT_NEIGHBORS) if reg_ids else (None, [])
+        chosen = ([inc] if inc else []) + neigh
+        (run_dir / "s05_candidates.json").write_text(
+            json.dumps({"n_generated": len(chosen), "lineups": [l.to_dict() for l in chosen], "only_incumbent": True},
+                       ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+        log(run_dir, f"S5 incumbent only: 現行={'あり' if inc else 'なし'} 近傍={len(neigh)} (登録 {len(reg_ids)} 体)")
+        return chosen
     for fam in fams:
         # 再利用した系統 (--reuse-concepts) や historical のコアには、今回の
         # 除外種やプール外の種族が残ることがある → コアから外し、空なら捨てる
@@ -207,7 +239,7 @@ def stage_s5(run_dir: Path, spec: BuildSpec, fams: list, feats: dict, threats: l
     from champions_agent.config import BUILD_INCUMBENT_NEIGHBORS
     _text, reg_ids, _mega = registered_team()
     inc, neigh = incumbent_branch(reg_ids, pool, feats, threats, spec.style, banned, set(spec.favorites),
-                                  threat_weights, BUILD_INCUMBENT_NEIGHBORS) if reg_ids else (None, [])
+                                  threat_weights, n_neighbors or BUILD_INCUMBENT_NEIGHBORS) if reg_ids else (None, [])
     existing = {tuple(l.members) for l in chosen}
     branch = [l for l in ([inc] if inc else []) + neigh if tuple(l.members) not in existing]
     chosen = branch + chosen
@@ -287,6 +319,12 @@ def main() -> None:
                     help="search=S0〜S6 / measure=S7〜S13 (既存の run に対して) / all")
     ap.add_argument("--reuse-concepts", action="store_true",
                     help="既存の s04_concepts.json を再利用して S5〜S6 だけやり直す (LLM を呼ばない)")
+    ap.add_argument("--only-incumbent", action="store_true",
+                    help="探索せず、現行チーム + 近傍だけを候補にする (接続テスト後の改善案の測定)")
+    ap.add_argument("--incumbent-neighbors-s5", type=int, default=None,
+                    help="S5 で候補に入れる現行チームの近傍の数 (既定 config BUILD_INCUMBENT_NEIGHBORS)")
+    ap.add_argument("--threat-weights-file", default=None,
+                    help="脅威の追加重み JSON {species_id: 0..1} (セッションの動きづらかった相手)。脅威リストに無い種は代表型で追加")
     ap.add_argument("--race-steps", default=None, help="racing の戦数段階 (例 100,300,600)。既定は config")
     ap.add_argument("--race-max", type=int, default=None)
     ap.add_argument("--adapt-min", type=int, default=None)
@@ -345,9 +383,22 @@ def main() -> None:
     write_manifest(run_dir, manifest)
     log(run_dir, f"run {args.run_id} start (commit {str(manifest.get('git_commit'))[:8]})")
     spec = stage_s0(run_dir, spec, legal)
-    doc, split, tv, feats = stage_s1_s3(run_dir, spec, prof, args.seed, args.top_n)
+    session_w = {}
+    if args.threat_weights_file:
+        session_w = {k: float(v) for k, v in json.loads(Path(args.threat_weights_file).read_text(encoding="utf-8")).items()}
+    doc, split, tv, feats = stage_s1_s3(run_dir, spec, prof, args.seed, args.top_n, extra_threats=list(session_w))
     threats = list(tv.keys())
     threat_weights = {t["id"]: float(t.get("usage") or 0.0) for t in doc["top"] if t["id"] in tv}
+    if session_w:
+        # セッションの相手 (正規化した難易度 0..1) を重みに反映: base × (1 + BOOST × w)。脅威リストに無かった種は
+        # 使用率の代わりに上位の中央値を base にする
+        from champions_agent.config import BUILD_SESSION_THREAT_BOOST
+        base_vals = sorted(threat_weights.values())
+        median = base_vals[len(base_vals) // 2] if base_vals else 1.0
+        for sid, w in session_w.items():
+            if sid in tv:
+                threat_weights[sid] = threat_weights.get(sid, median) * (1.0 + BUILD_SESSION_THREAT_BOOST * w)
+        log(run_dir, f"S3 session threat weights: {len([s for s in session_w if s in tv])} 種に反映 (boost {BUILD_SESSION_THREAT_BOOST})")
     if args.reuse_concepts and (run_dir / "s04_concepts.json").exists():
         fams = json.loads((run_dir / "s04_concepts.json").read_text(encoding="utf-8"))["families"]
         log(run_dir, f"S4 concepts: 既存を再利用 families={len(fams)}")
@@ -363,7 +414,8 @@ def main() -> None:
             log(run_dir, f"S4 article: claims={len(claims)} cores={len(cores)} → families={len(fams)}")
         except Exception as e:
             log(run_dir, f"S4 article error: {e!r}")
-    lineups = stage_s5(run_dir, spec, fams, feats, threats, prof, threat_weights)
+    lineups = stage_s5(run_dir, spec, fams, feats, threats, prof, threat_weights,
+                       only_incumbent=args.only_incumbent, n_neighbors=args.incumbent_neighbors_s5)
     concept_mega = {f["family_id"]: f.get("mega_id") for f in fams}
     results = stage_s6(run_dir, spec, lineups, doc["snapshot"]["id"], tv, concept_mega)
     from champions_agent.env.ranked_teams import pinned_meta_snapshot_id

@@ -23,10 +23,11 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
-from champions_agent.config import (PARTY_IMPROVE_FRAIL_FAST_DEF, PARTY_IMPROVE_FRAIL_FAST_SPE,
-                                    PARTY_IMPROVE_LOSS_WEIGHT, PARTY_IMPROVE_LOW_SCORE, PARTY_IMPROVE_MIN_DECISIONS,
-                                    PARTY_IMPROVE_SLOW_SPE, PARTY_IMPROVE_TOP_PARTIES, PARTY_IMPROVE_TOP_PROPOSALS,
-                                    PARTY_IMPROVE_TOP_THREATS, USAGE_TARGET_FORMAT)
+from champions_agent.config import (PARTY_IMPROVE_DEFAULT_LAST, PARTY_IMPROVE_FRAIL_FAST_DEF,
+                                    PARTY_IMPROVE_FRAIL_FAST_SPE, PARTY_IMPROVE_LOSS_WEIGHT, PARTY_IMPROVE_LOW_SCORE,
+                                    PARTY_IMPROVE_MEASURE_NEIGHBORS, PARTY_IMPROVE_MEASURE_PROFILE,
+                                    PARTY_IMPROVE_MIN_DECISIONS, PARTY_IMPROVE_SLOW_SPE, PARTY_IMPROVE_TOP_PARTIES,
+                                    PARTY_IMPROVE_TOP_PROPOSALS, PARTY_IMPROVE_TOP_THREATS, USAGE_TARGET_FORMAT)
 
 REPO = Path(__file__).resolve().parent.parent
 BATTLE_DIR = REPO / "logs" / "battles"
@@ -511,10 +512,12 @@ def build_report(battles: list, hypothetical: Optional[list] = None) -> dict:
     structural = {}
     if "psychic_terrain_support" in tags or hypothetical:
         structural["priority_dependence"] = priority_dependence(my_views, {o: opp_views[o] for o in opp_views}, dict(weights))
-    proposals = counter_proposals(current, owned_views, opp_views, dict(weights), threat_order=threat_order) if opp_views else {}
+    # 測定に渡す脅威重み (0..1 に正規化)。未測定の入替案はレポートに載せない (相性行列の見積もりは近傍の選び方にだけ使う)
+    top_score = max(threat_score.values(), default=0.0)
+    threat_weights_norm = {oid: round(v / top_score, 4) for oid, v in threat_score.items()} if top_score > 0 else {}
     return {"generated_at": time.strftime("%Y-%m-%d %H:%M"), "current": current,
             "current_ja": [_ja(resolver, s) for s in current], "n_battles": len(battles),
-            "parties": parties, "structural": structural, "proposals": proposals,
+            "parties": parties, "structural": structural, "threat_weights": threat_weights_norm,
             "ja": {sid: _ja(resolver, sid) for sid in set(list(owned_views) + all_opp_ids)}}
 
 
@@ -551,21 +554,113 @@ def render(rep: dict) -> str:
         for sid, m in sorted(pd["per_member"].items(), key=lambda kv: -kv[1]["drop"]):
             if m["priority_moves"]:
                 L.append(f"  - {ja.get(sid, sid)}: {m['coverage']} → {m['coverage_no_priority']} (先制技 {', '.join(m['priority_moves'])})")
-    pr = rep.get("proposals") or {}
-    if pr:
-        L += ["", "### 改善案 (相性行列による見積もり。未測定の draft)",
-              f"- 現行のチーム被覆 (動きづらかった相手に対して): {pr['base_coverage']}"]
-        for oid, t in pr["per_threat"].items():
-            bc = t["best_current"]
-            outs = ", ".join(f"{ja.get(s, s)} {v}" for v, s in t["best_owned_outside"])
-            L.append(f"- {ja.get(oid, oid)}: 現行の最善 {ja.get(bc[1], bc[1]) if bc[1] else '-'} {round(bc[0], 3)} / "
-                     f"現行外の所持種で高い順: {outs or '-'}")
-        if pr["swaps"]:
-            L.append("- 1 枠入替の案:")
-            for s in pr["swaps"]:
-                L.append(f"  - {ja.get(s['out'], s['out'])} → {ja.get(s['in'], s['in'])}: 被覆 {pr['base_coverage']} → {s['coverage']} ({s['delta']:+.3f})")
-        L.append("- 採否は測定で決める: `bash scripts/team_build.sh <run_id> --stages all --profile medium` "
-                 "(現行 + 近傍が候補に入る) か、案を --candidates で指定して S8a/S8b を回す")
+    L += ["", "### 改善案 (測定済みのパーティのみ)"]
+    m = rep.get("measure") or {}
+    if m.get("launched"):
+        L.append(f"- 測定を起動しました: run `{m['run_id']}` (現行 + 近傍 {m['neighbors']} 並びを S8a〜S13 に掛ける。"
+                 f"見込み数時間)。結果: `python -m tools.party_improvements --report {m['run_id']}`")
+    elif m.get("skipped"):
+        L.append(f"- 測定は起動していません: {m['skipped']}")
+    else:
+        L.append("- 未測定の入替案は載せません。`python -m tools.party_improvements --session --measure` で現行 + 近傍を"
+                 "構築システムの測定に掛け、`--report <run_id>` で 6 体の型つきパーティとして出します")
+    return "\n".join(L) + "\n"
+
+
+# ------------------------------------------------------------------ 測定の起動と、測定済みパーティの報告
+def measure_command(run_id: str, weights_file: Path, neighbors: int, profile: str, parallel: int, seed: int) -> list:
+    """改善案の測定 run のコマンド (bash scripts/team_build_nohup.sh …)。純粋"""
+    return ["bash", "scripts/team_build_nohup.sh", run_id, "--stages", "all", "--profile", profile,
+            "--only-incumbent", "--incumbent-neighbors-s5", str(neighbors), "--max-candidates", str(neighbors + 1),
+            "--threat-weights-file", str(weights_file), "--parallel", str(parallel), "--seed", str(seed)]
+
+
+def active_measurement() -> Optional[str]:
+    """走っている構築 run (tools.team_build.run) のコマンドライン。無ければ None"""
+    import subprocess
+    res = subprocess.run(["pgrep", "-fl", "-m", "tools.team_build.run"], capture_output=True, text=True)
+    lines = [ln for ln in res.stdout.splitlines() if "-m tools.team_build.run" in ln]
+    return lines[0] if lines else None
+
+
+def launch_measurement(rep: dict, neighbors: int, profile: str, parallel: int) -> dict:
+    """セッションの脅威重みを書き出し、現行 + 近傍の測定 run を nohup で起動する。既に run が走っていれば起動しない"""
+    import subprocess
+    if not rep.get("threat_weights"):
+        return {"skipped": "動きづらかった相手が無い (脅威重みが空)"}
+    active = active_measurement()
+    if active:
+        return {"skipped": f"構築 run が実行中 ({active[:80]}…)。終了後に --measure を再実行"}
+    ts = time.strftime("%Y%m%d_%H%M")
+    run_id = f"improve_{ts}"
+    wdir = REPO / "logs" / "build_search"
+    wdir.mkdir(parents=True, exist_ok=True)
+    wfile = wdir / f"session_threats_{ts}.json"
+    wfile.write_text(json.dumps(rep["threat_weights"], ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    cmd = measure_command(run_id, wfile, neighbors, profile, parallel, int(time.time()) % 1_000_000)
+    res = subprocess.run(cmd, cwd=str(REPO), capture_output=True, text=True)
+    return {"launched": res.returncode == 0, "run_id": run_id, "neighbors": neighbors, "weights_file": str(wfile),
+            "stdout": res.stdout.strip(), "stderr": res.stderr.strip()[-300:]}
+
+
+def _best_any(res: dict) -> dict:
+    """racing 結果からチームごとの最善 variant (脱落の有無によらず Δ 最大)"""
+    from tools.team_build.pipeline import split_variant
+    out = {}
+    for a in (res or {}).get("arms", []):
+        r = a.get("result") or {}
+        if r.get("mean") is None:
+            continue
+        cid, v = split_variant(a["arm_id"])
+        if cid not in out or r["mean"] > out[cid]["delta"]:
+            out[cid] = {"variant": v, "delta": r["mean"], "ci": [r.get("ci_low"), r.get("ci_high")],
+                        "n": a.get("n_done"), "state": a.get("state")}
+    return out
+
+
+def measured_report(run_id: str) -> str:
+    """測定 run の結果を、6 体の型つきパーティ (日本語) + 実測値で出す。測定の無い候補は載せない"""
+    from tools.evaluate_team import team_text_to_ja
+    run = REPO / "logs" / "build_search" / "runs" / run_id
+    ev = run / "evaluation"
+
+    def load(p):
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+    sets = load(run / "s06_sets.json") or []
+    s8a, s8b, summary = load(ev / "s08a_screen.json"), load(ev / "s08b_adapted.json"), load(ev / "summary.json") or {}
+    best_a, best_b = _best_any(s8a), _best_any(s8b)
+    ref = summary.get("reference_variant") or {}
+    hold = summary.get("holdout") or {}
+    winner = summary.get("winner")
+    L = [f"## 測定済みの候補パーティ (run {run_id})", ""]
+    if not s8a:
+        L.append("- まだ測定結果がありません (S8a 未完了)。進捗: " + str(run / "run.log"))
+        return "\n".join(L) + "\n"
+    L.append(f"参照 = 現行チーム (選出方策 {ref.get('variant', '?')})。Δ は参照との対応差 (同一相手列)、"
+             f"CI 95%、S8a = cheap 適応段、S8b = 収束適応 + 検証済み checkpoint の段。判定は封印 holdout のみ。")
+    rows = [r for r in sets if r.get("ok") and (r["candidate_id"] in best_a or r["candidate_id"] in best_b)]
+    rows.sort(key=lambda r: -(best_b.get(r["candidate_id"], best_a.get(r["candidate_id"], {})).get("delta") or -9))
+    for r in rows:
+        cid = r["candidate_id"]
+        tag = "現行" if r.get("tag") == "incumbent" else ("近傍" if r.get("tag") == "incumbent_mut" else r.get("tag", ""))
+        L += ["", f"### {cid} ({tag})"]
+        for stage, best in (("S8b", best_b), ("S8a", best_a)):
+            m = best.get(cid)
+            if m:
+                ci = m["ci"]
+                L.append(f"- {stage}: variant={m['variant']} Δ={m['delta']:+.3f} [{ci[0]:+.3f}, {ci[1]:+.3f}] "
+                         f"n={m['n']} {m['state']}")
+        if winner == cid and hold:
+            L.append(f"- 封印 holdout: **{hold.get('verdict')}** Δ={hold.get('delta')} CI={hold.get('ci')} n={hold.get('n')}")
+        text = (run / "s06_sets" / f"{cid}.txt")
+        if text.exists():
+            L += ["", "```", team_text_to_ja(text.read_text(encoding="utf-8")).rstrip(), "```"]
+    if summary.get("result"):
+        L += ["", f"run の結果: {summary['result']}" + (f" (勝者 {winner}, variant {summary.get('winner_variant')})" if winner else "")]
     return "\n".join(L) + "\n"
 
 
@@ -575,16 +670,36 @@ def main(argv=None) -> int:
     ap.add_argument("--last", type=int, default=None)
     ap.add_argument("--days", type=float, default=None)
     ap.add_argument("--opponents", default=None, help="仮想の相手パーティ (species id のカンマ区切り)。ログは使わない")
+    ap.add_argument("--measure", action="store_true",
+                    help="現行 + 近傍を構築システムの測定 (S8a〜S13) に掛ける run を nohup で起動する")
+    ap.add_argument("--neighbors", type=int, default=PARTY_IMPROVE_MEASURE_NEIGHBORS)
+    ap.add_argument("--profile", default=PARTY_IMPROVE_MEASURE_PROFILE)
+    ap.add_argument("--parallel", type=int, default=5)
+    ap.add_argument("--report", default=None, help="測定 run の結果を 6 体の型つきパーティとして出す (run_id)")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--no-save", action="store_true")
     args = ap.parse_args(argv)
+    if args.report:
+        md = measured_report(args.report)
+        print(md)
+        if not args.no_save:
+            OUT_DIR.mkdir(parents=True, exist_ok=True)
+            p = OUT_DIR / f"improvements_measured_{args.report}.md"
+            p.write_text(md, encoding="utf-8")
+            print(f"保存: {p}")
+        return 0
     battles, hyp = [], None
     if args.opponents:
         hyp = [_toid(x) for x in args.opponents.split(",") if x.strip()]
     else:
         since = session_start_ts() if args.session else None
-        battles = load_battles(since_ts=since, last=args.last, days=args.days)
+        last = args.last
+        if args.session and since is None and last is None and args.days is None:
+            last = PARTY_IMPROVE_DEFAULT_LAST      # 終了処理でマーカーが消えた後は直近の対戦だけ
+        battles = load_battles(since_ts=since, last=last, days=args.days)
     rep = build_report(battles, hypothetical=hyp)
+    if args.measure:
+        rep["measure"] = launch_measurement(rep, args.neighbors, args.profile, args.parallel)
     if args.json:
         print(json.dumps(rep, ensure_ascii=False, indent=1, default=str))
         return 0

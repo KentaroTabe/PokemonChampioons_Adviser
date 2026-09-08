@@ -84,8 +84,58 @@ def test_priority_dependence_and_proposals_with_dex():
     print("test_priority_dependence_and_proposals_with_dex OK")
 
 
+def test_measure_command_and_measured_report():
+    import json
+    import tempfile
+    from pathlib import Path
+    cmd = PI.measure_command("improve_x", Path("w.json"), 3, "medium", 5, 42)
+    s = " ".join(cmd)
+    assert s.startswith("bash scripts/team_build_nohup.sh improve_x --stages all --profile medium")
+    assert "--only-incumbent" in s and "--incumbent-neighbors-s5 3" in s and "--max-candidates 4" in s
+    assert "--threat-weights-file w.json" in s and "--seed 42" in s
+    # 測定済みの候補だけを載せ、型つきの本文を日本語で出す
+    with tempfile.TemporaryDirectory() as d:
+        run = Path(d) / "runs" / "improve_t"
+        (run / "evaluation").mkdir(parents=True)
+        (run / "s06_sets").mkdir()
+        (run / "s06_sets.json").write_text(json.dumps([
+            {"candidate_id": "L00_INC", "ok": True, "tag": "incumbent", "members": ["kingambit", "metagross"]},
+            {"candidate_id": "L01_INC", "ok": True, "tag": "incumbent_mut", "members": ["dragonite", "metagross"]},
+            {"candidate_id": "L02_INC", "ok": True, "tag": "incumbent_mut", "members": ["garchomp", "metagross"]}]),
+            encoding="utf-8")
+        (run / "s06_sets" / "L01_INC.txt").write_text(
+            "Dragonite @ heavydutyboots\nLevel: 50\nAbility: multiscale\nEVs: 2 HP / 32 Atk / 32 Spe\nAdamant Nature\n- dragondance\n- extremespeed\n",
+            encoding="utf-8")
+        def arm(aid, mean, state, n=300):
+            return {"arm_id": aid, "state": state, "eliminated_at": None, "n_done": n,
+                    "result": {"mean": mean, "se": 0.03, "ci_low": mean - 0.06, "ci_high": mean + 0.06}}
+        (run / "evaluation" / "s08a_screen.json").write_text(json.dumps({"arms": [
+            arm("L00_INC@cheap", -0.02, "equivalent"), arm("L01_INC@teampreview", -0.10, "uncertain"),
+            arm("L01_INC@cheap", +0.01, "uncertain")]}), encoding="utf-8")
+        (run / "evaluation" / "s08b_adapted.json").write_text(json.dumps({"arms": [
+            arm("L01_INC@fresh", +0.03, "uncertain"), arm("L01_INC@generic", -0.05, "uncertain")]}), encoding="utf-8")
+        (run / "evaluation" / "summary.json").write_text(json.dumps({
+            "reference_variant": {"variant": "teampreview"}, "winner": "L01_INC", "winner_variant": "fresh",
+            "holdout": {"verdict": "PASS_EQUIVALENT", "delta": 0.01, "ci": [-0.03, 0.05], "n": 600}, "result": "PASS_EQUIVALENT"}),
+            encoding="utf-8")
+        orig = PI.REPO
+        try:
+            PI.REPO = Path(d)
+            (Path(d) / "logs" / "build_search").mkdir(parents=True)
+            (Path(d) / "logs" / "build_search" / "runs").symlink_to(Path(d) / "runs")
+            md = PI.measured_report("improve_t")
+        finally:
+            PI.REPO = orig
+    assert "L01_INC" in md and "L00_INC" in md and "L02_INC" not in md          # 未測定の L02 は載せない
+    assert "S8b: variant=fresh Δ=+0.030" in md and "S8a: variant=cheap Δ=+0.010" in md
+    assert "PASS_EQUIVALENT" in md and "カイリュー" in md and "りゅうのまい" in md and "いじっぱり" in md
+    assert md.index("L01_INC") < md.index("L00_INC")                               # Δ の高い順
+    print("test_measure_command_and_measured_report OK")
+
+
 if __name__ == "__main__":
     test_parse_showdown_sets()
     test_pressure_and_difficulty()
     test_team_concepts_psychic_terrain()
     test_priority_dependence_and_proposals_with_dex()
+    test_measure_command_and_measured_report()
