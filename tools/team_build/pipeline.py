@@ -205,9 +205,18 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
     if n_folds <= max(BUILD_FOLD_EVAL, BUILD_FOLD_VALIDATE):
         raise SystemExit(f"opponent_families.json の SEARCH fold が {n_folds} 個で足りない (評価 {BUILD_FOLD_EVAL} / "
                          f"検証 {BUILD_FOLD_VALIDATE})。探索段を新しい seed でやり直す")
-    models_dir = pin_models()
+    models_dir = None
+    if resume:
+        # 途中再開では S8a と同じ RL ピンを使う (段をまたいで行動方策の世代が変わると対応比較が濁る)
+        prev = _load_json(run_dir / "evaluation" / "s08a_screen.json") or {}
+        prev_dir = (prev.get("reference") or {}).get("models_dir")
+        if prev_dir and Path(prev_dir).exists():
+            models_dir = prev_dir
+    if not models_dir:
+        models_dir = pin_models()
     generic = str(GENERAL_MODEL_PATH) if Path(GENERAL_MODEL_PATH).exists() else None
-    log(f"S7-13 measurement start: models_dir={models_dir} generic={'ok' if generic else 'none'}")
+    log(f"S7-13 measurement start: models_dir={models_dir} generic={'ok' if generic else 'none'}"
+        + (" (resume: S8a のピンを再利用)" if resume else ""))
     ref = reference_arm(run_dir, models_dir)
     # 代理スコアでは絞らない (max_candidates は S7 で収束まで適応するチーム数)
     cands = candidate_arms(run_dir, models_dir, None, ids=candidate_ids)
