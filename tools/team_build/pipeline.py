@@ -244,9 +244,9 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
 
     # S8a-2: 参照の variant の最善 (同一相手列、screen_max 戦)
     ref_variants = [a for a in (_variant_arm(ref, v, screen_models, generic) for v in screen_variants) if a]
-    ref_files = {a: eval_dir / f"s08a_reference_{a.arm_id}_0_{screen_max}.json" for a in ref_variants}
+    ref_files = {a.arm_id: eval_dir / f"s08a_reference_{a.arm_id}_0_{screen_max}.json" for a in ref_variants}
     if resume and all(p.exists() for p in ref_files.values()):
-        ref_wr = {split_variant(a.arm_id)[1]: (_load_json(p) or {}).get("win_rate") for a, p in ref_files.items()}
+        ref_wr = {split_variant(aid)[1]: (_load_json(p) or {}).get("win_rate") for aid, p in ref_files.items()}
         log("S8a reference variant: resume (測定済みの JSON を再利用)")
     else:
         R.measure_round(ref_variants, screen_max, 0, seed, split, "search", BUILD_FOLD_EVAL, eval_dir, "s08a_reference",
