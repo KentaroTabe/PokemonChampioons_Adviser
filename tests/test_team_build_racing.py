@@ -63,6 +63,24 @@ def test_measure_cmd_flags():
     print("test_measure_cmd_flags OK")
 
 
+def test_measure_round_reuses_measured_json():
+    """同じ (stage, arm, offset, n) の測定済み JSON があれば測り直さない (止めた run の腕単位の再開)"""
+    import importlib
+    import json as _json
+    R2 = importlib.reload(R)          # 上のテストで差し替えた measure_round を元に戻す
+    with tempfile.TemporaryDirectory() as d:
+        out = Path(d)
+        (out / "st_a_0_5.json").write_text(_json.dumps({"outcomes": [1, 0, 1, 1, 0], "win_rate": 0.6}), encoding="utf-8")
+        (out / "st_b_0_5.json").write_text(_json.dumps({"outcomes": [1, 0]}), encoding="utf-8")   # 件数不足 → 使わない
+        calls = []
+        R2._run_one = lambda cmd, log_path, timeout: (calls.append(cmd), 1)[1]    # 実行は失敗扱い
+        a, b = R2.Arm("a", Path("a.txt")), R2.Arm("b", Path("b.txt"))
+        R2.measure_round([a, b], 5, 0, 1, Path("split.json"), "search", 1, out, "st", parallel=1)
+        assert a.outcomes == [1, 0, 1, 1, 0] and a.n_done == 5 and a.history[0]["reused"] is True
+        assert b.outcomes == [] and len(calls) == 1 and "--candidate-id b" in " ".join(calls[0])
+    print("test_measure_round_reuses_measured_json OK")
+
+
 def test_look_z_widens_with_looks():
     """段階判定 (optional stopping) の z: 1 段は 1.96、段数が増えるほど広がり、表外は Bonferroni"""
     from tools.team_build.verdict import look_z, n_looks
@@ -100,5 +118,6 @@ def test_race_uses_look_adjusted_z():
 if __name__ == "__main__":
     test_race_eliminates_and_terminates()
     test_measure_cmd_flags()
+    test_measure_round_reuses_measured_json()
     test_look_z_widens_with_looks()
     test_race_uses_look_adjusted_z()

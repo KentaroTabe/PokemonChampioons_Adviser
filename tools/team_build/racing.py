@@ -80,6 +80,21 @@ def _run_one(cmd: list, log_path: Path, timeout: int) -> int:
 SEC_PER_BATTLE = 40         # subprocess timeout の見積もり (実測 5 並列で約 6 秒/戦 + 起動)
 
 
+def _load_measured(out_json: Path, n: int) -> Optional[dict]:
+    """測定済み JSON (outcomes が n 件そろっているもの) を読む。無ければ None"""
+    if not out_json.exists():
+        return None
+    try:
+        d = json.loads(out_json.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    outs = [int(x) for x in d.get("outcomes") or []]
+    if len(outs) != n:
+        return None
+    d["outcomes"] = outs
+    return d
+
+
 def measure_round(arms: list, n: int, offset: int, seed: int, split_file: Path, tier: str, fold: Optional[int],
                   out_dir: Path, stage: str, parallel: int = PARALLEL, timeout: Optional[int] = None,
                   pick_policy: str = "advisor") -> None:
@@ -90,6 +105,14 @@ def measure_round(arms: list, n: int, offset: int, seed: int, split_file: Path, 
     jobs = []
     for arm in arms:
         out_json = out_dir / f"{stage}_{arm.arm_id}_{offset}_{n}.json"
+        prev = _load_measured(out_json, n)
+        if prev is not None:
+            # 同じ (stage, arm, offset, n) の測定済み JSON があればそのまま使う (途中で止めた run の再開)
+            arm.outcomes.extend(prev["outcomes"])
+            arm.n_done = len(arm.outcomes)
+            arm.history.append({"offset": offset, "n": n, "win_rate": prev.get("win_rate"), "reused": True,
+                                "latency_p50_ms": prev.get("latency_p50_ms"), "stats": prev.get("stats")})
+            continue
         cmd = measure_cmd(arm, n, offset, seed, split_file, tier, fold, out_json,
                           out_dir / "battles" / f"{stage}_{arm.arm_id}.jsonl", pick_policy)
         jobs.append((arm, out_json, cmd))
