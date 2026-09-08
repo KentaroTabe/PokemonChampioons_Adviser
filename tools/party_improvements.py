@@ -588,6 +588,16 @@ def launch_measurement(rep: dict, neighbors: int, profile: str, parallel: int) -
     import subprocess
     if not rep.get("threat_weights"):
         return {"skipped": "動きづらかった相手が無い (脅威重みが空)"}
+    # 現行チーム (登録の型) が不正だと参照が作れず測定が全滅する → 先に validate-team で弾く
+    try:
+        from champions_agent.config import TRAINING_BATTLE_FORMAT
+        from tools.evaluate_team import build_myteam_text
+        from tools.team_build.sets import validate_team_text
+        ok, errs = validate_team_text(build_myteam_text(), TRAINING_BATTLE_FORMAT)
+        if not ok:
+            return {"skipped": "現行チームの登録の型が不正 (config/my_team.json を直してから --measure): " + " / ".join(errs[:4])}
+    except Exception as e:
+        return {"skipped": f"現行チームの検証に失敗: {e!r}"}
     active = active_measurement()
     if active:
         return {"skipped": f"構築 run が実行中 ({active[:80]}…)。終了後に --measure を再実行"}
