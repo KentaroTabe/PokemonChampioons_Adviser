@@ -187,9 +187,18 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
                     screen_max: int = BUILD_SCREEN_MAX, screen_variants: tuple = BUILD_SCREEN_VARIANTS,
                     variants: tuple = BUILD_PICK_VARIANTS, candidate_ids: Optional[list] = None,
                     stop_after: Optional[str] = None, s08b_seed_offset: int = 1, s11: bool = False,
-                    validate_n: int = BUILD_ADAPT_VALIDATE_N, validate_max: int = BUILD_ADAPT_VALIDATE_MAX_CKPTS) -> dict:
+                    validate_n: int = BUILD_ADAPT_VALIDATE_N, validate_max: int = BUILD_ADAPT_VALIDATE_MAX_CKPTS,
+                    resume: bool = False) -> dict:
+    """resume: 途中で落ちた run の続き。evaluation/ の S8a 結果 (cheap モデル・参照 variant・racing) と
+    advisors/<cid>/adapt_result.json (完了した適応) をそのまま使い、無いものだけ実行する"""
     from champions_agent.agent.selection_model import GENERAL_MODEL_PATH
     log = lambda m: _log(run_dir, m)
+
+    def _load_json(p: Path):
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return None
     split = run_dir / "opponent_families.json"
     doc = json.loads(split.read_text(encoding="utf-8"))
     n_folds = len(doc.get("search_folds") or [])
@@ -215,16 +224,26 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
     eval_dir = run_dir / "evaluation"
 
     # S8a-1: 全候補 + 参照を同じ予算で cheap adaptation
-    log(f"S8a cheap adaptation: {len(cands)} 候補 + 参照 × {screen_adapt} 戦")
-    screen_models = _screen_adapt_all([ref] + cands, split, run_dir / "advisors_screen", seed, screen_adapt,
-                                      adapt_chunk, parallel, log)
-    _write_stage(run_dir, "s08a_screen_models", screen_models)
+    screen_models = _load_json(eval_dir / "s08a_screen_models.json") if resume else None
+    if screen_models and all(a.arm_id in screen_models for a in [ref] + cands):
+        log(f"S8a cheap adaptation: resume (s08a_screen_models.json を再利用)")
+    else:
+        log(f"S8a cheap adaptation: {len(cands)} 候補 + 参照 × {screen_adapt} 戦")
+        screen_models = _screen_adapt_all([ref] + cands, split, run_dir / "advisors_screen", seed, screen_adapt,
+                                          adapt_chunk, parallel, log)
+        _write_stage(run_dir, "s08a_screen_models", screen_models)
 
     # S8a-2: 参照の variant の最善 (同一相手列、screen_max 戦)
     ref_variants = [a for a in (_variant_arm(ref, v, screen_models, generic) for v in screen_variants) if a]
-    R.measure_round(ref_variants, screen_max, 0, seed, split, "search", BUILD_FOLD_EVAL, eval_dir, "s08a_reference",
-                    parallel=parallel)
-    ref_wr = {split_variant(a.arm_id)[1]: (sum(a.outcomes) / len(a.outcomes) if a.outcomes else None) for a in ref_variants}
+    ref_files = {a: eval_dir / f"s08a_reference_{a.arm_id}_0_{screen_max}.json" for a in ref_variants}
+    if resume and all(p.exists() for p in ref_files.values()):
+        ref_wr = {split_variant(a.arm_id)[1]: (_load_json(p) or {}).get("win_rate") for a, p in ref_files.items()}
+        log("S8a reference variant: resume (測定済みの JSON を再利用)")
+    else:
+        R.measure_round(ref_variants, screen_max, 0, seed, split, "search", BUILD_FOLD_EVAL, eval_dir, "s08a_reference",
+                        parallel=parallel)
+        ref_wr = {split_variant(a.arm_id)[1]: (sum(a.outcomes) / len(a.outcomes) if a.outcomes else None)
+                  for a in ref_variants}
     ref_variant = best_by_win_rate(ref_wr, screen_variants) or "teampreview"
     ref_best = next(a for a in ref_variants if split_variant(a.arm_id)[1] == ref_variant)
     summary["reference_variant"] = {"variant": ref_variant, "win_rates": ref_wr, "selection_model": ref_best.selection_model,
@@ -235,10 +254,14 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
         return R.Arm(arm_id, ref.team_file, ref_best.selection_model, models_dir, pick_policy=ref_best.pick_policy)
 
     # S8a-3: screening racing (チーム × variant、脱落は margin 込み、短い段階)
-    arms8a = [a for c in cands for a in (_variant_arm(c, v, screen_models, generic) for v in screen_variants) if a]
-    res8a = R.race(arms8a, ref_arm(), split, "search", seed, eval_dir, stage="s08a_screen", fold=BUILD_FOLD_EVAL,
-                   steps=screen_steps, max_battles=screen_max, eps=BUILD_EQUIV_EPS + screen_margin,
-                   parallel=parallel, log=log)
+    res8a = _load_json(eval_dir / "s08a_screen.json") if resume else None
+    if res8a and {split_variant(a["arm_id"])[0] for a in res8a.get("arms", [])} >= {c.arm_id for c in cands}:
+        log("S8a screening: resume (s08a_screen.json を再利用)")
+    else:
+        arms8a = [a for c in cands for a in (_variant_arm(c, v, screen_models, generic) for v in screen_variants) if a]
+        res8a = R.race(arms8a, ref_arm(), split, "search", seed, eval_dir, stage="s08a_screen", fold=BUILD_FOLD_EVAL,
+                       steps=screen_steps, max_battles=screen_max, eps=BUILD_EQUIV_EPS + screen_margin,
+                       parallel=parallel, log=log)
     chosen8a = choose_variants(res8a)
     all_survivors = team_survivors(chosen8a, None)
     survivors = all_survivors[:max_candidates] if max_candidates else all_survivors
@@ -259,9 +282,18 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
     to_adapt = [a for a in cands if a.arm_id in survivors]
 
     def _adapt_one(a):
-        return a.arm_id, AD.adapt_selection(a.arm_id, a.team_file, split, run_dir / "advisors", seed,
-                                            min_battles=adapt_min, chunk=adapt_chunk, max_battles=adapt_max,
-                                            log=log, registry=registry, keep_checkpoints=True)
+        prev = _load_json(run_dir / "advisors" / a.arm_id / "adapt_result.json") if resume else None
+        if prev and prev.get("model") and Path(prev["model"]).exists():
+            prev["resumed"] = True
+            log(f"[adapt:{a.arm_id}] resume (adapt_result.json を再利用、n={prev.get('n_battles')})")
+            return a.arm_id, prev
+        try:
+            return a.arm_id, AD.adapt_selection(a.arm_id, a.team_file, split, run_dir / "advisors", seed,
+                                                min_battles=adapt_min, chunk=adapt_chunk, max_battles=adapt_max,
+                                                log=log, registry=registry, keep_checkpoints=True)
+        except Exception as e:      # 1 チームの失敗で run 全体を落とさない (fresh variant 無しで S8b へ)
+            log(f"[adapt:{a.arm_id}] failed: {e!r}")
+            return a.arm_id, {"candidate_id": a.arm_id, "model": None, "history": [], "stop_reason": f"error:{e!r}"}
 
     adapted = {}
     with ThreadPoolExecutor(max_workers=max(1, min(parallel, SCREEN_ADAPT_PARALLEL))) as ex:
@@ -270,7 +302,10 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
     for a in to_adapt:
         r = adapted[a.arm_id]
         ckpts = AD.checkpoints_from_history(r.get("history"))
-        if ckpts:
+        if (r.get("validated") or {}).get("chosen") and Path(r["validated"]["chosen"]).exists():
+            log(f"[validate:{a.arm_id}] resume (検証済み n{r['validated'].get('chosen_n')})")
+            r["model"] = r["validated"]["chosen"]
+        elif ckpts:
             sel = AD.select_checkpoint(a.arm_id, a.team_file, ckpts, split, seed + 8, models_dir,
                                        run_dir / "advisors" / a.arm_id / "validate", parallel=parallel, log=log,
                                        fold=BUILD_FOLD_VALIDATE, n=validate_n, max_ckpts=validate_max)
@@ -300,8 +335,12 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
             arm = _variant_arm(a, v, fresh_models, generic)
             if arm:
                 arms8b.append(arm)
-    res8b = R.race(arms8b, ref_arm(), split, "search", seed + s08b_seed_offset, eval_dir, stage="s08b_adapted",
-                   fold=BUILD_FOLD_EVAL, steps=steps, max_battles=max_battles, parallel=parallel, log=log)
+    res8b = _load_json(eval_dir / "s08b_adapted.json") if resume else None
+    if res8b and {split_variant(a["arm_id"])[0] for a in res8b.get("arms", [])} >= set(adapted):
+        log("S8b: resume (s08b_adapted.json を再利用)")
+    else:
+        res8b = R.race(arms8b, ref_arm(), split, "search", seed + s08b_seed_offset, eval_dir, stage="s08b_adapted",
+                       fold=BUILD_FOLD_EVAL, steps=steps, max_battles=max_battles, parallel=parallel, log=log)
     chosen = choose_variants(res8b)
     contenders = team_survivors(chosen, None)
     summary["s08b_variants"] = chosen

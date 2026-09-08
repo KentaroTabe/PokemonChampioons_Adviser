@@ -227,6 +227,10 @@ BUILD_FOLD_ADAPT, BUILD_FOLD_EVAL, BUILD_FOLD_VALIDATE = 0, 1, 2
 # 200 戦の CI 半幅は ±0.07 で、大きな落ち込みを弾く目的 (小差の優劣は S8b の variant 比較に任せる)
 BUILD_ADAPT_VALIDATE_N = 200
 BUILD_ADAPT_VALIDATE_MAX_CKPTS = 4     # 検証する checkpoint 数 (最初と最後を含めて等間隔)
+# 選出データ収集 (1 chunk = 1,000 戦 ≈ 2 分) の無応答対策: 戦数比例の timeout と、seed を変えた 1 回の再試行
+# (2026-09-07 chat_0907: Showdown の空理由の team rejected で poke-env が待ち続け、4 時間後の例外で run が落ちた)
+BUILD_COLLECT_TIMEOUT_PER_1K = 1800    # 1,000 戦あたりの秒数 (通常の約 15 倍)
+BUILD_COLLECT_RETRY_SEED_OFFSET = 7919
 BUILD_POOL_TOP_N = 200
 # 選出方策 ablation (teampreview / fresh adapted / production) の 1 条件あたりの戦数。
 # 対応差の CI 半幅は 100 戦 ±0.10、300 戦 ±0.06、1,000 戦 ±0.035 (実測の分散から)。

@@ -19,7 +19,8 @@ from typing import Optional
 
 from champions_agent.config import (
     BUILD_ADAPT_EPS_TRAIN, BUILD_ADAPT_MIN_BATTLES, BUILD_ADAPT_PATIENCE, BUILD_ADAPT_VALIDATE_MAX_CKPTS,
-    BUILD_ADAPT_VALIDATE_N, BUILD_FOLD_ADAPT, BUILD_FOLD_VALIDATE)
+    BUILD_ADAPT_VALIDATE_N, BUILD_COLLECT_RETRY_SEED_OFFSET, BUILD_COLLECT_TIMEOUT_PER_1K, BUILD_FOLD_ADAPT,
+    BUILD_FOLD_VALIDATE)
 
 REPO = Path(__file__).resolve().parent.parent.parent
 CHUNK = 1000                 # 1 回の収集戦数 (config 化候補)
@@ -97,19 +98,33 @@ def select_checkpoint(candidate_id: str, team_file: Path, ckpts: dict, split_fil
             "results": {str(k): v for k, v in results.items()}, "fold": fold, "n": n, "candidates": picks}
 
 
+RC_TIMEOUT = 124
+
+
 def _run(cmd: list, log_path: Path, timeout: int = 4 * 3600) -> int:
+    """サブプロセスを回して returncode を返す。timeout は例外にせず RC_TIMEOUT を返す
+    (2026-09-07 chat_0907: 収集が Showdown の空理由の team rejected で無応答になり、4 時間の timeout 例外が
+    run 全体を落とした。呼び出し側で候補単位に扱う)"""
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as lf:
-        return subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, cwd=str(REPO), timeout=timeout).returncode
+        try:
+            return subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, cwd=str(REPO), timeout=timeout).returncode
+        except subprocess.TimeoutExpired:
+            lf.write(f"\n[adapt] timeout {timeout}s: {' '.join(str(c) for c in cmd[:4])} ...\n")
+            return RC_TIMEOUT
 
 
 def collect_chunk(team_file: Path, split_file: Path, out_npz: Path, n: int, seed: int, log_path: Path,
-                  explore: float = 0.5, fold: Optional[int] = 0, tier: str = "search") -> int:
+                  explore: float = 0.5, fold: Optional[int] = 0, tier: str = "search",
+                  timeout: Optional[int] = None) -> int:
+    """1 chunk 分の収集。timeout は戦数に比例 (BUILD_COLLECT_TIMEOUT_PER_1K)。無応答は RC_TIMEOUT"""
     spec = f"{split_file}:{tier}" + (f":{fold}" if fold is not None else "")
     cmd = [sys.executable, "-m", "tools.collect_selection_data", "--battles", str(n), "--explore", str(explore),
            "--team-file", str(team_file), "--opp-split", spec, "--opp-seed", str(seed),
            "--out", str(out_npz)]
-    return _run(cmd, log_path)
+    if timeout is None:
+        timeout = int(BUILD_COLLECT_TIMEOUT_PER_1K * max(1, n) / 1000)
+    return _run(cmd, log_path, timeout=timeout)
 
 
 def train_candidate(data_npz: Path, out_model: Path, report_json: Path, log_path: Path,
@@ -142,9 +157,17 @@ def adapt_selection(candidate_id: str, team_file: Path, split_file: Path, out_di
     history, n_total, stale, last_val = [], 0, 0, None
     stop_reason = "max_battles"
     t0 = time.time()
+    if data.exists():
+        data.unlink()          # 前回の途中データに追記しない (収集は常に 0 から)
     while n_total < max_battles:
         tier, fold = tiers[(n_total // chunk) % len(tiers)]
-        rc = collect_chunk(team_file, split_file, data, chunk, seed + n_total // chunk, log_path, fold=fold, tier=tier)
+        chunk_seed = seed + n_total // chunk
+        rc = collect_chunk(team_file, split_file, data, chunk, chunk_seed, log_path, fold=fold, tier=tier)
+        if rc != 0:
+            # 無応答や一時的な失敗 (validator の空理由 rejected 等) は seed を変えて 1 回だけやり直す
+            log(f"[adapt:{candidate_id}] collect rc={rc} at n={n_total} → seed を変えて再試行")
+            rc = collect_chunk(team_file, split_file, data, chunk, chunk_seed + BUILD_COLLECT_RETRY_SEED_OFFSET,
+                               log_path, fold=fold, tier=tier)
         if rc != 0:
             stop_reason = f"collect_failed(rc={rc})"
             break

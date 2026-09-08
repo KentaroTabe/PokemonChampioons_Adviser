@@ -312,6 +312,8 @@ def main() -> None:
                     help="S8b の相手列 seed のオフセット (既定 1 = S8a と別の列。ablation 拡張では 0 で同一列)")
     ap.add_argument("--s11", choices=["on", "off"], default="off",
                     help="S11 (勝者の SEARCH+SELECTION 再学習)。既定 off = S7 の検証済み checkpoint を最終モデルにする")
+    ap.add_argument("--resume", action="store_true",
+                    help="途中で落ちた run の続き: S8a の結果と完了済みの適応 (adapt_result.json) を再利用する")
     ap.add_argument("--validate-n", type=int, default=None, help="S7 の checkpoint 検証の戦数 (既定 config)")
     ap.add_argument("--validate-max", type=int, default=None, help="S7 で検証する checkpoint 数 (既定 config)")
     ap.add_argument("--repairs", type=int, default=0)
@@ -447,7 +449,7 @@ def _measure(run_dir: Path, args) -> None:
                     screen_steps=screen_steps, screen_max=args.screen_max or BUILD_SCREEN_MAX,
                     candidate_ids=subset, stop_after=args.stop_after, s08b_seed_offset=args.s08b_seed_offset,
                     s11=(args.s11 == "on"), validate_n=args.validate_n or BUILD_ADAPT_VALIDATE_N,
-                    validate_max=args.validate_max or BUILD_ADAPT_VALIDATE_MAX_CKPTS)
+                    validate_max=args.validate_max or BUILD_ADAPT_VALIDATE_MAX_CKPTS, resume=args.resume)
 
 
 if __name__ == "__main__":

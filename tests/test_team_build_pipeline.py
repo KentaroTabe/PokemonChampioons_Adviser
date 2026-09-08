@@ -123,6 +123,21 @@ def test_screen_margin_analysis():
     print("test_screen_margin_analysis OK")
 
 
+def test_collect_run_timeout_returns_code():
+    """収集サブプロセスの無応答は例外にせず RC_TIMEOUT を返す (run 全体を落とさない)"""
+    import sys
+    import tempfile
+    from pathlib import Path
+    from tools.team_build import adapt as AD
+    with tempfile.TemporaryDirectory() as d:
+        rc = AD._run([sys.executable, "-c", "import time; time.sleep(5)"], Path(d) / "x.log", timeout=1)
+        assert rc == AD.RC_TIMEOUT, rc
+        assert "timeout" in (Path(d) / "x.log").read_text(encoding="utf-8")
+        rc_ok = AD._run([sys.executable, "-c", "print('ok')"], Path(d) / "y.log", timeout=30)
+        assert rc_ok == 0
+    print("test_collect_run_timeout_returns_code OK")
+
+
 def test_surrogate_quality_metrics():
     from tools.team_build.review_run import spearman, surrogate_quality
     assert spearman([1, 2, 3, 4], [10, 20, 30, 40]) == 1.0
@@ -148,4 +163,5 @@ if __name__ == "__main__":
     test_checkpoint_selection_helpers()
     test_resolve_candidate_subset()
     test_screen_margin_analysis()
+    test_collect_run_timeout_returns_code()
     test_surrogate_quality_metrics()
