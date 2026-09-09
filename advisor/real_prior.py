@@ -38,7 +38,13 @@ def species_pick_prior(sid: str, bank: Optional[dict] = None,
     bank = bank if bank is not None else load_bank()
     if not bank:
         return None
-    s = (bank.get("species") or {}).get(sid)
+    stats = bank.get("species") or {}
+    s = stats.get(sid)
+    if s is None:
+        # フォルム id (rotomwash / raichualola 等) は画面認識では基本種名で記録されることが多い → 最長の前方一致
+        cands = [k for k in stats if len(k) >= 4 and sid.startswith(k)]
+        if cands:
+            s = stats[max(cands, key=len)]
     if not s or (s.get("appear") or 0) < min_appear:
         return None
     return s["picked"] / s["appear"]

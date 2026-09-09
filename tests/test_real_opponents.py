@@ -124,7 +124,11 @@ def test_blamed_species_and_species_pick_weights():
 
 
 def test_slot_weights_and_combo_prior():
-    from advisor.real_prior import slot_weights
+    from advisor.real_prior import slot_weights, species_pick_prior
+    bank = {"species": {"rotom": {"appear": 10, "picked": 9, "lead": 2}, "raichu": {"appear": 2, "picked": 2, "lead": 0}}}
+    assert abs(species_pick_prior("rotomwash", bank) - 0.9) < 1e-9        # フォルム id は基本種で引く
+    assert species_pick_prior("raichualola", bank) is None                 # 出現が足りない
+    assert species_pick_prior("garchomp", bank) is None and species_pick_prior("rotomwash", {}) is None
     from champions_agent.agent.selection_model import combo_prior, expected_best
     w = slot_weights([0.9, 0.5, 0.1, None], mix=0.5, clip=(0.5, 1.5))
     assert w[3] == 1.0 and w[0] > w[1] > w[2] and abs(sum(w[:3]) / 3 - 1.0) < 1e-6      # 平均 1、情報なしは 1
