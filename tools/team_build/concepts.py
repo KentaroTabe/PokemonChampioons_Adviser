@@ -134,7 +134,7 @@ def cluster_concepts(concepts: list, min_jaccard: float = 0.5) -> list:
 def generate_concepts(spec, feats: dict, threats: list, legal: set, mega_capable: set,
                       provider=None, rounds: int = MAX_ROUNDS, per_round: int = 8,
                       system_prompt: Optional[str] = None, log: Optional[Callable] = None,
-                      threat_weights: Optional[dict] = None) -> dict:
+                      threat_weights: Optional[dict] = None, rules: Optional[list] = None) -> dict:
     """ルール baseline + LLM 複数ラウンド (framing を変える) → クラスタリング。coverage で停止。
     戻り値: {"families": [...], "raw": [...], "rounds": n, "stop_reason": str, "llm_calls": [...]}"""
     owned = set(spec.owned)
@@ -152,6 +152,10 @@ def generate_concepts(spec, feats: dict, threats: list, legal: set, mega_capable
             "roles": {s: {k: round(v, 2) for k, v in f.roles.items() if v} for s, f in feats.items()},
             "mega_capable": sorted(mega_capable & owned),
             "enums": {"win_condition": WIN_CONDITIONS, "support_roles": SUPPORT_ROLES},
+            # コンセプト規則 (hard constraint): 設置役/エースの候補を渡し、core_ids に両方を含めさせる (S5 で機械的に検査)
+            "rules": rules or [],
+            "constraints": ("各 concept の core_ids には、rules ごとに setters から 1 体と aces から 1 体 (別個体) を必ず含める"
+                            if rules else ""),
             "output_schema": {"authoritative": {"concepts": [{"name": "str", "core_ids": ["id"], "mega_id": "id|null",
                                                              "win_condition": "enum", "support_roles": ["enum"],
                                                              "weak_to": ["id"]}]},

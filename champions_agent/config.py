@@ -308,4 +308,10 @@ PARTY_IMPROVE_LOSS_WEIGHT = 1.0
 PARTY_IMPROVE_MEASURE_NEIGHBORS = 3
 PARTY_IMPROVE_MEASURE_PROFILE = "medium"
 BUILD_SESSION_THREAT_BOOST = 2.0
+# 構築のコンセプト規則 (tools/team_build/rules.py、hard constraint)。psychic_terrain_priority_ace のエース判定:
+# 接地していて 素早さ種族値 ≥ MIN_SPE、防御種族値 ≤ MAX_DEF (先制技はほぼ物理)。メガ石を持つ型はメガ後の値で判定。
+# 規則から作る軸 (設置役 × エース) は使用率の和の上位 MAX_CORES 対まで
+BUILD_RULE_ACE_MIN_SPE = 100
+BUILD_RULE_ACE_MAX_DEF = 70
+BUILD_RULE_MAX_CORES = 24
 BUILD_PROTOCOL_VERSION = "1"

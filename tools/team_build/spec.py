@@ -59,6 +59,7 @@ class BuildSpec:
     profile: str = "full"
     regulation: str = TRAINING_BATTLE_FORMAT
     notes: str = ""
+    rules: list = field(default_factory=list)         # コンセプト規則 (tools/team_build/rules.RULES の名前、hard constraint)
     provenance: dict = field(default_factory=dict)    # field -> resolved | inferred | unknown
 
     def to_dict(self) -> dict:
@@ -106,6 +107,12 @@ def parse_form(form: dict, owned: Optional[list] = None) -> BuildSpec:
                 vals = [v for v in re.split(r"[,、\s/]+", vals) if v]
             setattr(spec, key, [resolve_species_token(v) for v in vals if resolve_species_token(v)])
             prov[key] = "resolved"
+    rules = form.get("rules")
+    if rules:
+        if isinstance(rules, str):
+            rules = [v for v in re.split(r"[,、\s/]+", rules) if v]
+        spec.rules = [str(v).strip() for v in rules if str(v).strip()]
+        prov["rules"] = "resolved"
     if not spec.owned:
         spec.owned = list(owned) if owned is not None else owned_species_ids()
         prov["owned"] = "inferred"
@@ -151,6 +158,11 @@ def validate_spec(spec: BuildSpec, legal: Optional[set] = None) -> list:
             problems.append(f"所持に未知/使用不可の種: {unknown_owned[:5]}")
     if spec.objective == "favorites" and not spec.favorites:
         problems.append("objective=favorites だが固定枠が無い")
+    if spec.rules:
+        from tools.team_build.rules import RULES
+        for r in spec.rules:
+            if r not in RULES:
+                problems.append(f"rules に未知の規則: {r} (定義済み: {sorted(RULES)})")
     return problems
 
 

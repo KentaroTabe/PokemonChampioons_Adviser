@@ -63,7 +63,7 @@ def stage_s0(run_dir: Path, spec: BuildSpec, legal: set) -> BuildSpec:
         raise SystemExit("BuildSpec の問題: " + "; ".join(problems))
     save_spec(spec, run_dir)
     log(run_dir, f"S0 spec: objective={spec.objective} style={spec.style} owned={len(spec.owned)} "
-                 f"favorites={spec.favorites} banned={spec.banned} profile={spec.profile}")
+                 f"favorites={spec.favorites} banned={spec.banned} rules={spec.rules} profile={spec.profile}")
     return spec
 
 
@@ -104,15 +104,54 @@ def stage_s1_s3(run_dir: Path, spec: BuildSpec, prof: dict, seed: int, top_n: in
     return doc, split, tv, res["features"]
 
 
+def rule_context(run_dir: Path, spec: BuildSpec, feats: dict, snapshot_id: int) -> Optional[dict]:
+    """S0 の rules → 種ごとの判定材料 (代表型 + 図鑑 + champions mod の learnset) → 設置役/エースの集合。
+    規則が無ければ None。満たせる個体がプールに足りなければ止まる (勝手に緩めない)"""
+    if not spec.rules:
+        return None
+    from advisor.dex import get_dex
+    from tools.check_mega_items import mega_stones
+    from tools.team_build import rules as RU
+    from tools.team_build.learnsets import can_learn
+    dex = get_dex()
+    stone_form = {item_id: sid for (sid, _n, _r, item_id) in mega_stones() if item_id}
+    moves_needed = sorted({RU.RULES[n]["setter_move"] for n in spec.rules})
+    infos = {}
+    with db.get_connection() as conn:
+        for sid in feats:
+            rep = S.representative_set(conn, snapshot_id, sid)
+            if rep is None:
+                continue
+            form = stone_form.get(rep.item or "", sid)          # メガ石を持つ型はメガ後の種族値・タイプで判定
+            sp = dex.species(form) or dex.species(sid) or {}
+            bs = sp.get("baseStats") or {}
+            infos[sid] = RU.RuleInfo(sid, int(bs.get("spe") or 0), int(bs.get("def") or 0),
+                                     tuple(sp.get("types") or ()), rep.ability or "", rep.item or "",
+                                     {m: can_learn(sid, m) for m in moves_needed})
+    ctx = RU.build_context(spec.rules, infos)
+    (run_dir / "s03_rules.json").write_text(json.dumps(
+        {"rules": ctx["llm"],
+         "infos": {s: {"spe": i.spe, "def": i.dfn, "types": list(i.types), "ability": i.ability, "item": i.item,
+                       "can_learn": i.can_learn} for s, i in infos.items()}},
+        ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    for p in ctx["per_rule"]:
+        log(run_dir, f"S3 rule {p['name']}: 設置役={sorted(p['setters'])} エース={sorted(p['aces'])}")
+        if not p["setters"] or not p["aces"] or len(p["setters"] | p["aces"]) < 2:
+            raise SystemExit(f"規則 {p['name']} を満たす個体がプールに足りない "
+                             f"(設置役 {sorted(p['setters'])} / エース {sorted(p['aces'])})")
+    return ctx
+
+
 def stage_s4(run_dir: Path, spec: BuildSpec, feats: dict, threats: list, legal: set,
-             llm_mode: str, threat_weights: Optional[dict] = None) -> list:
+             llm_mode: str, threat_weights: Optional[dict] = None, rule_ctx: Optional[dict] = None) -> list:
     mega = mega_capable_ids(list(feats))
     provider = None
     if llm_mode == "headless":
         from tools.team_build.llm.provider import ClaudeCLIProvider
         provider = ClaudeCLIProvider(run_dir / "llm")
     res = K.generate_concepts(spec, feats, threats, legal, mega, provider=provider,
-                              log=lambda m: log(run_dir, m), threat_weights=threat_weights)
+                              log=lambda m: log(run_dir, m), threat_weights=threat_weights,
+                              rules=(rule_ctx or {}).get("llm"))
     # 候補源の多系統化: 上位実構築の所持部分集合 (historical) も軸として加える
     try:
         from tools.team_build.opponents import pool_teams
@@ -125,10 +164,18 @@ def stage_s4(run_dir: Path, spec: BuildSpec, feats: dict, threats: list, legal: 
         res["historical_added"] = len(res["families"]) - before
     except Exception as e:
         res["historical_error"] = repr(e)
+    if rule_ctx:
+        # 規則の軸 (設置役 × エース) を先頭に置く (系統の代表になる)。LLM/ルール/historical の軸で規則を満たさない
+        # ものは S5 で機械的に落ちる
+        from tools.team_build import rules as RU
+        cores = RU.context_cores(rule_ctx, feats, threats)
+        before = len(res["families"])
+        res["families"] = K.cluster_concepts(cores + [dict(f) for f in res["families"]])
+        res["rule_cores_added"] = len(res["families"]) - before
     (run_dir / "s04_concepts.json").write_text(
         json.dumps(res, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     log(run_dir, f"S4 concepts: families={len(res['families'])} rounds={res['rounds']} stop={res['stop_reason']} "
-                 f"historical=+{res.get('historical_added', 0)}")
+                 f"historical=+{res.get('historical_added', 0)} rules=+{res.get('rule_cores_added', 0)}")
     return res["families"]
 
 
@@ -187,7 +234,7 @@ def registered_team() -> tuple:
 
 def stage_s5(run_dir: Path, spec: BuildSpec, fams: list, feats: dict, threats: list, prof: dict,
              threat_weights: Optional[dict] = None, only_incumbent: bool = False,
-             n_neighbors: Optional[int] = None) -> list:
+             n_neighbors: Optional[int] = None, rule_ctx: Optional[dict] = None) -> list:
     pool = list(feats)
     banned = set(spec.banned)
     all_lineups = []
@@ -227,6 +274,12 @@ def stage_s5(run_dir: Path, spec: BuildSpec, fams: list, feats: dict, threats: l
     fav = set(spec.favorites)
     if fav:
         all_lineups = [l for l in all_lineups if fav <= set(l.members)]
+    if rule_ctx:
+        # コンセプト規則も hard constraint: 設置役 + エース (別個体) を含まない並びは候補にしない
+        from tools.team_build import rules as RU
+        n_before = len(all_lineups)
+        all_lineups = [l for l in all_lineups if RU.satisfies(l.members, rule_ctx)]
+        log(run_dir, f"S5 rules {rule_ctx['names']}: {n_before} → {len(all_lineups)} 並び")
     chosen = C.select_with_quotas(all_lineups, prof["quotas"])
     rest = sorted((l for l in all_lineups if l not in chosen), key=lambda l: -l.score)
     for l in rest:
@@ -235,16 +288,20 @@ def stage_s5(run_dir: Path, spec: BuildSpec, fams: list, feats: dict, threats: l
         if all(C.distance(l.members, c.members) >= C.MIN_DISTANCE for c in chosen):
             l.tag = "fill"
             chosen.append(l)
-    # exploitation pool: 現行チーム (較正点) と近傍を quota とは別枠で必ず入れる (2026-09-07)
-    from champions_agent.config import BUILD_INCUMBENT_NEIGHBORS
-    _text, reg_ids, _mega = registered_team()
-    inc, neigh = incumbent_branch(reg_ids, pool, feats, threats, spec.style, banned, set(spec.favorites),
-                                  threat_weights, n_neighbors or BUILD_INCUMBENT_NEIGHBORS) if reg_ids else (None, [])
-    existing = {tuple(l.members) for l in chosen}
-    branch = [l for l in ([inc] if inc else []) + neigh if tuple(l.members) not in existing]
-    chosen = branch + chosen
-    log(run_dir, f"S5 incumbent branch: 現行={'あり' if inc else 'なし (除外/プール外/未登録)'} 近傍={len(neigh)} "
-                 f"(登録 {len(reg_ids)} 体)")
+    if rule_ctx:
+        # 規則つきの構築では現行チーム枝 (規則を満たさない) を候補にしない。参照 (登録チーム) との比較は測定段で行う
+        log(run_dir, "S5 incumbent branch: 規則つきのため入れない (参照との比較は S8a/S8b で行う)")
+    else:
+        # exploitation pool: 現行チーム (較正点) と近傍を quota とは別枠で必ず入れる (2026-09-07)
+        from champions_agent.config import BUILD_INCUMBENT_NEIGHBORS
+        _text, reg_ids, _mega = registered_team()
+        inc, neigh = incumbent_branch(reg_ids, pool, feats, threats, spec.style, banned, set(spec.favorites),
+                                      threat_weights, n_neighbors or BUILD_INCUMBENT_NEIGHBORS) if reg_ids else (None, [])
+        existing = {tuple(l.members) for l in chosen}
+        branch = [l for l in ([inc] if inc else []) + neigh if tuple(l.members) not in existing]
+        chosen = branch + chosen
+        log(run_dir, f"S5 incumbent branch: 現行={'あり' if inc else 'なし (除外/プール外/未登録)'} 近傍={len(neigh)} "
+                     f"(登録 {len(reg_ids)} 体)")
     (run_dir / "s05_candidates.json").write_text(
         json.dumps({"n_generated": len(all_lineups), "lineups": [l.to_dict() for l in chosen]},
                    ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
@@ -253,12 +310,21 @@ def stage_s5(run_dir: Path, spec: BuildSpec, fams: list, feats: dict, threats: l
 
 
 def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv: dict,
-             concept_mega: Optional[dict] = None) -> list:
-    """各並びの型を型ライブラリから決め、メガ枠 1 体・クローズ・合法性を通した Showdown 本文を保存する"""
+             concept_mega: Optional[dict] = None, rule_ctx: Optional[dict] = None) -> list:
+    """各並びの型を型ライブラリから決め、メガ枠 1 体・クローズ・合法性を通した Showdown 本文を保存する。
+    規則つきなら設置役の型に技を保証する (持ち物・メガ枠の解決後に差し込み、validate-team で合法性を確認)"""
     out_dir = run_dir / "s06_sets"
     out_dir.mkdir(exist_ok=True)
     results = []
     concept_mega = concept_mega or {}
+    rule_kw = None
+    if rule_ctx:
+        from advisor.dex import get_dex
+        from advisor.search import SETUP_MOVES
+        from tools.team_build.interaction import _mega_stone_ids
+        dex = get_dex()
+        rule_kw = {"category_of": lambda m: str((dex.move(m) or {}).get("category") or "").lower(),
+                   "setup_moves": SETUP_MOVES, "stones": _mega_stone_ids()}
     # 現行チームとその近傍: 登録済み個体は登録の型を使い、メガ枠は登録のメガに合わせる
     reg_text, _reg_ids, reg_mega = registered_team()
     with db.get_connection() as conn:
@@ -283,6 +349,10 @@ def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv
                 team = S.prefer_registered(team, S.registered_items(reg_text))
             team = S.enforce_single_mega(team, alternatives, keep=keep_mega)
             team = S.resolve_item_clause(team, item_map)
+            rule_setter, rule_notes = None, []
+            if rule_kw and not is_inc:
+                from tools.team_build import rules as RU
+                team, rule_setter, rule_notes = RU.apply_to_team(team, rule_ctx, alternatives=alternatives, **rule_kw)
             text = S.to_showdown_text(team)
             registered = []
             if is_inc:
@@ -292,7 +362,7 @@ def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv
             (out_dir / f"{cid}.txt").write_text(text, encoding="utf-8")
             results.append({"index": idx, "candidate_id": cid, "members": list(l.members), "ok": ok,
                             "errors": errs[:5], "tag": l.tag, "score": round(l.score, 4),
-                            "registered_sets": registered,
+                            "registered_sets": registered, "rule_setter": rule_setter, "rule_notes": rule_notes,
                             "sets": [{"species": c.species_id, "item": c.item, "nature": c.nature,
                                       "evs": c.evs, "moves": c.moves, "source": c.source,
                                       "coverage": round(c.score, 3), "notes": c.notes} for c in team]})
@@ -309,6 +379,8 @@ def main() -> None:
     ap.add_argument("--spec", help="BuildSpec JSON (request.json 形式 or フォーム形式)")
     ap.add_argument("--favorites", default="", help="固定枠 (カンマ区切り、日本語名可)")
     ap.add_argument("--banned", default="", help="除外 (カンマ区切り)")
+    ap.add_argument("--rules", default="",
+                    help="コンセプト規則 (カンマ区切り、tools/team_build/rules.py の RULES)。例: psychic_terrain_priority_ace")
     ap.add_argument("--style", default="any")
     ap.add_argument("--objective", default="max_wr")
     ap.add_argument("--profile", choices=list(PROFILE_DEFAULTS), default="fast")
@@ -375,7 +447,7 @@ def main() -> None:
         spec = load_spec(Path(args.spec)) if "schema_version" in raw else parse_form(raw)
     else:
         spec = parse_form({"favorites": args.favorites, "banned": args.banned, "style": args.style,
-                           "objective": args.objective, "profile": args.profile})
+                           "objective": args.objective, "profile": args.profile, "rules": args.rules})
     spec.profile = args.profile
     prof = PROFILE_DEFAULTS[args.profile]
     manifest = build_manifest(args.run_id, {"profile": args.profile, "llm": args.llm, "seed": args.seed,
@@ -388,6 +460,7 @@ def main() -> None:
         session_w = {k: float(v) for k, v in json.loads(Path(args.threat_weights_file).read_text(encoding="utf-8")).items()}
     doc, split, tv, feats = stage_s1_s3(run_dir, spec, prof, args.seed, args.top_n, extra_threats=list(session_w))
     threats = list(tv.keys())
+    rule_ctx = rule_context(run_dir, spec, feats, doc["snapshot"]["id"])
     threat_weights = {t["id"]: float(t.get("usage") or 0.0) for t in doc["top"] if t["id"] in tv}
     if session_w:
         # セッションの相手 (正規化した難易度 0..1) を重みに反映: base × (1 + BOOST × w)。脅威リストに無かった種は
@@ -403,7 +476,7 @@ def main() -> None:
         fams = json.loads((run_dir / "s04_concepts.json").read_text(encoding="utf-8"))["families"]
         log(run_dir, f"S4 concepts: 既存を再利用 families={len(fams)}")
     else:
-        fams = stage_s4(run_dir, spec, feats, threats, legal, args.llm, threat_weights)
+        fams = stage_s4(run_dir, spec, feats, threats, legal, args.llm, threat_weights, rule_ctx=rule_ctx)
     if args.article_file and args.llm == "headless" and not args.reuse_concepts:
         try:
             from tools.team_build.articles import claims_to_cores, extract_claims
@@ -415,9 +488,10 @@ def main() -> None:
         except Exception as e:
             log(run_dir, f"S4 article error: {e!r}")
     lineups = stage_s5(run_dir, spec, fams, feats, threats, prof, threat_weights,
-                       only_incumbent=args.only_incumbent, n_neighbors=args.incumbent_neighbors_s5)
+                       only_incumbent=args.only_incumbent, n_neighbors=args.incumbent_neighbors_s5,
+                       rule_ctx=rule_ctx)
     concept_mega = {f["family_id"]: f.get("mega_id") for f in fams}
-    results = stage_s6(run_dir, spec, lineups, doc["snapshot"]["id"], tv, concept_mega)
+    results = stage_s6(run_dir, spec, lineups, doc["snapshot"]["id"], tv, concept_mega, rule_ctx=rule_ctx)
     from champions_agent.env.ranked_teams import pinned_meta_snapshot_id
     manifest.update({"meta_snapshot": doc["snapshot"]["id"], "meta_pin": pinned_meta_snapshot_id(),
                      "opponent_split": {"sealed_id": split["sealed_id"], "n_teams": split["n_teams"],
