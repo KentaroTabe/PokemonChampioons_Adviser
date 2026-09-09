@@ -422,16 +422,35 @@ def advise_selection(state: dict, resolver=None) -> dict:
             return matrix_mega[(m["index"], j)]
         return matrix[(m["index"], j)]
 
+    # 実戦の相手バンク (advisor/real_prior): 相手スロットを実戦の選出率で重みづけする (平均 1 を保つ)。
+    # 選ばれやすい個体への対面を重く、ほぼ選ばれない個体を軽く見る (2026-09-09、机上の均等重みの補正)
+    slot_w = {o["index"]: 1.0 for o in opps}
+    pick_prior_view = []
+    try:
+        from advisor.real_prior import slot_weights, species_pick_prior
+        priors = []
+        for o in opps:
+            sid = (o["candidates"][0][0] if o["candidates"] and o["candidates"][0][1] >= 1.0 else None)
+            priors.append(species_pick_prior(sid) if sid else None)
+        ws = slot_weights(priors)
+        for o, w, p in zip(opps, ws, priors):
+            slot_w[o["index"]] = w
+            if p is not None:
+                pick_prior_view.append({"label": o["label"], "pick_rate": round(p, 2), "weight": w})
+    except Exception:
+        pass
+    n_w = sum(slot_w.values()) or 1.0
+
     best = None
     for combo in combinations(mine, 3):
         holders = [m for m in combo if m["mega_holder"]]
         # メガ割当の候補: ストーン持ちそれぞれ + 割当なし
         for assignee in (holders or [None]):
             coverage = sum(
-                max(cell(m, o["index"], m is assignee) for m in combo)
+                slot_w[o["index"]] * max(cell(m, o["index"], m is assignee) for m in combo)
                 for o in opps)
             individual = sum(
-                sum(cell(m, o["index"], m is assignee) for o in opps) / len(opps)
+                sum(slot_w[o["index"]] * cell(m, o["index"], m is assignee) for o in opps) / n_w
                 for m in combo)
             total = coverage + 0.3 * individual
             # メガ枠以外のストーン持ちは持ち物が死ぬ
@@ -449,7 +468,7 @@ def advise_selection(state: dict, resolver=None) -> dict:
     _, combo, mega_assignee = best
     # 先発: 平均スコア最大 + 設置技持ちのボーナス (設置は初手に置けて
     # 初めて全交代に乗る。欠陥#4: 設置役を後発に回していた)
-    lead = max(combo, key=lambda m: sum(matrix[(m["index"], o["index"])]
+    lead = max(combo, key=lambda m: sum(slot_w[o["index"]] * matrix[(m["index"], o["index"])]
                                          for o in opps)
                + (HAZARD_LEAD_BONUS if m.get("hazard_setter") else 0.0))
     ordered = [lead] + [m for m in combo if m is not lead]
@@ -504,6 +523,8 @@ def advise_selection(state: dict, resolver=None) -> dict:
         "inference": inference_view,
         "mega_picks": mega_picks,
         "synergy": synergy,
+        # 実戦の選出傾向 (バンクにある種だけ)。空なら重みは均等
+        "opp_pick_prior": pick_prior_view,
     }
 
 
@@ -535,6 +556,27 @@ def attach_model_pick(advice: dict, my_party: list, opp_party: list) -> None:
             "names": names, "win_prob": round(prob, 3),
             "trained": is_in_distribution(mine),
         }
+        # 実戦の選出傾向に条件づけた推し (条件付きモデル + バンクの選出率)。前提を満たさなければ出さない
+        try:
+            from advisor.real_prior import load_bank, species_pick_prior
+            from champions_agent.agent.selection_model import predict_with_prior
+            bank = load_bank()
+            opp_ids = [p.get("species_id") for p in opp_party if p.get("species_id")]
+            prior = {sid: species_pick_prior(sid, bank) for sid in opp_ids}
+            prior = {k: v for k, v in prior.items() if v is not None}
+            if bank and prior:
+                got = predict_with_prior(mine, opp_ids, prior)
+                if got:
+                    perm2, ev, marginal = got
+                    advice["model_pick_real"] = {
+                        "names": [my_party[idx[i]].get("species_ja") or my_party[idx[i]].get("species_id") or "?"
+                                  for i in perm2],
+                        "expected_win_prob": round(ev, 3),
+                        "opp_pick_marginal": {k: round(v, 2) for k, v in marginal.items()},
+                        "n_prior": len(prior),
+                    }
+        except Exception:
+            pass
     except Exception:
         pass
 

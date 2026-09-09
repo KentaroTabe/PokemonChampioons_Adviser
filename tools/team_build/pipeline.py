@@ -57,12 +57,14 @@ def pin_models() -> str:
     return res.stdout.strip().splitlines()[-1] if res.stdout.strip() else ""
 
 
-def reference_arm(run_dir: Path, models_dir: str) -> R.Arm:
-    """参照 = 現在の my_team (config/my_team.json)。選出方策は S8a で variant の最善を測って決める"""
-    from tools.evaluate_team import build_myteam_text
-    text = build_myteam_text()
+def reference_arm(run_dir: Path, models_dir: str, resume: bool = False) -> R.Arm:
+    """参照 = 現在の my_team (config/my_team.json)。選出方策は S8a で variant の最善を測って決める。
+    resume では既存の reference_team.txt を使う (登録が変わっていても、段をまたいで参照が変わらないように。
+    2026-09-09 chat_0907: 再開時に参照が別チーム (しかも登録不正) に置き換わり S8b の参照が全滅した)"""
     p = run_dir / "reference_team.txt"
-    p.write_text(text, encoding="utf-8")
+    if not (resume and p.exists()):
+        from tools.evaluate_team import build_myteam_text
+        p.write_text(build_myteam_text(), encoding="utf-8")
     return R.Arm("reference", p, None, models_dir)
 
 
@@ -217,7 +219,7 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
     generic = str(GENERAL_MODEL_PATH) if Path(GENERAL_MODEL_PATH).exists() else None
     log(f"S7-13 measurement start: models_dir={models_dir} generic={'ok' if generic else 'none'}"
         + (" (resume: S8a のピンを再利用)" if resume else ""))
-    ref = reference_arm(run_dir, models_dir)
+    ref = reference_arm(run_dir, models_dir, resume=resume)
     # 代理スコアでは絞らない (max_candidates は S7 で収束まで適応するチーム数)
     cands = candidate_arms(run_dir, models_dir, None, ids=candidate_ids)
     if not cands:

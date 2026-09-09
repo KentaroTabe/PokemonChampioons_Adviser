@@ -51,6 +51,7 @@ TESTS=(
   test_team_build_pick_ablation
   test_team_build_pipeline
   test_party_improvements
+  test_real_opponents
 )
 
 fail=0

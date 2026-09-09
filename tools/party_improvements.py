@@ -111,6 +111,7 @@ def parse_battle(path: str) -> dict:
     decisions, events = [], []
     n_battle_scenes, t0 = 0, None
     opp_mega = False
+    opp_lead_ja, opp_mega_ja = None, set()
     for line in open(path, encoding="utf-8"):
         try:
             d = json.loads(line)
@@ -136,9 +137,12 @@ def parse_battle(path: str) -> dict:
                     opp_fielded.add(p["ja"])
                 if p.get("is_mega") or p.get("mega"):
                     opp_mega = True
+                    opp_mega_ja.add(p["ja"])
             ai = opp.get("active")
             if isinstance(ai, int) and 0 <= ai < len(party) and party[ai].get("ja"):
                 opp_active_ja = party[ai]["ja"]
+                if in_battle and opp_lead_ja is None:
+                    opp_lead_ja = opp_active_ja          # 対戦シーンで最初に場にいた相手 = 先発
             me = st.get("player") or {}
             mparty = me.get("party") or []
             for p in mparty:
@@ -158,9 +162,10 @@ def parse_battle(path: str) -> dict:
                               "second_score": float(acts[1].get("score") or 0.0) if len(acts) > 1 else None})
         elif typ == "events":
             for f in d.get("fired") or []:
-                events.append({"id": f, "t": d.get("t"), "turn": d.get("turn")})
+                events.append({"id": f, "t": d.get("t"), "turn": d.get("turn"), "opp": opp_active_ja})
     return {"file": Path(path).name, "t0": t0 or 0.0, "outcome": outcome, "inferred": inferred,
             "opp_roster": opp_roster, "opp_fielded": sorted(opp_fielded), "my_picked": sorted(my_picked),
+            "opp_lead": opp_lead_ja, "opp_mega_ja": sorted(opp_mega_ja),
             "decisions": decisions, "events": events, "n_battle_scenes": n_battle_scenes, "opp_mega": opp_mega}
 
 

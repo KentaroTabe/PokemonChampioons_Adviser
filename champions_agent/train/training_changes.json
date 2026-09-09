@@ -2,6 +2,12 @@
  "_comment": "学習に影響する変更の記録。watch_training が推移グラフに赤い縦線として描画し、履歴表示にも差し込む。新しい変更を入れたら追記すること (at はローカル時刻 'YYYY-MM-DD HH:MM')。kind: net=ネット構成 / reward=報酬 / opponent=相手構成 / env=環境仕様 / eval=評価方法 / fix=不具合修正",
  "changes": [
   {
+   "at": "2026-09-09 06:10",
+   "kind": "opponent",
+   "label": "実戦の相手バンクを学習環境の相手に混ぜる (TRAIN_REAL_OPP_MIX=0.3) + 相手の選出を実戦の傾向でサンプル (TRAIN_REAL_PICK_PROB=0.7)",
+   "detail": "ユーザー決定 (9/9): 自己対戦の相手は使用率メタの代表型 + 相性ヒューリスティクスの選出で机上の分布になる。対戦ログ (logs/battles、181 戦) から相手の構成・実際の選出・先発・判明した型を集めた logs/real_opponents/bank.json (tools/real_opponents --build、接続テスト終了時に更新) を、(1) 相手チームとして確率 0.3 で出す (代表型 + 判明した型、validate-team で合法なもの、遭遇数で重みづけ)、(2) 相手の teampreview を確率 0.7 で実戦の選出傾向 (同じ構成の観測が 2 以上ならその分布、無ければ種ごとの選出率・先発率、出現 3 以上の種が 3 体以上のとき) からサンプルする。バンクが無い/合法本文が 5 未満なら従来どおり。⚠ 学習分布が変わるので、9/9 以前のベンチ履歴と同一軸で比べない。評価 (make_benchmark_player) は変えていない。選出助言側も同じバンクで相手スロットを重みづけ (advisor/real_prior、SELECTION_REAL_PRIOR_MIX=0.5)"
+  },
+  {
    "at": "2026-09-05 19:00",
    "kind": "env",
    "label": "予定: 2026-09-09 11:00 JST レギュレーションM-C 切替 — 測定基準の切断点",

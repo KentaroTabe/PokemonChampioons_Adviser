@@ -52,6 +52,12 @@ echo "=== 決定監査 (テストAの合格判定) ==="
 python -m tools.decision_audit --session \
   || echo "(決定監査に失敗。手動実行: python -m tools.decision_audit)"
 
+# 実戦の相手バンク (相手の実際の選出・先発・判明した型) を更新 → 学習環境の相手プールと選出助言の条件づけに使う
+echo ""
+echo "=== 実戦の相手バンクを更新 ==="
+python -m tools.real_opponents --build 2>/dev/null \
+  || echo "(バンクの更新に失敗。手動実行: python -m tools.real_opponents --build)"
+
 # 自パーティ改善案: 動きづらかった相手・相手の良い動き (概念) を出し、現行 + 近傍の測定 run を起動する
 # (未測定の案は載せない。測定結果は python -m tools.party_improvements --report <run_id>)
 echo ""

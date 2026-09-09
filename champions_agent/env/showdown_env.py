@@ -532,6 +532,30 @@ def make_training_env(battle_format: str = TRAINING_BATTLE_FORMAT,
     except Exception as e:
         print(f"[showdown_env] 上位構築チームは無効 (メタ生成のみ): {e}")
 
+    # 実戦の相手バンク (2026-09-09): 実際に当たった構成を TRAIN_REAL_OPP_MIX の確率で相手にし、
+    # その構成で観測した選出・先発の分布から相手に選ばせる (机上の相性ヒューリスティクス選出の補正)。
+    # バンクが無い/少ないときは従来どおり。変更は training_changes.json に記録済み
+    real_tb, real_bank = None, None
+    try:
+        from champions_agent.config import TRAIN_REAL_OPP_MIX
+        from champions_agent.env.real_opponents import RealBankTeambuilder, load_bank
+        real_bank = load_bank()
+        _real = RealBankTeambuilder(real_bank, rng=rng)
+        if _real.enabled and TRAIN_REAL_OPP_MIX > 0 and opp_team is not None:
+            from poke_env.teambuilder import Teambuilder as _TB
+            real_tb = _real
+            _base_opp_team = opp_team
+
+            class _RealMixedTeambuilder(_TB):
+                def yield_team(self_inner) -> str:
+                    if rng.random() < TRAIN_REAL_OPP_MIX:
+                        return real_tb.yield_team()
+                    return _base_opp_team.yield_team()
+
+            opp_team = _RealMixedTeambuilder()
+    except Exception as e:
+        print(f"[showdown_env] 実戦バンクは無効 (従来の相手のみ): {e}")
+
     pool = OpponentPool()
     opponent = make_pool_opponent(
         pool,
@@ -540,8 +564,12 @@ def make_training_env(battle_format: str = TRAINING_BATTLE_FORMAT,
         server_configuration=TrainingServerConfiguration,
         team=opp_team,
     )
+    if real_tb is not None:
+        from champions_agent.env.real_opponents import apply_real_pick_teampreview
+        apply_real_pick_teampreview(opponent, real_bank, rng)
     print(f"[showdown_env] 対戦相手: selfplayプール{len(pool.entries())}件 + "
-          f"ヒューリスティクス強敵 + ランダム (混合)")
+          f"ヒューリスティクス強敵 + ランダム (混合)"
+          + (f" + 実戦バンク {len(real_tb.teams)} 構成 (確率 {TRAIN_REAL_OPP_MIX})" if real_tb is not None else ""))
 
     return MaskedSingleAgentWrapper(env, opponent)
 

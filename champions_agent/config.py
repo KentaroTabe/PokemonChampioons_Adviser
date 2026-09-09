@@ -270,6 +270,25 @@ BUILD_REAL_MAX_CI_HALFWIDTH = 0.03
 BUILD_USER_MODELS = {"full": 1.0, "high": 0.9, "mixed": 0.7, "expert": 0.5}
 BUILD_SCHEMA_VERSION = "1"
 
+# --- 実戦の相手バンク (tools/real_opponents、2026-09-09): 対戦ログの相手の「実際の選出・先発・判明した型」 ---
+# 自己対戦の相手は使用率メタの代表型 + 相性ヒューリスティクスの選出で机上の分布になる。実戦で当たった相手の
+# 構成と選出傾向を混ぜて補正する (ユーザー決定 9/9)。学習に影響する変更は training_changes.json に記録
+REAL_BANK_PATH = "logs/real_opponents/bank.json"
+REAL_BANK_MIN_ROSTER = 4               # バンクに載せる相手ロースターの最小既知数 (6 体そろわない対戦もある)
+REAL_BANK_MIN_TEAMS = 5                # 自己対戦に混ぜるのに必要な (本文が合法な) チーム数
+REAL_BANK_MIN_PICK_OBS = 2             # 観測した選出をそのまま相手の選出分布に使う最小観測数 (未満はヒューリスティクス)
+REAL_BANK_PICK_FLOOR = 0.05            # 観測で一度も選ばれなかった個体にも残す選出確率
+TRAIN_REAL_OPP_MIX = 0.30              # 学習環境で相手チームを実戦バンクから出す確率 (残りは従来の混合)
+# 相手の選出: 同じ構成の観測が REAL_BANK_MIN_PICK_OBS 以上ならその構成の観測分布、無ければ種ごとの実戦選出率
+# (出現 REAL_BANK_SPECIES_MIN_APPEAR 以上の種が 3 体以上いるとき) で 3 体をサンプルする。
+# 確率 TRAIN_REAL_PICK_PROB でこの実戦傾向の選出、残りは従来の相性ヒューリスティクス (多様性を残す)
+REAL_BANK_SPECIES_MIN_APPEAR = 3
+TRAIN_REAL_PICK_PROB = 0.7
+# 選出助言の条件づけ: 相手スロットの重み = 1 + MIX × (その種の実戦選出率 − 平均) / 平均 (平均は 1 のまま)
+SELECTION_REAL_PRIOR_MIX = 0.5
+SELECTION_REAL_PRIOR_MIN_APPEAR = 3    # 実戦での出現数がこれ未満の種は事前分布を使わない
+SELECTION_REAL_PRIOR_CLIP = (0.5, 1.5)
+
 # --- 接続テスト後の自パーティ改善案 (tools/party_improvements、2026-09-09) ---
 # 「動きづらさ」: 助言の最善手のスコアがこの値未満、または最善が交代だった決定を「圧力を受けた決定」と数える
 PARTY_IMPROVE_LOW_SCORE = 60.0
