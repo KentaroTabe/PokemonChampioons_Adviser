@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 from typing import Optional
 
+from champions_agent.config import BUILD_CONSUMABLE_ITEMS, BUILD_SPEED_BOOST_ABILITIES, BUILD_SPEED_SETUP_MOVES
 from champions_agent.data import database as db
 from tools.team_build.candidates import SpeciesFeature
 from tools.team_build.interaction import (
@@ -21,8 +22,20 @@ PIVOT_MOVES = ("uturn", "voltswitch", "flipturn", "partingshot", "teleport", "ba
 SPEED_ITEMS = ("choicescarf",)
 
 
+def boost_multiplier(ability, item, moves) -> float:
+    """自己加速の倍率 (最大のもの 1 つ): 特性 (かるわざは消費アイテム持ちのときだけ) と加速技 (1 回積んだ後)。純粋"""
+    mult = 1.0
+    ab = ability or ""
+    if ab in BUILD_SPEED_BOOST_ABILITIES and (ab != "unburden" or (item or "") in BUILD_CONSUMABLE_ITEMS):
+        mult = max(mult, float(BUILD_SPEED_BOOST_ABILITIES[ab]))
+    for m in moves or []:
+        if m in BUILD_SPEED_SETUP_MOVES:
+            mult = max(mult, float(BUILD_SPEED_SETUP_MOVES[m]))
+    return mult
+
+
 def roles_from_set(species_id: str, set_row: dict, view, threat_views: dict) -> dict:
-    """技・持ち物・種族値から役割 0..1 を機械的に出す"""
+    """技・持ち物・種族値から役割 0..1 を機械的に出す。speed = 上を取れる脅威の割合、speed_boost = 自己加速後の同割合"""
     from advisor.damage import effective_speed
     from advisor.search import SETUP_MOVES
     moves = list(set_row.get("moves") or [])
@@ -42,6 +55,13 @@ def roles_from_set(species_id: str, set_row: dict, view, threat_views: dict) -> 
         roles["speed"] = 0.0
     if (set_row.get("item") or "") in SPEED_ITEMS:
         roles["speed"] = max(roles["speed"], 0.8)
+    mult = boost_multiplier(set_row.get("ability"), set_row.get("item"), moves)
+    if threat_views and mult > 1.0:
+        boosted = int(spe * mult)
+        roles["speed_boost"] = sum(1 for (tv, _m) in threat_views.values() if boosted > effective_speed(tv)) / len(threat_views)
+        roles["speed_boost"] = max(roles["speed_boost"], roles["speed"])
+    else:
+        roles["speed_boost"] = roles["speed"]
     # 耐久: HP×B×D の幾何平均を上位種の中央値相当 (基準 100^3) で正規化
     hp, de, sd = view.max_hp(), view.stat("def"), view.stat("spd")
     bulk = (hp * de * sd) ** (1 / 3) / 150.0

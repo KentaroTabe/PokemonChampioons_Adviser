@@ -15,7 +15,8 @@ from dataclasses import dataclass
 from dataclasses import replace as dc_replace
 from typing import Callable, Optional
 
-from champions_agent.config import BUILD_RULE_ACE_MAX_DEF, BUILD_RULE_ACE_MIN_SPE, BUILD_RULE_MAX_CORES
+from champions_agent.config import (BUILD_RULE_ACE_ITEM_MIN_PCT, BUILD_RULE_ACE_ITEMS, BUILD_RULE_ACE_MAX_DEF,
+                                    BUILD_RULE_ACE_MIN_SPE, BUILD_RULE_MAX_CORES)
 
 RULES = {
     "psychic_terrain_priority_ace": {
@@ -28,6 +29,9 @@ RULES = {
         "airborne_types": ("Flying",),
         "airborne_abilities": ("levitate",),
         "airborne_items": ("airballoon",),
+        # エースの持ち物: その種での使用率が min_pct 以上なら先頭から優先 (きあいのタスキ)。クローズでもエースが残す
+        "ace_items": BUILD_RULE_ACE_ITEMS,
+        "ace_item_min_pct": BUILD_RULE_ACE_ITEM_MIN_PCT,
     },
 }
 CHOICE_ITEMS = ("choicescarf", "choiceband", "choicespecs")
@@ -145,11 +149,56 @@ def ensure_setter(team: list, setters: set, aces: set, rule: dict, alternatives:
     return [new if t is c else t for t in team], c.species_id, notes
 
 
-def apply_to_team(team: list, ctx: dict, **kw) -> tuple:
-    """規則ごとに ensure_setter。戻り値 (team, {rule_name: setter_id}, notes)"""
-    setters_used, notes = {}, []
+def choose_ace(team: list, aces: set, setter_id: Optional[str], rule: dict, usage_pct: Optional[dict] = None):
+    """エース = aces のうち設置役でない個体。複数なら「既に優先品を持つ > 優先品の使用率が高い > 並び順」"""
+    cands = [c for c in team if c.species_id in aces and c.species_id != setter_id]
+    if not cands:
+        return None
+    pref = tuple(rule.get("ace_items") or ())
+
+    def key(c) -> tuple:
+        pct = (usage_pct or {}).get(c.species_id) or {}
+        return ((c.item or "") in pref, max((pct.get(i, 0.0) for i in pref), default=0.0))
+
+    best = cands[0]
+    for c in cands[1:]:
+        if key(c) > key(best):
+            best = c
+    return best
+
+
+def ensure_ace_item(team: list, aces: set, setter_id: Optional[str], rule: dict, usage_pct: Optional[dict] = None,
+                    stones=frozenset()) -> tuple:
+    """エースの持ち物を規則の優先品 (ace_items) にする。既に優先品ならそのまま、メガ石は替えない、その種での使用率が
+    ace_item_min_pct 未満なら据え置き (注記)。元の SetCandidate は変更しない。戻り値 (team, ace_id or None, notes)"""
+    ace = choose_ace(team, aces, setter_id, rule, usage_pct)
+    if ace is None:
+        return team, None, ["no_ace"]
+    pref = tuple(rule.get("ace_items") or ())
+    if not pref or (ace.item or "") in pref or (ace.item or "") in stones:
+        return team, ace.species_id, []
+    pct = (usage_pct or {}).get(ace.species_id) or {}
+    item = next((i for i in pref if pct.get(i, 0.0) >= float(rule.get("ace_item_min_pct", 0.0))), None)
+    if item is None:
+        return team, ace.species_id, ["rule:ace_item_kept"]
+    note = f"rule:ace_item<-{ace.item}"
+    new = dc_replace(ace, item=item, source=ace.source + "+rule", notes=list(ace.notes) + [note])
+    return [new if t is ace else t for t in team], ace.species_id, [note]
+
+
+def apply_to_team(team: list, ctx: dict, usage_pct: Optional[dict] = None, **kw) -> tuple:
+    """規則ごとに ensure_setter (技) → ensure_ace_item (持ち物)。
+    戻り値 (team, {rule_name: {"setter", "ace"}}, notes, prefer = クローズで持ち物を残す優先度 {species_id: 2 (エース) | 1 (設置役)})。
+    設置役とエースの優先品が重なったら (きあいのタスキ) エースが残し、設置役は使用率次点の持ち物へ"""
+    roles, notes, prefer = {}, [], {}
+    stones = kw.get("stones", frozenset())
     for p in ctx["per_rule"]:
         team, sid, n = ensure_setter(team, p["setters"], p["aces"], p["rule"], **kw)
-        setters_used[p["name"]] = sid
-        notes.extend(n)
-    return team, setters_used, notes
+        team, aid, n2 = ensure_ace_item(team, p["aces"], sid, p["rule"], usage_pct, stones)
+        roles[p["name"]] = {"setter": sid, "ace": aid}
+        notes.extend(n + n2)
+        if sid:
+            prefer[sid] = max(prefer.get(sid, 0), 1)
+        if aid:
+            prefer[aid] = max(prefer.get(aid, 0), 2)
+    return team, roles, notes, prefer

@@ -314,4 +314,24 @@ BUILD_SESSION_THREAT_BOOST = 2.0
 BUILD_RULE_ACE_MIN_SPE = 100
 BUILD_RULE_ACE_MAX_DEF = 70
 BUILD_RULE_MAX_CORES = 24
+# 型ライブラリ (S6): 代替 (持ち物/技/配分の単独入替) は被覆スコアから「代表型との使用率差 (0..1) × USAGE_WEIGHT」を
+# 引いた値で代表型と比べる (使用率の事前分布。珍しい持ち物が被覆の差だけで採られるのを防ぐ。2026-09-10 レビュー対応)
+BUILD_SET_USAGE_WEIGHT = 0.3
+# 規則のエースの持ち物: その種での使用率が MIN_PCT 以上なら ACE_ITEMS の先頭から優先し、アイテムクローズでもエースが残す
+BUILD_RULE_ACE_ITEMS = ("focussash",)
+BUILD_RULE_ACE_ITEM_MIN_PCT = 10.0
+# 自己加速 (S3 の役割 speed_boost = 加速後に上を取れる脅威の割合): 特性の倍率 (かるわざは消費アイテム持ちのときだけ) と
+# 加速技の倍率 (1 回積んだ後)。効果は最大のもの 1 つを採る
+BUILD_SPEED_BOOST_ABILITIES = {"speedboost": 1.5, "unburden": 2.0}
+BUILD_SPEED_SETUP_MOVES = {"agility": 2.0, "rockpolish": 2.0, "autotomize": 2.0, "shellsmash": 2.0, "shiftgear": 2.0,
+                           "geomancy": 2.0, "dragondance": 1.5, "quiverdance": 1.5, "flamecharge": 1.5,
+                           "trailblaze": 1.5, "rapidspin": 1.5, "tidyup": 1.5, "victorydance": 1.5, "aquastep": 1.5}
+BUILD_CONSUMABLE_ITEMS = ("whiteherb", "focussash", "sitrusberry", "lumberry", "chestoberry", "salacberry", "liechiberry",
+                          "petayaberry", "apicotberry", "custapberry", "mentalherb", "powerherb", "throatspray",
+                          "weaknesspolicy", "electricseed", "psychicseed", "grassyseed", "mistyseed", "boosterenergy",
+                          "airballoon", "redcard", "ejectbutton", "ejectpack", "absorbbulb", "cellbattery",
+                          "luminousmoss", "snowball", "roomservice", "adrenalineorb", "keeberry", "marangaberry",
+                          "occaberry", "chopleberry", "yacheberry", "wacanberry", "rindoberry", "passhoberry",
+                          "shucaberry", "cobaberry", "payapaberry", "tangaberry", "chartiberry", "kasibberry",
+                          "habanberry", "colburberry", "babiriberry", "roseliberry", "chilanberry")
 BUILD_PROTOCOL_VERSION = "1"

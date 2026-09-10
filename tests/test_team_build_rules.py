@@ -108,9 +108,53 @@ def test_ensure_setter_injects_move():
     # apply_to_team は規則ごとの設置役を返す
     ctx = {"per_rule": [{"name": "psychic_terrain_priority_ace", "rule": RULE, "setters": {"espathra"},
                          "aces": {"raichu"}}]}
-    team, used, notes = RU.apply_to_team([rai, esp], ctx, category_of=cat, setup_moves=setup)
-    assert used == {"psychic_terrain_priority_ace": "espathra"} and "psychicterrain" in team[1].moves
+    team, roles, notes, prefer = RU.apply_to_team([rai, esp], ctx, category_of=cat, setup_moves=setup,
+                                                  stones={"raichunitey"})
+    assert roles == {"psychic_terrain_priority_ace": {"setter": "espathra", "ace": "raichu"}}
+    assert "psychicterrain" in team[1].moves and team[0].item == "raichunitey"
+    assert prefer == {"espathra": 1, "raichu": 2}
     print("test_ensure_setter_injects_move OK")
+
+
+def test_ensure_ace_item():
+    """エースの持ち物: 優先品 (きあいのタスキ) をその種での使用率が閾値以上なら付ける。メガ石は替えない"""
+    min_pct = float(RULE["ace_item_min_pct"])
+    esp = _set("espathra", "focussash", ["luminacrash", "protect", "psychicterrain", "calmmind"], "speedboost")
+    snea = _set("sneasler", "choicescarf", ["closecombat", "direclaw", "fakeout", "throatchop"], "unburden", source="alt:item")
+    usage = {"sneasler": {"whiteherb": 37.9, "focussash": min_pct + 10.0, "choicescarf": 6.2}}
+    team, ace, notes = RU.ensure_ace_item([esp, snea], {"espathra", "sneasler"}, "espathra", RULE, usage)
+    assert ace == "sneasler" and team[1].item == "focussash" and notes == ["rule:ace_item<-choicescarf"]
+    assert snea.item == "choicescarf" and team[1].source == "alt:item+rule" and team[0] is esp
+    # メガ石のエースは替えない / 既に優先品ならそのまま
+    rai = _set("raichu", "raichunitey", ["zapcannon", "focusblast", "grassknot", "nastyplot"], "lightningrod")
+    team, ace, notes = RU.ensure_ace_item([esp, rai], {"raichu"}, "espathra", RULE, usage, stones={"raichunitey"})
+    assert ace == "raichu" and team[1].item == "raichunitey" and notes == []
+    sash = _set("sneasler", "focussash", snea.moves, "unburden")
+    assert RU.ensure_ace_item([sash], {"sneasler"}, None, RULE, usage) == ([sash], "sneasler", [])
+    # 使用率が閾値未満なら据え置き (注記)
+    low = {"sneasler": {"whiteherb": 90.0, "focussash": min_pct - 1.0}}
+    _, _, notes = RU.ensure_ace_item([esp, snea], {"sneasler"}, "espathra", RULE, low)
+    assert notes == ["rule:ace_item_kept"]
+    # エース候補が設置役だけなら無し。複数なら優先品の使用率が高い方
+    assert RU.ensure_ace_item([esp], {"espathra"}, "espathra", RULE, usage)[1] is None
+    meo = _set("meowscarada", "choicescarf", ["flowertrick", "tripleaxel", "knockoff", "uturn"], "protean")
+    usage2 = dict(usage, meowscarada={"choicescarf": 60.0, "focussash": min_pct + 30.0})
+    assert RU.choose_ace([snea, meo], {"sneasler", "meowscarada"}, "espathra", RULE, usage2).species_id == "meowscarada"
+    print("test_ensure_ace_item OK")
+
+
+def test_boost_multiplier():
+    from champions_agent.config import BUILD_SPEED_BOOST_ABILITIES, BUILD_SPEED_SETUP_MOVES
+    from tools.team_build.features import boost_multiplier
+    assert boost_multiplier("speedboost", "focussash", ["protect"]) == BUILD_SPEED_BOOST_ABILITIES["speedboost"]
+    assert boost_multiplier("unburden", "whiteherb", []) == BUILD_SPEED_BOOST_ABILITIES["unburden"]
+    assert boost_multiplier("unburden", "choicescarf", []) == 1.0             # 消費アイテムでなければ発動しない
+    assert boost_multiplier("intimidate", "lifeorb", ["dragondance"]) == BUILD_SPEED_SETUP_MOVES["dragondance"]
+    assert boost_multiplier(None, None, ["agility"]) == BUILD_SPEED_SETUP_MOVES["agility"]
+    assert boost_multiplier("unburden", "sitrusberry", ["dragondance"]) == max(
+        BUILD_SPEED_BOOST_ABILITIES["unburden"], BUILD_SPEED_SETUP_MOVES["dragondance"])
+    assert boost_multiplier("blaze", "delphoxite", ["flamethrower"]) == 1.0
+    print("test_boost_multiplier OK")
 
 
 def test_parse_learnsets_and_resolve():
@@ -148,5 +192,7 @@ if __name__ == "__main__":
     test_classify_setters_and_aces()
     test_rule_cores_and_context_cores()
     test_ensure_setter_injects_move()
+    test_ensure_ace_item()
+    test_boost_multiplier()
     test_parse_learnsets_and_resolve()
     test_spec_rules_parse_and_validate()

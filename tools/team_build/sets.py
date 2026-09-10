@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from champions_agent.config import USAGE_TARGET_FORMAT
+from champions_agent.config import BUILD_SET_USAGE_WEIGHT, USAGE_TARGET_FORMAT
 from champions_agent.data import database as db
 from champions_agent.data.build_meta import move_categories, nature_fits, parse_points
 
@@ -39,8 +39,10 @@ class SetCandidate:
     evs: Optional[str]           # "2/32/0/0/0/32" (能力ポイント)
     moves: list
     source: str = "representative"   # representative / alt:item / alt:move / alt:spread
-    score: float = 0.0
+    score: float = 0.0               # 被覆 (Interaction Matrix)
     notes: list = field(default_factory=list)
+    usage_gap: float = 0.0           # 代表型との使用率差 (0..1、代替だけ > 0)。使用率の事前分布として採点から引く
+    adj: float = 0.0                 # score − BUILD_SET_USAGE_WEIGHT × usage_gap (order_candidates が入れる)
 
     def as_row(self) -> dict:
         return {"item": self.item, "nature": self.nature, "evs": self.evs, "moves": list(self.moves),
@@ -74,10 +76,26 @@ def enumerate_sets(conn, snapshot_id: int, species_id: str, min_pct: float = ALT
         return []
     out = [rep]
     seen = {rep.key()}
-    items = [i for i, _ in _rows(conn, "item_usage", "item_name", snapshot_id, species_id, min_pct)]
-    moves = [m for m, _ in _rows(conn, "move_usage", "move_name", snapshot_id, species_id, min_pct)]
-    natures = [n for n, _ in _rows(conn, "spread_usage", "nature", snapshot_id, species_id, min_pct) if n]
-    spreads = [e for e, _ in _rows(conn, "spread_usage", "evs", snapshot_id, species_id, min_pct) if e]
+    item_rows = _rows(conn, "item_usage", "item_name", snapshot_id, species_id, min_pct)
+    move_rows = _rows(conn, "move_usage", "move_name", snapshot_id, species_id, min_pct)
+    nature_rows = [(n, p) for n, p in _rows(conn, "spread_usage", "nature", snapshot_id, species_id, min_pct) if n]
+    spread_rows = [(e, p) for e, p in _rows(conn, "spread_usage", "evs", snapshot_id, species_id, min_pct) if e]
+    items = [i for i, _ in item_rows]
+    moves = [m for m, _ in move_rows]
+    natures = [n for n, _ in nature_rows]
+    spreads = [e for e, _ in spread_rows]
+
+    def pct_map(rows: list) -> dict:
+        d: dict = {}
+        for k, p in rows:
+            d[k] = max(d.get(k, 0.0), float(p or 0.0))
+        return d
+
+    item_pct, move_pct, nature_pct, spread_pct = pct_map(item_rows), pct_map(move_rows), pct_map(nature_rows), pct_map(spread_rows)
+
+    def gap(pct: dict, rep_key, alt_key) -> float:
+        return max(0.0, pct.get(rep_key, 0.0) - pct.get(alt_key, 0.0)) / 100.0
+
     cats = move_categories(rep.moves)
 
     def add(c: SetCandidate) -> None:
@@ -93,7 +111,8 @@ def enumerate_sets(conn, snapshot_id: int, species_id: str, min_pct: float = ALT
         if it in stones and not rep_is_mega:
             continue      # メガ石は代表型がメガ石のときだけ (メガ後で評価すると常に強く見えて偏る)
         # 代表型がメガ石なら、非メガ石の代替も残す (1 並びにメガ石 2 個のときの差し替え先)
-        cand = SetCandidate(species_id, rep.ability, it, rep.nature, rep.evs, list(rep.moves), "alt:item")
+        cand = SetCandidate(species_id, rep.ability, it, rep.nature, rep.evs, list(rep.moves), "alt:item",
+                            usage_gap=gap(item_pct, rep.item, it))
         if not set_sanity(cand):
             add(cand)
     for mv in moves:
@@ -102,14 +121,16 @@ def enumerate_sets(conn, snapshot_id: int, species_id: str, min_pct: float = ALT
         for k in range(len(rep.moves)):
             new_moves = list(rep.moves)
             new_moves[k] = mv
-            cand = SetCandidate(species_id, rep.ability, rep.item, rep.nature, rep.evs, new_moves, "alt:move")
+            cand = SetCandidate(species_id, rep.ability, rep.item, rep.nature, rep.evs, new_moves, "alt:move",
+                                usage_gap=gap(move_pct, rep.moves[k], mv))
             if not set_sanity(cand):
                 add(cand)
     for nv in natures:
         for ev in spreads:
             if (nv, ev) == (rep.nature, rep.evs) or not nature_fits(nv, ev, cats):
                 continue
-            add(SetCandidate(species_id, rep.ability, rep.item, nv, ev, list(rep.moves), "alt:spread"))
+            add(SetCandidate(species_id, rep.ability, rep.item, nv, ev, list(rep.moves), "alt:spread",
+                             usage_gap=(gap(nature_pct, rep.nature, nv) + gap(spread_pct, rep.evs, ev)) / 2.0))
     return out
 
 
@@ -162,21 +183,57 @@ def enforce_single_mega(team: list, alternatives: dict, keep: Optional[str] = No
     return out
 
 
-def resolve_item_clause(team: list, item_usage: dict) -> list:
-    """チーム内で持ち物が重複したら、使用率順の未使用品に差し替える (代表型を優先して残す)。
-    team: [SetCandidate]、item_usage: {species_id: [item ids (使用率順)]}"""
-    used = set()
+def _with_item(c: "SetCandidate", item: Optional[str], note: str) -> "SetCandidate":
+    return SetCandidate(c.species_id, c.ability, item, c.nature, c.evs, list(c.moves), c.source, c.score,
+                        c.notes + [note], c.usage_gap, c.adj)
+
+
+def resolve_item_clause(team: list, item_usage: dict, usage_pct: Optional[dict] = None, prefer=()) -> list:
+    """チーム内で持ち物が重複したら、使用率順の未使用品 (メガ石以外) に差し替える。
+    team: [SetCandidate]、item_usage: {species_id: [item ids (使用率順)]}。
+    usage_pct ({species_id: {item: 使用率 %}}) が無ければ従来どおり並び順で先の個体が残す。あれば残す個体を
+    「prefer の優先度 (規則のエース 2 > 設置役/登録個体 1 > 他 0) > 代表型 (alt:item でない) > その種でのその持ち物の
+    使用率 > 並び順」で決める。prefer は {species_id: 優先度} か、優先度 1 とみなす集合
+    (2026-09-10: ミミッキュ 81% のいのちのたまが、並び順で先のドドゲザン 8.7% に取られた件の対応)"""
     stones = _mega_stones()
-    out = []
-    for c in team:
-        if c.item and c.item in used:
-            # 差し替え先にメガ石は使わない (メガ枠は 1 体)
-            alt = next((i for i in item_usage.get(c.species_id, [])
-                        if i not in used and i != c.item and i not in stones), None)
-            c = SetCandidate(c.species_id, c.ability, alt, c.nature, c.evs, list(c.moves),
-                             c.source, c.score, c.notes + [f"clause:{c.item}->{alt}"])
+    if usage_pct is None:
+        used = set()
+        out = []
+        for c in team:
+            if c.item and c.item in used:
+                alt = next((i for i in item_usage.get(c.species_id, [])
+                            if i not in used and i != c.item and i not in stones), None)
+                c = _with_item(c, alt, f"clause:{c.item}->{alt}")
+            if c.item:
+                used.add(c.item)
+            out.append(c)
+        return out
+    prio = dict(prefer) if isinstance(prefer, dict) else {s: 1 for s in (prefer or ())}
+    by_item: dict = {}
+    for i, c in enumerate(team):
         if c.item:
-            used.add(c.item)
+            by_item.setdefault(c.item, []).append(i)
+    losers: set = set()
+    for item, idxs in by_item.items():
+        if len(idxs) < 2:
+            continue
+
+        def rank(i: int, item=item) -> tuple:
+            c = team[i]
+            return (int(prio.get(c.species_id, 0)), not c.source.startswith("alt:item"),
+                    float((usage_pct.get(c.species_id) or {}).get(item, 0.0)), -i)
+
+        keeper = max(idxs, key=rank)
+        losers.update(i for i in idxs if i != keeper)
+    used = {c.item for i, c in enumerate(team) if c.item and i not in losers}
+    out = []
+    for i, c in enumerate(team):
+        if i in losers:
+            alt = next((it for it in item_usage.get(c.species_id, [])
+                        if it not in used and it != c.item and it not in stones), None)
+            c = _with_item(c, alt, f"clause:{c.item}->{alt}")
+            if alt:
+                used.add(alt)
         out.append(c)
     return out
 
@@ -282,8 +339,23 @@ def coverage_score(rows: dict) -> float:
     return sum(vals) / len(vals) if vals else 0.0
 
 
-def rank_sets(candidates: list, threat_sets: dict) -> list:
-    """各型候補を Interaction Matrix の被覆で採点して降順に返す (candidates は同一種族)"""
+def order_candidates(scored: list, usage_weight: float = BUILD_SET_USAGE_WEIGHT,
+                     rep_margin: float = REP_MARGIN) -> list:
+    """被覆 (score) から使用率差の罰則 (usage_weight × usage_gap) を引いた adj の降順。
+    代表型は、最良の代替が adj で rep_margin 以上上回らない限り先頭に残す。純粋 (テスト可)"""
+    for c in scored:
+        c.adj = c.score - usage_weight * (c.usage_gap or 0.0)
+    ordered = sorted(scored, key=lambda c: -c.adj)
+    rep = next((c for c in ordered if c.source == "representative"), None)
+    if rep is not None and ordered and ordered[0] is not rep and ordered[0].adj - rep.adj < rep_margin:
+        ordered.remove(rep)
+        ordered.insert(0, rep)
+    return ordered
+
+
+def rank_sets(candidates: list, threat_sets: dict, usage_weight: float = BUILD_SET_USAGE_WEIGHT) -> list:
+    """各型候補を Interaction Matrix の被覆で採点し、使用率の事前分布 (order_candidates) を掛けて降順に返す
+    (candidates は同一種族)"""
     from tools.team_build.interaction import matrix, view_from_set
     # 代表型も常識フィルタにかける (代表型は各属性の最多を独立に貼り合わせたもので、
     # こだわり系 + 積み/回復 のような不整合が残ることがある)。全滅なら元の候補をそのまま使う
@@ -303,15 +375,15 @@ def rank_sets(candidates: list, threat_sets: dict) -> list:
         rows = matrix({c.species_id: (view, moves)}, threat_sets)[c.species_id]
         c.score = coverage_score(rows)
         scored.append(c)
-    scored.sort(key=lambda c: -c.score)
-    # 代表型を優先: 代替は被覆が REP_MARGIN 以上で上回るときだけ先頭に残す
-    rep = next((c for c in scored if c.source == "representative"), None)
-    if rep is not None and scored and scored[0] is not rep and scored[0].score - rep.score < REP_MARGIN:
-        scored.remove(rep)
-        scored.insert(0, rep)
-    return scored
+    return order_candidates(scored, usage_weight, REP_MARGIN)
 
 
 def item_usage_map(conn, snapshot_id: int, species_ids: list, min_pct: float = 0.0) -> dict:
     return {sid: [i for i, _ in _rows(conn, "item_usage", "item_name", snapshot_id, sid, min_pct)]
+            for sid in species_ids}
+
+
+def item_usage_pct_map(conn, snapshot_id: int, species_ids: list, min_pct: float = 0.0) -> dict:
+    """{species_id: {item: 使用率 %}} (アイテムクローズの解決と規則のエースの持ち物に使う)"""
+    return {sid: {i: float(p or 0.0) for i, p in _rows(conn, "item_usage", "item_name", snapshot_id, sid, min_pct)}
             for sid in species_ids}

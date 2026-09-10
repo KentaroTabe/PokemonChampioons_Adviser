@@ -328,7 +328,9 @@ def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv
     # 現行チームとその近傍: 登録済み個体は登録の型を使い、メガ枠は登録のメガに合わせる
     reg_text, _reg_ids, reg_mega = registered_team()
     with db.get_connection() as conn:
-        item_map = S.item_usage_map(conn, snapshot_id, sorted({m for l in lineups for m in l.members}))
+        members_all = sorted({m for l in lineups for m in l.members})
+        item_map = S.item_usage_map(conn, snapshot_id, members_all)
+        usage_pct = S.item_usage_pct_map(conn, snapshot_id, members_all)
         for idx, l in enumerate(lineups):
             team, alternatives = [], {}
             for sid in l.members:
@@ -344,15 +346,20 @@ def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv
                 continue
             is_inc = l.tag in ("incumbent", "incumbent_mut") and bool(reg_text)
             keep_mega = (reg_mega if is_inc and reg_mega in l.members else None) or concept_mega.get(l.concept)
+            prefer: dict = {}
             if is_inc:
                 # 登録個体を先頭に置き持ち物を登録に合わせる (クローズ解決で新規個体側が譲る)
-                team = S.prefer_registered(team, S.registered_items(reg_text))
+                reg_items = S.registered_items(reg_text)
+                team = S.prefer_registered(team, reg_items)
+                prefer = {c.species_id: 1 for c in team if c.species_id in reg_items}
             team = S.enforce_single_mega(team, alternatives, keep=keep_mega)
-            team = S.resolve_item_clause(team, item_map)
             rule_setter, rule_notes = None, []
             if rule_kw and not is_inc:
+                # 規則: 設置役の技と、エースの持ち物 (クローズでは設置役/エースが残す側)
                 from tools.team_build import rules as RU
-                team, rule_setter, rule_notes = RU.apply_to_team(team, rule_ctx, alternatives=alternatives, **rule_kw)
+                team, rule_setter, rule_notes, prefer = RU.apply_to_team(team, rule_ctx, usage_pct=usage_pct,
+                                                                         alternatives=alternatives, **rule_kw)
+            team = S.resolve_item_clause(team, item_map, usage_pct, prefer=prefer)
             text = S.to_showdown_text(team)
             registered = []
             if is_inc:
