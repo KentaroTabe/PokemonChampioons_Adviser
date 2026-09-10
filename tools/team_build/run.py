@@ -98,11 +98,19 @@ def stage_s1_s3(run_dir: Path, spec: BuildSpec, prof: dict, seed: int, top_n: in
                     continue
         log(run_dir, f"S3 extra threats: +{len(added)} {added}")
     owned = [s for s in spec.owned if s not in set(spec.banned)]
-    res = species_features(owned, doc, tv, custom_sets=custom_sets_of(spec), required_moves=spec.required_moves)
+    usage_w = {t["id"]: float(t.get("usage") or 0.0) for t in doc["top"] if t["id"] in tv}
+    gen = make_generator(tv, usage_w)
+    res = species_features(owned, doc, tv, custom_sets=custom_sets_of(spec), required_moves=spec.required_moves,
+                           generator=gen)
     save_features(res, run_dir)
-    log(run_dir, f"S3 features: {len(res['features'])} species, missing={res['missing']}"
-                 + (f" 型指定={sorted(spec.custom_sets)}" if spec.custom_sets else "")
-                 + (f" 技指定={ {k: v for k, v in spec.required_moves.items()} }" if spec.required_moves else ""))
+    msg = f"S3 features: {len(res['features'])} species, missing={res['missing']}"
+    if res.get("generated"):
+        msg += f" 生成型で補完={res['generated']}"
+    if spec.custom_sets:
+        msg += f" 型指定={sorted(spec.custom_sets)}"
+    if spec.required_moves:
+        msg += f" 技指定={dict(spec.required_moves)}"
+    log(run_dir, msg)
     return doc, split, tv, res["features"]
 
 
@@ -111,17 +119,52 @@ def custom_sets_of(spec: BuildSpec) -> dict:
     return {sid: S.candidate_from_row(sid, row) for sid, row in (spec.custom_sets or {}).items()}
 
 
-def set_library_kwargs(spec: BuildSpec, sid: str) -> dict:
-    """型ライブラリに渡す、その種の指定の型と必須技 (無ければ空)"""
+def make_generator(tv: dict, threat_weights: Optional[dict]):
+    """learnset からの型生成 (gen_sets.generate_for_species) を種ごとにキャッシュする callable。
+    BUILD_GEN_SETS=off なら常に空。戻り値の callable は sid → [SetCandidate]、.items(sid) → 持ち物の候補"""
+    from champions_agent.config import BUILD_GEN_SETS
+    from tools.team_build import gen_sets as G
+    cache: dict = {}
+
+    def _run(sid: str) -> dict:
+        if sid not in cache:
+            if BUILD_GEN_SETS == "off":
+                cache[sid] = {"sets": [], "items": []}
+            else:
+                try:
+                    cache[sid] = G.generate_for_species(sid, tv, threat_weights)
+                except Exception as e:  # 生成できない種は空 (使用率の型だけで進む)
+                    cache[sid] = {"sets": [], "items": [], "error": repr(e)}
+        return cache[sid]
+
+    def gen(sid: str) -> list:
+        return list(_run(sid).get("sets") or [])
+
+    gen.items = lambda sid: list(_run(sid).get("items") or [])      # type: ignore[attr-defined]
+    gen.info = _run                                                   # type: ignore[attr-defined]
+    return gen
+
+
+def set_library_kwargs(spec: BuildSpec, sid: str, gen=None, conn=None, snapshot_id: Optional[int] = None) -> dict:
+    """型ライブラリに渡す、その種の指定の型・必須技・生成型 (無ければ空)。
+    生成型は BUILD_GEN_SETS=auto なら常に、missing なら代表型が無い種だけ渡す"""
+    from champions_agent.config import BUILD_GEN_SETS
     custom = custom_sets_of(spec).get(sid)
     required = (spec.required_moves or {}).get(sid)
-    if custom is None and not required:
+    generated = None
+    if gen is not None and custom is None and BUILD_GEN_SETS != "off":
+        if BUILD_GEN_SETS == "auto" or conn is None or S.representative_set(conn, snapshot_id, sid) is None:
+            generated = gen(sid) or None
+    if custom is None and not required and not generated:
         return {}
-    return {"custom": custom, "required": required, "category_of": S.default_category_of(),
-            "setup_moves": S.default_setup_moves()}
+    out = {"custom": custom, "required": required, "generated": generated}
+    if required:
+        out.update({"category_of": S.default_category_of(), "setup_moves": S.default_setup_moves()})
+    return out
 
 
-def rule_context(run_dir: Path, spec: BuildSpec, feats: dict, snapshot_id: int, tv: Optional[dict] = None) -> Optional[dict]:
+def rule_context(run_dir: Path, spec: BuildSpec, feats: dict, snapshot_id: int, tv: Optional[dict] = None,
+                 gen=None) -> Optional[dict]:
     """S0 の rules → 種ごとの判定材料 (型ライブラリ + 図鑑 + champions mod の learnset) → 設置役/エースの集合。
     エースの火力・技範囲は 代表型 + 単独入替の代替 (使用率 5% 以上) のうち門を通る最初の型で判定し、代表型と違えば
     その型を ace_sets に残して S6 で採用する (2026-09-10 ユーザー決定)。規則が無ければ None。
@@ -162,9 +205,9 @@ def rule_context(run_dir: Path, spec: BuildSpec, feats: dict, snapshot_id: int, 
     infos, ace_sets = {}, {}
     with db.get_connection() as conn:
         for sid in feats:
-            lib = set_library_kwargs(spec, sid)
+            lib = set_library_kwargs(spec, sid, gen, conn, snapshot_id)
             rep = S.base_set(conn, snapshot_id, sid, lib.get("custom"), lib.get("required"),
-                             lib.get("category_of"), lib.get("setup_moves", ()))
+                             lib.get("category_of"), lib.get("setup_moves", ()), generated=lib.get("generated"))
             if rep is None:
                 continue
             form = stone_form.get(rep.item or "", sid)          # メガ石を持つ型はメガ後の種族値・タイプで判定
@@ -405,7 +448,7 @@ def stage_s5(run_dir: Path, spec: BuildSpec, fams: list, feats: dict, threats: l
 
 
 def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv: dict,
-             concept_mega: Optional[dict] = None, rule_ctx: Optional[dict] = None) -> list:
+             concept_mega: Optional[dict] = None, rule_ctx: Optional[dict] = None, gen=None) -> list:
     """各並びの型を型ライブラリから決め、メガ枠 1 体・クローズ・合法性を通した Showdown 本文を保存する。
     規則つきなら設置役の型に技を保証する (持ち物・メガ枠の解決後に差し込み、validate-team で合法性を確認)"""
     out_dir = run_dir / "s06_sets"
@@ -426,10 +469,15 @@ def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv
         members_all = sorted({m for l in lineups for m in l.members})
         item_map = S.item_usage_map(conn, snapshot_id, members_all)
         usage_pct = S.item_usage_pct_map(conn, snapshot_id, members_all)
+        if gen is not None:
+            # 使用率の無い種 (生成型で補完) はアイテムクローズの差し替え先も生成側の候補から
+            for sid in members_all:
+                if not item_map.get(sid):
+                    item_map[sid] = gen.items(sid)
         for idx, l in enumerate(lineups):
             team, alternatives = [], {}
             for sid in l.members:
-                cands = S.enumerate_sets(conn, snapshot_id, sid, **set_library_kwargs(spec, sid))
+                cands = S.enumerate_sets(conn, snapshot_id, sid, **set_library_kwargs(spec, sid, gen, conn, snapshot_id))
                 if not cands:
                     team = []
                     break
@@ -488,6 +536,8 @@ def main() -> None:
                     help="技 + ポケモンの指定 (その種を使う型に必ず入れる)。例: 'マフォクシー:サイコフィールド, ポットデス:からをやぶる/アシストパワー'")
     ap.add_argument("--sets-file", default=None,
                     help="指定の型 (Showdown 形式の本文ファイル、EVs は能力ポイント)。その種は使用率データを見ずこの型を使う")
+    ap.add_argument("--targets", default="",
+                    help="想定する相手 (カンマ区切り、日本語可)。脅威に加えて重みを最大にし、型生成の技・配分と並びの被覆に効かせる")
     ap.add_argument("--style", default="any")
     ap.add_argument("--objective", default="max_wr")
     ap.add_argument("--profile", choices=list(PROFILE_DEFAULTS), default="fast")
@@ -580,9 +630,15 @@ def main() -> None:
     session_w = {}
     if args.threat_weights_file:
         session_w = {k: float(v) for k, v in json.loads(Path(args.threat_weights_file).read_text(encoding="utf-8")).items()}
+    if args.targets:
+        # 想定する相手 (日本語可): 脅威リストに加え、重みを最大にする (型生成の技・配分と並びの被覆に効く)
+        from tools.team_build.spec import resolve_species_token
+        for tok in args.targets.split(","):
+            sid = resolve_species_token(tok)
+            if sid:
+                session_w[sid] = max(session_w.get(sid, 0.0), 1.0)
     doc, split, tv, feats = stage_s1_s3(run_dir, spec, prof, args.seed, args.top_n, extra_threats=list(session_w))
     threats = list(tv.keys())
-    rule_ctx = rule_context(run_dir, spec, feats, doc["snapshot"]["id"], tv)
     threat_weights = {t["id"]: float(t.get("usage") or 0.0) for t in doc["top"] if t["id"] in tv}
     if session_w:
         # セッションの相手 (正規化した難易度 0..1) を重みに反映: base × (1 + BOOST × w)。脅威リストに無かった種は
@@ -594,6 +650,9 @@ def main() -> None:
             if sid in tv:
                 threat_weights[sid] = threat_weights.get(sid, median) * (1.0 + BUILD_SESSION_THREAT_BOOST * w)
         log(run_dir, f"S3 session threat weights: {len([s for s in session_w if s in tv])} 種に反映 (boost {BUILD_SESSION_THREAT_BOOST})")
+    # learnset からの型生成 (想定する相手 = 脅威の重み) と、規則の判定材料
+    gen = make_generator(tv, threat_weights)
+    rule_ctx = rule_context(run_dir, spec, feats, doc["snapshot"]["id"], tv, gen=gen)
     if args.reuse_concepts and (run_dir / "s04_concepts.json").exists():
         fams = json.loads((run_dir / "s04_concepts.json").read_text(encoding="utf-8"))["families"]
         log(run_dir, f"S4 concepts: 既存を再利用 families={len(fams)}")
@@ -613,7 +672,7 @@ def main() -> None:
                        only_incumbent=args.only_incumbent, n_neighbors=args.incumbent_neighbors_s5,
                        rule_ctx=rule_ctx)
     concept_mega = {f["family_id"]: f.get("mega_id") for f in fams}
-    results = stage_s6(run_dir, spec, lineups, doc["snapshot"]["id"], tv, concept_mega, rule_ctx=rule_ctx)
+    results = stage_s6(run_dir, spec, lineups, doc["snapshot"]["id"], tv, concept_mega, rule_ctx=rule_ctx, gen=gen)
     from champions_agent.env.ranked_teams import pinned_meta_snapshot_id
     manifest.update({"meta_snapshot": doc["snapshot"]["id"], "meta_pin": pinned_meta_snapshot_id(),
                      "opponent_split": {"sealed_id": split["sealed_id"], "n_teams": split["n_teams"],

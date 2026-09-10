@@ -51,6 +51,7 @@ TESTS=(
   test_team_build_pick_ablation
   test_team_build_pipeline
   test_team_build_rules
+  test_team_build_gen_sets
   test_search
   test_battle_prune
   test_party_improvements

@@ -348,6 +348,61 @@ BUILD_RULE_PAIR_WEIGHT = 0.5
 # 型ライブラリ (S6): 代替 (持ち物/技/配分の単独入替) は被覆スコアから「代表型との使用率差 (0..1) × USAGE_WEIGHT」を
 # 引いた値で代表型と比べる (使用率の事前分布。珍しい持ち物が被覆の差だけで採られるのを防ぐ。2026-09-10 レビュー対応)
 BUILD_SET_USAGE_WEIGHT = 0.3
+# learnset からの型生成 (tools/team_build/gen_sets.py、2026-09-11 ユーザー決定): 使用率が無い種 (シーズン序盤・新種) は
+# 覚える技から型を作って代表型の代わりにし、使用率がある種でも候補に加える (使用率差の罰則は代替と同じ重み)。
+# 全探索はせず、技プールの刈り込み → テンプレート → 貪欲な被覆選択 (想定する相手の重みつき) で範囲を絞る
+BUILD_GEN_SETS = "auto"                      # auto: 全ての種で生成して候補に加える / missing: 代表型が無い種だけ / off
+BUILD_GEN_ATTACKS_PER_TYPE = 1               # 攻撃技はタイプ × 分類ごとに上位 N 本
+BUILD_GEN_CATEGORY_TOLERANCE = 0.85          # 攻撃/特攻の低い方がこの比率以上なら両分類の攻撃技を残す
+BUILD_GEN_MAX_ATTACKS = 8                    # 刈り込み後の攻撃技の上限
+BUILD_GEN_MAX_SETS = 6                       # 種ごとの生成型の上限
+BUILD_GEN_AVOID_MOVES = ("hyperbeam", "gigaimpact", "explosion", "selfdestruct", "skyattack", "solarbeam", "solarblade",
+                         "futuresight", "doomdesire", "lastresort", "dreameater", "synchronoise", "beatup", "fling",
+                         "naturalgift", "endeavor", "counter", "mirrorcoat", "metalburst", "bide", "focuspunch",
+                         "skullbash", "razorwind", "freezeshock", "iceburn", "geomancy", "meteorbeam", "electroshot",
+                         "mistyexplosion", "steelbeam", "mindblown", "chloroblast", "finalgambit", "memento",
+                         # 反動 (次のターン動けない) と 2 ターン技 (生成型では扱わない)
+                         "blastburn", "frenzyplant", "hydrocannon", "rockwrecker", "roaroftime", "eternabeam",
+                         "fly", "dig", "dive", "bounce", "phantomforce", "shadowforce", "skydrop")
+# テンプレート: attacks = 攻撃技の本数、utility = 補助技の役割 (順に埋める。埋まらなければそのテンプレートは捨てる)
+BUILD_GEN_TEMPLATES = (
+    {"name": "attack3_setup", "attacks": 3, "utility": ("setup",)},
+    {"name": "attack3_protect", "attacks": 3, "utility": ("protect",)},
+    {"name": "attack3_priority", "attacks": 3, "utility": ("priority",)},
+    {"name": "attack3_pivot", "attacks": 3, "utility": ("pivot",)},
+    {"name": "attack2_setup_protect", "attacks": 2, "utility": ("setup", "protect")},
+    {"name": "attack4", "attacks": 4, "utility": ()},
+    {"name": "attack2_hazard_status", "attacks": 2, "utility": ("hazard", "status")},
+    {"name": "attack2_heal_status", "attacks": 2, "utility": ("heal", "status")},
+    {"name": "attack3_field", "attacks": 3, "utility": ("field",)},
+    {"name": "attack2_screens", "attacks": 2, "utility": ("screens", "screens")},
+)
+# 役割 → 技 (積み/先制/交代/設置/除去/状態異常/回復/まもる は既存の辞書 (advisor.search、features、interaction) から取る)
+BUILD_GEN_UTILITY_MOVES = {
+    "field": ("psychicterrain", "electricterrain", "grassyterrain", "mistyterrain", "sunnyday", "raindance",
+              "sandstorm", "snowscape", "tailwind", "trickroom"),
+    "screens": ("reflect", "lightscreen", "auroraveil"),
+}
+# 型の定型。能力ポイントは合計 BUILD_GEN_POINT_BUDGET (ゲーム内の上限 66)。性格は「+Spe で上を取れる脅威が増えるか」で選ぶ
+BUILD_GEN_POINT_BUDGET = 66
+BUILD_GEN_ARCHETYPES = {
+    # 持ち物はチャンピオンズに存在するものだけ (こだわりハチマキ/メガネ・とつげきチョッキは無い)。生成時にシムの一覧でも検査する
+    "fast_physical":  {"evs": "2/32/0/0/0/32", "natures": ("jolly", "adamant"), "items": ("focussash", "lifeorb", "choicescarf")},
+    "fast_special":   {"evs": "2/0/0/32/0/32", "natures": ("timid", "modest"), "items": ("focussash", "lifeorb", "choicescarf")},
+    "bulky_physical": {"evs": "32/32/0/0/0/2", "natures": ("adamant",), "items": ("leftovers", "sitrusberry", "lumberry")},
+    "bulky_special":  {"evs": "32/0/0/32/0/2", "natures": ("modest",), "items": ("leftovers", "sitrusberry", "lumberry")},
+    "wall_physical":  {"evs": "32/0/32/0/2/0", "natures": ("impish", "bold"), "items": ("leftovers", "rockyhelmet", "sitrusberry")},
+    "wall_special":   {"evs": "32/0/0/0/32/2", "natures": ("careful", "calm"), "items": ("leftovers", "sitrusberry")},
+}
+BUILD_GEN_SETUP_ITEMS = ("sitrusberry", "lumberry", "focussash")   # 積みテンプレートの持ち物 (じゃくてんほけんは M-C に無い)
+BUILD_GEN_FAST_SPEED_SHARE = 0.6    # 上位脅威への先手率 (+Spe 性格・振り切り) がこれ以上なら速攻型
+BUILD_GEN_WALL_OFFENSE_MAX = 90     # 使う側の攻撃種族値がこれ以下なら壁型 (攻撃技 2 本のテンプレートを優先)
+BUILD_GEN_SPEED_GAIN_MIN = 1.0      # +Spe 性格で上を取れる脅威 (重みの和) がこれ以上増えれば +Spe 性格
+BUILD_GEN_ABILITY_PRIORITY = ("psychicsurge", "grassysurge", "electricsurge", "mistysurge", "drought", "drizzle",
+                              "sandstream", "snowwarning", "intimidate", "regenerator", "protean", "libero",
+                              "adaptability", "toughclaws", "sheerforce", "hugepower", "purepower", "speedboost",
+                              "unburden", "magicguard", "prankster", "technician", "guts", "multiscale", "levitate",
+                              "moldbreaker", "sharpness", "supremeoverlord", "roughskin", "ironbarbs", "stamina")
 # 規則のエースの持ち物: その種での使用率が MIN_PCT 以上なら ACE_ITEMS の先頭から優先し、アイテムクローズでもエースが残す
 BUILD_RULE_ACE_ITEMS = ("focussash",)
 BUILD_RULE_ACE_ITEM_MIN_PCT = 10.0

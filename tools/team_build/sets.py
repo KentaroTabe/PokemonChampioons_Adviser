@@ -161,9 +161,12 @@ def representative_set(conn, snapshot_id: int, species_id: str) -> Optional[SetC
 
 
 def base_set(conn, snapshot_id: int, species_id: str, custom: Optional["SetCandidate"] = None, required=None,
-             category_of=None, setup_moves=()) -> Optional["SetCandidate"]:
-    """その種の基本の型: 指定の型 (custom) があればそれ、無ければ代表型。必須技 (required) があれば差し込む"""
+             category_of=None, setup_moves=(), generated=None) -> Optional["SetCandidate"]:
+    """その種の基本の型: 指定の型 (custom) → 代表型 → 生成型 (generated: learnset から作った型、代表型が無い種の補完) の順。
+    必須技 (required) があれば差し込む"""
     rep = custom if custom is not None else representative_set(conn, snapshot_id, species_id)
+    if rep is None and generated:
+        rep = generated[0]
     if rep is None:
         return None
     return apply_required_moves(rep, required, category_of, setup_moves) if required else rep
@@ -185,15 +188,16 @@ def finalize_candidates(cands: list, required=None, category_of=None, setup_move
 
 def enumerate_sets(conn, snapshot_id: int, species_id: str, min_pct: float = ALT_MIN_PCT,
                    limit: int = MAX_ALTERNATIVES, custom: Optional["SetCandidate"] = None, required=None,
-                   category_of=None, setup_moves=()) -> list:
+                   category_of=None, setup_moves=(), generated=None) -> list:
     """代表型 + 単独入替の代替 (持ち物 / 技 1 本 / 性格×配分)。整合しない性格×配分は落とす。
     custom (指定の型) があれば使用率データは見ずその型だけを返す (使用率に振り回されないため)。
-    required (必須技) は全候補に差し込む"""
+    generated (learnset から生成した型) は代表型が無ければそれを候補にし、あれば代替の後ろに加える
+    (使用率差の罰則 usage_gap = 代表型に無い技の使用率差の平均)。required (必須技) は全候補に差し込む"""
     if custom is not None:
         return finalize_candidates([custom], required, category_of, setup_moves)
     rep = representative_set(conn, snapshot_id, species_id)
     if rep is None:
-        return []
+        return finalize_candidates(list(generated or []), required, category_of, setup_moves)
     if required:
         category_of = category_of or default_category_of()
         setup_moves = setup_moves or default_setup_moves()
@@ -254,6 +258,15 @@ def enumerate_sets(conn, snapshot_id: int, species_id: str, min_pct: float = ALT
                 continue
             add(SetCandidate(species_id, rep.ability, rep.item, nv, ev, list(rep.moves), "alt:spread",
                              usage_gap=(gap(nature_pct, rep.nature, nv) + gap(spread_pct, rep.evs, ev)) / 2.0))
+    if generated:
+        # 生成型は代替の上限とは別枠で加える (罰則は「代表型に無い技の使用率差」)
+        from tools.team_build.gen_sets import generated_usage_gap
+        for g in generated:
+            c = SetCandidate(species_id, g.ability, g.item, g.nature, g.evs, list(g.moves), g.source, 0.0,
+                             list(g.notes), usage_gap=generated_usage_gap(g.moves, rep.moves, move_pct))
+            if c.key() not in seen:
+                seen.add(c.key())
+                out.append(c)
     return finalize_candidates(out, required, category_of, setup_moves)
 
 
