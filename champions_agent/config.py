@@ -36,7 +36,7 @@ SHOWDOWN_PORT = int(os.environ.get("SHOWDOWN_PORT", "8100"))
 # メガシンカ (交代後も継続する仕様含む)・まひ1/8・ねむり2-3T等のリバランス・
 # チャンピオンズの技プール/新メガストーンが忠実に再現されている。
 # Flat Rules = 6体構築から3体選出・Lv50・種族/アイテムクロース。
-TRAINING_BATTLE_FORMAT = "gen9championsbssregmb"
+TRAINING_BATTLE_FORMAT = "gen9championsbssregmc"   # 2026-09-11 M-C へ切替 (M-B は gen9championsbssregmb、mod championsregmb)
 TRAINING_TEAM_SIZE = 6
 
 # --- 外部API設定 ---

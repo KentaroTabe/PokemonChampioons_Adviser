@@ -2,6 +2,13 @@
  "_comment": "学習に影響する変更の記録。watch_training が推移グラフに赤い縦線として描画し、履歴表示にも差し込む。新しい変更を入れたら追記すること (at はローカル時刻 'YYYY-MM-DD HH:MM')。kind: net=ネット構成 / reward=報酬 / opponent=相手構成 / env=環境仕様 / eval=評価方法 / fix=不具合修正",
  "changes": [
   {
+   "at": "2026-09-11 01:25",
+   "kind": "env",
+   "label": "レギュレーション M-C へ切替 (TRAINING_BATTLE_FORMAT=gen9championsbssregmc) — 測定基準の切断点",
+   "detail": "上流 smogon/pokemon-showdown d849b2200 (9/10、Add Champions Regulation M-C 812501ede を含む) を取り込み再ビルド (Node 22+ 必須のためユーザーが Node 26 を導入)。champions mod で新規 24 種 (プクリン/ペルシアン/アローラペルシアン/ニャイキング/カモネギ/ネギガナイト/バリヤード/マルノーム/ボーマンダ/ゴーゴート/グソクムシャ/ゴリランダー/エースバーン/インテレオン/フォクスライ/ストリンダー/オトスパス/バチンウニ/イエッサン/オリーヴァ/セグレイブ/パーモット/イキリンコ/マフィティフ) + 新メガ 6 (メガアブソルZ/メガボーマンダ/メガガブリアスZ/メガルカリオZ/メガグソクムシャ (かたいツメ)/メガセグレイブ) が解禁、サイコシード・グランドコート・ふうせん・ゴツゴツメット等の持ち物も解禁。champions_dex.json を再書き出し (species 1518 / moves 938)。登録チームは M-C で合法。⚠ 学習・評価の相手は当面 M-B の使用率プール (新種の使用率データ未着: cbd の seasons は Current/M5/M4) のまま。9/11 01:25 以前のベンチ・h2h と同一軸で比べない。best_checkpoint --reset all を実施 (旧記録 balance 0.65 / offense 0.71 / cycle 0.61)。POOL_PIN/META_PIN は新シーズン opendata が USAGE_MIN_RANKED_TEAMS を超えた日に一度だけ更新して再基準化する (前後のベンチ値を両方記録)",
+   "isolated": false
+  },
+  {
    "at": "2026-09-09 06:10",
    "kind": "opponent",
    "label": "実戦の相手バンクを学習環境の相手に混ぜる (TRAIN_REAL_OPP_MIX=0.3) + 相手の選出を実戦の傾向でサンプル (TRAIN_REAL_PICK_PROB=0.7)",

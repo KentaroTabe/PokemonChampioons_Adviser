@@ -139,3 +139,28 @@ pokedb詳細ページのスクレイピングは規約禁止 (opendataのみ可)
    更新 → `scripts/run_test.sh` の関連テスト → 学習再開。
 3. `best_checkpoint --reset` と progress_tracking への切断明記 (§4)。
 4. pokedb 新シーズンが 100 構築を超えたら POOL_PIN / META_PIN を更新して再基準化。
+
+## 2026-09-11 レギュレーションM-C 切替の実施記録
+
+- 9/9 時点で上流に無かった M-C は 9/9 夜に上流へ入った (812501ede "Add Champions Regulation M-C"、d849b2200 まで取り込み)。
+  フォーマット id `gen9championsbssregmc` (mod champions)、M-B は `gen9championsbssregmb` (mod championsregmb) に退避。
+- **上流は Node.js 22 以上を要求** (build と起動スクリプト、validate-team も同じ検査で拒否)。ローカルは node@20 のみで
+  一度失敗 → 旧コミット f0327afad をブランチ `node20-hold` で保持して運用継続 → ユーザーが `brew install node` (v26.8.2)
+  を導入 → master (d849b2200) に戻し `scripts/showdown_update.sh` でビルド → 旧サーバー (pid 114) を停止して
+  `scripts/ensure_showdown.sh` で再起動。**サーバーを落とす前にビルドが通ることを確認する** (旧 dist で動く間は落とさない)。
+- 解禁内容 (mod の formats-data 差分): 新規 24 種 (プクリン/ペルシアン/アローラペルシアン/ニャイキング/カモネギ/ネギガナイト/
+  バリヤード/マルノーム/ボーマンダ/ゴーゴート/グソクムシャ/ゴリランダー/エースバーン/インテレオン/フォクスライ/ストリンダー/
+  オトスパス/バチンウニ/イエッサン/オリーヴァ/セグレイブ/パーモット/イキリンコ/マフィティフ) + 新メガ 6 (メガアブソルZ/
+  メガボーマンダ/メガガブリアスZ/メガルカリオZ/メガグソクムシャ (特性 かたいツメ に変更)/メガセグレイブ)。持ち物の解禁:
+  サイコシード/グランドコート/ふうせん/ゴツゴツメット/レッドカード/だっしゅつボタン/エレキシード/グラスシード/ミストシード/
+  ノーマルジュエル/しめつけバンド/ながねぎ (leek)。
+- データ: `scripts/export_champions_dex.sh` (新設) で champions_dex.json を再書き出し (species 1518 / moves 938)。advisor/data/dex.json
+  (PokeAPI) は新種・新メガ (Mega-Z 含む) を既に収録済み。jp_names: メガアブソル/メガガブリアス/メガルカリオが Z 形態 id に
+  結び付いていた誤りを直し、メガ〇〇Z を追加 (06289114)。tools/check_mega_items: 問題なし (Rayquaza-Mega は従来どおり対象外)。
+- 設定: `TRAINING_BATTLE_FORMAT = gen9championsbssregmc`。登録チーム (メタグロス/ミミッキュ/アシレーヌ/ムクホーク/ラグラージ/ドドゲザン)
+  は M-C で合法 (validate-team)。テスト: test_my_team / test_team_build_sets / test_team_build_opponents /
+  test_my_species_resolution (非参戦 1005 → 974 種) / test_team_build_rules 全緑。
+- 切断: training_changes.json に 2026-09-11 01:25 の記録、`best_checkpoint --reset all` (balance 0.65 / offense 0.71 / cycle 0.61 をリセット)。
+- 未了 (§3/§4): cbd の M-C 日次データは未着 (index の seasons は Current/M5/M4 で M5 = M-B)。pokedb の新シーズンも同様。
+  新種の代表型が無い間は、構築では `--sets-file` (型の指定) / `--moves` (技の指定) で新種を候補に入れる。
+  POOL_PIN/META_PIN の更新と再基準化は opendata が 100 構築を超えた日に実施する。
