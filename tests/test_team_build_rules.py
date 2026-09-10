@@ -14,10 +14,10 @@ TH = dict(fast_share=0.75, fast_max_def=75, boost_share=0.8, boost_min_bulk=0.25
 
 
 def _info(sid, spe=100, dfn=60, types=("Psychic",), ability="", item="", learn=False, speed=0.0, boost=None,
-          mult=1.0, bulk=0.0, tr=False):
+          mult=1.0, bulk=0.0, tr=False, offense=130, atk_moves=3, atk_types=2, cov=0.5):
     return RU.RuleInfo(sid, spe, dfn, tuple(types), ability, item, {"psychicterrain": learn},
                        speed_share=speed, boost_share=(speed if boost is None else boost), boost_mult=mult, bulk=bulk,
-                       has_tr=tr)
+                       has_tr=tr, offense=offense, attack_moves=atk_moves, attack_types=atk_types, coverage_mean=cov)
 
 
 def _infos():
@@ -39,6 +39,14 @@ def _infos():
         "slowking": _info("slowking", 30, 80, ("Water", "Psychic"), "regenerator", "leftovers", speed=0.05, bulk=0.6, tr=True),  # TR 使い (遅い → TR 型エースでもある)
         "kingambit": _info("kingambit", 50, 120, ("Dark", "Steel"), "supremeoverlord", "blackglasses", speed=0.05, bulk=0.57),  # TR 型
         "airballoon_mon": _info("airballoon_mon", 120, 60, ("Fighting",), "unburden", "airballoon", speed=0.7, boost=1.0, mult=2.0, bulk=0.3),  # ふうせん
+        # 火力・技範囲を満たさない (2026-09-10 指摘: 加速するだけの補助型ペロリーム、攻撃技 1 本のポットデス)
+        "slurpuff": _info("slurpuff", 72, 86, ("Fairy",), "unburden", "sitrusberry", speed=0.3, boost=0.95, mult=2.0, bulk=0.38,
+                          offense=85, atk_moves=1, atk_types=1, cov=0.2),
+        "polteageist": _info("polteageist", 70, 65, ("Ghost",), "cursedbody", "whiteherb", speed=0.3, boost=0.95, mult=2.0,
+                             bulk=0.5, offense=134, atk_moves=1, atk_types=1, cov=0.2),
+        "narrow": _info("narrow", 130, 55, ("Electric",), "static", "lifeorb", speed=0.9, bulk=0.3, offense=120,
+                        atk_moves=3, atk_types=1, cov=0.5),                                                                 # 技範囲 1 タイプ
+        "weak": _info("weak", 130, 55, ("Electric",), "static", "lifeorb", speed=0.9, bulk=0.3, offense=80),               # 火力不足
     }
 
 
@@ -52,6 +60,11 @@ def test_classify_setters_and_aces():
     # 速攻型: 防御の閾値、加速型: 加速手段が要る (hydreigon は速いが浮いている、greninja は B77)
     assert "greninja" not in aces and "hydreigon" not in aces and "staraptor" not in aces and "airballoon_mon" not in aces
     assert RU.ace_types(infos["greninja"], RULE, fast_max_def=80) == ["fast"]                 # 閾値を緩めれば入る
+    # 火力・技範囲: 加速するだけの補助型 (slurpuff)、攻撃技 1 本 (polteageist)、1 タイプ (narrow)、火力不足 (weak) は外れる
+    assert all(s not in aces for s in ("slurpuff", "polteageist", "narrow", "weak"))
+    assert RU.offensive(infos["sneasler"]) and not RU.offensive(infos["slurpuff"]) and not RU.offensive(infos["weak"])
+    assert RU.ace_types(infos["polteageist"], RULE, min_attack_moves=1, min_attack_types=1, min_coverage=0.0) == ["boost", "tr"]
+    assert RU.ace_types(infos["weak"], RULE, min_offense=80) == ["fast"]
     # 並びの判定: 設置役とエースは別個体。TR 型エースは TR 使いが同じ並びにいるとき
     assert RU.lineup_satisfies(("espathra", "raichu", "kingambit"), setters, aces, trs)
     assert not RU.lineup_satisfies(("espathra", "kingambit", "hydreigon"), setters, aces, trs)   # TR 使い無しの TR 型

@@ -22,6 +22,8 @@ from typing import Callable, Optional
 from champions_agent.config import (BUILD_LINEUP_HOLE_THRESHOLD, BUILD_RULE_ACE_BOOST_MIN_BULK,
                                     BUILD_RULE_ACE_BOOST_SPEED_SHARE, BUILD_RULE_ACE_FAST_MAX_DEF,
                                     BUILD_RULE_ACE_FAST_SPEED_SHARE, BUILD_RULE_ACE_ITEM_MIN_PCT, BUILD_RULE_ACE_ITEMS,
+                                    BUILD_RULE_ACE_MIN_ATTACK_MOVES, BUILD_RULE_ACE_MIN_ATTACK_TYPES,
+                                    BUILD_RULE_ACE_MIN_COVERAGE, BUILD_RULE_ACE_MIN_OFFENSE,
                                     BUILD_RULE_ACE_TR_SPEED_SHARE, BUILD_RULE_MAX_CORES, BUILD_RULE_PAIR_COVER)
 
 RULES = {
@@ -58,6 +60,10 @@ class RuleInfo:
     boost_mult: float = 1.0      # 自己加速の倍率 (features.boost_multiplier、1.0 = 加速手段なし)
     bulk: float = 0.0            # 耐久 (S3 roles.bulk)
     has_tr: bool = False         # 代表型にトリックルーム
+    offense: int = 0             # 使う側の攻撃種族値 (代表型の攻撃技が物理なら攻撃、特殊なら特攻、両方なら大きい方。メガ後)
+    attack_moves: int = 0        # 代表型の攻撃技 (威力 > 0) の本数
+    attack_types: int = 0        # 攻撃技のタイプ数 (技範囲)
+    coverage_mean: float = 0.0   # 脅威への平均被覆 (S3 coverage)
 
 
 def grounded(info: RuleInfo, rule: dict) -> bool:
@@ -66,11 +72,25 @@ def grounded(info: RuleInfo, rule: dict) -> bool:
             and info.item not in rule["airborne_items"])
 
 
+def offensive(info: RuleInfo, min_offense: int = BUILD_RULE_ACE_MIN_OFFENSE,
+              min_attack_moves: int = BUILD_RULE_ACE_MIN_ATTACK_MOVES,
+              min_attack_types: int = BUILD_RULE_ACE_MIN_ATTACK_TYPES,
+              min_coverage: float = BUILD_RULE_ACE_MIN_COVERAGE) -> bool:
+    """エース共通の火力・技範囲: 攻撃種族値、攻撃技の本数、タイプ数、平均被覆がそれぞれ閾値以上
+    (加速するだけの補助型や攻撃技 1 本の型をエースにしない)"""
+    return (info.offense >= min_offense and info.attack_moves >= min_attack_moves
+            and info.attack_types >= min_attack_types and info.coverage_mean >= min_coverage)
+
+
 def ace_types(info: RuleInfo, rule: dict, fast_share: float = BUILD_RULE_ACE_FAST_SPEED_SHARE,
               fast_max_def: int = BUILD_RULE_ACE_FAST_MAX_DEF, boost_share: float = BUILD_RULE_ACE_BOOST_SPEED_SHARE,
-              boost_min_bulk: float = BUILD_RULE_ACE_BOOST_MIN_BULK, tr_share: float = BUILD_RULE_ACE_TR_SPEED_SHARE) -> list:
-    """個体が満たすエースの型 (fast / boost / tr の部分集合、ACE_TYPE_ORDER 順)。接地していなければ空"""
-    if not grounded(info, rule):
+              boost_min_bulk: float = BUILD_RULE_ACE_BOOST_MIN_BULK, tr_share: float = BUILD_RULE_ACE_TR_SPEED_SHARE,
+              min_offense: int = BUILD_RULE_ACE_MIN_OFFENSE, min_attack_moves: int = BUILD_RULE_ACE_MIN_ATTACK_MOVES,
+              min_attack_types: int = BUILD_RULE_ACE_MIN_ATTACK_TYPES,
+              min_coverage: float = BUILD_RULE_ACE_MIN_COVERAGE) -> list:
+    """個体が満たすエースの型 (fast / boost / tr の部分集合、ACE_TYPE_ORDER 順)。
+    接地していない、または火力・技範囲の条件 (offensive) を満たさなければ空"""
+    if not grounded(info, rule) or not offensive(info, min_offense, min_attack_moves, min_attack_types, min_coverage):
         return []
     out = []
     if info.speed_share >= fast_share and info.dfn <= fast_max_def:

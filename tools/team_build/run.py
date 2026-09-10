@@ -128,6 +128,14 @@ def rule_context(run_dir: Path, spec: BuildSpec, feats: dict, snapshot_id: int) 
             sp = dex.species(form) or dex.species(sid) or {}
             bs = sp.get("baseStats") or {}
             roles = feats[sid].roles
+            # 火力・技範囲: 代表型の攻撃技 (威力 > 0) の分類とタイプ、使う側の攻撃種族値 (メガ後)、脅威への平均被覆
+            atk_moves = [(m, str(mv.get("category") or "").lower(), mv.get("type"))
+                         for m in rep.moves for mv in [dex.move(m) or {}]
+                         if str(mv.get("category") or "").lower() in ("physical", "special") and (mv.get("power") or 0) > 0]
+            has_phys = any(c == "physical" for _, c, _ in atk_moves)
+            has_spec = any(c == "special" for _, c, _ in atk_moves)
+            offense = max(int(bs.get("atk") or 0) if has_phys else 0, int(bs.get("spa") or 0) if has_spec else 0)
+            cov = feats[sid].coverage
             infos[sid] = RU.RuleInfo(sid, int(bs.get("spe") or 0), int(bs.get("def") or 0),
                                      tuple(sp.get("types") or ()), rep.ability or "", rep.item or "",
                                      {m: can_learn(sid, m) for m in moves_needed},
@@ -135,13 +143,18 @@ def rule_context(run_dir: Path, spec: BuildSpec, feats: dict, snapshot_id: int) 
                                      boost_share=float(roles.get("speed_boost", roles.get("speed", 0.0))),
                                      boost_mult=boost_multiplier(rep.ability, rep.item, rep.moves),
                                      bulk=float(roles.get("bulk", 0.0)),
-                                     has_tr=any(m in BUILD_TRICK_ROOM_MOVES for m in rep.moves))
+                                     has_tr=any(m in BUILD_TRICK_ROOM_MOVES for m in rep.moves),
+                                     offense=offense, attack_moves=len(atk_moves),
+                                     attack_types=len({t for _, _, t in atk_moves}),
+                                     coverage_mean=(sum(cov.values()) / len(cov)) if cov else 0.0)
     ctx = RU.build_context(spec.rules, infos)
     (run_dir / "s03_rules.json").write_text(json.dumps(
         {"rules": ctx["llm"],
          "infos": {s: {"spe": i.spe, "def": i.dfn, "types": list(i.types), "ability": i.ability, "item": i.item,
                        "can_learn": i.can_learn, "speed_share": i.speed_share, "boost_share": i.boost_share,
-                       "boost_mult": i.boost_mult, "bulk": i.bulk, "has_tr": i.has_tr} for s, i in infos.items()}},
+                       "boost_mult": i.boost_mult, "bulk": i.bulk, "has_tr": i.has_tr, "offense": i.offense,
+                       "attack_moves": i.attack_moves, "attack_types": i.attack_types,
+                       "coverage_mean": round(i.coverage_mean, 3)} for s, i in infos.items()}},
         ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     for p in ctx["per_rule"]:
         aces = {s: "/".join(t) for s, t in sorted(p["aces"].items())}

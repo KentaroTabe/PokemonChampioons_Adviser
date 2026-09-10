@@ -326,6 +326,13 @@ BUILD_RULE_ACE_BOOST_SPEED_SHARE = 0.8
 BUILD_RULE_ACE_BOOST_MIN_BULK = 0.25
 BUILD_RULE_ACE_TR_SPEED_SHARE = 0.3
 BUILD_TRICK_ROOM_MOVES = ("trickroom",)
+# エース共通の火力・技範囲の条件 (2026-09-10 ユーザー指摘: 加速するだけの補助型 (ペロリーム) がエースに入っていた)。
+# 代表型の攻撃技 (威力 > 0) から: 使う側の攻撃種族値 (物理なら攻撃、特殊なら特攻、メガ後) ≥ MIN_OFFENSE、
+# 攻撃技の本数 ≥ MIN_ATTACK_MOVES、攻撃技のタイプ数 ≥ MIN_ATTACK_TYPES、脅威への平均被覆 ≥ MIN_COVERAGE
+BUILD_RULE_ACE_MIN_OFFENSE = 100
+BUILD_RULE_ACE_MIN_ATTACK_MOVES = 2
+BUILD_RULE_ACE_MIN_ATTACK_TYPES = 2
+BUILD_RULE_ACE_MIN_COVERAGE = 0.3
 BUILD_RULE_MAX_CORES = 24
 # 並びの採点 (S5): 穴の罰則 = 最も薄い脅威の不足分 (HOLE_THRESHOLD − 最良被覆)+ × 脅威の重み (最大を 1 に正規化) × HOLE_WEIGHT。
 # 30 脅威の平均に薄まる 1 体の穴 (rule_0909 のカイリュー 0.18) を候補間の差と同じ桁で罰する
