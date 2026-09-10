@@ -4197,14 +4197,26 @@
    "num": 354
   },
   "メガアブソル": {
+   "id": "absolmega",
+   "num": 359
+  },
+  "メガアブソルZ": {
    "id": "absolmegaz",
    "num": 359
   },
   "メガガブリアス": {
+   "id": "garchompmega",
+   "num": 445
+  },
+  "メガガブリアスZ": {
    "id": "garchompmegaz",
    "num": 445
   },
   "メガルカリオ": {
+   "id": "lucariomega",
+   "num": 448
+  },
+  "メガルカリオZ": {
    "id": "lucariomegaz",
    "num": 448
   },
