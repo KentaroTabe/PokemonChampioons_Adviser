@@ -60,10 +60,65 @@ class BuildSpec:
     regulation: str = TRAINING_BATTLE_FORMAT
     notes: str = ""
     rules: list = field(default_factory=list)         # コンセプト規則 (tools/team_build/rules.RULES の名前、hard constraint)
+    required_moves: dict = field(default_factory=dict)  # 技 + ポケモンの指定 {species_id: [move_id]}: その種を使う型に必ず入れる
+    custom_sets: dict = field(default_factory=dict)     # 指定の型 {species_id: {item, ability, nature, evs, moves}}: 使用率より優先
     provenance: dict = field(default_factory=dict)    # field -> resolved | inferred | unknown
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def resolve_move_token(token: str) -> str:
+    """"psychicterrain" / "Psychic Terrain" / "サイコフィールド" → 技 id。解決できなければ id 化した文字列 (検証で弾く)"""
+    token = (token or "").strip()
+    if not token:
+        return ""
+    sid = _toid(token)
+    if sid and re.fullmatch(r"[a-z0-9]+", sid) and not re.search(r"[^\x00-\x7f]", token):
+        return sid
+    try:
+        from vision.normalize import NameResolver
+        r = NameResolver().resolve(token, "moves", cutoff=0.85)
+        if r:
+            return str(r[1])
+    except Exception:
+        pass
+    return sid or token
+
+
+def parse_required_moves(value) -> dict:
+    """"種:技/技, 種:技" (日本語可、区切りは , 、 改行 / ： :) または {種: [技]} → {species_id: [move_id]}。純粋 (名前解決を除く)"""
+    if not value:
+        return {}
+    pairs = []
+    if isinstance(value, dict):
+        pairs = [(k, v if isinstance(v, (list, tuple)) else re.split(r"[/+・\s]+", str(v))) for k, v in value.items()]
+    else:
+        for entry in re.split(r"[,、\n]+", str(value)):
+            if not entry.strip():
+                continue
+            sp, _, mv = re.sub("：", ":", entry).partition(":")
+            pairs.append((sp, re.split(r"[/+・\s]+", mv)))
+    out: dict = {}
+    for sp, mvs in pairs:
+        sid = resolve_species_token(sp)
+        ids = [resolve_move_token(m) for m in mvs if str(m).strip()]
+        ids = [m for m in ids if m]
+        if sid and ids:
+            out.setdefault(sid, [])
+            out[sid].extend(m for m in ids if m not in out[sid])
+    return out
+
+
+def parse_custom_sets(value) -> dict:
+    """Showdown 形式の型本文 (str) または {species_id: row} → {species_id: row (item/ability/nature/evs/moves/source)}"""
+    if not value:
+        return {}
+    if isinstance(value, dict):
+        return {resolve_species_token(k): dict(v) for k, v in value.items() if v}
+    from tools.team_build.sets import parse_set_text
+    return {sid: {"item": c.item, "ability": c.ability, "nature": c.nature, "evs": c.evs, "moves": list(c.moves),
+                  "source": c.source} for sid, c in parse_set_text(str(value)).items()}
 
 
 def owned_species_ids() -> list:
@@ -113,6 +168,12 @@ def parse_form(form: dict, owned: Optional[list] = None) -> BuildSpec:
             rules = [v for v in re.split(r"[,、\s/]+", rules) if v]
         spec.rules = [str(v).strip() for v in rules if str(v).strip()]
         prov["rules"] = "resolved"
+    if form.get("moves"):
+        spec.required_moves = parse_required_moves(form["moves"])
+        prov["required_moves"] = "resolved"
+    if form.get("sets"):
+        spec.custom_sets = parse_custom_sets(form["sets"])
+        prov["custom_sets"] = "resolved"
     if not spec.owned:
         spec.owned = list(owned) if owned is not None else owned_species_ids()
         prov["owned"] = "inferred"
@@ -163,6 +224,26 @@ def validate_spec(spec: BuildSpec, legal: Optional[set] = None) -> list:
         for r in spec.rules:
             if r not in RULES:
                 problems.append(f"rules に未知の規則: {r} (定義済み: {sorted(RULES)})")
+    if spec.required_moves or spec.custom_sets:
+        try:
+            from advisor.dex import get_dex
+            dex = get_dex()
+        except Exception:
+            dex = None
+        for sid, mvs in spec.required_moves.items():
+            if sid not in owned:
+                problems.append(f"技指定の {sid} が所持にない")
+            for m in mvs:
+                if dex is not None and dex.move(m) is None:
+                    problems.append(f"技指定 {sid}:{m} は図鑑に無い技")
+        for sid, row in spec.custom_sets.items():
+            if sid not in owned:
+                problems.append(f"型指定の {sid} が所持にない")
+            if not row.get("moves"):
+                problems.append(f"型指定の {sid} に技が無い")
+            for m in row.get("moves") or []:
+                if dex is not None and dex.move(m) is None:
+                    problems.append(f"型指定 {sid}:{m} は図鑑に無い技")
     return problems
 
 

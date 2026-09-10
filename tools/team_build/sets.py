@@ -52,6 +52,98 @@ class SetCandidate:
         return (self.species_id, self.ability, self.item, self.nature, self.evs, tuple(self.moves))
 
 
+_STAT_KEYS = {"hp": "hp", "atk": "atk", "def": "def", "spa": "spa", "spd": "spd", "spe": "spe",
+              "h": "hp", "a": "atk", "b": "def", "c": "spa", "d": "spd", "s": "spe"}
+_STAT_ORDER = ("hp", "atk", "def", "spa", "spd", "spe")
+
+
+def _toid(name: str) -> str:
+    import re
+    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
+
+
+def default_category_of():
+    """技 id → 分類 (physical/special/status、小文字) を図鑑から引く callable"""
+    from advisor.dex import get_dex
+    dex = get_dex()
+    return lambda m: str((dex.move(m) or {}).get("category") or "").lower()
+
+
+def default_setup_moves():
+    from advisor.search import SETUP_MOVES
+    return SETUP_MOVES
+
+
+def inject_move(moves: list, move: str, category_of=None, setup_moves=()) -> tuple:
+    """技を 1 本差し込む (既にあればそのまま)。4 本未満なら足す。差し替え枠は
+    (1) 積み技でない変化技の末尾 → (2) 変化技の末尾 → (3) 末尾。戻り値 (new_moves, 差し替えた技 or None)。純粋"""
+    ms = list(moves)
+    if move in ms:
+        return ms, None
+    if len(ms) < 4:
+        return ms + [move], None
+    cats = [(category_of(m) if category_of else "") for m in ms]
+    idx = next((k for k in range(len(ms) - 1, -1, -1) if cats[k] == "status" and ms[k] not in setup_moves), None)
+    if idx is None:
+        idx = next((k for k in range(len(ms) - 1, -1, -1) if cats[k] == "status"), len(ms) - 1)
+    replaced = ms[idx]
+    ms[idx] = move
+    return ms, replaced
+
+
+def apply_required_moves(c: "SetCandidate", moves, category_of=None, setup_moves=()) -> "SetCandidate":
+    """必須技 (技 + ポケモンの指定) を型に差し込む。無ければそのまま。注記 req:<技><-<差し替えた技>。純粋"""
+    ms, notes = list(c.moves), []
+    for m in moves or []:
+        if m in ms:
+            continue
+        ms, replaced = inject_move(ms, m, category_of, setup_moves)
+        notes.append(f"req:{m}<-{replaced}")
+    if not notes:
+        return c
+    return SetCandidate(c.species_id, c.ability, c.item, c.nature, c.evs, ms, c.source + "+req", c.score,
+                        list(c.notes) + notes, c.usage_gap, c.adj)
+
+
+def parse_set_text(text: str) -> dict:
+    """Showdown 形式の型本文 → {species_id: SetCandidate (source="custom")}。EVs 行はこのプロジェクトの規約どおり
+    能力ポイント (0-32) として読む (H/A/B/C/D/S の順の文字列に直す)。純粋"""
+    import re
+    out: dict = {}
+    for block in (text or "").strip().split("\n\n"):
+        lines = [ln.strip() for ln in block.strip().splitlines() if ln.strip()]
+        if not lines:
+            continue
+        head = lines[0]
+        name, _, item = head.partition("@")
+        sid = _toid(name)
+        if not sid:
+            continue
+        ability, nature, moves = None, None, []
+        pts = {k: 0 for k in _STAT_ORDER}
+        for ln in lines[1:]:
+            if ln.startswith("Ability:"):
+                ability = _toid(ln.split(":", 1)[1])
+            elif ln.startswith("EVs:"):
+                for part in ln.split(":", 1)[1].split("/"):
+                    m = re.match(r"\s*(\d+)\s+(\w+)", part)
+                    if m and m.group(2).lower() in _STAT_KEYS:
+                        pts[_STAT_KEYS[m.group(2).lower()]] = int(m.group(1))
+            elif ln.endswith("Nature"):
+                nature = ln.split()[0].lower()
+            elif ln.startswith("- "):
+                moves.append(_toid(ln[2:]))
+        evs = "/".join(str(pts[k]) for k in _STAT_ORDER) if any(pts.values()) else None
+        out[sid] = SetCandidate(sid, ability, _toid(item) or None, nature, evs, moves, "custom")
+    return out
+
+
+def candidate_from_row(species_id: str, row: dict) -> "SetCandidate":
+    """request.json に保存した型 (item/ability/nature/evs/moves) → SetCandidate (source="custom")"""
+    return SetCandidate(species_id, row.get("ability"), row.get("item"), row.get("nature"), row.get("evs"),
+                        list(row.get("moves") or []), row.get("source") or "custom")
+
+
 def _rows(conn, table: str, col: str, snapshot_id: int, name: str, min_pct: float) -> list:
     return [(r[0], r[1]) for r in conn.execute(
         f"SELECT {col}, usage_percent FROM {table} WHERE snapshot_id=? AND pokemon_name=? "
@@ -68,12 +160,43 @@ def representative_set(conn, snapshot_id: int, species_id: str) -> Optional[SetC
     return SetCandidate(species_id, r[0], r[1], r[2], r[3], moves, "representative")
 
 
+def base_set(conn, snapshot_id: int, species_id: str, custom: Optional["SetCandidate"] = None, required=None,
+             category_of=None, setup_moves=()) -> Optional["SetCandidate"]:
+    """その種の基本の型: 指定の型 (custom) があればそれ、無ければ代表型。必須技 (required) があれば差し込む"""
+    rep = custom if custom is not None else representative_set(conn, snapshot_id, species_id)
+    if rep is None:
+        return None
+    return apply_required_moves(rep, required, category_of, setup_moves) if required else rep
+
+
+def finalize_candidates(cands: list, required=None, category_of=None, setup_moves=()) -> list:
+    """必須技を全候補に差し込み、同じ型になったものは 1 つにまとめる (順序は保つ)。純粋"""
+    if not required:
+        return list(cands)
+    out, seen = [], set()
+    for c in cands:
+        c2 = apply_required_moves(c, required, category_of, setup_moves)
+        if c2.key() in seen:
+            continue
+        seen.add(c2.key())
+        out.append(c2)
+    return out
+
+
 def enumerate_sets(conn, snapshot_id: int, species_id: str, min_pct: float = ALT_MIN_PCT,
-                   limit: int = MAX_ALTERNATIVES) -> list:
-    """代表型 + 単独入替の代替 (持ち物 / 技 1 本 / 性格×配分)。整合しない性格×配分は落とす"""
+                   limit: int = MAX_ALTERNATIVES, custom: Optional["SetCandidate"] = None, required=None,
+                   category_of=None, setup_moves=()) -> list:
+    """代表型 + 単独入替の代替 (持ち物 / 技 1 本 / 性格×配分)。整合しない性格×配分は落とす。
+    custom (指定の型) があれば使用率データは見ずその型だけを返す (使用率に振り回されないため)。
+    required (必須技) は全候補に差し込む"""
+    if custom is not None:
+        return finalize_candidates([custom], required, category_of, setup_moves)
     rep = representative_set(conn, snapshot_id, species_id)
     if rep is None:
         return []
+    if required:
+        category_of = category_of or default_category_of()
+        setup_moves = setup_moves or default_setup_moves()
     out = [rep]
     seen = {rep.key()}
     item_rows = _rows(conn, "item_usage", "item_name", snapshot_id, species_id, min_pct)
@@ -131,7 +254,7 @@ def enumerate_sets(conn, snapshot_id: int, species_id: str, min_pct: float = ALT
                 continue
             add(SetCandidate(species_id, rep.ability, rep.item, nv, ev, list(rep.moves), "alt:spread",
                              usage_gap=(gap(nature_pct, rep.nature, nv) + gap(spread_pct, rep.evs, ev)) / 2.0))
-    return out
+    return finalize_candidates(out, required, category_of, setup_moves)
 
 
 def _mega_stones() -> set:

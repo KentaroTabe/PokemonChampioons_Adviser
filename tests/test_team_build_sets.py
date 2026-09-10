@@ -84,6 +84,51 @@ def test_item_clause_by_usage_and_prefer():
     print("test_item_clause_by_usage_and_prefer OK")
 
 
+def test_inject_and_required_moves():
+    """技 + ポケモンの指定: 差し込み枠は 積み技でない変化技の末尾 → 変化技の末尾 → 末尾。4 本未満なら足す"""
+    from tools.team_build.sets import apply_required_moves, finalize_candidates, inject_move
+    cat = {"flamethrower": "special", "psychic": "special", "nastyplot": "status", "dazzlinggleam": "special",
+           "protect": "status", "calmmind": "status", "luminacrash": "special", "psychicterrain": "status"}.get
+    setup = {"nastyplot", "calmmind"}
+    assert inject_move(["flamethrower", "psychic", "nastyplot", "dazzlinggleam"], "psychicterrain", cat, setup) == \
+        (["flamethrower", "psychic", "psychicterrain", "dazzlinggleam"], "nastyplot")          # 変化技は積み技だけ → それ
+    assert inject_move(["luminacrash", "protect", "calmmind", "dazzlinggleam"], "psychicterrain", cat, setup) == \
+        (["luminacrash", "psychicterrain", "calmmind", "dazzlinggleam"], "protect")            # 積み技でない変化技を優先
+    assert inject_move(["flamethrower", "psychic"], "psychicterrain", cat, setup) == (["flamethrower", "psychic", "psychicterrain"], None)
+    assert inject_move(["flamethrower", "psychicterrain", "psychic", "dazzlinggleam"], "psychicterrain", cat, setup)[1] is None
+    rep = SetCandidate("delphox", "blaze", "delphoxite", "timid", "2/0/0/32/0/32",
+                       ["flamethrower", "psychic", "nastyplot", "dazzlinggleam"], "representative", 0.5)
+    c = apply_required_moves(rep, ["psychicterrain"], cat, setup)
+    assert c.moves == ["flamethrower", "psychic", "psychicterrain", "dazzlinggleam"] and c.source == "representative+req"
+    assert c.notes == ["req:psychicterrain<-nastyplot"] and rep.moves[2] == "nastyplot" and c.score == 0.5
+    assert apply_required_moves(rep, ["psychic"], cat, setup) is rep                          # 既にあれば何もしない
+    # 全候補に差し込み、同じ型になったものはまとめる
+    alt = SetCandidate("delphox", "blaze", "delphoxite", "timid", "2/0/0/32/0/32",
+                       ["flamethrower", "psychic", "psychicterrain", "dazzlinggleam"], "alt:move", 0.4, usage_gap=0.3)
+    out = finalize_candidates([rep, alt], ["psychicterrain"], cat, setup)
+    assert [x.moves for x in out] == [c.moves] and out[0].source == "representative+req"
+    assert finalize_candidates([rep, alt], None) == [rep, alt]
+    print("test_inject_and_required_moves OK")
+
+
+def test_parse_set_text_and_candidate_row():
+    """指定の型 (Showdown 本文、EVs は能力ポイント) → SetCandidate (source custom)"""
+    from tools.team_build.sets import candidate_from_row, parse_set_text
+    text = ("Indeedee @ Psychic Seed\nLevel: 50\nAbility: Psychic Surge\nEVs: 32 HP / 32 SpA / 2 Spe\nModest Nature\n"
+            "- Expanding Force\n- Dazzling Gleam\n- Protect\n- Healing Wish\n\n"
+            "rillaboom @ choiceband\nAbility: grassysurge\nAdamant Nature\n- grassyglide\n- woodhammer\n- uturn\n- knockoff\n")
+    sets = parse_set_text(text)
+    ind = sets["indeedee"]
+    assert ind.item == "psychicseed" and ind.ability == "psychicsurge" and ind.nature == "modest"
+    assert ind.evs == "32/0/0/32/0/2" and ind.moves == ["expandingforce", "dazzlinggleam", "protect", "healingwish"]
+    assert ind.source == "custom" and sets["rillaboom"].evs is None and sets["rillaboom"].item == "choiceband"
+    row = {"item": ind.item, "ability": ind.ability, "nature": ind.nature, "evs": ind.evs, "moves": ind.moves}
+    back = candidate_from_row("indeedee", row)
+    assert back.key() == ind.key() and back.source == "custom"
+    assert parse_set_text("") == {}
+    print("test_parse_set_text_and_candidate_row OK")
+
+
 def test_splice_registered_sets():
     from tools.team_build.sets import splice_registered_sets, team_blocks
     cand = ("metagross @ lifeorb\nLevel: 50\n- bulletpunch\n\nkingambit @ blackglasses\nLevel: 50\n- suckerpunch\n\n"
@@ -120,5 +165,7 @@ if __name__ == "__main__":
     test_item_clause_and_text()
     test_order_candidates_usage_prior()
     test_item_clause_by_usage_and_prefer()
+    test_inject_and_required_moves()
+    test_parse_set_text_and_candidate_row()
     test_splice_registered_sets()
     test_prefer_registered_keeps_registered_items()

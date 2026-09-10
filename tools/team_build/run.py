@@ -98,10 +98,27 @@ def stage_s1_s3(run_dir: Path, spec: BuildSpec, prof: dict, seed: int, top_n: in
                     continue
         log(run_dir, f"S3 extra threats: +{len(added)} {added}")
     owned = [s for s in spec.owned if s not in set(spec.banned)]
-    res = species_features(owned, doc, tv)
+    res = species_features(owned, doc, tv, custom_sets=custom_sets_of(spec), required_moves=spec.required_moves)
     save_features(res, run_dir)
-    log(run_dir, f"S3 features: {len(res['features'])} species, missing={res['missing']}")
+    log(run_dir, f"S3 features: {len(res['features'])} species, missing={res['missing']}"
+                 + (f" 型指定={sorted(spec.custom_sets)}" if spec.custom_sets else "")
+                 + (f" 技指定={ {k: v for k, v in spec.required_moves.items()} }" if spec.required_moves else ""))
     return doc, split, tv, res["features"]
+
+
+def custom_sets_of(spec: BuildSpec) -> dict:
+    """spec.custom_sets (request.json の行) → {species_id: SetCandidate}"""
+    return {sid: S.candidate_from_row(sid, row) for sid, row in (spec.custom_sets or {}).items()}
+
+
+def set_library_kwargs(spec: BuildSpec, sid: str) -> dict:
+    """型ライブラリに渡す、その種の指定の型と必須技 (無ければ空)"""
+    custom = custom_sets_of(spec).get(sid)
+    required = (spec.required_moves or {}).get(sid)
+    if custom is None and not required:
+        return {}
+    return {"custom": custom, "required": required, "category_of": S.default_category_of(),
+            "setup_moves": S.default_setup_moves()}
 
 
 def rule_context(run_dir: Path, spec: BuildSpec, feats: dict, snapshot_id: int, tv: Optional[dict] = None) -> Optional[dict]:
@@ -145,7 +162,9 @@ def rule_context(run_dir: Path, spec: BuildSpec, feats: dict, snapshot_id: int, 
     infos, ace_sets = {}, {}
     with db.get_connection() as conn:
         for sid in feats:
-            rep = S.representative_set(conn, snapshot_id, sid)
+            lib = set_library_kwargs(spec, sid)
+            rep = S.base_set(conn, snapshot_id, sid, lib.get("custom"), lib.get("required"),
+                             lib.get("category_of"), lib.get("setup_moves", ()))
             if rep is None:
                 continue
             form = stone_form.get(rep.item or "", sid)          # メガ石を持つ型はメガ後の種族値・タイプで判定
@@ -155,7 +174,7 @@ def rule_context(run_dir: Path, spec: BuildSpec, feats: dict, snapshot_id: int, 
             cov = feats[sid].coverage
             # 火力・技範囲: 型ライブラリ (代表型 + 単独入替の代替、adj 降順) のうち門を通る最初の型で判定。
             # 代表型が通らず代替が通れば、その型をエースの型として S6 で採用する
-            ranked = S.rank_sets(list(S.enumerate_sets(conn, snapshot_id, sid)), tv) if tv else [rep]
+            ranked = S.rank_sets(list(S.enumerate_sets(conn, snapshot_id, sid, **lib)), tv) if tv else [rep]
             cov_cache: dict = {}
 
             def cov_of(c, sid=sid):
@@ -410,7 +429,7 @@ def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv
         for idx, l in enumerate(lineups):
             team, alternatives = [], {}
             for sid in l.members:
-                cands = S.enumerate_sets(conn, snapshot_id, sid)
+                cands = S.enumerate_sets(conn, snapshot_id, sid, **set_library_kwargs(spec, sid))
                 if not cands:
                     team = []
                     break
@@ -465,6 +484,10 @@ def main() -> None:
     ap.add_argument("--banned", default="", help="除外 (カンマ区切り)")
     ap.add_argument("--rules", default="",
                     help="コンセプト規則 (カンマ区切り、tools/team_build/rules.py の RULES)。例: psychic_terrain_priority_ace")
+    ap.add_argument("--moves", default="",
+                    help="技 + ポケモンの指定 (その種を使う型に必ず入れる)。例: 'マフォクシー:サイコフィールド, ポットデス:からをやぶる/アシストパワー'")
+    ap.add_argument("--sets-file", default=None,
+                    help="指定の型 (Showdown 形式の本文ファイル、EVs は能力ポイント)。その種は使用率データを見ずこの型を使う")
     ap.add_argument("--style", default="any")
     ap.add_argument("--objective", default="max_wr")
     ap.add_argument("--profile", choices=list(PROFILE_DEFAULTS), default="fast")
@@ -526,12 +549,27 @@ def main() -> None:
         _measure(run_dir, args)
         return
     legal = legal_species_ids()
+    sets_text = Path(args.sets_file).read_text(encoding="utf-8") if args.sets_file else ""
     if args.spec:
         raw = json.loads(Path(args.spec).read_text(encoding="utf-8"))
         spec = load_spec(Path(args.spec)) if "schema_version" in raw else parse_form(raw)
+        # --spec と併用した --rules / --moves / --sets-file は spec に足す (spec の値は残す)
+        from tools.team_build.spec import parse_custom_sets, parse_required_moves
+        if args.rules:
+            spec.rules = sorted(set(spec.rules) | {r for r in args.rules.split(",") if r.strip()})
+            spec.provenance["rules"] = "resolved"
+        if args.moves:
+            for sid, mvs in parse_required_moves(args.moves).items():
+                cur = spec.required_moves.setdefault(sid, [])
+                cur.extend(m for m in mvs if m not in cur)
+            spec.provenance["required_moves"] = "resolved"
+        if sets_text:
+            spec.custom_sets.update(parse_custom_sets(sets_text))
+            spec.provenance["custom_sets"] = "resolved"
     else:
         spec = parse_form({"favorites": args.favorites, "banned": args.banned, "style": args.style,
-                           "objective": args.objective, "profile": args.profile, "rules": args.rules})
+                           "objective": args.objective, "profile": args.profile, "rules": args.rules,
+                           "moves": args.moves, "sets": sets_text})
     spec.profile = args.profile
     prof = PROFILE_DEFAULTS[args.profile]
     manifest = build_manifest(args.run_id, {"profile": args.profile, "llm": args.llm, "seed": args.seed,

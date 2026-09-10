@@ -315,6 +315,22 @@ def test_spec_rules_parse_and_validate():
     bad = parse_form({"rules": ["nope", "psychic_terrain_priority_ace"]}, owned=owned)
     assert any("nope" in p for p in validate_spec(bad))
     assert parse_form({}, owned=owned).rules == []
+    # 技 + ポケモンの指定 (日本語可) と指定の型
+    from tools.team_build.spec import parse_required_moves
+    got = parse_required_moves("マフォクシー:サイコフィールド, ポットデス:からをやぶる/アシストパワー")
+    assert got == {"delphox": ["psychicterrain"], "polteageist": ["shellsmash", "storedpower"]}, got
+    assert parse_required_moves({"espathra": ["luminacrash", "dazzlinggleam"]}) == {"espathra": ["luminacrash", "dazzlinggleam"]}
+    assert parse_required_moves("delphox：psychicterrain") == {"delphox": ["psychicterrain"]}
+    owned2 = ["delphox", "polteageist", "indeedee", "a", "b", "c"]
+    spec2 = parse_form({"moves": "マフォクシー:サイコフィールド",
+                        "sets": "Indeedee @ Psychic Seed\nAbility: Psychic Surge\n- Expanding Force\n- Protect\n"},
+                       owned=owned2)
+    assert spec2.required_moves == {"delphox": ["psychicterrain"]} and spec2.provenance["required_moves"] == "resolved"
+    assert spec2.custom_sets["indeedee"]["moves"] == ["expandingforce", "protect"] and spec2.provenance["custom_sets"] == "resolved"
+    assert not [p for p in validate_spec(spec2) if "指定" in p], validate_spec(spec2)
+    bad2 = parse_form({"moves": "gengar:shadowball", "sets": "delphox @ delphoxite\n- notamove\n"}, owned=owned2)
+    probs = validate_spec(bad2)
+    assert any("gengar" in p and "所持" in p for p in probs) and any("notamove" in p for p in probs), probs
     print("test_spec_rules_parse_and_validate OK")
 
 

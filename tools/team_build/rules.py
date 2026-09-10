@@ -290,13 +290,8 @@ def ensure_setter(team: list, setters: set, aces, rule: dict, alternatives: Opti
     c = cands[0]
     if move in c.moves or c.ability == abil:
         return team, c.species_id, []
-    moves = list(c.moves)
-    cats = [(category_of(m) if category_of else "") for m in moves]
-    idx = next((k for k in range(len(moves) - 1, -1, -1) if cats[k] == "status" and moves[k] not in setup_moves), None)
-    if idx is None:
-        idx = next((k for k in range(len(moves) - 1, -1, -1) if cats[k] == "status"), len(moves) - 1)
-    replaced = moves[idx]
-    moves[idx] = move
+    from tools.team_build.sets import inject_move
+    moves, replaced = inject_move(c.moves, move, category_of, setup_moves)
     notes = [f"rule:{move}<-{replaced}"]
     item = c.item
     if (item or "") in CHOICE_ITEMS:

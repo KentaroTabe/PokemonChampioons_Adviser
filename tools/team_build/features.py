@@ -70,16 +70,22 @@ def roles_from_set(species_id: str, set_row: dict, view, threat_views: dict) -> 
 
 
 def species_features(owned: list, snapshot_doc: dict, threat_views: dict,
-                     snapshot_id: Optional[int] = None) -> dict:
-    """{species_id: SpeciesFeature}。代表型が無い種は落とす (報告用に missing を返す)"""
+                     snapshot_id: Optional[int] = None, custom_sets: Optional[dict] = None,
+                     required_moves: Optional[dict] = None) -> dict:
+    """{species_id: SpeciesFeature}。基本の型 = 指定の型 (custom_sets) があればそれ、無ければ代表型。
+    必須技 (required_moves) は差し込んでから評価する。型が無い種は落とす (報告用に missing を返す)"""
     from tools.team_build.interaction import _mega_stone_ids
+    from tools.team_build.sets import base_set, default_category_of, default_setup_moves
     stones = _mega_stone_ids()
     by_id = {t["id"]: t for t in snapshot_doc.get("top", [])}
     feats, missing = {}, []
+    custom_sets, required_moves = custom_sets or {}, required_moves or {}
+    cat = default_category_of() if required_moves else None
+    setup = default_setup_moves() if required_moves else ()
     with db.get_connection() as conn:
         sid_snap = snapshot_id or snapshot_doc["snapshot"]["id"]
         for sid in owned:
-            rep = representative_set(conn, sid_snap, sid)
+            rep = base_set(conn, sid_snap, sid, custom_sets.get(sid), required_moves.get(sid), cat, setup)
             if rep is None:
                 missing.append(sid)
                 continue
