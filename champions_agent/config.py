@@ -391,10 +391,39 @@ BUILD_GEN_ARCHETYPES = {
     "fast_special":   {"evs": "2/0/0/32/0/32", "natures": ("timid", "modest"), "items": ("focussash", "lifeorb", "choicescarf")},
     "bulky_physical": {"evs": "32/32/0/0/0/2", "natures": ("adamant",), "items": ("leftovers", "sitrusberry", "lumberry")},
     "bulky_special":  {"evs": "32/0/0/32/0/2", "natures": ("modest",), "items": ("leftovers", "sitrusberry", "lumberry")},
+    # 壁型の性格は (物理攻撃向け −SpA, 特殊攻撃向け −Atk) の順 (攻撃に使わない側を下げる。速攻型の (+Spe, +攻撃) とは意味が違う)
     "wall_physical":  {"evs": "32/0/32/0/2/0", "natures": ("impish", "bold"), "items": ("leftovers", "rockyhelmet", "sitrusberry")},
     "wall_special":   {"evs": "32/0/0/0/32/2", "natures": ("careful", "calm"), "items": ("leftovers", "sitrusberry")},
 }
 BUILD_GEN_SETUP_ITEMS = ("sitrusberry", "lumberry", "focussash")   # 積みテンプレートの持ち物 (じゃくてんほけんは M-C に無い)
+# 自分で張れるフィールド/天候 (特性は常時、技は型にその技があるとき) を技選択のダメージ計算に入れる (2026-09-11)。
+# 標準の補正 (フィールド 1.3 倍、晴れ/雨の 1.5 倍) は advisor.damage が持つ。技固有の補正はここで掛ける
+BUILD_GEN_FIELD_SOURCES = {
+    "abilities": {"psychicsurge": ("terrain", "psychic"), "electricsurge": ("terrain", "electric"),
+                  "grassysurge": ("terrain", "grassy"), "mistysurge": ("terrain", "misty"),
+                  "drought": ("weather", "sun"), "drizzle": ("weather", "rain"), "sandstream": ("weather", "sandstorm"),
+                  "snowwarning": ("weather", "snow")},
+    "moves": {"psychicterrain": ("terrain", "psychic"), "electricterrain": ("terrain", "electric"),
+              "grassyterrain": ("terrain", "grassy"), "mistyterrain": ("terrain", "misty"),
+              "sunnyday": ("weather", "sun"), "raindance": ("weather", "rain"), "sandstorm": ("weather", "sandstorm"),
+              "snowscape": ("weather", "snow")},
+}
+# 技固有の補正: 技 → (種別, 条件, 倍率, 接地が必要な側 user/target/none)。条件 "any" はその種別が何か張られていれば。
+# 倍率 1.0 の技 (ソーラービーム) は「条件下では BUILD_GEN_AVOID_MOVES の除外を解く」ためだけに載せる (晴れなら 1 ターン技)
+BUILD_GEN_FIELD_MOVE_BOOSTS = {
+    "expandingforce": ("terrain", "psychic", 1.5, "user"), "risingvoltage": ("terrain", "electric", 2.0, "target"),
+    "mistyexplosion": ("terrain", "misty", 1.5, "user"), "terrainpulse": ("terrain", "any", 2.0, "user"),
+    "weatherball": ("weather", "any", 2.0, "none"), "solarbeam": ("weather", "sun", 1.0, "none"),
+    "solarblade": ("weather", "sun", 1.0, "none"),
+}
+BUILD_GEN_FIELD_MOVE_TYPES = {   # 条件下でタイプが変わる技: 技 → {フィールド/天候 id: タイプ}
+    "weatherball": {"sun": "Fire", "rain": "Water", "sandstorm": "Rock", "snow": "Ice"},
+    "terrainpulse": {"electric": "Electric", "grassy": "Grass", "psychic": "Psychic", "misty": "Fairy"},
+}
+BUILD_GEN_FIELD_TYPE_BOOSTS = {   # 標準の補正 (刈り込みの採点用。ダメージ計算では advisor.damage が同じ補正を掛ける)
+    "terrain": {"psychic": {"Psychic": 1.3}, "electric": {"Electric": 1.3}, "grassy": {"Grass": 1.3}},
+    "weather": {"sun": {"Fire": 1.5, "Water": 0.5}, "rain": {"Water": 1.5, "Fire": 0.5}},
+}
 BUILD_GEN_FAST_SPEED_SHARE = 0.6    # 上位脅威への先手率 (+Spe 性格・振り切り) がこれ以上なら速攻型
 BUILD_GEN_WALL_OFFENSE_MAX = 90     # 使う側の攻撃種族値がこれ以下なら壁型 (攻撃技 2 本のテンプレートを優先)
 BUILD_GEN_SPEED_GAIN_MIN = 1.0      # +Spe 性格で上を取れる脅威 (重みの和) がこれ以上増えれば +Spe 性格

@@ -5,6 +5,8 @@
   段 2  テンプレート (config BUILD_GEN_TEMPLATES) で組み立て: 攻撃技は想定する相手 (脅威の重み) への被覆の増分で貪欲に選ぶ、
         補助技は役割ごとに 1 本。持ち物/性格/配分は役割の定型 (config) から、性格は +Spe で上を取れる相手が増えるかで決める
   段 3  既存の採点 (被覆 + 使用率の事前分布 + 常識フィルタ + validate-team) に合流 (sets.enumerate_sets)
+フィールド/天候 (2026-09-11): 自分で張れるもの (特性は常時、フィールド技はその技が型に入るテンプレートだけ) の威力補正を
+  段 1 の採点と段 2 の与ダメージ表の両方に入れる (config BUILD_GEN_FIELD_*)。相手側やチームの設置役のフィールドは見ない。
 純粋関数は move_info / damage_fn などを引数で受け取り、図鑑・learnset の読み出しは generate_for_species が行う。
 """
 from __future__ import annotations
@@ -14,12 +16,86 @@ from typing import Callable, Optional
 
 from champions_agent.config import (BUILD_GEN_ABILITY_PRIORITY, BUILD_GEN_ARCHETYPES, BUILD_GEN_ATTACKS_PER_TYPE,
                                     BUILD_GEN_AVOID_MOVES, BUILD_GEN_CATEGORY_TOLERANCE, BUILD_GEN_FAST_SPEED_SHARE,
-                                    BUILD_GEN_MAX_ATTACKS, BUILD_GEN_MAX_SETS, BUILD_GEN_SETUP_ITEMS,
-                                    BUILD_GEN_SPEED_GAIN_MIN, BUILD_GEN_TEMPLATES, BUILD_GEN_UTILITY_MOVES,
-                                    BUILD_GEN_WALL_OFFENSE_MAX)
+                                    BUILD_GEN_FIELD_MOVE_BOOSTS, BUILD_GEN_FIELD_MOVE_TYPES, BUILD_GEN_FIELD_SOURCES,
+                                    BUILD_GEN_FIELD_TYPE_BOOSTS, BUILD_GEN_MAX_ATTACKS, BUILD_GEN_MAX_SETS,
+                                    BUILD_GEN_SETUP_ITEMS, BUILD_GEN_SPEED_GAIN_MIN, BUILD_GEN_TEMPLATES,
+                                    BUILD_GEN_UTILITY_MOVES, BUILD_GEN_WALL_OFFENSE_MAX)
 from tools.team_build.sets import SetCandidate
 
 STAB_MULT = 1.5
+NO_FIELD = {"terrain": None, "weather": None}
+
+
+# ------------------------------------------------------------------ フィールド/天候 (自分で張れるもの) の補正。純粋
+def own_field(ability: Optional[str], moves, sources=BUILD_GEN_FIELD_SOURCES) -> dict:
+    """自分で張れるフィールド/天候: 特性は常時、技はその技が型にあるとき (先に載っている技が優先)。
+    {"terrain": id or None, "weather": id or None}"""
+    out = dict(NO_FIELD)
+    kind_val = sources["abilities"].get(ability or "")
+    if kind_val:
+        out[kind_val[0]] = kind_val[1]
+    for m in moves or []:
+        kind_val = sources["moves"].get(m)
+        if kind_val and out[kind_val[0]] is None:
+            out[kind_val[0]] = kind_val[1]
+    return out
+
+
+def field_key(field: Optional[dict]) -> tuple:
+    return ((field or {}).get("terrain"), (field or {}).get("weather"))
+
+
+def field_move_boost(move: str, field: Optional[dict], user_grounded: bool = True, target_grounded: bool = True,
+                     boosts=BUILD_GEN_FIELD_MOVE_BOOSTS) -> Optional[float]:
+    """技固有のフィールド/天候補正が発動する条件なら倍率 (ワイドフォース 1.5、ライジングボルト 2.0 …)、しなければ None。
+    倍率 1.0 でも None でなければ「条件下で使える技」(ソーラービームの除外解除に使う)"""
+    spec = boosts.get(move)
+    if not spec:
+        return None
+    kind, cond, mult, who = spec
+    cur = (field or {}).get(kind)
+    if not cur or not (cond == "any" or cond == cur):
+        return None
+    if (who == "user" and not user_grounded) or (who == "target" and not target_grounded):
+        return None
+    return float(mult)
+
+
+def field_move_type(move: str, move_type: str, field: Optional[dict], types=BUILD_GEN_FIELD_MOVE_TYPES) -> str:
+    """条件下でタイプが変わる技 (ウェザーボール/ダイチノハドウ) の実際のタイプ。変わらなければ move_type"""
+    table = types.get(move)
+    if not table:
+        return move_type
+    for kind in ("terrain", "weather"):
+        cur = (field or {}).get(kind)
+        if cur and cur in table:
+            return table[cur]
+    return move_type
+
+
+def standard_field_mult(move_type: str, field: Optional[dict], grounded: bool = True,
+                        table=BUILD_GEN_FIELD_TYPE_BOOSTS) -> float:
+    """標準のフィールド/天候補正 (フィールドは接地した使用者だけ)。刈り込みの採点用"""
+    mult = 1.0
+    t = (field or {}).get("terrain")
+    w = (field or {}).get("weather")
+    if grounded and t:
+        mult *= float(table["terrain"].get(t, {}).get(move_type, 1.0))
+    if w:
+        mult *= float(table["weather"].get(w, {}).get(move_type, 1.0))
+    return mult
+
+
+def preferred_field_moves(field_moves, types, sources=BUILD_GEN_FIELD_SOURCES,
+                          table=BUILD_GEN_FIELD_TYPE_BOOSTS) -> list:
+    """フィールド役割の技の順: 自分のタイプの技を強化するフィールド/天候を張る技を先に (元の順は保つ)"""
+    def boosts_own(m: str) -> bool:
+        kind_val = sources["moves"].get(m)
+        if not kind_val:
+            return False
+        kind, val = kind_val
+        return any(float(table[kind].get(val, {}).get(t, 1.0)) > 1.0 for t in types)
+    return sorted(field_moves, key=lambda m: 0 if boosts_own(m) else 1)
 
 
 @dataclass(frozen=True)
@@ -32,16 +108,22 @@ class Attack:
 
 def prune_moves(learnset, move_info: Callable, base_stats: dict, types, roles: dict,
                 avoid=BUILD_GEN_AVOID_MOVES, per_type: int = BUILD_GEN_ATTACKS_PER_TYPE,
-                tolerance: float = BUILD_GEN_CATEGORY_TOLERANCE, max_attacks: int = BUILD_GEN_MAX_ATTACKS) -> dict:
+                tolerance: float = BUILD_GEN_CATEGORY_TOLERANCE, max_attacks: int = BUILD_GEN_MAX_ATTACKS,
+                field: Optional[dict] = None, grounded: bool = True) -> dict:
     """learnset → {"attacks": [Attack (score 降順)], "utility": {role: [move]}}。
-    move_info(m) → {"type", "category", "power", "accuracy", "priority"} か None。roles: {role: iterable of move ids}"""
+    move_info(m) → {"type", "category", "power", "accuracy", "priority"} か None。roles: {role: iterable of move ids}。
+    field (自分で張れるフィールド/天候) があれば、その補正込みの採点でもタイプ × 分類ごとの上位を残す
+    (ワイドフォースはサイコフィールド下でサイコキネシスを上回る、等)。フィールド無しの上位と両方残す"""
     atk, spa = int(base_stats.get("atk") or 0), int(base_stats.get("spa") or 0)
     hi, lo = max(atk, spa), min(atk, spa)
     both = hi > 0 and lo / hi >= tolerance
     main_cat = "physical" if atk >= spa else "special"
     attacks: list = []
+    boosted: list = []
+    has_field = bool(field and (field.get("terrain") or field.get("weather")))
     for m in sorted(learnset):
-        if m in avoid:
+        boost = field_move_boost(m, field, grounded) if has_field else None
+        if m in avoid and boost is None:
             continue
         mi = move_info(m)
         if not mi:
@@ -54,20 +136,38 @@ def prune_moves(learnset, move_info: Callable, base_stats: dict, types, roles: d
             continue
         acc = float(mi.get("accuracy") or 0)
         acc_f = (acc / 100.0) if acc else 1.0
-        stab = STAB_MULT if mi.get("type") in tuple(types or ()) else 1.0
+        mtype = str(mi.get("type") or "")
         fit = 1.0 if cat == main_cat else (lo / hi if hi else 0.0)
-        attacks.append(Attack(m, cat, str(mi.get("type") or ""), power * acc_f * stab * fit))
-    attacks.sort(key=lambda a: -a.score)
-    kept: list = []
-    seen: dict = {}
-    for a in attacks:
-        key = (a.type, a.category)
-        if seen.get(key, 0) >= per_type:
-            continue
-        seen[key] = seen.get(key, 0) + 1
-        kept.append(a)
-        if len(kept) >= max_attacks:
-            break
+        if m not in avoid:
+            stab = STAB_MULT if mtype in tuple(types or ()) else 1.0
+            attacks.append(Attack(m, cat, mtype, power * acc_f * stab * fit))
+        if has_field:
+            # 条件下の実際のタイプ (ウェザーボール等) で STAB と標準補正、技固有の補正を掛けた採点
+            etype = field_move_type(m, mtype, field)
+            stab = STAB_MULT if etype in tuple(types or ()) else 1.0
+            fm = standard_field_mult(etype, field, grounded) * (boost if boost is not None else 1.0)
+            boosted.append(Attack(m, cat, etype, power * acc_f * stab * fit * fm))
+
+    def top_per_type(cands: list) -> list:
+        cands = sorted(cands, key=lambda a: -a.score)
+        out: list = []
+        seen: dict = {}
+        for a in cands:
+            key = (a.type, a.category)
+            if seen.get(key, 0) >= per_type:
+                continue
+            seen[key] = seen.get(key, 0) + 1
+            out.append(a)
+        return out
+
+    kept = top_per_type(attacks)
+    names = {a.move for a in kept}
+    for a in top_per_type(boosted):
+        if a.move not in names:
+            kept.append(a)      # フィールド込みの採点で残った技は、その採点のまま (フィールド無しの候補と併存)
+            names.add(a.move)
+    kept.sort(key=lambda a: -a.score)
+    kept = kept[:max_attacks]
     utility = {}
     for role, moves in roles.items():
         have = [m for m in moves if m in learnset]
@@ -120,6 +220,22 @@ def choose_nature(natures, speed_plus: float, speed_neutral: float, threat_speed
     w = {t: float((weights or {}).get(t, 1.0)) for t in threat_speeds}
     gain = sum(w[t] for t, s in threat_speeds.items() if speed_plus > s >= speed_neutral)
     return natures[0] if gain >= gain_min else natures[1]
+
+
+def choose_wall_nature(natures, main_physical: bool) -> str:
+    """壁型の性格 = (物理攻撃向け −SpA, 特殊攻撃向け −Atk) の順。攻撃に使わない側を下げる"""
+    if len(natures) < 2:
+        return natures[0]
+    return natures[0] if main_physical else natures[1]
+
+
+def wall_nature_for_moves(natures, categories, main_physical: bool) -> str:
+    """壁型の性格をその型の攻撃技の分類で決める: 特殊技だけなら −Atk、物理技だけなら −SpA、
+    混合なら先頭の攻撃技 (貪欲選択で最も被覆に効いた技) の分類を残す。攻撃技が無ければ種族値の高い側"""
+    cats = [str(c).lower() for c in categories]
+    if not cats:
+        return choose_wall_nature(natures, main_physical)
+    return choose_wall_nature(natures, cats[0] == "physical")
 
 
 def choose_archetype(base_stats: dict, fast_share: float, phys_pressure: float, spec_pressure: float,
@@ -260,7 +376,7 @@ def generate_for_species(species_id: str, threat_views: dict, threat_weights: Op
     import json
     from pathlib import Path
 
-    from advisor.damage import MonView, calc_damage, effective_speed
+    from advisor.damage import FieldView, MonView, _is_grounded, calc_damage, effective_speed
     from advisor.dex import get_dex
     from advisor.ev_infer import _nature_mult
     from tools.team_build.interaction import _mega_stone_ids, _points_to_ev
@@ -295,7 +411,15 @@ def generate_for_species(species_id: str, threat_views: dict, threat_weights: Op
     def move_info(m: str):
         return dex.move(m)
 
-    pool = prune_moves(learnset, move_info, base, types, role_moves())
+    # 自分で張れるフィールド/天候: 特性 (常時) と、覚えるフィールド技 (自分のタイプを強化するものを先に)。
+    # 刈り込みは「特性 + 先頭のフィールド技」の条件込みでも上位を残す (ワイドフォース等を落とさない)
+    ability = choose_ability(abilities)
+    roles = role_moves()
+    learnable_field = preferred_field_moves([m for m in roles.get("field", ()) if m in learnset], types)
+    roles["field"] = tuple(learnable_field)
+    grounded = _is_grounded(MonView(species_id=species_id, types=types, base=base, ability=ability))
+    potential = own_field(ability, learnable_field[:1])
+    pool = prune_moves(learnset, move_info, base, types, roles, field=potential, grounded=grounded)
     if not pool["attacks"]:
         return {"sets": [], "items": [], "archetype": None}
     # 想定する相手への素早さ関係と被ダメの偏り (物理 / 特殊) で型の定型を決める
@@ -322,23 +446,47 @@ def generate_for_species(species_id: str, threat_views: dict, threat_weights: Op
     archetype = choose_archetype(base, share_plus, phys_p, spec_p)
     archetypes, setup_items = legal_item_tables()
     arch = archetypes[archetype]
-    nature = choose_nature(arch["natures"], effective_speed(view_plus), effective_speed(view_neutral), threat_speeds,
-                           weights) if len(arch["natures"]) > 1 else arch["natures"][0]
-    ability = choose_ability(abilities)
+    if archetype.startswith("wall"):
+        nature = choose_wall_nature(arch["natures"], main_phys)
+    else:
+        nature = choose_nature(arch["natures"], effective_speed(view_plus), effective_speed(view_neutral), threat_speeds,
+                               weights) if len(arch["natures"]) > 1 else arch["natures"][0]
     attacker = MonView(species_id=species_id, types=types, base=base, ev=_points_to_ev(arch["evs"]),
                        nature=_nature_mult(nature), ability=ability)
+    tables: dict = {}
 
-    def damage_fn(move: str, tid: str) -> float:
-        tv, _m = threat_views[tid]
-        return calc_damage(attacker, tv, move).get("avg", 0.0) / 100.0
+    def table_for(field: dict) -> dict:
+        """その型のフィールド/天候 (特性 + 型に入るフィールド技) 込みの与ダメージ表。フィールドごとにキャッシュ"""
+        key = field_key(field)
+        if key not in tables:
+            fv = FieldView(terrain=field.get("terrain"), weather=field.get("weather"))
+            mtypes = {a.move: str((dex.move(a.move) or {}).get("type") or "") for a in pool["attacks"]}
 
-    tbl = attack_table(pool["attacks"], list(threat_views), damage_fn)
+            def damage_fn(move: str, tid: str) -> float:
+                tv, _m = threat_views[tid]
+                boost = field_move_boost(move, field, grounded, _is_grounded(tv))
+                if move in BUILD_GEN_AVOID_MOVES and boost is None:
+                    return 0.0      # 条件 (晴れのソーラービーム等) が無ければ使わない
+                etype = field_move_type(move, mtypes.get(move, ""), field)
+                dmg = calc_damage(attacker, tv, move, fieldv=fv,
+                                  override_move_type=etype if etype != mtypes.get(move) else None)
+                return dmg.get("avg", 0.0) / 100.0 * (boost if boost is not None else 1.0)
+
+            tables[key] = attack_table(pool["attacks"], list(threat_views), damage_fn)
+        return tables[key]
 
     def pick_attacks(n: int, exclude) -> list:
+        tbl = table_for(own_field(ability, exclude))
         sub = {m: row for m, row in tbl.items() if m not in exclude}
         return greedy_attacks(sub, n, weights)
 
     sets = assemble_sets(species_id, pool, pick_attacks, archetype, nature, ability, archetypes=archetypes,
                          setup_items=setup_items, mega_stone=mega_stone)
+    if archetype.startswith("wall"):
+        # 壁型の性格は型ごとの攻撃技の分類で決め直す (特殊技だけの型に −SpA を付けない)
+        from dataclasses import replace
+        cat_of = {a.move: a.category for a in pool["attacks"]}
+        sets = [replace(s, nature=wall_nature_for_moves(arch["natures"], [cat_of[m] for m in s.moves if m in cat_of],
+                                                          main_phys)) for s in sets]
     return {"sets": sets, "items": item_options(archetype, archetypes, setup_items), "archetype": archetype,
             "mega": mega_sid}

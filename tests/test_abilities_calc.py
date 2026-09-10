@@ -65,8 +65,28 @@ def test_defensive_abilities():
     print("test_defensive_abilities OK")
 
 
+def test_override_move_type():
+    """条件でタイプが変わる技 (ウェザーボール/ダイチノハドウ): 指定タイプで相性・STAB・フィールド/天候の補正を計算する"""
+    peli = _view("pelipper", ability="drizzle")
+    hippo = _view("hippowdon")           # じめん: みず 2 倍、ノーマル 1 倍
+    normal = calc_damage(peli, hippo, "weatherball", FieldView(weather="rain"))
+    water = calc_damage(peli, hippo, "weatherball", FieldView(weather="rain"), override_move_type="Water")
+    # みず: 相性 2 倍 × STAB 1.5 × 雨 1.5 = 4.5 倍 (乱数と切り捨てで少しずれる)
+    assert water["type_mult"] == 2.0 and normal["type_mult"] == 1.0
+    assert 4.0 < water["avg"] / normal["avg"] < 5.0, (normal["avg"], water["avg"])
+    # ダイチノハドウをサイコフィールド下のエスパータイプとして計算: 接地した使用者ならフィールドの 1.3 倍が乗る
+    ind = _view("indeedee", ability="psychicsurge")     # エスパー/ノーマル: どちらのタイプでも STAB
+    chomp = _view("garchomp")                           # ドラゴン/じめん: エスパーもノーマルも 1 倍
+    plain = calc_damage(ind, chomp, "terrainpulse")
+    psy = calc_damage(ind, chomp, "terrainpulse", FieldView(terrain="psychic"), override_move_type="Psychic")
+    assert 1.2 < psy["avg"] / plain["avg"] < 1.4, (plain["avg"], psy["avg"])
+    assert calc_damage(ind, chomp, "terrainpulse", FieldView(terrain="psychic"))["avg"] == plain["avg"]   # 指定なしはノーマルのまま
+    print("test_override_move_type OK")
+
+
 if __name__ == "__main__":
     test_weather_speed_abilities()
     test_pinch_and_type_boost()
     test_defensive_abilities()
+    test_override_move_type()
     print("ALL OK")

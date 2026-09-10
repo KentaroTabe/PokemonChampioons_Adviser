@@ -146,11 +146,14 @@ IMMUNITY_ABILITIES = {
 
 def calc_damage(attacker: MonView, defender: MonView, move_id: str,
                 fieldv: Optional[FieldView] = None,
-                override_type_mult: Optional[float] = None) -> dict:
+                override_type_mult: Optional[float] = None,
+                override_move_type: Optional[str] = None) -> dict:
     """ダメージを計算して割合 (%表記) で返す。
 
     戻り値: {"min": %, "max": %, "avg": %, "type_mult": x, "category": ...,
              "notes": [...]}  計算不能 (変化技等) なら {"min":0,...}
+    override_move_type: 条件でタイプが変わる技 (ウェザーボール/ダイチノハドウ) の実際のタイプ。
+    相性・STAB・フィールド/天候の補正すべてにこのタイプを使う
     """
     dex = get_dex()
     move = dex.move(move_id)
@@ -161,7 +164,7 @@ def calc_damage(attacker: MonView, defender: MonView, move_id: str,
         return {"min": 0.0, "max": 0.0, "avg": 0.0, "type_mult": 1.0,
                 "category": move["category"] if move else "Status", "notes": []}
 
-    mtype = move["type"]
+    mtype = override_move_type or move["type"]
     power = float(move["power"])
     category = move["category"]
 

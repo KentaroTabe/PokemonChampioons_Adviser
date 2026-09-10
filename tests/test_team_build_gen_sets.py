@@ -22,11 +22,107 @@ MOVES = {
     "willowisp": {"type": "Fire", "category": "Status", "power": 0, "accuracy": 85},
     "psychicterrain": {"type": "Psychic", "category": "Status", "power": 0, "accuracy": 0},
     "uturn": {"type": "Bug", "category": "Physical", "power": 70, "accuracy": 100},
+    "expandingforce": {"type": "Psychic", "category": "Special", "power": 80, "accuracy": 100},
+    "solarbeam": {"type": "Grass", "category": "Special", "power": 120, "accuracy": 100},
+    "weatherball": {"type": "Normal", "category": "Special", "power": 50, "accuracy": 100},
+    "sunnyday": {"type": "Fire", "category": "Status", "power": 0, "accuracy": 0},
 }
 ROLES = {"setup": ("nastyplot", "calmmind"), "protect": ("protect",), "status": ("willowisp",),
          "field": ("psychicterrain",), "pivot": ("uturn",), "priority": ("shadowsneak",), "hazard": ("stealthrock",),
          "heal": ("recover",), "screens": ("reflect",)}
 DELPHOX = {"hp": 75, "atk": 69, "def": 72, "spa": 114, "spd": 100, "spe": 104}
+PSY = {"terrain": "psychic", "weather": None}
+SUN = {"terrain": None, "weather": "sun"}
+
+
+def test_field_helpers():
+    """自分で張れるフィールド/天候と、技固有の補正・タイプ変化・標準補正 (純粋)"""
+    assert G.own_field("psychicsurge", []) == PSY
+    assert G.own_field("drought", ["psychicterrain"]) == {"terrain": "psychic", "weather": "sun"}
+    assert G.own_field(None, ["sunnyday", "raindance"]) == SUN     # 先に載っている技が優先
+    assert G.own_field("blaze", ["protect"]) == G.NO_FIELD and G.field_key(PSY) == ("psychic", None)
+    # 技固有の補正: 使用者/相手の接地条件、条件外は None、倍率 1.0 (ソーラービーム) は「条件下で使える」印
+    assert G.field_move_boost("expandingforce", PSY) == 1.5
+    assert G.field_move_boost("expandingforce", PSY, user_grounded=False) is None
+    ele = {"terrain": "electric", "weather": None}
+    assert G.field_move_boost("risingvoltage", ele) == 2.0 and G.field_move_boost("risingvoltage", ele, target_grounded=False) is None
+    assert G.field_move_boost("terrainpulse", PSY) == 2.0 and G.field_move_boost("terrainpulse", G.NO_FIELD) is None
+    assert G.field_move_boost("solarbeam", SUN) == 1.0 and G.field_move_boost("solarbeam", {"terrain": None, "weather": "rain"}) is None
+    assert G.field_move_boost("psychic", PSY) is None
+    # タイプ変化
+    assert G.field_move_type("weatherball", "Normal", {"terrain": None, "weather": "rain"}) == "Water"
+    assert G.field_move_type("weatherball", "Normal", {"terrain": "psychic", "weather": "rain"}) == "Water"
+    assert G.field_move_type("terrainpulse", "Normal", PSY) == "Psychic"
+    assert G.field_move_type("terrainpulse", "Normal", G.NO_FIELD) == "Normal" and G.field_move_type("psychic", "Psychic", PSY) == "Psychic"
+    # 標準の補正 (フィールドは接地した使用者だけ、天候はタイプで増減)
+    assert abs(G.standard_field_mult("Psychic", PSY) - 1.3) < 1e-9 and G.standard_field_mult("Psychic", PSY, grounded=False) == 1.0
+    assert abs(G.standard_field_mult("Fire", SUN) - 1.5) < 1e-9 and abs(G.standard_field_mult("Water", SUN) - 0.5) < 1e-9
+    assert G.standard_field_mult("Fire", PSY) == 1.0 and G.standard_field_mult("Fire", None) == 1.0
+    # フィールド技の順: 自分のタイプを強化するものを先に (元の順は保つ)
+    assert G.preferred_field_moves(["psychicterrain", "sunnyday", "trickroom"], ("Fire",)) == ["sunnyday", "psychicterrain", "trickroom"]
+    assert G.preferred_field_moves(["psychicterrain", "sunnyday"], ("Normal",)) == ["psychicterrain", "sunnyday"]
+    assert G.choose_wall_nature(("impish", "bold"), main_physical=False) == "bold"
+    assert G.choose_wall_nature(("impish", "bold"), main_physical=True) == "impish" and G.choose_wall_nature(("calm",), False) == "calm"
+    # 型ごとの攻撃技の分類で決め直す: 特殊技だけ → −Atk、物理技だけ → −SpA、混合 → 先頭 (最も効いた技) の分類を残す
+    assert G.wall_nature_for_moves(("careful", "calm"), ["special", "special"], main_physical=True) == "calm"
+    assert G.wall_nature_for_moves(("careful", "calm"), ["physical"], main_physical=False) == "careful"
+    assert G.wall_nature_for_moves(("careful", "calm"), ["special", "physical"], main_physical=True) == "calm"
+    assert G.wall_nature_for_moves(("careful", "calm"), ["physical", "special"], main_physical=False) == "careful"
+    assert G.wall_nature_for_moves(("careful", "calm"), [], main_physical=True) == "careful"
+    print("test_field_helpers OK")
+
+
+def test_prune_moves_with_field():
+    """自分で張れるフィールド/天候込みの採点でも上位を残す (ワイドフォース/ソーラービーム/ウェザーボール)"""
+    plain = [a.move for a in G.prune_moves(set(MOVES), MOVES.get, DELPHOX, ("Fire", "Psychic"), ROLES)["attacks"]]
+    # フィールド無し: ワイドフォース (120) はサイコキネシス (135) に負けて落ちる、ソーラービームは除外技。
+    # ウェザーボールはノーマル特殊の唯一の技なので (弱くても) 残る
+    assert "psychic" in plain and "expandingforce" not in plain and "solarbeam" not in plain and "weatherball" in plain
+    # サイコフィールド: ワイドフォース 80×1.5(STAB)×1.3×1.5 = 234 > サイコキネシス 90×1.5×1.3 = 175.5 → 両方残る
+    pool = G.prune_moves(set(MOVES), MOVES.get, DELPHOX, ("Fire", "Psychic"), ROLES, field=PSY)
+    moves = [a.move for a in pool["attacks"]]
+    assert "expandingforce" in moves and "psychic" in moves
+    ef = next(a for a in pool["attacks"] if a.move == "expandingforce")
+    assert abs(ef.score - 234.0) < 1e-9 and ef.type == "Psychic"
+    # 接地していなければワイドフォースの補正もフィールドの補正も無い → 残らない
+    air = [a.move for a in G.prune_moves(set(MOVES), MOVES.get, DELPHOX, ("Fire", "Psychic"), ROLES, field=PSY, grounded=False)["attacks"]]
+    assert "expandingforce" not in air
+    # 晴れ: 除外技のソーラービームが使える (くさ 1 本目)、だいもんじも残る。ウェザーボール (晴れならほのお
+    # 50×1.5(STAB)×1.5×2 = 225 > だいもんじ 210.4) は既にプールにあり、実際のダメージは型ごとの表で天候込みに計算される
+    sun = G.prune_moves(set(MOVES), MOVES.get, DELPHOX, ("Fire", "Psychic"), ROLES, field=SUN)
+    sm = [a.move for a in sun["attacks"]]
+    assert "solarbeam" in sm and "weatherball" in sm and "fireblast" in sm and "grassknot" in sm
+    assert len(sun["attacks"]) <= 8
+    # ウェザーボールがノーマル技として残らない (他にノーマル特殊技がある) 場合は、晴れの採点 (ほのお 225) で残る
+    moves2 = dict(MOVES, hypervoice={"type": "Normal", "category": "Special", "power": 90, "accuracy": 100})
+    sun2 = G.prune_moves(set(moves2), moves2.get, DELPHOX, ("Fire", "Psychic"), ROLES, field=SUN)
+    wb = next(a for a in sun2["attacks"] if a.move == "weatherball")
+    assert wb.type == "Fire" and abs(wb.score - 225.0) < 1e-9
+    assert "weatherball" not in [a.move for a in G.prune_moves(set(moves2), moves2.get, DELPHOX, ("Fire", "Psychic"), ROLES)["attacks"]]
+    print("test_prune_moves_with_field OK")
+
+
+def test_assemble_field_dependent_pick():
+    """テンプレートにフィールド技が入るときだけ、その条件込みの表で攻撃技を選ぶ (pick_attacks は除外 = 補助技を受け取る)"""
+    pool = G.prune_moves(set(MOVES), MOVES.get, DELPHOX, ("Fire", "Psychic"), ROLES, field=PSY)
+    calls = []
+
+    def pick(n, exclude):
+        field = G.own_field("blaze", exclude)
+        calls.append(field["terrain"])
+        best = (["expandingforce", "flamethrower", "dazzlinggleam", "shadowball"] if field["terrain"] == "psychic"
+                else ["psychic", "flamethrower", "dazzlinggleam", "shadowball"])
+        return [m for m in best if m not in exclude][:n]
+
+    templates = ({"name": "attack4", "attacks": 4, "utility": ()},
+                 {"name": "attack3_field", "attacks": 3, "utility": ("field",)})
+    sets = G.assemble_sets("delphox", pool, pick, "fast_special", "timid", "blaze", templates=templates)
+    plain = next(s for s in sets if "attack4" in s.notes[0])
+    field = next(s for s in sets if "attack3_field" in s.notes[0])
+    assert "psychic" in plain.moves and "expandingforce" not in plain.moves
+    assert field.moves == ["expandingforce", "flamethrower", "dazzlinggleam", "psychicterrain"]
+    assert calls == [None, "psychic"]
+    print("test_assemble_field_dependent_pick OK")
 
 
 def test_prune_moves():
@@ -123,3 +219,6 @@ if __name__ == "__main__":
     test_prune_moves()
     test_greedy_attacks_and_shares()
     test_archetype_ability_and_assembly()
+    test_field_helpers()
+    test_prune_moves_with_field()
+    test_assemble_field_dependent_pick()
