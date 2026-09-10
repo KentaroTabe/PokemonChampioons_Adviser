@@ -217,6 +217,12 @@ BUILD_RACE_ALPHA = 0.05
 BUILD_RACE_POCOCK_Z = {1: 1.960, 2: 2.178, 3: 2.289, 4: 2.361, 5: 2.413,
                        6: 2.453, 7: 2.485, 8: 2.512, 9: 2.535, 10: 2.555}
 BUILD_RACE_DEFAULT_MAX = 2400          # 通常候補の打ち切り。重要候補は延長可
+# improved / equivalent は MIN_TERMINAL_N 戦未満では確定させない (degraded の早期脱落は残す: 誤脱落は候補 1 つの損、
+# 誤昇格は推薦の誤り)。封印 holdout は上限まで回す。勝者は S8b と S10 の両分割で Δ ≥ 0 でなければ holdout に進めない
+# (再現性の門)。2026-09-10: rule_0909 の L21 が S8b 100 戦で improved (+0.150) → 別分割の S10 で degraded (−0.043) に反転
+BUILD_RACE_MIN_TERMINAL_N = 300
+BUILD_HOLDOUT_RUN_TO_MAX = True
+BUILD_REPRO_GATE = True
 # 相手系統: 種族集合の Jaccard がこれ以上 (6体中4体共通 = 4/8) で同一系統
 BUILD_FAMILY_JACCARD = 0.5
 BUILD_SPLIT_RATIOS = {"search": 0.5, "selection": 0.3, "holdout": 0.2}
@@ -308,12 +314,27 @@ PARTY_IMPROVE_LOSS_WEIGHT = 1.0
 PARTY_IMPROVE_MEASURE_NEIGHBORS = 3
 PARTY_IMPROVE_MEASURE_PROFILE = "medium"
 BUILD_SESSION_THREAT_BOOST = 2.0
-# 構築のコンセプト規則 (tools/team_build/rules.py、hard constraint)。psychic_terrain_priority_ace のエース判定:
-# 接地していて 素早さ種族値 ≥ MIN_SPE、防御種族値 ≤ MAX_DEF (先制技はほぼ物理)。メガ石を持つ型はメガ後の値で判定。
+# 構築のコンセプト規則 (tools/team_build/rules.py、hard constraint)。psychic_terrain_priority_ace のエース = 接地していて
+# 次のいずれかの型 (2026-09-10 改訂。閾値はより良い値が見つかれば変更してよい: ユーザー合意)。
+#   速攻型: 上位脅威への先手率 (S3 の役割 speed、加速前) ≥ FAST_SPEED_SHARE かつ 防御種族値 (メガ後) ≤ FAST_MAX_DEF
+#   自己加速型: かそく/かるわざ/加速技を持ち、加速後の先手率 (speed_boost) ≥ BOOST_SPEED_SHARE かつ 1 発耐える耐久 (bulk) ≥ BOOST_MIN_BULK
+#   トリックルーム型: 先手率 ≤ TR_SPEED_SHARE で、同じ 6 体に TR 使い (代表型に TRICK_ROOM_MOVES) がいる
 # 規則から作る軸 (設置役 × エース) は使用率の和の上位 MAX_CORES 対まで
-BUILD_RULE_ACE_MIN_SPE = 100
-BUILD_RULE_ACE_MAX_DEF = 70
+BUILD_RULE_ACE_FAST_SPEED_SHARE = 0.75
+BUILD_RULE_ACE_FAST_MAX_DEF = 75
+BUILD_RULE_ACE_BOOST_SPEED_SHARE = 0.8
+BUILD_RULE_ACE_BOOST_MIN_BULK = 0.25
+BUILD_RULE_ACE_TR_SPEED_SHARE = 0.3
+BUILD_TRICK_ROOM_MOVES = ("trickroom",)
 BUILD_RULE_MAX_CORES = 24
+# 並びの採点 (S5): 穴の罰則 = 最も薄い脅威の不足分 (HOLE_THRESHOLD − 最良被覆)+ × 脅威の重み (最大を 1 に正規化) × HOLE_WEIGHT。
+# 30 脅威の平均に薄まる 1 体の穴 (rule_0909 のカイリュー 0.18) を候補間の差と同じ桁で罰する
+BUILD_LINEUP_HOLE_THRESHOLD = 0.4
+BUILD_LINEUP_HOLE_WEIGHT = 0.5
+# 規則の対 (設置役, エース) の相補性: 共通の苦手 (両方 < HOLE_THRESHOLD) を他の 4 体が PAIR_COVER 以上で見ている割合。
+# 見ていない割合 × PAIR_WEIGHT を並びの点から引く (記事にも 共通の苦手 / 見ている個体 / 未対策 を書く)
+BUILD_RULE_PAIR_COVER = 0.6
+BUILD_RULE_PAIR_WEIGHT = 0.5
 # 型ライブラリ (S6): 代替 (持ち物/技/配分の単独入替) は被覆スコアから「代表型との使用率差 (0..1) × USAGE_WEIGHT」を
 # 引いた値で代表型と比べる (使用率の事前分布。珍しい持ち物が被覆の差だけで採られるのを防ぐ。2026-09-10 レビュー対応)
 BUILD_SET_USAGE_WEIGHT = 0.3

@@ -18,7 +18,7 @@ import math
 from dataclasses import dataclass, field, replace
 from typing import Optional
 
-from advisor.damage import MonView, FieldView, calc_damage
+from advisor.damage import MonView, FieldView, _is_grounded, calc_damage
 from advisor.dex import get_dex
 
 ROLL_GROUPS = ((0.25, "min"), (0.5, "avg"), (0.25, "max"))
@@ -209,6 +209,8 @@ def simulate_turn(me: SimSide, opp: SimSide, my_act: Action, opp_act: Action,
 
     protected = {"me": False, "opp": False}
     moved: set = set()
+    fieldv = my_field or opp_field
+    psychic_terrain = bool(fieldv and fieldv.terrain == "psychic")
     for who, move_id, _pri, _spe in movers:
         atk_side, def_side = ("me", "opp") if who == "me" else ("opp", "me")
         atk = me if who == "me" else opp
@@ -216,6 +218,11 @@ def simulate_turn(me: SimSide, opp: SimSide, my_act: Action, opp_act: Action,
         if atk.active_hp <= 0:
             continue
         moved.add(who)
+
+        # サイコフィールド: 接地している相手を対象にした優先度 > 0 の技は不発 (自分対象の積み/回復/まもるは通る)
+        if psychic_terrain and _pri > 0 and move_id not in PROTECT_MOVES and move_id not in HEAL_MOVES \
+                and move_id not in SETUP_MOVES and _is_grounded(dfn.active):
+            continue
 
         # ふいうち系: 相手が攻撃技を選んでいて未行動の場合のみ成功する
         if move_id in SUCKER_MOVES:

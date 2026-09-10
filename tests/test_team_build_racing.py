@@ -48,6 +48,31 @@ def test_race_eliminates_and_terminates():
     print("test_race_eliminates_and_terminates OK")
 
 
+def test_min_terminal_n_and_run_to_max():
+    """improved は min_terminal_n 戦未満では確定させず測り続ける。run_to_max は状態によらず上限まで"""
+    rng = random.Random(11)
+    rates = {"ref": 0.50, "good": 0.75, "bad": 0.30}
+    R.measure_round = _stub_measure(rates, rng)
+    with tempfile.TemporaryDirectory() as d:
+        cands = [R.Arm(a, Path(f"{a}.txt")) for a in ("good", "bad")]
+        ref = R.Arm("ref", Path("ref.txt"))
+        res = R.race(cands, ref, Path("split.json"), "search", 1, Path(d), stage="t1",
+                     steps=(100, 300, 600), max_battles=600, log=lambda m: None, min_terminal_n=300)
+        st = {a["arm_id"]: a for a in res["arms"]}
+        assert st["good"]["state"] == IMPROVED and st["good"]["n_done"] >= 300, st["good"]   # 100 戦では確定しない
+        assert st["bad"]["state"] == DEGRADED and st["bad"]["n_done"] == 100                  # 脱落は早期のまま
+        assert res["min_terminal_n"] == 300 and res["run_to_max"] is False
+        res2 = R.race([R.Arm("good", Path("good.txt"))], R.Arm("ref", Path("ref.txt")), Path("split.json"), "holdout",
+                      2, Path(d), stage="t2", steps=(100, 300, 600), max_battles=600, log=lambda m: None,
+                      compare_to_best=False, run_to_max=True)
+        assert res2["arms"][0]["n_done"] == 600 and res2["arms"][0]["state"] == IMPROVED
+        res3 = R.race([R.Arm("good", Path("good.txt"))], R.Arm("ref", Path("ref.txt")), Path("split.json"), "search",
+                      3, Path(d), stage="t3", steps=(100, 300, 600), max_battles=600, log=lambda m: None,
+                      min_terminal_n=0)
+        assert res3["arms"][0]["n_done"] == 100                                                # 従来: 1 段目で確定
+    print("test_min_terminal_n_and_run_to_max OK")
+
+
 def test_measure_cmd_flags():
     arm = R.Arm("c1", Path("t.txt"), selection_model="m.pt", models_dir="pin", extra_args=["--action-noise", "0.1"])
     cmd = R.measure_cmd(arm, 100, 300, 5, Path("split.json"), "search", 1, Path("o.json"), Path("b.jsonl"))
@@ -117,6 +142,7 @@ def test_race_uses_look_adjusted_z():
 
 if __name__ == "__main__":
     test_race_eliminates_and_terminates()
+    test_min_terminal_n_and_run_to_max()
     test_measure_cmd_flags()
     test_measure_round_reuses_measured_json()
     test_look_z_widens_with_looks()

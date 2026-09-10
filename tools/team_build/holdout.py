@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from champions_agent.config import BUILD_EQUIV_EPS, BUILD_RACE_DEFAULT_MAX, BUILD_RACE_STEPS
+from champions_agent.config import BUILD_EQUIV_EPS, BUILD_HOLDOUT_RUN_TO_MAX, BUILD_RACE_DEFAULT_MAX, BUILD_RACE_STEPS
 from tools.team_build import racing as R
 from tools.team_build.verdict import DEGRADED, EQUIVALENT, IMPROVED, UNCERTAIN
 
@@ -40,9 +40,10 @@ def final_holdout(candidate: R.Arm, reference: R.Arm, split_file: Path, sealed_i
             "修正→再評価は holdout ではない。次 run は新しい封印を使うこと")
     sealed_dir = run_dir / "sealed" / f"holdout_{sealed_id}"
     sealed_dir.mkdir(parents=True, exist_ok=True)
+    # 封印 holdout は 1 段目の improved で止めず上限まで回す (BUILD_HOLDOUT_RUN_TO_MAX、2026-09-10)
     res = R.race([candidate], reference, split_file, "holdout", seed, sealed_dir, stage="s12_holdout",
                  steps=steps, max_battles=max_battles, eps=eps, parallel=parallel, log=lambda m: None,
-                 compare_to_best=False)
+                 compare_to_best=False, run_to_max=BUILD_HOLDOUT_RUN_TO_MAX)
     arm = res["arms"][0]
     r = arm.get("result") or {}
     verdict = STATE_TO_VERDICT.get(arm.get("state"), "INCONCLUSIVE")

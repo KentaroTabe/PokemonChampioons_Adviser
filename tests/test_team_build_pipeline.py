@@ -156,7 +156,16 @@ def test_surrogate_quality_metrics():
     print("test_surrogate_quality_metrics OK")
 
 
+def test_repro_gate():
+    """再現性の門: S8b と S10 の両分割で Δ ≥ 0 のときだけ holdout に進める。欠損は不可"""
+    assert P.repro_gate_ok(0.093, 0.078) and P.repro_gate_ok(0.0, 0.0)
+    assert not P.repro_gate_ok(0.150, -0.043)          # rule_0909 の L21: S8b improved → S10 degraded
+    assert not P.repro_gate_ok(-0.01, 0.05) and not P.repro_gate_ok(None, 0.05) and not P.repro_gate_ok(0.05, None)
+    print("test_repro_gate OK")
+
+
 if __name__ == "__main__":
+    test_repro_gate()
     test_select_survivors_orders_and_caps()
     test_choose_variants_picks_best_non_degraded()
     test_choose_variants_team_x_pickvariant_and_survivors()

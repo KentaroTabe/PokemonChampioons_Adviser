@@ -11,6 +11,8 @@ import itertools
 from dataclasses import dataclass, field
 from typing import Optional
 
+from champions_agent.config import BUILD_LINEUP_HOLE_THRESHOLD, BUILD_LINEUP_HOLE_WEIGHT
+
 ROLE_KEYS = ("hazard", "removal", "priority", "setup", "status", "speed", "pivot", "bulk")
 DEFAULT_ROLE_WEIGHTS = {"hazard": 0.6, "priority": 0.5, "speed": 0.5, "setup": 0.3,
                         "status": 0.2, "removal": 0.2, "pivot": 0.3, "bulk": 0.3}
@@ -109,17 +111,34 @@ def redundancy(members: tuple, feats: dict) -> float:
     return dup / max(1, len(members)) + (0.5 * max(0, megas - 1))
 
 
+def worst_hole(members: tuple, feats: dict, threats: list, weights: Optional[dict] = None,
+               threshold: float = BUILD_LINEUP_HOLE_THRESHOLD) -> float:
+    """穴の大きさ: 脅威ごとの (threshold − 最良被覆)+ に脅威の重み (最大を 1 に正規化) を掛けた最大値。
+    平均に薄まる 1 体の穴 (例: カイリューに対して 6 体とも 0.18) を候補間の差と同じ桁で罰するための項"""
+    if not threats:
+        return 0.0
+    w = weights or {}
+    wmax = max((float(w.get(t, 1.0)) for t in threats), default=1.0) or 1.0
+    worst = 0.0
+    for t in threats:
+        best = max((feats[m].coverage.get(t, 0.0) for m in members if m in feats), default=0.0)
+        worst = max(worst, max(0.0, threshold - best) * float(w.get(t, 1.0)) / wmax)
+    return worst
+
+
 def lineup_score(members: tuple, feats: dict, threats: list, style: str,
                  weights: Optional[dict] = None, threat_weights: Optional[dict] = None) -> tuple:
-    w = {"coverage": 1.0, "roles": 0.5, "synergy": 0.3, "redundancy": 0.4}
+    w = {"coverage": 1.0, "roles": 0.5, "synergy": 0.3, "redundancy": 0.4, "hole": BUILD_LINEUP_HOLE_WEIGHT}
     if weights:
         w.update(weights)
     parts = {"coverage": team_coverage(members, feats, threats, threat_weights),
              "roles": role_fulfillment(members, feats, style),
              "synergy": synergy(members, feats),
-             "redundancy": redundancy(members, feats)}
+             "redundancy": redundancy(members, feats),
+             "hole": worst_hole(members, feats, threats, threat_weights)}
     score = (w["coverage"] * parts["coverage"] + w["roles"] * parts["roles"]
-             + w["synergy"] * parts["synergy"] - w["redundancy"] * parts["redundancy"])
+             + w["synergy"] * parts["synergy"] - w["redundancy"] * parts["redundancy"]
+             - w["hole"] * parts["hole"])
     return score, parts
 
 

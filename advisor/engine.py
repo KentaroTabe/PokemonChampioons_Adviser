@@ -14,7 +14,7 @@ import os
 from typing import Optional
 
 from advisor.dex import get_dex, BOOST_MULT
-from advisor.damage import MonView, FieldView, calc_damage
+from advisor.damage import MonView, FieldView, _is_grounded, calc_damage
 from advisor.sets import get_predictor
 
 # 画面の相性ヒント -> タイプ倍率
@@ -71,6 +71,8 @@ ACT_BEFORE_KO_DISCOUNT = 0.25
 # 余剰ダメージ (突破余裕) を小さく加点して高火力側を上位に保つ
 KO_MARGIN_WEIGHT = 0.15
 KO_MARGIN_CAP = 20.0
+# サイコフィールド中に接地した相手へ撃つ先制技は不発 (2026-09-10)。技スコアはこの値に固定する
+PRIORITY_BLOCKED_SCORE = -20.0
 # 挑発の文脈加点: 相手の技プール (判明+使用率予測) に占める変化技の
 # 重み比率に比例して加点する。素点15固定では受け/起点作りの相手でも
 # 攻撃技に埋もれ、RLが78-84%で挑発を推しても順位が上がらなかった
@@ -416,11 +418,19 @@ def evaluate(state: dict, resolver=None) -> dict:
     # 相手の先制技: KO圏の先制技を持つ相手には、素早さで勝っていても
     # 「先に殴られる」前提で評価する (かげうち/ふいうち/しんそく等)
     opp_priority_threat = 0     # KO圏の先制技の最大優先度
+    # サイコフィールド: 接地している側への先制技 (優先度 > 0) は不発。相手→自分、自分→相手の両方向で見る
+    psychic_terrain = (state["field"].get("terrain") == "psychic")
+    my_grounded = _is_grounded(my_view)
+    opp_grounded = _is_grounded(opp_view) if opp_view is not None else True
     for t in threats:
         mv_t = dex.move(t["move_id"])
         pri_t = (mv_t or {}).get("priority") or 0
+        if pri_t > 0 and psychic_terrain and my_grounded:
+            continue
         if pri_t > 0 and t["dmg_max"] >= my_hp_pct * 0.95:
             opp_priority_threat = max(opp_priority_threat, pri_t)
+    if psychic_terrain and my_grounded:
+        speed_note = "サイコフィールド中: 接地している自分への先制技は不発。" + speed_note
     # 「相手の攻撃が自分より先に来る」状況 (素早さ負け or 先制技KO圏)
     threat_faces_me = threat_ko and (i_am_faster is False
                                      or opp_priority_threat > 0)
@@ -591,6 +601,11 @@ def evaluate(state: dict, resolver=None) -> dict:
                 score += min(KO_MARGIN_CAP,
                              KO_MARGIN_WEIGHT * max(0.0, exp - opp_hp_pct))
             mv_pri = mv["priority"] or 0
+            if mv_pri > 0 and psychic_terrain and opp_grounded:
+                # サイコフィールド中に接地した相手へ撃つ先制技は不発: ダメージも先手も無い
+                exp, ko_prob, mv_pri = 0.0, 0.0, 0
+                score = PRIORITY_BLOCKED_SCORE
+                reason_parts.append("サイコフィールド中は接地した相手への先制技が不発")
             # この技での実効先手: 優先度が相手のKO圏先制技を上回れば
             # 素早さ不問で先に動ける (しんそく+2 > かげうち+1 の撃ち合い等)
             strikes_first = (mv_pri > opp_priority_threat) or \

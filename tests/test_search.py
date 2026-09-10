@@ -164,8 +164,30 @@ def test_performance():
     print(f"test_performance OK: 6x6行列+2手読み {dt:.2f}s")
 
 
+def test_psychic_terrain_blocks_priority():
+    """サイコフィールド中は接地した相手への先制技が不発 (浮いている相手には当たる、非先制技は通る)"""
+    psy = FieldView(terrain="psychic")
+    me = SimSide(active=_view("grimmsnarl", ja="オーロンゲ", ev={"atk": 252}), active_hp=1.0)
+    chomp = SimSide(active=_view("garchomp", ja="ガブリアス"), active_hp=1.0)
+    _, o = simulate_turn(me, chomp, Action("move", move_id="suckerpunch"),
+                         Action("move", move_id="earthquake"), psy, psy, "avg")
+    assert o.active_hp == 1.0, "サイコフィールド中の接地相手にふいうちが当たっている"
+    _, o2 = simulate_turn(me, chomp, Action("move", move_id="suckerpunch"),
+                          Action("move", move_id="earthquake"), None, None, "avg")
+    assert o2.active_hp < 1.0, "フィールド無しではふいうちが当たるはず"
+    _, o3 = simulate_turn(me, chomp, Action("move", move_id="darkpulse"),
+                          Action("move", move_id="earthquake"), psy, psy, "avg")
+    assert o3.active_hp < 1.0, "非先制技はフィールド中でも通るはず"
+    flyer = SimSide(active=_view("dragonite", ja="カイリュー"), active_hp=1.0)
+    _, o4 = simulate_turn(me, flyer, Action("move", move_id="suckerpunch"),
+                          Action("move", move_id="earthquake"), psy, psy, "avg")
+    assert o4.active_hp < 1.0, "浮いている相手にはフィールド中でも先制技が当たるはず"
+    print("test_psychic_terrain_blocks_priority OK")
+
+
 if __name__ == "__main__":
     test_priority_mechanics()
+    test_psychic_terrain_blocks_priority()
     test_simulate_turn_faint_and_switch()
     test_clean_kill_preferred()
     test_lethal_dodge()

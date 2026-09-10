@@ -10,35 +10,86 @@ from tools.team_build.learnsets import can_learn, learnsets, parse_learnsets, re
 from tools.team_build.sets import SetCandidate
 
 RULE = RU.RULES["psychic_terrain_priority_ace"]
+TH = dict(fast_share=0.75, fast_max_def=75, boost_share=0.8, boost_min_bulk=0.25, tr_share=0.3)
 
 
-def _info(sid, spe, dfn, types=("Psychic",), ability="", item="", learn=False):
-    return RU.RuleInfo(sid, spe, dfn, tuple(types), ability, item, {"psychicterrain": learn})
+def _info(sid, spe=100, dfn=60, types=("Psychic",), ability="", item="", learn=False, speed=0.0, boost=None,
+          mult=1.0, bulk=0.0, tr=False):
+    return RU.RuleInfo(sid, spe, dfn, tuple(types), ability, item, {"psychicterrain": learn},
+                       speed_share=speed, boost_share=(speed if boost is None else boost), boost_mult=mult, bulk=bulk,
+                       has_tr=tr)
+
+
+def _infos():
+    return {
+        # 設置役
+        "espathra": _info("espathra", 105, 60, ability="speedboost", item="focussash", learn=True, speed=0.6, boost=0.95,
+                          mult=1.5, bulk=0.29),                                              # 設置役 + 自己加速型
+        "delphox": _info("delphox", 134, 72, ("Fire", "Psychic"), "blaze", "delphoxite", learn=True, speed=0.8, bulk=0.44),  # 設置役 + 速攻型 (B72)
+        "indeedee": _info("indeedee", 95, 55, ("Psychic", "Normal"), "psychicsurge", "leftovers", speed=0.5, bulk=0.3),
+        # エース候補
+        "raichu": _info("raichu", 130, 55, ("Electric",), "lightningrod", "raichunitey", speed=0.75, bulk=0.27),         # 速攻型
+        "sneasler": _info("sneasler", 120, 60, ("Fighting", "Poison"), "unburden", "whiteherb", speed=0.7, boost=1.0,
+                          mult=2.0, bulk=0.32),                                                                          # 自己加速型
+        "gyarados": _info("gyarados", 81, 109, ("Water", "Dark"), "moldbreaker", "gyaradosite", speed=0.4, boost=0.95,
+                          mult=1.5, bulk=0.6),                                                                           # 自己加速型 (りゅうのまい)
+        "hydreigon": _info("hydreigon", 98, 90, ("Dark", "Dragon"), "levitate", "choicescarf", speed=0.95, bulk=0.45),   # ふゆう → 対象外
+        "staraptor": _info("staraptor", 100, 70, ("Normal", "Flying"), "intimidate", "choicescarf", speed=0.7, bulk=0.46),  # ひこう → 対象外
+        "greninja": _info("greninja", 142, 77, ("Water", "Dark"), "protean", "greninjite", speed=0.9, bulk=0.36),        # 速いが B77 → 速攻型でない
+        "slowking": _info("slowking", 30, 80, ("Water", "Psychic"), "regenerator", "leftovers", speed=0.05, bulk=0.6, tr=True),  # TR 使い (遅い → TR 型エースでもある)
+        "kingambit": _info("kingambit", 50, 120, ("Dark", "Steel"), "supremeoverlord", "blackglasses", speed=0.05, bulk=0.57),  # TR 型
+        "airballoon_mon": _info("airballoon_mon", 120, 60, ("Fighting",), "unburden", "airballoon", speed=0.7, boost=1.0, mult=2.0, bulk=0.3),  # ふうせん
+    }
 
 
 def test_classify_setters_and_aces():
-    infos = {
-        "espathra": _info("espathra", 105, 60, ability="speedboost", item="focussash", learn=True),
-        "delphox": _info("delphox", 134, 72, ("Fire", "Psychic"), "blaze", "delphoxite", learn=True),
-        "raichu": _info("raichu", 130, 55, ("Electric",), "lightningrod", "raichunitey"),
-        "staraptor": _info("staraptor", 100, 70, ("Normal", "Flying"), "intimidate", "choicescarf"),   # 浮いている
-        "rotom": _info("rotom", 86, 107, ("Electric", "Water"), "levitate", "leftovers"),
-        "sneasler": _info("sneasler", 120, 60, ("Fighting", "Poison"), "unburden", "airballoon"),       # ふうせん
-        "indeedee": _info("indeedee", 95, 55, ("Psychic", "Normal"), "psychicsurge", "leftovers"),
-        "kingambit": _info("kingambit", 50, 120, ("Dark", "Steel"), "supremeoverlord", "blackglasses"),
-    }
-    setters, aces = RU.classify(infos, RULE, min_spe=100, max_def=70)
+    infos = _infos()
+    setters, aces, trs = RU.classify(infos, RULE, **TH)
     assert setters == {"espathra", "delphox", "indeedee"}
-    assert aces == {"espathra", "raichu"}          # delphox は防御 72、staraptor はひこう、sneasler はふうせん
-    assert RU.lineup_satisfies(("espathra", "raichu", "kingambit"), setters, aces)
-    assert not RU.lineup_satisfies(("espathra", "kingambit", "rotom"), setters, aces)      # 1 体が両方を兼ねるだけ
-    assert RU.lineup_satisfies(("espathra", "delphox", "rotom"), setters, aces)             # delphox 設置 + espathra エース
-    assert not RU.lineup_satisfies(("raichu", "kingambit"), setters, aces)
-    ctx = RU.build_context(["psychic_terrain_priority_ace"], infos)
-    assert ctx["per_rule"][0]["setters"] == RU.classify(infos, RULE)[0]
-    assert ctx["llm"][0]["aces"] == sorted(RU.classify(infos, RULE)[1]) and ctx["llm"][0]["label"] == RULE["label"]
+    assert aces == {"espathra": ["boost"], "delphox": ["fast"], "raichu": ["fast"], "sneasler": ["boost"],
+                    "gyarados": ["boost"], "slowking": ["tr"], "kingambit": ["tr"]}, aces
+    assert trs == {"slowking"}
+    # 速攻型: 防御の閾値、加速型: 加速手段が要る (hydreigon は速いが浮いている、greninja は B77)
+    assert "greninja" not in aces and "hydreigon" not in aces and "staraptor" not in aces and "airballoon_mon" not in aces
+    assert RU.ace_types(infos["greninja"], RULE, fast_max_def=80) == ["fast"]                 # 閾値を緩めれば入る
+    # 並びの判定: 設置役とエースは別個体。TR 型エースは TR 使いが同じ並びにいるとき
+    assert RU.lineup_satisfies(("espathra", "raichu", "kingambit"), setters, aces, trs)
+    assert not RU.lineup_satisfies(("espathra", "kingambit", "hydreigon"), setters, aces, trs)   # TR 使い無しの TR 型
+    assert RU.lineup_satisfies(("espathra", "kingambit", "slowking"), setters, aces, trs)         # TR 使いあり
+    assert not RU.lineup_satisfies(("delphox", "hydreigon"), setters, aces, trs)                   # 設置役 = エースの 1 体だけ
+    assert RU.lineup_satisfies(("delphox", "espathra", "hydreigon"), setters, aces, trs)           # 互いに設置役/エース
+    assert not RU.lineup_satisfies(("indeedee", "slowking"), setters, aces, trs)                   # TR 使い = TR 型エース自身
+    ctx = RU.build_context(["psychic_terrain_priority_ace"], infos, **TH)
+    assert ctx["per_rule"][0]["aces"] == aces and ctx["llm"][0]["tr_setters"] == ["slowking"]
+    assert ctx["llm"][0]["ace_types"]["sneasler"] == ["boost"] and ctx["llm"][0]["label"] == RULE["label"]
     assert RU.satisfies(("espathra", "raichu"), ctx) and not RU.satisfies(("raichu",), ctx)
+    # 既定の閾値 (config) でも同じ判定になる値域
+    assert RU.classify(infos, RULE)[0] == setters
     print("test_classify_setters_and_aces OK")
+
+
+def test_choose_pair_and_complementarity():
+    infos = _infos()
+    setters, aces, trs = RU.classify(infos, RULE, **TH)
+    # 設置役はエースでない個体を優先、エースは速攻 > 加速 > TR の順
+    assert RU.choose_pair(("delphox", "espathra", "sneasler", "raichu"), setters, aces, trs) == ("delphox", "raichu")
+    assert RU.choose_pair(("espathra", "sneasler", "kingambit"), setters, aces, trs) == ("espathra", "sneasler")
+    assert RU.choose_pair(("indeedee", "kingambit", "slowking"), setters, aces, trs) == ("indeedee", "kingambit")
+    assert RU.choose_pair(("raichu", "kingambit"), setters, aces, trs) is None
+    threats = ["t1", "t2", "t3", "t4", "t5"]
+
+    def f(sid, cov, usage=1.0, mega=False):
+        return SpeciesFeature(sid, dict(zip(threats, cov)), {}, ("Psychic",), mega, 0, usage, {})
+
+    feats = {"s": f("s", [0.9, 0.1, 0.1, 0.1, 0.7]), "a": f("a", [0.1, 0.1, 0.1, 0.9, 0.2]),
+             "x": f("x", [0.1, 0.9, 0.1, 0.1, 0.1]), "y": f("y", [0.1, 0.1, 0.5, 0.1, 0.1])}
+    comp = RU.pair_complementarity(("s", "a", "x", "y"), "s", "a", feats, threats, threshold=0.4, cover=0.6)
+    assert comp["shared_weak"] == ["t2", "t3"] and comp["covered_by"] == {"t2": "x"} and comp["uncovered"] == ["t3"]
+    assert abs(comp["score"] - 0.5) < 1e-9
+    assert comp["ace_checks"] == ["t1", "t2", "t3", "t5"] and abs(comp["setter_covers_ace_checks"] - 0.5) < 1e-9   # t1, t5
+    none = RU.pair_complementarity(("s", "a"), "s", "a", {"s": f("s", [0.9] * 5), "a": f("a", [0.1] * 5)}, threats)
+    assert none["shared_weak"] == [] and none["score"] == 1.0
+    print("test_choose_pair_and_complementarity OK")
 
 
 def test_rule_cores_and_context_cores():
@@ -50,14 +101,23 @@ def test_rule_cores_and_context_cores():
     feats = {"espathra": f("espathra", [0.9, 0.1, 0.1, 0.1], 5.0, roles={"setup": 1.0}),
              "delphox": f("delphox", [0.1, 0.9, 0.1, 0.1], 3.0, mega=True),
              "raichu": f("raichu", [0.1, 0.1, 0.9, 0.1], 8.0, mega=True, roles={"setup": 1.0}),
-             "volcarona": f("volcarona", [0.1, 0.1, 0.1, 0.9], 1.0, roles={"setup": 1.0})}
-    cores = RU.rule_cores("psychic_terrain_priority_ace", {"espathra", "delphox"},
-                          {"espathra", "raichu", "volcarona"}, feats, threats, max_cores=3)
-    assert [c["core_ids"] for c in cores] == [["espathra", "raichu"], ["delphox", "raichu"], ["delphox", "espathra"]]
-    assert cores[0]["mega_id"] == "raichu" and cores[2]["mega_id"] == "delphox"
-    assert cores[0]["win_condition"] == "setup_sweep" and cores[0]["source"] == "rule:psychic_terrain_priority_ace"
-    assert cores[0]["weak_to"][:2] == ["t2", "t4"]
-    ctx = {"per_rule": [{"name": "psychic_terrain_priority_ace", "setters": {"espathra"}, "aces": {"raichu"}}]}
+             "volcarona": f("volcarona", [0.1, 0.1, 0.1, 0.9], 1.0, roles={"setup": 1.0}),
+             "kingambit": f("kingambit", [0.1, 0.1, 0.1, 0.5], 9.0, roles={"setup": 1.0}),
+             "slowking": f("slowking", [0.3, 0.3, 0.3, 0.3], 2.0)}
+    aces = {"espathra": ["boost"], "raichu": ["fast"], "volcarona": ["boost"], "kingambit": ["tr"]}
+    cores = RU.rule_cores("psychic_terrain_priority_ace", {"espathra", "delphox"}, aces, feats, threats,
+                          tr_setters={"slowking"}, max_cores=4)
+    # 使用率の和の順: espathra+kingambit+slowking (16) > delphox+kingambit+slowking (14) > espathra+raichu (13) > delphox+raichu (11)
+    assert [c["core_ids"] for c in cores] == [["espathra", "kingambit", "slowking"], ["delphox", "kingambit", "slowking"],
+                                              ["espathra", "raichu"], ["delphox", "raichu"]], [c["core_ids"] for c in cores]
+    assert cores[0]["mega_id"] is None and cores[1]["mega_id"] == "delphox" and cores[2]["mega_id"] == "raichu"
+    assert cores[2]["win_condition"] == "setup_sweep" and cores[2]["source"] == "rule:psychic_terrain_priority_ace"
+    assert cores[2]["weak_to"][:2] == ["t2", "t4"] and cores[0]["name"].endswith("espathra+kingambit+slowking")
+    # TR 使いが居なければ TR 型だけのエースの軸は作らない
+    no_tr = RU.rule_cores("psychic_terrain_priority_ace", {"espathra", "delphox"}, aces, feats, threats, max_cores=8)
+    assert all("kingambit" not in c["core_ids"] for c in no_tr) and len(no_tr) == 5
+    ctx = {"per_rule": [{"name": "psychic_terrain_priority_ace", "setters": {"espathra"}, "aces": {"raichu": ["fast"]},
+                         "tr_setters": set()}]}
     assert [c["core_ids"] for c in RU.context_cores(ctx, feats, threats)] == [["espathra", "raichu"]]
     print("test_rule_cores_and_context_cores OK")
 
@@ -73,41 +133,40 @@ def test_ensure_setter_injects_move():
     setup = {"calmmind", "nastyplot"}
     esp = _set("espathra", "focussash", ["luminacrash", "protect", "batonpass", "calmmind"], "speedboost")
     rai = _set("raichu", "raichunitey", ["zapcannon", "focusblast", "grassknot", "nastyplot"], "lightningrod")
-    team, sid, notes = RU.ensure_setter([rai, esp], {"espathra"}, {"raichu", "espathra"}, RULE,
-                                        category_of=cat, setup_moves=setup)
+    aces = {"raichu": ["fast"], "espathra": ["boost"]}
+    team, sid, notes = RU.ensure_setter([rai, esp], {"espathra"}, aces, RULE, category_of=cat, setup_moves=setup)
     # 積み技でない変化技の末尾 (batonpass) を差し替える。元の型は変えない
     assert sid == "espathra" and team[1].moves == ["luminacrash", "protect", "psychicterrain", "calmmind"]
     assert team[1].source.endswith("+rule") and notes == ["rule:psychicterrain<-batonpass"] and team[0] is rai
     assert esp.moves[2] == "batonpass" and team[1].item == "focussash"
     # 設置役が 2 体いればエースでない方 (delphox) を設置役にする。変化技が積み技だけならそれを差し替える
     dlp = _set("delphox", "delphoxite", ["flamethrower", "psychic", "nastyplot", "dazzlinggleam"], "blaze")
-    team, sid, _ = RU.ensure_setter([esp, dlp], {"espathra", "delphox"}, {"espathra"}, RULE,
+    team, sid, _ = RU.ensure_setter([esp, dlp], {"espathra", "delphox"}, {"espathra": ["boost"]}, RULE,
                                     category_of=cat, setup_moves=setup)
     assert sid == "delphox" and team[0] is esp
     assert team[1].moves == ["flamethrower", "psychic", "psychicterrain", "dazzlinggleam"]
     # 既に技/特性で足りていればそのまま
     ind = _set("indeedee", "leftovers", ["expandingforce", "dazzlinggleam", "protect", "healingwish"], "psychicsurge")
-    team, sid, notes = RU.ensure_setter([ind, rai], {"indeedee"}, {"raichu"}, RULE, category_of=cat)
+    team, sid, notes = RU.ensure_setter([ind, rai], {"indeedee"}, {"raichu": ["fast"]}, RULE, category_of=cat)
     assert sid == "indeedee" and notes == [] and team[0] is ind
     has = _set("gardevoir", "leftovers", ["moonblast", "psychicterrain", "psychic", "calmmind"], "trace")
-    assert RU.ensure_setter([has], {"gardevoir"}, set(), RULE)[1] == "gardevoir"
-    assert RU.ensure_setter([rai], {"espathra"}, {"raichu"}, RULE) == ([rai], None, ["no_setter"])
+    assert RU.ensure_setter([has], {"gardevoir"}, {}, RULE)[1] == "gardevoir"
+    assert RU.ensure_setter([rai], {"espathra"}, {"raichu": ["fast"]}, RULE) == ([rai], None, ["no_setter"])
     # こだわり持ち物は代替 (alt:item、こだわり/メガ石/チーム内重複でない) に替える。変化技が無ければ末尾に差し込む
     meo = _set("meowscarada", "choicescarf", ["flowertrick", "tripleaxel", "knockoff", "uturn"], "protean")
     alts = {"meowscarada": [meo,
                             _set("meowscarada", "focussash", meo.moves, "protean", source="alt:item"),
                             _set("meowscarada", "meowscaradite", meo.moves, "protean", source="alt:item"),
                             _set("meowscarada", "lifeorb", meo.moves, "protean", source="alt:item")]}
-    team, sid, notes = RU.ensure_setter([esp, meo], {"meowscarada"}, {"espathra"}, RULE, alternatives=alts,
+    team, sid, notes = RU.ensure_setter([esp, meo], {"meowscarada"}, {"espathra": ["boost"]}, RULE, alternatives=alts,
                                         category_of=cat, stones={"meowscaradite"})
     assert sid == "meowscarada" and team[1].item == "lifeorb" and "rule:item<-choicescarf" in notes
     assert team[1].moves == ["flowertrick", "tripleaxel", "knockoff", "psychicterrain"] and meo.item == "choicescarf"
-    # 代替が無ければ持ち物はそのまま (注記だけ)
-    _, _, notes = RU.ensure_setter([meo], {"meowscarada"}, set(), RULE, category_of=cat)
+    _, _, notes = RU.ensure_setter([meo], {"meowscarada"}, {}, RULE, category_of=cat)
     assert "rule:choice_item_kept" in notes
-    # apply_to_team は規則ごとの設置役を返す
+    # apply_to_team は規則ごとの設置役/エースと、クローズの優先度 (エース 2 > 設置役 1) を返す
     ctx = {"per_rule": [{"name": "psychic_terrain_priority_ace", "rule": RULE, "setters": {"espathra"},
-                         "aces": {"raichu"}}]}
+                         "aces": {"raichu": ["fast"]}, "tr_setters": set()}]}
     team, roles, notes, prefer = RU.apply_to_team([rai, esp], ctx, category_of=cat, setup_moves=setup,
                                                   stones={"raichunitey"})
     assert roles == {"psychic_terrain_priority_ace": {"setter": "espathra", "ace": "raichu"}}
@@ -121,25 +180,32 @@ def test_ensure_ace_item():
     min_pct = float(RULE["ace_item_min_pct"])
     esp = _set("espathra", "focussash", ["luminacrash", "protect", "psychicterrain", "calmmind"], "speedboost")
     snea = _set("sneasler", "choicescarf", ["closecombat", "direclaw", "fakeout", "throatchop"], "unburden", source="alt:item")
+    aces = {"espathra": ["boost"], "sneasler": ["boost"]}
     usage = {"sneasler": {"whiteherb": 37.9, "focussash": min_pct + 10.0, "choicescarf": 6.2}}
-    team, ace, notes = RU.ensure_ace_item([esp, snea], {"espathra", "sneasler"}, "espathra", RULE, usage)
+    team, ace, notes = RU.ensure_ace_item([esp, snea], aces, "espathra", RULE, usage)
     assert ace == "sneasler" and team[1].item == "focussash" and notes == ["rule:ace_item<-choicescarf"]
     assert snea.item == "choicescarf" and team[1].source == "alt:item+rule" and team[0] is esp
     # メガ石のエースは替えない / 既に優先品ならそのまま
     rai = _set("raichu", "raichunitey", ["zapcannon", "focusblast", "grassknot", "nastyplot"], "lightningrod")
-    team, ace, notes = RU.ensure_ace_item([esp, rai], {"raichu"}, "espathra", RULE, usage, stones={"raichunitey"})
+    team, ace, notes = RU.ensure_ace_item([esp, rai], {"raichu": ["fast"]}, "espathra", RULE, usage, stones={"raichunitey"})
     assert ace == "raichu" and team[1].item == "raichunitey" and notes == []
     sash = _set("sneasler", "focussash", snea.moves, "unburden")
-    assert RU.ensure_ace_item([sash], {"sneasler"}, None, RULE, usage) == ([sash], "sneasler", [])
+    assert RU.ensure_ace_item([sash], {"sneasler": ["boost"]}, None, RULE, usage) == ([sash], "sneasler", [])
     # 使用率が閾値未満なら据え置き (注記)
     low = {"sneasler": {"whiteherb": 90.0, "focussash": min_pct - 1.0}}
-    _, _, notes = RU.ensure_ace_item([esp, snea], {"sneasler"}, "espathra", RULE, low)
+    _, _, notes = RU.ensure_ace_item([esp, snea], {"sneasler": ["boost"]}, "espathra", RULE, low)
     assert notes == ["rule:ace_item_kept"]
-    # エース候補が設置役だけなら無し。複数なら優先品の使用率が高い方
-    assert RU.ensure_ace_item([esp], {"espathra"}, "espathra", RULE, usage)[1] is None
+    # エース候補が設置役だけなら無し。複数なら優先品の使用率が高い方。TR 型のエースは TR 使いが並びにいるとき
+    assert RU.ensure_ace_item([esp], {"espathra": ["boost"]}, "espathra", RULE, usage)[1] is None
     meo = _set("meowscarada", "choicescarf", ["flowertrick", "tripleaxel", "knockoff", "uturn"], "protean")
     usage2 = dict(usage, meowscarada={"choicescarf": 60.0, "focussash": min_pct + 30.0})
-    assert RU.choose_ace([snea, meo], {"sneasler", "meowscarada"}, "espathra", RULE, usage2).species_id == "meowscarada"
+    assert RU.choose_ace([snea, meo], {"sneasler": ["boost"], "meowscarada": ["fast"]}, "espathra", RULE,
+                         usage2).species_id == "meowscarada"
+    king = _set("kingambit", "blackglasses", ["suckerpunch"], "supremeoverlord")
+    slow = _set("slowking", "leftovers", ["trickroom"], "regenerator")
+    assert RU.choose_ace([esp, king], {"kingambit": ["tr"]}, "espathra", RULE, usage, tr_setters={"slowking"}) is None
+    assert RU.choose_ace([esp, king, slow], {"kingambit": ["tr"]}, "espathra", RULE, usage,
+                         tr_setters={"slowking"}).species_id == "kingambit"
     print("test_ensure_ace_item OK")
 
 
@@ -190,6 +256,7 @@ def test_spec_rules_parse_and_validate():
 
 if __name__ == "__main__":
     test_classify_setters_and_aces()
+    test_choose_pair_and_complementarity()
     test_rule_cores_and_context_cores()
     test_ensure_setter_injects_move()
     test_ensure_ace_item()

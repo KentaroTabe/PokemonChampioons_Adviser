@@ -78,6 +78,27 @@ def test_scores_and_beam():
     print("test_scores_and_beam OK")
 
 
+def test_worst_hole_penalty():
+    """穴の罰則: 1 脅威だけ誰も見ていない並びは、平均では僅差でも点で下がる。重みは最大を 1 に正規化"""
+    feats, threats = _feats()
+    # a,b,c,d は t1..t4 を 1 体ずつ 0.9 で見る。a,b,c,h は t4 を h の 0.6 で見る (穴ではない)、
+    # a,b,c,g は t4 を最大 0.1 (a/b/c) でしか見ない → 不足 0.4 − 0.1 = 0.3
+    assert abs(C.worst_hole(("a", "b", "c", "d"), feats, threats, threshold=0.4)) < 1e-9
+    assert abs(C.worst_hole(("a", "b", "c", "g"), feats, threats, threshold=0.4) - 0.3) < 1e-9
+    assert abs(C.worst_hole(("a", "b", "c", "h"), feats, threats, threshold=0.4)) < 1e-9
+    # 重み: t4 が軽い (0.1 vs 1.0) と穴の罰則も軽い
+    assert abs(C.worst_hole(("a", "b", "c", "g"), feats, threats, {"t1": 1.0, "t2": 1.0, "t3": 1.0, "t4": 0.1},
+                            threshold=0.4) - 0.03) < 1e-9
+    s_full, p_full = C.lineup_score(("a", "b", "c", "d"), feats, threats, "any")
+    s_hole, p_hole = C.lineup_score(("a", "b", "c", "g"), feats, threats, "any")
+    assert p_full["hole"] == 0.0 and abs(p_hole["hole"] - 0.3) < 1e-9 and s_hole < s_full
+    # 罰則の重みを 0 にすると穴の項は効かない
+    s0, _ = C.lineup_score(("a", "b", "c", "g"), feats, threats, "any", weights={"hole": 0.0})
+    assert s0 > s_hole
+    print("test_worst_hole_penalty OK")
+
+
 if __name__ == "__main__":
     test_scores_and_beam()
     test_incumbent_branch()
+    test_worst_hole_penalty()

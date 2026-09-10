@@ -312,6 +312,66 @@ def test_priority_evaluation():
     print("test_priority_evaluation OK")
 
 
+def test_psychic_terrain_priority():
+    """サイコフィールド中: 接地した相手への自分の先制技は不発 (低評価)、接地した自分への相手の先制技は脅威に数えない"""
+    from vision.normalize import NameResolver
+    resolver = NameResolver()
+    my = {"species_id": "mimikyu", "species_ja": "ミミッキュ",
+          "types": ["ゴースト", "フェアリー"], "hp_percent": 100.0,
+          "hp_current": 131, "hp_max": 131, "status": None, "boosts": {},
+          "ability_id": "disguise", "item_id": None,
+          "moves": [
+              {"name_ja": "かげうち", "move_id": "shadowsneak",
+               "pp": 20, "max_pp": 20, "effectiveness": "super"},
+              {"name_ja": "じゃれつく", "move_id": "playrough",
+               "pp": 10, "max_pp": 10, "effectiveness": "neutral"},
+          ], "revealed_moves": []}
+    opp = {"species_id": "gengar", "species_ja": "ゲンガー",
+           "types": ["ゴースト", "どく"], "hp_percent": 15.0,
+           "hp_current": None, "hp_max": None, "status": None, "boosts": {},
+           "ability_id": None, "item_id": None, "moves": [],
+           "revealed_moves": ["シャドーボール"]}
+    st = _mini_state(my, opp)
+    st["field"]["terrain"] = "psychic"
+    adv = evaluate(st, resolver)
+    sneak = next(a for a in adv["actions"] if a["id"] == "shadowsneak")
+    rough = next(a for a in adv["actions"] if a["id"] == "playrough")
+    assert "先制技が不発" in sneak["reason"], sneak
+    assert sneak["score"] < rough["score"], (sneak["score"], rough["score"])
+    # 相手 (浮いている: ふうせん) には当たる → 不発の注記は付かない
+    opp_air = dict(opp, item_id="airballoon")
+    adv_air = evaluate(_mini_state_terrain(my, opp_air), resolver)
+    sneak_air = next(a for a in adv_air["actions"] if a["id"] == "shadowsneak")
+    assert "先制技が不発" not in sneak_air["reason"], sneak_air
+    # 相手のKO圏の先制技 (ふいうち判明) も、接地した自分にはフィールド中は来ない
+    my2 = {"species_id": "gengar", "species_ja": "ゲンガー",
+           "types": ["ゴースト", "どく"], "hp_percent": 30.0,
+           "hp_current": 40, "hp_max": 135, "status": None, "boosts": {},
+           "ability_id": None, "item_id": None,
+           "moves": [
+               {"name_ja": "みちづれ", "move_id": "destinybond",
+                "pp": 8, "max_pp": 8, "effectiveness": None},
+               {"name_ja": "シャドーボール", "move_id": "shadowball",
+                "pp": 16, "max_pp": 16, "effectiveness": "resist"},
+           ], "revealed_moves": []}
+    opp2 = {"species_id": "grimmsnarl", "species_ja": "オーロンゲ",
+            "types": ["あく", "フェアリー"], "hp_percent": 100.0,
+            "hp_current": None, "hp_max": None, "status": None, "boosts": {},
+            "ability_id": None, "item_id": None, "moves": [],
+            "revealed_moves": ["ふいうち"]}
+    adv2 = evaluate(_mini_state_terrain(my2, opp2), resolver)
+    assert "先制技は不発" in adv2["speed_note"], adv2["speed_note"]
+    db = next(a for a in adv2["actions"] if a["id"] == "destinybond")
+    assert "先制技で倒される危険" not in db["reason"], db
+    print("test_psychic_terrain_priority OK")
+
+
+def _mini_state_terrain(my_mon, opp_mon, terrain="psychic"):
+    st = _mini_state(my_mon, opp_mon)
+    st["field"]["terrain"] = terrain
+    return st
+
+
 def test_fainted_active_switch_only():
     """自分の場のポケモンがひんしなら技を評価せず交代先のみ提案する。
 
@@ -731,6 +791,7 @@ if __name__ == "__main__":
     test_evaluate_end_to_end()
     test_pivot_over_plain_switch()
     test_priority_evaluation()
+    test_psychic_terrain_priority()
     test_fainted_active_switch_only()
     test_act_before_ko_discount()
     test_ko_margin_prefers_overkill()

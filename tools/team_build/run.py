@@ -110,8 +110,10 @@ def rule_context(run_dir: Path, spec: BuildSpec, feats: dict, snapshot_id: int) 
     if not spec.rules:
         return None
     from advisor.dex import get_dex
+    from champions_agent.config import BUILD_TRICK_ROOM_MOVES
     from tools.check_mega_items import mega_stones
     from tools.team_build import rules as RU
+    from tools.team_build.features import boost_multiplier
     from tools.team_build.learnsets import can_learn
     dex = get_dex()
     stone_form = {item_id: sid for (sid, _n, _r, item_id) in mega_stones() if item_id}
@@ -125,20 +127,29 @@ def rule_context(run_dir: Path, spec: BuildSpec, feats: dict, snapshot_id: int) 
             form = stone_form.get(rep.item or "", sid)          # メガ石を持つ型はメガ後の種族値・タイプで判定
             sp = dex.species(form) or dex.species(sid) or {}
             bs = sp.get("baseStats") or {}
+            roles = feats[sid].roles
             infos[sid] = RU.RuleInfo(sid, int(bs.get("spe") or 0), int(bs.get("def") or 0),
                                      tuple(sp.get("types") or ()), rep.ability or "", rep.item or "",
-                                     {m: can_learn(sid, m) for m in moves_needed})
+                                     {m: can_learn(sid, m) for m in moves_needed},
+                                     speed_share=float(roles.get("speed", 0.0)),
+                                     boost_share=float(roles.get("speed_boost", roles.get("speed", 0.0))),
+                                     boost_mult=boost_multiplier(rep.ability, rep.item, rep.moves),
+                                     bulk=float(roles.get("bulk", 0.0)),
+                                     has_tr=any(m in BUILD_TRICK_ROOM_MOVES for m in rep.moves))
     ctx = RU.build_context(spec.rules, infos)
     (run_dir / "s03_rules.json").write_text(json.dumps(
         {"rules": ctx["llm"],
          "infos": {s: {"spe": i.spe, "def": i.dfn, "types": list(i.types), "ability": i.ability, "item": i.item,
-                       "can_learn": i.can_learn} for s, i in infos.items()}},
+                       "can_learn": i.can_learn, "speed_share": i.speed_share, "boost_share": i.boost_share,
+                       "boost_mult": i.boost_mult, "bulk": i.bulk, "has_tr": i.has_tr} for s, i in infos.items()}},
         ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     for p in ctx["per_rule"]:
-        log(run_dir, f"S3 rule {p['name']}: 設置役={sorted(p['setters'])} エース={sorted(p['aces'])}")
-        if not p["setters"] or not p["aces"] or len(p["setters"] | p["aces"]) < 2:
+        aces = {s: "/".join(t) for s, t in sorted(p["aces"].items())}
+        log(run_dir, f"S3 rule {p['name']}: 設置役={sorted(p['setters'])} エース={aces} TR使い={sorted(p['tr_setters'])}")
+        usable = {a for a in p["aces"] if any(t in ("fast", "boost") for t in p["aces"][a]) or p["tr_setters"]}
+        if not p["setters"] or not usable or len(p["setters"] | usable) < 2:
             raise SystemExit(f"規則 {p['name']} を満たす個体がプールに足りない "
-                             f"(設置役 {sorted(p['setters'])} / エース {sorted(p['aces'])})")
+                             f"(設置役 {sorted(p['setters'])} / エース {aces} / TR使い {sorted(p['tr_setters'])})")
     return ctx
 
 
@@ -280,6 +291,21 @@ def stage_s5(run_dir: Path, spec: BuildSpec, fams: list, feats: dict, threats: l
         n_before = len(all_lineups)
         all_lineups = [l for l in all_lineups if RU.satisfies(l.members, rule_ctx)]
         log(run_dir, f"S5 rules {rule_ctx['names']}: {n_before} → {len(all_lineups)} 並び")
+        # 対の相補性: (設置役, エース) の共通の苦手を他の 4 体が見ている割合。見ていない分を点から引く (記事にも書く)
+        from champions_agent.config import BUILD_LINEUP_HOLE_THRESHOLD, BUILD_RULE_PAIR_COVER, BUILD_RULE_PAIR_WEIGHT
+        pairs = rule_ctx.setdefault("pairs", {})
+        for l in all_lineups:
+            comp = None
+            for p in rule_ctx["per_rule"]:
+                pr = RU.choose_pair(l.members, p["setters"], p["aces"], p.get("tr_setters", ()))
+                if pr:
+                    comp = RU.pair_complementarity(l.members, pr[0], pr[1], feats, threats,
+                                                   BUILD_LINEUP_HOLE_THRESHOLD, BUILD_RULE_PAIR_COVER)
+                    break
+            if comp:
+                l.parts["pair"] = comp["score"]
+                l.score -= BUILD_RULE_PAIR_WEIGHT * (1.0 - comp["score"])
+                pairs[tuple(l.members)] = comp
     chosen = C.select_with_quotas(all_lineups, prof["quotas"])
     rest = sorted((l for l in all_lineups if l not in chosen), key=lambda l: -l.score)
     for l in rest:
@@ -370,6 +396,7 @@ def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv
             results.append({"index": idx, "candidate_id": cid, "members": list(l.members), "ok": ok,
                             "errors": errs[:5], "tag": l.tag, "score": round(l.score, 4),
                             "registered_sets": registered, "rule_setter": rule_setter, "rule_notes": rule_notes,
+                            "rule_pair": (rule_ctx or {}).get("pairs", {}).get(tuple(l.members)),
                             "sets": [{"species": c.species_id, "item": c.item, "nature": c.nature,
                                       "evs": c.evs, "moves": c.moves, "source": c.source,
                                       "coverage": round(c.score, 3), "notes": c.notes} for c in team]})

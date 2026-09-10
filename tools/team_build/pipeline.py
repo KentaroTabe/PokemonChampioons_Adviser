@@ -27,8 +27,9 @@ from typing import Optional
 
 from champions_agent.config import (BUILD_ADAPT_MIN_BATTLES, BUILD_ADAPT_VALIDATE_MAX_CKPTS, BUILD_ADAPT_VALIDATE_N,
                                     BUILD_EQUIV_EPS, BUILD_FOLD_EVAL, BUILD_FOLD_VALIDATE, BUILD_PICK_VARIANTS,
-                                    BUILD_RACE_DEFAULT_MAX, BUILD_RACE_STEPS, BUILD_SCREEN_ADAPT_BATTLES,
-                                    BUILD_SCREEN_MARGIN, BUILD_SCREEN_MAX, BUILD_SCREEN_STEPS, BUILD_SCREEN_VARIANTS)
+                                    BUILD_RACE_DEFAULT_MAX, BUILD_RACE_STEPS, BUILD_REPRO_GATE,
+                                    BUILD_SCREEN_ADAPT_BATTLES, BUILD_SCREEN_MARGIN, BUILD_SCREEN_MAX,
+                                    BUILD_SCREEN_STEPS, BUILD_SCREEN_VARIANTS)
 from tools.team_build import ablation as AB
 from tools.team_build import adapt as AD
 from tools.team_build import holdout as HO
@@ -133,6 +134,11 @@ def team_survivors(chosen: dict, max_candidates: Optional[int]) -> list:
     """choose_variants の結果を Δ の降順に並べ、max_candidates まで返す"""
     ids = sorted(chosen, key=lambda c: -chosen[c]["delta"])
     return ids[:max_candidates] if max_candidates else ids
+
+
+def repro_gate_ok(s08b_delta: Optional[float], s10_delta: Optional[float]) -> bool:
+    """再現性の門: 勝者は S8b (SEARCH) と S10 (SELECTION) の両分割で Δ ≥ 0 でなければ holdout に進めない。純粋"""
+    return s08b_delta is not None and s10_delta is not None and s08b_delta >= 0.0 and s10_delta >= 0.0
 
 
 def best_by_win_rate(rows: dict, order: tuple) -> Optional[str]:
@@ -395,6 +401,15 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
     summary["winner"] = winner
     summary["winner_variant"] = chosen[winner]["variant"]
     log(f"S10 winner: {winner} variant={chosen[winner]['variant']} (finalists {finalists})")
+    s10_delta = next(((a.get("result") or {}).get("mean") for a in res10["arms"] if a["arm_id"] == winner), None)
+    s08b_delta = chosen[winner].get("delta")
+    summary["repro_gate"] = {"s08b_delta": s08b_delta, "s10_delta": s10_delta,
+                             "ok": repro_gate_ok(s08b_delta, s10_delta), "enabled": BUILD_REPRO_GATE}
+    if BUILD_REPRO_GATE and not repro_gate_ok(s08b_delta, s10_delta):
+        log(f"再現性の門: 勝者 {winner} の Δ が両分割で非負でない (S8b {s08b_delta} / S10 {s10_delta})。holdout に進めず終了")
+        summary["result"] = "not_reproducible"
+        _write_stage(run_dir, "summary", summary)
+        return summary
 
     # S11 (任意): 勝者の選出モデルを SEARCH + SELECTION で再学習 (variant が fresh のとき)。既定 off
     win_arm = next(a for a in cands if a.arm_id == winner)

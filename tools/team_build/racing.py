@@ -19,7 +19,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from champions_agent.config import BUILD_EQUIV_EPS, BUILD_RACE_DEFAULT_MAX, BUILD_RACE_STEPS
+from champions_agent.config import (BUILD_EQUIV_EPS, BUILD_RACE_DEFAULT_MAX, BUILD_RACE_MIN_TERMINAL_N,
+                                    BUILD_RACE_STEPS)
 from tools.team_build.verdict import (DEGRADED, EQUIVALENT, IMPROVED, UNCERTAIN, look_z, n_looks, next_step,
                                       verdict4)
 
@@ -136,8 +137,11 @@ def race(candidates: list, reference: Arm, split_file: Path, tier: str, seed: in
          stage: str = "s08", fold: Optional[int] = None, steps: tuple = BUILD_RACE_STEPS,
          max_battles: int = BUILD_RACE_DEFAULT_MAX, eps: float = BUILD_EQUIV_EPS,
          parallel: int = PARALLEL, log=print, compare_to_best: bool = True,
-         pick_policy: str = "advisor") -> dict:
-    """候補群 vs 参照の confidence racing。戻り値は evaluation/<stage>.json と同じ dict"""
+         pick_policy: str = "advisor", min_terminal_n: int = BUILD_RACE_MIN_TERMINAL_N,
+         run_to_max: bool = False) -> dict:
+    """候補群 vs 参照の confidence racing。戻り値は evaluation/<stage>.json と同じ dict。
+    improved / equivalent は min_terminal_n 戦未満では確定させず測り続ける (degraded の早期脱落は残す)。
+    run_to_max なら状態によらず上限まで測る (封印 holdout)"""
     arms = list(candidates)
     active = list(arms)
     offset = 0
@@ -177,13 +181,16 @@ def race(candidates: list, reference: Arm, split_file: Path, tier: str, seed: in
             still.append(arm)
         rounds.append({"offset": offset, "n_active": len(still),
                        "states": {a.arm_id: a.state for a in active}})
-        # 参照との判定が確定 (improved / degraded / equivalent) した候補は追加測定しない
-        active = [a for a in still if a.state == UNCERTAIN]
+        # 参照との判定が確定 (improved / degraded / equivalent) した候補は追加測定しない。ただし improved / equivalent は
+        # min_terminal_n 戦未満では暫定扱いで測り続ける (2026-09-10: 100 戦の improved が別分割で反転した件)。
+        # run_to_max (封印 holdout) は状態によらず上限まで
+        active = [a for a in still if run_to_max or a.state == UNCERTAIN
+                  or (a.state in (IMPROVED, EQUIVALENT) and offset < min_terminal_n)]
         log(f"[racing:{stage}] after {offset}: " +
             ", ".join(f"{a.arm_id}={a.state}({(a.result or {}).get('mean') or 0:+.3f})" for a in arms))
     result = {
         "stage": stage, "tier": tier, "fold": fold, "seed": seed, "eps": eps, "steps": list(steps),
-        "pick_policy": pick_policy, "n_looks": k_looks, "z": z,
+        "pick_policy": pick_policy, "n_looks": k_looks, "z": z, "min_terminal_n": min_terminal_n, "run_to_max": run_to_max,
         "max_battles": max_battles, "n_candidates_seen": len(arms), "elapsed_s": round(time.time() - t0, 1),
         "reference": reference.to_dict(), "arms": [a.to_dict() for a in arms], "rounds": rounds,
         "note": "探索時の最高値は期待勝率ではない (Winner's curse)。採否は holdout の結果だけで決める",
