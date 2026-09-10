@@ -72,6 +72,49 @@ def grounded(info: RuleInfo, rule: dict) -> bool:
             and info.item not in rule["airborne_items"])
 
 
+def offense_metrics(moves, base_stats: dict, move_info: Optional[Callable]) -> tuple:
+    """(使う側の攻撃種族値, 攻撃技の本数, 攻撃技のタイプ数)。move_info(id) → (category, type, power) か None。純粋"""
+    atk = []
+    for m in moves or []:
+        mi = move_info(m) if move_info else None
+        if not mi:
+            continue
+        cat, typ, power = mi
+        if str(cat or "").lower() in ("physical", "special") and (power or 0) > 0:
+            atk.append((str(cat).lower(), typ))
+    has_p = any(c == "physical" for c, _ in atk)
+    has_s = any(c == "special" for c, _ in atk)
+    offense = max(int(base_stats.get("atk") or 0) if has_p else 0, int(base_stats.get("spa") or 0) if has_s else 0)
+    return offense, len(atk), len({t for _, t in atk})
+
+
+def setup_stages(moves, setup_moves: dict, ability_spe_mult: float = 1.0) -> dict:
+    """1 回積んだ後の能力ランク {stat: 段}: 型の積み技 (setup_moves: move → {stat: 段}) の各能力の最大 (下降はそのまま) と、
+    特性の加速 (倍率 1.5 → +1、2.0 → +2)。積み手段が無ければ空 (被覆は積む前の値のまま)。純粋"""
+    stages: dict = {}
+    for m in moves or []:
+        for k, d in (setup_moves.get(m) or {}).items():
+            cur = stages.get(k, 0)
+            stages[k] = max(cur, d) if d > 0 else min(cur, d) if cur <= 0 else cur
+    if ability_spe_mult > 1.0:
+        stages["spe"] = max(stages.get("spe", 0), int(round((ability_spe_mult - 1.0) * 2)))
+    return {k: v for k, v in stages.items() if v}
+
+
+def pick_ace_set(cands: list, base_stats: dict, move_info: Optional[Callable], coverage_of: Callable,
+                 min_offense: int = BUILD_RULE_ACE_MIN_OFFENSE, min_attack_moves: int = BUILD_RULE_ACE_MIN_ATTACK_MOVES,
+                 min_attack_types: int = BUILD_RULE_ACE_MIN_ATTACK_TYPES, min_coverage: float = BUILD_RULE_ACE_MIN_COVERAGE):
+    """型ライブラリの候補 (代表型 + 単独入替の代替、adj 降順) のうち火力・技範囲・被覆の門を通る最初の型を返す
+    (無ければ None)。coverage_of(c) → その型の平均被覆。代表型が通ればそれが返る (並びの先頭にあるため)。
+    2026-09-10: ポットデス (代表型 = からをやぶる + バトンタッチ、攻撃技 1 本) のように、殴れる型が代替にある個体を
+    エースにするため"""
+    for c in cands:
+        off, n, t = offense_metrics(c.moves, base_stats, move_info)
+        if off >= min_offense and n >= min_attack_moves and t >= min_attack_types and coverage_of(c) >= min_coverage:
+            return c
+    return None
+
+
 def offensive(info: RuleInfo, min_offense: int = BUILD_RULE_ACE_MIN_OFFENSE,
               min_attack_moves: int = BUILD_RULE_ACE_MIN_ATTACK_MOVES,
               min_attack_types: int = BUILD_RULE_ACE_MIN_ATTACK_TYPES,
@@ -316,17 +359,37 @@ def ensure_ace_item(team: list, aces, setter_id: Optional[str], rule: dict, usag
     return [new if t is ace else t for t in team], ace.species_id, [note]
 
 
+def ensure_ace_set(team: list, ace_id: Optional[str], ace_sets: Optional[dict]) -> tuple:
+    """エースの型を、判定に使った攻撃的な代替型 (ace_sets[species_id]: 技/性格/配分/特性) に合わせる。持ち物は今の型のまま
+    (メガ枠・タスキ・クローズの解決に任せる)。既に同じ技構成なら何もしない。戻り値 (team, notes)"""
+    if not ace_id or not ace_sets or ace_id not in ace_sets:
+        return team, []
+    a = ace_sets[ace_id]
+    c = next((t for t in team if t.species_id == ace_id), None)
+    if c is None or list(c.moves) == list(a.moves):
+        return team, []
+    note = f"rule:ace_set<-{'/'.join(c.moves)}"
+    new = dc_replace(c, moves=list(a.moves), nature=a.nature, evs=a.evs, ability=a.ability,
+                     source=c.source + "+rule", notes=list(c.notes) + [note], usage_gap=a.usage_gap)
+    return [new if t is c else t for t in team], [note]
+
+
 def apply_to_team(team: list, ctx: dict, usage_pct: Optional[dict] = None, **kw) -> tuple:
-    """規則ごとに ensure_setter (技) → ensure_ace_item (持ち物)。
+    """規則ごとに ensure_setter (技) → ensure_ace_set (エースの型) → ensure_ace_item (持ち物)。
     戻り値 (team, {rule_name: {"setter", "ace"}}, notes, prefer = クローズで持ち物を残す優先度 {species_id: 2 (エース) | 1 (設置役)})。
     設置役とエースの優先品が重なったら (きあいのタスキ) エースが残し、設置役は使用率次点の持ち物へ"""
     roles, notes, prefer = {}, [], {}
     stones = kw.get("stones", frozenset())
+    ace_sets = ctx.get("ace_sets") or {}
     for p in ctx["per_rule"]:
         team, sid, n = ensure_setter(team, p["setters"], p["aces"], p["rule"], **kw)
+        ace = choose_ace(team, p["aces"], sid, p["rule"], usage_pct, p.get("tr_setters", ()))
+        n_set: list = []
+        if ace is not None:
+            team, n_set = ensure_ace_set(team, ace.species_id, ace_sets)
         team, aid, n2 = ensure_ace_item(team, p["aces"], sid, p["rule"], usage_pct, stones, p.get("tr_setters", ()))
         roles[p["name"]] = {"setter": sid, "ace": aid}
-        notes.extend(n + n2)
+        notes.extend(n + n_set + n2)
         if sid:
             prefer[sid] = max(prefer.get(sid, 0), 1)
         if aid:

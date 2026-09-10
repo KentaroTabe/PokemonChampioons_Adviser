@@ -104,9 +104,11 @@ def stage_s1_s3(run_dir: Path, spec: BuildSpec, prof: dict, seed: int, top_n: in
     return doc, split, tv, res["features"]
 
 
-def rule_context(run_dir: Path, spec: BuildSpec, feats: dict, snapshot_id: int) -> Optional[dict]:
-    """S0 の rules → 種ごとの判定材料 (代表型 + 図鑑 + champions mod の learnset) → 設置役/エースの集合。
-    規則が無ければ None。満たせる個体がプールに足りなければ止まる (勝手に緩めない)"""
+def rule_context(run_dir: Path, spec: BuildSpec, feats: dict, snapshot_id: int, tv: Optional[dict] = None) -> Optional[dict]:
+    """S0 の rules → 種ごとの判定材料 (型ライブラリ + 図鑑 + champions mod の learnset) → 設置役/エースの集合。
+    エースの火力・技範囲は 代表型 + 単独入替の代替 (使用率 5% 以上) のうち門を通る最初の型で判定し、代表型と違えば
+    その型を ace_sets に残して S6 で採用する (2026-09-10 ユーザー決定)。規則が無ければ None。
+    満たせる個体がプールに足りなければ止まる (勝手に緩めない)"""
     if not spec.rules:
         return None
     from advisor.dex import get_dex
@@ -118,7 +120,29 @@ def rule_context(run_dir: Path, spec: BuildSpec, feats: dict, snapshot_id: int) 
     dex = get_dex()
     stone_form = {item_id: sid for (sid, _n, _r, item_id) in mega_stones() if item_id}
     moves_needed = sorted({RU.RULES[n]["setter_move"] for n in spec.rules})
-    infos = {}
+
+    def move_info(m: str):
+        mv = dex.move(m)
+        return (mv.get("category"), mv.get("type"), mv.get("power")) if mv else None
+
+    from advisor.search import SETUP_MOVES
+    from tools.team_build.interaction import matrix, view_from_set
+
+    def boosted_coverage(sid: str, c) -> float:
+        """積み技・加速特性を持つ型は「1 回積んだ後」の被覆も計算し、大きい方を使う (自己加速型・積み型のエースは
+        積む前の被覆が低いのが普通で、そのままでは門を通らない)"""
+        stages = RU.setup_stages(c.moves, SETUP_MOVES, boost_multiplier(c.ability, c.item, []))
+        if not stages or not tv:
+            return float(c.score)
+        try:
+            view, mv = view_from_set(sid, c.as_row())
+            view.boosts = dict(stages)
+            rows = matrix({sid: (view, mv)}, tv)[sid]
+            return max(float(c.score), S.coverage_score(rows))
+        except Exception:
+            return float(c.score)
+
+    infos, ace_sets = {}, {}
     with db.get_connection() as conn:
         for sid in feats:
             rep = S.representative_set(conn, snapshot_id, sid)
@@ -128,28 +152,40 @@ def rule_context(run_dir: Path, spec: BuildSpec, feats: dict, snapshot_id: int) 
             sp = dex.species(form) or dex.species(sid) or {}
             bs = sp.get("baseStats") or {}
             roles = feats[sid].roles
-            # 火力・技範囲: 代表型の攻撃技 (威力 > 0) の分類とタイプ、使う側の攻撃種族値 (メガ後)、脅威への平均被覆
-            atk_moves = [(m, str(mv.get("category") or "").lower(), mv.get("type"))
-                         for m in rep.moves for mv in [dex.move(m) or {}]
-                         if str(mv.get("category") or "").lower() in ("physical", "special") and (mv.get("power") or 0) > 0]
-            has_phys = any(c == "physical" for _, c, _ in atk_moves)
-            has_spec = any(c == "special" for _, c, _ in atk_moves)
-            offense = max(int(bs.get("atk") or 0) if has_phys else 0, int(bs.get("spa") or 0) if has_spec else 0)
             cov = feats[sid].coverage
+            # 火力・技範囲: 型ライブラリ (代表型 + 単独入替の代替、adj 降順) のうち門を通る最初の型で判定。
+            # 代表型が通らず代替が通れば、その型をエースの型として S6 で採用する
+            ranked = S.rank_sets(list(S.enumerate_sets(conn, snapshot_id, sid)), tv) if tv else [rep]
+            cov_cache: dict = {}
+
+            def cov_of(c, sid=sid):
+                key = c.key()
+                if key not in cov_cache:
+                    cov_cache[key] = boosted_coverage(sid, c)
+                return cov_cache[key]
+
+            chosen = RU.pick_ace_set(ranked, bs, move_info, cov_of)
+            basis = chosen if chosen is not None else rep
+            offense, n_atk, n_types = RU.offense_metrics(basis.moves, bs, move_info)
+            cov_mean = (cov_of(chosen) if chosen is not None and tv else ((sum(cov.values()) / len(cov)) if cov else 0.0))
+            if chosen is not None and chosen.source != "representative":
+                ace_sets[sid] = chosen
             infos[sid] = RU.RuleInfo(sid, int(bs.get("spe") or 0), int(bs.get("def") or 0),
                                      tuple(sp.get("types") or ()), rep.ability or "", rep.item or "",
                                      {m: can_learn(sid, m) for m in moves_needed},
                                      speed_share=float(roles.get("speed", 0.0)),
                                      boost_share=float(roles.get("speed_boost", roles.get("speed", 0.0))),
-                                     boost_mult=boost_multiplier(rep.ability, rep.item, rep.moves),
+                                     boost_mult=boost_multiplier(basis.ability, basis.item, basis.moves),
                                      bulk=float(roles.get("bulk", 0.0)),
                                      has_tr=any(m in BUILD_TRICK_ROOM_MOVES for m in rep.moves),
-                                     offense=offense, attack_moves=len(atk_moves),
-                                     attack_types=len({t for _, _, t in atk_moves}),
-                                     coverage_mean=(sum(cov.values()) / len(cov)) if cov else 0.0)
+                                     offense=offense, attack_moves=n_atk, attack_types=n_types,
+                                     coverage_mean=float(cov_mean))
     ctx = RU.build_context(spec.rules, infos)
+    ctx["ace_sets"] = ace_sets
     (run_dir / "s03_rules.json").write_text(json.dumps(
         {"rules": ctx["llm"],
+         "ace_sets": {s: {"moves": list(c.moves), "item": c.item, "nature": c.nature, "evs": c.evs, "source": c.source,
+                          "coverage": round(c.score, 3), "usage_gap": round(c.usage_gap, 3)} for s, c in ace_sets.items()},
          "infos": {s: {"spe": i.spe, "def": i.dfn, "types": list(i.types), "ability": i.ability, "item": i.item,
                        "can_learn": i.can_learn, "speed_share": i.speed_share, "boost_share": i.boost_share,
                        "boost_mult": i.boost_mult, "bulk": i.bulk, "has_tr": i.has_tr, "offense": i.offense,
@@ -158,7 +194,8 @@ def rule_context(run_dir: Path, spec: BuildSpec, feats: dict, snapshot_id: int) 
         ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     for p in ctx["per_rule"]:
         aces = {s: "/".join(t) for s, t in sorted(p["aces"].items())}
-        log(run_dir, f"S3 rule {p['name']}: 設置役={sorted(p['setters'])} エース={aces} TR使い={sorted(p['tr_setters'])}")
+        log(run_dir, f"S3 rule {p['name']}: 設置役={sorted(p['setters'])} エース={aces} TR使い={sorted(p['tr_setters'])} "
+                     f"代替型で判定={sorted(s for s in ace_sets if s in p['aces'])}")
         usable = {a for a in p["aces"] if any(t in ("fast", "boost") for t in p["aces"][a]) or p["tr_setters"]}
         if not p["setters"] or not usable or len(p["setters"] | usable) < 2:
             raise SystemExit(f"規則 {p['name']} を満たす個体がプールに足りない "
@@ -507,7 +544,7 @@ def main() -> None:
         session_w = {k: float(v) for k, v in json.loads(Path(args.threat_weights_file).read_text(encoding="utf-8")).items()}
     doc, split, tv, feats = stage_s1_s3(run_dir, spec, prof, args.seed, args.top_n, extra_threats=list(session_w))
     threats = list(tv.keys())
-    rule_ctx = rule_context(run_dir, spec, feats, doc["snapshot"]["id"])
+    rule_ctx = rule_context(run_dir, spec, feats, doc["snapshot"]["id"], tv)
     threat_weights = {t["id"]: float(t.get("usage") or 0.0) for t in doc["top"] if t["id"] in tv}
     if session_w:
         # セッションの相手 (正規化した難易度 0..1) を重みに反映: base × (1 + BOOST × w)。脅威リストに無かった種は

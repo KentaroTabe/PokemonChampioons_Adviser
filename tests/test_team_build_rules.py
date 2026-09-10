@@ -222,6 +222,57 @@ def test_ensure_ace_item():
     print("test_ensure_ace_item OK")
 
 
+def test_offense_metrics_and_ace_set():
+    """火力・技範囲は型ライブラリの代替も見る: ポットデスの代表型 (からをやぶる+バトンタッチ、攻撃技 1 本) は通らないが、
+    アシストパワー入りの代替が通る → その型をエースの型として S6 で採用する"""
+    info = {"shellsmash": ("Status", "Normal", 0), "batonpass": ("Status", "Normal", 0), "shadowball": ("Special", "Ghost", 80),
+            "strengthsap": ("Status", "Grass", 0), "storedpower": ("Special", "Psychic", 20), "gigadrain": ("Special", "Grass", 75),
+            "suckerpunch": ("Physical", "Dark", 70)}.get
+    bs = {"atk": 65, "spa": 134}
+    assert RU.offense_metrics(["shellsmash", "batonpass", "shadowball", "strengthsap"], bs, info) == (134, 1, 1)
+    assert RU.offense_metrics(["shellsmash", "storedpower", "shadowball", "strengthsap"], bs, info) == (134, 2, 2)
+    assert RU.offense_metrics(["suckerpunch", "shadowball"], bs, info) == (134, 2, 2)      # 物理も特殊もあれば大きい方
+    assert RU.offense_metrics([], bs, info) == (0, 0, 0)
+    rep = _set("polteageist", "whiteherb", ["shellsmash", "batonpass", "shadowball", "strengthsap"], "cursedbody")
+    rep.score = 0.20
+    alt_pass = SetCandidate("polteageist", "cursedbody", "whiteherb", "modest", "2/0/0/32/0/32",
+                            ["shellsmash", "storedpower", "shadowball", "strengthsap"], "alt:move", 0.35, usage_gap=0.27)
+    alt_low = SetCandidate("polteageist", "cursedbody", "whiteherb", "modest", "2/0/0/32/0/32",
+                           ["shellsmash", "gigadrain", "shadowball", "strengthsap"], "alt:move", 0.25, usage_gap=0.67)
+    th = dict(min_offense=100, min_attack_moves=2, min_attack_types=2, min_coverage=0.3)
+    assert RU.pick_ace_set([rep, alt_low, alt_pass], bs, info, lambda c: c.score, **th) is alt_pass   # 被覆 0.25 は門を通らない
+    assert RU.pick_ace_set([rep, alt_low], bs, info, lambda c: c.score, **th) is None
+    good_rep = _set("sneasler", "whiteherb", ["suckerpunch", "shadowball"], "unburden")
+    good_rep.score = 0.5
+    assert RU.pick_ace_set([good_rep, alt_pass], bs, info, lambda c: c.score, **th) is good_rep       # 代表型が通ればそれ
+    # S6: エースの型を差し替える (持ち物は今のまま)。同じ技構成なら何もしない。登録が無ければ何もしない
+    cur = _set("polteageist", "focussash", rep.moves, "cursedbody")
+    team, notes = RU.ensure_ace_set([cur], "polteageist", {"polteageist": alt_pass})
+    assert team[0].moves == alt_pass.moves and team[0].item == "focussash" and team[0].source.endswith("+rule")
+    assert notes == ["rule:ace_set<-shellsmash/batonpass/shadowball/strengthsap"] and cur.moves == rep.moves
+    assert RU.ensure_ace_set([cur], "polteageist", {}) == ([cur], []) and RU.ensure_ace_set([cur], None, {"polteageist": alt_pass}) == ([cur], [])
+    same = _set("polteageist", "focussash", alt_pass.moves, "cursedbody")
+    assert RU.ensure_ace_set([same], "polteageist", {"polteageist": alt_pass}) == ([same], [])
+    # apply_to_team: 設置役の技 → エースの型 → エースの持ち物
+    esp = _set("espathra", "focussash", ["luminacrash", "protect", "psychicterrain", "calmmind"], "speedboost")
+    ctx = {"per_rule": [{"name": "psychic_terrain_priority_ace", "rule": RULE, "setters": {"espathra"},
+                         "aces": {"polteageist": ["boost"]}, "tr_setters": set()}],
+           "ace_sets": {"polteageist": alt_pass}}
+    usage = {"polteageist": {"whiteherb": 77.7, "focussash": 18.0}}
+    team, roles, notes, prefer = RU.apply_to_team([esp, cur], ctx, usage_pct=usage)
+    assert roles["psychic_terrain_priority_ace"] == {"setter": "espathra", "ace": "polteageist"}
+    assert team[1].moves == alt_pass.moves and team[1].item == "focussash" and any(n.startswith("rule:ace_set") for n in notes)
+    # 1 回積んだ後の能力ランク: 積み技の最大 (下降はそのまま) + 特性の加速 (1.5 → +1、2.0 → +2)
+    setup = {"shellsmash": {"atk": 2, "spa": 2, "spe": 2, "def": -1, "spd": -1}, "calmmind": {"spa": 1, "spd": 1},
+             "dragondance": {"atk": 1, "spe": 1}}
+    assert RU.setup_stages(["shellsmash", "shadowball"], setup) == {"atk": 2, "spa": 2, "spe": 2, "def": -1, "spd": -1}
+    assert RU.setup_stages(["calmmind", "luminacrash"], setup, ability_spe_mult=1.5) == {"spa": 1, "spd": 1, "spe": 1}
+    assert RU.setup_stages(["closecombat"], setup, ability_spe_mult=2.0) == {"spe": 2}
+    assert RU.setup_stages(["dragondance", "shellsmash"], setup) == {"atk": 2, "spa": 2, "spe": 2, "def": -1, "spd": -1}
+    assert RU.setup_stages(["shadowball"], setup) == {}
+    print("test_offense_metrics_and_ace_set OK")
+
+
 def test_boost_multiplier():
     from champions_agent.config import BUILD_SPEED_BOOST_ABILITIES, BUILD_SPEED_SETUP_MOVES
     from tools.team_build.features import boost_multiplier
@@ -273,6 +324,7 @@ if __name__ == "__main__":
     test_rule_cores_and_context_cores()
     test_ensure_setter_injects_move()
     test_ensure_ace_item()
+    test_offense_metrics_and_ace_set()
     test_boost_multiplier()
     test_parse_learnsets_and_resolve()
     test_spec_rules_parse_and_validate()
