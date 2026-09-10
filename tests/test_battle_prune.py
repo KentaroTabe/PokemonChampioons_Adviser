@@ -76,6 +76,18 @@ def main() -> None:
     test_keep_zero_removes_all_finished()
     test_none_player_and_empty_are_skipped()
     test_fewer_finished_than_keep_removes_nothing()
+    test_ignorable_unknown_effect_warning()
+
+
+def test_ignorable_unknown_effect_warning():
+    """poke-env の "Unexpected effect 'X' received." は X が config の既知リストにあるときだけ抑止する"""
+    from champions_agent.env.showdown_env import is_ignorable_unknown_effect_warning as ok
+    msg = "Unexpected effect 'MEGA_SOL' received. Effect.UNKNOWN will be used instead."
+    assert ok(msg, ("MEGA_SOL",)) and not ok(msg, ())
+    assert not ok("Unexpected effect 'SOMETHING_NEW' received.", ("MEGA_SOL",))     # 未知のものは出す
+    assert not ok("Popup message received: foo", ("MEGA_SOL",))
+    assert ok(msg)                                                                   # 既定 = config
+    print("test_ignorable_unknown_effect_warning OK")
     print("\nALL OK")
 
 

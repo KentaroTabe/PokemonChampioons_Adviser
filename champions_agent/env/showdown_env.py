@@ -25,6 +25,7 @@ poke-env (0.10系) の SinglesEnv を利用した、シングルバトル専用�
 """
 from __future__ import annotations
 
+import logging
 import os
 import random
 
@@ -60,6 +61,27 @@ TrainingServerConfiguration = ServerConfiguration(
 # poke-envの静的データへチャンピオンズの新フォーム/リバランス技を注入する
 from champions_agent.env import champions_dex_patch
 champions_dex_patch.apply()
+
+
+def is_ignorable_unknown_effect_warning(message: str, names=None) -> bool:
+    """poke-env の "Unexpected effect 'X' received." のうち、X が既知のチャンピオンズ固有効果 (config) なら True。純粋"""
+    from champions_agent.config import TRAIN_IGNORED_UNKNOWN_EFFECTS
+    names = TRAIN_IGNORED_UNKNOWN_EFFECTS if names is None else names
+    if not message.startswith("Unexpected effect '"):
+        return False
+    name = message[len("Unexpected effect '"):].split("'", 1)[0]
+    return name in names
+
+
+class _IgnoreKnownUnknownEffects(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            return not is_ignorable_unknown_effect_warning(record.getMessage())
+        except Exception:
+            return True
+
+
+logging.getLogger("poke-env").addFilter(_IgnoreKnownUnknownEffects())
 
 
 def compute_action_mask(battle) -> np.ndarray:

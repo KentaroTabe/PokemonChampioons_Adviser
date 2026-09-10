@@ -37,6 +37,9 @@ SHOWDOWN_PORT = int(os.environ.get("SHOWDOWN_PORT", "8100"))
 # チャンピオンズの技プール/新メガストーンが忠実に再現されている。
 # Flat Rules = 6体構築から3体選出・Lv50・種族/アイテムクロース。
 TRAINING_BATTLE_FORMAT = "gen9championsbssregmc"   # 2026-09-11 M-C へ切替 (M-B は gen9championsbssregmb、mod championsregmb)
+# poke-env が知らないチャンピオンズ固有の効果名 (Effect.UNKNOWN に落ちる)。既知のものは警告ログを抑止する
+# (2026-09-11: 上流更新でメガメガニウムの特性 Mega Sol が "[from] ability" として流れ、1 戦ごとに数行の警告が出た)
+TRAIN_IGNORED_UNKNOWN_EFFECTS = ("MEGA_SOL",)
 TRAINING_TEAM_SIZE = 6
 
 # --- 外部API設定 ---

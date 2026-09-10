@@ -164,3 +164,7 @@ pokedb詳細ページのスクレイピングは規約禁止 (opendataのみ可)
 - 未了 (§3/§4): cbd の M-C 日次データは未着 (index の seasons は Current/M5/M4 で M5 = M-B)。pokedb の新シーズンも同様。
   新種の代表型が無い間は、構築では `--sets-file` (型の指定) / `--moves` (技の指定) で新種を候補に入れる。
   POOL_PIN/META_PIN の更新と再基準化は opendata が 100 構築を超えた日に実施する。
+- 切替後に気づいた点: 上流の champions mod でメガメガニウムの特性が **Mega Sol** (自分の攻撃を常に晴れ扱い) になり、
+  poke-env が "Unexpected effect 'MEGA_SOL'" の警告を 1 戦ごとに数行出す (Effect.UNKNOWN に落ちるだけで学習は継続)。
+  既知の効果名 (`TRAIN_IGNORED_UNKNOWN_EFFECTS`) の警告は環境モジュールで抑止し、助言のダメージ計算に Mega Sol
+  (ほのお 1.5 倍 / みず 0.5 倍) を入れた。学習は 01:26 に M-C で再開 (fps 266、既存チェックポイントから継続)。

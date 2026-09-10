@@ -265,13 +265,14 @@ def calc_damage(attacker: MonView, defender: MonView, move_id: str,
     base = base / 50 + 2
 
     mult = 1.0
-    # 天候
-    if fv.weather == "sun":
+    # 天候 (メガメガニウムの特性 Mega Sol は自分の攻撃を常に晴れ扱いにする: 2026-09-11 上流更新)
+    weather = "sun" if a_ab == "megasol" else fv.weather
+    if weather == "sun":
         if mtype == "Fire":
             mult *= 1.5
         elif mtype == "Water":
             mult *= 0.5
-    elif fv.weather == "rain":
+    elif weather == "rain":
         if mtype == "Water":
             mult *= 1.5
         elif mtype == "Fire":

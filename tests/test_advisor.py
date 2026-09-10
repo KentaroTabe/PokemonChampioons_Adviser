@@ -94,6 +94,12 @@ def test_weather_and_screens():
     approx(sun["avg"], base["avg"] * 1.5, 2.0)
     wall = calc_damage(atk, dfn, "flamethrower", FieldView(light_screen=True))
     approx(wall["avg"], base["avg"] * 0.5, 2.0)
+    # メガメガニウムの Mega Sol: 天候が無くても自分の攻撃は晴れ扱い (ほのお 1.5 倍、みず 0.5 倍)
+    sol = MonView(species_id="charizard", base=dex.species("charizard")["baseStats"],
+                  types=dex.species("charizard")["types"], ev={"spa": 252}, ability="megasol")
+    approx(calc_damage(sol, dfn, "flamethrower")["avg"], base["avg"] * 1.5, 2.0)
+    water_base = calc_damage(atk, dfn, "hydropump")["avg"]
+    approx(calc_damage(sol, dfn, "hydropump")["avg"], water_base * 0.5, 2.0)
     print("test_weather_and_screens OK")
 
 
