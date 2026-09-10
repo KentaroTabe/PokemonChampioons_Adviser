@@ -179,11 +179,14 @@ def test_archetype_ability_and_assembly():
                  {"name": "attack3_priority", "attacks": 3, "utility": ("priority",)},     # 先制技を覚えない → 捨てる
                  {"name": "attack4", "attacks": 4, "utility": ()},
                  {"name": "attack3_field", "attacks": 3, "utility": ("field",)})
-    sets = G.assemble_sets("delphox", pool, pick, "fast_special", "timid", "blaze", templates=templates,
-                           mega_stone="delphoxite", max_sets=6)
+    sets = G.assemble_sets("delphox", pool, pick, "fast_special", "timid", "blaze", templates=templates, max_sets=6)
     names = [s.notes[0] for s in sets]
-    assert names[0] == "gen:attack3_setup:fast_special" and "gen:mega" in sets[1].notes and sets[1].item == "delphoxite"
+    assert names[0] == "gen:attack3_setup:fast_special" and all("gen:mega" not in n for s in sets for n in s.notes)
     assert all("attack3_priority" not in n for n in names)
+    # メガ型はフォルムごとに別に組む: 持ち物は石で固定、印を付ける (2026-09-11 までは先頭の型の複製だった)
+    mega = G.assemble_sets("delphox", pool, pick, "fast_special", "timid", "blaze", templates=templates,
+                           fixed_item="delphoxite", extra_notes=("gen:mega:delphoxmega",), max_sets=2)
+    assert len(mega) == 2 and all(s.item == "delphoxite" and "gen:mega:delphoxmega" in s.notes for s in mega)
     setup_set = sets[0]
     # 貪欲: psychic (和 1.2) → flamethrower (t1 の増分 0.6) → 増分 0 の同点は表の順 (dazzlinggleam)
     assert setup_set.moves[:3] == ["psychic", "flamethrower", "dazzlinggleam"] and setup_set.moves[3] == "nastyplot"
@@ -215,6 +218,48 @@ def test_archetype_ability_and_assembly():
     print("test_archetype_ability_and_assembly OK")
 
 
+def test_ev_tuning_helpers():
+    """能力ポイントの微調整 (純粋): 素早さの候補、配分の列挙、採点、選択"""
+    # 素早さ候補: speed_of(p) = 100 + p (単調)、脅威 110/115/200 → 上を取る最小ポイント 11, 16 (200 は届かない) + 0 と上限
+    assert G.speed_point_options(lambda p: 100 + p, {"a": 110, "b": 115, "c": 200}, cap=32) == [0, 11, 16, 32]
+    cands = G.enumerate_spreads(66, 32, [0, 32], "spa", step=8)
+    assert all(sum(c.values()) == 66 and max(c.values()) <= 32 and c["atk"] == 0 for c in cands)
+    assert {"hp": 2, "atk": 0, "def": 0, "spa": 32, "spd": 0, "spe": 32} in cands
+    assert {"hp": 32, "atk": 0, "def": 32, "spa": 0, "spd": 2, "spe": 0} in cands      # 端数はどの耐久にも置ける
+    assert len(cands) == len({G.spread_string(c) for c in cands})
+    assert G.parse_spread("2/0/0/32/0/32") == {"hp": 2, "atk": 0, "def": 0, "spa": 32, "spd": 0, "spe": 32}
+    assert G.parse_spread("bad") == {} and G.spread_string({"hp": 2, "spa": 32, "spe": 32}) == "2/0/0/32/0/32"
+    # 採点: 上を取る / 耐える (1 発・2 発・余裕) / 倒す (1 発・2 発・割合)
+    params = {"outspeed": 1.0, "survive": 1.0, "survive_2hit": 0.5, "survive_margin": 0.25,
+              "ko": 1.0, "ko_2hko": 0.5, "ko_margin": 0.25}
+    stats = {"hp": 150, "atk": 100, "def": 100, "spa": 100, "spd": 100, "spe": 120}
+    incoming = {"t": {"def": (0.6, 100, 150), "spd": (0.0, 100, 150)}}   # 基準と同じ実数値 → 被ダメ 0.6
+    outgoing = {"t": [("spa", 0.7, 100)]}
+    sc = G.score_spread(stats, ["t"], {"t": 2.0}, {"t": 110}, incoming, outgoing, params)
+    # outspeed 1 + survive 1 + 2 発 0 + 余裕 0.25×0.4 + ko 0 + 2 発 0.5 + 割合 0.25×0.7 = 2.775 → 重み 2 倍
+    assert abs(sc - 2 * 2.775) < 1e-9
+    stats2 = dict(stats, **{"def": 200})                                  # 防御を倍 → 被ダメ 0.3 → 2 発耐え (+0.5)
+    sc2 = G.score_spread(stats2, ["t"], {"t": 2.0}, {"t": 110}, incoming, outgoing, params)
+    assert abs(sc2 - 2 * (1 + 1 + 0.5 + 0.25 * 0.7 + 0.5 + 0.25 * 0.7)) < 1e-9
+    stats3 = dict(stats, **{"spa": 150})                                  # 与ダメ 1.05 → 1 発 (+1)
+    sc3 = G.score_spread(stats3, ["t"], {"t": 1.0}, {"t": 110}, incoming, outgoing, params)
+    assert abs(sc3 - (1 + 1 + 0.25 * 0.4 + 1 + 0.5 + 0.25)) < 1e-9
+    # トリックルームは下を取る (被ダメ無しなら耐える側は満点 1 + 0.5 + 0.25)。通常なら S50 < 110 で上を取れない
+    assert abs(G.score_spread(dict(stats, spe=50), ["t"], {}, {"t": 110}, {}, {}, params, trick_room=True) - 2.75) < 1e-9
+    assert abs(G.score_spread(dict(stats, spe=50), ["t"], {}, {"t": 110}, {}, {}, params) - 1.75) < 1e-9
+    # tune_spread: 脅威が無ければ (全て同点) 定型、あれば候補から最大 (上を取る最小の 11 ポイント + 残りは耐久へ)
+    def stats_of(pts):
+        return {"hp": 100 + pts["hp"], "atk": 100 + pts["atk"], "def": 100 + pts["def"], "spa": 100 + pts["spa"],
+                "spd": 100 + pts["spd"], "spe": 100 + pts["spe"]}
+    default = {"hp": 2, "atk": 0, "def": 0, "spa": 32, "spd": 0, "spe": 32}
+    cands = G.enumerate_spreads(66, 32, [0, 11, 32], "spa")
+    assert G.tune_spread(default, cands, stats_of, [], {}, {}, {}, {}, params) == default
+    best = G.tune_spread(default, cands, stats_of, ["t"], {"t": 1.0}, {"t": 110}, incoming, {"t": [("spa", 0.4, 132)]}, params)
+    # 与ダメ 0.4×(100+C)/132 は 2 発の線 (0.5) に届かない → 特攻より耐久 (被ダメの余裕) が有利、素早さは 11 で足りる
+    assert best["spe"] == 11 and best["spa"] < 32 and sum(best.values()) == 66, best
+    print("test_ev_tuning_helpers OK")
+
+
 if __name__ == "__main__":
     test_prune_moves()
     test_greedy_attacks_and_shares()
@@ -222,3 +267,4 @@ if __name__ == "__main__":
     test_field_helpers()
     test_prune_moves_with_field()
     test_assemble_field_dependent_pick()
+    test_ev_tuning_helpers()

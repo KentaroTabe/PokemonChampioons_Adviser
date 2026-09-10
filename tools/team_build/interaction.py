@@ -40,17 +40,30 @@ def _score01(score: Optional[float]) -> Optional[float]:
     return round((max(-1.0, min(1.0, score)) + 1.0) / 2.0, 3)
 
 
+def duel_field(me: MonView, opp: MonView):
+    """対面の場 (天候/フィールド): 自分の特性で張れるもの (メガリザードン Y のひでり、サイコメイカー等) を優先し、
+    無ければ相手の特性のもの。どちらも無ければ None (従来どおり場なし)。両者の技のダメージと実効素早さに掛かる"""
+    from advisor.damage import FieldView
+    from tools.team_build.gen_sets import own_field
+    for view in (me, opp):
+        f = own_field(view.ability, ())
+        if f.get("terrain") or f.get("weather"):
+            return FieldView(weather=f.get("weather"), terrain=f.get("terrain"))
+    return None
+
+
 def _duel(a: MonView, a_hp: float, a_moves: list, b: MonView, b_hp: float, b_moves: list) -> Optional[float]:
-    """endgame.duel_score と同じ定義 (撃破ターン差 + 先手権) を HP 指定つきで"""
-    turns_a, eff_a = _race_turns(a, a_hp, a_moves, b, b_hp, b_moves)
-    turns_b, eff_b = _race_turns(b, b_hp, b_moves, a, a_hp, a_moves)
+    """endgame.duel_score と同じ定義 (撃破ターン差 + 先手権) を HP 指定つきで。場は duel_field"""
+    fv = duel_field(a, b)
+    turns_a, eff_a = _race_turns(a, a_hp, a_moves, b, b_hp, b_moves, fv)
+    turns_b, eff_b = _race_turns(b, b_hp, b_moves, a, a_hp, a_moves, fv)
     if turns_a is None and turns_b is None:
         return None
     if turns_a is None:
         return -1.0
     if turns_b is None:
         return 1.0
-    a_first = effective_speed(eff_a) >= effective_speed(eff_b)
+    a_first = effective_speed(eff_a, fv) >= effective_speed(eff_b, fv)
     margin = (turns_b - turns_a) + (0.5 if a_first else -0.5)
     return math.tanh(margin * 0.8)
 
@@ -73,7 +86,8 @@ def lead_score(me: MonView, my_moves: list, opp: MonView, opp_moves: list) -> Op
 
 def switch_in_score(me: MonView, my_moves: list, opp: MonView, opp_moves: list) -> float:
     """相手の最大打点を 1 発受けてからの対面。受け切れなければ 0"""
-    taken = _best_dmg(opp, me, opp_moves) / 100.0
+    fv = duel_field(me, opp)
+    taken = _best_dmg(opp, me, opp_moves, fv) / 100.0
     hp_after = 1.0 - taken
     if hp_after < SWITCH_IN_MIN_HP:
         return 0.0
@@ -84,18 +98,19 @@ def switch_in_score(me: MonView, my_moves: list, opp: MonView, opp_moves: list) 
 def revenge_score(me: MonView, my_moves: list, opp: MonView, opp_moves: list,
                   opp_hp: float = REVENGE_HP) -> float:
     """削れた相手を上から / 先制技で落とせるか"""
-    dmg = _best_dmg(me, opp, my_moves) / 100.0
+    fv = duel_field(me, opp)
+    dmg = _best_dmg(me, opp, my_moves, fv) / 100.0
     if dmg <= 0:
         return 0.0
-    faster = effective_speed(me) > effective_speed(opp)
+    faster = effective_speed(me, fv) > effective_speed(opp, fv)
     prio = _priority_moves(my_moves)
-    prio_dmg = max((_best_dmg(me, opp, [p]) for p in prio), default=0.0) / 100.0
+    prio_dmg = max((_best_dmg(me, opp, [p], fv) for p in prio), default=0.0) / 100.0
     if prio_dmg >= opp_hp:
         return 1.0
     if faster and dmg >= opp_hp:
         return 1.0
     # 上を取れないが 1 発耐えて返せる
-    taken = _best_dmg(opp, me, opp_moves) / 100.0
+    taken = _best_dmg(opp, me, opp_moves, fv) / 100.0
     if dmg >= opp_hp and taken < 1.0:
         return 0.6
     if faster and dmg >= opp_hp / 2:
@@ -113,18 +128,20 @@ def setup_stop_score(me: MonView, my_moves: list, opp: MonView, opp_moves: list)
 
 
 def speed_relation(me: MonView, opp: MonView) -> str:
-    a, b = effective_speed(me), effective_speed(opp)
+    fv = duel_field(me, opp)
+    a, b = effective_speed(me, fv), effective_speed(opp, fv)
     return "faster" if a > b else ("slower" if a < b else "tie")
 
 
 def resource_cost(me: MonView, my_moves: list, opp: MonView, opp_moves: list) -> dict:
     """対面で勝つまでに失う HP 割合と、消耗品を消費しそうか"""
-    turns_a, _ = _race_turns(me, 1.0, my_moves, opp, 1.0, opp_moves)
-    taken_per_turn = _best_dmg(opp, me, opp_moves) / 100.0
+    fv = duel_field(me, opp)
+    turns_a, _ = _race_turns(me, 1.0, my_moves, opp, 1.0, opp_moves, fv)
+    taken_per_turn = _best_dmg(opp, me, opp_moves, fv) / 100.0
     if turns_a is None:
         hp_cost = 1.0
     else:
-        faster = effective_speed(me) >= effective_speed(opp)
+        faster = effective_speed(me, fv) >= effective_speed(opp, fv)
         hits = max(0, turns_a - (1 if faster else 0))
         hp_cost = min(1.0, hits * taken_per_turn)
     item = (me.item or "").lower()
@@ -166,9 +183,35 @@ def coverage_value(row: dict) -> float:
     return round(tot / wsum, 4) if wsum else 0.0
 
 
+_CDEX_SPECIES: Optional[dict] = None
+
+
+def _cdex_species() -> dict:
+    """champions_dex.json の species (特性を持つ。advisor の図鑑には特性が無い)。読めなければ空"""
+    global _CDEX_SPECIES
+    if _CDEX_SPECIES is None:
+        import json
+        from pathlib import Path
+        p = Path(__file__).resolve().parent.parent.parent / "champions_agent" / "data" / "champions_dex.json"
+        try:
+            _CDEX_SPECIES = json.loads(p.read_text(encoding="utf-8")).get("species") or {}
+        except Exception:
+            _CDEX_SPECIES = {}
+    return _CDEX_SPECIES
+
+
+def mega_ability(mega_sid: str) -> Optional[str]:
+    """メガ後のフォルムの特性 id (メガフォルムは特性が 1 つ)。無ければ None"""
+    import re
+    abil = (_cdex_species().get(mega_sid) or {}).get("abilities") or {}
+    name = abil.get("0") or next(iter(abil.values()), None)
+    return re.sub(r"[^a-z0-9]", "", name.lower()) if name else None
+
+
 def view_from_set(species_id: str, set_row: dict, level: int = 50) -> tuple:
     """型 (ability/item/nature/evs(能力ポイント "2/32/0/0/0/32" か dict)/moves) → (MonView, moves)。
-    メガ石を持つ型はメガ後の種族値・タイプで評価する (メガシンカ後の対面が実態に近い)"""
+    メガ石を持つ型はメガ後の種族値・タイプ・特性で評価する (メガシンカ後の対面が実態に近い。特性はメガ後のもの:
+    メガリザードン Y のひでり、メガクチートのちからもち等。2026-09-11 まではメガ前の特性のままだった)"""
     from advisor.dex import get_dex
     from advisor.ev_infer import _nature_mult
     dex = get_dex()
@@ -189,9 +232,11 @@ def view_from_set(species_id: str, set_row: dict, level: int = 50) -> tuple:
         raise KeyError(species_id)
     ev = _points_to_ev(set_row.get("evs") or set_row.get("能力ポイント"))
     nature = _nature_mult(set_row.get("nature")) if set_row.get("nature") else {}
+    ability = set_row.get("ability") or set_row.get("ability_name")
+    if sid != species_id:
+        ability = mega_ability(sid) or ability
     view = MonView(species_id=sid, types=list(sp["types"]), base=dict(sp["baseStats"]),
-                   level=level, ev=ev, nature=nature or {}, item=item,
-                   ability=set_row.get("ability") or set_row.get("ability_name"))
+                   level=level, ev=ev, nature=nature or {}, item=item, ability=ability)
     moves = [m for m in (set_row.get("moves") or
                          [set_row.get(k) for k in ("move1", "move2", "move3", "move4")]) if m]
     return view, moves

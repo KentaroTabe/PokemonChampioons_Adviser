@@ -396,6 +396,17 @@ BUILD_GEN_ARCHETYPES = {
     "wall_special":   {"evs": "32/0/0/0/32/2", "natures": ("careful", "calm"), "items": ("leftovers", "sitrusberry")},
 }
 BUILD_GEN_SETUP_ITEMS = ("sitrusberry", "lumberry", "focussash")   # 積みテンプレートの持ち物 (じゃくてんほけんは M-C に無い)
+# メガ石を持つ種は、メガ後の種族値・タイプ・特性 (メガリザードン Y のひでり等) でメガ型を別に生成する (フォルムごとに上限 N 型)
+BUILD_GEN_MEGA_SETS = 2
+# 想定する相手ごとの能力ポイントの微調整 (2026-09-11 ユーザー指示)。配分の候補を全ポイント使い切りで列挙し、
+# 脅威の重みつきで「上を取れる」「最大打点を 1 発 / 2 発耐える (+余裕)」「最大打点で 1 発 / 2 発で倒す (+割合)」の和が
+# 最大の配分を採る (基準線を越える配分を優先し、連続項は同点の中での選好)
+BUILD_GEN_EV_TUNE = True
+BUILD_GEN_EV_POINT_CAP = 32          # 1 能力あたりの上限ポイント (ゲーム内)
+BUILD_GEN_EV_STEP = 8                # 攻撃/耐久の刻み (素早さは「脅威の上を取る最小ポイント」を候補にする)
+BUILD_GEN_EV_WEIGHTS = {"outspeed": 1.0, "survive": 1.0, "survive_2hit": 0.5, "survive_margin": 0.25,
+                        "ko": 1.0, "ko_2hko": 0.5, "ko_margin": 0.25}
+BUILD_GEN_EV_THREATS = 12            # 微調整で見る相手の数 (重みの大きい順。候補配分 × 相手の計算量を抑える)
 # 自分で張れるフィールド/天候 (特性は常時、技は型にその技があるとき) を技選択のダメージ計算に入れる (2026-09-11)。
 # 標準の補正 (フィールド 1.3 倍、晴れ/雨の 1.5 倍) は advisor.damage が持つ。技固有の補正はここで掛ける
 BUILD_GEN_FIELD_SOURCES = {

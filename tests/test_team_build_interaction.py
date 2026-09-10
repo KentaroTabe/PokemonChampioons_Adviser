@@ -75,7 +75,33 @@ def test_mega_stone_xy_maps_to_form():
     print("test_mega_stone_xy_maps_to_form OK")
 
 
+def test_mega_ability_and_duel_field():
+    """メガ石の型はメガ後の特性で評価し (ひでり/ちからもち)、自分の特性で張れる天候/フィールドを対面の場にする"""
+    from dataclasses import replace
+    ymoves = ["fireblast", "solarbeam", "airslash", "roost"]
+    y, _ = I.view_from_set("charizard", _set("charizarditey", "timid", "2/0/0/32/0/32", ymoves, ability="blaze"))
+    assert y.species_id == "charizardmegay" and y.ability == "drought", (y.species_id, y.ability)
+    assert I.mega_ability("mawilemega") == "hugepower" and I.mega_ability("nosuchmega") is None
+    plain, _ = I.view_from_set("charizard", _set("focussash", "timid", "2/0/0/32/0/32", ymoves, ability="blaze"))
+    assert plain.ability == "blaze"                                       # メガ石が無ければそのまま
+    chomp, cmoves = I.view_from_set("garchomp", _set("focussash", "jolly", "2/32/0/0/0/32",
+                                                     ["earthquake", "outrage", "stoneedge", "swordsdance"]))
+    fv = I.duel_field(y, chomp)
+    assert fv is not None and fv.weather == "sun" and fv.terrain is None
+    assert I.duel_field(chomp, y).weather == "sun" and I.duel_field(chomp, chomp) is None   # 相手の特性でも場になる
+    # 晴れでほのお技 1.5 倍: 同じ実数値でメガ前の特性 (もうか) のままより最大打点が大きい
+    y_blaze = replace(y, ability="blaze")
+    d_sun = I._best_dmg(y, chomp, ["fireblast"], I.duel_field(y, chomp))
+    d_plain = I._best_dmg(y_blaze, chomp, ["fireblast"], I.duel_field(y_blaze, chomp))
+    assert d_plain > 0 and 1.4 < d_sun / d_plain < 1.6, (d_sun, d_plain)
+    row = I.interaction_row("charizard", y, ymoves, "garchomp", chomp, cmoves, {"charizarditey"})
+    assert row["uses_mega"] is True and row["lead"] is not None
+    assert row["lead"] >= I.interaction_row("charizard", y_blaze, ymoves, "garchomp", chomp, cmoves, set())["lead"]
+    print("test_mega_ability_and_duel_field OK")
+
+
 if __name__ == "__main__":
     test_rows_are_bounded_and_sensible()
     test_points_conversion_and_matrix()
+    test_mega_ability_and_duel_field()
     test_mega_stone_xy_maps_to_form()

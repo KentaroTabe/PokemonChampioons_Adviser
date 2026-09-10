@@ -11,19 +11,126 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, Optional
 
 from champions_agent.config import (BUILD_GEN_ABILITY_PRIORITY, BUILD_GEN_ARCHETYPES, BUILD_GEN_ATTACKS_PER_TYPE,
-                                    BUILD_GEN_AVOID_MOVES, BUILD_GEN_CATEGORY_TOLERANCE, BUILD_GEN_FAST_SPEED_SHARE,
-                                    BUILD_GEN_FIELD_MOVE_BOOSTS, BUILD_GEN_FIELD_MOVE_TYPES, BUILD_GEN_FIELD_SOURCES,
-                                    BUILD_GEN_FIELD_TYPE_BOOSTS, BUILD_GEN_MAX_ATTACKS, BUILD_GEN_MAX_SETS,
+                                    BUILD_GEN_AVOID_MOVES, BUILD_GEN_CATEGORY_TOLERANCE, BUILD_GEN_EV_POINT_CAP,
+                                    BUILD_GEN_EV_STEP, BUILD_GEN_EV_THREATS, BUILD_GEN_EV_TUNE, BUILD_GEN_EV_WEIGHTS,
+                                    BUILD_GEN_FAST_SPEED_SHARE, BUILD_GEN_FIELD_MOVE_BOOSTS, BUILD_GEN_FIELD_MOVE_TYPES,
+                                    BUILD_GEN_FIELD_SOURCES, BUILD_GEN_FIELD_TYPE_BOOSTS, BUILD_GEN_MAX_ATTACKS,
+                                    BUILD_GEN_MAX_SETS, BUILD_GEN_MEGA_SETS, BUILD_GEN_POINT_BUDGET,
                                     BUILD_GEN_SETUP_ITEMS, BUILD_GEN_SPEED_GAIN_MIN, BUILD_GEN_TEMPLATES,
-                                    BUILD_GEN_UTILITY_MOVES, BUILD_GEN_WALL_OFFENSE_MAX)
+                                    BUILD_GEN_UTILITY_MOVES, BUILD_GEN_WALL_OFFENSE_MAX, BUILD_TRICK_ROOM_MOVES)
 from tools.team_build.sets import SetCandidate
 
 STAB_MULT = 1.5
 NO_FIELD = {"terrain": None, "weather": None}
+STAT_KEYS = ("hp", "atk", "def", "spa", "spd", "spe")
+
+
+# ------------------------------------------------------------------ 能力ポイントの微調整 (想定する相手ごと)。純粋
+def spread_string(pts: dict) -> str:
+    return "/".join(str(int(pts.get(k, 0) or 0)) for k in STAT_KEYS)
+
+
+def parse_spread(text: str) -> dict:
+    """"2/0/0/32/0/32" → {"hp": 2, ...}。形式が違えば {}"""
+    try:
+        parts = [int(p) for p in str(text or "").split("/")]
+    except ValueError:
+        return {}
+    return dict(zip(STAT_KEYS, parts)) if len(parts) == 6 else {}
+
+
+def speed_point_options(speed_of: Callable, threat_speeds: dict, cap: int = BUILD_GEN_EV_POINT_CAP) -> list:
+    """speed_of(points) → 実効素早さ (単調非減少)。脅威ごとの「上を取る最小ポイント」を候補にする (0 と cap を含む、昇順)"""
+    opts = {0, int(cap)}
+    top = speed_of(int(cap))
+    for s in set(float(v) for v in threat_speeds.values()):
+        if top <= s:
+            continue
+        lo, hi = 0, int(cap)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if speed_of(mid) > s:
+                hi = mid
+            else:
+                lo = mid + 1
+        opts.add(lo)
+    return sorted(opts)
+
+
+def enumerate_spreads(budget: int, cap: int, speed_options, attack_key: str, step: int = BUILD_GEN_EV_STEP) -> list:
+    """全ポイントを使い切る配分の候補。素早さは候補値、攻撃 (attack_key) は step 刻み、残りを HP/防御/特防に配る
+    (2 つを step 刻み、残る 1 つは端数まで。0..cap)。重複は除く。戻り値 [dict]"""
+    out: list = []
+    seen: set = set()
+    grid = list(range(0, int(cap) + 1, int(step)))
+    bulk = ("hp", "def", "spd")
+    for spe in speed_options:
+        for atk in grid:
+            rest = int(budget) - int(spe) - atk
+            if rest < 0:
+                continue
+            for rem_i, rem_key in enumerate(bulk):
+                others = [k for k in bulk if k != rem_key]
+                for a in grid:
+                    for b in grid:
+                        r = rest - a - b
+                        if r < 0 or r > cap:
+                            continue
+                        pts = {k: 0 for k in STAT_KEYS}
+                        pts["spe"], pts[attack_key] = int(spe), atk
+                        pts[others[0]], pts[others[1]], pts[rem_key] = a, b, r
+                        key = tuple(pts[k] for k in STAT_KEYS)
+                        if key not in seen:
+                            seen.add(key)
+                            out.append(pts)
+    return out
+
+
+def score_spread(stats: dict, threats, weights: dict, threat_speeds: dict, incoming: dict, outgoing: dict,
+                 params: dict = BUILD_GEN_EV_WEIGHTS, trick_room: bool = False) -> float:
+    """配分 (実数値 stats) の評価: Σ_t w_t [outspeed·1[上を取る]
+        + survive·1[最大打点を 1 発耐える] + survive_2hit·1[2 発耐える] + survive_margin·残り HP
+        + ko·1[最大打点で 1 発] + ko_2hko·1[2 発] + ko_margin·min(1, 与ダメ)]。
+    基準線 (耐える / 倒す) を越える配分が優先され、連続項は同点の中での選好。
+    incoming[t] = {"def": (被ダメ割合の基準値, 基準の防御, 基準の HP), "spd": (...)}: 被ダメは 基準 × 基準防御/防御 × 基準HP/HP で伸縮。
+    outgoing[t] = [(攻撃の能力キー, 与ダメ割合の基準値, 基準の攻撃)]: 与ダメは 基準 × 攻撃/基準攻撃"""
+    total = 0.0
+    for t in threats:
+        w = float(weights.get(t, 1.0))
+        ts = float(threat_speeds.get(t, 0.0))
+        out_ok = (stats["spe"] < ts) if trick_room else (stats["spe"] > ts)
+        taken = 0.0
+        for def_key, (frac0, def0, hp0) in (incoming.get(t) or {}).items():
+            if frac0 <= 0:
+                continue
+            taken = max(taken, frac0 * (def0 / max(1.0, stats[def_key])) * (hp0 / max(1.0, stats["hp"])))
+        ko = 0.0
+        for atk_key, frac0, atk0 in (outgoing.get(t) or ()):
+            ko = max(ko, frac0 * (stats[atk_key] / max(1.0, atk0)))
+        total += w * (params["outspeed"] * (1.0 if out_ok else 0.0)
+                      + params["survive"] * (1.0 if taken < 1.0 else 0.0)
+                      + params.get("survive_2hit", 0.0) * (1.0 if taken < 0.5 else 0.0)
+                      + params["survive_margin"] * max(0.0, 1.0 - taken)
+                      + params["ko"] * (1.0 if ko >= 1.0 else 0.0)
+                      + params.get("ko_2hko", 0.0) * (1.0 if ko >= 0.5 else 0.0)
+                      + params.get("ko_margin", 0.0) * min(1.0, ko))
+    return total
+
+
+def tune_spread(default: dict, candidates: list, stats_of: Callable, threats, weights: dict, threat_speeds: dict,
+                incoming: dict, outgoing: dict, params: dict = BUILD_GEN_EV_WEIGHTS, trick_room: bool = False) -> dict:
+    """候補のうち score_spread が最大の配分。同点は定型 → 素早さの少ない順 → 文字列順。候補が無ければ default"""
+    best, best_key = None, None
+    for pts in [default] + [c for c in candidates if c != default]:
+        sc = score_spread(stats_of(pts), threats, weights, threat_speeds, incoming, outgoing, params, trick_room)
+        key = (-round(sc, 9), 0 if pts == default else 1, int(pts.get("spe", 0)), spread_string(pts))
+        if best_key is None or key < best_key:
+            best, best_key = pts, key
+    return dict(best if best is not None else default)
 
 
 # ------------------------------------------------------------------ フィールド/天候 (自分で張れるもの) の補正。純粋
@@ -262,10 +369,10 @@ def choose_ability(abilities, priority=BUILD_GEN_ABILITY_PRIORITY) -> Optional[s
 
 def assemble_sets(species_id: str, pool: dict, pick_attacks: Callable, archetype: str, nature: str,
                   ability: Optional[str], templates=BUILD_GEN_TEMPLATES, archetypes=BUILD_GEN_ARCHETYPES,
-                  setup_items=BUILD_GEN_SETUP_ITEMS, mega_stone: Optional[str] = None,
+                  setup_items=BUILD_GEN_SETUP_ITEMS, fixed_item: Optional[str] = None, extra_notes=(),
                   max_sets: int = BUILD_GEN_MAX_SETS) -> list:
-    """テンプレートごとに 1 型 (+ メガ石があれば先頭テンプレートのメガ変種)。pick_attacks(n, exclude) → [move]。
-    役割が埋まらないテンプレートは捨てる。戻り値 [SetCandidate (source learnset)]"""
+    """テンプレートごとに 1 型。pick_attacks(n, exclude) → [move]。役割が埋まらないテンプレートは捨てる。
+    fixed_item (メガ石) があれば全型その持ち物。戻り値 [SetCandidate (source learnset)]"""
     arch = archetypes[archetype]
     out: list = []
     seen: set = set()
@@ -291,15 +398,10 @@ def assemble_sets(species_id: str, pool: dict, pick_attacks: Callable, archetype
             continue
         seen.add(key)
         items = setup_items if "setup" in tpl["utility"] else arch["items"]
-        out.append(SetCandidate(species_id, ability, items[0], nature, arch["evs"], moves, "learnset",
-                                notes=[f"gen:{tpl['name']}:{archetype}"]))
+        out.append(SetCandidate(species_id, ability, fixed_item or items[0], nature, arch["evs"], moves, "learnset",
+                                notes=[f"gen:{tpl['name']}:{archetype}"] + list(extra_notes)))
         if len(out) >= max_sets:
             break
-    if mega_stone and out:
-        first = out[0]
-        out.insert(1, SetCandidate(species_id, ability, mega_stone, first.nature, first.evs, list(first.moves),
-                                   "learnset", notes=list(first.notes) + ["gen:mega"]))
-        out = out[:max_sets]
     return out
 
 
@@ -369,51 +471,22 @@ def legal_item_tables(archetypes=BUILD_GEN_ARCHETYPES, setup_items=BUILD_GEN_SET
     return arch, setup
 
 
-def generate_for_species(species_id: str, threat_views: dict, threat_weights: Optional[dict] = None,
-                         learnset_table: Optional[dict] = None, cdex_species: Optional[dict] = None) -> dict:
-    """{"sets": [SetCandidate], "items": [item ids], "archetype": str}。learnset が無ければ空。
-    threat_views: {threat_id: (MonView, moves)} (想定する相手)。threat_weights で特定の相手を重くできる"""
-    import json
-    from pathlib import Path
-
+def _generate_form(species_id: str, learnset, base: dict, types: list, eval_abilities: list,
+                   set_ability: Optional[str], fixed_item: Optional[str], extra_notes, threat_views: dict,
+                   weights: dict, dex, max_sets: int = BUILD_GEN_MAX_SETS) -> dict:
+    """1 フォルム (通常 / メガ後) の型生成。評価 (フィールド・接地・与ダメ・配分) は base/types/eval_abilities で、
+    型に書く特性は set_ability (メガ型はメガ前の特性)。戻り値 {"sets", "items", "archetype"}"""
     from advisor.damage import FieldView, MonView, _is_grounded, calc_damage, effective_speed
-    from advisor.dex import get_dex
     from advisor.ev_infer import _nature_mult
-    from tools.team_build.interaction import _mega_stone_ids, _points_to_ev
-    from tools.team_build.learnsets import learnset_of, learnsets
-
-    dex = get_dex()
-    table = learnset_table if learnset_table is not None else learnsets()
-    learnset = learnset_of(species_id, table)
-    sp = dex.species(species_id)
-    if not learnset or not sp:
-        return {"sets": [], "items": [], "archetype": None}
-    if cdex_species is None:
-        p = Path(__file__).resolve().parent.parent.parent / "champions_agent" / "data" / "champions_dex.json"
-        try:
-            cdex_species = json.loads(p.read_text(encoding="utf-8")).get("species") or {}
-        except Exception:
-            cdex_species = {}
-    entry = cdex_species.get(species_id) or {}
-    abilities = [_toid(v) for k, v in sorted((entry.get("abilities") or {}).items())]
-    stones = _mega_stone_ids()
-    mega_stone, mega_sid = None, None
-    for sid2, e2 in cdex_species.items():
-        if e2.get("baseSpecies") == entry.get("name") and e2.get("isMega") and e2.get("requiredItem"):
-            cand = _toid(e2["requiredItem"])
-            if cand in stones:
-                mega_stone, mega_sid = cand, sid2
-                break
-    base = dict(sp["baseStats"])
-    types = list(sp["types"])
-    weights = dict(threat_weights or {})
+    from tools.team_build.interaction import _points_to_ev
 
     def move_info(m: str):
         return dex.move(m)
 
     # 自分で張れるフィールド/天候: 特性 (常時) と、覚えるフィールド技 (自分のタイプを強化するものを先に)。
     # 刈り込みは「特性 + 先頭のフィールド技」の条件込みでも上位を残す (ワイドフォース等を落とさない)
-    ability = choose_ability(abilities)
+    ability = choose_ability(eval_abilities)
+    ability_set = set_ability or ability
     roles = role_moves()
     learnable_field = preferred_field_moves([m for m in roles.get("field", ()) if m in learnset], types)
     roles["field"] = tuple(learnable_field)
@@ -440,7 +513,7 @@ def generate_for_species(species_id: str, threat_views: dict, threat_weights: Op
                 continue
             d = calc_damage(tv, probe, m).get("avg", 0.0) / 100.0
             if str(mi.get("category") or "").lower() == "physical":
-                phys_p = max(phys_p, 0.0) + w * d
+                phys_p += w * d
             else:
                 spec_p += w * d
     archetype = choose_archetype(base, share_plus, phys_p, spec_p)
@@ -454,13 +527,14 @@ def generate_for_species(species_id: str, threat_views: dict, threat_weights: Op
     attacker = MonView(species_id=species_id, types=types, base=base, ev=_points_to_ev(arch["evs"]),
                        nature=_nature_mult(nature), ability=ability)
     tables: dict = {}
+    mtypes = {a.move: str((dex.move(a.move) or {}).get("type") or "") for a in pool["attacks"]}
+    cat_of = {a.move: a.category for a in pool["attacks"]}
 
     def table_for(field: dict) -> dict:
         """その型のフィールド/天候 (特性 + 型に入るフィールド技) 込みの与ダメージ表。フィールドごとにキャッシュ"""
         key = field_key(field)
         if key not in tables:
             fv = FieldView(terrain=field.get("terrain"), weather=field.get("weather"))
-            mtypes = {a.move: str((dex.move(a.move) or {}).get("type") or "") for a in pool["attacks"]}
 
             def damage_fn(move: str, tid: str) -> float:
                 tv, _m = threat_views[tid]
@@ -480,13 +554,142 @@ def generate_for_species(species_id: str, threat_views: dict, threat_weights: Op
         sub = {m: row for m, row in tbl.items() if m not in exclude}
         return greedy_attacks(sub, n, weights)
 
-    sets = assemble_sets(species_id, pool, pick_attacks, archetype, nature, ability, archetypes=archetypes,
-                         setup_items=setup_items, mega_stone=mega_stone)
+    sets = assemble_sets(species_id, pool, pick_attacks, archetype, nature, ability_set, archetypes=archetypes,
+                         setup_items=setup_items, fixed_item=fixed_item, extra_notes=extra_notes, max_sets=max_sets)
     if archetype.startswith("wall"):
         # 壁型の性格は型ごとの攻撃技の分類で決め直す (特殊技だけの型に −SpA を付けない)
-        from dataclasses import replace
-        cat_of = {a.move: a.category for a in pool["attacks"]}
         sets = [replace(s, nature=wall_nature_for_moves(arch["natures"], [cat_of[m] for m in s.moves if m in cat_of],
                                                           main_phys)) for s in sets]
-    return {"sets": sets, "items": item_options(archetype, archetypes, setup_items), "archetype": archetype,
-            "mega": mega_sid}
+    if BUILD_GEN_EV_TUNE and threat_views:
+        sets = [tune_set_spread(s, base, types, ability, threat_views, weights, threat_speeds, attacker, cat_of,
+                                lambda field: table_for(field), dex) for s in sets]
+    return {"sets": sets, "items": item_options(archetype, archetypes, setup_items), "archetype": archetype}
+
+
+def tune_set_spread(s: SetCandidate, base: dict, types: list, ability: Optional[str], threat_views: dict,
+                    weights: dict, threat_speeds: dict, attacker, cat_of: dict, table_for: Callable, dex,
+                    n_threats: int = BUILD_GEN_EV_THREATS, budget: int = BUILD_GEN_POINT_BUDGET,
+                    cap: int = BUILD_GEN_EV_POINT_CAP, step: int = BUILD_GEN_EV_STEP) -> SetCandidate:
+    """1 型の能力ポイントを想定する相手 (重みの大きい n_threats 種) に合わせて微調整する。
+    被ダメは基準配分からの伸縮 (基準 × 基準防御/防御 × 基準HP/HP)、与ダメは型の与ダメージ表からの伸縮 (× 攻撃/基準攻撃)。
+    定型より良い配分が無ければそのまま。トリックルーム型は素早さに振らず「下を取る」"""
+    from advisor.damage import MonView, calc_damage
+    from advisor.ev_infer import _nature_mult
+    from tools.team_build.interaction import _points_to_ev
+
+    default = parse_spread(s.evs)
+    if not default:
+        return s
+    ranked = sorted(threat_views, key=lambda t: (-float(weights.get(t, 1.0)), t))[:n_threats]
+    if not ranked:
+        return s
+    nature_mult = _nature_mult(s.nature) if s.nature else {}
+    trick_room = any(m in BUILD_TRICK_ROOM_MOVES for m in s.moves)
+
+    def view_of(pts: dict):
+        return MonView(species_id=s.species_id, types=types, base=base, ev=_points_to_ev(pts), nature=nature_mult,
+                       ability=ability)
+
+    cache: dict = {}
+
+    def stats_of(pts: dict) -> dict:
+        key = spread_string(pts)
+        if key not in cache:
+            v = view_of(pts)
+            st = {k: float(v.stat(k)) for k in STAT_KEYS if k != "hp"}
+            st["hp"] = float(v.max_hp())
+            cache[key] = st
+        return cache[key]
+
+    def speed_of(p: int) -> float:
+        return float(view_of({"spe": p}).stat("spe"))
+
+    # 被ダメの基準 (0 ポイント、その型の性格): 脅威ごとに物理/特殊の最大打点
+    probe = view_of({})
+    hp0, def0, spd0 = float(probe.max_hp()), float(probe.stat("def")), float(probe.stat("spd"))
+    incoming: dict = {}
+    for t in ranked:
+        tv, tmoves = threat_views[t]
+        best = {"def": 0.0, "spd": 0.0}
+        for m in tmoves:
+            mi = dex.move(m) or {}
+            if (mi.get("power") or 0) <= 0:
+                continue
+            key = "def" if str(mi.get("category") or "").lower() == "physical" else "spd"
+            best[key] = max(best[key], calc_damage(tv, probe, m).get("avg", 0.0) / 100.0)
+        incoming[t] = {"def": (best["def"], def0, hp0), "spd": (best["spd"], spd0, hp0)}
+    # 与ダメの基準: その型のフィールド込みの表 (attacker = 定型の配分) からの伸縮
+    tbl = table_for(own_field(ability, s.moves))
+    attacks = [m for m in s.moves if m in tbl]
+    outgoing: dict = {}
+    for t in ranked:
+        rows = []
+        for m in attacks:
+            atk_key = "atk" if cat_of.get(m) == "physical" else "spa"
+            rows.append((atk_key, float(tbl[m].get(t, 0.0)), float(attacker.stat(atk_key))))
+        outgoing[t] = rows
+    attack_key = ("atk" if cat_of.get(attacks[0]) == "physical" else "spa") if attacks else \
+        ("atk" if base.get("atk", 0) >= base.get("spa", 0) else "spa")
+    speeds = {t: threat_speeds[t] for t in ranked}
+    speed_opts = [0] if trick_room else speed_point_options(speed_of, speeds, cap)
+    cands = enumerate_spreads(budget, cap, speed_opts, attack_key, step)
+    tuned = tune_spread(default, cands, stats_of, ranked, weights, speeds, incoming, outgoing, trick_room=trick_room)
+    if tuned == default:
+        return s
+    st = stats_of(tuned)
+    n_out = sum(1 for t in ranked if ((st["spe"] < speeds[t]) if trick_room else (st["spe"] > speeds[t])))
+    n_surv = 0
+    for t in ranked:
+        taken = max(f0 * (d0 / max(1.0, st[k])) * (h0 / max(1.0, st["hp"])) for k, (f0, d0, h0) in incoming[t].items())
+        n_surv += 1 if taken < 1.0 else 0
+    note = f"ev:tuned outspeed={n_out}/{len(ranked)} survive={n_surv}/{len(ranked)}"
+    return replace(s, evs=spread_string(tuned), notes=list(s.notes) + [note])
+
+
+def generate_for_species(species_id: str, threat_views: dict, threat_weights: Optional[dict] = None,
+                         learnset_table: Optional[dict] = None, cdex_species: Optional[dict] = None) -> dict:
+    """{"sets": [SetCandidate], "items": [item ids], "archetype": str, "megas": [メガ後の種族 id]}。learnset が無ければ空。
+    threat_views: {threat_id: (MonView, moves)} (想定する相手)。threat_weights で特定の相手を重くできる。
+    メガ石を持てる種は、メガ後の種族値・タイプ・特性 (メガリザードン Y のひでり等) でメガ型を別に生成する
+    (フォルムごと BUILD_GEN_MEGA_SETS 型、持ち物はその石、型に書く特性はメガ前のもの)"""
+    import json
+    from pathlib import Path
+
+    from advisor.dex import get_dex
+    from tools.team_build.interaction import _mega_stone_ids
+    from tools.team_build.learnsets import learnset_of, learnsets
+
+    dex = get_dex()
+    table = learnset_table if learnset_table is not None else learnsets()
+    learnset = learnset_of(species_id, table)
+    sp = dex.species(species_id)
+    if not learnset or not sp:
+        return {"sets": [], "items": [], "archetype": None, "megas": []}
+    if cdex_species is None:
+        p = Path(__file__).resolve().parent.parent.parent / "champions_agent" / "data" / "champions_dex.json"
+        try:
+            cdex_species = json.loads(p.read_text(encoding="utf-8")).get("species") or {}
+        except Exception:
+            cdex_species = {}
+    entry = cdex_species.get(species_id) or {}
+    abilities = [_toid(v) for k, v in sorted((entry.get("abilities") or {}).items())]
+    stones = _mega_stone_ids()
+    megas = []
+    for sid2, e2 in cdex_species.items():
+        if e2.get("baseSpecies") == entry.get("name") and e2.get("isMega") and e2.get("requiredItem"):
+            cand = _toid(e2["requiredItem"])
+            if cand in stones and dex.species(sid2):
+                megas.append((sid2, cand, e2))
+    weights = dict(threat_weights or {})
+    res = _generate_form(species_id, learnset, dict(sp["baseStats"]), list(sp["types"]), abilities, None, None, (),
+                         threat_views, weights, dex)
+    sets = list(res["sets"])
+    set_ability = choose_ability(abilities)
+    for sid2, stone, e2 in megas:
+        msp = dex.species(sid2)
+        mab = [_toid(v) for k, v in sorted((e2.get("abilities") or {}).items())] or abilities
+        mres = _generate_form(species_id, learnset, dict(msp["baseStats"]), list(msp["types"]), mab, set_ability, stone,
+                              (f"gen:mega:{sid2}",), threat_views, weights, dex, max_sets=BUILD_GEN_MEGA_SETS)
+        sets += mres["sets"]
+    return {"sets": sets, "items": res["items"], "archetype": res["archetype"], "megas": [m[0] for m in megas],
+            "mega": megas[0][0] if megas else None}
