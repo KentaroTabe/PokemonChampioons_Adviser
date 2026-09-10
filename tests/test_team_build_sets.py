@@ -73,6 +73,14 @@ def test_item_clause_by_usage_and_prefer():
     # usage_pct 無し = 従来 (並び順で先が残す)
     old = resolve_item_clause([king, mimi], item_usage)
     assert [c.item for c in old] == ["lifeorb", "scopelens"]
+    # 持ち物なし (メガ枠の解決で代替が無かったマフォクシー) には使用率順の未使用品を付ける (両方の経路)
+    dlp = SetCandidate("delphox", "blaze", None, "timid", "2/0/0/32/0/32", ["flamethrower"], "representative",
+                       notes=["single_mega:delphoxite->none"])
+    usage["delphox"] = {"delphoxite": 99.0, "focussash": 0.2, "choicescarf": 0.1}
+    item_usage["delphox"] = ["delphoxite", "focussash", "choicescarf", "sitrusberry"]
+    for fixed in (resolve_item_clause([garc, dlp], item_usage, usage), resolve_item_clause([garc, dlp], item_usage)):
+        assert [c.item for c in fixed] == ["focussash", "choicescarf"], [c.item for c in fixed]   # タスキは使用済み
+        assert fixed[1].notes[-1] == "clause:None->choicescarf"
     print("test_item_clause_by_usage_and_prefer OK")
 
 

@@ -200,10 +200,12 @@ def resolve_item_clause(team: list, item_usage: dict, usage_pct: Optional[dict] 
         used = set()
         out = []
         for c in team:
-            if c.item and c.item in used:
+            if (c.item and c.item in used) or not c.item:
+                # 重複、または持ち物なし (メガ枠の解決で代替が無かった個体) → 使用率順の未使用品
                 alt = next((i for i in item_usage.get(c.species_id, [])
                             if i not in used and i != c.item and i not in stones), None)
-                c = _with_item(c, alt, f"clause:{c.item}->{alt}")
+                if alt or c.item:
+                    c = _with_item(c, alt, f"clause:{c.item}->{alt}")
             if c.item:
                 used.add(c.item)
             out.append(c)
@@ -228,10 +230,12 @@ def resolve_item_clause(team: list, item_usage: dict, usage_pct: Optional[dict] 
     used = {c.item for i, c in enumerate(team) if c.item and i not in losers}
     out = []
     for i, c in enumerate(team):
-        if i in losers:
+        if i in losers or not c.item:
+            # 重複で譲る個体、または持ち物なし (メガ枠の解決で代替が無かった個体) → 使用率順の未使用品
             alt = next((it for it in item_usage.get(c.species_id, [])
                         if it not in used and it != c.item and it not in stones), None)
-            c = _with_item(c, alt, f"clause:{c.item}->{alt}")
+            if alt or c.item:
+                c = _with_item(c, alt, f"clause:{c.item}->{alt}")
             if alt:
                 used.add(alt)
         out.append(c)
