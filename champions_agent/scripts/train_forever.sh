@@ -17,6 +17,10 @@ SLEEP_BETWEEN="${SLEEP_BETWEEN:-60}"
 # 8コアでは4が最適 (6にすると伸びが鈍化しサーバー/アドバイザーと競合。
 # 実測: 単一140fps -> 3並列271 -> 6並列323。4は約290fps=2倍)。
 export N_ENVS="${N_ENVS:-4}"
+# 観測の版: v8 = メガシンカの推定 16 次元を末尾追記 (436)。2026-09-12 にチェックポイントを
+# scripts/migrate_policy_obs.sh でゼロ拡張して切替 (docs/GIMMICK_INFERENCE_DESIGN.md)。
+# ⚠ ここを v6 に戻すと 436 のチェックポイントが観測空間不一致で「非互換→退避→新規学習」になる
+export TRAIN_OBS="${TRAIN_OBS:-v8}"
 CYCLE=0
 
 echo "[forever] 常時学習を開始します (N_ENVS=$N_ENVS, Ctrl+Cで停止)"

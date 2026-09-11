@@ -178,7 +178,9 @@ class _DummyBattleEnv:
         # 実環境 (showdown_env) と同じ規則: TRAIN_OBS=v7 で420、既定は388。
         # ここが実環境とずれると、BCで作ったモデルが学習再開時に
         # 観測空間不一致で非互換扱いになる
-        dim = BATTLE_OBS_DIM if os.environ.get("TRAIN_OBS", "v6") == "v7" \
+        from champions_agent.agent.spaces import BATTLE_OBS_DIM_V7
+        obs_ver = os.environ.get("TRAIN_OBS", "v6")
+        dim = BATTLE_OBS_DIM if obs_ver == "v8" else BATTLE_OBS_DIM_V7 if obs_ver == "v7" \
             else 388
 
         class _E(gym.Env):

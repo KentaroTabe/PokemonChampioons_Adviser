@@ -803,17 +803,19 @@ def evaluate(state: dict, resolver=None) -> dict:
         if rl_hint and rl_hint.get("top"):
             probs = {}
             for t in rl_hint["top"]:
-                # 「技名+メガ」は技名側にも最大値で寄せる
+                # 「技名+メガ」は技名側にも最大値で寄せる (素の技の確率で上書きしない。2026-09-12 修正:
+                # 上書きのせいで「たきのぼり+メガ 100% / たきのぼり 0%」が技側 0% になりブレンドが消えていた)
                 base_label = t["label"].replace("+メガ", "")
                 probs[base_label] = max(probs.get(base_label, 0.0), t["prob"])
-                probs[t["label"]] = t["prob"]
+                if t["label"] != base_label:
+                    probs[t["label"]] = max(probs.get(t["label"], 0.0), t["prob"])
             RL_BLEND = float(os.environ.get("RL_BLEND_WEIGHT", "25"))
             for a in actions:
                 if a["score"] <= -90:
                     continue   # わざふうじ等で選べない行動はブレンドしない
                 key = a["name"] if a["kind"] == "move" else f"交代:{a['name']}"
                 p = probs.get(key)
-                if p:
+                if p is not None:
                     a["score"] = round(a["score"] + RL_BLEND * p, 1)
                     a["reason"] = (a.get("reason") or "") + f" / RL{p:.0%}"
             actions.sort(key=lambda a: -a["score"])

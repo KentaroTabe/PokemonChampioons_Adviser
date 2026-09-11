@@ -2,6 +2,13 @@
  "_comment": "学習に影響する変更の記録。watch_training が推移グラフに赤い縦線として描画し、履歴表示にも差し込む。新しい変更を入れたら追記すること (at はローカル時刻 'YYYY-MM-DD HH:MM')。kind: net=ネット構成 / reward=報酬 / opponent=相手構成 / env=環境仕様 / eval=評価方法 / fix=不具合修正",
  "changes": [
   {
+   "at": "2026-09-12 00:20",
+   "kind": "env",
+   "label": "観測 v8 (メガシンカの推定 16 次元、388→436) へ切替 — チェックポイントは入力層のゼロ拡張で継続",
+   "detail": "ユーザー指摘「相手がチームプレビューからメガ先を読まないのは致命的」への対応 (docs/GIMMICK_INFERENCE_DESIGN.md)。末尾追記 16 次元 = 相手の場の P(メガ) と期待種族値の差 (7)、相手控え 2 体の P (2)、自分の場の石/メガ可能 + 控えの石 (3)、権利の消費 自分/相手 (2)、陣営の残りメガ脅威 相手/自分 (2)。事前分布は使用率 DB の石の使用率 (advisor/gimmick)。balance/offense/cycle の 本体/_ema/_best を scripts/migrate_policy_obs.sh で 436 に拡張 (追加列の重みはゼロ、拡張前後で同じ盤面の出力が一致することを検査済み。旧ファイルは checkpoints/obs_backup_*/)。train_forever.sh で TRAIN_OBS=v8 を既定に。挙動は切替時点で同一なので測定基準の切断点ではないが、以後の学習は新しい 16 次元を使うため、v8 前後で伸びを比べるときはこの時刻を境にする",
+   "isolated": false
+  },
+  {
    "at": "2026-09-11 01:25",
    "kind": "env",
    "label": "レギュレーション M-C へ切替 (TRAINING_BATTLE_FORMAT=gen9championsbssregmc) — 測定基準の切断点",
