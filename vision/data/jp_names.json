@@ -7858,5 +7858,32 @@
   "あく": "Dark",
   "フェアリー": "Fairy",
   "ステラ": "Stellar"
+ },
+ "natures": {
+  "がんばりや": "hardy",
+  "さみしがり": "lonely",
+  "ゆうかん": "brave",
+  "いじっぱり": "adamant",
+  "やんちゃ": "naughty",
+  "ずぶとい": "bold",
+  "すなお": "docile",
+  "のんき": "relaxed",
+  "わんぱく": "impish",
+  "のうてんき": "lax",
+  "おくびょう": "timid",
+  "せっかち": "hasty",
+  "まじめ": "serious",
+  "ようき": "jolly",
+  "むじゃき": "naive",
+  "ひかえめ": "modest",
+  "おっとり": "mild",
+  "れいせい": "quiet",
+  "てれや": "bashful",
+  "うっかりや": "rash",
+  "おだやか": "calm",
+  "おとなしい": "gentle",
+  "なまいき": "sassy",
+  "しんちょう": "careful",
+  "きまぐれ": "quirky"
  }
 }

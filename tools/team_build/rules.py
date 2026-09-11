@@ -22,9 +22,10 @@ from typing import Callable, Optional
 from champions_agent.config import (BUILD_LINEUP_HOLE_THRESHOLD, BUILD_RULE_ACE_BOOST_MIN_BULK,
                                     BUILD_RULE_ACE_BOOST_SPEED_SHARE, BUILD_RULE_ACE_FAST_MAX_DEF,
                                     BUILD_RULE_ACE_FAST_SPEED_SHARE, BUILD_RULE_ACE_ITEM_MIN_PCT, BUILD_RULE_ACE_ITEMS,
-                                    BUILD_RULE_ACE_MIN_ATTACK_MOVES, BUILD_RULE_ACE_MIN_ATTACK_TYPES,
-                                    BUILD_RULE_ACE_MIN_COVERAGE, BUILD_RULE_ACE_MIN_OFFENSE,
-                                    BUILD_RULE_ACE_TR_SPEED_SHARE, BUILD_RULE_MAX_CORES, BUILD_RULE_PAIR_COVER)
+                                    BUILD_RULE_ACE_ITEMS_BY_ABILITY, BUILD_RULE_ACE_MIN_ATTACK_MOVES,
+                                    BUILD_RULE_ACE_MIN_ATTACK_TYPES, BUILD_RULE_ACE_MIN_COVERAGE,
+                                    BUILD_RULE_ACE_MIN_OFFENSE, BUILD_RULE_ACE_TR_SPEED_SHARE, BUILD_RULE_MAX_CORES,
+                                    BUILD_RULE_PAIR_COVER, BUILD_UNBURDEN_TRIGGERS)
 
 RULES = {
     "psychic_terrain_priority_ace": {
@@ -37,8 +38,11 @@ RULES = {
         "airborne_types": ("Flying",),
         "airborne_abilities": ("levitate",),
         "airborne_items": ("airballoon",),
-        # エースの持ち物: その種での使用率が min_pct 以上なら先頭から優先 (きあいのタスキ)。クローズでもエースが残す
+        # エースの持ち物: その種での使用率が min_pct 以上なら先頭から優先 (きあいのタスキ)。クローズでもエースが残す。
+        # 特性ごとの優先品 (かるわざ = 発動させる消耗品: しろいハーブ / ノーマルジュエル / タスキ) は ace_items より先
         "ace_items": BUILD_RULE_ACE_ITEMS,
+        "ace_items_by_ability": BUILD_RULE_ACE_ITEMS_BY_ABILITY,
+        "unburden_triggers": BUILD_UNBURDEN_TRIGGERS,
         "ace_item_min_pct": BUILD_RULE_ACE_ITEM_MIN_PCT,
     },
 }
@@ -345,18 +349,56 @@ def choose_ace(team: list, aces, setter_id: Optional[str], rule: dict, usage_pct
     return best
 
 
+def _dex_move_info(m: str):
+    from advisor.dex import get_dex
+    mv = get_dex().move(m)
+    return (mv.get("category"), mv.get("type"), mv.get("power")) if mv else None
+
+
+def unburden_trigger_ok(item: Optional[str], moves, triggers: dict, move_info=None) -> bool:
+    """かるわざを発動させる持ち物の条件: しろいハーブ = 自分の能力を下げる技 (インファイト等) がある、
+    ノーマルジュエル = ノーマルタイプの攻撃技がある。条件の無い持ち物 (タスキ等) は True"""
+    kind = (triggers or {}).get(item or "")
+    if kind is None:
+        return True
+    if kind == "self_stat_drop":
+        from advisor.dex import move_boost_effects
+        return any(any(v < 0 for v in ((move_boost_effects(m) or {}).get("self") or {}).values()) for m in moves)
+    if kind == "normal_attack":
+        info = move_info or _dex_move_info
+        for m in moves:
+            mi = info(m)
+            if mi and mi[1] == "Normal" and (mi[2] or 0) > 0:
+                return True
+        return False
+    return True
+
+
+def ace_item_preference(rule: dict, ability: Optional[str]) -> tuple:
+    """エースの持ち物の優先順: 特性ごとの表 (ace_items_by_ability) があればそれ、無ければ ace_items"""
+    by_ab = rule.get("ace_items_by_ability") or {}
+    return tuple(by_ab.get(ability or "") or rule.get("ace_items") or ())
+
+
 def ensure_ace_item(team: list, aces, setter_id: Optional[str], rule: dict, usage_pct: Optional[dict] = None,
-                    stones=frozenset(), tr_setters=()) -> tuple:
-    """エースの持ち物を規則の優先品 (ace_items) にする。既に優先品ならそのまま、メガ石は替えない、その種での使用率が
-    ace_item_min_pct 未満なら据え置き (注記)。元の SetCandidate は変更しない。戻り値 (team, ace_id or None, notes)"""
+                    stones=frozenset(), tr_setters=(), move_info=None) -> tuple:
+    """エースの持ち物を規則の優先品 (特性ごとの表 → ace_items) にする。既に優先品 (かるわざなら発動条件つき) ならそのまま、
+    メガ石は替えない、その種での使用率が ace_item_min_pct 未満なら据え置き (注記)。元の SetCandidate は変更しない。
+    戻り値 (team, ace_id or None, notes)"""
     ace = choose_ace(team, aces, setter_id, rule, usage_pct, tr_setters)
     if ace is None:
         return team, None, ["no_ace"]
-    pref = tuple(rule.get("ace_items") or ())
-    if not pref or (ace.item or "") in pref or (ace.item or "") in stones:
+    pref = ace_item_preference(rule, ace.ability)
+    triggers = rule.get("unburden_triggers") or {}
+    unburden = (ace.ability or "") == "unburden"
+
+    def usable(item: Optional[str]) -> bool:
+        return (item or "") in pref and (not unburden or unburden_trigger_ok(item, ace.moves, triggers, move_info))
+
+    if not pref or usable(ace.item) or (ace.item or "") in stones:
         return team, ace.species_id, []
     pct = (usage_pct or {}).get(ace.species_id) or {}
-    item = next((i for i in pref if pct.get(i, 0.0) >= float(rule.get("ace_item_min_pct", 0.0))), None)
+    item = next((i for i in pref if pct.get(i, 0.0) >= float(rule.get("ace_item_min_pct", 0.0)) and usable(i)), None)
     if item is None:
         return team, ace.species_id, ["rule:ace_item_kept"]
     note = f"rule:ace_item<-{ace.item}"

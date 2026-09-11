@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from champions_agent.config import BUILD_SET_USAGE_WEIGHT, USAGE_TARGET_FORMAT
+from champions_agent.config import BUILD_MAX_MEGA_STONES, BUILD_SET_USAGE_WEIGHT, USAGE_TARGET_FORMAT
 from champions_agent.data import database as db
 from champions_agent.data.build_meta import move_categories, nature_fits, parse_points
 
@@ -296,27 +296,35 @@ def set_sanity(c: "SetCandidate") -> list:
     return problems
 
 
-def enforce_single_mega(team: list, alternatives: dict, keep: Optional[str] = None) -> list:
-    """メガ石を持つ型が 2 体以上なら 1 体 (keep か被覆が最大の種) だけ残し、他はメガ石以外の最良代替に差し替える。
-    alternatives: {species_id: [SetCandidate (被覆降順)]}"""
+def enforce_max_megas(team: list, alternatives: dict, keep: Optional[str] = None,
+                      max_n: int = BUILD_MAX_MEGA_STONES) -> list:
+    """メガ石を持つ型が max_n 体を超えるなら、keep と被覆の高い順に max_n 体だけ残し、他はメガ石以外の最良代替に
+    差し替える (2026-09-11 まで上限 1 体だった: 1 試合 1 回のメガシンカを 1 構築 1 個の石と取り違えていた。
+    実構築は石 2 個が 6 割)。alternatives: {species_id: [SetCandidate (被覆降順)]}"""
     stones = _mega_stones()
     megas = [c for c in team if (c.item or "") in stones]
-    if len(megas) <= 1:
+    if len(megas) <= max_n:
         return team
-    keeper = keep if keep in {c.species_id for c in megas} else max(megas, key=lambda c: c.score).species_id
+    order = sorted(megas, key=lambda c: (0 if c.species_id == keep else 1, -c.score, c.species_id))
+    keepers = {c.species_id for c in order[:max(0, int(max_n))]}
     out = []
     for c in team:
-        if (c.item or "") in stones and c.species_id != keeper:
+        if (c.item or "") in stones and c.species_id not in keepers:
             alt = next((a for a in alternatives.get(c.species_id, []) if (a.item or "") not in stones), None)
             if alt is not None:
                 alt = SetCandidate(alt.species_id, alt.ability, alt.item, alt.nature, alt.evs, list(alt.moves),
-                                   alt.source, alt.score, list(alt.notes) + [f"single_mega:{c.item}->{alt.item}"])
+                                   alt.source, alt.score, list(alt.notes) + [f"mega_cap:{c.item}->{alt.item}"])
                 out.append(alt)
                 continue
             c = SetCandidate(c.species_id, c.ability, None, c.nature, c.evs, list(c.moves), c.source, c.score,
-                             list(c.notes) + [f"single_mega:{c.item}->none"])
+                             list(c.notes) + [f"mega_cap:{c.item}->none"])
         out.append(c)
     return out
+
+
+def enforce_single_mega(team: list, alternatives: dict, keep: Optional[str] = None) -> list:
+    """互換: メガ石 1 体だけ残す (enforce_max_megas の max_n=1)"""
+    return enforce_max_megas(team, alternatives, keep, 1)
 
 
 def _with_item(c: "SetCandidate", item: Optional[str], note: str) -> "SetCandidate":

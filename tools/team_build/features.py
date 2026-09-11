@@ -102,19 +102,31 @@ def species_features(owned: list, snapshot_doc: dict, threat_views: dict,
                 continue
             rows = matrix({sid: (view, moves)}, threat_views)[sid]
             cov = {t: coverage_value(r) for t, r in rows.items() if "error" not in r}
+            is_mega = bool((row.get("item") or "") in stones)
+            cov_base = None
+            if is_mega:
+                # メガ石を持つ型の「メガシンカしない姿」の被覆 (1 試合に 1 体しかメガシンカできないので、石が 2 個以上の並びでは
+                # 2 体目以降はこちらで評価する)
+                try:
+                    view_b, moves_b = view_from_set(sid, dict(row, item=None))
+                    rows_b = matrix({sid: (view_b, moves_b)}, threat_views)[sid]
+                    cov_base = {t: coverage_value(r) for t, r in rows_b.items() if "error" not in r}
+                except Exception:
+                    cov_base = None
             top = by_id.get(sid) or {}
             feats[sid] = SpeciesFeature(
                 species_id=sid, coverage=cov, roles=roles_from_set(sid, row, view, threat_views),
-                types=tuple(view.types), mega=bool((row.get("item") or "") in stones),
+                types=tuple(view.types), mega=is_mega,
                 speed=view.stat("spe"), usage=float(top.get("usage") or 0.0),
-                teammates={m: float(u) for m, u in (top.get("teammates") or [])})
+                teammates={m: float(u) for m, u in (top.get("teammates") or [])}, coverage_base=cov_base)
     return {"features": feats, "missing": missing, "generated": generated_used}
 
 
 def features_to_json(res: dict) -> dict:
     return {"missing": res["missing"],
             "features": {sid: {"coverage": f.coverage, "roles": f.roles, "types": list(f.types),
-                               "mega": f.mega, "speed": f.speed, "usage": f.usage, "teammates": f.teammates}
+                               "mega": f.mega, "speed": f.speed, "usage": f.usage, "teammates": f.teammates,
+                               "coverage_base": f.coverage_base}
                          for sid, f in res["features"].items()}}
 
 

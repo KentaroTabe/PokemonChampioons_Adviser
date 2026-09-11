@@ -22,7 +22,7 @@ def test_report():
         facts = facts_from_run(run, "L00_C001")
         assert facts["concept"]["core_ids"] == ["a", "b"] and facts["holdout"]["verdict"] == "PASS"
         md = template_report(facts)
-        assert "PASS" in md and "a @ x" in md
+        assert "PASS" in md and "| a | x |" in md and "いじっぱり H32 A32 S2" in md      # 並びは日本語の表 (表に無い id はそのまま)
         good = json.dumps({"authoritative": {"ok": True}, "display": {"markdown": "# 記事\n本文"}})
         p = write_report(run, "L00_C001", MockProvider([good]))
         text = p.read_text(encoding="utf-8")

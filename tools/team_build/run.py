@@ -549,14 +549,14 @@ def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv
                 reg_items = S.registered_items(reg_text)
                 team = S.prefer_registered(team, reg_items)
                 prefer = {c.species_id: 1 for c in team if c.species_id in reg_items}
-            team = S.enforce_single_mega(team, alternatives, keep=keep_mega)
+            team = S.enforce_max_megas(team, alternatives, keep=keep_mega)
             team_field = None
             if not is_inc:
                 from tools.team_build import rules as RU
                 rf = RU.rule_field(rule_ctx["names"]) if rule_ctx else None
                 team, alternatives, team_field = apply_team_field(team, alternatives, tv, gen, rf)
                 if team_field:
-                    team = S.enforce_single_mega(team, alternatives, keep=keep_mega)
+                    team = S.enforce_max_megas(team, alternatives, keep=keep_mega)
             rule_setter, rule_notes = None, []
             if rule_kw and not is_inc:
                 # 規則: 設置役の技と、エースの持ち物 (クローズでは設置役/エースが残す側)

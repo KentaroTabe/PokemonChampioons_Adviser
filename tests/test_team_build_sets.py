@@ -84,6 +84,28 @@ def test_item_clause_by_usage_and_prefer():
     print("test_item_clause_by_usage_and_prefer OK")
 
 
+def test_enforce_max_megas():
+    """メガ石は max_n 体まで (既定 config)。超えた分は keep → 被覆順に残し、他は石以外の代替へ。互換の enforce_single_mega は 1 体"""
+    from tools.team_build.sets import enforce_max_megas, enforce_single_mega
+    stones = ["metagrossite", "swampertite", "gengarite"]
+    a = SetCandidate("metagross", "clearbody", "metagrossite", "adamant", "2/32/0/0/0/32", ["bulletpunch"], "representative", 0.6)
+    b = SetCandidate("swampert", "damp", "swampertite", "adamant", "8/32/0/0/0/26", ["wavecrash"], "representative", 0.5)
+    c = SetCandidate("gengar", "cursedbody", "gengarite", "timid", "2/0/0/32/0/32", ["shadowball"], "representative", 0.7)
+    alt_b = SetCandidate("swampert", "torrent", "leftovers", "adamant", "32/32/0/0/0/2", ["wavecrash"], "alt:item", 0.4)
+    alts = {"swampert": [b, alt_b], "metagross": [a], "gengar": [c]}
+    assert enforce_max_megas([a, b, c], alts, max_n=3) == [a, b, c]
+    team = enforce_max_megas([a, b, c], alts, max_n=2)
+    assert [t.item for t in team] == ["metagrossite", "leftovers", "gengarite"]      # 被覆 0.5 の swampert が石を外す
+    assert team[1].notes == ["mega_cap:swampertite->leftovers"] and b.item == "swampertite"
+    team = enforce_max_megas([a, b, c], alts, keep="swampert", max_n=2)
+    assert [t.item for t in team] == [None, "swampertite", "gengarite"]     # keep の swampert + 被覆 0.7 の gengar が残る
+    assert team[0].notes == ["mega_cap:metagrossite->none"]                  # 石以外の代替が無ければ持ち物なし
+    single = enforce_single_mega([a, b, c], alts)
+    assert [t.item for t in single] == [None, "leftovers", "gengarite"]      # 互換: 最高被覆の gengar だけ
+    assert sum(1 for t in single if t.item in stones) == 1
+    print("test_enforce_max_megas OK")
+
+
 def test_inject_and_required_moves():
     """技 + ポケモンの指定: 差し込み枠は 積み技でない変化技の末尾 → 変化技の末尾 → 末尾。4 本未満なら足す"""
     from tools.team_build.sets import apply_required_moves, finalize_candidates, inject_move
@@ -165,6 +187,7 @@ if __name__ == "__main__":
     test_item_clause_and_text()
     test_order_candidates_usage_prior()
     test_item_clause_by_usage_and_prefer()
+    test_enforce_max_megas()
     test_inject_and_required_moves()
     test_parse_set_text_and_candidate_row()
     test_splice_registered_sets()

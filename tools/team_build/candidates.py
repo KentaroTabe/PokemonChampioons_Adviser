@@ -11,7 +11,8 @@ import itertools
 from dataclasses import dataclass, field
 from typing import Optional
 
-from champions_agent.config import BUILD_LINEUP_HOLE_THRESHOLD, BUILD_LINEUP_HOLE_WEIGHT
+from champions_agent.config import (BUILD_LINEUP_HOLE_THRESHOLD, BUILD_LINEUP_HOLE_WEIGHT, BUILD_MAX_MEGA_STONES,
+                                    BUILD_MEGA_FREE_STONES)
 
 ROLE_KEYS = ("hazard", "removal", "priority", "setup", "status", "speed", "pivot", "bulk")
 DEFAULT_ROLE_WEIGHTS = {"hazard": 0.6, "priority": 0.5, "speed": 0.5, "setup": 0.3,
@@ -32,13 +33,17 @@ STYLE_ROLE_BONUS = {
 @dataclass
 class SpeciesFeature:
     species_id: str
-    coverage: dict                 # threat_id -> 0..1 (Interaction の coverage_value)
+    coverage: dict                 # threat_id -> 0..1 (Interaction の coverage_value。メガ石を持つ型はメガ後)
     roles: dict = field(default_factory=dict)      # role -> 0..1
     types: tuple = ()
     mega: bool = False
     speed: int = 0
     usage: float = 0.0
     teammates: dict = field(default_factory=dict)  # teammate_id -> co-occurrence %
+    coverage_base: Optional[dict] = None           # メガ石を持つ型の、メガシンカしない (素の姿の) 被覆。無ければ coverage と同じ
+
+    def base_coverage(self) -> dict:
+        return self.coverage_base if self.coverage_base is not None else self.coverage
 
 
 @dataclass
@@ -57,14 +62,43 @@ class Lineup:
 MIN_DISTANCE = 0.5     # 保持する候補同士は 6 体中 3 体以上違う
 
 
+def mega_user(members: tuple, feats: dict, threats: list, weights: Optional[dict] = None) -> Optional[str]:
+    """メガ石を持つ個体が複数いるとき、1 試合に 1 体しかメガシンカできないので「メガシンカで最も得をする 1 体」を決める
+    (メガ後の被覆 − 素の被覆 の重みつき和が最大)。石持ちが 1 体以下ならその個体 (居なければ None)"""
+    stones = [m for m in members if m in feats and feats[m].mega]
+    if len(stones) <= 1:
+        return stones[0] if stones else None
+    w = weights or {}
+
+    def gain(m: str) -> float:
+        f = feats[m]
+        base = f.base_coverage()
+        return sum(float(w.get(t, 1.0)) * (f.coverage.get(t, 0.0) - base.get(t, 0.0)) for t in threats)
+    return max(stones, key=lambda m: (gain(m), m))
+
+
+def member_coverages(members: tuple, feats: dict, threats: list, weights: Optional[dict] = None) -> dict:
+    """{member: coverage dict}。メガ石持ちはメガシンカする 1 体だけメガ後の被覆、他は素の姿の被覆"""
+    user = mega_user(members, feats, threats, weights)
+    out = {}
+    for m in members:
+        if m not in feats:
+            continue
+        f = feats[m]
+        out[m] = f.coverage if (not f.mega or m == user) else f.base_coverage()
+    return out
+
+
 def team_coverage(members: tuple, feats: dict, threats: list, weights: Optional[dict] = None) -> float:
-    """脅威ごとに「最良 0.7 + 次善 0.3」(1 体に依存しない厚み) を使用率で加重平均"""
+    """脅威ごとに「最良 0.7 + 次善 0.3」(1 体に依存しない厚み) を使用率で加重平均。
+    メガ石を持つ個体が複数いても、メガ後の被覆を使えるのは 1 体だけ (他は素の姿)"""
     if not threats:
         return 0.0
     w = weights or {}
+    covs = member_coverages(members, feats, threats, weights)
     tot, wsum = 0.0, 0.0
     for t in threats:
-        vals = sorted((feats[m].coverage.get(t, 0.0) for m in members if m in feats), reverse=True)
+        vals = sorted((c.get(t, 0.0) for c in covs.values()), reverse=True)
         v = 0.7 * (vals[0] if vals else 0.0) + 0.3 * (vals[1] if len(vals) > 1 else 0.0)
         wt = float(w.get(t, 1.0))
         tot += wt * v
@@ -96,8 +130,9 @@ def synergy(members: tuple, feats: dict) -> float:
     return tot / len(pairs)
 
 
-def redundancy(members: tuple, feats: dict) -> float:
-    """タイプの重複 (同じタイプを持つ個体数が多いほど大きい) とメガ枠の重複"""
+def redundancy(members: tuple, feats: dict, free_stones: int = BUILD_MEGA_FREE_STONES) -> float:
+    """タイプの重複 (同じタイプを持つ個体数が多いほど大きい) とメガ石の過剰 (free_stones 個までは罰しない。
+    実構築の 6 割が石 2 個: メガシンカする個体を相手に読ませないため)"""
     counts: dict = {}
     megas = 0
     for m in members:
@@ -108,7 +143,7 @@ def redundancy(members: tuple, feats: dict) -> float:
         for t in f.types:
             counts[t] = counts.get(t, 0) + 1
     dup = sum(max(0, c - 1) for c in counts.values())
-    return dup / max(1, len(members)) + (0.5 * max(0, megas - 1))
+    return dup / max(1, len(members)) + (0.5 * max(0, megas - int(free_stones)))
 
 
 def worst_hole(members: tuple, feats: dict, threats: list, weights: Optional[dict] = None,
@@ -150,9 +185,10 @@ def distance(a: tuple, b: tuple) -> float:
 def beam_complete(core: tuple, pool: list, feats: dict, threats: list, style: str,
                   width: int = 8, team_size: int = 6, min_distance: float = 0.34,
                   banned: Optional[set] = None, concept: str = "",
-                  threat_weights: Optional[dict] = None, max_megas: int = 1) -> list:
+                  threat_weights: Optional[dict] = None, max_megas: int = BUILD_MAX_MEGA_STONES) -> list:
     """core から team_size 体まで 1 体ずつ足すビーム探索。各段で候補間距離が min_distance 未満の
-    重複 (5 体同じ等) を落として多様性を保つ。戻り値: [Lineup] (スコア降順)"""
+    重複 (5 体同じ等) を落として多様性を保つ。メガ石は max_megas 個まで (1 試合 1 回のメガシンカとは別。
+    実構築は石 2 個が 6 割)。戻り値: [Lineup] (スコア降順)"""
     banned = banned or set()
     beam = [tuple(core)]
     while beam and len(beam[0]) < team_size:
@@ -163,7 +199,7 @@ def beam_complete(core: tuple, pool: list, feats: dict, threats: list, style: st
                 if sid in members or sid in banned or sid not in feats:
                     continue
                 if feats[sid].mega and n_mega >= max_megas:
-                    continue          # メガ枠は 1 試合 1 回: 2 体目のメガ石は積まない
+                    continue          # メガ石の上限 (BUILD_MAX_MEGA_STONES)
                 new = tuple(sorted(members + (sid,)))
                 if new in expanded:
                     continue

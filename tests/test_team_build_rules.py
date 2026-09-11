@@ -195,8 +195,9 @@ def test_ensure_ace_item():
     snea = _set("sneasler", "choicescarf", ["closecombat", "direclaw", "fakeout", "throatchop"], "unburden", source="alt:item")
     aces = {"espathra": ["boost"], "sneasler": ["boost"]}
     usage = {"sneasler": {"whiteherb": 37.9, "focussash": min_pct + 10.0, "choicescarf": 6.2}}
+    # かるわざのエース: 発動させる消耗品 (しろいハーブ + インファイト) が優先。タスキは他に回せる (2026-09-11 ユーザー指摘)
     team, ace, notes = RU.ensure_ace_item([esp, snea], aces, "espathra", RULE, usage)
-    assert ace == "sneasler" and team[1].item == "focussash" and notes == ["rule:ace_item<-choicescarf"]
+    assert ace == "sneasler" and team[1].item == "whiteherb" and notes == ["rule:ace_item<-choicescarf"]
     assert snea.item == "choicescarf" and team[1].source == "alt:item+rule" and team[0] is esp
     # メガ石のエースは替えない / 既に優先品ならそのまま
     rai = _set("raichu", "raichunitey", ["zapcannon", "focusblast", "grassknot", "nastyplot"], "lightningrod")
@@ -204,10 +205,26 @@ def test_ensure_ace_item():
     assert ace == "raichu" and team[1].item == "raichunitey" and notes == []
     sash = _set("sneasler", "focussash", snea.moves, "unburden")
     assert RU.ensure_ace_item([sash], {"sneasler": ["boost"]}, None, RULE, usage) == ([sash], "sneasler", [])
-    # 使用率が閾値未満なら据え置き (注記)
-    low = {"sneasler": {"whiteherb": 90.0, "focussash": min_pct - 1.0}}
-    _, _, notes = RU.ensure_ace_item([esp, snea], {"sneasler": ["boost"]}, "espathra", RULE, low)
+    herb = _set("sneasler", "whiteherb", snea.moves, "unburden")
+    assert RU.ensure_ace_item([herb], {"sneasler": ["boost"]}, None, RULE, usage) == ([herb], "sneasler", [])
+    # しろいハーブは自分の能力を下げる技が無いと発動しない → ノーマルジュエル (ノーマル攻撃技あり) → 無ければタスキ
+    usage_gem = {"sneasler": {"whiteherb": 30.0, "normalgem": 15.0, "focussash": 30.0}}
+    no_drop = _set("sneasler", "choicescarf", ["direclaw", "fakeout", "throatchop", "swordsdance"], "unburden")
+    assert RU.ensure_ace_item([esp, no_drop], aces, "espathra", RULE, usage_gem)[0][1].item == "normalgem"
+    no_normal = _set("sneasler", "choicescarf", ["direclaw", "throatchop", "swordsdance", "uturn"], "unburden")
+    assert RU.ensure_ace_item([esp, no_normal], aces, "espathra", RULE, usage_gem)[0][1].item == "focussash"
+    assert RU.unburden_trigger_ok("whiteherb", ["closecombat"], RULE["unburden_triggers"])
+    assert not RU.unburden_trigger_ok("whiteherb", ["direclaw"], RULE["unburden_triggers"])
+    assert RU.unburden_trigger_ok("normalgem", ["fakeout"], RULE["unburden_triggers"])
+    assert RU.unburden_trigger_ok("focussash", [], RULE["unburden_triggers"]) and RU.unburden_trigger_ok("normalgem", [], {})
+    assert RU.ace_item_preference(RULE, "unburden")[0] == "whiteherb" and RU.ace_item_preference(RULE, "protean") == ("focussash",)
+    # 特性に表が無ければ ace_items (タスキ)。使用率が閾値未満なら据え置き (注記)
+    meo_scarf = _set("meowscarada", "choicescarf", ["flowertrick", "tripleaxel", "knockoff", "uturn"], "protean")
+    low = {"meowscarada": {"choicescarf": 90.0, "focussash": min_pct - 1.0}}
+    _, _, notes = RU.ensure_ace_item([esp, meo_scarf], {"meowscarada": ["fast"]}, "espathra", RULE, low)
     assert notes == ["rule:ace_item_kept"]
+    ok_usage = {"meowscarada": {"choicescarf": 60.0, "focussash": min_pct + 5.0}}
+    assert RU.ensure_ace_item([esp, meo_scarf], {"meowscarada": ["fast"]}, "espathra", RULE, ok_usage)[0][1].item == "focussash"
     # エース候補が設置役だけなら無し。複数なら優先品の使用率が高い方。TR 型のエースは TR 使いが並びにいるとき
     assert RU.ensure_ace_item([esp], {"espathra": ["boost"]}, "espathra", RULE, usage)[1] is None
     meo = _set("meowscarada", "choicescarf", ["flowertrick", "tripleaxel", "knockoff", "uturn"], "protean")

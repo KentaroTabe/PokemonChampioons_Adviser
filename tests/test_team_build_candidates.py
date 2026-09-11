@@ -57,7 +57,29 @@ def test_scores_and_beam():
     # 使用率加重: t1 だけ重いと a の被覆が効く
     assert C.team_coverage(("a",), feats, threats, {"t1": 10.0, "t2": 1.0, "t3": 1.0, "t4": 1.0}) > \
         C.team_coverage(("a",), feats, threats)
-    assert C.redundancy(("a", "f"), feats) > C.redundancy(("a", "b"), feats)      # メガ重複とタイプ重複
+    assert C.redundancy(("a", "f"), feats) > C.redundancy(("a", "b"), feats)      # タイプ重複 (はがね 2 体)
+    # メガ石は free_stones 個までは罰しない (実構築の 6 割が石 2 個)。3 個目から 0.5 ずつ
+    assert C.redundancy(("a", "f"), feats, free_stones=2) == C.redundancy(("a", "f"), feats, free_stones=3)
+    assert abs(C.redundancy(("a", "f"), feats, free_stones=1) - C.redundancy(("a", "f"), feats, free_stones=2) - 0.5) < 1e-9
+    # 石持ちが複数なら、メガシンカで最も得をする 1 体だけメガ後の被覆、他は素の姿の被覆 (coverage_base)
+    feats["f"].coverage_base = {"t1": 0.15, "t2": 0.15, "t3": 0.15, "t4": 0.15}   # f の得 0.2
+    feats["a"].coverage_base = {"t1": 0.5, "t2": 0.1, "t3": 0.1, "t4": 0.1}       # a の得 0.4 → a がメガシンカする
+    assert C.mega_user(("a", "f", "b"), feats, threats) == "a"
+    assert C.mega_user(("b", "c"), feats, threats) is None and C.mega_user(("a", "b"), feats, threats) == "a"
+    covs = C.member_coverages(("a", "f"), feats, threats)
+    user = C.mega_user(("a", "f"), feats, threats)
+    other = "f" if user == "a" else "a"
+    assert covs[user] == feats[user].coverage and covs[other] == feats[other].coverage_base
+    # 2 体目の石持ちは素の被覆で数えるので、メガ後の被覆で数えるより低い
+    full = 0.7 * 0.9 + 0.3 * 0.2                                                   # t1: a 0.9, f (メガ後) 0.2 のとき
+    assert C.team_coverage(("a", "f"), feats, ["t1"]) <= full + 1e-9
+    feats["a"].coverage_base = None
+    feats["f"].coverage_base = None
+    # ビームのメガ石の上限: max_megas=1 なら 2 体目の石持ちは積まない、2 なら積める
+    one = C.beam_complete(("a",), list(feats), feats, threats, "balance", width=4, team_size=3, max_megas=1)
+    assert all(sum(1 for m in l.members if feats[m].mega) <= 1 for l in one)
+    two = C.beam_complete(("a",), list(feats), feats, threats, "balance", width=50, team_size=3, min_distance=0.0, max_megas=2)
+    assert any(sum(1 for m in l.members if feats[m].mega) == 2 for l in two)     # 幅が十分なら a + f (石 2 個) の並びが残る
     assert C.synergy(("a", "b"), feats) == 0.6
     res = C.beam_complete(("a", "b"), list(feats), feats, threats, "balance", width=4)
     assert res and all(len(l.members) == 6 for l in res)

@@ -181,7 +181,7 @@ def attach_texts(bank: dict, log=print) -> dict:
                 team = [merge_set(reps[sid], None if sid in reverted else (t.get("revealed") or {}).get(sid))
                         for sid in t["roster"]]
                 alternatives = {c.species_id: [c] for c in team}
-                team = S.enforce_single_mega(team, alternatives)
+                team = S.enforce_max_megas(team, alternatives)      # 実構築は石 2 個が普通 (上限は config)
                 team = S.resolve_item_clause(team, item_map)
                 text = S.to_showdown_text(team)
                 ok, errs = S.validate_team_text(text, TRAINING_BATTLE_FORMAT)
