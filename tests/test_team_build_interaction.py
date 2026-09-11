@@ -95,13 +95,38 @@ def test_mega_ability_and_duel_field():
     d_plain = I._best_dmg(y_blaze, chomp, ["fireblast"], I.duel_field(y_blaze, chomp))
     assert d_plain > 0 and 1.4 < d_sun / d_plain < 1.6, (d_sun, d_plain)
     row = I.interaction_row("charizard", y, ymoves, "garchomp", chomp, cmoves, {"charizarditey"})
-    assert row["uses_mega"] is True and row["lead"] is not None
+    assert row["uses_mega"] is True and row["lead"] is not None and row["field"] == {"terrain": None, "weather": "sun"}
     assert row["lead"] >= I.interaction_row("charizard", y_blaze, ymoves, "garchomp", chomp, cmoves, set())["lead"]
     print("test_mega_ability_and_duel_field OK")
+
+
+def test_field_override_and_resolve():
+    """並びの場 (設置役が張るサイコフィールド等) の指定: 無い種別は両者の特性の場で埋める。ワイドフォース使いの行が上がる"""
+    from advisor.damage import FieldView
+    imoves = ["expandingforce", "dazzlinggleam", "mysticalfire", "protect"]
+    ind, _ = I.view_from_set("indeedee", _set("focussash", "timid", "2/0/0/32/0/32", imoves, ability="synchronize"))
+    peli, pmoves = I.view_from_set("pelipper", _set("leftovers", "modest", "32/0/0/32/0/2",
+                                                    ["hurricane", "surf", "icebeam", "roost"], ability="drizzle"))
+    psy = FieldView(terrain="psychic")
+    fv = I.resolve_field(ind, peli, psy)
+    assert fv.terrain == "psychic" and fv.weather == "rain"          # 指定の場 + 相手の特性の雨
+    assert I.resolve_field(ind, peli, None).weather == "rain" and I.resolve_field(ind, peli, None).terrain is None
+    assert I.resolve_field(ind, ind, None) is None and I.resolve_field(ind, ind, psy) is psy
+    chomp, cmoves = I.view_from_set("garchomp", _set("focussash", "jolly", "2/32/0/0/0/32",
+                                                     ["earthquake", "outrage", "stoneedge", "swordsdance"]))
+    plain = I.interaction_row("indeedee", ind, imoves, "garchomp", chomp, cmoves, set())
+    under = I.interaction_row("indeedee", ind, imoves, "garchomp", chomp, cmoves, set(), fieldv=psy)
+    assert under["field"] == {"terrain": "psychic", "weather": None} and plain["field"] == {"terrain": None, "weather": None}
+    assert I._best_dmg(ind, chomp, ["expandingforce"], psy) > I._best_dmg(ind, chomp, ["expandingforce"]) * 1.8
+    assert under["lead"] >= plain["lead"] and under["revenge"] >= plain["revenge"]
+    m = I.matrix({"indeedee": (ind, imoves)}, {"garchomp": (chomp, cmoves)}, fieldv=psy)
+    assert m["indeedee"]["garchomp"]["field"]["terrain"] == "psychic"
+    print("test_field_override_and_resolve OK")
 
 
 if __name__ == "__main__":
     test_rows_are_bounded_and_sensible()
     test_points_conversion_and_matrix()
     test_mega_ability_and_duel_field()
+    test_field_override_and_resolve()
     test_mega_stone_xy_maps_to_form()

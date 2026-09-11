@@ -126,35 +126,38 @@ def make_generator(tv: dict, threat_weights: Optional[dict]):
     from tools.team_build import gen_sets as G
     cache: dict = {}
 
-    def _run(sid: str) -> dict:
-        if sid not in cache:
+    def _run(sid: str, field: Optional[dict] = None) -> dict:
+        """field = 並びの場 (設置役が張るフィールド/天候) の前提。種 × 場ごとにキャッシュ"""
+        key = (sid, G.field_key(field))
+        if key not in cache:
             if BUILD_GEN_SETS == "off":
-                cache[sid] = {"sets": [], "items": []}
+                cache[key] = {"sets": [], "items": []}
             else:
                 try:
-                    cache[sid] = G.generate_for_species(sid, tv, threat_weights)
+                    cache[key] = G.generate_for_species(sid, tv, threat_weights, assumed_field=field)
                 except Exception as e:  # 生成できない種は空 (使用率の型だけで進む)
-                    cache[sid] = {"sets": [], "items": [], "error": repr(e)}
-        return cache[sid]
+                    cache[key] = {"sets": [], "items": [], "error": repr(e)}
+        return cache[key]
 
-    def gen(sid: str) -> list:
-        return list(_run(sid).get("sets") or [])
+    def gen(sid: str, field: Optional[dict] = None) -> list:
+        return list(_run(sid, field).get("sets") or [])
 
     gen.items = lambda sid: list(_run(sid).get("items") or [])      # type: ignore[attr-defined]
     gen.info = _run                                                   # type: ignore[attr-defined]
     return gen
 
 
-def set_library_kwargs(spec: BuildSpec, sid: str, gen=None, conn=None, snapshot_id: Optional[int] = None) -> dict:
+def set_library_kwargs(spec: BuildSpec, sid: str, gen=None, conn=None, snapshot_id: Optional[int] = None,
+                       field: Optional[dict] = None) -> dict:
     """型ライブラリに渡す、その種の指定の型・必須技・生成型 (無ければ空)。
-    生成型は BUILD_GEN_SETS=auto なら常に、missing なら代表型が無い種だけ渡す"""
+    生成型は BUILD_GEN_SETS=auto なら常に、missing なら代表型が無い種だけ渡す。field = 並びの場の前提 (生成型に渡す)"""
     from champions_agent.config import BUILD_GEN_SETS
     custom = custom_sets_of(spec).get(sid)
     required = (spec.required_moves or {}).get(sid)
     generated = None
     if gen is not None and custom is None and BUILD_GEN_SETS != "off":
         if BUILD_GEN_SETS == "auto" or conn is None or S.representative_set(conn, snapshot_id, sid) is None:
-            generated = gen(sid) or None
+            generated = gen(sid, field) or None
     if custom is None and not required and not generated:
         return {}
     out = {"custom": custom, "required": required, "generated": generated}
@@ -185,8 +188,15 @@ def rule_context(run_dir: Path, spec: BuildSpec, feats: dict, snapshot_id: int, 
         mv = dex.move(m)
         return (mv.get("category"), mv.get("type"), mv.get("power")) if mv else None
 
+    from advisor.damage import FieldView
     from advisor.search import SETUP_MOVES
+    from tools.team_build import gen_sets as G
     from tools.team_build.interaction import matrix, view_from_set
+
+    # 規則が前提とする場 (サイコフィールド等): エースの型の採点と生成型の技選択にその場を使う
+    rf = RU.rule_field(spec.rules)
+    rule_fd = rf if G.has_field(rf) else None
+    rule_fv = FieldView(terrain=rf.get("terrain"), weather=rf.get("weather")) if rule_fd else None
 
     def boosted_coverage(sid: str, c) -> float:
         """積み技・加速特性を持つ型は「1 回積んだ後」の被覆も計算し、大きい方を使う (自己加速型・積み型のエースは
@@ -197,7 +207,7 @@ def rule_context(run_dir: Path, spec: BuildSpec, feats: dict, snapshot_id: int, 
         try:
             view, mv = view_from_set(sid, c.as_row())
             view.boosts = dict(stages)
-            rows = matrix({sid: (view, mv)}, tv)[sid]
+            rows = matrix({sid: (view, mv)}, tv, fieldv=rule_fv)[sid]
             return max(float(c.score), S.coverage_score(rows))
         except Exception:
             return float(c.score)
@@ -205,7 +215,7 @@ def rule_context(run_dir: Path, spec: BuildSpec, feats: dict, snapshot_id: int, 
     infos, ace_sets = {}, {}
     with db.get_connection() as conn:
         for sid in feats:
-            lib = set_library_kwargs(spec, sid, gen, conn, snapshot_id)
+            lib = set_library_kwargs(spec, sid, gen, conn, snapshot_id, field=rule_fd)
             rep = S.base_set(conn, snapshot_id, sid, lib.get("custom"), lib.get("required"),
                              lib.get("category_of"), lib.get("setup_moves", ()), generated=lib.get("generated"))
             if rep is None:
@@ -216,8 +226,8 @@ def rule_context(run_dir: Path, spec: BuildSpec, feats: dict, snapshot_id: int, 
             roles = feats[sid].roles
             cov = feats[sid].coverage
             # 火力・技範囲: 型ライブラリ (代表型 + 単独入替の代替、adj 降順) のうち門を通る最初の型で判定。
-            # 代表型が通らず代替が通れば、その型をエースの型として S6 で採用する
-            ranked = S.rank_sets(list(S.enumerate_sets(conn, snapshot_id, sid, **lib)), tv) if tv else [rep]
+            # 代表型が通らず代替が通れば、その型をエースの型として S6 で採用する。採点は規則の場の前提で
+            ranked = S.rank_sets(list(S.enumerate_sets(conn, snapshot_id, sid, **lib)), tv, field=rule_fv) if tv else [rep]
             cov_cache: dict = {}
 
             def cov_of(c, sid=sid):
@@ -447,10 +457,54 @@ def stage_s5(run_dir: Path, spec: BuildSpec, fams: list, feats: dict, threats: l
     return chosen
 
 
+def apply_team_field(team: list, alternatives: dict, tv: dict, gen, rule_field: Optional[dict]) -> tuple:
+    """並びの場 (規則の前提 + メンバーの特性 (メガ後)/技で張る場) があれば、自分で張らないメンバーの型をその場の前提で
+    選び直す: 生成型の場つき変種 (gen(sid, field)) を候補に足し、被覆をその場で採点し直す。
+    戻り値 (team, alternatives, team_field or None)。場が無ければそのまま"""
+    from advisor.damage import FieldView
+    from tools.team_build import gen_sets as G
+    from tools.team_build.interaction import view_from_set
+    members = []
+    for c in team:
+        try:
+            view, _mv = view_from_set(c.species_id, c.as_row())
+            members.append((view.ability, list(c.moves)))
+        except Exception:
+            members.append((c.ability, list(c.moves)))
+    tf = G.team_field_of(members, rule_field)
+    if not G.has_field(tf):
+        return team, alternatives, None
+    fv = FieldView(terrain=tf.get("terrain"), weather=tf.get("weather"))
+    label = "/".join(v for v in (tf.get("terrain"), tf.get("weather")) if v)
+    new_team = []
+    for c, (ability, moves) in zip(team, members):
+        own = G.own_field(ability, moves)
+        if own.get("terrain") == tf.get("terrain") and own.get("weather") == tf.get("weather"):
+            new_team.append(c)                      # 自分で張る側 (設置役) はそのまま
+            continue
+        cands = list(alternatives.get(c.species_id) or [c])
+        keys = {x.key() for x in cands}
+        for g in (gen(c.species_id, tf) if gen is not None else []):
+            if g.key() not in keys:
+                cands.append(g)
+                keys.add(g.key())
+        ranked = S.rank_sets(cands, tv, field=fv)
+        if not ranked:
+            new_team.append(c)
+            continue
+        alternatives[c.species_id] = ranked
+        chosen = ranked[0]
+        if chosen.key() != c.key() and f"team_field:{label}" not in chosen.notes:
+            chosen.notes = list(chosen.notes) + [f"team_field:{label}"]
+        new_team.append(chosen)
+    return new_team, alternatives, tf
+
+
 def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv: dict,
              concept_mega: Optional[dict] = None, rule_ctx: Optional[dict] = None, gen=None) -> list:
     """各並びの型を型ライブラリから決め、メガ枠 1 体・クローズ・合法性を通した Showdown 本文を保存する。
-    規則つきなら設置役の型に技を保証する (持ち物・メガ枠の解決後に差し込み、validate-team で合法性を確認)"""
+    規則つきなら設置役の型に技を保証する (持ち物・メガ枠の解決後に差し込み、validate-team で合法性を確認)。
+    並びの場 (規則の前提 + 設置役の特性/技) があれば、他のメンバーの型をその場の前提で選び直す (apply_team_field)"""
     out_dir = run_dir / "s06_sets"
     out_dir.mkdir(exist_ok=True)
     results = []
@@ -496,6 +550,13 @@ def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv
                 team = S.prefer_registered(team, reg_items)
                 prefer = {c.species_id: 1 for c in team if c.species_id in reg_items}
             team = S.enforce_single_mega(team, alternatives, keep=keep_mega)
+            team_field = None
+            if not is_inc:
+                from tools.team_build import rules as RU
+                rf = RU.rule_field(rule_ctx["names"]) if rule_ctx else None
+                team, alternatives, team_field = apply_team_field(team, alternatives, tv, gen, rf)
+                if team_field:
+                    team = S.enforce_single_mega(team, alternatives, keep=keep_mega)
             rule_setter, rule_notes = None, []
             if rule_kw and not is_inc:
                 # 規則: 設置役の技と、エースの持ち物 (クローズでは設置役/エースが残す側)
@@ -514,6 +575,7 @@ def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv
                             "errors": errs[:5], "tag": l.tag, "score": round(l.score, 4),
                             "registered_sets": registered, "rule_setter": rule_setter, "rule_notes": rule_notes,
                             "rule_pair": (rule_ctx or {}).get("pairs", {}).get(tuple(l.members)),
+                            "team_field": team_field,
                             "sets": [{"species": c.species_id, "item": c.item, "nature": c.nature,
                                       "evs": c.evs, "moves": c.moves, "source": c.source,
                                       "coverage": round(c.score, 3), "notes": c.notes} for c in team]})

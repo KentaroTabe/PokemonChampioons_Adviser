@@ -52,6 +52,19 @@ def get_dex() -> Dex:
     return _dex
 
 
+FIELD_EFFECTS_PATH = Path(__file__).resolve().parent / "data" / "field_effects.json"
+
+
+@lru_cache(maxsize=1)
+def field_effects() -> dict:
+    """フィールド/天候の補正表 (advisor/data/field_effects.json: 場を張る特性/技、タイプ別倍率、技固有の効果、優先度)。
+    ダメージ計算と型生成の唯一の源。読めなければ空"""
+    try:
+        return json.loads(FIELD_EFFECTS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
 BOOST_MOVES_PATH = Path(__file__).resolve().parent / "data" / "boost_moves.json"
 
 

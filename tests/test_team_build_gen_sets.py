@@ -41,6 +41,15 @@ def test_field_helpers():
     assert G.own_field("drought", ["psychicterrain"]) == {"terrain": "psychic", "weather": "sun"}
     assert G.own_field(None, ["sunnyday", "raindance"]) == SUN     # 先に載っている技が優先
     assert G.own_field("blaze", ["protect"]) == G.NO_FIELD and G.field_key(PSY) == ("psychic", None)
+    # 場の合成: 自分 (味方込み) の場を優先し、無い種別だけ相手の特性 / 規則の前提で埋める
+    assert G.merge_fields(PSY, SUN) == {"terrain": "psychic", "weather": "sun"}
+    assert G.merge_fields(None, SUN) == SUN and G.merge_fields(PSY, None) == PSY and not G.has_field(None)
+    assert G.battle_field(G.NO_FIELD, "drizzle") == {"terrain": None, "weather": "rain"}
+    assert G.battle_field(SUN, "drizzle") == SUN                       # 自分の晴れが優先 (相手の雨は見ない)
+    assert G.battle_field(PSY, "drizzle") == {"terrain": "psychic", "weather": "rain"}
+    assert G.team_field_of([("blaze", ["protect"]), ("psychicsurge", []), ("drought", [])]) == {"terrain": "psychic", "weather": "sun"}
+    assert G.team_field_of([("blaze", ["sunnyday"]), ("drizzle", [])]) == SUN     # 並び順で先の者が優先
+    assert G.team_field_of([("blaze", [])], rule_field=PSY) == PSY and G.team_field_of([]) == G.NO_FIELD
     # 技固有の補正: 使用者/相手の接地条件、条件外は None、倍率 1.0 (ソーラービーム) は「条件下で使える」印
     assert G.field_move_boost("expandingforce", PSY) == 1.5
     assert G.field_move_boost("expandingforce", PSY, user_grounded=False) is None

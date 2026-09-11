@@ -112,8 +112,11 @@ def _hazard_frac(mon: MonView, side: SimSide) -> float:
     return 0.125 * mult
 
 
-def _priority(move_id: Optional[str], view: Optional[MonView] = None) -> int:
-    """技の優先度 (特性補正込み: いたずらごころ=変化技+1 等)"""
+def _priority(move_id: Optional[str], view: Optional[MonView] = None,
+              fieldv: Optional[FieldView] = None) -> int:
+    """技の優先度 (特性補正込み: いたずらごころ=変化技+1 等。フィールド込み: グラススライダーはグラスフィールドで
+    接地した使用者なら +1。表は advisor/data/field_effects.json の priority)"""
+    from advisor.dex import field_effects
     mv = get_dex().move(move_id) if move_id else None
     if not mv:
         return 0
@@ -124,6 +127,12 @@ def _priority(move_id: Optional[str], view: Optional[MonView] = None) -> int:
     elif ab == "galewings" and (mv.get("type") or "") == "Flying" \
             and view is not None and view.hp_frac >= 0.999:
         pri += 1
+    spec = (field_effects().get("priority") or {}).get(move_id or "")
+    if spec and fieldv is not None:
+        cur = fieldv.terrain if spec.get("kind") == "terrain" else fieldv.weather
+        if cur and (spec.get("cond") == "any" or spec.get("cond") == cur):
+            if spec.get("grounded") != "user" or view is None or _is_grounded(view):
+                pri += int(spec.get("delta", 0))
     return pri
 
 
@@ -198,11 +207,11 @@ def simulate_turn(me: SimSide, opp: SimSide, my_act: Action, opp_act: Action,
     movers = []
     if my_act.kind == "move" and me.active_hp > 0:
         movers.append(("me", my_act.move_id,
-                       _priority(my_act.move_id, me.active),
+                       _priority(my_act.move_id, me.active, my_field or opp_field),
                        _speed(me.active, my_field)))
     if opp_act.kind == "move" and opp.active_hp > 0:
         movers.append(("opp", opp_act.move_id,
-                       _priority(opp_act.move_id, opp.active),
+                       _priority(opp_act.move_id, opp.active, my_field or opp_field),
                        _speed(opp.active, my_field)))
     trick_room = bool(my_field and my_field.trick_room)
     movers.sort(key=lambda m: (-m[2], m[3] if trick_room else -m[3]))

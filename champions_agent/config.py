@@ -407,34 +407,8 @@ BUILD_GEN_EV_STEP = 8                # 攻撃/耐久の刻み (素早さは「�
 BUILD_GEN_EV_WEIGHTS = {"outspeed": 1.0, "survive": 1.0, "survive_2hit": 0.5, "survive_margin": 0.25,
                         "ko": 1.0, "ko_2hko": 0.5, "ko_margin": 0.25}
 BUILD_GEN_EV_THREATS = 12            # 微調整で見る相手の数 (重みの大きい順。候補配分 × 相手の計算量を抑える)
-# 自分で張れるフィールド/天候 (特性は常時、技は型にその技があるとき) を技選択のダメージ計算に入れる (2026-09-11)。
-# 標準の補正 (フィールド 1.3 倍、晴れ/雨の 1.5 倍) は advisor.damage が持つ。技固有の補正はここで掛ける
-BUILD_GEN_FIELD_SOURCES = {
-    "abilities": {"psychicsurge": ("terrain", "psychic"), "electricsurge": ("terrain", "electric"),
-                  "grassysurge": ("terrain", "grassy"), "mistysurge": ("terrain", "misty"),
-                  "drought": ("weather", "sun"), "drizzle": ("weather", "rain"), "sandstream": ("weather", "sandstorm"),
-                  "snowwarning": ("weather", "snow")},
-    "moves": {"psychicterrain": ("terrain", "psychic"), "electricterrain": ("terrain", "electric"),
-              "grassyterrain": ("terrain", "grassy"), "mistyterrain": ("terrain", "misty"),
-              "sunnyday": ("weather", "sun"), "raindance": ("weather", "rain"), "sandstorm": ("weather", "sandstorm"),
-              "snowscape": ("weather", "snow")},
-}
-# 技固有の補正: 技 → (種別, 条件, 倍率, 接地が必要な側 user/target/none)。条件 "any" はその種別が何か張られていれば。
-# 倍率 1.0 の技 (ソーラービーム) は「条件下では BUILD_GEN_AVOID_MOVES の除外を解く」ためだけに載せる (晴れなら 1 ターン技)
-BUILD_GEN_FIELD_MOVE_BOOSTS = {
-    "expandingforce": ("terrain", "psychic", 1.5, "user"), "risingvoltage": ("terrain", "electric", 2.0, "target"),
-    "mistyexplosion": ("terrain", "misty", 1.5, "user"), "terrainpulse": ("terrain", "any", 2.0, "user"),
-    "weatherball": ("weather", "any", 2.0, "none"), "solarbeam": ("weather", "sun", 1.0, "none"),
-    "solarblade": ("weather", "sun", 1.0, "none"),
-}
-BUILD_GEN_FIELD_MOVE_TYPES = {   # 条件下でタイプが変わる技: 技 → {フィールド/天候 id: タイプ}
-    "weatherball": {"sun": "Fire", "rain": "Water", "sandstorm": "Rock", "snow": "Ice"},
-    "terrainpulse": {"electric": "Electric", "grassy": "Grass", "psychic": "Psychic", "misty": "Fairy"},
-}
-BUILD_GEN_FIELD_TYPE_BOOSTS = {   # 標準の補正 (刈り込みの採点用。ダメージ計算では advisor.damage が同じ補正を掛ける)
-    "terrain": {"psychic": {"Psychic": 1.3}, "electric": {"Electric": 1.3}, "grassy": {"Grass": 1.3}},
-    "weather": {"sun": {"Fire": 1.5, "Water": 0.5}, "rain": {"Water": 1.5, "Fire": 0.5}},
-}
+# フィールド/天候の補正 (場を張る特性/技、タイプ別倍率、技固有の効果、優先度) は advisor/data/field_effects.json が
+# 唯一の源 (advisor.damage と gen_sets が共有。2026-09-11 に config から移した)
 BUILD_GEN_FAST_SPEED_SHARE = 0.6    # 上位脅威への先手率 (+Spe 性格・振り切り) がこれ以上なら速攻型
 BUILD_GEN_WALL_OFFENSE_MAX = 90     # 使う側の攻撃種族値がこれ以下なら壁型 (攻撃技 2 本のテンプレートを優先)
 BUILD_GEN_SPEED_GAIN_MIN = 1.0      # +Spe 性格で上を取れる脅威 (重みの和) がこれ以上増えれば +Spe 性格

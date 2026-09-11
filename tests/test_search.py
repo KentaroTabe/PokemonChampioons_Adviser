@@ -185,9 +185,29 @@ def test_psychic_terrain_blocks_priority():
     print("test_psychic_terrain_blocks_priority OK")
 
 
+def test_grassy_glide_priority():
+    """グラススライダー: グラスフィールドで接地した使用者なら優先度 +1 (表 field_effects.json)。浮いていれば +0"""
+    from dataclasses import replace
+    from advisor.search import _priority
+    grassy = FieldView(terrain="grassy")
+    rilla = _view("rillaboom", ja="ゴリランダー")
+    assert _priority("grassyglide", rilla) == 0 and _priority("grassyglide", rilla, grassy) == 1
+    assert _priority("grassyglide", rilla, FieldView(terrain="psychic")) == 0
+    assert _priority("grassyglide", replace(rilla, types=["Grass", "Flying"]), grassy) == 0
+    assert _priority("woodhammer", rilla, grassy) == 0
+    # 対戦の解決: グラスフィールド中は遅いゴリランダーのグラススライダーが先に当たる
+    me = SimSide(active=replace(rilla, ev={"atk": 252}), active_hp=1.0)
+    chomp = SimSide(active=_view("garchomp", ja="ガブリアス"), active_hp=1.0)
+    _, o = simulate_turn(me, chomp, Action("move", move_id="grassyglide"), Action("move", move_id="earthquake"),
+                         grassy, grassy, "avg")
+    assert o.active_hp < 1.0
+    print("test_grassy_glide_priority OK")
+
+
 if __name__ == "__main__":
     test_priority_mechanics()
     test_psychic_terrain_blocks_priority()
+    test_grassy_glide_priority()
     test_simulate_turn_faint_and_switch()
     test_clean_kill_preferred()
     test_lethal_dodge()

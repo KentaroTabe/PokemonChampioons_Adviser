@@ -52,9 +52,21 @@ def duel_field(me: MonView, opp: MonView):
     return None
 
 
-def _duel(a: MonView, a_hp: float, a_moves: list, b: MonView, b_hp: float, b_moves: list) -> Optional[float]:
-    """endgame.duel_score と同じ定義 (撃破ターン差 + 先手権) を HP 指定つきで。場は duel_field"""
-    fv = duel_field(a, b)
+def resolve_field(me: MonView, opp: MonView, fieldv=None):
+    """行の場: 指定の場 (並びの設置役が張る場など) を優先し、無い種別は duel_field (両者の特性) で埋める"""
+    from advisor.damage import FieldView
+    base = duel_field(me, opp)
+    if fieldv is None:
+        return base
+    if base is None:
+        return fieldv
+    return FieldView(weather=fieldv.weather or base.weather, terrain=fieldv.terrain or base.terrain)
+
+
+def _duel(a: MonView, a_hp: float, a_moves: list, b: MonView, b_hp: float, b_moves: list,
+          fieldv=None) -> Optional[float]:
+    """endgame.duel_score と同じ定義 (撃破ターン差 + 先手権) を HP 指定つきで。場は resolve_field"""
+    fv = resolve_field(a, b, fieldv)
     turns_a, eff_a = _race_turns(a, a_hp, a_moves, b, b_hp, b_moves, fv)
     turns_b, eff_b = _race_turns(b, b_hp, b_moves, a, a_hp, a_moves, fv)
     if turns_a is None and turns_b is None:
@@ -80,25 +92,25 @@ def _priority_moves(moves: list) -> list:
     return out
 
 
-def lead_score(me: MonView, my_moves: list, opp: MonView, opp_moves: list) -> Optional[float]:
-    return _score01(_duel(me, 1.0, my_moves, opp, 1.0, opp_moves))
+def lead_score(me: MonView, my_moves: list, opp: MonView, opp_moves: list, fieldv=None) -> Optional[float]:
+    return _score01(_duel(me, 1.0, my_moves, opp, 1.0, opp_moves, fieldv))
 
 
-def switch_in_score(me: MonView, my_moves: list, opp: MonView, opp_moves: list) -> float:
+def switch_in_score(me: MonView, my_moves: list, opp: MonView, opp_moves: list, fieldv=None) -> float:
     """相手の最大打点を 1 発受けてからの対面。受け切れなければ 0"""
-    fv = duel_field(me, opp)
+    fv = resolve_field(me, opp, fieldv)
     taken = _best_dmg(opp, me, opp_moves, fv) / 100.0
     hp_after = 1.0 - taken
     if hp_after < SWITCH_IN_MIN_HP:
         return 0.0
-    s = _duel(me, hp_after, my_moves, opp, 1.0, opp_moves)
+    s = _duel(me, hp_after, my_moves, opp, 1.0, opp_moves, fv)
     return _score01(s) if s is not None else 0.0
 
 
 def revenge_score(me: MonView, my_moves: list, opp: MonView, opp_moves: list,
-                  opp_hp: float = REVENGE_HP) -> float:
+                  opp_hp: float = REVENGE_HP, fieldv=None) -> float:
     """削れた相手を上から / 先制技で落とせるか"""
-    fv = duel_field(me, opp)
+    fv = resolve_field(me, opp, fieldv)
     dmg = _best_dmg(me, opp, my_moves, fv) / 100.0
     if dmg <= 0:
         return 0.0
@@ -118,24 +130,24 @@ def revenge_score(me: MonView, my_moves: list, opp: MonView, opp_moves: list,
     return 0.0
 
 
-def setup_stop_score(me: MonView, my_moves: list, opp: MonView, opp_moves: list) -> Optional[float]:
+def setup_stop_score(me: MonView, my_moves: list, opp: MonView, opp_moves: list, fieldv=None) -> Optional[float]:
     """1 回積んだ相手 (100%) を止められるか。相手に積み技が無ければ None"""
     boosted = _setup_boosted(opp, opp_moves)
     if boosted is None:
         return None
-    s = _duel(me, 1.0, my_moves, boosted, 1.0, opp_moves)
+    s = _duel(me, 1.0, my_moves, boosted, 1.0, opp_moves, fieldv)
     return _score01(s) if s is not None else 0.0
 
 
-def speed_relation(me: MonView, opp: MonView) -> str:
-    fv = duel_field(me, opp)
+def speed_relation(me: MonView, opp: MonView, fieldv=None) -> str:
+    fv = resolve_field(me, opp, fieldv)
     a, b = effective_speed(me, fv), effective_speed(opp, fv)
     return "faster" if a > b else ("slower" if a < b else "tie")
 
 
-def resource_cost(me: MonView, my_moves: list, opp: MonView, opp_moves: list) -> dict:
+def resource_cost(me: MonView, my_moves: list, opp: MonView, opp_moves: list, fieldv=None) -> dict:
     """対面で勝つまでに失う HP 割合と、消耗品を消費しそうか"""
-    fv = duel_field(me, opp)
+    fv = resolve_field(me, opp, fieldv)
     turns_a, _ = _race_turns(me, 1.0, my_moves, opp, 1.0, opp_moves, fv)
     taken_per_turn = _best_dmg(opp, me, opp_moves, fv) / 100.0
     if turns_a is None:
@@ -150,20 +162,23 @@ def resource_cost(me: MonView, my_moves: list, opp: MonView, opp_moves: list) ->
 
 
 def interaction_row(my_id: str, me: MonView, my_moves: list, opp_id: str, opp: MonView,
-                    opp_moves: list, mega_stones: Optional[set] = None) -> dict:
+                    opp_moves: list, mega_stones: Optional[set] = None, fieldv=None) -> dict:
+    """fieldv = 並びの場 (設置役が張るフィールド/天候) の指定。無い種別は両者の特性の場 (resolve_field)"""
     stones = mega_stones or set()
+    fv = resolve_field(me, opp, fieldv)
     return {
         "my_id": my_id, "opponent": opp_id,
-        "lead": lead_score(me, my_moves, opp, opp_moves),
-        "switch_in": switch_in_score(me, my_moves, opp, opp_moves),
-        "revenge": revenge_score(me, my_moves, opp, opp_moves),
-        "setup_stop": setup_stop_score(me, my_moves, opp, opp_moves),
-        "speed_control": speed_relation(me, opp),
+        "lead": lead_score(me, my_moves, opp, opp_moves, fv),
+        "switch_in": switch_in_score(me, my_moves, opp, opp_moves, fv),
+        "revenge": revenge_score(me, my_moves, opp, opp_moves, fieldv=fv),
+        "setup_stop": setup_stop_score(me, my_moves, opp, opp_moves, fv),
+        "speed_control": speed_relation(me, opp, fv),
         "hazard": {"sets": any(m in HAZARD_SET for m in my_moves),
                    "removes": any(m in HAZARD_REMOVE for m in my_moves)},
         "status_pressure": round(sum(1 for m in my_moves if m in STATUS_MOVES) / max(1, len(my_moves)), 3),
         "uses_mega": bool((me.item or "") in stones),
-        "resource_cost": resource_cost(me, my_moves, opp, opp_moves),
+        "resource_cost": resource_cost(me, my_moves, opp, opp_moves, fv),
+        "field": {"terrain": fv.terrain if fv else None, "weather": fv.weather if fv else None},
     }
 
 
@@ -268,15 +283,15 @@ def _mega_stone_ids() -> set:
         return set()
 
 
-def matrix(my_sets: dict, threat_sets: dict) -> dict:
-    """my_sets / threat_sets: {id: (MonView, moves)} → {my_id: {opp_id: row}}"""
+def matrix(my_sets: dict, threat_sets: dict, fieldv=None) -> dict:
+    """my_sets / threat_sets: {id: (MonView, moves)} → {my_id: {opp_id: row}}。fieldv = 並びの場の指定 (任意)"""
     stones = _mega_stone_ids()
     out = {}
     for my_id, (me, my_moves) in my_sets.items():
         out[my_id] = {}
         for opp_id, (opp, opp_moves) in threat_sets.items():
             try:
-                out[my_id][opp_id] = interaction_row(my_id, me, my_moves, opp_id, opp, opp_moves, stones)
+                out[my_id][opp_id] = interaction_row(my_id, me, my_moves, opp_id, opp, opp_moves, stones, fieldv)
             except Exception as e:      # 図鑑欠落等は行ごとに落とす
                 out[my_id][opp_id] = {"my_id": my_id, "opponent": opp_id, "error": repr(e)}
     return out

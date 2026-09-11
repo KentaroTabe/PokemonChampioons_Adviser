@@ -211,6 +211,16 @@ def build_context(names, infos: dict, **thresholds) -> dict:
                      "tr_setters": sorted(p["tr_setters"])} for p in per]}
 
 
+def rule_field(names) -> dict:
+    """規則が前提とする場 (設置役の技が張るフィールド/天候): {"terrain", "weather"}。無ければ両方 None"""
+    from tools.team_build.gen_sets import merge_fields, own_field
+    out = {"terrain": None, "weather": None}
+    for n in names or ():
+        mv = (RULES.get(n) or {}).get("setter_move")
+        out = merge_fields(out, own_field(None, [mv] if mv else []))
+    return out
+
+
 def satisfies(members, ctx: dict) -> bool:
     return all(lineup_satisfies(members, p["setters"], p["aces"], p.get("tr_setters", ())) for p in ctx["per_rule"])
 

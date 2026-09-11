@@ -334,7 +334,16 @@ def test_spec_rules_parse_and_validate():
     print("test_spec_rules_parse_and_validate OK")
 
 
+def test_rule_field():
+    """規則が前提とする場: 設置役の技 (サイコフィールド) から {"terrain": "psychic"}。規則が無ければ両方 None"""
+    from tools.team_build import rules as RU
+    assert RU.rule_field(["psychic_terrain_priority_ace"]) == {"terrain": "psychic", "weather": None}
+    assert RU.rule_field([]) == {"terrain": None, "weather": None} and RU.rule_field(None) == {"terrain": None, "weather": None}
+    print("test_rule_field OK")
+
+
 if __name__ == "__main__":
+    test_rule_field()
     test_classify_setters_and_aces()
     test_choose_pair_and_complementarity()
     test_rule_cores_and_context_cores()

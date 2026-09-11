@@ -67,6 +67,28 @@ def _is_grounded(mon: MonView, ignore_ability: bool = False) -> bool:
     return True
 
 
+def field_move_effect(move_id: Optional[str], fv: Optional[FieldView], user_grounded: bool = True,
+                      target_grounded: bool = True) -> tuple:
+    """技固有のフィールド/天候の効果 → (威力倍率, 変化後のタイプ or None, 条件が成立したか)。
+    表は advisor/data/field_effects.json の moves (ワイドフォース/ライジングボルト/ダイチノハドウ/ウェザーボール/
+    ソーラービーム/じしん (グラスフィールドで半減) 等)。条件外は (1.0, None, False)。
+    ソーラービーム系は晴れ以外の天候では other_weather_mult (0.5) 倍で不成立"""
+    from advisor.dex import field_effects
+    spec = (field_effects().get("moves") or {}).get(move_id or "")
+    if not spec or fv is None:
+        return 1.0, None, False
+    cur = fv.terrain if spec.get("kind") == "terrain" else fv.weather
+    cond = spec.get("cond")
+    if not cur or not (cond == "any" or cond == cur):
+        if cur and spec.get("kind") == "weather" and spec.get("other_weather_mult") is not None:
+            return float(spec["other_weather_mult"]), None, False
+        return 1.0, None, False
+    who = spec.get("grounded", "none")
+    if (who == "user" and not user_grounded) or (who == "target" and not target_grounded):
+        return 1.0, None, False
+    return float(spec.get("mult", 1.0)), (spec.get("types") or {}).get(cur), True
+
+
 _FLAG_MOVES: dict = {}
 
 
@@ -155,9 +177,11 @@ def calc_damage(attacker: MonView, defender: MonView, move_id: str,
     override_move_type: 条件でタイプが変わる技 (ウェザーボール/ダイチノハドウ) の実際のタイプ。
     相性・STAB・フィールド/天候の補正すべてにこのタイプを使う
     """
+    from advisor.dex import field_effects
     dex = get_dex()
     move = dex.move(move_id)
     fv = fieldv or FieldView()
+    fe = field_effects()
     notes = []
 
     if not move or move["category"] == "Status" or not move["power"]:
@@ -174,6 +198,17 @@ def calc_damage(attacker: MonView, defender: MonView, move_id: str,
     if mold:
         notes.append("かたやぶりで相手特性無視")
 
+    # --- 技固有のフィールド/天候の効果 (威力倍率・タイプ変化。表は advisor/data/field_effects.json) ---
+    a_grounded = _is_grounded(attacker)
+    d_grounded = _is_grounded(defender, ignore_ability=mold)
+    f_mult, f_type, _f_active = field_move_effect(move_id, fv, a_grounded, d_grounded)
+    if f_type and override_move_type is None:
+        mtype = f_type
+        notes.append(f"{fv.terrain or fv.weather}で{f_type}タイプ")
+    if f_mult != 1.0:
+        power *= f_mult
+        notes.append(f"フィールド/天候で威力×{f_mult:g}")
+
     # --- 特性による無効化 ---
     imm = IMMUNITY_ABILITIES.get(defender.ability or "")
     if imm and mtype in imm and not mold:
@@ -186,7 +221,7 @@ def calc_damage(attacker: MonView, defender: MonView, move_id: str,
     else:
         dtypes = defender.types or (dex.species(defender.species_id) or {}).get("types", [])
         type_mult = dex.effectiveness(mtype, dtypes)
-        if mtype == "Ground" and not _is_grounded(defender, ignore_ability=mold):
+        if mtype == "Ground" and not d_grounded:
             type_mult = 0.0
     if type_mult == 0.0:
         return {"min": 0.0, "max": 0.0, "avg": 0.0, "type_mult": 0.0,
@@ -219,9 +254,10 @@ def calc_damage(attacker: MonView, defender: MonView, move_id: str,
 
     # --- 防御側の実数補正 (かたやぶりなら特性無視) ---
     d_ab = d_ab_real
-    # 砂嵐時の岩タイプ特防1.5倍
-    if fv.weather == "sandstorm" and "Rock" in defender.types and def_key == "spd":
-        dfn = int(dfn * 1.5)
+    # 天候による防御側の実数補正 (砂嵐: いわタイプの特防 1.5 倍、ゆき: こおりタイプの防御 1.5 倍。表から)
+    for w_type, stat_mults in ((fe.get("weather_defense") or {}).get(fv.weather or "") or {}).items():
+        if w_type in defender.types and def_key in stat_mults:
+            dfn = int(dfn * float(stat_mults[def_key]))
     if d_ab == "furcoat" and def_key == "def":
         dfn *= 2
     if d_ab == "marvelscale" and defender.status and def_key == "def":
@@ -254,32 +290,22 @@ def calc_damage(attacker: MonView, defender: MonView, move_id: str,
         power *= 1.5
     if a_ab == "analytic":
         pass   # 行動順依存のため探索側では未適用 (保守的に無視)
-    if fv.terrain == "electric" and mtype == "Electric" and _is_grounded(attacker):
-        power *= 1.3
-    if fv.terrain == "grassy" and mtype == "Grass" and _is_grounded(attacker):
-        power *= 1.3
-    if fv.terrain == "psychic" and mtype == "Psychic" and _is_grounded(attacker):
-        power *= 1.3
-    if fv.terrain == "misty" and mtype == "Dragon" and _is_grounded(defender):
-        power *= 0.5
+    # フィールドのタイプ別補正 (接地した使用者だけ) と、接地した相手への減衰 (ミストフィールドのドラゴン技)。表から
+    type_boost = fe.get("type_boost") or {}
+    if fv.terrain and a_grounded:
+        power *= float((type_boost.get("terrain") or {}).get(fv.terrain, {}).get(mtype, 1.0))
+    if fv.terrain and d_grounded:
+        power *= float((fe.get("terrain_target_nerf") or {}).get(fv.terrain, {}).get(mtype, 1.0))
 
     # --- 基本ダメージ ---
     base = (2 * attacker.level // 5 + 2) * power * atk / max(1, dfn)
     base = base / 50 + 2
 
     mult = 1.0
-    # 天候 (メガメガニウムの特性 Mega Sol は自分の攻撃を常に晴れ扱いにする: 2026-09-11 上流更新)
+    # 天候のタイプ別補正 (晴れ/雨。表から)。メガメガニウムの特性 Mega Sol は自分の攻撃を常に晴れ扱いにする (2026-09-11 上流更新)
     weather = "sun" if a_ab == "megasol" else fv.weather
-    if weather == "sun":
-        if mtype == "Fire":
-            mult *= 1.5
-        elif mtype == "Water":
-            mult *= 0.5
-    elif weather == "rain":
-        if mtype == "Water":
-            mult *= 1.5
-        elif mtype == "Fire":
-            mult *= 0.5
+    if weather:
+        mult *= float((type_boost.get("weather") or {}).get(weather, {}).get(mtype, 1.0))
 
     # STAB
     atypes = attacker.types or (dex.species(attacker.species_id) or {}).get("types", [])

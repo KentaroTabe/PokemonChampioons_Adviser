@@ -493,9 +493,10 @@ def order_candidates(scored: list, usage_weight: float = BUILD_SET_USAGE_WEIGHT,
     return ordered
 
 
-def rank_sets(candidates: list, threat_sets: dict, usage_weight: float = BUILD_SET_USAGE_WEIGHT) -> list:
+def rank_sets(candidates: list, threat_sets: dict, usage_weight: float = BUILD_SET_USAGE_WEIGHT,
+              field=None) -> list:
     """各型候補を Interaction Matrix の被覆で採点し、使用率の事前分布 (order_candidates) を掛けて降順に返す
-    (candidates は同一種族)"""
+    (candidates は同一種族)。field = 並びの場 (FieldView、設置役が張るフィールド/天候) の指定 (任意)"""
     from tools.team_build.interaction import matrix, view_from_set
     # 代表型も常識フィルタにかける (代表型は各属性の最多を独立に貼り合わせたもので、
     # こだわり系 + 積み/回復 のような不整合が残ることがある)。全滅なら元の候補をそのまま使う
@@ -503,7 +504,9 @@ def rank_sets(candidates: list, threat_sets: dict, usage_weight: float = BUILD_S
     if sane:
         for c in candidates:
             if c not in sane:
-                c.notes.append("sanity:" + ";".join(set_sanity(c)))
+                note = "sanity:" + ";".join(set_sanity(c))
+                if note not in c.notes:
+                    c.notes.append(note)
         candidates = sane
     scored = []
     for c in candidates:
@@ -512,7 +515,7 @@ def rank_sets(candidates: list, threat_sets: dict, usage_weight: float = BUILD_S
         except Exception as e:
             c.notes.append(f"view: {e!r}")
             continue
-        rows = matrix({c.species_id: (view, moves)}, threat_sets)[c.species_id]
+        rows = matrix({c.species_id: (view, moves)}, threat_sets, fieldv=field)[c.species_id]
         c.score = coverage_score(rows)
         scored.append(c)
     return order_candidates(scored, usage_weight, REP_MARGIN)
