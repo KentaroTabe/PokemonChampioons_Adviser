@@ -205,6 +205,7 @@ def pick_order_from_perm(perm, n: int) -> str:
 
 def advisor_pick_order(battle, selection_model_path=None) -> Optional[str]:
     """実助言と同じ選出: 選出モデル (候補専用モデルか、既定モデルで分布内のとき)。使えなければ None"""
+    from champions_agent.agent import selection_dispatch as SD
     from champions_agent.agent import selection_model as sm
     my = [p.species for p in battle.team.values()]
     opp_src = getattr(battle, "teampreview_opponent_team", None) or battle.opponent_team.values()
@@ -213,8 +214,8 @@ def advisor_pick_order(battle, selection_model_path=None) -> Optional[str]:
         return None
     if selection_model_path is None and not sm.is_in_distribution(my):
         return None
-    path = Path(selection_model_path) if selection_model_path else sm.MODEL_PATH
-    scored = sm.score_all(my, opp, path)
+    path = Path(selection_model_path) if selection_model_path else SD.deployed_model_path()
+    scored = SD.score_all(my, opp, path)
     if not scored:
         return None
     return pick_order_from_perm(scored[0][0], len(my))

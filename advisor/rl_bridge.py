@@ -44,7 +44,7 @@ STATUS_MAP = {"burn": "brn", "paralysis": "par", "sleep": "slp",
               "freeze": "frz", "poison": "psn", "toxic": "tox"}
 BOOST_KEYS = ["atk", "def", "spa", "spd", "spe", "acc", "eva"]
 BASE_KEYS = ["hp", "atk", "def", "spa", "spd", "spe"]
-N_MOVE_SLOTS, MOVE_FEAT_DIM, OBS_DIM = 4, 9, 420  # v7拡張 (v1=227の末尾追記)
+N_MOVE_SLOTS, MOVE_FEAT_DIM, OBS_DIM = 4, 9, 436  # v8拡張 (v1=227の末尾追記。v7=420 + メガシンカの推定16)
 MOVE_EFFECT_DIM = 8
 VOLATILE_EFFECTS = ["confusion", "leech_seed", "substitute", "taunt",
                     "encore", "yawn"]

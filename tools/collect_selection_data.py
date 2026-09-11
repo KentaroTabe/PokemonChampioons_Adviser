@@ -39,6 +39,23 @@ def _to_id(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(name).lower())
 
 
+def _item_id(pokemon) -> str:
+    """自分の個体の持ち物 id (不明なら空)"""
+    item = getattr(pokemon, "item", None)
+    if not item or str(item).lower() in ("unknown_item", "unknownitem"):
+        return ""
+    return _to_id(str(item))
+
+
+def _mega_used(team_values) -> str:
+    """対戦中にメガシンカした個体の基本種 id (無ければ空)。1 試合 1 回なので高々 1 体"""
+    for p in team_values:
+        sid = str(getattr(p, "species", "") or "")
+        if "mega" in sid:
+            return re.sub(r"mega[a-z]?$", "", sid)
+    return ""
+
+
 def _opp_selected(battle) -> list:
     """相手が実際に選出した3体 (対戦後に判明した範囲。長さ3にパディング)。
 
@@ -135,6 +152,8 @@ async def collect_paired(n_groups: int, group_size: int, style: str,
                     _emb_of([p.species for p in opp_mons])]),
                 "action": SELECTION_PERMUTATIONS.index(perm),
                 "team": [p.species for p in mons],
+                # 自分の持ち物 (メガ石 = 1 試合 1 回の資源の所在。選出モデル v3 が使う。2026-09-11)
+                "own_items": [_item_id(p) for p in mons],
                 "opp_team": ([p.species for p in opp_mons] + [""] * 6)[:6],
                 "group": state["group"],
             }
@@ -169,6 +188,7 @@ async def collect_paired(n_groups: int, group_size: int, style: str,
 
     obs, emb, act, rew, team, opp_team, group, opp_sel = \
         [], [], [], [], [], [], [], []
+    own_items, own_mega, opp_mega = [], [], []
     for tag, battle in me.battles.items():
         rec = records.get(tag)
         if rec is None or battle.won is None:
@@ -181,6 +201,9 @@ async def collect_paired(n_groups: int, group_size: int, style: str,
         opp_team.append(rec["opp_team"])
         group.append(rec["group"])
         opp_sel.append(_opp_selected(battle))
+        own_items.append(rec.get("own_items") or [""] * 6)
+        own_mega.append(_mega_used(battle.team.values()))
+        opp_mega.append(_mega_used(battle.opponent_team.values()))
     return {"obs": np.asarray(obs, dtype=np.float32),
             "emb": np.asarray(emb, dtype=np.float32),
             "action": np.asarray(act, dtype=np.int64),
@@ -188,7 +211,10 @@ async def collect_paired(n_groups: int, group_size: int, style: str,
             "team": np.asarray(team, dtype="<U24"),
             "opp_team": np.asarray(opp_team, dtype="<U24"),
             "group": np.asarray(group, dtype=np.int64),
-            "opp_sel": np.asarray(opp_sel, dtype="<U24")}
+            "opp_sel": np.asarray(opp_sel, dtype="<U24"),
+            "own_items": np.asarray(own_items, dtype="<U24"),
+            "own_mega": np.asarray(own_mega, dtype="<U24"),
+            "opp_mega": np.asarray(opp_mega, dtype="<U24")}
 
 
 async def collect(n_battles: int, explore: float, style: str,
@@ -246,6 +272,7 @@ async def collect(n_battles: int, explore: float, style: str,
                 "action": SELECTION_PERMUTATIONS.index(perm),
                 # 行動インデックスを後から3体の名前へ戻せるよう並び順も保存する
                 "team": [p.species for p in mons],
+                "own_items": [_item_id(p) for p in mons],
                 # 相手6体も選出画面では見えている (battle.opponent_team は
                 # 対戦前は teampreview の6体を返す)。これを保存しないと
                 # 「相手に応じた選出」が学習できない
@@ -286,6 +313,7 @@ async def collect(n_battles: int, explore: float, style: str,
     await me.battle_against(opp, n_battles=n_battles)
 
     obs, emb, act, rew, team, opp_team, opp_sel = [], [], [], [], [], [], []
+    own_items, own_mega, opp_mega = [], [], []
     for tag, battle in me.battles.items():
         rec = records.get(tag)
         if rec is None or battle.won is None:
@@ -297,6 +325,9 @@ async def collect(n_battles: int, explore: float, style: str,
         team.append(rec["team"])
         opp_team.append(rec["opp_team"])
         opp_sel.append(_opp_selected(battle))
+        own_items.append(rec.get("own_items") or [""] * 6)
+        own_mega.append(_mega_used(battle.team.values()))
+        opp_mega.append(_mega_used(battle.opponent_team.values()))
     return {"obs": np.asarray(obs, dtype=np.float32),
             "emb": np.asarray(emb, dtype=np.float32),
             "action": np.asarray(act, dtype=np.int64),
@@ -305,7 +336,11 @@ async def collect(n_battles: int, explore: float, style: str,
             "opp_team": np.asarray(opp_team, dtype="<U24"),
             # -1 = 対応なし (毎戦チームを引き直しているので比較相手がいない)
             "group": np.full(len(rew), -1, dtype=np.int64),
-            "opp_sel": np.asarray(opp_sel, dtype="<U24")}
+            "opp_sel": np.asarray(opp_sel, dtype="<U24"),
+            # 1 試合 1 回の資源: 自分の持ち物 (石の所在) と、実際にメガシンカした個体 (自分/相手)。2026-09-11
+            "own_items": np.asarray(own_items, dtype="<U24"),
+            "own_mega": np.asarray(own_mega, dtype="<U24"),
+            "opp_mega": np.asarray(opp_mega, dtype="<U24")}
 
 
 def _default_column(sample: np.ndarray, n: int) -> np.ndarray:

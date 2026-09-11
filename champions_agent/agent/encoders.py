@@ -549,6 +549,65 @@ def _field_remaining_vec(battle) -> np.ndarray:
     return vec
 
 
+def _mega_prob_of(pokemon, mega_used: bool) -> tuple:
+    """(この先メガシンカする確率, {mega_sid: p})。poke-env の Pokemon から (持ち物は判明分のみ)"""
+    try:
+        from advisor.gimmick import expected_mega
+        species = str(getattr(pokemon, "species", "") or "")
+        item = getattr(pokemon, "item", None)
+        item_id = None
+        if item and item not in ("unknown_item", "unknownitem"):
+            item_id = str(item).lower().replace(" ", "")
+        forms = expected_mega(species, item_id, "mega" in species, mega_used)
+        return min(1.0, sum(forms.values())), forms
+    except Exception:
+        return 0.0, {}
+
+
+def _gimmick_vec(battle, own, opp, own_bench: list, opp_bench: list) -> np.ndarray:
+    """v8 ブロック (16): 相手の場の P(メガ) 1 + 期待種族値の差 6、相手控え 2 体の P 2、自分の場の石/メガ可能 1 + 控えの石 2、
+    権利の消費 (自分/相手) 2、陣営の残りメガ脅威 (相手/自分) 2。表と使用率 DB の事前分布から (advisor.gimmick)"""
+    vec = np.zeros(16, dtype=np.float32)
+    own_used = _mega_in_team(getattr(battle, "team", {}) or {})
+    opp_used = _mega_in_team(getattr(battle, "opponent_team", {}) or {})
+    try:
+        from advisor.gimmick import mixture_base_stats
+        if opp is not None:
+            p, forms = _mega_prob_of(opp, opp_used)
+            vec[0] = p
+            if forms:
+                species = str(getattr(opp, "species", "") or "")
+                base = getattr(opp, "base_stats", None) or {}
+                mix = mixture_base_stats(species, forms)
+                for i, k in enumerate(("hp", "atk", "def", "spa", "spd", "spe")):
+                    vec[1 + i] = (float(mix.get(k, 0.0)) - float(base.get(k, mix.get(k, 0.0)))) / 255.0
+        for i in range(2):
+            b = opp_bench[i] if i < len(opp_bench) else None
+            vec[7 + i] = _mega_prob_of(b, opp_used)[0] if b is not None else 0.0
+        stones = None
+        if own is not None:
+            from advisor.gimmick import stone_table
+            stones = stone_table()
+            item = str(getattr(own, "item", "") or "").lower().replace(" ", "")
+            vec[9] = 1.0 if (item in stones and not own_used and getattr(battle, "can_mega_evolve", False)) else 0.0
+        for i in range(2):
+            b = own_bench[i] if i < len(own_bench) else None
+            if b is not None:
+                if stones is None:
+                    from advisor.gimmick import stone_table
+                    stones = stone_table()
+                item = str(getattr(b, "item", "") or "").lower().replace(" ", "")
+                vec[10 + i] = 1.0 if (item in stones and not own_used) else 0.0
+        vec[12] = 1.0 if own_used else 0.0
+        vec[13] = 1.0 if opp_used else 0.0
+        opp_all = list((getattr(battle, "opponent_team", {}) or {}).values())
+        vec[14] = max((_mega_prob_of(p, opp_used)[0] for p in opp_all), default=0.0)
+        vec[15] = min(1.0, vec[9] + vec[10] + vec[11])
+    except Exception:
+        pass
+    return vec
+
+
 def encode_battle(battle) -> np.ndarray:
     """AbstractBattle -> 固定長観測ベクトル (BATTLE_OBS_DIM)"""
     own = battle.active_pokemon
@@ -882,6 +941,9 @@ def encode_battle(battle) -> np.ndarray:
         opp_bench_v7.append(_base_stats6(b) if b is not None
                             else np.zeros(6, dtype=np.float32))
 
+    # --- v8: 1 試合 1 回の資源 (メガシンカ) の推定 ---
+    gimmick_vec = _gimmick_vec(battle, own, opp, own_bench, opp_bench)
+
     vec = np.concatenate([own_vec, opp_vec, opp_extra,
                           *own_bench_vecs, *opp_bench_vecs, opp_count_vec,
                           my_side, opp_side, field, speed_vec,
@@ -894,7 +956,7 @@ def encode_battle(battle) -> np.ndarray:
                           special_vec, protect_vec,
                           ability_vec,
                           race_vec, *own_bench_v7,
-                          *opp_bench_v7]).astype(np.float32)
+                          *opp_bench_v7, gimmick_vec]).astype(np.float32)
 
     # 固定長を保証
     if len(vec) < BATTLE_OBS_DIM:

@@ -429,6 +429,16 @@ BUILD_UNBURDEN_TRIGGERS = {"whiteherb": "self_stat_drop", "normalgem": "normal_a
 # 以前は「1 試合 1 回のメガシンカ」を「1 構築 1 個の石」と取り違えて 1 個に制限していた。石が 2 個までは冗長の罰則なし、上限 3
 BUILD_MAX_MEGA_STONES = 3
 BUILD_MEGA_FREE_STONES = 2
+# 1 試合 1 回の資源 (メガシンカ) の推定 (advisor/gimmick.py。2026-09-11 ユーザー指摘「相手がメガ先を読まないのは致命的」):
+# 相手の種族ごとの「メガ石を持つ確率」は使用率 DB の石の使用率。石を持てるが使用率が無い種の既定値と、無視する下限
+GIMMICK_DEFAULT_STONE_PRIOR = 0.5
+GIMMICK_MIN_PRIOR = 0.02
+# 助言の探索: 相手がこの確率以上でメガシンカし得るなら「技 + メガシンカ」の分岐を相手の行動候補に加える
+SEARCH_OPP_MEGA_MIN_PROB = 0.2
+# 選出モデルの特徴量の版 (agent/selection_dispatch): "v1" = 種族埋め込みのみ (配布中)、"v3" = メガシンカ込み。
+# 構築の相手の選出 (apply_model_teampreview)、測定の助言の選出 (advisor_pick_order)、候補専用モデルの適応が従う。
+# v3 への切替は tools/compare_selection_features の門 (未知チームの MSE 改善・対応比較の順位精度が v1 に劣らない) を通してから
+SELECTION_FEATURES = "v1"
 # 自己加速 (S3 の役割 speed_boost = 加速後に上を取れる脅威の割合): 特性の倍率 (かるわざは消費アイテム持ちのときだけ) と
 # 加速技の倍率 (1 回積んだ後)。効果は最大のもの 1 つを採る
 BUILD_SPEED_BOOST_ABILITIES = {"speedboost": 1.5, "unburden": 2.0}

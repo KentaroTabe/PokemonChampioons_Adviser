@@ -225,17 +225,16 @@ def apply_model_teampreview(player, path=None) -> None:
     モデルが読めないときは相性ベースに落ちる (無選出で壊れないように)。
     """
     import types
-    from champions_agent.agent.selection_model import (
-        GENERAL_MODEL_PATH, predict_best,
-    )
-    model_path = path or GENERAL_MODEL_PATH
+    from champions_agent.agent import selection_dispatch as SD
+    # 版 (v1 / v3 = メガシンカ込み) は config SELECTION_FEATURES。path 指定は候補専用モデル等 (その版で作ったもの)
+    model_path = path or SD.general_model_path()
 
     def _teampreview(self, battle):
         try:
             mons = list(battle.team.values())
             mine = [p.species for p in mons]
             opp = [p.species for p in battle.opponent_team.values()]
-            best = predict_best(mine, opp, model_path)
+            best = SD.predict_best(mine, opp, model_path)
             if best is not None:
                 perm = best[0]
                 # Showdown は1始まりの並びで6体すべてを並べる (先頭3体が選出)
@@ -344,8 +343,11 @@ class ChampionsSinglesEnv(SinglesEnv):
         # v7ブロックは末尾追記なので、切り詰めれば正確にv6になる。
         # ⚠ 既定をv7にしてはいけない: 本番の388チェックポイントのresumeが
         # 観測空間不一致で「非互換→退避→新規学習」になり方策が消える
-        self._obs_dim = (BATTLE_OBS_DIM
-                         if os.environ.get("TRAIN_OBS", "v6") == "v7"
+        # v8 (メガシンカの推定、436) も末尾追記。v7 は 420 (BATTLE_OBS_DIM_V7)
+        from champions_agent.agent.spaces import BATTLE_OBS_DIM_V7
+        obs_ver = os.environ.get("TRAIN_OBS", "v6")
+        self._obs_dim = (BATTLE_OBS_DIM if obs_ver == "v8"
+                         else BATTLE_OBS_DIM_V7 if obs_ver == "v7"
                          else 388)
         obs_space = Box(low=-np.inf, high=np.inf, shape=(self._obs_dim,),
                         dtype=np.float32)

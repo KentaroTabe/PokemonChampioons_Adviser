@@ -20,6 +20,7 @@ from typing import Optional
 
 from advisor.damage import MonView, FieldView, _is_grounded, calc_damage
 from advisor.dex import get_dex
+from champions_agent.config import SEARCH_OPP_MEGA_MIN_PROB
 
 ROLL_GROUPS = ((0.25, "min"), (0.5, "avg"), (0.25, "max"))
 RISK_WEIGHT = 0.4   # 推奨値 = (1-w)*期待値 + w*保証値 (中立局面での基準)
@@ -90,6 +91,10 @@ class SimSide:
     active_hp: float                  # 0..1
     bench: list = field(default_factory=list)   # [(MonView, hp_frac)]
     stealth_rock: bool = False
+    # 1 試合 1 回の資源 (メガシンカ): 場のポケモンがこの先メガシンカする姿の確率 {mega_sid: p} (advisor.gimmick)。
+    # 権利を消費済みなら mega_used。交代すると新しい場のポケモンの分は不明 (空) にする
+    mega_forms: dict = field(default_factory=dict)
+    mega_used: bool = False
 
     def alive_count(self) -> int:
         return (1 if self.active_hp > 0 else 0) + \
@@ -103,6 +108,7 @@ class Action:
     bench_index: Optional[int] = None
     label: str = ""
     prob: float = 1.0         # 相手側: 行動分布の重み
+    mega: bool = False        # 技と同時にメガシンカする (相手側: 事前分布で分岐)
 
 
 def _hazard_frac(mon: MonView, side: SimSide) -> float:
@@ -188,7 +194,34 @@ def _apply_switch(side: SimSide, idx: int) -> SimSide:
     hp = max(0.0, hp - _hazard_frac(view, side))
     new_bench = list(side.bench)
     new_bench[idx] = (side.active, side.active_hp)
-    return replace(side, active=view, active_hp=hp, bench=new_bench)
+    return replace(side, active=view, active_hp=hp, bench=new_bench, mega_forms={})
+
+
+def _mega_evolve(side: SimSide) -> SimSide:
+    """場のポケモンを最も確からしいメガ後の姿にし、権利を消費する (HP 割合・ランク・状態異常は保つ)"""
+    from advisor.gimmick import mega_view
+    if not side.mega_forms or side.mega_used:
+        return side
+    form = max(side.mega_forms, key=lambda k: (side.mega_forms[k], k))
+    return replace(side, active=mega_view(side.active, form), mega_forms={}, mega_used=True)
+
+
+def opp_mega_split(acts: list, side: SimSide, min_prob: float = SEARCH_OPP_MEGA_MIN_PROB) -> list:
+    """相手の技の候補を「メガシンカあり / なし」に分岐する。確率 p = メガ石を持つ事前分布の合計 (判明情報込み)。
+    p < min_prob か、権利消費済み・姿が不明なら分岐しない。純粋"""
+    if not side.mega_forms or side.mega_used:
+        return acts
+    p = min(1.0, sum(side.mega_forms.values()))
+    if p < min_prob:
+        return acts
+    out = []
+    for a in acts:
+        if a.kind != "move":
+            out.append(a)
+            continue
+        out.append(replace(a, prob=a.prob * (1.0 - p)))
+        out.append(replace(a, prob=a.prob * p, mega=True, label=f"{a.label}+メガ"))
+    return out
 
 
 def simulate_turn(me: SimSide, opp: SimSide, my_act: Action, opp_act: Action,
@@ -203,6 +236,11 @@ def simulate_turn(me: SimSide, opp: SimSide, my_act: Action, opp_act: Action,
         me = _apply_switch(me, my_act.bench_index)
     if opp_act.kind == "switch":
         opp = _apply_switch(opp, opp_act.bench_index)
+    # メガシンカ (1 試合 1 回) は技の解決前に姿を変える
+    if opp_act.kind == "move" and opp_act.mega:
+        opp = _mega_evolve(opp)
+    if my_act.kind == "move" and my_act.mega:
+        me = _mega_evolve(me)
 
     movers = []
     if my_act.kind == "move" and me.active_hp > 0:
@@ -324,7 +362,7 @@ def _position_value(me: SimSide, opp: SimSide, my_moves: list,
         return -1.0
     if opp.alive_count() == 0:
         return 1.0
-    opp_acts = _opp_actions(opp, opp_move_pool)
+    opp_acts = opp_mega_split(_opp_actions(opp, opp_move_pool), opp)
     best = -9.9
     for ma in _my_actions(me, my_moves):
         v = 0.0
@@ -368,7 +406,7 @@ def search(me: SimSide, opp: SimSide, my_moves: list, opp_move_pool: list,
                           recommended, risky}], "matrix": {...}}
     """
     my_acts = _my_actions(me, my_moves)
-    opp_acts = _opp_actions(opp, opp_move_pool, opp_prior, prior_mix)
+    opp_acts = opp_mega_split(_opp_actions(opp, opp_move_pool, opp_prior, prior_mix), opp)
     if not my_acts or not opp_acts:
         return {"actions": [], "matrix": None}
 

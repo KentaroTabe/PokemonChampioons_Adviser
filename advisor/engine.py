@@ -742,6 +742,15 @@ def evaluate(state: dict, resolver=None) -> dict:
                                           resolver) or mega_note
         except Exception:
             pass
+    # 相手の場のポケモンがこの先メガシンカする見込み (使用率 DB の石の使用率 + 判明情報)
+    try:
+        opp_forms = _opp_mega_forms(opp_state["party"][opp_state["active_index"]], state)
+        if opp_forms:
+            from advisor.infer import species_ja_name
+            parts = ", ".join(f"{species_ja_name(k)} {v:.0%}" for k, v in sorted(opp_forms.items(), key=lambda kv: -kv[1]))
+            mega_note = (mega_note + " / " if mega_note else "") + f"相手もメガシンカ未使用: {parts} の見込み"
+    except Exception:
+        pass
 
     # 詰み筋・勝ち筋判定 (残存メンバーの1v1マッチアップ行列)。
     # 探索より先に計算し、勝ち筋の温存を探索の葉評価へ渡す (定説H3)
@@ -919,6 +928,19 @@ def _sacrifice_note(actions: list, endgame: str) -> str:
             f"有効です{keep}")
 
 
+def _opp_mega_forms(opp_p: dict, state: dict) -> dict:
+    """相手の個体がこの先メガシンカする姿 {mega_sid: p} (advisor.gimmick: 石の使用率の事前分布 + 持ち物/メガ済み/権利消費の判明情報)"""
+    try:
+        from advisor.gimmick import expected_mega
+        item_id = opp_p.get("item_id")
+        if item_id == "megastone":       # 画面認識の総称 (石であることは分かるが種類は不明) → 事前分布に任せる
+            item_id = None
+        return expected_mega(opp_p.get("species_id") or "", item_id, bool(opp_p.get("is_mega")),
+                             bool((state.get("mega_used") or {}).get("opponent")))
+    except Exception:
+        return {}
+
+
 def _mega_timing_note(my_p, my_view, opp_view, my_field, resolver):
     """メガフォルムでの最大打点/被ダメを比較し、切るタイミングを定量提案"""
     if opp_view is None:
@@ -1073,10 +1095,14 @@ def _run_search(state, my_state, my_view, my_p, opp_state, opp_view,
     me = SimSide(active=my_view, active_hp=_hp_frac_of(my_p),
                  bench=bench_of(my_state, "player"),
                  stealth_rock=bool(my_state.get("hazards", {}).get("stealth_rock")))
-    opp = SimSide(active=opp_view, active_hp=_hp_frac_of(
-                      opp_state["party"][opp_state["active_index"]]),
+    # 相手の場のポケモンがこの先メガシンカする姿 (事前分布 + 判明情報)。探索で「技 + メガシンカ」を分岐する
+    opp_active_p = opp_state["party"][opp_state["active_index"]]
+    opp_mega_forms = _opp_mega_forms(opp_active_p, state)
+    opp = SimSide(active=opp_view, active_hp=_hp_frac_of(opp_active_p),
                   bench=bench_of(opp_state, "opponent"),
-                  stealth_rock=bool(opp_state.get("hazards", {}).get("stealth_rock")))
+                  stealth_rock=bool(opp_state.get("hazards", {}).get("stealth_rock")),
+                  mega_forms=opp_mega_forms,
+                  mega_used=bool(state.get("mega_used", {}).get("opponent")))
     # RL価値関数を葉評価にブレンド (学習結果の反映)。使えない環境ではNone。
     # 並列実行のため関数でなく文脈 (leaf_ctx) も持ち、ワーカー側で再構成する
     from advisor.search import make_rl_leaf_fn
@@ -1103,7 +1129,8 @@ def _run_search(state, my_state, my_view, my_p, opp_state, opp_view,
         jobs, ws = [], []
         for w_c, me_c, view_o in combos:
             opp_k = SimSide(active=view_o, active_hp=opp.active_hp,
-                            bench=opp.bench, stealth_rock=opp.stealth_rock)
+                            bench=opp.bench, stealth_rock=opp.stealth_rock,
+                            mega_forms=opp.mega_forms, mega_used=opp.mega_used)
             jobs.append(dict(me=me_c, opp=opp_k, my_moves=my_moves,
                              opp_move_pool=pool, my_field=my_field,
                              opp_field=opp_field, leaf_ctx=leaf_ctx,

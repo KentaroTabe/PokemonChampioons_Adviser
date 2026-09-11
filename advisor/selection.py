@@ -232,6 +232,31 @@ def _weather_synergy_bonus(members: list) -> float:
     return bonus
 
 
+def _with_mega_candidates(cands: list, p: dict, state: dict) -> list:
+    """相手 1 枠の候補 [(sid, prob, ja)] に、メガ後の姿を確率で混ぜる: (sid, prob×(1−Σp)) + (mega_sid, prob×p_f)。
+    判明情報 (持ち物・メガ済み・相手の権利消費) は advisor.gimmick が上書きする。純粋 (usage は DB から)"""
+    try:
+        from advisor.gimmick import expected_mega
+        from advisor.infer import species_ja_name
+    except Exception:
+        return cands
+    item_id = p.get("item_id")
+    if item_id == "megastone":
+        item_id = None
+    used = bool((state.get("mega_used") or {}).get("opponent"))
+    out = []
+    for sid, prob, ja in cands:
+        forms = expected_mega(sid, item_id, bool(p.get("is_mega")), used)
+        total = min(1.0, sum(forms.values()))
+        if total <= 0:
+            out.append((sid, prob, ja))
+            continue
+        out.append((sid, prob * (1.0 - total), ja))
+        for msid, pf in forms.items():
+            out.append((msid, prob * pf, species_ja_name(msid)))
+    return out
+
+
 def _make_view(species_id: str) -> Optional[MonView]:
     dex = get_dex()
     sp = dex.species(species_id)
@@ -354,6 +379,8 @@ def advise_selection(state: dict, resolver=None) -> dict:
                       p.get("species_ja") or species_ja_name(p["species_id"]))]
         else:
             cands = inference.candidates(types_ja)
+        # 1 試合 1 回の資源: メガ石を持つ見込み (使用率の事前分布 + 判明情報) でメガ後の姿も候補に混ぜる
+        cands = _with_mega_candidates(cands, p, state)
         label = p.get("species_ja") or "/".join(types_ja)
         opps.append({"index": j, "types": types_en, "label": label,
                      "types_ja": types_ja, "candidates": cands})
@@ -370,7 +397,16 @@ def advise_selection(state: dict, resolver=None) -> dict:
     def get_view(sid):
         if sid not in view_cache:
             view_cache[sid] = _make_view(sid)
-            moves_cache[sid] = _predicted_attack_moves(sid) if view_cache[sid] else []
+            moves = _predicted_attack_moves(sid) if view_cache[sid] else []
+            if view_cache[sid] is not None and not moves:
+                # メガ後の姿は使用率データが無い → 基本種の予測技を使う
+                try:
+                    from advisor.gimmick import _base_of, is_mega_form
+                    if is_mega_form(sid):
+                        moves = _predicted_attack_moves(_base_of(sid))
+                except Exception:
+                    pass
+            moves_cache[sid] = moves
         return view_cache[sid], moves_cache[sid]
 
     # スコア行列: 候補種族分布で加重したダメージ計算ベース。

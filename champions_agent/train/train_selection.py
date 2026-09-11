@@ -67,6 +67,10 @@ def load_dataset(path: Path = DATA_PATH, opp_col: str = "team",
         raise SystemExit("opp_sel が記録されていないデータです。"
                          "収集し直してください (2026-07-31以降の収集で記録)")
     feats, rewards, rows = [], [], []
+    # 列が増えた収集 (own_items = 自分の持ち物: メガ石の所在) は、受け取れる特徴量関数 (v3) にだけ渡す
+    import inspect
+    accepts_items = "own_items" in inspect.signature(builder).parameters
+    has_items = "own_items" in d.files
     for i in range(len(d["action"])):
         team = [str(s) for s in d["team"][i]]
         if opp_col == "sel":
@@ -79,7 +83,11 @@ def load_dataset(path: Path = DATA_PATH, opp_col: str = "team",
             opp = ([str(s) for s in d["opp_team"][i] if str(s)]
                    if has_opp else [])
         perm = SELECTION_PERMUTATIONS[int(d["action"][i])]
-        feats.append(builder(team, opp, perm))
+        if accepts_items and has_items:
+            items = [str(s) for s in d["own_items"][i]]
+            feats.append(builder(team, opp, perm, own_items=items if any(items) else None))
+        else:
+            feats.append(builder(team, opp, perm))
         rewards.append(float(d["reward"][i]))
         rows.append(i)
     if not feats:
@@ -212,6 +220,9 @@ def train(epochs: int = 300, lr: float = 1e-3, holdout: float = 0.2,
             build_features_v2,
         )
         builder = build_features_v2
+    elif features == "v3":
+        from champions_agent.agent.selection_features_v3 import build_features_v3
+        builder = build_features_v3
     else:
         builder = build_features
     X, y, meta = load_dataset(opp_col="sel" if cond_sel else "team",
@@ -219,6 +230,8 @@ def train(epochs: int = 300, lr: float = 1e-3, holdout: float = 0.2,
     tag = " (相手の実選出3体に条件付け)" if cond_sel else ""
     if features == "v2":
         tag += " [v2特徴量: 型情報+メタ事前分布]"
+    if features == "v3":
+        tag += " [v3特徴量: メガシンカ (自分は石の有無、相手は石の事前分布) 込み]"
     print(f"[train_selection] データ {meta['n']}件{tag} / "
           f"チーム{meta['teams']}種 / "
           f"特徴{X.shape[1]}次元 / 全体勝率{y.mean():.3f}")
@@ -249,6 +262,9 @@ def train(epochs: int = 300, lr: float = 1e-3, holdout: float = 0.2,
     if features == "v2":
         from champions_agent.agent.selection_features_v2 import make_net_v2
         net = make_net_v2()
+    elif features == "v3":
+        from champions_agent.agent.selection_features_v3 import make_net_v3
+        net = make_net_v3()
     else:
         net = make_net()
     # weight_decay: 未知チーム検証で train 0.09 / val 0.30 と強い過学習が
@@ -324,10 +340,21 @@ def train(epochs: int = 300, lr: float = 1e-3, holdout: float = 0.2,
         import shutil
         from champions_agent.agent.selection_model import EMB_PIN_PATH
         from tools.species_embedding import CACHE as EMB_LIVE_PATH
-        shutil.copy(EMB_LIVE_PATH, EMB_PIN_PATH)
-        print(f"[train_selection] 埋め込みをピン止め: {EMB_PIN_PATH}")
+        if features == "v3":
+            # v3 は自分のピンを持つ (v1 のピンを上書きすると、基底のずれで配布中の v1 が崩れる: 2026-08-06 の前例)
+            from champions_agent.agent.selection_features_v3 import V3_EMB_PIN_PATH
+            shutil.copy(EMB_LIVE_PATH, V3_EMB_PIN_PATH)
+            print(f"[train_selection] v3 の埋め込みをピン止め: {V3_EMB_PIN_PATH}")
+        else:
+            shutil.copy(EMB_LIVE_PATH, EMB_PIN_PATH)
+            print(f"[train_selection] 埋め込みをピン止め: {EMB_PIN_PATH}")
     except Exception as e:
         print(f"  ⚠ 埋め込みのピン止めに失敗: {e}")
+    if features == "v3":
+        from champions_agent.agent.selection_features_v3 import V3_GENERAL_MODEL_PATH
+        torch.save(net.state_dict(), V3_GENERAL_MODEL_PATH)
+        print(f"[train_selection] v3 汎用モデル保存: {V3_GENERAL_MODEL_PATH}")
+        return
     if features == "v2":
         # v2は比較実験中の候補。v1の配布/汎用/微調整には触れない
         from champions_agent.agent.selection_features_v2 import (
@@ -407,11 +434,16 @@ def adapt_candidate(data_path: Path, out_model: Path, base_model: Path = GENERAL
     import json
     import torch
     from torch.optim import Adam
+    from champions_agent.agent import selection_dispatch as SD
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
-    X, y, meta = load_dataset(Path(data_path))
+    # 候補専用モデルの版は config SELECTION_FEATURES (v3 = メガシンカ込み)。起点の汎用モデルも同じ版
+    version = SD.features_version()
+    X, y, meta = load_dataset(Path(data_path), builder=SD.builder(version))
     n = len(y)
-    net = make_net()
+    net = SD.make_net(version)
+    if base_model == GENERAL_MODEL_PATH:
+        base_model = SD.general_model_path(version)
     if Path(base_model).exists():
         net.load_state_dict(torch.load(base_model, map_location="cpu"))
     idx = rng.permutation(n)
@@ -448,7 +480,7 @@ def adapt_candidate(data_path: Path, out_model: Path, base_model: Path = GENERAL
     rep = {"n": int(n), "n_train": int(len(tr)), "n_val": int(n_val), "base_val_mse": round(base_val, 5),
            "val_mse": round(best_val, 5), "gain_pct": round(gain, 2), "improved": best_val < base_val,
            "base_model": str(base_model), "out_model": str(out_model), "data": str(data_path),
-           "teams": int(meta.get("teams", 0))}
+           "teams": int(meta.get("teams", 0)), "features": version}
     if report_json:
         Path(report_json).write_text(json.dumps(rep, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     print(f"[adapt_candidate] n={n} val_mse {base_val:.4f} → {best_val:.4f} ({gain:+.1f}%) 保存: {out_model}")
@@ -469,9 +501,11 @@ def main() -> None:
     ap.add_argument("--cond-sel", action="store_true",
                     help="相手の実選出3体に条件付けたモデルを学習する "
                          "(利得行列/読み合い用。opp_sel入りのデータが必要)")
-    ap.add_argument("--features", default="v1", choices=["v1", "v2"],
+    ap.add_argument("--features", default="v1", choices=["v1", "v2", "v3"],
                     help="v2=型情報+メタ事前分布を加えた特徴量 (比較実験用。"
-                         "保存先も selection_model_v2_general.pt に分離)")
+                         "保存先も selection_model_v2_general.pt に分離)。"
+                         "v3=メガシンカ (1試合1回の資源) 込み: 自分は石の有無、相手は石の事前分布 "
+                         "(保存先 selection_model_v3_general.pt、埋め込みのピンも別)")
     ap.add_argument("--adapt-data", default=None, help="候補専用の適応: 候補データ npz")
     ap.add_argument("--adapt-out", default=None, help="候補専用の適応: 保存先 .pt")
     ap.add_argument("--adapt-report", default=None, help="候補専用の適応: 結果 JSON")

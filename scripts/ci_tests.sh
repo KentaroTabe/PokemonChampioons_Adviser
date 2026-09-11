@@ -53,6 +53,9 @@ TESTS=(
   test_team_build_rules
   test_team_build_gen_sets
   test_ja_names
+  test_gimmick
+  test_selection_v3
+  test_migrate_obs
   test_search
   test_battle_prune
   test_party_improvements

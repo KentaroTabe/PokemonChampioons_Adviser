@@ -47,6 +47,15 @@ def _view_with_moves(sid: str):
     ようにするための補完。技が空だと対面スコアが常にNoneになり使えない。
     """
     from advisor.team_advice import build_meta_view
+    from advisor.gimmick import _base_of, is_mega_form, mega_view, stone_table
+    if is_mega_form(sid):
+        # メガ後の姿: 基本種の型 (技・配分) にメガ後の種族値/タイプ/特性を載せ、持ち物は石 (2026-09-11: 選出モデル v3 用)
+        view, moves = _view_with_moves(_base_of(sid))
+        if view is None:
+            return None, []
+        stone = next((item for item, msid in stone_table().items() if msid == sid), None)
+        from dataclasses import replace as _replace
+        return _replace(mega_view(view, sid), item=stone), moves
     view, moves = build_meta_view(sid)
     if view is None:
         return None, []
@@ -60,8 +69,12 @@ def _view_with_moves(sid: str):
 def _target_species() -> list:
     """ベクトルを作る対象。championsで使える全種族 + 自分の登録チーム"""
     from advisor.dex import get_dex
+    from advisor.gimmick import mega_forms
     from advisor.team_advice import champions_usable
     out = {sid for sid in get_dex()._species if champions_usable(sid)}
+    # メガ後の姿も作る (選出モデル v3: 石を持つ個体はメガ後の埋め込み、相手は事前分布で混ぜる)
+    for sid in list(out):
+        out.update(mega_forms(sid))
     try:
         from advisor.my_team import _load
         from vision.normalize import NameResolver
