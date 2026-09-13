@@ -144,10 +144,26 @@ def candidate_from_row(species_id: str, row: dict) -> "SetCandidate":
                         list(row.get("moves") or []), row.get("source") or "custom")
 
 
+def legal_item(item: Optional[str]) -> bool:
+    """シムに存在する持ち物 id か (2026-09-13: cbd の未対応 id "unknownitem542" が代表型に入り validate-team で不合法になった)。
+    持ち物なし (None/空) は True"""
+    if not item:
+        return True
+    try:
+        from champions_agent.env.team_builder import _legal_item_ids
+        ids = _legal_item_ids()
+    except Exception:
+        return not str(item).startswith("unknownitem")
+    return item in ids if ids else not str(item).startswith("unknownitem")
+
+
 def _rows(conn, table: str, col: str, snapshot_id: int, name: str, min_pct: float) -> list:
-    return [(r[0], r[1]) for r in conn.execute(
+    rows = [(r[0], r[1]) for r in conn.execute(
         f"SELECT {col}, usage_percent FROM {table} WHERE snapshot_id=? AND pokemon_name=? "
         f"AND usage_percent >= ? ORDER BY usage_percent DESC", (snapshot_id, name, min_pct))]
+    if table == "item_usage":
+        rows = [(i, p) for i, p in rows if legal_item(i)]
+    return rows
 
 
 def representative_set(conn, snapshot_id: int, species_id: str) -> Optional[SetCandidate]:
@@ -157,7 +173,12 @@ def representative_set(conn, snapshot_id: int, species_id: str) -> Optional[SetC
     if r is None:
         return None
     moves = [m for m in (r[4], r[5], r[6], r[7]) if m]
-    return SetCandidate(species_id, r[0], r[1], r[2], r[3], moves, "representative")
+    item = r[1]
+    if not legal_item(item):
+        # 未対応の持ち物 id (unknownitem…) は、その種の使用率上位の合法な持ち物に替える
+        alt = _rows(conn, "item_usage", "item_name", snapshot_id, species_id, 0.0)
+        item = alt[0][0] if alt else None
+    return SetCandidate(species_id, r[0], item, r[2], r[3], moves, "representative")
 
 
 def base_set(conn, snapshot_id: int, species_id: str, custom: Optional["SetCandidate"] = None, required=None,

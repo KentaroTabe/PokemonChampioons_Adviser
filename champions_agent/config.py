@@ -423,8 +423,13 @@ BUILD_RULE_ACE_ITEM_MIN_PCT = 10.0
 # 特性ごとのエースの持ち物 (2026-09-11 ユーザー指摘: かるわざのエースにタスキは要らない。発動させる消耗品で良く、タスキは
 # 他に回せる)。かるわざ = しろいハーブ (自分の能力を下げる技: インファイト等) / ノーマルジュエル (ノーマル攻撃技) / タスキ。
 # 実データ (M-B 末、オオニューラ): しろいハーブ 37.9% > タスキ 26.7% > オボン 16.8%、ノーマルジュエルは上位 10 に無い
-BUILD_RULE_ACE_ITEMS_BY_ABILITY = {"unburden": ("whiteherb", "normalgem", "focussash")}
-BUILD_UNBURDEN_TRIGGERS = {"whiteherb": "self_stat_drop", "normalgem": "normal_attack"}   # 発動条件 (技構成で確認)
+# M-C の実データ (9/12、オオニューラ): タスキ 25.6% > オボン 20.3% > サイコシード 18.4% (サイコフィールドで消費 → かるわざ発動。
+# 規則のフィールドと噛み合う) > しろいハーブ 4.4%。シード類は並びの場 (規則の前提) が一致するときだけ使える
+BUILD_RULE_ACE_ITEMS_BY_ABILITY = {"unburden": ("psychicseed", "electricseed", "grassyseed", "mistyseed",
+                                                "whiteherb", "normalgem", "focussash")}
+BUILD_UNBURDEN_TRIGGERS = {"whiteherb": "self_stat_drop", "normalgem": "normal_attack",
+                           "psychicseed": "terrain:psychic", "electricseed": "terrain:electric",
+                           "grassyseed": "terrain:grassy", "mistyseed": "terrain:misty"}   # 発動条件
 # メガ石の所持数 (2026-09-11 ユーザー指摘で調査): ランク上位 200 構築の実測は 0 個 1% / 1 個 33% / 2 個 61% / 3 個 4% / 4 個 0.5%。
 # 以前は「1 試合 1 回のメガシンカ」を「1 構築 1 個の石」と取り違えて 1 個に制限していた。石が 2 個までは冗長の罰則なし、上限 3
 BUILD_MAX_MEGA_STONES = 3

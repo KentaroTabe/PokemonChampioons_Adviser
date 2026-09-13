@@ -84,6 +84,14 @@ def test_item_clause_by_usage_and_prefer():
     print("test_item_clause_by_usage_and_prefer OK")
 
 
+def test_legal_item():
+    """シムに無い持ち物 id (cbd の未対応 id unknownitem…) は使用率の行と代表型から落とす"""
+    from tools.team_build.sets import legal_item
+    assert legal_item(None) and legal_item("") and legal_item("focussash") and legal_item("delphoxite")
+    assert not legal_item("unknownitem542")
+    print("test_legal_item OK")
+
+
 def test_enforce_max_megas():
     """メガ石は max_n 体まで (既定 config)。超えた分は keep → 被覆順に残し、他は石以外の代替へ。互換の enforce_single_mega は 1 体"""
     from tools.team_build.sets import enforce_max_megas, enforce_single_mega
@@ -187,6 +195,7 @@ if __name__ == "__main__":
     test_item_clause_and_text()
     test_order_candidates_usage_prior()
     test_item_clause_by_usage_and_prefer()
+    test_legal_item()
     test_enforce_max_megas()
     test_inject_and_required_moves()
     test_parse_set_text_and_candidate_row()

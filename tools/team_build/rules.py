@@ -355,12 +355,16 @@ def _dex_move_info(m: str):
     return (mv.get("category"), mv.get("type"), mv.get("power")) if mv else None
 
 
-def unburden_trigger_ok(item: Optional[str], moves, triggers: dict, move_info=None) -> bool:
+def unburden_trigger_ok(item: Optional[str], moves, triggers: dict, move_info=None,
+                        team_field: Optional[dict] = None) -> bool:
     """かるわざを発動させる持ち物の条件: しろいハーブ = 自分の能力を下げる技 (インファイト等) がある、
-    ノーマルジュエル = ノーマルタイプの攻撃技がある。条件の無い持ち物 (タスキ等) は True"""
+    ノーマルジュエル = ノーマルタイプの攻撃技がある、シード類 = 並びの場 (team_field、規則の前提) のフィールドが一致する。
+    条件の無い持ち物 (タスキ等) は True"""
     kind = (triggers or {}).get(item or "")
     if kind is None:
         return True
+    if kind.startswith("terrain:"):
+        return (team_field or {}).get("terrain") == kind.split(":", 1)[1]
     if kind == "self_stat_drop":
         from advisor.dex import move_boost_effects
         return any(any(v < 0 for v in ((move_boost_effects(m) or {}).get("self") or {}).values()) for m in moves)
@@ -381,26 +385,35 @@ def ace_item_preference(rule: dict, ability: Optional[str]) -> tuple:
 
 
 def ensure_ace_item(team: list, aces, setter_id: Optional[str], rule: dict, usage_pct: Optional[dict] = None,
-                    stones=frozenset(), tr_setters=(), move_info=None) -> tuple:
-    """エースの持ち物を規則の優先品 (特性ごとの表 → ace_items) にする。既に優先品 (かるわざなら発動条件つき) ならそのまま、
-    メガ石は替えない、その種での使用率が ace_item_min_pct 未満なら据え置き (注記)。元の SetCandidate は変更しない。
-    戻り値 (team, ace_id or None, notes)"""
+                    stones=frozenset(), tr_setters=(), move_info=None, team_field: Optional[dict] = None) -> tuple:
+    """エースの持ち物を規則の優先品 (特性ごとの表 → ace_items) にする。優先順の先頭から、発動条件 (かるわざ: 技構成・
+    並びの場 team_field) を満たし使用率が閾値以上のものを採る。メガ石は替えない、使えるものが無ければ据え置き (注記)。
+    元の SetCandidate は変更しない。戻り値 (team, ace_id or None, notes)"""
     ace = choose_ace(team, aces, setter_id, rule, usage_pct, tr_setters)
     if ace is None:
         return team, None, ["no_ace"]
     pref = ace_item_preference(rule, ace.ability)
     triggers = rule.get("unburden_triggers") or {}
     unburden = (ace.ability or "") == "unburden"
+    if team_field is None:
+        team_field = rule_field([n for n, r in RULES.items() if r is rule]) if rule.get("setter_move") else None
 
     def usable(item: Optional[str]) -> bool:
-        return (item or "") in pref and (not unburden or unburden_trigger_ok(item, ace.moves, triggers, move_info))
+        return (item or "") in pref and (not unburden
+                                         or unburden_trigger_ok(item, ace.moves, triggers, move_info, team_field))
 
-    if not pref or usable(ace.item) or (ace.item or "") in stones:
+    if not pref or (ace.item or "") in stones:
         return team, ace.species_id, []
     pct = (usage_pct or {}).get(ace.species_id) or {}
-    item = next((i for i in pref if pct.get(i, 0.0) >= float(rule.get("ace_item_min_pct", 0.0)) and usable(i)), None)
+    min_pct = float(rule.get("ace_item_min_pct", 0.0))
+    # 優先順の先頭から、発動条件を満たし (今の持ち物か) 使用率が閾値以上のものを採る。今の持ち物がそれなら据え置き
+    # (2026-09-13: かるわざのエースが代表型でタスキを持っていると、しろいハーブが使えても据え置いていた。
+    # タスキは他に回せるので、より優先の持ち物が使えるならそちらへ)
+    item = next((i for i in pref if usable(i) and (i == (ace.item or "") or pct.get(i, 0.0) >= min_pct)), None)
     if item is None:
         return team, ace.species_id, ["rule:ace_item_kept"]
+    if item == (ace.item or ""):
+        return team, ace.species_id, []
     note = f"rule:ace_item<-{ace.item}"
     new = dc_replace(ace, item=item, source=ace.source + "+rule", notes=list(ace.notes) + [note])
     return [new if t is ace else t for t in team], ace.species_id, [note]
@@ -434,7 +447,8 @@ def apply_to_team(team: list, ctx: dict, usage_pct: Optional[dict] = None, **kw)
         n_set: list = []
         if ace is not None:
             team, n_set = ensure_ace_set(team, ace.species_id, ace_sets)
-        team, aid, n2 = ensure_ace_item(team, p["aces"], sid, p["rule"], usage_pct, stones, p.get("tr_setters", ()))
+        team, aid, n2 = ensure_ace_item(team, p["aces"], sid, p["rule"], usage_pct, stones, p.get("tr_setters", ()),
+                                        team_field=rule_field([p["name"]]))
         roles[p["name"]] = {"setter": sid, "ace": aid}
         notes.extend(n + n_set + n2)
         if sid:

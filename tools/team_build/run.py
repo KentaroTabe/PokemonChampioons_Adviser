@@ -309,6 +309,13 @@ def stage_s4(run_dir: Path, spec: BuildSpec, feats: dict, threats: list, legal: 
         json.dumps(res, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     log(run_dir, f"S4 concepts: families={len(res['families'])} rounds={res['rounds']} stop={res['stop_reason']} "
                  f"historical=+{res.get('historical_added', 0)} rules=+{res.get('rule_cores_added', 0)}")
+    # LLM の呼び出しが失敗していたら隠さず書く (2026-09-13: claude CLI の OAuth 失効で全 18 回が失敗していたのに
+    # "rounds=6 stop=max_rounds" としか出ず、規則ベースだけで進んだことが分かりにくかった)
+    calls = res.get("llm_calls") or []
+    failed = [c for c in calls if isinstance(c, dict) and not c.get("ok")]
+    if calls and failed:
+        problems = (failed[-1].get("problems") or [])[:2]
+        log(run_dir, f"S4 LLM: {len(calls)} 回中 {len(failed)} 回失敗 (規則ベースの軸だけで進む)。最後の問題: {problems}")
     return res["families"]
 
 

@@ -195,7 +195,8 @@ def test_ensure_ace_item():
     snea = _set("sneasler", "choicescarf", ["closecombat", "direclaw", "fakeout", "throatchop"], "unburden", source="alt:item")
     aces = {"espathra": ["boost"], "sneasler": ["boost"]}
     usage = {"sneasler": {"whiteherb": 37.9, "focussash": min_pct + 10.0, "choicescarf": 6.2}}
-    # かるわざのエース: 発動させる消耗品 (しろいハーブ + インファイト) が優先。タスキは他に回せる (2026-09-11 ユーザー指摘)
+    # かるわざのエース: 発動させる消耗品 (しろいハーブ + インファイト) が優先。タスキは他に回せる (2026-09-11 ユーザー指摘)。
+    # サイコシードは使用率が無いので飛ばす
     team, ace, notes = RU.ensure_ace_item([esp, snea], aces, "espathra", RULE, usage)
     assert ace == "sneasler" and team[1].item == "whiteherb" and notes == ["rule:ace_item<-choicescarf"]
     assert snea.item == "choicescarf" and team[1].source == "alt:item+rule" and team[0] is esp
@@ -203,8 +204,11 @@ def test_ensure_ace_item():
     rai = _set("raichu", "raichunitey", ["zapcannon", "focusblast", "grassknot", "nastyplot"], "lightningrod")
     team, ace, notes = RU.ensure_ace_item([esp, rai], {"raichu": ["fast"]}, "espathra", RULE, usage, stones={"raichunitey"})
     assert ace == "raichu" and team[1].item == "raichunitey" and notes == []
+    # 代表型がタスキでも、より優先の発動品 (しろいハーブ 37.9%) が使えるならそちらへ (タスキは他に回せる)。
+    # 既に最優先の使える持ち物ならそのまま
     sash = _set("sneasler", "focussash", snea.moves, "unburden")
-    assert RU.ensure_ace_item([sash], {"sneasler": ["boost"]}, None, RULE, usage) == ([sash], "sneasler", [])
+    team, ace, notes = RU.ensure_ace_item([sash], {"sneasler": ["boost"]}, None, RULE, usage)
+    assert team[0].item == "whiteherb" and notes == ["rule:ace_item<-focussash"] and sash.item == "focussash"
     herb = _set("sneasler", "whiteherb", snea.moves, "unburden")
     assert RU.ensure_ace_item([herb], {"sneasler": ["boost"]}, None, RULE, usage) == ([herb], "sneasler", [])
     # しろいハーブは自分の能力を下げる技が無いと発動しない → ノーマルジュエル (ノーマル攻撃技あり) → 無ければタスキ
@@ -217,7 +221,19 @@ def test_ensure_ace_item():
     assert not RU.unburden_trigger_ok("whiteherb", ["direclaw"], RULE["unburden_triggers"])
     assert RU.unburden_trigger_ok("normalgem", ["fakeout"], RULE["unburden_triggers"])
     assert RU.unburden_trigger_ok("focussash", [], RULE["unburden_triggers"]) and RU.unburden_trigger_ok("normalgem", [], {})
-    assert RU.ace_item_preference(RULE, "unburden")[0] == "whiteherb" and RU.ace_item_preference(RULE, "protean") == ("focussash",)
+    # シード類は並びの場 (規則の前提) のフィールドが一致するときだけ
+    psy = {"terrain": "psychic", "weather": None}
+    assert RU.unburden_trigger_ok("psychicseed", [], RULE["unburden_triggers"], team_field=psy)
+    assert not RU.unburden_trigger_ok("psychicseed", [], RULE["unburden_triggers"], team_field=None)
+    assert not RU.unburden_trigger_ok("grassyseed", [], RULE["unburden_triggers"], team_field=psy)
+    assert RU.ace_item_preference(RULE, "unburden")[0] == "psychicseed" and RU.ace_item_preference(RULE, "protean") == ("focussash",)
+    # M-C の実データ (サイコシード 18.4% ≥ 閾値): 規則の場がサイコフィールドなので、タスキの代表型でもサイコシードへ
+    usage_mc = {"sneasler": {"focussash": 25.6, "sitrusberry": 20.3, "psychicseed": 18.4, "whiteherb": 4.4}}
+    team, ace, notes = RU.ensure_ace_item([esp, sash], aces, "espathra", RULE, usage_mc)
+    assert team[1].item == "psychicseed" and notes == ["rule:ace_item<-focussash"]
+    # 規則の場が無ければシードは使えず、しろいハーブ (4.4% < 閾値) も使えず、タスキのまま
+    team, ace, notes = RU.ensure_ace_item([esp, sash], aces, "espathra", RULE, usage_mc, team_field={"terrain": None, "weather": None})
+    assert team[1].item == "focussash" and notes == []
     # 特性に表が無ければ ace_items (タスキ)。使用率が閾値未満なら据え置き (注記)
     meo_scarf = _set("meowscarada", "choicescarf", ["flowertrick", "tripleaxel", "knockoff", "uturn"], "protean")
     low = {"meowscarada": {"choicescarf": 90.0, "focussash": min_pct - 1.0}}
