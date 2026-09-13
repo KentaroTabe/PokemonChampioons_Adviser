@@ -100,6 +100,26 @@ def _load_meta_sets(snapshot_id: int | None = None) -> dict:
     return {r["pokemon_name"]: dict(r) for r in rows}
 
 
+def _load_move_usage(snapshot_id: int | None = None, limit: int = 12) -> dict:
+    """{species_id: [技 (使用率順)]}: champions mod の learnset で落ちた技の埋め合わせ用"""
+    out: dict = {}
+    try:
+        with db.get_connection() as conn:
+            snap = (snapshot_id if snapshot_id is not None else db.latest_snapshot_id(conn))
+            if snap is None:
+                return out
+            rows = conn.execute(
+                "SELECT pokemon_name, move_name, usage_percent FROM move_usage WHERE snapshot_id = ? "
+                "ORDER BY pokemon_name, usage_percent DESC", (snap,)).fetchall()
+    except Exception:
+        return out
+    for r in rows:
+        lst = out.setdefault(r[0], [])
+        if len(lst) < limit:
+            lst.append(r[1])
+    return out
+
+
 EXTERNAL_PATH = (Path(__file__).resolve().parents[1] / "data" / "teams" /
                  "external_teams.json")
 
@@ -124,8 +144,10 @@ def _load_external_teams() -> list:
     return out
 
 
-def _to_team_text(t: dict, meta: dict, team_size: int) -> str | None:
-    """{"team": [{"pokemon","item"}]} -> Showdownチームテキスト (組めなければNone)"""
+def _to_team_text(t: dict, meta: dict, team_size: int, move_pool: dict | None = None) -> str | None:
+    """{"team": [{"pokemon","item"}]} -> Showdownチームテキスト (組めなければNone)。
+    技は champions mod の learnset で検査し、覚えない技は move_pool (使用率順) の合法な技で埋める (2026-09-13 障害対応)"""
+    from champions_agent.env.legality import fill_moves
     sets = []
     seen = set()
     for m in t.get("team", []):
@@ -150,6 +172,10 @@ def _to_team_text(t: dict, meta: dict, team_size: int) -> str | None:
             continue
         seen.add(base_key)
         item = _item_id((m.get("item") or "").strip()) or meta_row["item_name"]
+        moves = fill_moves(sid, [meta_row["move1"], meta_row["move2"], meta_row["move3"], meta_row["move4"]],
+                           (move_pool or {}).get(sid) or (move_pool or {}).get(meta_row.get("pokemon_name", ""), []))
+        if not moves:
+            continue
         sets.append(PokemonSet(
             species=to_showdown_name(_sanitize_species(sid)),
             ability=meta_row["ability_name"],
@@ -157,8 +183,7 @@ def _to_team_text(t: dict, meta: dict, team_size: int) -> str | None:
             tera_type=None,
             nature=meta_row["nature"],
             evs=meta_row["evs"],
-            moves=[meta_row["move1"], meta_row["move2"],
-                   meta_row["move3"], meta_row["move4"]],
+            moves=moves,
         ))
     if len(sets) < team_size:
         return None
@@ -184,20 +209,21 @@ def build_ranked_teams(top_n: int | None = None, team_size: int = 6,
         return _cache[key]
 
     meta = _load_meta_sets(meta_snapshot_id)
+    move_pool = _load_move_usage(meta_snapshot_id)
     ladder = _load_ladder_teams()
     if top_n is not None:
         ladder = ladder[:top_n * 2]
 
     result = []
     for t in ladder:
-        text = _to_team_text(t, meta, team_size)
+        text = _to_team_text(t, meta, team_size, move_pool)
         if text:
             result.append(text)
         if top_n is not None and len(result) >= top_n:
             break
     if include_external:
         for t in _load_external_teams():
-            text = _to_team_text(t, meta, team_size)
+            text = _to_team_text(t, meta, team_size, move_pool)
             if text:
                 result.append(text)
 

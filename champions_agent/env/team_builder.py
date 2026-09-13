@@ -80,6 +80,22 @@ def _fetch_meta_pool(conn, snapshot_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def _fetch_move_pool(conn, snapshot_id: int, limit: int = 12) -> dict:
+    """{species_id: [技 (使用率順)]}: learnset で落ちた技の埋め合わせ用"""
+    out: dict = {}
+    try:
+        rows = conn.execute(
+            "SELECT pokemon_name, move_name, usage_percent FROM move_usage WHERE snapshot_id = ? "
+            "ORDER BY pokemon_name, usage_percent DESC", (snapshot_id,)).fetchall()
+    except Exception:
+        return out
+    for r in rows:
+        lst = out.setdefault(r[0], [])
+        if len(lst) < limit:
+            lst.append(r[1])
+    return out
+
+
 def _fetch_fallback_items(conn, snapshot_id: int) -> list[str]:
     """アイテム重複解消用の代替候補を、実使用率DB (=champions実在確定) から取る"""
     rows = conn.execute(
@@ -155,6 +171,21 @@ def build_random_party(size: int = 6, fmt: str = USAGE_TARGET_FORMAT,
         pool = _fetch_meta_pool(conn, snapshot_id)
         role_scores = _fetch_role_scores(conn, snapshot_id)
         fallback_items = _fetch_fallback_items(conn, snapshot_id)
+        move_pool = _fetch_move_pool(conn, snapshot_id)
+    # 技は champions mod の learnset で検査し、覚えない技は使用率上位の合法な技で埋める (2026-09-13 障害:
+    # cbd の M-C データにある「メテオアサルト」を mod が拒否し、学習が毎サイクル止まった)。合法な技が無い型は候補から外す
+    from champions_agent.env.legality import fill_moves
+    legal_pool = []
+    for r in pool:
+        r = dict(r)
+        moves = fill_moves(r["pokemon_name"], [r["move1"], r["move2"], r["move3"], r["move4"]],
+                           move_pool.get(r["pokemon_name"], []))
+        if not moves:
+            continue
+        for i in range(4):
+            r[f"move{i + 1}"] = moves[i] if i < len(moves) else None
+        legal_pool.append(r)
+    pool = legal_pool
 
     if len(pool) < size:
         raise RuntimeError(
@@ -195,7 +226,7 @@ def build_random_party(size: int = 6, fmt: str = USAGE_TARGET_FORMAT,
             tera_type=r["tera_type"],
             nature=r["nature"],
             evs=r["evs"],
-            moves=[r["move1"], r["move2"], r["move3"], r["move4"]],
+            moves=[m for m in (r["move1"], r["move2"], r["move3"], r["move4"]) if m],
         )
         for r in result
     ]

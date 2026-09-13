@@ -2,6 +2,13 @@
  "_comment": "学習に影響する変更の記録。watch_training が推移グラフに赤い縦線として描画し、履歴表示にも差し込む。新しい変更を入れたら追記すること (at はローカル時刻 'YYYY-MM-DD HH:MM')。kind: net=ネット構成 / reward=報酬 / opponent=相手構成 / env=環境仕様 / eval=評価方法 / fix=不具合修正",
  "changes": [
   {
+   "at": "2026-09-13 18:13",
+   "kind": "fix",
+   "label": "学習停止 (9/13 06:22〜18:20、13 サイクル) の修正: 生成チームの技を champions mod の learnset で検査",
+   "detail": "9/12 21:32 に取り込んだ使用率スナップショット 35 (cbd の M-C データ) にネギガナイトの meteorassault が入り、ランダム生成チーム (team_builder、最新スナップショットの meta_sets) にその型が出ると champions mod の learnset に無いため Showdown が「can't learn」で拒否、poke-env は受理を待ち続け smoke_train が毎回タイムアウト (cycle 74〜86 の 全性格で「学習が失敗/タイムアウト」)。最後に学習が進んだのは cycle 73 (05:40〜06:22)。修正: env/legality.py (learnset で技を検査し、覚えない技は同じ種の使用率上位の合法な技で埋める) を team_builder と ranked_teams に適用。検証: ランダム生成 30 チームと上位 60 構築を validate-team で全件合法。詳細 docs/incidents/reports/2026-09-13-training-stalled-by-illegal-move.md。この期間の学習量は失われたが、チェックポイントと評価軸は無傷",
+   "isolated": false
+  },
+  {
    "at": "2026-09-12 00:20",
    "kind": "env",
    "label": "観測 v8 (メガシンカの推定 16 次元、388→436) へ切替 — チェックポイントは入力層のゼロ拡張で継続",

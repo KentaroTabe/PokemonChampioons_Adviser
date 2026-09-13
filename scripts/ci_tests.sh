@@ -56,6 +56,7 @@ TESTS=(
   test_gimmick
   test_selection_v3
   test_migrate_obs
+  test_env_legality
   test_search
   test_battle_prune
   test_party_improvements
