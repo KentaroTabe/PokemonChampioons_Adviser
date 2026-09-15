@@ -5,7 +5,7 @@
 import tempfile
 from pathlib import Path
 
-from tools.team_build.reference_adapt import ARM_FULL, ARM_REF, control_arms, interpret, summarize
+from tools.team_build.reference_adapt import ARM_FULL, ARM_PROD, ARM_REF, control_arms, interpret, summarize
 
 
 def test_control_arms():
@@ -27,6 +27,11 @@ def test_control_arms():
         (run / "final" / "advisor_policy" / "selection_model.pt").write_bytes(b"x")
         w2 = {a.arm_id: a for a in control_arms(run, summary, {}, None)}["L24_C023"]
         assert w2.selection_model.endswith("final/advisor_policy/selection_model.pt") and w2.models_dir == "/pins/base"
+        # --production: 参照 + 配布版の選出モデル (強制) を 4 腕目に加える
+        by4 = {a.arm_id: a for a in control_arms(run, summary, {}, "/adv/full.pt", "/deploy/selection_model.pt")}
+        assert set(by4) == {ARM_REF, ARM_FULL, "L24_C023", ARM_PROD}
+        assert by4[ARM_PROD].team_file == run / "reference_team.txt" and by4[ARM_PROD].pick_policy == "advisor"
+        assert by4[ARM_PROD].selection_model == "/deploy/selection_model.pt" and by4[ARM_PROD].models_dir == "/pins/base"
     print("test_control_arms OK")
 
 
@@ -42,6 +47,12 @@ def test_summarize():
     assert "参照の適応 +0.250" in line and "勝者−参照+適応 +0.000" in line and "勝者−参照 +0.250" in line
     empty = summarize({ARM_REF: [], ARM_FULL: [], "X": []}, "X")
     assert empty["win_rates"]["X"] is None and empty["adapt_effect"]["mean"] is None and "?" in interpret(empty)
+    assert "production_vs_base" not in res and "本番モデル" not in line
+    # production の腕があれば 本番モデル−参照 と 適応−本番モデル も出す
+    prod = [1, 1, 0, 0] * 50                 # 0.50 (= 参照)
+    res_p = summarize({ARM_REF: base, ARM_FULL: full, "L24_C023": win, ARM_PROD: prod}, "L24_C023")
+    assert abs(res_p["production_vs_base"]["mean"]) < 1e-9 and abs(res_p["full_vs_production"]["mean"] - 0.25) < 1e-9
+    assert "本番モデル−参照 +0.000" in interpret(res_p) and "適応−本番モデル +0.250" in interpret(res_p)
     print("test_summarize OK")
 
 

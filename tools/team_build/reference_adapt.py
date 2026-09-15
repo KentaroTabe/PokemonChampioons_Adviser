@@ -32,6 +32,7 @@ from tools.team_build.verdict import verdict4
 REPO = Path(__file__).resolve().parent.parent.parent
 ARM_REF = "reference"
 ARM_FULL = "reference_full"
+ARM_PROD = "reference_production"      # --production: 参照 + 配布版 (本番) の選出モデルを強制
 STAGE = "reference_full"
 SEED_ADAPT, SEED_VALIDATE, SEED_MEASURE = 9, 10, 11      # run の seed からのずらし (pipeline は 0〜8 を使う)
 
@@ -51,9 +52,11 @@ def _load(p: Path) -> Optional[dict]:
 
 
 # ------------------------------------------------------------------ 純粋関数 (テスト対象)
-def control_arms(run_dir: Path, summary: dict, manifest: dict, full_model: Optional[str]) -> list:
+def control_arms(run_dir: Path, summary: dict, manifest: dict, full_model: Optional[str],
+                 production_model: Optional[str] = None) -> list:
     """3 腕: 参照 (手順どおり: S8a で選んだ variant)、参照+適応 (full_model を advisor で使う)、
-    勝者 (Package の選出モデル。無ければ S8b で選んだ variant のモデル)"""
+    勝者 (Package の選出モデル。無ければ S8b で選んだ variant のモデル)。
+    production_model があれば 4 腕目: 参照 + 配布版の選出モデル (分布内判定を迂回して強制)"""
     models_dir = summary.get("models_dir")
     rv = summary.get("reference_variant") or {}
     ref_team = run_dir / "reference_team.txt"
@@ -61,16 +64,19 @@ def control_arms(run_dir: Path, summary: dict, manifest: dict, full_model: Optio
     wv = (summary.get("s08b_variants") or {}).get(winner) or {}
     pkg_model = run_dir / "final" / "advisor_policy" / "selection_model.pt"
     win_model = str(pkg_model) if pkg_model.exists() else wv.get("selection_model")
-    return [
+    arms = [
         R.Arm(ARM_REF, ref_team, rv.get("selection_model"), models_dir, pick_policy=rv.get("pick_policy") or "teampreview"),
         R.Arm(ARM_FULL, ref_team, full_model, models_dir, pick_policy="advisor"),
         R.Arm(winner, run_dir / "s06_sets" / f"{winner}.txt", win_model, manifest.get("models_dir") or models_dir,
               pick_policy=wv.get("pick_policy") or "advisor"),
     ]
+    if production_model:
+        arms.append(R.Arm(ARM_PROD, ref_team, production_model, models_dir, pick_policy="advisor"))
+    return arms
 
 
 def summarize(outcomes: dict, winner: str) -> dict:
-    """勝敗列 {arm_id: [1/0, ...]} → 勝率と 3 つの対応比較"""
+    """勝敗列 {arm_id: [1/0, ...]} → 勝率と対応比較 (3 つ + production があれば 2 つ)"""
     def wr(k):
         o = outcomes.get(k) or []
         return round(sum(o) / len(o), 4) if o else None
@@ -78,10 +84,14 @@ def summarize(outcomes: dict, winner: str) -> dict:
     def d(a, b):
         return verdict4(outcomes.get(a) or [], outcomes.get(b) or []).to_dict()
 
-    return {"win_rates": {k: wr(k) for k in outcomes},
-            "adapt_effect": d(ARM_FULL, ARM_REF),
-            "winner_vs_full": d(winner, ARM_FULL),
-            "winner_vs_base": d(winner, ARM_REF)}
+    out = {"win_rates": {k: wr(k) for k in outcomes},
+           "adapt_effect": d(ARM_FULL, ARM_REF),
+           "winner_vs_full": d(winner, ARM_FULL),
+           "winner_vs_base": d(winner, ARM_REF)}
+    if ARM_PROD in outcomes:
+        out["production_vs_base"] = d(ARM_PROD, ARM_REF)       # 本番モデルは手順どおりの参照よりどれだけ上か
+        out["full_vs_production"] = d(ARM_FULL, ARM_PROD)      # run 内で適応したモデルは本番モデルより上か
+    return out
 
 
 def _fmt(x: Optional[float]) -> str:
@@ -89,11 +99,16 @@ def _fmt(x: Optional[float]) -> str:
 
 
 def interpret(res: dict) -> str:
-    """1 行の読み: 参照が適応でどれだけ上がり、公平な条件で勝者が残るか"""
+    """1 行の読み: 参照が適応でどれだけ上がり、公平な条件で勝者が残るか (production があればその比較も)"""
     ae, wf, wb = res["adapt_effect"], res["winner_vs_full"], res["winner_vs_base"]
-    return (f"参照の適応 {_fmt(ae.get('mean'))} ({ae.get('state')}) / 勝者−参照+適応 {_fmt(wf.get('mean'))} "
+    line = (f"参照の適応 {_fmt(ae.get('mean'))} ({ae.get('state')}) / 勝者−参照+適応 {_fmt(wf.get('mean'))} "
             f"[{_fmt(wf.get('ci_low'))}, {_fmt(wf.get('ci_high'))}] ({wf.get('state')}) / "
             f"勝者−参照 {_fmt(wb.get('mean'))} ({wb.get('state')})")
+    if "full_vs_production" in res:
+        fp, pb = res["full_vs_production"], res["production_vs_base"]
+        line += (f" / 本番モデル−参照 {_fmt(pb.get('mean'))} ({pb.get('state')}) / 適応−本番モデル {_fmt(fp.get('mean'))} "
+                 f"[{_fmt(fp.get('ci_low'))}, {_fmt(fp.get('ci_high'))}] ({fp.get('state')})")
+    return line
 
 
 # ------------------------------------------------------------------ 実行
@@ -129,6 +144,8 @@ def main() -> None:
     ap.add_argument("--n", type=int, default=BUILD_REFERENCE_CONTROL_BATTLES, help="3 腕それぞれの戦数 (同一相手列)")
     ap.add_argument("--parallel", type=int, default=R.PARALLEL)
     ap.add_argument("--seed", type=int, default=None, help="省略時は final/manifest.json の seed (run と同じ)")
+    ap.add_argument("--production", action="store_true",
+                    help="参照 + 配布版 (本番) の選出モデルを 4 腕目に加える (測定済みの腕は JSON を再利用するので追加分だけ回る)")
     args = ap.parse_args()
     run_dir = REPO / "logs" / "build_search" / "runs" / args.run_id
     summary = _load(run_dir / "evaluation" / "summary.json") or {}
@@ -148,14 +165,22 @@ def main() -> None:
         log(f"adapt failed ({r.get('stop_reason')}) → 終了")
         raise SystemExit(1)
     log(f"adapt done: n={r.get('n_battles')} stop={r.get('stop_reason')} model={r['model']}")
-    arms = control_arms(run_dir, summary, manifest, r["model"])
+    production = None
+    if args.production:
+        from champions_agent.agent.selection_dispatch import deployed_model_path
+        p = deployed_model_path()
+        if not Path(p).exists():
+            log(f"production: 配布版の選出モデルが無い ({p}) → 終了")
+            raise SystemExit(1)
+        production = str(p)
+    arms = control_arms(run_dir, summary, manifest, r["model"], production)
     eval_dir = run_dir / "evaluation"
     log("measure: " + ", ".join(f"{a.arm_id}({a.pick_policy}{', model' if a.selection_model else ''})" for a in arms))
     R.measure_round(arms, args.n, 0, seed + SEED_MEASURE, split, "selection", None, eval_dir, STAGE, parallel=args.parallel)
     res = summarize({a.arm_id: [int(x) for x in a.outcomes] for a in arms}, summary["winner"])
     res.update({"n": args.n, "seed": seed + SEED_MEASURE, "tier": "selection", "reference_full_model": r["model"],
                 "reference_full_n_battles": r.get("n_battles"), "validated": r.get("validated"),
-                "arms": [a.to_dict() for a in arms]})
+                "production_model": production, "arms": [a.to_dict() for a in arms]})
     (eval_dir / f"{STAGE}.json").write_text(json.dumps(res, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     log("完了: " + interpret(res) + f" (勝率 {res['win_rates']})")
 
