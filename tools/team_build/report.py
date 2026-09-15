@@ -112,3 +112,28 @@ def write_report(run_dir: Path, candidate_id: str, provider=None) -> Path:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(md, encoding="utf-8")
     return out
+
+
+def main() -> None:
+    """run 終了後にレポートだけ作り直す (LLM が使えなかった run の記事化、日本語名の表への差し替え)。
+        python -m tools.team_build.report --run-id rule_0913 [--candidate L00_C005] [--llm headless|none]"""
+    import argparse
+    ap = argparse.ArgumentParser(description="構築レポートの再生成")
+    ap.add_argument("--run-id", required=True)
+    ap.add_argument("--candidate", default=None, help="省略時は final/team.json の勝者")
+    ap.add_argument("--llm", choices=["none", "headless"], default="headless")
+    args = ap.parse_args()
+    run_dir = Path(__file__).resolve().parent.parent.parent / "logs" / "build_search" / "runs" / args.run_id
+    cid = args.candidate
+    if cid is None:
+        cid = json.loads((run_dir / "final" / "team.json").read_text(encoding="utf-8"))["candidate_id"]
+    provider = None
+    if args.llm == "headless":
+        from tools.team_build.llm.provider import ClaudeCLIProvider
+        provider = ClaudeCLIProvider(run_dir / "llm")
+    out = write_report(run_dir, cid, provider)
+    print(f"[report] {cid} → {out}")
+
+
+if __name__ == "__main__":
+    main()
