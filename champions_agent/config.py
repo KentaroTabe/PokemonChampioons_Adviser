@@ -288,6 +288,9 @@ BUILD_REFERENCE_CONTROL_BATTLES = 600
 # rule_0913 の対照実験 (2026-09-15): 参照 teampreview 0.757 / 参照+適応 0.830 / 勝者 (適応済み) 0.788 →
 # 候補だけ収束まで適応し参照は cheap 1000 戦だけ、という手順は候補に有利だった (docs/incidents/reports/2026-09-15-*.md)
 BUILD_REFERENCE_FULL_ADAPT = True
+# 参照の variant に配布版 (本番) の選出モデルも加える (登録チームで微調整済み。候補には無い)。rule_0913 の対照実験 (9/16):
+# 本番 0.848 > 参照+適応 0.830 > teampreview 0.757 (本番 − teampreview +0.092 improved、適応 − 本番 −0.018 uncertain)
+BUILD_REFERENCE_PRODUCTION_VARIANT = True
 BUILD_MAX_REPAIRS = 2                  # 同じ系統の改修反復。3 回目以降は新しい concept branch
 BUILD_MAX_CHANGES = 2                  # 1 反復あたりの入替枠数。3 枠以上は新系統
 BUILD_STRESS_ACTION_NOISE = (0.05, 0.10)

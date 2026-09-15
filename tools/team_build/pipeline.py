@@ -32,8 +32,8 @@ from typing import Optional
 from champions_agent.config import (BUILD_ADAPT_MIN_BATTLES, BUILD_ADAPT_VALIDATE_MAX_CKPTS, BUILD_ADAPT_VALIDATE_N,
                                     BUILD_EQUIV_EPS, BUILD_FOLD_EVAL, BUILD_FOLD_VALIDATE, BUILD_PICK_VARIANTS,
                                     BUILD_RACE_DEFAULT_MAX, BUILD_RACE_STEPS, BUILD_REFERENCE_FULL_ADAPT,
-                                    BUILD_REPRO_GATE, BUILD_SCREEN_ADAPT_BATTLES, BUILD_SCREEN_MARGIN,
-                                    BUILD_SCREEN_MAX, BUILD_SCREEN_STEPS, BUILD_SCREEN_VARIANTS)
+                                    BUILD_REFERENCE_PRODUCTION_VARIANT, BUILD_REPRO_GATE, BUILD_SCREEN_ADAPT_BATTLES,
+                                    BUILD_SCREEN_MARGIN, BUILD_SCREEN_MAX, BUILD_SCREEN_STEPS, BUILD_SCREEN_VARIANTS)
 from tools.team_build import ablation as AB
 from tools.team_build import adapt as AD
 from tools.team_build import holdout as HO
@@ -175,14 +175,21 @@ def _screen_adapt_all(arms: list, split: Path, out_dir: Path, seed: int, n_battl
     return out
 
 
-def _variant_arm(base: R.Arm, variant: str, models: dict, generic_path: Optional[str]) -> Optional[R.Arm]:
-    """base (チーム) の選出方策 variant の腕。使えない variant は None"""
+def _variant_arm(base: R.Arm, variant: str, models: dict, generic_path: Optional[str],
+                 production_path: Optional[str] = None) -> Optional[R.Arm]:
+    """base (チーム) の選出方策 variant の腕。使えない variant は None。
+    production = 配布版 (登録チームで微調整済み) の選出モデルを強制 (参照だけに使う。候補には無い)"""
     if variant == "teampreview":
         return R.Arm(variant_arm_id(base.arm_id, variant), base.team_file, None, base.models_dir, pick_policy="teampreview")
     if variant == "generic":
         if not generic_path:
             return None
         return R.Arm(variant_arm_id(base.arm_id, variant), base.team_file, generic_path, base.models_dir, pick_policy="advisor")
+    if variant == "production":
+        if not production_path:
+            return None
+        return R.Arm(variant_arm_id(base.arm_id, variant), base.team_file, production_path, base.models_dir,
+                     pick_policy="advisor")
     model = models.get(base.arm_id)
     if not model:
         return None
@@ -200,10 +207,12 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
                     variants: tuple = BUILD_PICK_VARIANTS, candidate_ids: Optional[list] = None,
                     stop_after: Optional[str] = None, s08b_seed_offset: int = 1, s11: bool = False,
                     validate_n: int = BUILD_ADAPT_VALIDATE_N, validate_max: int = BUILD_ADAPT_VALIDATE_MAX_CKPTS,
-                    resume: bool = False, reference_full_adapt: bool = BUILD_REFERENCE_FULL_ADAPT) -> dict:
+                    resume: bool = False, reference_full_adapt: bool = BUILD_REFERENCE_FULL_ADAPT,
+                    reference_production_variant: bool = BUILD_REFERENCE_PRODUCTION_VARIANT) -> dict:
     """resume: 途中で落ちた run の続き。evaluation/ の S8a 結果 (cheap モデル・参照 variant・racing) と
     advisors/<cid>/adapt_result.json (完了した適応) をそのまま使い、無いものだけ実行する
-    reference_full_adapt: 参照にも S7 と同じ適応を与え、fresh を参照の variant に加える (S7b)"""
+    reference_full_adapt: 参照にも S7 と同じ適応を与え、fresh を参照の variant に加える (S7b)
+    reference_production_variant: 参照の variant に配布版 (本番) の選出モデルを加える"""
     from champions_agent.agent.selection_model import GENERAL_MODEL_PATH
     log = lambda m: _log(run_dir, m)
 
@@ -243,7 +252,8 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
                             "fold_eval": BUILD_FOLD_EVAL, "fold_validate": BUILD_FOLD_VALIDATE,
                             "validate_n": validate_n, "validate_max_ckpts": validate_max,
                             "s08b_seed_offset": s08b_seed_offset, "s11": s11, "stop_after": stop_after,
-                            "reference_full_adapt": reference_full_adapt}}
+                            "reference_full_adapt": reference_full_adapt,
+                            "reference_production_variant": reference_production_variant}}
     eval_dir = run_dir / "evaluation"
 
     # S8a-1: 全候補 + 参照を同じ予算で cheap adaptation
@@ -257,7 +267,18 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
         _write_stage(run_dir, "s08a_screen_models", screen_models)
 
     # S8a-2: 参照の variant の最善 (同一相手列、screen_max 戦)
-    ref_variants = [a for a in (_variant_arm(ref, v, screen_models, generic) for v in screen_variants) if a]
+    # 参照の variant: screening の 3 つ + 配布版 (本番) の選出モデル (登録チームで微調整済み。rule_0913 の対照実験では
+    # 本番 0.848 > 適応 0.830 > teampreview 0.757)。候補には本番モデルが無いので参照だけ
+    production = None
+    if reference_production_variant:
+        try:
+            from champions_agent.agent.selection_dispatch import deployed_model_path
+            pth = deployed_model_path()
+            production = str(pth) if Path(pth).exists() else None
+        except Exception:
+            production = None
+    ref_order = tuple(screen_variants) + (("production",) if production else ())
+    ref_variants = [a for a in (_variant_arm(ref, v, screen_models, generic, production) for v in ref_order) if a]
     ref_files = {a.arm_id: eval_dir / f"s08a_reference_{a.arm_id}_0_{screen_max}.json" for a in ref_variants}
     if resume and all(p.exists() for p in ref_files.values()):
         ref_wr = {split_variant(aid)[1]: (_load_json(p) or {}).get("win_rate") for aid, p in ref_files.items()}
@@ -267,10 +288,10 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
                         parallel=parallel)
         ref_wr = {split_variant(a.arm_id)[1]: (sum(a.outcomes) / len(a.outcomes) if a.outcomes else None)
                   for a in ref_variants}
-    ref_variant = best_by_win_rate(ref_wr, screen_variants) or "teampreview"
+    ref_variant = best_by_win_rate(ref_wr, ref_order) or "teampreview"
     ref_best = next(a for a in ref_variants if split_variant(a.arm_id)[1] == ref_variant)
     summary["reference_variant"] = {"variant": ref_variant, "win_rates": ref_wr, "selection_model": ref_best.selection_model,
-                                    "pick_policy": ref_best.pick_policy}
+                                    "pick_policy": ref_best.pick_policy, "production_model": production}
     log(f"S8a reference variant: {ref_variant} " + " ".join(f"{k}={v}" for k, v in ref_wr.items()))
 
     def ref_arm(arm_id: str = "reference") -> R.Arm:
@@ -366,7 +387,7 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
                         parallel=parallel)
         ref_wr["fresh"] = (sum(fresh_ref.outcomes) / len(fresh_ref.outcomes)) if fresh_ref.outcomes else None
         ref_variants.append(fresh_ref)
-        ref_variant = best_by_win_rate(ref_wr, tuple(screen_variants) + ("fresh",)) or ref_variant
+        ref_variant = best_by_win_rate(ref_wr, ref_order + ("fresh",)) or ref_variant
         ref_best = next(a for a in ref_variants if split_variant(a.arm_id)[1] == ref_variant)
         summary["reference_variant"] = {"variant": ref_variant, "win_rates": ref_wr, "selection_model": ref_best.selection_model,
                                         "pick_policy": ref_best.pick_policy,

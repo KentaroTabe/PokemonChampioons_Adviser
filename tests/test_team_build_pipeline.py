@@ -215,7 +215,23 @@ def test_import_lineups():
     print("test_import_lineups OK")
 
 
+def test_variant_arm_production():
+    """参照の variant「production」(配布版の選出モデルを強制) は path があるときだけ作られ、advisor 方策になる"""
+    from pathlib import Path
+    from tools.team_build import racing as R
+    base = R.Arm("reference", Path("/r.txt"), None, "/pins")
+    arm = P._variant_arm(base, "production", {}, None, production_path="/deploy/selection_model.pt")
+    assert arm is not None and arm.arm_id == "reference@production"
+    assert arm.selection_model == "/deploy/selection_model.pt" and arm.pick_policy == "advisor" and arm.models_dir == "/pins"
+    assert P._variant_arm(base, "production", {}, None) is None                     # 配布版が無ければ variant も無い
+    assert P._variant_arm(base, "teampreview", {}, None).pick_policy == "teampreview"  # 既存 variant は不変
+    assert P.best_by_win_rate({"teampreview": 0.757, "cheap": 0.72, "production": 0.848, "fresh": 0.83},
+                              ("teampreview", "generic", "cheap", "production", "fresh")) == "production"
+    print("test_variant_arm_production OK")
+
+
 if __name__ == "__main__":
+    test_variant_arm_production()
     test_import_lineups()
     test_repro_gate()
     test_select_survivors_orders_and_caps()
