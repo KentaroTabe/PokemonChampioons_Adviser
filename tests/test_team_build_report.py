@@ -16,13 +16,16 @@ def test_report():
         (run / "evaluation").mkdir()
         (run / "s06_sets.json").write_text(json.dumps([{"candidate_id": "L00_C001", "members": ["a", "b"],
                                                         "sets": [{"species": "a", "item": "x", "nature": "adamant", "evs": "32/32/0/0/0/2", "moves": ["m1"]}]}]))
+        (run / "s06_sets").mkdir()
+        (run / "s06_sets" / "L00_C001.txt").write_text("a @ x\nLevel: 50\nAbility: abil1\nEVs: 32 HP / 32 Atk / 2 Spe\nAdamant Nature\n- m1\n")
         (run / "s04_concepts.json").write_text(json.dumps({"families": [{"family_id": "C001", "core_ids": ["a", "b"], "win_condition": "setup_sweep"}]}))
         (run / "evaluation" / "summary.json").write_text(json.dumps({"holdout": {"verdict": "PASS", "delta": 0.05, "ci": [0.02, 0.08], "n": 300},
                                                                      "ablation": {"team": {"mean": 0.03}}, "robustness_worst": 0.02}))
         facts = facts_from_run(run, "L00_C001")
         assert facts["concept"]["core_ids"] == ["a", "b"] and facts["holdout"]["verdict"] == "PASS"
         md = template_report(facts)
-        assert "PASS" in md and "| a | x |" in md and "いじっぱり H32 A32 S2" in md      # 並びは日本語の表 (表に無い id はそのまま)
+        assert facts["sets"][0]["ability"] == "abil1"                     # 特性は s06_sets/<id>.txt の本文から補う
+        assert "PASS" in md and "| a | x | abil1 |" in md and "いじっぱり H32 A32 S2" in md      # 並びは日本語の表 (表に無い id はそのまま)
         good = json.dumps({"authoritative": {"ok": True}, "display": {"markdown": "# 記事\n本文"}})
         p = write_report(run, "L00_C001", MockProvider([good]))
         text = p.read_text(encoding="utf-8")

@@ -9,9 +9,16 @@ from typing import Optional
 REPORT_SYSTEM = (
     "あなたはポケモンチャンピオンズの構築記事を書く。入力 (チーム、コンセプト、選出パターン、対面行列の要約、評価結果) の"
     "数値と id だけを根拠に、構築コンセプト → 各個体の採用理由 → 選出パターン → 苦手・課題 → 戦績 の順で日本語の Markdown を書く。"
-    "入力に無い数値・技・持ち物を作らない。評価の数値は入力の値をそのまま引用する。ポケモン・技・持ち物・特性・性格は "
-    "入力の ja (日本語名の対応表) の表記で書き、id は括弧で添える。authoritative は {\"ok\": true} だけ、"
-    "本文は display.markdown に入れる。出力は JSON オブジェクト 1 つ。"
+    "入力に無い数値・技・持ち物を作らない。評価の数値は入力の値を根拠にするが、本文では勝率・差は % か小数 3 桁に丸める。"
+    "ポケモン・技・持ち物・特性・性格は入力の ja (日本語名の対応表) の表記で書き、id は括弧で添える。"
+    "読者は対戦プレイヤーで、このシステムの内部を知らない: JSON のキー名や内部用語 (family_id, rule_pair, covered_by, "
+    "setter, ace, coverage, holdout, ablation, state, se, ci など) を本文にそのまま書かず、日本語で言い換える "
+    "(例: setter → 場を作る役、ace → 場で暴れる役、coverage → 脅威をどれだけ見られるかの割合、holdout → 封印した相手列での最終評価、"
+    "ablation → チーム・選出・行動に分けた寄与、信頼区間 → 「この範囲に収まる見込み」)。"
+    "notes の `rule:X<-Y` は「規則により Y を X に置き換えた」の意味 (例: rule:ace_item<-sitrusberry は持ち物をオボンのみから今の持ち物に替えた)。"
+    "holdout.delta と s10 の delta は参照 (今使っている登録チーム) との勝率差で、前回との差ではない。"
+    "robustness_worst は条件 (行動の乱れ・選出の乱れ・相手の方策) を変えたときの勝率の落ち幅の最悪値で、優位の下限ではない。"
+    "authoritative は {\"ok\": true} だけ、本文は display.markdown に入れる。出力は JSON オブジェクト 1 つ。"
 )
 
 
@@ -24,6 +31,7 @@ def facts_from_run(run_dir: Path, candidate_id: str) -> dict:
             return None
     sets = load("s06_sets.json") or []
     team = next((r for r in sets if r.get("candidate_id") == candidate_id), {})
+    _fill_abilities(team.get("sets") or [], run_dir / "s06_sets" / f"{candidate_id}.txt")
     concepts = load("s04_concepts.json") or {}
     fam = next((f for f in concepts.get("families", []) if team.get("candidate_id", "").endswith(f.get("family_id", "?"))), {})
     summary = load("evaluation/summary.json") or {}
@@ -37,6 +45,17 @@ def facts_from_run(run_dir: Path, candidate_id: str) -> dict:
         "s10": {a["arm_id"]: {"win_rate": a.get("win_rate"), "state": a.get("state"), "delta": (a.get("result") or {}).get("mean")}
                 for a in (load("evaluation/s10.json") or {}).get("arms", [])},
     }
+
+
+def _fill_abilities(rows: list, sets_file: Path) -> None:
+    """s06_sets.json の型の行には特性が無い (Showdown 本文にだけある) ので、本文から種族→特性を補う (表の特性欄が ? にならないように)"""
+    if not sets_file.exists() or all(r.get("ability") for r in rows):
+        return
+    from advisor.ja_names import parse_showdown_text
+    by_species = {r["species"]: r.get("ability") for r in parse_showdown_text(sets_file.read_text(encoding="utf-8"))}
+    for r in rows:
+        if not r.get("ability") and by_species.get(r.get("species")):
+            r["ability"] = by_species[r["species"]]
 
 
 def _ja(sid) -> str:
