@@ -648,6 +648,8 @@ def main() -> None:
                     help="S8b の相手列 seed のオフセット (既定 1 = S8a と別の列。ablation 拡張では 0 で同一列)")
     ap.add_argument("--s11", choices=["on", "off"], default="off",
                     help="S11 (勝者の SEARCH+SELECTION 再学習)。既定 off = S7 の検証済み checkpoint を最終モデルにする")
+    ap.add_argument("--reference-adapt", choices=["on", "off"], default=None,
+                    help="S7b: 参照にも S7 と同じ適応を与え fresh を参照の variant に加える (既定 config BUILD_REFERENCE_FULL_ADAPT)")
     ap.add_argument("--resume", action="store_true",
                     help="途中で落ちた run の続き: S8a の結果と完了済みの適応 (adapt_result.json) を再利用する")
     ap.add_argument("--validate-n", type=int, default=None, help="S7 の checkpoint 検証の戦数 (既定 config)")
@@ -801,8 +803,8 @@ def _measure(run_dir: Path, args) -> None:
     if subset is not None:
         log(run_dir, f"measure subset: {len(subset)} チーム {subset}")
     from champions_agent.config import (BUILD_ADAPT_VALIDATE_MAX_CKPTS, BUILD_ADAPT_VALIDATE_N,
-                                        BUILD_SCREEN_ADAPT_BATTLES, BUILD_SCREEN_MARGIN, BUILD_SCREEN_MAX,
-                                        BUILD_SCREEN_STEPS)
+                                        BUILD_REFERENCE_FULL_ADAPT, BUILD_SCREEN_ADAPT_BATTLES, BUILD_SCREEN_MARGIN,
+                                        BUILD_SCREEN_MAX, BUILD_SCREEN_STEPS)
     pm = PROFILE_MEASURE.get(getattr(args, "profile", "full"), PROFILE_MEASURE["full"])
     for key in ("race_max", "stress_n", "ablation_n", "max_candidates", "screen_adapt"):
         if getattr(args, key, None) is None and pm.get(key) is not None:
@@ -825,7 +827,9 @@ def _measure(run_dir: Path, args) -> None:
                     screen_steps=screen_steps, screen_max=args.screen_max or BUILD_SCREEN_MAX,
                     candidate_ids=subset, stop_after=args.stop_after, s08b_seed_offset=args.s08b_seed_offset,
                     s11=(args.s11 == "on"), validate_n=args.validate_n or BUILD_ADAPT_VALIDATE_N,
-                    validate_max=args.validate_max or BUILD_ADAPT_VALIDATE_MAX_CKPTS, resume=args.resume)
+                    validate_max=args.validate_max or BUILD_ADAPT_VALIDATE_MAX_CKPTS, resume=args.resume,
+                    reference_full_adapt=(BUILD_REFERENCE_FULL_ADAPT if args.reference_adapt is None
+                                          else args.reference_adapt == "on"))
 
 
 if __name__ == "__main__":

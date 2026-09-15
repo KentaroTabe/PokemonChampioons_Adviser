@@ -270,6 +270,10 @@ BUILD_ADAPT_EPS_TRAIN = 0.01
 # 参照チームの対照実験 (tools/team_build/reference_adapt): 参照にも S7 と同じ深さの適応を与えて勝者と同一相手列で比べる戦数
 # (medium プロファイルの race_max と同じ)
 BUILD_REFERENCE_CONTROL_BATTLES = 600
+# 参照 (登録チーム) にも S7 と同じ深さの選出モデル適応を与え、fresh を参照の variant に加える (S8b 以降の参照は variant の最善)。
+# rule_0913 の対照実験 (2026-09-15): 参照 teampreview 0.757 / 参照+適応 0.830 / 勝者 (適応済み) 0.788 →
+# 候補だけ収束まで適応し参照は cheap 1000 戦だけ、という手順は候補に有利だった (docs/incidents/reports/2026-09-15-*.md)
+BUILD_REFERENCE_FULL_ADAPT = True
 BUILD_MAX_REPAIRS = 2                  # 同じ系統の改修反復。3 回目以降は新しい concept branch
 BUILD_MAX_CHANGES = 2                  # 1 反復あたりの入替枠数。3 枠以上は新系統
 BUILD_STRESS_ACTION_NOISE = (0.05, 0.10)

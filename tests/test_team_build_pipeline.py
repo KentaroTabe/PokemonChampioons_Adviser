@@ -64,6 +64,9 @@ def test_choose_variants_team_x_pickvariant_and_survivors():
     assert P.best_by_win_rate({"teampreview": 0.85, "generic": 0.82, "cheap": 0.85}, ("teampreview", "generic", "cheap")) == "teampreview"
     assert P.best_by_win_rate({"teampreview": None, "cheap": 0.7}, ("teampreview", "generic", "cheap")) == "cheap"
     assert P.best_by_win_rate({}, ("teampreview",)) is None
+    # S7b: 参照の fresh 変種 (S7 と同じ適応) が加わると、それが最善なら参照の variant になる (rule_0913 の対照実験の値)
+    assert P.best_by_win_rate({"teampreview": 0.757, "generic": 0.713, "cheap": 0.72, "fresh": 0.83},
+                              ("teampreview", "generic", "cheap", "fresh")) == "fresh"
     print("test_choose_variants_team_x_pickvariant_and_survivors OK")
 
 

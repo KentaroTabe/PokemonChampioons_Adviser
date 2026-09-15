@@ -5,6 +5,10 @@ S8a 全候補 (代理スコアで絞らない) を cheap adaptation (BUILD_SCREE
     SEARCH fold B、脱落は伸び代 margin 込み)
 S7  生存チーム (最善 variant の Δ 順に max_candidates まで) の選出モデル適応 (SEARCH fold A、収束まで、checkpoint 保存)
     → checkpoint は独立 fold V の実測勝率で選ぶ (val_mse では選ばない)
+S7b 参照 (登録チーム) にも S7 と同じ適応を与え (BUILD_REFERENCE_FULL_ADAPT)、fresh を参照の variant に加えて S8a-2 と同じ
+    相手列で最善を選び直す。以降 (S8b / S10 / holdout / stress / ablation) の参照はそれ。
+    2026-09-15: 候補だけ収束まで適応し参照は cheap 1000 戦だけ、という非対称を rule_0913 の対照実験で確認
+    (参照 teampreview 0.757 / 参照+適応 0.830 / 勝者 0.788。docs/incidents/reports/2026-09-15-reference-adaptation-asymmetry.md)
 S8b チーム × variant (teampreview / generic / fresh) × 参照の racing (fold B、別 seed)。チームごとに variant を測定で選ぶ
 S9  介入実験 (ルール mutation [+ LLM 仮説]、任意)
 S10 SELECTION で contenders を比較
@@ -27,9 +31,9 @@ from typing import Optional
 
 from champions_agent.config import (BUILD_ADAPT_MIN_BATTLES, BUILD_ADAPT_VALIDATE_MAX_CKPTS, BUILD_ADAPT_VALIDATE_N,
                                     BUILD_EQUIV_EPS, BUILD_FOLD_EVAL, BUILD_FOLD_VALIDATE, BUILD_PICK_VARIANTS,
-                                    BUILD_RACE_DEFAULT_MAX, BUILD_RACE_STEPS, BUILD_REPRO_GATE,
-                                    BUILD_SCREEN_ADAPT_BATTLES, BUILD_SCREEN_MARGIN, BUILD_SCREEN_MAX,
-                                    BUILD_SCREEN_STEPS, BUILD_SCREEN_VARIANTS)
+                                    BUILD_RACE_DEFAULT_MAX, BUILD_RACE_STEPS, BUILD_REFERENCE_FULL_ADAPT,
+                                    BUILD_REPRO_GATE, BUILD_SCREEN_ADAPT_BATTLES, BUILD_SCREEN_MARGIN,
+                                    BUILD_SCREEN_MAX, BUILD_SCREEN_STEPS, BUILD_SCREEN_VARIANTS)
 from tools.team_build import ablation as AB
 from tools.team_build import adapt as AD
 from tools.team_build import holdout as HO
@@ -196,9 +200,10 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
                     variants: tuple = BUILD_PICK_VARIANTS, candidate_ids: Optional[list] = None,
                     stop_after: Optional[str] = None, s08b_seed_offset: int = 1, s11: bool = False,
                     validate_n: int = BUILD_ADAPT_VALIDATE_N, validate_max: int = BUILD_ADAPT_VALIDATE_MAX_CKPTS,
-                    resume: bool = False) -> dict:
+                    resume: bool = False, reference_full_adapt: bool = BUILD_REFERENCE_FULL_ADAPT) -> dict:
     """resume: 途中で落ちた run の続き。evaluation/ の S8a 結果 (cheap モデル・参照 variant・racing) と
-    advisors/<cid>/adapt_result.json (完了した適応) をそのまま使い、無いものだけ実行する"""
+    advisors/<cid>/adapt_result.json (完了した適応) をそのまま使い、無いものだけ実行する
+    reference_full_adapt: 参照にも S7 と同じ適応を与え、fresh を参照の variant に加える (S7b)"""
     from champions_agent.agent.selection_model import GENERAL_MODEL_PATH
     log = lambda m: _log(run_dir, m)
 
@@ -237,7 +242,8 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
                             "variants": list(variants), "max_candidates": max_candidates,
                             "fold_eval": BUILD_FOLD_EVAL, "fold_validate": BUILD_FOLD_VALIDATE,
                             "validate_n": validate_n, "validate_max_ckpts": validate_max,
-                            "s08b_seed_offset": s08b_seed_offset, "s11": s11, "stop_after": stop_after}}
+                            "s08b_seed_offset": s08b_seed_offset, "s11": s11, "stop_after": stop_after,
+                            "reference_full_adapt": reference_full_adapt}}
     eval_dir = run_dir / "evaluation"
 
     # S8a-1: 全候補 + 参照を同じ予算で cheap adaptation
@@ -295,8 +301,11 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
         return summary
 
     # S7: 生存チームの選出モデル適応 (fold A、収束まで、checkpoint 保存) → 独立 fold V の実測で checkpoint を選ぶ。
-    # 適応は数チームを並列 (収集は 1 プロセスずつ)、検証は チームごとに checkpoint を並列に測る
+    # 適応は数チームを並列 (収集は 1 プロセスずつ)、検証は チームごとに checkpoint を並列に測る。
+    # S7b: 参照も同じ手順で適応する (候補だけ深く適応する非対称を無くす。advisors/reference/)
     to_adapt = [a for a in cands if a.arm_id in survivors]
+    if reference_full_adapt:
+        to_adapt.append(ref)
 
     prev_s07 = (_load_json(eval_dir / "s07_adapt.json") or {}) if resume else {}
 
@@ -348,8 +357,28 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
         adapted[a.arm_id] = r
     _write_stage(run_dir, "s07_adapt", adapted)
 
+    # S7b: 参照の fresh 変種を S8a-2 と同じ相手列 (s08a_reference、screen_max 戦) で測り、参照の variant を選び直す。
+    # 以降の参照 (ref_arm) は teampreview / generic / cheap / fresh の最善
+    ref_fresh = (adapted.get(ref.arm_id) or {}) if reference_full_adapt else {}
+    if reference_full_adapt and ref_fresh.get("model"):
+        fresh_ref = _variant_arm(ref, "fresh", {ref.arm_id: ref_fresh["model"]}, generic)
+        R.measure_round([fresh_ref], screen_max, 0, seed, split, "search", BUILD_FOLD_EVAL, eval_dir, "s08a_reference",
+                        parallel=parallel)
+        ref_wr["fresh"] = (sum(fresh_ref.outcomes) / len(fresh_ref.outcomes)) if fresh_ref.outcomes else None
+        ref_variants.append(fresh_ref)
+        ref_variant = best_by_win_rate(ref_wr, tuple(screen_variants) + ("fresh",)) or ref_variant
+        ref_best = next(a for a in ref_variants if split_variant(a.arm_id)[1] == ref_variant)
+        summary["reference_variant"] = {"variant": ref_variant, "win_rates": ref_wr, "selection_model": ref_best.selection_model,
+                                        "pick_policy": ref_best.pick_policy,
+                                        "fresh": {"model": ref_fresh.get("model"), "n_battles": ref_fresh.get("n_battles"),
+                                                  "chosen_n": (ref_fresh.get("validated") or {}).get("chosen_n")}}
+        log(f"S7b reference variant (fresh を加えて選び直し): {ref_variant} "
+            + " ".join(f"{k}={v}" for k, v in ref_wr.items()))
+    elif reference_full_adapt:
+        log(f"S7b reference fresh: 適応に失敗 ({ref_fresh.get('stop_reason')}) → 参照は S8a の variant ({ref_variant}) のまま")
+
     # S8b: チーム × variant (teampreview / generic / fresh) × 参照 (variant の最善)。variant はチームごとに測定で選ぶ
-    fresh_models = {cid: r.get("model") for cid, r in adapted.items()}
+    fresh_models = {cid: r.get("model") for cid, r in adapted.items() if cid != ref.arm_id}
     arms8b = []
     for a in cands:
         if a.arm_id not in adapted:
@@ -446,7 +475,8 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
     # ablation の A1: adapter を採用したらそれ (action 効果 = adapter − 基底)、無ければ前世代のチェックポイント
     alt_dir = final_models_dir if final_models_dir != models_dir else pop.get("prev")
     abl = AB.ablation_grid(win_arm.team_file, ref.team_file, final_model, ref_best.selection_model, models_dir,
-                           alt_dir, split, run_dir, seed + 6, n=ablation_n, log=log, parallel=parallel)
+                           alt_dir, split, run_dir, seed + 6, n=ablation_n, log=log, parallel=parallel,
+                           ref_pick_policy=ref_best.pick_policy)
     summary["ablation"] = abl.get("effects")
 
     # S13: Package
