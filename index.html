@@ -187,7 +187,7 @@
             if (oppPendingState) {
                 const s = oppPendingState;
                 oppPendingState = null;
-                renderOppParty(s);
+                commitPanels({'opp-party': ['html', renderOppPartyHtml(s)]});   // 操作の完了は即反映
             }
         }
 
@@ -448,10 +448,6 @@
                     p.moves.map(m => `${m.name_ja}${m.pp!=null?`(${m.pp})`:''}`).join(' / ') + '</div>';
             if (p.revealed_moves && p.revealed_moves.length)
                 moves += `<div style="font-size:11px;color:#c98">判明技: ${p.revealed_moves.join(' / ')}</div>`;
-            // 相手の型推定: 使用率の型 (性格・配分・持ち物) を仮説に、先後/ダメージ/持ち物の観測で更新した事後確率の上位
-            if (side === 'opp' && p.set_hyps && p.set_hyps.length)
-                moves += `<div style="font-size:11px;color:#9ab">型の推定${p.set_obs ? `(観測${p.set_obs}件)` : '(事前)'}: ` +
-                    p.set_hyps.map(h => `${h.nature} ${h.pts}${h.item ? ' @' + h.item : ''} ${h.w}%`).join(' / ') + '</div>';
             // 相手の未確定ポケモン: タイプ推論の候補から手動で確定できる
             let picker = '';
             if (side === 'opp' && !p.species_ja && p.candidates && p.candidates.length) {
@@ -574,8 +570,8 @@
             if (r.ok) socket.emit('get_my_team_detail', {});
         });
 
-        // 相手のパーティ欄の描画: 確定済みを先に、未確定枠は「予測 (あり得る順)」
-        function renderOppParty(s) {
+        // 相手のパーティ欄の描画 (HTML を返す。DOM への反映は表示の安定化を通す): 確定済みを先に、未確定枠は「予測 (あり得る順)」
+        function renderOppPartyHtml(s) {
             const oppParty = s.opponent.party || [];
             const confirmed = [], predicted = [];
             let unknownCount = 0;
@@ -614,7 +610,7 @@
             const mism = (s.events || []).filter(e => e.event === 'hud_name_mismatch').slice(-1);
             if (mism.length)
                 shown.push(`<div style="font-size:11px;color:#fa6">⚠ ${mism[0].text} — ✏️で種族を確定すると以後正しく帰属されます</div>`);
-            document.getElementById('opp-party').innerHTML = shown.join('');
+            return shown.join('');
         }
 
         // プルダウン操作の検知 (再描画の保留開始/解除)。要素は毎回作り直される
@@ -627,16 +623,53 @@
             if (e.target.tagName === 'SELECT') releaseOppHold();
         });
 
+        // --- 表示の安定化 (2026-09-16 ユーザー要望: ユーザー向けの画面では表示がコロコロ変わらないこと。応答は遅くてよい) ---
+        // state_update ごとに各欄の内容 (HTML/テキスト) を組み立て、同じ内容が UI_SETTLE_MS 続いたときだけ DOM に反映する。
+        // シーン分類の揺れ・HP バーの途中読み・選出フラグの反転など、数百 ms で戻る変化は画面に出ない。
+        // 内容が揺れ続けても UI_MAX_HOLD_MS を超えたら最新を反映する (凍結防止)。助言欄は対象外 (advice_update)
+        const UI_SETTLE_MS = 1500;
+        const UI_MAX_HOLD_MS = 6000;
+        let uiPending = null;          // {key, panels, since}
+        let uiUnsettledSince = 0;      // 未反映の内容が最初に現れた時刻
+        let uiCommittedKey = null;
+        function commitPanels(panels) {
+            for (const [id, [kind, val]] of Object.entries(panels)) {
+                const el = document.getElementById(id);
+                if (!el) continue;
+                if (kind === 'text') { if (el.textContent !== val) el.textContent = val; }
+                else if (el.innerHTML !== val) el.innerHTML = val;
+            }
+        }
+        function scheduleSettle(panels) {
+            const key = JSON.stringify(panels);
+            if (key === uiCommittedKey) { uiPending = null; uiUnsettledSince = 0; return; }
+            if (uiPending && uiPending.key === key) return;        // 同じ内容が続いている (時計は進む)
+            const now = Date.now();
+            if (!uiUnsettledSince) uiUnsettledSince = now;
+            uiPending = {key, panels, since: now};
+        }
+        setInterval(() => {
+            if (!uiPending) return;
+            const now = Date.now();
+            if (now - uiPending.since >= UI_SETTLE_MS || now - uiUnsettledSince >= UI_MAX_HOLD_MS) {
+                commitPanels(uiPending.panels);
+                uiCommittedKey = uiPending.key;
+                uiPending = null;
+                uiUnsettledSince = 0;
+            }
+        }, 250);
+
         socket.on('state_update', (s) => {
+            const panels = {};
             // レートは結果画面のOCRから取得 (勝敗推定にも使用)
             const rate = s.last_rate && s.last_rate.value ? ` | レート${s.last_rate.value}` : '';
-            document.getElementById('scene-label').textContent = 'scene: ' + s.scene + rate;
+            panels['scene-label'] = ['text', 'scene: ' + s.scene + rate];
             const f = s.field || {};
             const parts = [];
             if (f.weather) parts.push(WEATHER_JA[f.weather] || f.weather);
             if (f.terrain) parts.push(TERRAIN_JA[f.terrain] || f.terrain);
             if (f.trick_room) parts.push('トリックルーム');
-            document.getElementById('field-label').textContent = parts.join(' / ') || '場: 通常';
+            panels['field-label'] = ['text', parts.join(' / ') || '場: 通常'];
             // 陣営ごとの場の効果 (壁・追い風・設置技) をパーティ欄の直上に
             // 色付きチップで常設表示 (2026-08-25 第9回後: 壁の表示が
             // わかりづらいという指摘。従来はステロのみ1行ラベルに混在)
@@ -657,8 +690,8 @@
                 if (hz.sticky_web) chips.push(chip('ねばねばネット', '#556b2f'));
                 return chips.join(' ');
             };
-            document.getElementById('my-side-fx').innerHTML = sideFxHtml(s.player);
-            document.getElementById('opp-side-fx').innerHTML = sideFxHtml(s.opponent);
+            panels['my-side-fx'] = ['html', sideFxHtml(s.player)];
+            panels['opp-side-fx'] = ['html', sideFxHtml(s.opponent)];
 
             // 自分のパーティ: 対戦中は選出3体 (白リボン追跡+登場済み) のみ表示
             const inBattle = !['selection', 'standby', 'unknown'].includes(s.scene);
@@ -671,20 +704,21 @@
                 if (inBattle && picked >= 1 && !p.is_picked && !appeared) return;
                 myShown.push(renderMon(p, i, s.player.active_index, 'my'));
             });
-            document.getElementById('my-party').innerHTML = myShown.join('');
+            panels['my-party'] = ['html', myShown.join('')];
             // 相手のパーティ: プルダウン操作中は再描画を保留する
             if (oppUiHold && Date.now() - oppUiHold < OPP_HOLD_MAX_MS) {
                 oppPendingState = s;
             } else {
                 oppUiHold = 0;
-                renderOppParty(s);
+                panels['opp-party'] = ['html', renderOppPartyHtml(s)];
             }
 
             // 誤表示削減: イベント化された行のみ表示 (OCRノイズの生ログは出さない)
             const evs = (s.events || []).filter(e => e.event);
-            document.getElementById('events-count').textContent = `(${evs.length}件)`;
-            document.getElementById('events').innerHTML = evs.slice().reverse().slice(0, 30)
-                .map(e => `<div>[${e.source}] ${e.text} → <b>${e.event}</b></div>`).join('');
+            panels['events-count'] = ['text', `(${evs.length}件)`];
+            panels['events'] = ['html', evs.slice().reverse().slice(0, 30)
+                .map(e => `<div>[${e.source}] ${e.text} → <b>${e.event}</b></div>`).join('')];
+            scheduleSettle(panels);
         });
 
         socket.on('advice_update', (a) => {

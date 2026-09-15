@@ -50,7 +50,6 @@ pipeline = VisionPipeline()
 advisor = Advisor(resolver=pipeline.resolver)
 battle_log = BattleLogger()
 from advisor.ev_infer import get_tracker as _get_spread_tracker
-from champions_agent.config import SET_HYPS_MIN_WEIGHT, SET_HYPS_SHOWN
 spread_tracker = _get_spread_tracker()
 
 # 起動 (更新反映) のタイミングで不要ログを掃除する
@@ -333,18 +332,6 @@ async def _handle_one_frame(sid, data):
         print(f"[server] 画像処理エラー: {e}")
 
 
-def _fmt_set_hyp(h: dict) -> dict:
-    """型仮説 {nature, evs, item, weight} → 表示用 {nature (日本語), pts ("H32 A32 S2"), item (日本語), w (%)}"""
-    from advisor.ev_infer import _NATURE_JA, _ev_to_points
-    from advisor.ja_names import item_ja
-    abbr = {"hp": "H", "atk": "A", "def": "B", "spa": "C", "spd": "D", "spe": "S"}
-    pts = _ev_to_points(h.get("evs") or {})
-    return {"nature": _NATURE_JA.get(h.get("nature"), h.get("nature")) or "性格?",
-            "pts": " ".join(f"{abbr[k]}{v}" for k, v in pts.items() if v),
-            "item": item_ja(h["item"]) if h.get("item") else None,
-            "w": round((h.get("weight") or 0) * 100)}
-
-
 def _attach_candidates(state: dict) -> None:
     """相手の未確定ポケモンにタイプ推論の候補リストを付与する (プルダウン用)。
 
@@ -375,11 +362,6 @@ def _attach_candidates(state: dict) -> None:
             if se and (se["n_obs"] > 0 or se["lo"] or se["hi"]):
                 p["spe_est"] = se["est"]
                 p["spe_range"] = [se["lo"], se["hi"]]
-            # 型 (性格・配分・持ち物) の仮説と事後確率 (使用率の事前分布 × 先後/ダメージ/持ち物の観測)
-            hyps = est.top_k(SET_HYPS_SHOWN, SET_HYPS_MIN_WEIGHT)
-            if hyps:
-                p["set_obs"] = est.n_obs
-                p["set_hyps"] = [_fmt_set_hyp(h) for h in hyps]
     except Exception:
         pass
     # 未確定枠に「次に出してきそう度」を付与 (相手視点のマッチアップ:
