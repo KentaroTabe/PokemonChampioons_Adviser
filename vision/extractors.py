@@ -19,6 +19,8 @@ from vision import zones, ocr
 from vision.zones import crop
 from vision.state import BattleStateV2, MoveSlot, PokemonState
 from vision.typeicons import classify_type_icon
+from champions_agent.config import (MY_EXACT_RESOLVE_CUTOFF, MY_REGISTERED_MATCH_RATIO,
+                                    MY_ROSTER_MATCH_RATIO, PARTY_SIZE)
 
 # 相性ヒント表記 -> 内部表現
 EFFECTIVENESS_MAP = [
@@ -34,36 +36,88 @@ EFFECTIVENESS_MAP = [
 ]
 
 
-def resolve_my_species(resolver, name_text: str, cutoff: float = 0.72):
-    """自分側の種族名解決: 登録済みmy_teamの名前を優先する。
+def _with_registered_form_id(r):
+    """登録エントリがフォルムの showdown id を持つならそれを使う (HUD はフォルム名を省くため「ロトム」→ rotom に
+    丸まる。手入力の「種族ID」: rotomwash で種族値・タイプを正しく引く)"""
+    try:
+        from advisor.my_team import registered_species_id
+        sid = registered_species_id(r[0])
+        if sid:
+            return (r[0], sid) + tuple(r[2:])
+    except Exception:
+        pass
+    return r
 
-    汎用のファジー解決は全種族が母集団のため、OCRの揺れで近縁の別種へ
-    飛ぶことがある (2026-08-05接続テスト: ゲッコウガ→ケイコウオ。
-    「ケイコウガ」のような誤読はケイコウオとの類似度の方が高くなる)。
-    自分側の画面に出るのは登録済みパーティだけなので、まず登録名と照合し、
-    十分近ければそれを採用する。登録が無い/遠い場合は従来の解決に落ちる。
+
+def _closest_name(name_text: str, names) -> tuple:
+    names = [n for n in (names or []) if n]
+    if not names:
+        return None, 0.0
+    best = max(names, key=lambda n: difflib.SequenceMatcher(None, name_text, n).ratio())
+    return best, difflib.SequenceMatcher(None, name_text, best).ratio()
+
+
+def resolve_my_species(resolver, name_text: str, cutoff: float = 0.72, roster=None):
+    """自分側の種族名解決。優先順:
+    (1) 表記どおりの種族がある (汎用解決の高閾値 MY_EXACT_RESOLVE_CUTOFF)。登録に無い種でもチーム変更直後は出る。
+        ロスター外の表記どおりの名前は、当てはめ側 (adopt_my_hud_species) がロスター満枠なら誤読として無視する
+    (2) 今の対戦のロスター (選出画面で読んだ名前 roster) への一致 (MY_ROSTER_MATCH_RATIO)。OCR 揺れの救済
+    (3) 登録済み my_team の名前への吸着 (MY_REGISTERED_MATCH_RATIO)
+    (4) 従来の汎用解決 (cutoff)
+
+    汎用のファジー解決は全種族が母集団のため、OCRの揺れで近縁の別種へ飛ぶことがある (2026-08-05 接続テスト:
+    ゲッコウガ→ケイコウオ)。登録名を先に見ていた頃は逆に、未登録の種が登録済みの似た名前に化けた (2026-09-16 第15回:
+    ミミロップ→ミミッキュ (類似度 0.6)、場のメタグロス枠を上書きして 7 体目が生えた)。表記どおり → ロスター → 登録の順にする
     """
+    exact = resolver.resolve_species(name_text, cutoff=MY_EXACT_RESOLVE_CUTOFF)
+    if exact:
+        return _with_registered_form_id(exact)
+    best, ratio = _closest_name(name_text, roster)
+    if best and ratio >= MY_ROSTER_MATCH_RATIO:
+        r = resolver.resolve_species(best, cutoff=0.9)
+        if r:
+            return _with_registered_form_id(r)
     try:
         from advisor.my_team import registered_species_ja
-        names = registered_species_ja()
-        if names:
-            best = max(names, key=lambda n: difflib.SequenceMatcher(
-                None, name_text, n).ratio())
-            if difflib.SequenceMatcher(
-                    None, name_text, best).ratio() >= 0.55:
-                r = resolver.resolve_species(best, cutoff=0.9)
-                if r:
-                    # 登録エントリがフォルムの showdown id を持つならそれを使う
-                    # (HUD はフォルム名を省くため「ロトム」→ rotom に丸まる。
-                    #  手入力の「種族ID」: rotomwash で種族値・タイプを正しく引く)
-                    from advisor.my_team import registered_species_id
-                    sid = registered_species_id(r[0])
-                    if sid:
-                        r = (r[0], sid) + tuple(r[2:])
-                    return r
+        best, ratio = _closest_name(name_text, registered_species_ja())
+        if best and ratio >= MY_REGISTERED_MATCH_RATIO:
+            r = resolver.resolve_species(best, cutoff=0.9)
+            if r:
+                return _with_registered_form_id(r)
     except Exception:
         pass
     return resolver.resolve_species(name_text, cutoff=cutoff)
+
+
+def adopt_my_hud_species(state: BattleStateV2, sp) -> Optional[PokemonState]:
+    """HUD で読んだ自分の種族 sp=(日本語名, id, ...) をロスターに当てはめる。
+
+    ロスター内の別枠なら交代の見逃しとして付け替える。ロスター (PARTY_SIZE 体) が判明済みで一致する枠が無く、場の個体も
+    別の種族なら誤読とみなして無視する (2026-09-16 第15回: ミミッキュへの誤解決が場のメタグロス枠を上書きした)。
+    戻り値: 当てはめた個体 (無視なら None)
+    """
+    me = state.player.ensure_active()
+    idx = state.player.find_by_species(sp[0], sp[1] if len(sp) > 1 else None)
+    if idx is None:
+        known = [p for p in state.player.party if p.species_ja]
+        if me.species_ja and me.species_ja != sp[0] and len(known) >= PARTY_SIZE:
+            state.log_event("system", f"HUD名 {sp[0]} はロスター外のため無視 (場は {me.species_ja})",
+                            event_id="hud_name_ignored")
+            return None
+    if idx is not None and idx != state.player.active_index:
+        # 交代イベントを見ていないのにHUD名で付け替わった = 交代 (と、その前のひんしの可能性) を取り逃した。
+        # 前のactiveの状態は「不明」として印を付け、交代候補の推奨を抑える (2026-08-18 第2回: 取り逃した
+        # サザンドラのひんしが100%のまま残り、交代候補として推奨され続けた)
+        prev = state.player.active()
+        if prev is not None and prev.status != "fainted" \
+                and prev.species_ja and prev.species_ja != sp[0]:
+            prev.hp_uncertain = True
+            state.log_event("system", f"交代見逃し: {prev.species_ja}の状態を不明扱い",
+                            event_id="missed_switch")
+        state.player.switch_to(idx)
+        me = state.player.party[idx]
+    me.merge_species(sp[0], sp[1])
+    return me
 
 
 def _normalize_hint(text: str) -> Optional[str]:
@@ -1350,27 +1404,11 @@ def extract_my_hud(img, state: BattleStateV2, resolver) -> None:
                                  allowlist=ocr.KATAKANA_ALLOWLIST)
     if my_name:
         me.display_name = my_name
-        sp = resolve_my_species(resolver, my_name, cutoff=0.8)
-        if sp:
-            # 表示名=種族名のケース (ニックネーム未設定)
-            idx = state.player.find_by_species(sp[0])
-            if idx is not None and idx != state.player.active_index:
-                # 交代イベントを見ていないのにHUD名で付け替わった =
-                # 交代 (と、その前のひんしの可能性) を取り逃した。
-                # 前のactiveの状態は「不明」として印を付け、交代候補の
-                # 推奨を抑える (2026-08-18 第2回: 取り逃したサザンドラの
-                # ひんしが100%のまま残り、交代候補として推奨され続けた)
-                prev = state.player.active()
-                if prev is not None and prev.status != "fainted" \
-                        and prev.species_ja and prev.species_ja != sp[0]:
-                    prev.hp_uncertain = True
-                    state.log_event(
-                        "system",
-                        f"交代見逃し: {prev.species_ja}の状態を不明扱い",
-                        event_id="missed_switch")
-                state.player.switch_to(idx)
-                me = state.player.party[idx]
-            me.merge_species(sp[0], sp[1])
+        # 表示名=種族名のケース (ニックネーム未設定)。今の対戦のロスター (選出画面で読んだ 6 体) を最優先に解決し、
+        # ロスター外の名前は誤読として無視する (adopt_my_hud_species)
+        roster = [p.species_ja for p in state.player.party if p.species_ja]
+        sp = resolve_my_species(resolver, my_name, cutoff=0.8, roster=roster)
+        if sp and adopt_my_hud_species(state, sp) is not None:
             link_active_to_party(state, "player")
             me = state.player.ensure_active()
 

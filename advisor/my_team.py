@@ -218,6 +218,24 @@ def _normalize_points(points: dict) -> dict:
     return {_POINT_KEYS.get(k, k): int(v) for k, v in (points or {}).items() if v}
 
 
+_BUILD_KEYS = ("能力ポイント", "性格", "持ち物", "特性", "技")
+
+
+def merge_build_patch(entry: Optional[dict], patch: Optional[dict]) -> dict:
+    """詳細パネルからの部分更新 (純粋): patch にあるキーだけ置き換え (空値はそのキーを削除)、
+    種族ID など patch に無いキーは残す"""
+    out = dict(entry or {})
+    for key in _BUILD_KEYS:
+        if key not in (patch or {}):
+            continue
+        val = patch[key]
+        if val in (None, "", [], {}):
+            out.pop(key, None)
+        else:
+            out[key] = val
+    return out
+
+
 def set_build(species_ja: str, entry: dict) -> bool:
     """手入力ベースの登録: エントリを丸ごと置き換えて保存する (他の種は残す)。
 

@@ -50,6 +50,7 @@ pipeline = VisionPipeline()
 advisor = Advisor(resolver=pipeline.resolver)
 battle_log = BattleLogger()
 from advisor.ev_infer import get_tracker as _get_spread_tracker
+from champions_agent.config import SET_HYPS_MIN_WEIGHT, SET_HYPS_SHOWN
 spread_tracker = _get_spread_tracker()
 
 # 起動 (更新反映) のタイミングで不要ログを掃除する
@@ -305,8 +306,10 @@ async def _handle_one_frame(sid, data):
                 print("--- 選出アドバイス ---")
                 print(advice["text"])
 
-        # コマンド選択中のみアドバイスを計算 (状態が変わった時だけ)
-        if state["scene"] in ("command", "move_select", "watch"):
+        # コマンド選択中のみアドバイスを計算 (状態が変わった時だけ)。終了後 (勝敗文言 / ランク画面 / リザルト画面 /
+        # 3体目のひんしの確定) は出さない: リザルト画面が move_select に誤分類され、終わった対戦に助言が出ていた (第15回)
+        if state["scene"] in ("command", "move_select", "watch") \
+                and not state.get("battle_ended") and not state.get("outcome"):
             key = _advice_key(state)
             now = time.time()
             if key and (key != _last_advice_key or now - _last_advice_time > 10.0):
@@ -328,6 +331,18 @@ async def _handle_one_frame(sid, data):
 
     except Exception as e:
         print(f"[server] 画像処理エラー: {e}")
+
+
+def _fmt_set_hyp(h: dict) -> dict:
+    """型仮説 {nature, evs, item, weight} → 表示用 {nature (日本語), pts ("H32 A32 S2"), item (日本語), w (%)}"""
+    from advisor.ev_infer import _NATURE_JA, _ev_to_points
+    from advisor.ja_names import item_ja
+    abbr = {"hp": "H", "atk": "A", "def": "B", "spa": "C", "spd": "D", "spe": "S"}
+    pts = _ev_to_points(h.get("evs") or {})
+    return {"nature": _NATURE_JA.get(h.get("nature"), h.get("nature")) or "性格?",
+            "pts": " ".join(f"{abbr[k]}{v}" for k, v in pts.items() if v),
+            "item": item_ja(h["item"]) if h.get("item") else None,
+            "w": round((h.get("weight") or 0) * 100)}
 
 
 def _attach_candidates(state: dict) -> None:
@@ -360,6 +375,11 @@ def _attach_candidates(state: dict) -> None:
             if se and (se["n_obs"] > 0 or se["lo"] or se["hi"]):
                 p["spe_est"] = se["est"]
                 p["spe_range"] = [se["lo"], se["hi"]]
+            # 型 (性格・配分・持ち物) の仮説と事後確率 (使用率の事前分布 × 先後/ダメージ/持ち物の観測)
+            hyps = est.top_k(SET_HYPS_SHOWN, SET_HYPS_MIN_WEIGHT)
+            if hyps:
+                p["set_obs"] = est.n_obs
+                p["set_hyps"] = [_fmt_set_hyp(h) for h in hyps]
     except Exception:
         pass
     # 未確定枠に「次に出してきそう度」を付与 (相手視点のマッチアップ:
@@ -541,15 +561,48 @@ async def run_playbook(sid, data):
     await _run_heavy_analysis(sid, "playbook", _job)
 
 
+def _my_team_edit_options(entries: dict) -> dict:
+    """詳細パネルの編集用 (2026-09-16 ユーザー要望: 詳細を開いて直接変更、性格・特性はプルダウン):
+    性格の一覧、種族ごとの合法特性と覚える技 (learnset)、持ち物の一覧、今の対戦のロスター (未登録の種もパネルから登録)"""
+    from advisor.ja_names import ability_ja, move_ja
+    from advisor.my_team import _NATURES, registered_species_id
+    from vision.abilities import legal_abilities
+    roster = []
+    try:
+        roster = [p.species_ja for p in pipeline.state.player.party if p.species_ja]
+    except Exception:
+        pass
+    try:
+        from tools.team_build.learnsets import learnset_of
+    except Exception:
+        learnset_of = None
+    abilities, moves, species_id = {}, {}, {}
+    for ja in list(dict.fromkeys(list(entries.keys()) + roster)):
+        r = pipeline.resolver.resolve_species(ja, cutoff=0.85)
+        sid = registered_species_id(ja) or (r[1] if r else None)
+        if not sid:
+            continue
+        species_id[ja] = sid
+        abilities[ja] = sorted({ability_ja(a) for a in (legal_abilities(sid) or [])})
+        try:
+            moves[ja] = sorted({move_ja(m) for m in (learnset_of(sid) if learnset_of else [])})
+        except Exception:
+            moves[ja] = []
+    return {"roster": roster,
+            "options": {"natures": [n for n in _NATURES if not n.isascii()],
+                        "abilities": abilities, "moves": moves, "species_id": species_id},
+            "items": sorted(j for j, *_ in pipeline.resolver._entries.get("items", []))}
+
+
 @sio.on('get_my_team_detail')
 async def get_my_team_detail(sid, data):
     """自分のポケモンの登録詳細と欠落項目を返す (2026-08-25 第9回後:
-    「もっと見る」で取り込んだ内容が登録済みか画面で確認したい、への対応)"""
+    「もっと見る」で取り込んだ内容が登録済みか画面で確認したい、への対応)。編集用の選択肢も添える"""
     def _work():
         import advisor.my_team as mt
         from tools.team_proposal import registration_gaps
         entries = mt._load() or {}
-        return {"entries": entries, "gaps": registration_gaps(entries)}
+        return {"entries": entries, "gaps": registration_gaps(entries), **_my_team_edit_options(entries)}
 
     try:
         payload = await asyncio.get_event_loop().run_in_executor(None, _work)
@@ -813,6 +866,39 @@ async def improve_team(sid, data):
     await _run_heavy_analysis(sid, "improve", _job)
 
 
+async def _emit_team_advice(sid) -> None:
+    """登録の変更直後にパーティ診断を実行して表示する (登録の即時フィードバック)"""
+    try:
+        from advisor.team_advice import team_advice, format_team_advice
+        loop = asyncio.get_event_loop()
+        data = await loop.run_in_executor(None, team_advice, pipeline.resolver)
+        await sio.emit('team_advice', {"text": format_team_advice(data), "data": data}, room=sid)
+        print("--- パーティ診断 (登録時) ---")
+    except Exception as e:
+        print(f"[server] 登録時診断エラー: {e}")
+
+
+@sio.on('save_my_build')
+async def save_my_build(sid, data):
+    """詳細パネルからの 1 体ぶんの型登録 / 更新 (2026-09-16)。送られたキーだけ置き換え (空値は削除)、種族ID 等は残す"""
+    try:
+        ja = ((data or {}).get("species") or "").strip()
+        patch = (data or {}).get("entry") or {}
+        if not ja or not pipeline.resolver.resolve_species(ja, cutoff=0.85):
+            await sio.emit('my_build_saved', {"ok": False, "reason": f"種族を解決できません: {ja}"}, room=sid)
+            return
+        import advisor.my_team as mt
+        entry = mt.merge_build_patch((mt._load() or {}).get(ja), patch)
+        ok = mt.set_build(ja, entry)
+        await sio.emit('my_build_saved', {"ok": ok, "species": ja, "reason": None if ok else "保存に失敗しました"},
+                       room=sid)
+        if ok:
+            await _emit_team_advice(sid)
+    except Exception as e:
+        print(f"[server] save_my_buildエラー: {e}")
+        await sio.emit('my_build_saved', {"ok": False, "reason": str(e)}, room=sid)
+
+
 @sio.on('save_my_team')
 async def save_my_team(sid, data):
     """フロントエンドのパーティ編集フォームから config/my_team.json を保存"""
@@ -831,17 +917,7 @@ async def save_my_team(sid, data):
         print(f"[server] my_team.json 保存: {len(cleaned)}体 ({list(cleaned)})")
         await sio.emit('my_team_saved', {"ok": True, "count": len(cleaned)},
                        room=sid)
-        # 保存直後にパーティ診断を実行して表示する (登録の即時フィードバック)
-        try:
-            from advisor.team_advice import team_advice, format_team_advice
-            loop = asyncio.get_event_loop()
-            data = await loop.run_in_executor(None, team_advice, pipeline.resolver)
-            await sio.emit('team_advice',
-                           {"text": format_team_advice(data), "data": data},
-                           room=sid)
-            print("--- パーティ診断 (登録時) ---")
-        except Exception as e:
-            print(f"[server] 登録時診断エラー: {e}")
+        await _emit_team_advice(sid)
     except Exception as e:
         print(f"[server] save_my_teamエラー: {e}")
         await sio.emit('my_team_saved', {"ok": False, "reason": str(e)}, room=sid)

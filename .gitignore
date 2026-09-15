@@ -32,6 +32,7 @@ CLAUDE.md
 .claude/
 
 # --- その他 ---
+config/ports.local.js
 
 # 対戦ログ (自動記録)
 logs/

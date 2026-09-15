@@ -206,6 +206,23 @@ DEFAULT_PLAY_STYLE = "balance"
 
 
 
+# --- 画面認識・対戦状態 (2026-09-16 第15回接続テスト後) ---
+# ゲームの枠数: パーティ 6 体から 3 体選出 (シングル)。3 体目のひんし = 陣営の全滅
+PARTY_SIZE = 6
+BSS_PICK_COUNT = 3
+# 3 体目のひんしを見てから終了を確定するまでの猶予 (秒)。この間にその陣営の交代を観測したら取り消す (ひんしの帰属誤り対策)。
+# 勝負文言の取り逃し (フレーム破棄率 42%) だとリザルト画面まで終了が分からず、リザルト画面の誤分類で助言が出続けた
+BATTLE_END_FAINT_CONFIRM_SEC = 6.0
+# 相手の型推定 (advisor/ev_infer) の表示: 上位いくつの仮説を、事後確率がいくつ以上のとき見せるか
+SET_HYPS_SHOWN = 3
+SET_HYPS_MIN_WEIGHT = 0.05
+# 自分側の HUD 名の解決 (vision/extractors.resolve_my_species): 表記どおりの種族 (汎用解決の高閾値) → 今の対戦のロスター
+# への一致 (OCR 揺れの救済) → 登録名への吸着 → 汎用。登録名を先に見ると未登録の種が登録済みの似た名前に化ける
+# (第15回: ミミロップ → ミミッキュ (類似度 0.6) に解決され、場のメタグロス枠を上書きして 7 体目が生えた)
+MY_ROSTER_MATCH_RATIO = 0.6
+MY_EXACT_RESOLVE_CUTOFF = 0.92
+MY_REGISTERED_MATCH_RATIO = 0.55
+
 # --- パーティ構築システム (docs/TEAM_BUILDING_IMPLEMENTATION.md §9 の決定値、2026-09-06) ---
 # 対応差 (候補 − 参照) の判定: 実用差 ε の帯に CI が収まれば「実用上同等」
 BUILD_EQUIV_EPS = 0.02

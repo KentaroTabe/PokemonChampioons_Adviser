@@ -17,6 +17,7 @@ import re
 import time
 from typing import Optional
 
+from champions_agent.config import BATTLE_END_FAINT_CONFIRM_SEC, BSS_PICK_COUNT
 from vision.normalize import loose_key, normalize
 from vision.state import BattleStateV2
 
@@ -91,7 +92,7 @@ SIMPLE_EVENTS = [
     {"id": "toxicspikes_set", "keywords": [["どくびし", "とくひし", "毒びし"], ["散らば", "ちらは"]],
      "action": "hazard_add", "key": "toxic_spikes", "max": 2},
     {"id": "stickyweb_set",
-     "keywords": [["ねばねばネット", "ねはねはねつと"], ["張り巡", "はりめく"]],
+     "keywords": [["ねばねばネット", "ねはねはねつと"], ["張り巡", "はりめく", "広がっ", "ひろがっ"]],
      "action": "hazard", "key": "sticky_web", "value": True},
     {"id": "stealthrock_off",
      "keywords": [["とがった岩", "尖った岩"], ["消え", "きえ"]],
@@ -253,6 +254,7 @@ class EventParser:
         self.state = state
         self.resolver = resolver
         self._recent_fired: dict = {}   # event_id -> 最終発火時刻
+        self._switch_ts: dict = {}      # side -> 最後の交代時刻 (3体目のひんしによる終了見込みの取り消しに使う)
 
     def _dedup(self, event_id: str, window: float = EVENT_DEDUP_SEC) -> bool:
         """同一イベントIDの window 秒以内の再発火を抑止する。
@@ -424,6 +426,8 @@ class EventParser:
             # (次戦の選出まで待つとひんし数等の終局情報が失われる)
             if self.state.battle_active and not self._dedup("battle_end_rank"):
                 self.state.battle_active = False
+                self.state.battle_ended = True
+                self.state.end_hint = None
                 self.state.log_event("system", "ランク画面を検出 (対戦終了)",
                                      event_id="battle_end_rank")
                 return ["battle_end_rank"]
@@ -432,6 +436,9 @@ class EventParser:
 
         # 1. 交代 (繰り出した / ゆけっ)
         self._parse_switch(cleaned, norm, fired)
+        for f in fired:
+            if f.startswith("switch_"):
+                self._switch_ts[f.split("_", 1)[1]] = time.time()
 
         # 2. キーワードイベント (連結メッセージ「急所に当たった!効果は〜」等の
         #    ため、最初の1件で打ち切らず合致した全イベントを発火する)
@@ -439,6 +446,12 @@ class EventParser:
             if _match_keywords(norm, ev["keywords"]) and not self._dedup(ev["id"]):
                 self._apply(ev, cleaned, source)
                 fired.append(ev["id"])
+
+        # 2.5 3体目のひんし → 終了の見込み (猶予内に交代が無ければ confirm_end_hint が確定する)
+        if "faint" in fired:
+            hint = self._check_all_fainted()
+            if hint:
+                fired.append(hint)
 
         # 3. ランク変化 (複数ステータス同時変化はステータスごとに発火する)
         if not any(not f.startswith("switch") for f in fired):
@@ -465,8 +478,12 @@ class EventParser:
         # 「〜は…にひっかかった!」等の被弾/接触メッセージは技の使用ではない
         # (2026-08-31 第11回: 相手が網にかかるたび複合文フォールバックが
         #  ねばねばネットを技として拾い、判明技汚染と誤設置が起きた)
+        # 設置技の展開文 (「相手の足下にねばねばネットが広がった」「味方の周りにとがった岩が…」) も技の使用文ではない:
+        # 「相手の…のねばねばネット」と読めて move_opponent_stickyweb が誤発火し、使用者の陣営も逆だった
+        # (2026-09-16 第15回)。設置の陣営は keyword イベント (stickyweb_set 等) が「相手の」の有無で決める
         is_contact_msg = ("ひつかか" in norm or "ひっかか" in cleaned
-                          or "引っかか" in cleaned)
+                          or "引っかか" in cleaned
+                          or "足下" in cleaned or "足元" in cleaned or "周りに" in cleaned)
         if not is_contact_msg and \
                 not any(f.startswith("switch") or f.endswith("_end")
                         for f in fired):
@@ -535,6 +552,63 @@ class EventParser:
         "batonpass", "shedtail", "chillyreception", "teleport"})
 
     # --------------------------------------------------------------
+    # --------------------------------------------------------------
+    # 対戦終了の追加シグナル (2026-09-16 第15回: 勝負文言は取り逃し得る (フレーム破棄率 42%)、ランク画面の文言 OCR は
+    # 決着から 10 秒以上遅れ、その間リザルト画面の誤分類 (move_select) で助言が出た)。
+    #   battle_end_faint (見込み) → confirm_end_hint で battle_end_faint_confirmed / battle_end_faint_cancel
+    #   battle_end_result: リザルト画面 (順位/レート行のアンカーつきシーン分類) を見た
+    def _check_all_fainted(self) -> Optional[str]:
+        """直前にひんしになった陣営の選出 BSS_PICK_COUNT 体がすべてひんしなら終了の見込みを立てる"""
+        st = self.state
+        if not st.battle_active or st.outcome or st.end_hint:
+            return None
+        side_name = (st.last_faint or {}).get("side")
+        if side_name not in ("player", "opponent"):
+            return None
+        fainted = sum(1 for p in st.side(side_name).party if p.status == "fainted")
+        if fainted < BSS_PICK_COUNT:
+            return None
+        st.end_hint = {"side": side_name, "ts": time.time(), "fainted": fainted}
+        who = "自分" if side_name == "player" else "相手"
+        st.log_event("system", f"{who}の選出{BSS_PICK_COUNT}体がすべてひんし (終了の見込み)",
+                     event_id="battle_end_faint")
+        return "battle_end_faint"
+
+    def confirm_end_hint(self) -> Optional[str]:
+        """終了の見込みを、猶予 BATTLE_END_FAINT_CONFIRM_SEC の間にその陣営の交代が無ければ終了として確定する
+        (pipeline が毎フレーム呼ぶ)。交代を観測したら取り消す (ひんしの帰属誤り)"""
+        st = self.state
+        hint = st.end_hint
+        if not hint or not st.battle_active:
+            return None
+        if self._switch_ts.get(hint["side"], 0.0) > hint["ts"]:
+            st.end_hint = None
+            st.log_event("system", "終了の見込みを取り消し (交代を観測)", event_id="battle_end_faint_cancel")
+            return "battle_end_faint_cancel"
+        if time.time() - hint["ts"] < BATTLE_END_FAINT_CONFIRM_SEC:
+            return None
+        other = "opponent" if hint["side"] == "player" else "player"
+        other_fainted = sum(1 for p in st.side(other).party if p.status == "fainted")
+        if not st.outcome and other_fainted < BSS_PICK_COUNT:
+            st.outcome = "loss" if hint["side"] == "player" else "win"
+        st.battle_active = False
+        st.battle_ended = True
+        st.end_hint = None
+        st.log_event("system", f"対戦終了 ({BSS_PICK_COUNT}体目のひんしから確定)",
+                     event_id="battle_end_faint_confirmed")
+        return "battle_end_faint_confirmed"
+
+    def end_by_result_scene(self) -> Optional[str]:
+        """リザルト画面を見た = 対戦終了 (pipeline がシーン分類から呼ぶ)。勝敗は文言/レート/ひんし数から logger が決める"""
+        st = self.state
+        if not st.battle_active or self._dedup("battle_end_result"):
+            return None
+        st.battle_active = False
+        st.battle_ended = True
+        st.end_hint = None
+        st.log_event("system", "リザルト画面を検出 (対戦終了)", event_id="battle_end_result")
+        return "battle_end_result"
+
     def _parse_switch(self, cleaned: str, norm: str, fired: list) -> bool:
         if not any(k in norm for k in ("繰り出", "くりたし", "くりた", "ゆけつ")):
             return False
@@ -1145,6 +1219,8 @@ class EventParser:
             return
         if action == "battle_end":
             self.state.outcome = ev["value"]
+            self.state.battle_ended = True
+            self.state.end_hint = None
             return
         if action == "weather":
             f.weather = ev["value"]

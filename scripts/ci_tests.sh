@@ -53,6 +53,9 @@ TESTS=(
   test_team_build_pipeline
   test_team_build_ablation
   test_ports_lib
+  test_battle_end_signals
+  test_my_roster_resolution
+  test_current_party_roster
   test_team_build_rules
   test_team_build_gen_sets
   test_ja_names

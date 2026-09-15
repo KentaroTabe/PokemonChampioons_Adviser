@@ -21,6 +21,9 @@ from pathlib import Path
 from typing import Optional
 
 LOG_DIR = Path(__file__).resolve().parent / "logs" / "battles"
+# 対戦終了を確定させるイベント (どれか 1 つで勝敗レコードを書く): ランク画面の文言 / リザルト画面のシーン分類 /
+# 3体目のひんしの確定 (2026-09-16: 勝負文言・ランク文言の取り逃しでも終了を取れるように)
+BATTLE_END_EVENTS = ("battle_end_rank", "battle_end_result", "battle_end_faint_confirmed")
 
 
 def _compact_state(state: dict) -> dict:
@@ -241,7 +244,7 @@ class BattleLogger:
             # ランク画面 = 対戦終了のキー (2026-08-21 ユーザー提案)。
             # 終局時点のひんし数・レート増減が揃っているここで勝敗を確定する
             # (次戦の選出まで待つと状態がリセットされ推定材料が失われる)
-            if "battle_end_rank" in fired and not self._outcome_logged:
+            if any(f in fired for f in BATTLE_END_EVENTS) and not self._outcome_logged:
                 outcome = state.get("outcome")
                 inferred = None if outcome else self._infer_outcome()
                 rec = {"type": "outcome",

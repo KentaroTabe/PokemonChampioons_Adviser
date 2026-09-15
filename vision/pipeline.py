@@ -395,6 +395,10 @@ class VisionPipeline:
             fired += self._process_text_regions(img, [
                 ("message", zones.RESULT["rate_row"]),
             ], single_shot)
+            # シーン分類自体 (順位/レート行のアンカーつき) を終了のキーにする。文言 OCR の取り逃しに依存しない
+            end = self.parser.end_by_result_scene()
+            if end:
+                fired.append(end)
 
         # パーティ管理画面 (対戦外) からの型登録取り込み (2026-08-30 要望)。
         # ⚠ battle_active 中は一切走らせない: 対戦中のつよさ表示 (watch
@@ -442,6 +446,11 @@ class VisionPipeline:
 
         # 破棄フレームから救出したメッセージ域の消化 (rescue_scan 参照)
         self._drain_rescue(fired)
+
+        # 3体目のひんしの終了見込みを、猶予後に確定 (その陣営の交代を観測したら取り消し)
+        conf = self.parser.confirm_end_hint()
+        if conf:
+            fired.append(conf)
 
         return self.state.to_dict(), fired
 

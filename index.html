@@ -233,6 +233,13 @@
 
         // --- パーティ編集 (config/my_team.json をフロントエンドから登録) ---
         const PT_STATS = [["h","HP"],["a","攻"],["b","防"],["c","特攻"],["d","特防"],["s","素早"]];
+        const PT_TOTAL = 66, PT_MAX = 32;   // 能力ポイントの上限 (ゲームの規則。config BUILD_GEN_POINT_BUDGET と同じ値)
+        // 性格のプルダウン (2026-09-16: 自由入力の datalist は表記揺れで解決に失敗しやすい)
+        function natureOptions(names, cur) {
+            const list = [...new Set([...(cur ? [cur] : []), ...((names && names.natures) || [])])];
+            return '<option value="">—</option>' +
+                list.map(n => `<option value="${n}"${n === cur ? ' selected' : ''}>${n}</option>`).join('');
+        }
         function openTeamEditor() {
             socket.emit('get_my_team');
             document.getElementById('team-editor').style.display = 'block';
@@ -250,7 +257,7 @@
                 const moves = (e["技"] || []).join("、");
                 rows.push(`<div style="border:1px solid #345;border-radius:6px;padding:6px;margin:6px 0;font-size:12px">
                     <input list="tl-species" class="te-sp" value="${ja}" placeholder="ポケモン${i+1}" style="width:110px">
-                    <input list="tl-natures" class="te-nat" value="${e["性格"]||""}" placeholder="性格" style="width:90px">
+                    <select class="te-nat" style="width:100px;background:#223;color:#cde;border:1px solid #446;border-radius:4px">${natureOptions(d.names, e["性格"]||"")}</select>
                     <input list="tl-items" class="te-item" value="${e["持ち物"]||""}" placeholder="持ち物" style="width:120px">
                     <input list="tl-abilities" class="te-ab" value="${e["特性"]||""}" placeholder="特性" style="width:110px">
                     <div style="margin-top:4px">` +
@@ -441,6 +448,10 @@
                     p.moves.map(m => `${m.name_ja}${m.pp!=null?`(${m.pp})`:''}`).join(' / ') + '</div>';
             if (p.revealed_moves && p.revealed_moves.length)
                 moves += `<div style="font-size:11px;color:#c98">判明技: ${p.revealed_moves.join(' / ')}</div>`;
+            // 相手の型推定: 使用率の型 (性格・配分・持ち物) を仮説に、先後/ダメージ/持ち物の観測で更新した事後確率の上位
+            if (side === 'opp' && p.set_hyps && p.set_hyps.length)
+                moves += `<div style="font-size:11px;color:#9ab">型の推定${p.set_obs ? `(観測${p.set_obs}件)` : '(事前)'}: ` +
+                    p.set_hyps.map(h => `${h.nature} ${h.pts}${h.item ? ' @' + h.item : ''} ${h.w}%`).join(' / ') + '</div>';
             // 相手の未確定ポケモン: タイプ推論の候補から手動で確定できる
             let picker = '';
             if (side === 'opp' && !p.species_ja && p.candidates && p.candidates.length) {
@@ -472,41 +483,96 @@
             renderMyDetail();
         }
         socket.on('my_team_detail', (d) => { myTeamDetail = d; renderMyDetail(); });
+        // 詳細パネル = その場で編集できる登録フォーム (2026-09-16 ユーザー要望: 値を直接変更、性格・特性はプルダウン)。
+        // 保存は 1 体ぶんの部分更新 (save_my_build)。未登録の種 (今の対戦のロスター) もここから登録できる
         function renderMyDetail() {
             const el = document.getElementById('my-detail');
             if (!myDetailTarget) { el.style.display = 'none'; return; }
             el.style.display = 'block';
             if (!myTeamDetail) { el.textContent = '⏳ 登録情報を取得中…'; return; }
             if (myTeamDetail.error) { el.textContent = '取得失敗: ' + myTeamDetail.error; return; }
-            const e = (myTeamDetail.entries || {})[myDetailTarget];
-            const gap = (myTeamDetail.gaps || {})[myDetailTarget];
-            const esc = (v) => String(v).replace(/[&<>"]/g, c =>
+            const ja = myDetailTarget;
+            const e = (myTeamDetail.entries || {})[ja] || null;
+            const gap = (myTeamDetail.gaps || {})[ja];
+            const opts = myTeamDetail.options || {};
+            const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, c =>
                 ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
             let head;
-            if (!e) head = `<span style="color:#f88">❌ 未登録</span>`;
+            if (!e) head = `<span style="color:#f88">❌ 未登録 (下の欄に入力して保存)</span>`;
             else if (gap && gap.length) head =
                 `<span style="color:#fa6">⚠ 欠落: ${gap.map(esc).join(', ')}</span>`;
             else head = `<span style="color:#7fa">✅ 登録完了</span>`;
-            const rows = [];
-            if (e) {
-                const pts = e['能力ポイント'] || e.evs || {};
-                const ptsText = Object.entries(pts)
-                    .map(([k, v]) => `${String(k).toUpperCase()}${v}`).join(' ') || '—';
-                rows.push(['特性', e['特性'] || '—'],
-                          ['持ち物', e['持ち物'] || '—'],
-                          ['性格', e['性格'] || '—'],
-                          ['能力ポイント', ptsText],
-                          ['技', (e['技'] || []).join(' / ') || '—']);
-            }
+            const cur = (k) => (e && e[k]) || '';
+            const inp = 'background:#223;color:#cde;border:1px solid #446;border-radius:4px';
+            const select = (cls, list, curVal, width) => {
+                const vals = [...new Set([...(curVal ? [curVal] : []), ...(list || [])])];
+                return `<select class="${cls}" style="width:${width}px;${inp}"><option value="">—</option>` +
+                    vals.map(v => `<option value="${esc(v)}"${v === curVal ? ' selected' : ''}>${esc(v)}</option>`).join('') +
+                    '</select>';
+            };
+            const pts = (e && (e['能力ポイント'] || e.evs)) || {};
+            const ptVal = (k) => pts[k] ?? pts[{h:'hp',a:'atk',b:'def',c:'spa',d:'spd',s:'spe'}[k]] ?? '';
+            const mv = (e && e['技']) || [];
+            const row = (k, v) => `<tr><td style="color:#89a;padding-right:10px;white-space:nowrap">${k}</td><td>${v}</td></tr>`;
             el.innerHTML =
-                `<b>${esc(myDetailTarget)}</b> ${head}` +
+                `<b>${esc(ja)}</b> ${head}` +
+                `<button onclick="toggleMyDetail('${esc(ja)}')" style="float:right;margin-left:6px;font-size:11px;background:#533;color:#cde;border:1px solid #755;border-radius:4px;cursor:pointer">閉じる</button>` +
                 `<button onclick="socket.emit('get_my_team_detail', {})" style="float:right;font-size:11px;background:#356;color:#cde;border:1px solid #467;border-radius:4px;cursor:pointer">更新</button>` +
-                `<button onclick="toggleMyDetail('${esc(myDetailTarget)}')" style="float:right;margin-left:6px;font-size:11px;background:#533;color:#cde;border:1px solid #755;border-radius:4px;cursor:pointer">閉じる</button>` +
                 '<table style="margin-top:6px;font-size:12px">' +
-                rows.map(([k, v]) => `<tr><td style="color:#89a;padding-right:10px">${k}</td><td>${esc(v)}</td></tr>`).join('') +
+                row('特性', select('md-ab', (opts.abilities || {})[ja], cur('特性'), 150)) +
+                row('持ち物', `<input class="md-item" list="tl-items-detail" value="${esc(cur('持ち物'))}" placeholder="持ち物" style="width:150px;${inp}">`) +
+                row('性格', select('md-nat', opts.natures, cur('性格'), 120)) +
+                row('能力ポイント', PT_STATS.map(([k, la]) =>
+                    `${la}<input class="md-pt-${k}" type="number" min="0" max="${PT_MAX}" value="${esc(ptVal(k))}" oninput="updatePtSum()" style="width:44px;margin:0 6px 0 2px;${inp}">`).join('') +
+                    `<span id="md-pt-sum" style="margin-left:4px"></span>`) +
+                row('技', [0, 1, 2, 3].map(i =>
+                    `<input class="md-mv" list="tl-moves-detail" value="${esc(mv[i] || '')}" placeholder="技${i + 1}" style="width:120px;margin:2px 4px 2px 0;${inp}">`).join('')) +
                 '</table>' +
-                '<div style="color:#89a;font-size:11px;margin-top:6px">技・特性・持ち物は対戦中に「もっと見る」画面を開くと自動で取り込まれます。性格・能力ポイントは「パーティ編集」から入力してください</div>';
+                `<datalist id="tl-items-detail">${(myTeamDetail.items || []).map(x => `<option value="${esc(x)}">`).join('')}</datalist>` +
+                `<datalist id="tl-moves-detail">${((opts.moves || {})[ja] || []).map(x => `<option value="${esc(x)}">`).join('')}</datalist>` +
+                `<div style="margin-top:6px"><button onclick="saveMyBuild()" style="background:#3567c9;color:#fff;border:none;border-radius:6px;padding:6px 14px;cursor:pointer">保存</button>` +
+                ` <span id="md-status" style="font-size:12px"></span></div>` +
+                '<div style="color:#89a;font-size:11px;margin-top:6px">特性・性格はプルダウン、技は覚える技の候補から入力 (自由入力も可)。保存は即反映。技・特性・持ち物は対戦中の「もっと見る」画面からも取り込めます</div>';
+            updatePtSum();
         }
+        function updatePtSum() {
+            const el = document.getElementById('my-detail');
+            let sum = 0;
+            for (const [k] of PT_STATS) {
+                const box = el.querySelector(`.md-pt-${k}`);
+                sum += box ? (+box.value || 0) : 0;
+            }
+            const sp = document.getElementById('md-pt-sum');
+            if (!sp) return;
+            sp.textContent = `合計 ${sum}/${PT_TOTAL}`;
+            sp.style.color = sum > PT_TOTAL ? '#f66' : (sum === PT_TOTAL ? '#7fa' : '#fa6');
+        }
+        function saveMyBuild() {
+            const el = document.getElementById('my-detail');
+            if (!myDetailTarget) return;
+            const entry = {};
+            const pts = {};
+            for (const [k] of PT_STATS) {
+                const v = el.querySelector(`.md-pt-${k}`).value;
+                if (v !== '' && +v > 0) pts[k] = Math.min(PT_MAX, +v);
+            }
+            entry['能力ポイント'] = pts;
+            entry['性格'] = el.querySelector('.md-nat').value.trim();
+            entry['持ち物'] = el.querySelector('.md-item').value.trim();
+            entry['特性'] = el.querySelector('.md-ab').value.trim();
+            entry['技'] = [...el.querySelectorAll('.md-mv')].map(i => i.value.trim()).filter(Boolean).slice(0, 4);
+            socket.emit('save_my_build', {species: myDetailTarget, entry});
+            const st = document.getElementById('md-status');
+            if (st) st.textContent = '⏳ 保存中…';
+        }
+        socket.on('my_build_saved', (r) => {
+            const st = document.getElementById('md-status');
+            if (st) {
+                st.textContent = r.ok ? '✅ 保存しました (即反映)' : `⚠ 保存失敗: ${r.reason}`;
+                st.style.color = r.ok ? '#6c6' : '#c66';
+            }
+            if (r.ok) socket.emit('get_my_team_detail', {});
+        });
 
         // 相手のパーティ欄の描画: 確定済みを先に、未確定枠は「予測 (あり得る順)」
         function renderOppParty(s) {

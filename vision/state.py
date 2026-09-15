@@ -350,6 +350,11 @@ class BattleStateV2:
         self.mega_used = {"player": False, "opponent": False}
         self.battle_active: bool = False
         self.outcome: Optional[str] = None    # win / loss (勝敗メッセージから)
+        # 終了シグナル (勝敗文言 / ランク画面 / リザルト画面 / 3体目のひんしの確定) のいずれかを見た。
+        # battle_active は開始前も False なので、終了後の助言抑止にはこちらを使う
+        self.battle_ended: bool = False
+        # 3体目のひんし等の終了の兆候 {"side", "ts", "fainted"}。猶予内に交代が無ければ確定 (events.confirm_end_hint)
+        self.end_hint: Optional[dict] = None
         # とんぼがえり系を自分が使用し、交代先の選択が保留中 (2026-08-21
         # 第8回: この場面で技トップの助言が出ていた)。events が技使用で
         # 立て、switch_player / 次ターン到達で下ろす。engineは交代限定で助言
@@ -451,6 +456,7 @@ class BattleStateV2:
         self.protect_streak = dict(d.get("protect_streak") or
                                    {"player": 0, "opponent": 0})
         self.battle_active = bool(d.get("battle_active"))
+        self.battle_ended = bool(d.get("battle_ended"))
         self.selection_picked = d.get("selection_picked")
         self.battle_seq = int(d.get("battle_seq") or 0)
         self.last_move = dict(d.get("last_move") or {})
@@ -462,6 +468,8 @@ class BattleStateV2:
             "turn": self.turn,
             "command_no": self.command_no,
             "battle_active": self.battle_active,
+            "battle_ended": self.battle_ended,
+            "end_hint": self.end_hint,
             "outcome": self.outcome,
             "pending_pivot_switch": self.pending_pivot_switch,
             "field": self.field.to_dict(),

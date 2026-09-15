@@ -249,21 +249,32 @@ def _latest_selection_roster(log_dir=None) -> list:
     return []
 
 
-def current_team_entries() -> dict:
+def current_team_entries(roster=None) -> dict:
     """my_team.json から「現在のパーティ6体」ぶんのエントリを選ぶ。
 
-    もっと見る自動登録の蓄積で7体以上残ることがある (旧チームは型ライブラリ
-    として保持する仕様)。7体以上のままチーム化するとShowdownに拒否され、
-    開始しない対戦を待ち続けてハングする (2026-07-26実測: 9体で発生)。
-    直近対戦ログの選出ロスター→自選出に登場した種族→技登録済み→登録順、
-    の優先で絞る。
+    直近の対戦ログの選出画面で読んだ 6 体 (roster、省略時は _latest_selection_roster) が実際に使っている
+    パーティそのもの。未登録の種は空エントリで入れる (build_myteam_text が使用率で補完する)。
+    2026-09-16: 登録に無い種を落として「登録順」で埋めていたため、チーム変更後 (ミミロップ/イダイトウ/イエッサン/
+    サーフゴー未登録) の改善案の測定が旧チームで走った。
+
+    ロスターが取れないときの従来手順: もっと見る自動登録の蓄積で7体以上残ることがある (旧チームは型ライブラリ
+    として保持する仕様)。7体以上のままチーム化するとShowdownに拒否され、開始しない対戦を待ち続けてハングする
+    (2026-07-26実測: 9体で発生)。自選出に登場した種族→技登録済み→登録順、の優先で絞る。
     """
     from advisor.my_team import _load
+    from champions_agent.config import PARTY_SIZE
     team = _load()
-    if len(team) <= 6:
+    if roster is None:
+        roster = _latest_selection_roster()
+    if roster and len(roster) == PARTY_SIZE:
+        missing = [ja for ja in roster if ja not in team]
+        print(f"[my_team] 直近の選出ロスターを現在の{PARTY_SIZE}体にする: {' / '.join(roster)}"
+              + (f" (未登録: {' / '.join(missing)} → 使用率で補完)" if missing else ""))
+        return {ja: dict(team.get(ja) or {}) for ja in roster}
+    if len(team) <= PARTY_SIZE:
         return dict(team)
     order = []
-    for ja in _latest_selection_roster():
+    for ja in (roster or []):
         if ja in team and ja not in order:
             order.append(ja)
     try:
@@ -280,8 +291,8 @@ def current_team_entries() -> dict:
     for ja in team:
         if ja not in order:
             order.append(ja)
-    picked = order[:6]
-    print(f"[my_team] 登録{len(team)}体から現在の6体を推定: "
+    picked = order[:PARTY_SIZE]
+    print(f"[my_team] 登録{len(team)}体から現在の{PARTY_SIZE}体を推定: "
           f"{' / '.join(picked)}")
     return {ja: team[ja] for ja in picked}
 
