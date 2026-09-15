@@ -13,14 +13,16 @@
 #     矛盾候補の機械検出+層化サンプリングで sonnet 1回にまとめて検証する
 #  5. フレーム取りこぼし率の表示 (受信/処理/破棄。改善効果の確認用)
 cd "$(dirname "$0")/.." || exit 1
+. scripts/lib/ports.sh
+load_ports
 
 echo "=== 接続テスト終了処理 ==="
 
-# アドバイザー/フロントエンド停止
-pkill -f "uvicorn server:app_asgi" 2>/dev/null && echo "アドバイザー(8000): 停止" \
-  || echo "アドバイザー(8000): 未起動"
-pkill -f "http.server 3000" 2>/dev/null && echo "フロントエンド(3000): 停止" \
-  || echo "フロントエンド(3000): 未起動"
+# アドバイザー/フロントエンド停止 (ポートは起動時に決めたもの: logs/ports.env)
+pkill -f "uvicorn server:app_asgi" 2>/dev/null && echo "アドバイザー($ADVISOR_PORT): 停止" \
+  || echo "アドバイザー($ADVISOR_PORT): 未起動"
+pkill -f "http.server $FRONTEND_PORT" 2>/dev/null && echo "フロントエンド($FRONTEND_PORT): 停止" \
+  || echo "フロントエンド($FRONTEND_PORT): 未起動"
 
 # 学習ループの確認 (テスト中も止めていないため、通常はそのまま稼働中)
 if pgrep -f train_forever >/dev/null; then

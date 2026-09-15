@@ -17,13 +17,19 @@ ps -eo pid,etime,%cpu,command \
   | head -20
 
 echo
-echo "=== ポート ==="
-for PORT in 8000 8100 3000; do
+echo "=== ポート (既定 + 前回起動時に決めたもの。[別プロセス] は自分たちの常駐ではない) ==="
+. "$ROOT/scripts/lib/ports.sh"
+load_ports
+for PORT in $(printf '%s\n' "$ADVISOR_PORT_DEFAULT" "$ADVISOR_PORT" 8100 "$FRONTEND_PORT_DEFAULT" "$FRONTEND_PORT" | awk '!seen[$0]++'); do
   OUT="$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | tail -n +2 | head -1)"
-  if [ -n "$OUT" ]; then
-    echo "$PORT: $OUT"
-  else
+  if [ -z "$OUT" ]; then
     echo "$PORT: (未使用)"
+  elif [ "$PORT" = "$ADVISOR_PORT" ] || [ "$PORT" = "$ADVISOR_PORT_DEFAULT" ]; then
+    echo "$PORT: $OUT $([ "$(port_state "$PORT" "$ADVISOR_PATTERN")" = ours ] && echo "[アドバイザー]" || echo "[別プロセス: $(port_owner "$PORT")]")"
+  elif [ "$PORT" = "$FRONTEND_PORT" ] || [ "$PORT" = "$FRONTEND_PORT_DEFAULT" ]; then
+    echo "$PORT: $OUT $([ "$(port_state "$PORT" "$FRONTEND_PATTERN")" = ours ] && echo "[フロントエンド]" || echo "[別プロセス: $(port_owner "$PORT")]")"
+  else
+    echo "$PORT: $OUT"
   fi
 done
 

@@ -52,6 +52,7 @@ TESTS=(
   test_team_build_pick_ablation
   test_team_build_pipeline
   test_team_build_ablation
+  test_ports_lib
   test_team_build_rules
   test_team_build_gen_sets
   test_ja_names

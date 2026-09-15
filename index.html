@@ -137,10 +137,14 @@
         Battle data provided by <a href="https://championsbattledata.com" style="color:#aab">Pokémon Champions Battle Data</a>
         / <a href="https://champs.pokedb.tokyo" style="color:#aab">バトルデータベース チャンピオンズ</a>
     </footer>
+    <!-- 起動スクリプトが生成する (無ければ 404 で既定の 8000)。アドバイザーのポート window.ADVISOR_PORT -->
+    <script src="config/ports.local.js"></script>
     <script>
-        // バックエンドはフロントエンドと同じホストの8000番 (localhost固定だと
-        // LAN内の別端末 (Windows等) から開いたときに接続できない)
-        const socket = io('http://' + location.hostname + ':8000');
+        // バックエンドはフロントエンドと同じホスト (localhost固定だと LAN内の別端末 (Windows等) から開いたときに
+        // 接続できない)。ポートは URL の ?api=PORT > 起動スクリプトが書いた config/ports.local.js > 既定 8000
+        // (config/ports.env の ADVISOR_PORT_DEFAULT と同じ値)
+        const ADVISOR_PORT = new URLSearchParams(location.search).get('api') || window.ADVISOR_PORT || 8000;
+        const socket = io('http://' + location.hostname + ':' + ADVISOR_PORT);
         const connLabel = document.getElementById('conn-label');
         socket.on('connect', () => {
             console.log('バックエンドに接続しました');
@@ -152,7 +156,7 @@
             connLabel.style.background = '#a33';
         });
         socket.on('connect_error', (e) => {
-            connLabel.textContent = 'バックエンド: 接続失敗 (uvicornをポート8000で起動してください)';
+            connLabel.textContent = 'バックエンド: 接続失敗 (uvicornをポート' + ADVISOR_PORT + 'で起動してください)';
             connLabel.style.background = '#a33';
         });
 

@@ -54,6 +54,9 @@ bash champions_agent/scripts/update_usage_db.sh
 > **ポート構成**: アドバイザーサーバー=8000 / フロントエンド=3000 /
 > 学習用Showdown=**8100** (環境変数 `SHOWDOWN_PORT` で変更可)。
 > ポートを分けているため**実運用 (ライブアドバイス) と学習は同時に実行できます**。
+> 8000 / 3000 は `config/ports.env` の既定で、別のプロセスが使っていれば起動スクリプト
+> (`scripts/start_all_nohup.sh` 等) が次の空きポートへ自動でずらし、表示した URL を開けばよい
+> (フロントは `config/ports.local.js` からアドバイザーのポートを読む。手動指定は URL の `?api=<port>`)。
 
 ---
 

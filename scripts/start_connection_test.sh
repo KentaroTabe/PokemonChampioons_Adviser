@@ -15,6 +15,8 @@
 # 30分のテストで約30万ステップを失うため、継続したまま行う。
 cd "$(dirname "$0")/.." || exit 1
 mkdir -p logs
+. scripts/lib/ports.sh
+load_ports
 
 echo "=== 接続テスト開始準備 ==="
 date +%s > logs/.connection_test_start
@@ -39,7 +41,9 @@ fi
 # 明示的に起動する。deploy.sh に任せると起動されないまま
 # 「準備完了」と表示され、DEBUG_DUMP_FRAMES 無しの手動起動を招いて
 # 終了時の視覚監査ができなくなる (2026-08-11に発生)
-if lsof -nP -iTCP:8000 -sTCP:LISTEN >/dev/null 2>&1; then
+# 「稼働中」は自分たちのプロセスが待ち受けているときだけ (別プロジェクトが同じポートを使っていても起動側で空きへずらす)
+set -- $(choose_port "$ADVISOR_PORT_DEFAULT" "$ADVISOR_PORT" "$ADVISOR_PATTERN")
+if [ "$2" = "ours" ]; then
   bash scripts/deploy.sh || {
     echo "deploy.sh が失敗しました (対戦中判定の可能性)。--force が必要か確認してください"
     exit 1
@@ -47,6 +51,7 @@ if lsof -nP -iTCP:8000 -sTCP:LISTEN >/dev/null 2>&1; then
 else
   bash scripts/start_all_nohup.sh
 fi
+load_ports
 
 # フレーム保存の実測確認 (視覚監査の前提。無ければ終了時に監査できない)
 if ! ps eww "$(pgrep -f 'uvicorn server:app_asgi' | head -1)" 2>/dev/null \
@@ -59,7 +64,7 @@ fi
 IP=$(ipconfig getifaddr en0 2>/dev/null || echo "localhost")
 echo ""
 echo "=== 準備完了 ==="
-echo "フロントエンド:   http://${IP}:3000  (このMacなら http://localhost:3000)"
+echo "フロントエンド:   http://${IP}:${FRONTEND_PORT}  (このMacなら http://localhost:${FRONTEND_PORT}、アドバイザー ${ADVISOR_PORT})"
 echo "human_battle用:   https://play.pokemonshowdown.com/~~localhost:8100/"
 echo "チェックリスト:   docs/CONNECTION_TEST_CHECKLIST.md"
 echo "終了時:           bash scripts/end_connection_test.sh"

@@ -11,6 +11,13 @@ cd ~/GitHub/PokemonChampioons_Adviser
 bash scripts/start_all_nohup.sh
 ```
 
+ポートは `config/ports.env` の既定 (アドバイザー 8000 / フロントエンド 3000)。**既定ポートを別のプロセス
+(他プロジェクトの開発サーバー等) が使っていれば、次の空きポート (+1 ずつ、最大 +20) へ自動でずらす。**
+「稼働中」と判定するのは、そのポートで待ち受けているのがこのリポジトリから起動した uvicorn / http.server の
+ときだけ (`scripts/lib/ports.sh`)。決めたポートは `logs/ports.env` と `config/ports.local.js` (フロントが
+アドバイザーのポートを読む) に書かれるので、**起動スクリプトが表示した URL を開く**。手動でアドバイザーの
+ポートを指定するときは URL に `?api=<port>` を付ける。
+
 ## 個別起動
 
 すべてリポジトリルートで実行する。
