@@ -638,6 +638,9 @@ def main() -> None:
     ap.add_argument("--screen-steps", default=None, help="screening の戦数段階 (例 100,300)")
     ap.add_argument("--screen-max", type=int, default=None)
     ap.add_argument("--candidates", default=None, help="測定するチームを candidate_id のカンマ区切りで限定")
+    ap.add_argument("--extra-lineups", default=None,
+                    help="別の run の並びを測定に持ち込む: run_id:candidate_id のカンマ区切り (例 rule_0910:L26_C003)。"
+                         "本文を s06_sets に写してこの run のレギュレーションで validate-team。--candidates と併用時も自動で加える")
     ap.add_argument("--strata", default=None,
                     help="探索候補を S5 スコア順に並べた順位 (1 始まり) のカンマ区切りで限定 (例 1,2,5,10,20,40)")
     ap.add_argument("--include-incumbent", action="store_true", help="--strata/--candidates に現行チームと近傍を加える")
@@ -790,16 +793,84 @@ def resolve_candidate_subset(rows: list, candidates: Optional[str], strata: Opti
     return out
 
 
+def parse_extra_lineups(spec: Optional[str]) -> list:
+    """--extra-lineups "run_id:candidate_id,run_id:candidate_id" → [(run_id, candidate_id)] (純粋)"""
+    out = []
+    for part in (spec or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if ":" not in part:
+            raise SystemExit(f"--extra-lineups の書式は run_id:candidate_id ({part!r})")
+        run_id, cid = part.split(":", 1)
+        out.append((run_id.strip(), cid.strip()))
+    return out
+
+
+def imported_candidate_id(run_id: str, cid: str) -> str:
+    """持ち込んだ並びの candidate_id。run_id を末尾に置き、記事の系統検索 (candidate_id の末尾一致) に掛からないようにする"""
+    return f"{cid}_from_{run_id}"
+
+
+def import_lineups(run_dir: Path, rows: list, extra: list, regulation: str, validate=None,
+                   runs_dir: Path = RUNS_DIR, log=print) -> list:
+    """別の run の並び (s06_sets/<cid>.txt と s06_sets.json の行) をこの run の s06_sets に写し、この run のレギュレーションで
+    validate-team する (前の run の勝者を新しい手順・新しい相手列で候補と同じ土俵に乗せる)。写してあれば再利用。
+    rows は書き換える (呼び出し側が s06_sets.json に書き戻す)。戻り値: 持ち込んだ candidate_id の列"""
+    validate = validate or (lambda text: S.validate_team_text(text, regulation))
+    have = {r.get("candidate_id") for r in rows}
+    ids = []
+    for src_run, cid in extra:
+        new_id = imported_candidate_id(src_run, cid)
+        ids.append(new_id)
+        if new_id in have:
+            continue
+        src_dir = Path(runs_dir) / src_run
+        try:
+            src_rows = json.loads((src_dir / "s06_sets.json").read_text(encoding="utf-8"))
+        except Exception:
+            raise SystemExit(f"--extra-lineups: {src_run} の s06_sets.json が読めない")
+        src = next((r for r in src_rows if r.get("candidate_id") == cid), None)
+        src_txt = src_dir / "s06_sets" / f"{cid}.txt"
+        if src is None or not src_txt.exists():
+            raise SystemExit(f"--extra-lineups: {src_run} に {cid} が無い")
+        text = src_txt.read_text(encoding="utf-8")
+        ok, errs = validate(text)
+        (run_dir / "s06_sets").mkdir(parents=True, exist_ok=True)
+        (run_dir / "s06_sets" / f"{new_id}.txt").write_text(text, encoding="utf-8")
+        row = {k: src.get(k) for k in ("members", "sets", "score", "rule_setter", "rule_notes", "rule_pair",
+                                       "team_field", "registered_sets")}
+        row.update({"index": len(rows), "candidate_id": new_id, "ok": bool(ok), "errors": list(errs)[:5],
+                    "tag": "imported", "imported_from": {"run_id": src_run, "candidate_id": cid}})
+        rows.append(row)
+        have.add(new_id)
+        log(f"extra lineup: {src_run}:{cid} → {new_id} ({'合法' if ok else '不合法: ' + '; '.join(list(errs)[:2])})")
+    return ids
+
+
 def _measure(run_dir: Path, args) -> None:
-    from champions_agent.config import (BUILD_ADAPT_MIN_BATTLES, BUILD_RACE_DEFAULT_MAX, BUILD_RACE_STEPS)
+    from champions_agent.config import (BUILD_ADAPT_MIN_BATTLES, BUILD_RACE_DEFAULT_MAX, BUILD_RACE_STEPS,
+                                        TRAINING_BATTLE_FORMAT)
     from tools.team_build import ablation as AB, adapt as AD, racing as R, stress as ST
     from tools.team_build.pipeline import run_measurement
     from tools.team_build.registry import Registry
     steps = tuple(int(x) for x in args.race_steps.split(",")) if args.race_steps else BUILD_RACE_STEPS
     reg = Registry(Path(args.registry)) if args.registry else Registry()
     rows = json.loads((run_dir / "s06_sets.json").read_text(encoding="utf-8"))
+    imported = []
+    extra = parse_extra_lineups(getattr(args, "extra_lineups", None))
+    if extra:
+        try:
+            req = json.loads((run_dir / "request.json").read_text(encoding="utf-8"))
+        except Exception:
+            req = {}
+        imported = import_lineups(run_dir, rows, extra, req.get("regulation") or TRAINING_BATTLE_FORMAT,
+                                  log=lambda m: log(run_dir, m))
+        (run_dir / "s06_sets.json").write_text(json.dumps(rows, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     subset = resolve_candidate_subset(rows, args.candidates, args.strata,
                                       args.include_incumbent, args.incumbent_neighbors)
+    if subset is not None:
+        subset += [i for i in imported if i not in subset]
     if subset is not None:
         log(run_dir, f"measure subset: {len(subset)} チーム {subset}")
     from champions_agent.config import (BUILD_ADAPT_VALIDATE_MAX_CKPTS, BUILD_ADAPT_VALIDATE_N,

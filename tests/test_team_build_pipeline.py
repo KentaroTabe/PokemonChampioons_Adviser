@@ -167,7 +167,56 @@ def test_repro_gate():
     print("test_repro_gate OK")
 
 
+def test_import_lineups():
+    """--extra-lineups: 別の run の並びを s06_sets に写し、この run のレギュレーションで検査して候補に加える"""
+    import json
+    import tempfile
+    from pathlib import Path
+    from tools.team_build.run import import_lineups, imported_candidate_id, parse_extra_lineups
+    assert parse_extra_lineups("rule_0910:L26_C003, rule_0909:L07_C026") == [("rule_0910", "L26_C003"), ("rule_0909", "L07_C026")]
+    assert parse_extra_lineups(None) == [] and parse_extra_lineups(" ") == []
+    assert imported_candidate_id("rule_0910", "L26_C003") == "L26_C003_from_rule_0910"
+    try:
+        parse_extra_lineups("L26_C003")
+        assert False, "run_id 無しは受け付けない"
+    except SystemExit:
+        pass
+    with tempfile.TemporaryDirectory() as d:
+        runs = Path(d)
+        src = runs / "rule_0910"
+        (src / "s06_sets").mkdir(parents=True)
+        (src / "s06_sets" / "L26_C003.txt").write_text("delphox @ delphoxite\nLevel: 50\n- psychic\n")
+        (src / "s06_sets.json").write_text(json.dumps([{"candidate_id": "L26_C003", "members": ["delphox"], "ok": True,
+                                                        "sets": [{"species": "delphox"}], "score": 1.2, "tag": "concept"}]))
+        dst = runs / "new_run"
+        (dst / "s06_sets").mkdir(parents=True)
+        rows = [{"candidate_id": "L00_C001", "members": ["a"], "ok": True}]
+        logs = []
+        ids = import_lineups(dst, rows, [("rule_0910", "L26_C003")], "gen9championsbssregmc",
+                             validate=lambda text: (True, []), runs_dir=runs, log=logs.append)
+        assert ids == ["L26_C003_from_rule_0910"] and len(rows) == 2
+        row = rows[1]
+        assert row["candidate_id"] == "L26_C003_from_rule_0910" and row["ok"] and row["tag"] == "imported"
+        assert row["members"] == ["delphox"] and row["score"] == 1.2 and row["imported_from"] == {"run_id": "rule_0910", "candidate_id": "L26_C003"}
+        assert (dst / "s06_sets" / "L26_C003_from_rule_0910.txt").read_text().startswith("delphox @ delphoxite")
+        assert logs and "合法" in logs[0]
+        # 2 回目は再利用 (行を増やさない)。不合法なら ok=False で errors を残す (候補には入らない)
+        assert import_lineups(dst, rows, [("rule_0910", "L26_C003")], "x", validate=lambda t: (True, []), runs_dir=runs,
+                              log=logs.append) == ["L26_C003_from_rule_0910"] and len(rows) == 2
+        rows2 = []
+        import_lineups(dst / "other", rows2, [("rule_0910", "L26_C003")], "x", validate=lambda t: (False, ["bad item"]),
+                       runs_dir=runs, log=logs.append)
+        assert rows2[0]["ok"] is False and rows2[0]["errors"] == ["bad item"]
+        try:
+            import_lineups(dst, rows, [("rule_0910", "L99_C999")], "x", validate=lambda t: (True, []), runs_dir=runs, log=logs.append)
+            assert False, "無い並びは止まる"
+        except SystemExit:
+            pass
+    print("test_import_lineups OK")
+
+
 if __name__ == "__main__":
+    test_import_lineups()
     test_repro_gate()
     test_select_survivors_orders_and_caps()
     test_choose_variants_picks_best_non_degraded()
