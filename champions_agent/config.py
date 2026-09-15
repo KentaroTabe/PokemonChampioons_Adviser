@@ -267,6 +267,9 @@ BUILD_INCUMBENT_NEIGHBORS = 4
 BUILD_ADAPT_MIN_BATTLES = 5000
 BUILD_ADAPT_PATIENCE = 3               # 連続でこの回数、改善 < BUILD_ADAPT_EPS_TRAIN なら停止
 BUILD_ADAPT_EPS_TRAIN = 0.01
+# 参照チームの対照実験 (tools/team_build/reference_adapt): 参照にも S7 と同じ深さの適応を与えて勝者と同一相手列で比べる戦数
+# (medium プロファイルの race_max と同じ)
+BUILD_REFERENCE_CONTROL_BATTLES = 600
 BUILD_MAX_REPAIRS = 2                  # 同じ系統の改修反復。3 回目以降は新しい concept branch
 BUILD_MAX_CHANGES = 2                  # 1 反復あたりの入替枠数。3 枠以上は新系統
 BUILD_STRESS_ACTION_NOISE = (0.05, 0.10)
