@@ -91,6 +91,7 @@ def summarize(outcomes: dict, winner: str) -> dict:
     if ARM_PROD in outcomes:
         out["production_vs_base"] = d(ARM_PROD, ARM_REF)       # 本番モデルは手順どおりの参照よりどれだけ上か
         out["full_vs_production"] = d(ARM_FULL, ARM_PROD)      # run 内で適応したモデルは本番モデルより上か
+        out["winner_vs_production"] = d(winner, ARM_PROD)      # 勝者は「参照 + 本番モデル」に勝つか (最も公平な比較)
     return out
 
 
@@ -106,8 +107,11 @@ def interpret(res: dict) -> str:
             f"勝者−参照 {_fmt(wb.get('mean'))} ({wb.get('state')})")
     if "full_vs_production" in res:
         fp, pb = res["full_vs_production"], res["production_vs_base"]
+        wp = res.get("winner_vs_production") or {}
         line += (f" / 本番モデル−参照 {_fmt(pb.get('mean'))} ({pb.get('state')}) / 適応−本番モデル {_fmt(fp.get('mean'))} "
-                 f"[{_fmt(fp.get('ci_low'))}, {_fmt(fp.get('ci_high'))}] ({fp.get('state')})")
+                 f"[{_fmt(fp.get('ci_low'))}, {_fmt(fp.get('ci_high'))}] ({fp.get('state')})"
+                 f" / 勝者−参照+本番モデル {_fmt(wp.get('mean'))} [{_fmt(wp.get('ci_low'))}, {_fmt(wp.get('ci_high'))}] "
+                 f"({wp.get('state')})")
     return line
 
 

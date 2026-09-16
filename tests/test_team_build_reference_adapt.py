@@ -52,7 +52,9 @@ def test_summarize():
     prod = [1, 1, 0, 0] * 50                 # 0.50 (= 参照)
     res_p = summarize({ARM_REF: base, ARM_FULL: full, "L24_C023": win, ARM_PROD: prod}, "L24_C023")
     assert abs(res_p["production_vs_base"]["mean"]) < 1e-9 and abs(res_p["full_vs_production"]["mean"] - 0.25) < 1e-9
+    assert abs(res_p["winner_vs_production"]["mean"] - (res_p["winner_vs_base"]["mean"])) < 1e-9   # prod = base の列
     assert "本番モデル−参照 +0.000" in interpret(res_p) and "適応−本番モデル +0.250" in interpret(res_p)
+    assert "勝者−参照+本番モデル" in interpret(res_p)
     print("test_summarize OK")
 
 
