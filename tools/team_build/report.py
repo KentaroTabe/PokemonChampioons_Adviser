@@ -9,6 +9,7 @@ from typing import Optional
 REPORT_SYSTEM = (
     "あなたはポケモンチャンピオンズの構築記事を書く。入力 (チーム、コンセプト、選出パターン、対面行列の要約、評価結果) の"
     "数値と id だけを根拠に、構築コンセプト → 各個体の採用理由 → 選出パターン → 苦手・課題 → 戦績 の順で日本語の Markdown を書く。"
+    "finalists (方向性の違う他の最終候補) があれば、末尾に『他の方向性の候補との違い』を短く書く (どれを選ぶかは読者)。"
     "入力に無い数値・技・持ち物を作らない。評価の数値は入力の値を根拠にするが、本文では勝率・差は % か小数 3 桁に丸める。"
     "ポケモン・技・持ち物・特性・性格は入力の ja (日本語名の対応表) の表記で書き、id は括弧で添える。"
     "読者は対戦プレイヤーで、このシステムの内部を知らない: JSON のキー名や内部用語 (family_id, rule_pair, covered_by, "
@@ -35,15 +36,26 @@ def facts_from_run(run_dir: Path, candidate_id: str) -> dict:
     concepts = load("s04_concepts.json") or {}
     fam = next((f for f in concepts.get("families", []) if team.get("candidate_id", "").endswith(f.get("family_id", "?"))), {})
     summary = load("evaluation/summary.json") or {}
+    # 複数の最終候補 (2026-09-17): 自分の順位・holdout は finalists の行から、比較表は全員ぶん
+    finalists = summary.get("finalists") or []
+    mine = next((f for f in finalists if f.get("candidate_id") == candidate_id), None)
+    members_of = {r.get("candidate_id"): list(r.get("members") or []) for r in sets}
+    holdout = (mine or {}).get("holdout") if mine and mine.get("holdout") else summary.get("holdout")
+    if mine and not mine.get("holdout"):
+        holdout = None if mine.get("rank", 1) != 1 else summary.get("holdout")
     return {
         "candidate_id": candidate_id, "members": team.get("members"), "sets": team.get("sets"),
         "concept": {k: fam.get(k) for k in ("family_id", "core_ids", "mega_id", "win_condition", "support_roles", "weak_to")},
         "rule_setter": team.get("rule_setter"), "rule_pair": team.get("rule_pair"),
-        "holdout": summary.get("holdout"), "ablation": summary.get("ablation"),
-        "robustness_worst": summary.get("robustness_worst"),
-        "selection_patterns": load("final/selection_patterns.json"),
+        "holdout": holdout, "ablation": summary.get("ablation") if (mine is None or mine.get("rank", 1) == 1) else None,
+        "robustness_worst": summary.get("robustness_worst") if (mine is None or mine.get("rank", 1) == 1) else None,
+        "selection_patterns": load("final/selection_patterns.json") if (mine is None or mine.get("rank", 1) == 1) else None,
         "s10": {a["arm_id"]: {"win_rate": a.get("win_rate"), "state": a.get("state"), "delta": (a.get("result") or {}).get("mean")}
                 for a in (load("evaluation/s10.json") or {}).get("arms", [])},
+        "finalist_rank": (mine or {}).get("rank"),
+        "finalists": [{"rank": f.get("rank"), "candidate_id": f.get("candidate_id"), "direction_ja": f.get("direction_ja"),
+                       "delta_s10": f.get("delta_s10"), "holdout": f.get("holdout"),
+                       "members": members_of.get(f.get("candidate_id"), [])} for f in finalists],
     }
 
 
@@ -91,7 +103,33 @@ def ja_facts(facts: dict) -> dict:
     for sid in list(pair.get("shared_weak") or []) + list(pair.get("ace_checks") or []) + list(concept.get("weak_to") or []) \
             + list((pair.get("covered_by") or {}).values()) + list(concept.get("core_ids") or []):
         out["species"].setdefault(sid, species_ja(sid))
+    for f in facts.get("finalists") or []:
+        for sid in f.get("members") or []:
+            out["species"].setdefault(sid, species_ja(sid))
     return out
+
+
+def finalists_table(facts: dict) -> str:
+    """最終候補 (方向性の違う並び) の比較表。★ = この記事の候補"""
+    rows = facts.get("finalists") or []
+    if not rows:
+        return ""
+    def _h(f):
+        h = f.get("holdout") or {}
+        if not h:
+            return "未測定"
+        ci = h.get("ci") or [None, None]
+        return f"{h.get('verdict')} {_fnum(h.get('delta'))} [{_fnum(ci[0])}, {_fnum(ci[1])}] n={h.get('n')}"
+    lines = ["| 順位 | 候補 | 方向性 | S10 Δ | 封印 holdout | メンバー |", "|---|---|---|---|---|---|"]
+    for f in rows:
+        mark = "★ " if f.get("candidate_id") == facts.get("candidate_id") else ""
+        lines.append(f"| {f.get('rank')} | {mark}{f.get('candidate_id')} | {f.get('direction_ja') or '-'} | "
+                     f"{_fnum(f.get('delta_s10'))} | {_h(f)} | {_ja(f.get('members'))} |")
+    return "\n".join(lines)
+
+
+def _fnum(x) -> str:
+    return f"{x:+.3f}" if isinstance(x, (int, float)) else "?"
 
 
 def template_report(facts: dict) -> str:
@@ -113,12 +151,16 @@ def template_report(facts: dict) -> str:
                   f"- 未対策: {_ja(pair.get('uncovered'))} (見ている割合 {pair.get('score')})",
                   f"- エースの止め手 {_ja(pair.get('ace_checks'))} を設置役が見ている割合: {pair.get('setter_covers_ace_checks')}"]
     lines += ["", "## 評価 (封印 holdout)", f"- verdict: {h.get('verdict')} / ΔWR: {h.get('delta')} / CI: {h.get('ci')} / n: {h.get('n')}",
-              f"- ablation: {facts.get('ablation')}", f"- STRESS 最悪感度: {facts.get('robustness_worst')}", "",
-              "## 注意", "- 探索時の勝率は期待勝率ではない。採否は holdout の verdict による。"]
+              f"- ablation: {facts.get('ablation')}", f"- STRESS 最悪感度: {facts.get('robustness_worst')}"]
+    table = finalists_table(facts)
+    if table:
+        lines += ["", "## 最終候補 (方向性の違う並び。どれを使うかは読者が選ぶ)", table]
+    lines += ["", "## 注意", "- 探索時の勝率は期待勝率ではない。採否は holdout の verdict による。"]
     return "\n".join(lines) + "\n"
 
 
-def write_report(run_dir: Path, candidate_id: str, provider=None) -> Path:
+def write_report(run_dir: Path, candidate_id: str, provider=None, out_path: Optional[Path] = None) -> Path:
+    """out_path: 書き先 (既定 final/build_report.md。他の最終候補は final/alternatives/<cid>/build_report.md)"""
     facts = facts_from_run(run_dir, candidate_id)
     facts["ja"] = ja_facts(facts)
     md = template_report(facts)
@@ -127,7 +169,7 @@ def write_report(run_dir: Path, candidate_id: str, provider=None) -> Path:
         text = (res.get("display") or {}).get("markdown") if res.get("ok") else None
         if text:
             md = text + "\n\n---\n(機械生成の数値表)\n\n" + md
-    out = Path(run_dir) / "final" / "build_report.md"
+    out = Path(out_path) if out_path else Path(run_dir) / "final" / "build_report.md"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(md, encoding="utf-8")
     return out

@@ -40,9 +40,12 @@ def selection_patterns_from_records(records: list, top_k: int = 5) -> dict:
 
 
 def build_package(run_dir: Path, candidate_id: str, team_file: Path, selection_model: Optional[Path],
-                  species: list, registry=None, report_md: Optional[str] = None, extra_manifest: Optional[dict] = None) -> dict:
+                  species: list, registry=None, report_md: Optional[str] = None, extra_manifest: Optional[dict] = None,
+                  out_dir: Optional[Path] = None, holdout_name: str = "s12_holdout") -> dict:
+    """out_dir: 書き先 (既定 run_dir/final。他の最終候補は run_dir/final/alternatives/<cid>)、
+    holdout_name: その候補の封印 holdout の要約ファイル名 (evaluation.json の s12_holdout に入る)"""
     run_dir = Path(run_dir)
-    final = run_dir / "final"
+    final = Path(out_dir) if out_dir else run_dir / "final"
     final.mkdir(parents=True, exist_ok=True)
     text = Path(team_file).read_text(encoding="utf-8")
     team = {"candidate_id": candidate_id, "text": text, "species": list(species),
@@ -64,8 +67,8 @@ def build_package(run_dir: Path, candidate_id: str, team_file: Path, selection_m
     if matrix is None:
         matrix = final_team_matrix(run_dir, candidate_id)
     (final / "matchup_matrix.json").write_text(json.dumps(matrix, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
-    evaluation = {name: _load(run_dir / "evaluation" / f"{name}.json") for name in
-                  ("s08a_screen", "s08b_adapted", "s10", "s12_holdout", "ablation")
+    evaluation = {("s12_holdout" if name == holdout_name else name): _load(run_dir / "evaluation" / f"{name}.json")
+                  for name in ("s08a_screen", "s08b_adapted", "s10", holdout_name, "ablation")
                   if (run_dir / "evaluation" / f"{name}.json").exists()}
     (final / "evaluation.json").write_text(json.dumps(evaluation, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     for src, dst in (("evaluation/robustness.json", "robustness.json"), ("lineage.json", "lineage.json")):

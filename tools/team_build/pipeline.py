@@ -30,12 +30,14 @@ from pathlib import Path
 from typing import Optional
 
 from champions_agent.config import (BUILD_ADAPT_MIN_BATTLES, BUILD_ADAPT_VALIDATE_MAX_CKPTS, BUILD_ADAPT_VALIDATE_N,
-                                    BUILD_EQUIV_EPS, BUILD_FOLD_EVAL, BUILD_FOLD_VALIDATE, BUILD_PICK_VARIANTS,
+                                    BUILD_EQUIV_EPS, BUILD_FINALIST_HOLDOUT_ALL, BUILD_FINALIST_MAX_SHARED,
+                                    BUILD_FINALISTS, BUILD_FOLD_EVAL, BUILD_FOLD_VALIDATE, BUILD_PICK_VARIANTS,
                                     BUILD_RACE_DEFAULT_MAX, BUILD_RACE_STEPS, BUILD_REFERENCE_FULL_ADAPT,
                                     BUILD_REFERENCE_PRODUCTION_VARIANT, BUILD_REPRO_GATE, BUILD_SCREEN_ADAPT_BATTLES,
                                     BUILD_SCREEN_MARGIN, BUILD_SCREEN_MAX, BUILD_SCREEN_STEPS, BUILD_SCREEN_VARIANTS)
 from tools.team_build import ablation as AB
 from tools.team_build import adapt as AD
+from tools.team_build import finalists as FN
 from tools.team_build import holdout as HO
 from tools.team_build import racing as R
 from tools.team_build import stress as ST
@@ -208,11 +210,15 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
                     stop_after: Optional[str] = None, s08b_seed_offset: int = 1, s11: bool = False,
                     validate_n: int = BUILD_ADAPT_VALIDATE_N, validate_max: int = BUILD_ADAPT_VALIDATE_MAX_CKPTS,
                     resume: bool = False, reference_full_adapt: bool = BUILD_REFERENCE_FULL_ADAPT,
-                    reference_production_variant: bool = BUILD_REFERENCE_PRODUCTION_VARIANT) -> dict:
+                    reference_production_variant: bool = BUILD_REFERENCE_PRODUCTION_VARIANT,
+                    finalists_k: int = BUILD_FINALISTS, finalist_max_shared: int = BUILD_FINALIST_MAX_SHARED,
+                    finalist_holdout_all: bool = BUILD_FINALIST_HOLDOUT_ALL) -> dict:
     """resume: 途中で落ちた run の続き。evaluation/ の S8a 結果 (cheap モデル・参照 variant・racing) と
     advisors/<cid>/adapt_result.json (完了した適応) をそのまま使い、無いものだけ実行する
     reference_full_adapt: 参照にも S7 と同じ適応を与え、fresh を参照の variant に加える (S7b)
-    reference_production_variant: 参照の variant に配布版 (本番) の選出モデルを加える"""
+    reference_production_variant: 参照の variant に配布版 (本番) の選出モデルを加える
+    finalists_k / finalist_max_shared / finalist_holdout_all: 方向性の違う最終候補を K 並び残し (共通メンバー ≤ max_shared)、
+    それぞれに S11/S11b/封印 holdout を行う (2026-09-17)。STRESS と ablation は 1 位だけ"""
     from champions_agent.agent.selection_model import GENERAL_MODEL_PATH
     log = lambda m: _log(run_dir, m)
 
@@ -253,7 +259,9 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
                             "validate_n": validate_n, "validate_max_ckpts": validate_max,
                             "s08b_seed_offset": s08b_seed_offset, "s11": s11, "stop_after": stop_after,
                             "reference_full_adapt": reference_full_adapt,
-                            "reference_production_variant": reference_production_variant}}
+                            "reference_production_variant": reference_production_variant,
+                            "finalists_k": finalists_k, "finalist_max_shared": finalist_max_shared,
+                            "finalist_holdout_all": finalist_holdout_all}}
     eval_dir = run_dir / "evaluation"
 
     # S8a-1: 全候補 + 参照を同じ予算で cheap adaptation
@@ -447,11 +455,13 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
         summary["result"] = "no_contender"
         _write_stage(run_dir, "summary", summary)
         return summary
-    winner = max(finalists, key=lambda cid: next((a["result"] or {}).get("mean") or -1 for a in res10["arms"] if a["arm_id"] == cid))
+    deltas10 = {a["arm_id"]: (a.get("result") or {}).get("mean") for a in res10["arms"]}
+    ranked = sorted(finalists, key=lambda cid: -(deltas10[cid] if deltas10.get(cid) is not None else -1.0))
+    winner = ranked[0]
     summary["winner"] = winner
     summary["winner_variant"] = chosen[winner]["variant"]
     log(f"S10 winner: {winner} variant={chosen[winner]['variant']} (finalists {finalists})")
-    s10_delta = next(((a.get("result") or {}).get("mean") for a in res10["arms"] if a["arm_id"] == winner), None)
+    s10_delta = deltas10.get(winner)
     s08b_delta = chosen[winner].get("delta")
     summary["repro_gate"] = {"s08b_delta": s08b_delta, "s10_delta": s10_delta,
                              "ok": repro_gate_ok(s08b_delta, s10_delta), "enabled": BUILD_REPRO_GATE}
@@ -461,67 +471,117 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
         _write_stage(run_dir, "summary", summary)
         return summary
 
-    # S11 (任意): 勝者の選出モデルを SEARCH + SELECTION で再学習 (variant が fresh のとき)。既定 off
-    win_arm = next(a for a in cands if a.arm_id == winner)
-    final_model = chosen[winner]["selection_model"]
-    final_pick = chosen[winner]["pick_policy"]
-    if s11 and chosen[winner]["variant"] == "fresh":
-        r11 = AD.adapt_selection(f"{winner}_final", win_arm.team_file, split, run_dir / "advisors", seed + 3,
-                                 min_battles=adapt_min, chunk=adapt_chunk, max_battles=adapt_max, log=log,
-                                 registry=registry, tiers=(("search", None), ("selection", None)))
-        final_model = r11.get("model") or final_model
-        _write_stage(run_dir, "s11_final_adapt", r11)
-    else:
-        log(f"S11: 省略 (s11={s11}, variant={chosen[winner]['variant']}) → S7 の検証済みモデルを最終モデルにする")
+    # 複数の方向性の最終候補 (2026-09-17 ユーザー決定): 再現性の門を通った候補から、既に選んだ候補との共通メンバーが
+    # finalist_max_shared 以下のものを Δ 順に finalists_k 並び。1 位はこれまでどおりの勝者。
+    # 以降の S11 (再学習) / S11b (行動 adapter) / S12 の封印 holdout は最終候補ごとに行い、STRESS と ablation は 1 位だけ
+    eligible = [cid for cid in ranked
+                if not BUILD_REPRO_GATE or repro_gate_ok(chosen[cid].get("delta"), deltas10.get(cid))]
+    sets_rows = json.loads((run_dir / "s06_sets.json").read_text(encoding="utf-8"))
+    members_by = {r.get("candidate_id"): list(r.get("members") or []) for r in sets_rows}
+    fam_doc = _load_json(run_dir / "s04_concepts.json") or {}
+    fam_by = {cid: FN.family_of(cid, fam_doc.get("families") or []) for cid in eligible}
+    picks = FN.pick_finalists(eligible, deltas10, members_by, fam_by, k=finalists_k, max_shared=finalist_max_shared)
+    summary["finalists"] = picks
+    summary["finalists_skipped_similar"] = FN.skipped_as_similar(eligible, picks, members_by, finalist_max_shared)
+    log(f"最終候補 (方向性の違う並び、共通メンバー ≤ {finalist_max_shared}): "
+        + " / ".join(f"{p['rank']}. {p['candidate_id']} [{p['direction_ja']}] S10 {(p['delta_s10'] or 0):+.3f}" for p in picks)
+        + (f" (近い方向で外れた: {[s['candidate_id'] for s in summary['finalists_skipped_similar']]})"
+           if summary["finalists_skipped_similar"] else ""))
 
-    # S11b: 行動方策 adapter (任意、full プロファイル既定): 勝者チーム固定で短く微調整し、基底との対応差で採否
-    final_models_dir = models_dir
-    if adapt_action:
-        ra = AD.adapt_action(winner, win_arm.team_file, models_dir, run_dir / "advisors", split, seed + 7,
-                             chunk_steps=action_steps, eval_battles=action_eval, log=log, registry=registry)
-        final_models_dir = ra.get("models_dir") or models_dir
-        summary["action_adapter"] = {k: ra.get(k) for k in ("use_adapted", "reason", "elapsed_s", "artifact_id")}
-        _write_stage(run_dir, "s11b_action_adapt", ra)
-        log(f"S11b action adapter: use_adapted={ra.get('use_adapted')} ({ra.get('reason')})")
-
-    # S12: 封印 HOLDOUT + STRESS + ablation
-    final_arm = R.Arm(winner, win_arm.team_file, final_model, final_models_dir, pick_policy=final_pick)
-    hold = HO.final_holdout(final_arm, ref_arm(), split, doc["sealed_id"], run_dir, seed + 4,
-                            candidate_key=f"{winner}:{Path(final_model or '').name}", steps=steps,
-                            max_battles=max_battles, log=log, parallel=min(2, parallel))
-    summary["holdout"] = hold
-    rob = ST.run_stress(final_arm, ref_arm(), split, run_dir, seed + 5, n=stress_n, log=log, parallel=parallel)
-    summary["robustness_worst"] = rob.get("worst_sensitivity_candidate")
+    # S11 / S11b / S12 (封印 holdout) を最終候補ごとに。STRESS と ablation は 1 位だけ (費用)
     pop = ST.policy_population(run_dir / "advisors" / "population")
-    # ablation の A1: adapter を採用したらそれ (action 効果 = adapter − 基底)、無ければ前世代のチェックポイント
-    alt_dir = final_models_dir if final_models_dir != models_dir else pop.get("prev")
-    abl = AB.ablation_grid(win_arm.team_file, ref.team_file, final_model, ref_best.selection_model, models_dir,
-                           alt_dir, split, run_dir, seed + 6, n=ablation_n, log=log, parallel=parallel,
-                           ref_pick_policy=ref_best.pick_policy)
-    summary["ablation"] = abl.get("effects")
-
-    # S13: Package
-    sets = json.loads((run_dir / "s06_sets.json").read_text(encoding="utf-8"))
-    species = next((r["members"] for r in sets if r.get("candidate_id") == winner), [])
-    summary["result"] = hold.get("verdict")
+    pkg, hold = None, None
+    for p in picks:
+        cid = p["candidate_id"]
+        is_top = cid == winner
+        tag = "" if is_top else f"_{cid}"
+        arm_c = next(a for a in cands if a.arm_id == cid)
+        final_model = chosen[cid]["selection_model"]
+        final_pick = chosen[cid]["pick_policy"]
+        # S11 (任意): 選出モデルを SEARCH + SELECTION で再学習 (variant が fresh のとき)。既定 off
+        if s11 and chosen[cid]["variant"] == "fresh":
+            r11 = AD.adapt_selection(f"{cid}_final", arm_c.team_file, split, run_dir / "advisors", seed + 3,
+                                     min_battles=adapt_min, chunk=adapt_chunk, max_battles=adapt_max, log=log,
+                                     registry=registry, tiers=(("search", None), ("selection", None)))
+            final_model = r11.get("model") or final_model
+            _write_stage(run_dir, f"s11_final_adapt{tag}", r11)
+        elif is_top:
+            log(f"S11: 省略 (s11={s11}, variant={chosen[cid]['variant']}) → S7 の検証済みモデルを最終モデルにする")
+        # S11b: 行動方策 adapter (構築と連動した学習): その並びに固定して短く微調整し、基底との対応差で採否
+        final_models_dir = models_dir
+        if adapt_action:
+            ra = AD.adapt_action(cid, arm_c.team_file, models_dir, run_dir / "advisors", split, seed + 7,
+                                 chunk_steps=action_steps, eval_battles=action_eval, log=log, registry=registry)
+            final_models_dir = ra.get("models_dir") or models_dir
+            p["action_adapter"] = {k: ra.get(k) for k in ("use_adapted", "reason", "elapsed_s", "artifact_id")}
+            if is_top:
+                summary["action_adapter"] = p["action_adapter"]
+            _write_stage(run_dir, f"s11b_action_adapt{tag}", ra)
+            log(f"S11b action adapter [{cid}]: use_adapted={ra.get('use_adapted')} ({ra.get('reason')})")
+        final_arm = R.Arm(cid, arm_c.team_file, final_model, final_models_dir, pick_policy=final_pick)
+        h = None
+        if is_top or finalist_holdout_all:
+            h = HO.final_holdout(final_arm, ref_arm(), split, doc["sealed_id"], run_dir, seed + 4,
+                                 candidate_key=f"{cid}:{Path(final_model or '').name}", steps=steps,
+                                 max_battles=max_battles, log=log, parallel=min(2, parallel),
+                                 stage=f"s12_holdout{tag}")
+        p.update({"holdout": h, "variant": chosen[cid]["variant"], "pick_policy": final_pick,
+                  "selection_model": final_model, "models_dir": final_models_dir,
+                  "delta_s08b": chosen[cid].get("delta")})
+        if is_top:
+            hold = h
+            summary["holdout"] = hold
+            rob = ST.run_stress(final_arm, ref_arm(), split, run_dir, seed + 5, n=stress_n, log=log, parallel=parallel)
+            summary["robustness_worst"] = rob.get("worst_sensitivity_candidate")
+            # ablation の A1: adapter を採用したらそれ (action 効果 = adapter − 基底)、無ければ前世代のチェックポイント
+            alt_dir = final_models_dir if final_models_dir != models_dir else pop.get("prev")
+            abl = AB.ablation_grid(arm_c.team_file, ref.team_file, final_model, ref_best.selection_model, models_dir,
+                                   alt_dir, split, run_dir, seed + 6, n=ablation_n, log=log, parallel=parallel,
+                                   ref_pick_policy=ref_best.pick_policy)
+            summary["ablation"] = abl.get("effects")
+        # S13: Package (1 位は final/、他の最終候補は final/alternatives/<cid>/)
+        species = members_by.get(cid, [])
+        out_dir = (run_dir / "final") if is_top else (run_dir / "final" / "alternatives" / cid)
+        pk = build_package(run_dir, cid, arm_c.team_file, Path(final_model) if final_model else None, species,
+                           registry=None, out_dir=out_dir, holdout_name=f"s12_holdout{tag}",
+                           extra_manifest={"models_dir": final_models_dir, "base_models_dir": models_dir, "seed": seed,
+                                           "pick_variant": chosen[cid]["variant"], "pick_policy": final_pick,
+                                           "reference_variant": ref_variant, "finalist_rank": p["rank"],
+                                           "direction": p.get("direction")})
+        p["package_dir"] = pk.get("final_dir")
+        if is_top:
+            pkg = pk
+        summary["finalists"] = picks
+        _write_stage(run_dir, "summary", summary)
+    summary["result"] = (hold or {}).get("verdict")
     _write_stage(run_dir, "summary", summary)
-    pkg = build_package(run_dir, winner, win_arm.team_file, Path(final_model) if final_model else None, species,
-                        registry=None, extra_manifest={"models_dir": final_models_dir, "base_models_dir": models_dir,
-                                                       "seed": seed, "pick_variant": chosen[winner]["variant"],
-                                                       "pick_policy": final_pick,
-                                                       "reference_variant": ref_variant})
-    # 記事 (表示専用): LLM があれば Sonnet、無ければテンプレート。registry 登録は記事を書いてから (Package の内容を固定)
+    # 記事 (表示専用): 1 位は LLM があれば Sonnet、他の最終候補はテンプレート (比較表つき)。registry 登録は記事を書いてから
     try:
         from tools.team_build.report import write_report
         write_report(run_dir, winner, provider=llm_provider)
+        for p in picks[1:]:
+            if p.get("package_dir"):
+                write_report(run_dir, p["candidate_id"], provider=None,
+                             out_path=Path(p["package_dir"]) / "build_report.md")
     except Exception as e:
         log(f"S13 report error: {e!r}")
     if registry is not None:
-        row = registry.register("package", run_dir / "final",
-                                meta={"candidate_id": winner, "species": list(species), "holdout": hold},
-                                run_id=run_dir.name, status="candidate")
-        pkg["artifact_id"] = row["id"]
+        for p in picks:
+            if not p.get("package_dir"):
+                continue
+            try:
+                row = registry.register("package", Path(p["package_dir"]),
+                                        meta={"candidate_id": p["candidate_id"], "species": members_by.get(p["candidate_id"], []),
+                                              "holdout": p.get("holdout"), "finalist_rank": p["rank"],
+                                              "direction_ja": p.get("direction_ja")},
+                                        run_id=run_dir.name, status="candidate")
+                p["artifact_id"] = row["id"]
+                if p["candidate_id"] == winner and pkg is not None:
+                    pkg["artifact_id"] = row["id"]
+            except Exception as e:
+                log(f"registry error [{p['candidate_id']}]: {e!r}")
     summary["package"] = pkg
+    summary["finalists"] = picks
     _write_stage(run_dir, "summary", summary)
-    log(f"S13 package: {pkg.get('artifact_id')} verdict={hold.get('verdict')}")
+    log(f"S13 package: {(pkg or {}).get('artifact_id')} verdict={(hold or {}).get('verdict')} 最終候補 {len(picks)} 並び")
     return summary

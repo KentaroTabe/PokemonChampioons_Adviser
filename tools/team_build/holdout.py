@@ -31,9 +31,10 @@ def holdout_used_before(sealed_id: str, candidate_key: str) -> list:
 def final_holdout(candidate: R.Arm, reference: R.Arm, split_file: Path, sealed_id: str, run_dir: Path,
                   seed: int, candidate_key: str, steps: tuple = BUILD_RACE_STEPS,
                   max_battles: int = BUILD_RACE_DEFAULT_MAX, eps: float = BUILD_EQUIV_EPS,
-                  log=print, parallel: int = 2) -> dict:
+                  log=print, parallel: int = 2, stage: str = "s12_holdout") -> dict:
     """戻り値 (process 向け): {"verdict": PASS|PASS_EQUIVALENT|FAIL|INCONCLUSIVE, "delta", "ci", "n", "sealed_id"}.
-    詳細は run_dir/sealed/holdout_<sealed_id>/ に封印"""
+    詳細は run_dir/sealed/holdout_<sealed_id>/ に封印。stage: 要約の書き先 evaluation/<stage>.json (1 位は s12_holdout、
+    他の最終候補は s12_holdout_<cid>。2026-09-17 複数の最終候補)"""
     prior = holdout_used_before(sealed_id, candidate_key)
     if prior:
         log(f"[holdout] ⚠ 同じ封印 holdout {sealed_id} を同じ候補 {candidate_key} に再利用 (前回: {prior[-1].get('at')})。"
@@ -41,7 +42,7 @@ def final_holdout(candidate: R.Arm, reference: R.Arm, split_file: Path, sealed_i
     sealed_dir = run_dir / "sealed" / f"holdout_{sealed_id}"
     sealed_dir.mkdir(parents=True, exist_ok=True)
     # 封印 holdout は 1 段目の improved で止めず上限まで回す (BUILD_HOLDOUT_RUN_TO_MAX、2026-09-10)
-    res = R.race([candidate], reference, split_file, "holdout", seed, sealed_dir, stage="s12_holdout",
+    res = R.race([candidate], reference, split_file, "holdout", seed, sealed_dir, stage=stage,
                  steps=steps, max_battles=max_battles, eps=eps, parallel=parallel, log=lambda m: None,
                  compare_to_best=False, run_to_max=BUILD_HOLDOUT_RUN_TO_MAX)
     arm = res["arms"][0]
@@ -51,7 +52,7 @@ def final_holdout(candidate: R.Arm, reference: R.Arm, split_file: Path, sealed_i
                "n": arm.get("n_done"), "sealed_id": sealed_id, "eps": eps,
                "note": "詳細 (相手別・敗因・記録) は sealed/ に封印。この holdout で同じ候補を修正→再評価しない"}
     (run_dir / "evaluation").mkdir(parents=True, exist_ok=True)
-    (run_dir / "evaluation" / "s12_holdout.json").write_text(
+    (run_dir / "evaluation" / f"{stage}.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     USAGE_LOG.parent.mkdir(parents=True, exist_ok=True)
     with USAGE_LOG.open("a", encoding="utf-8") as f:

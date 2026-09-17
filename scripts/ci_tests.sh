@@ -52,6 +52,7 @@ TESTS=(
   test_team_build_pick_ablation
   test_team_build_pipeline
   test_team_build_ablation
+  test_team_build_finalists
   test_ports_lib
   test_battle_end_signals
   test_my_roster_resolution

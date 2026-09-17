@@ -653,6 +653,8 @@ def main() -> None:
                     help="S11 (勝者の SEARCH+SELECTION 再学習)。既定 off = S7 の検証済み checkpoint を最終モデルにする")
     ap.add_argument("--reference-adapt", choices=["on", "off"], default=None,
                     help="S7b: 参照にも S7 と同じ適応を与え fresh を参照の variant に加える (既定 config BUILD_REFERENCE_FULL_ADAPT)")
+    ap.add_argument("--finalists", type=int, default=None,
+                    help="方向性の違う最終候補の数 (既定 config BUILD_FINALISTS)。それぞれに S11/S11b/封印 holdout を行う")
     ap.add_argument("--resume", action="store_true",
                     help="途中で落ちた run の続き: S8a の結果と完了済みの適応 (adapt_result.json) を再利用する")
     ap.add_argument("--validate-n", type=int, default=None, help="S7 の checkpoint 検証の戦数 (既定 config)")
@@ -873,7 +875,7 @@ def _measure(run_dir: Path, args) -> None:
         subset += [i for i in imported if i not in subset]
     if subset is not None:
         log(run_dir, f"measure subset: {len(subset)} チーム {subset}")
-    from champions_agent.config import (BUILD_ADAPT_VALIDATE_MAX_CKPTS, BUILD_ADAPT_VALIDATE_N,
+    from champions_agent.config import (BUILD_ADAPT_VALIDATE_MAX_CKPTS, BUILD_ADAPT_VALIDATE_N, BUILD_FINALISTS,
                                         BUILD_REFERENCE_FULL_ADAPT, BUILD_SCREEN_ADAPT_BATTLES, BUILD_SCREEN_MARGIN,
                                         BUILD_SCREEN_MAX, BUILD_SCREEN_STEPS)
     pm = PROFILE_MEASURE.get(getattr(args, "profile", "full"), PROFILE_MEASURE["full"])
@@ -890,7 +892,10 @@ def _measure(run_dir: Path, args) -> None:
                     adapt_max=args.adapt_max or AD.MAX_BATTLES, stress_n=args.stress_n or ST.STRESS_BATTLES,
                     ablation_n=args.ablation_n or AB.ABLATION_BATTLES, parallel=args.parallel or R.PARALLEL,
                     repairs=args.repairs, max_candidates=args.max_candidates, registry=reg, llm_provider=provider,
-                    adapt_action=(args.adapt_action == "on" or (args.adapt_action == "auto" and args.profile == "full")),
+                    # 行動 adapter (構築と連動した学習): auto は medium 以上で有効 (2026-09-17 常時学習の停止で CPU が空いた)
+                    adapt_action=(args.adapt_action == "on"
+                                  or (args.adapt_action == "auto" and args.profile in ("medium", "full"))),
+                    finalists_k=args.finalists or BUILD_FINALISTS,
                     action_steps=args.action_steps or AD.ACTION_CHUNK_STEPS,
                     action_eval=args.action_eval or AD.ACTION_EVAL_BATTLES,
                     screen_adapt=args.screen_adapt or BUILD_SCREEN_ADAPT_BATTLES,
