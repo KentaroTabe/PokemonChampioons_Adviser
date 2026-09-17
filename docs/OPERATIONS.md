@@ -47,7 +47,14 @@ nohup node pokemon-showdown/pokemon-showdown start 8100 --no-security \
   > logs/showdown_nohup.log 2>&1 & disown
 ```
 
-### 4. 連続学習ループ
+### 4. 学習ループ (2026-09-17 から必要時のみ)
+
+**常時学習は 2026-09-17 20:37 に停止した (ユーザー決定)。** 6 日間・約 330 サイクルでベンチが横ばい
+(最良記録 9/11 から更新なし) で収束と判断し、CPU を構築の測定に回す。`config/training.env` の
+`TRAINING_MODE=on_demand` により、`start_all_nohup.sh` と `end_connection_test.sh` は学習を自動起動・自動再開しない。
+回すのは (1) レギュレーション/使用率の大きな変化、(2) 接続テスト後の実戦バンク更新、(3) 使用パーティへの特化微調整、
+(4) 構築提案と連動した学習 (複数方向の構築それぞれへの適応) のときで、`start_training.sh` で登録し、終わったら
+`stop_training.sh` で外す。再開時はベンチ軸を最新スナップショットへ張り替え、前後の値を記録する。
 
 launchd (`com.championsadviser.train`, KeepAlive) で常駐させる。起動・停止は
 スクリプト経由で行う (launchctl 直叩きは 2026-09-02 に Showdown を巻き添えにした):

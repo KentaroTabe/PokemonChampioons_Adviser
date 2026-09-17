@@ -2,6 +2,13 @@
  "_comment": "学習に影響する変更の記録。watch_training が推移グラフに赤い縦線として描画し、履歴表示にも差し込む。新しい変更を入れたら追記すること (at はローカル時刻 'YYYY-MM-DD HH:MM')。kind: net=ネット構成 / reward=報酬 / opponent=相手構成 / env=環境仕様 / eval=評価方法 / fix=不具合修正",
  "changes": [
   {
+   "at": "2026-09-17 20:37",
+   "kind": "env",
+   "label": "常時学習を停止 (ユーザー決定): 以後は必要なときだけ回す (on_demand)",
+   "detail": "根拠: 9/11 03:29〜03:49 (M-C リセット直後の最初の 5 サイクル) に立った最良記録 balance 0.564 / offense 0.620 / cycle 0.560 を、6 日間・約 330 サイクル (約 5,000 万ステップ) で一度も更新せず、直近の 250 戦平均は balance 0.52〜0.55 / offense 0.52〜0.58 / cycle 0.44〜0.54 でリセット時と同じか下 (学習率 3e-4 固定、approx_kl 0.057 で方策は動くが評価は動かない頭打ち)。常時学習は CPU の半分近くを使い、構築の測定を 2〜3 倍遅くしていた。停止手順: scripts/pin_models.sh で停止時点を logs/pinned_models/20260917_203746 に固定 → scripts/stop_training.sh (launchd bootout + TERM。cycle 189 の offense/cycle を途中で切ったが損失は最大 2 万ステップ)。Showdown 8100 は残す。config/training.env TRAINING_MODE=on_demand で start_all_nohup.sh / end_connection_test.sh の自動起動・自動再開を止めた (再開は scripts/start_training.sh)。今後回すのは: レギュレーション/使用率の大きな変化 (新種の解禁・型の大量回転)、接続テスト後の実戦バンクの更新、使用パーティへの特化微調整 (選出モデル refresh_selection_myteam / 行動 adapter)、構築提案と連動した学習 (複数の方向性の構築それぞれに適応)。ベンチ軸 (META_PIN=24、M-B の型) は M-C の学習を映さないので、再開時に最新スナップショットへ張り替えて前後の値を両方記録する (未実施)",
+   "isolated": false
+  },
+  {
    "at": "2026-09-13 18:13",
    "kind": "fix",
    "label": "学習停止 (9/13 06:22〜18:20、13 サイクル) の修正: 生成チームの技を champions mod の learnset で検査",

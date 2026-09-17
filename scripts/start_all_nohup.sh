@@ -44,7 +44,13 @@ if lsof -nP -iTCP:8100 -sTCP:LISTEN >/dev/null 2>&1; then echo "Showdown(8100): 
   echo "Showdown(8100): 起動"
 fi
 
-if pgrep -f train_forever >/dev/null; then echo "学習ループ: 稼働中"; else
+# 学習ループは config/training.env の TRAINING_MODE が continuous のときだけ自動起動する
+# (2026-09-17: 常時学習は停止。必要なときだけ scripts/start_training.sh で回す)
+TRAINING_MODE=continuous
+[ -f config/training.env ] && . config/training.env
+if pgrep -f train_forever >/dev/null; then echo "学習ループ: 稼働中"
+elif [ "$TRAINING_MODE" != "continuous" ]; then echo "学習ループ: 停止中 (TRAINING_MODE=$TRAINING_MODE、自動起動しない)"
+else
   nohup bash champions_agent/scripts/train_forever.sh \
     > champions_agent/train/logs/train_forever_nohup.log 2>&1 & disown
   echo "学習ループ: 起動"

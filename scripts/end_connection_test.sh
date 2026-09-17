@@ -24,9 +24,14 @@ pkill -f "uvicorn server:app_asgi" 2>/dev/null && echo "アドバイザー($ADVI
 pkill -f "http.server $FRONTEND_PORT" 2>/dev/null && echo "フロントエンド($FRONTEND_PORT): 停止" \
   || echo "フロントエンド($FRONTEND_PORT): 未起動"
 
-# 学習ループの確認 (テスト中も止めていないため、通常はそのまま稼働中)
+# 学習ループの確認。TRAINING_MODE=continuous のときだけ止まっていれば再開する
+# (2026-09-17: 常時学習は停止 (on_demand)。必要なときだけ scripts/start_training.sh で回す)
+TRAINING_MODE=continuous
+[ -f config/training.env ] && . config/training.env
 if pgrep -f train_forever >/dev/null; then
   echo "学習ループ: 稼働中 (テスト中も継続)"
+elif [ "$TRAINING_MODE" != "continuous" ]; then
+  echo "学習ループ: 停止中 (TRAINING_MODE=$TRAINING_MODE、自動再開しない)"
 else
   launchctl load -w ~/Library/LaunchAgents/com.championsadviser.train.plist 2>/dev/null
   sleep 3
