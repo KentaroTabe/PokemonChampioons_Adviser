@@ -175,7 +175,7 @@ def _meta_move_ids(species: str) -> list:
         except Exception:
             pass
     key = _squash(species)
-    for k in (key, key.removesuffix("megay").removesuffix("megax")
+    for k in (key, key.removesuffix("megay").removesuffix("megax").removesuffix("megaz")
               .removesuffix("mega")):
         if k in _meta_moves_cache:
             return _meta_moves_cache[k]

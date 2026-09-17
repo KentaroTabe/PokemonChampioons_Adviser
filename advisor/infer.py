@@ -89,7 +89,7 @@ def species_ja_name(species_id: str) -> str:
     base = _base_species_id(species_id)
     if base != species_id and base in _ID2JA:
         suffix = species_id[len(base):]
-        xy = {"megax": "X", "megay": "Y"}.get(suffix, "")
+        xy = {"megax": "X", "megay": "Y", "megaz": "Z"}.get(suffix, "")
         return f"メガ{_ID2JA[base]}{xy}"
     return _ID2JA.get(species_id, species_id)
 
@@ -100,7 +100,7 @@ def _slug(name: str) -> str:
 
 def _base_species_id(species_id: str) -> str:
     """メガ形態は選出画面ではベース種として表示されるため合算用に丸める"""
-    for suf in ("megax", "megay", "mega"):
+    for suf in ("megax", "megay", "megaz", "mega"):
         if species_id.endswith(suf) and len(species_id) > len(suf) + 2:
             return species_id[: -len(suf)]
     return species_id

@@ -153,16 +153,15 @@ def _my_views(resolver, party_ja: list | None = None) -> list:
         # あるが、1v1対面の実力はメガ前提が実態に近い。ライチュウ等の
         # メガ進化前の種族値で過小評価される問題の対策)
         item_ja = b.get("item_ja") or ""
-        if item_ja.endswith(("ナイト", "ナイトX", "ナイトY")):
-            suffix = "x" if item_ja.endswith("X") else \
-                ("y" if item_ja.endswith("Y") else "")
-            cands = [base_sid + "mega" + suffix] if suffix else \
-                [base_sid + "mega", base_sid + "megax", base_sid + "megay"]
-            for cand in cands:   # 表記ゆれ (X/Y未記載の登録) はX優先で補完
-                msp = get_dex().species(cand)
-                if msp:
-                    sid, sp = cand, msp
-                    break
+        if item_ja.endswith(("ナイト", "ナイトX", "ナイトY", "ナイトZ")):
+            # 石 → メガ後のフォルムは requiredItem の表で引く (Z 石は表引きでないと通常メガに倒れる)。
+            # 表記ゆれ (X/Y 未記載の登録) は stone_form_of が無印 → X の順で補完する
+            from advisor.gimmick import stone_form_of
+            r_item = resolver.resolve(item_ja, "items", cutoff=0.9)
+            cand = stone_form_of(base_sid, r_item[1] if r_item else None, item_ja)
+            msp = get_dex().species(cand) if cand else None
+            if msp:
+                sid, sp = cand, msp
         view = MonView(species_id=sid, name_ja=ja, types=sp["types"],
                        base=sp["baseStats"], ev=b["ev"], nature=b["nature"])
         moves = []

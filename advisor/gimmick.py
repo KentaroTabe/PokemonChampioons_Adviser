@@ -56,6 +56,30 @@ def is_mega_form(species_id: str) -> bool:
     return _toid(species_id) in set(stone_table().values())
 
 
+def stone_form_of(species_id: str, item_id: Optional[str] = None, item_ja: Optional[str] = None) -> Optional[str]:
+    """基本種 + メガ石 → メガ後のフォルム id (その種がメガシンカできなければ None)。
+    石の id が分かれば requiredItem の表 (stone_table) で引く。分からなければ名前の末尾 (X / Y / Z) で推定し、
+    末尾が無ければ無印のメガ → X の順。
+    2026-09-18: 末尾 x/y だけを見る推定が各所にあり、Z 石 (ガブリアスナイトZ 等、M-C で追加) が通常のメガに倒れていた
+    (脅威の評価・自分の型の被覆・助言のメガ後比較が別フォルムの種族値になる)。表引きを正にする"""
+    base = _toid(species_id)
+    forms = mega_forms(base)
+    if not forms:
+        return None
+    if item_id:
+        form = stone_table().get(_toid(item_id))
+        if form in forms:
+            return form
+    text = (item_ja or item_id or "").strip()
+    suffix = text[-1].lower() if text and text[-1] in ("X", "Y", "Z", "x", "y", "z") else ""
+    if suffix and base + "mega" + suffix in forms:
+        return base + "mega" + suffix
+    for cand in (base + "mega", base + "megax", base + "megay"):
+        if cand in forms:
+            return cand
+    return forms[0]
+
+
 @lru_cache(maxsize=4)
 def _stone_usage(snapshot_id: Optional[int]) -> dict:
     """{基本種 id: {石 id: 使用率%}} (使用率 DB)。読めなければ空"""

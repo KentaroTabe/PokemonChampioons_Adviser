@@ -234,14 +234,13 @@ def view_from_set(species_id: str, set_row: dict, level: int = 50) -> tuple:
     item = (set_row.get("item") or set_row.get("item_name") or "") or None
     stones = _mega_stone_ids()
     if item in stones:
-        # X/Y のメガ石 (…itex / …itey / …nitex / …nitey) は対応するフォルムへ (ライチュウナイトY → raichumegay。
-        # 以前は先に見つかった megax に倒れていた)
-        suffix = item[-1] if item[-1] in ("x", "y") else ""
-        cands = [sid + "mega" + suffix] if suffix else [sid + "mega", sid + "megax", sid + "megay"]
-        for cand in cands:
-            if dex.species(cand):
-                sid = cand
-                break
+        # メガ石 → メガ後のフォルムは requiredItem の表で引く (advisor.gimmick.stone_form_of)。
+        # ライチュウナイトY → raichumegay、ガブリアスナイトZ → garchompmegaz (2026-09-18: 末尾 x/y だけの推定では
+        # Z 石が通常のメガに倒れていた)
+        from advisor.gimmick import stone_form_of
+        form = stone_form_of(sid, item)
+        if form and dex.species(form):
+            sid = form
     sp = dex.species(sid) or dex.species(species_id)
     if sp is None:
         raise KeyError(species_id)

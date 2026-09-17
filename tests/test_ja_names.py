@@ -38,6 +38,7 @@ def test_form_names():
         "ogerponwellspringmask": "オーガポン(いどのめん)",
         "urshifusinglestrike": "ウーラオス(いちげき)",
         "basculegionmale": "イダイトウ(オス)",
+        "garchompmegaz": "メガガブリアスZ",
         "landorustherian": "ランドロス(れいじゅう)",
         "swampertmega": "メガラグラージ",
         "charizardmegay": "メガリザードンY",

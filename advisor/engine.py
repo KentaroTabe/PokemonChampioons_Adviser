@@ -735,7 +735,7 @@ def evaluate(state: dict, resolver=None) -> dict:
     mega_note = ""
     if (not state.get("mega_used", {}).get("player")
             and (my_p.get("item_id") == "megastone"
-                 or (my_p.get("item_ja") or "").endswith(("ナイトX", "ナイトY", "ナイト")))):
+                 or (my_p.get("item_ja") or "").endswith(("ナイトX", "ナイトY", "ナイトZ", "ナイト")))):
         mega_note = "メガシンカが可能です (種族値+100)。攻撃するターンにメガシンカを推奨。"
         try:
             mega_note = _mega_timing_note(my_p, my_view, opp_view, my_field,
@@ -949,10 +949,20 @@ def _mega_timing_note(my_p, my_view, opp_view, my_field, resolver):
         return None
     dex = get_dex()
     base_id = my_view.species_id
-    # メガフォルムの解決 (X/Yはメガストーン名で判別)
+    # メガフォルムの解決: 石の id が分かれば requiredItem の表で引く (Z 石を通常メガに倒さない)。分からなければ
+    # メガストーン名の末尾 (X/Y/Z) で推定する
     item_ja = (my_p.get("item_ja") or "")
-    suffix = "x" if item_ja.endswith("X") else ("y" if item_ja.endswith("Y") else "")
-    mega_sp = dex.species(base_id + "mega" + suffix) or dex.species(base_id + "mega")
+    from advisor.gimmick import stone_form_of
+    r_item = None
+    try:
+        r_item = resolver.resolve(item_ja, "items", cutoff=0.9) if (resolver is not None and item_ja) else None
+    except Exception:
+        r_item = None
+    form = stone_form_of(base_id, r_item[1] if r_item else my_p.get("item_id"), item_ja)
+    mega_sp = dex.species(form) if form else None
+    if mega_sp is None:
+        suffix = "x" if item_ja.endswith("X") else ("y" if item_ja.endswith("Y") else ("z" if item_ja.endswith("Z") else ""))
+        mega_sp = dex.species(base_id + "mega" + suffix) or dex.species(base_id + "mega")
     if mega_sp is None:
         return None
     from dataclasses import replace as _replace

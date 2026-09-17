@@ -54,7 +54,26 @@ def test_mega_view_and_mixture():
     print("test_mega_view_and_mixture OK")
 
 
+def test_stone_form_of():
+    """石 → メガ後のフォルム: id は requiredItem の表、名前は末尾 X/Y/Z。Z 石 (M-C) を通常メガに倒さない (2026-09-18)"""
+    from advisor.infer import _base_species_id
+    assert "garchompmegaz" in G.mega_forms("garchomp") and "garchompmega" in G.mega_forms("garchomp")
+    assert G.stone_form_of("garchomp", "garchompitez") == "garchompmegaz"
+    assert G.stone_form_of("garchomp", "garchompite") == "garchompmega"
+    assert G.stone_form_of("garchomp", None, "ガブリアスナイトZ") == "garchompmegaz"
+    assert G.stone_form_of("garchomp", None, "ガブリアスナイト") == "garchompmega"
+    assert G.stone_form_of("lucario", "lucarionitez") == "lucariomegaz" and G.stone_form_of("absol", "absolitez") == "absolmegaz"
+    assert G.stone_form_of("charizard", None, "リザードナイトY") == "charizardmegay"
+    assert G.stone_form_of("charizard", "charizarditex", "リザードナイトY") == "charizardmegax"   # id が分かれば id を優先
+    assert G.stone_form_of("charizard", None, "リザードナイト") == "charizardmegax"           # 無印: 無印のメガが無ければ X
+    assert G.stone_form_of("charizard", "garchompitez") == "charizardmegax"                    # 他種の石は名前の推定に落ちる
+    assert G.stone_form_of("mimikyu", "focussash") is None and G.stone_form_of("mimikyu", None, "ミミッキュナイト") is None
+    assert _base_species_id("garchompmegaz") == "garchomp" and _base_species_id("raichumegay") == "raichu"
+    print("test_stone_form_of OK")
+
+
 if __name__ == "__main__":
     test_forms_and_priors()
     test_expected_mega_overrides()
     test_mega_view_and_mixture()
+    test_stone_form_of()

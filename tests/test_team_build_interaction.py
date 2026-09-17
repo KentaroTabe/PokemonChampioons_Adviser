@@ -75,6 +75,19 @@ def test_mega_stone_xy_maps_to_form():
     print("test_mega_stone_xy_maps_to_form OK")
 
 
+def test_mega_stone_z_maps_to_form():
+    """Z 石 (M-C で追加: ガブリアスナイトZ 等) は requiredItem の表で Z フォルムへ。2026-09-18 まで末尾 x/y だけの推定で
+    通常のメガ (garchompmega、A170 S92) に倒れ、脅威 (使用率 1 位の代表型が Z 石) の評価が別の姿になっていた"""
+    z, _ = I.view_from_set("garchomp", _set("garchompitez", "jolly", "2/32/0/0/0/32", ["earthquake", "dracometeor"]))
+    assert z.species_id == "garchompmegaz", z.species_id
+    assert z.base["spa"] == 141 and z.base["spe"] == 151 and z.types == ["Dragon"], (z.base, z.types)
+    plain, _ = I.view_from_set("garchomp", _set("garchompite", "jolly", "2/32/0/0/0/32", ["earthquake"]))
+    assert plain.species_id == "garchompmega" and plain.base["atk"] == 170, (plain.species_id, plain.base)
+    lz, _ = I.view_from_set("lucario", _set("lucarionitez", "timid", "2/0/0/32/0/32", ["aurasphere"]))
+    assert lz.species_id == "lucariomegaz" and lz.base["spa"] == 164, (lz.species_id, lz.base)
+    print("test_mega_stone_z_maps_to_form OK")
+
+
 def test_mega_ability_and_duel_field():
     """メガ石の型はメガ後の特性で評価し (ひでり/ちからもち)、自分の特性で張れる天候/フィールドを対面の場にする"""
     from dataclasses import replace
@@ -130,3 +143,4 @@ if __name__ == "__main__":
     test_mega_ability_and_duel_field()
     test_field_override_and_resolve()
     test_mega_stone_xy_maps_to_form()
+    test_mega_stone_z_maps_to_form()

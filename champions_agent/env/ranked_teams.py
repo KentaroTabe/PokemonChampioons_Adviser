@@ -155,7 +155,7 @@ def _to_team_text(t: dict, meta: dict, team_size: int, move_pool: dict | None = 
         meta_row = meta.get(sid)
         if meta_row is None:
             # メガ形態ページの構成を参照できる場合がある
-            for cand in (sid + "mega", sid + "megax", sid + "megay"):
+            for cand in (sid + "mega", sid + "megax", sid + "megay", sid + "megaz"):
                 if cand in meta:
                     meta_row = meta[cand]
                     break

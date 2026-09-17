@@ -269,7 +269,7 @@ def _legal_item_ids() -> set:
 
 
 def _sanitize_species(name: str) -> str:
-    for suf in ("megax", "megay", "mega"):
+    for suf in ("megax", "megay", "megaz", "mega"):
         if name.endswith(suf) and len(name) > len(suf) + 2:
             return name[: -len(suf)]
     return name

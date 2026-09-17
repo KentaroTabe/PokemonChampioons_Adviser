@@ -51,10 +51,13 @@ def log(run_dir: Path, msg: str) -> None:
 
 
 def mega_capable_ids(owned: list) -> set:
-    """メガ石を持てる所持種 (図鑑に <id>mega/megax/megay がある)"""
+    """メガ石を持てる所持種 (champions_dex の requiredItem の表 (advisor.gimmick.mega_forms) にメガ後のフォルムがある。
+    無ければ図鑑の <id>mega/megax/megay/megaz で補う)"""
     from advisor.dex import get_dex
+    from advisor.gimmick import mega_forms
     dex = get_dex()
-    return {s for s in owned if any(dex.species(s + suf) for suf in ("mega", "megax", "megay"))}
+    return {s for s in owned
+            if mega_forms(s) or any(dex.species(s + suf) for suf in ("mega", "megax", "megay", "megaz"))}
 
 
 def stage_s0(run_dir: Path, spec: BuildSpec, legal: set) -> BuildSpec:
