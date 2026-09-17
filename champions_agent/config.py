@@ -346,6 +346,14 @@ PARTY_IMPROVE_LOSS_WEIGHT = 1.0
 PARTY_IMPROVE_MEASURE_NEIGHBORS = 3
 PARTY_IMPROVE_MEASURE_PROFILE = "medium"
 BUILD_SESSION_THREAT_BOOST = 2.0
+# 環境スナップショット (S1、tools/team_build/meta_snapshot.py): 上位種と脅威リスト。
+# 脅威は「pokedb 上位ランカー構築の使用率% 上位 BUILD_META_TOP_N」と「ゲーム内バトルデータの使用率順位
+# (championsbattledata の列位置 = DB の pokemon_usage.rank) 上位 BUILD_META_INGAME_N」の和集合から、重み
+# (使用率% と、順位 r を使用率曲線の r 番目に読み替えた値の大きい方) の順に BUILD_META_THREATS_N 種。
+# 2026-09-18: M-C 序盤、上位ランカー構築に載らないボーマンダ (ゲーム内 1 位) / グソクムシャ (5 位) が脅威に入らなかった
+BUILD_META_TOP_N = 60
+BUILD_META_THREATS_N = 30
+BUILD_META_INGAME_N = 30
 # 構築のコンセプト規則 (tools/team_build/rules.py、hard constraint)。psychic_terrain_priority_ace のエース = 接地していて
 # 次のいずれかの型 (2026-09-10 改訂。閾値はより良い値が見つかれば変更してよい: ユーザー合意)。
 #   速攻型: 上位脅威への先手率 (S3 の役割 speed、加速前) ≥ FAST_SPEED_SHARE かつ 防御種族値 (メガ後) ≤ FAST_MAX_DEF

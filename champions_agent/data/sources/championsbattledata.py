@@ -82,11 +82,20 @@ def parse_battle_rows(payload: dict) -> dict:
     """APIレスポンスの rows[] をカテゴリ別に整理する。
 
     戻り値: {"moves": {id: pct}, "items": {...}, "abilities": {...},
-             "spreads": [{nature, evs, usage_percent}], "teammates": {id: pct}}
+             "spreads": [{nature, evs, usage_percent}], "teammates": {id: pct},
+             "ingame_rank": int|None}
+    ingame_rank = 行の column_position (そのシーズン・フォーマットでのポケモンの並び位置 = ゲーム内バトルデータの
+    使用率順位。2026-09-18: 上位ランカー構築 (pokedb) に載らない種でもゲーム内では上位のことがある —
+    M-C 序盤のボーマンダ 1 位 / グソクムシャ 5 位 — ので、脅威リストの材料として保存する)
     """
-    out = {"moves": {}, "items": {}, "abilities": {}, "spreads": [], "teammates": {}}
+    out = {"moves": {}, "items": {}, "abilities": {}, "spreads": [], "teammates": {}, "ingame_rank": None}
     alignments = []   # (nature, pct)
     for row in payload.get("rows", []):
+        if out["ingame_rank"] is None and row.get("column_position") is not None:
+            try:
+                out["ingame_rank"] = int(row.get("column_position"))
+            except (TypeError, ValueError):
+                pass
         cat = row.get("category")
         pct = row.get("percentage_value")
         if pct is None:

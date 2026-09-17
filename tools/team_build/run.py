@@ -23,7 +23,7 @@ from tools.team_build import concepts as K
 from tools.team_build import sets as S
 from tools.team_build.features import save_features, species_features
 from tools.team_build.manifest import build_manifest, write_manifest
-from tools.team_build.meta_snapshot import build_snapshot, save_snapshot, threat_sets
+from tools.team_build.meta_snapshot import build_snapshot, save_snapshot, threat_sets, threat_weight
 from tools.team_build.opponents import build_split
 from tools.team_build.spec import (BuildSpec, legal_species_ids, load_spec, parse_form, save_spec,
                                    validate_spec)
@@ -74,7 +74,9 @@ def stage_s1_s3(run_dir: Path, spec: BuildSpec, prof: dict, seed: int, top_n: in
                 extra_threats: Optional[list] = None) -> tuple:
     doc = build_snapshot()
     save_snapshot(doc, run_dir)
+    ingame_only = (doc.get("threat_source") or {}).get("ingame_only") or []
     log(run_dir, f"S1 meta snapshot id={doc['snapshot']['id']} top={len(doc['top'])} "
+                 f"threats={len(doc['threats'])} ゲーム内順位だけで入った種={ingame_only} "
                  f"local_battles={doc['local_meta'].get('n_battles')}")
     from champions_agent.env.ranked_teams import pinned_meta_snapshot_id
     split = build_split(run_dir.name, run_dir, seed=seed, top_n=top_n,
@@ -101,7 +103,7 @@ def stage_s1_s3(run_dir: Path, spec: BuildSpec, prof: dict, seed: int, top_n: in
                     continue
         log(run_dir, f"S3 extra threats: +{len(added)} {added}")
     owned = [s for s in spec.owned if s not in set(spec.banned)]
-    usage_w = {t["id"]: float(t.get("usage") or 0.0) for t in doc["top"] if t["id"] in tv}
+    usage_w = {t["id"]: threat_weight(t) for t in doc["top"] if t["id"] in tv}
     gen = make_generator(tv, usage_w)
     res = species_features(owned, doc, tv, custom_sets=custom_sets_of(spec), required_moves=spec.required_moves,
                            generator=gen)
@@ -718,7 +720,7 @@ def main() -> None:
                 session_w[sid] = max(session_w.get(sid, 0.0), 1.0)
     doc, split, tv, feats = stage_s1_s3(run_dir, spec, prof, args.seed, args.top_n, extra_threats=list(session_w))
     threats = list(tv.keys())
-    threat_weights = {t["id"]: float(t.get("usage") or 0.0) for t in doc["top"] if t["id"] in tv}
+    threat_weights = {t["id"]: threat_weight(t) for t in doc["top"] if t["id"] in tv}
     if session_w:
         # セッションの相手 (正規化した難易度 0..1) を重みに反映: base × (1 + BOOST × w)。脅威リストに無かった種は
         # 使用率の代わりに上位の中央値を base にする

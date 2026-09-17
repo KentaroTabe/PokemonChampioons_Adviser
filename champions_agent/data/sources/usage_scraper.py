@@ -255,7 +255,9 @@ def fetch_champions_usage(fmt: str = "Singles", season: str | None = None,
     # 使用率が分かるもの (pokedb掲載) を上位に、それ以外は名前順で後ろに並べる
     ordered = sorted(per_pokemon.keys(),
                      key=lambda s: (-usage.get(s, {}).get("percent", 0.0), s))
-    for rank, sid in enumerate(ordered, start=1):
+    # rank = ゲーム内バトルデータの使用率順位 (cbd の列位置)。無い種は使用率% の順で後ろ (2026-09-18)
+    ranks = assign_ranks(per_pokemon, ordered)
+    for sid in ordered:
         parsed = per_pokemon[sid]
         u = usage.get(sid)
         # pokedb未掲載 (上位構築に不在) はごく低い擬似使用率を与える
@@ -266,7 +268,7 @@ def fetch_champions_usage(fmt: str = "Singles", season: str | None = None,
         entries.append(PokemonUsageEntry(
             pokemon_name=sid,
             usage_percent=usage_percent,
-            rank=rank,
+            rank=ranks[sid],
             abilities=parsed["abilities"],
             items=items,
             moves=parsed["moves"],
@@ -286,10 +288,36 @@ def fetch_champions_usage(fmt: str = "Singles", season: str | None = None,
         "source_url": "https://championsbattledata.com/api",
         "note": ("usage%はpokedb上位構築の採用頻度、技/持ち物/特性/配分は"
                  "championsbattledata (ゲーム内バトルデータ由来)。"
+                 "rank はゲーム内バトルデータの使用率順位 (championsbattledata の列位置。無い種は使用率%順で後置)。"
                  "number_of_battles は対戦数ではなくpokedbの集計構築数。"
                  "Credit: Battle data provided by Pokémon Champions Battle Data"),
     }
     return entries, meta
+
+
+def assign_ranks(per_pokemon: dict, fallback_order: list) -> dict:
+    """{species_id: rank}。championsbattledata の ingame_rank (ゲーム内バトルデータの使用率順位) があればそれ、
+    無い種は「ある種の最大順位 + fallback_order (使用率% 降順) の順」で後ろに並べる。純粋"""
+    known = {}
+    for sid, parsed in per_pokemon.items():
+        r = (parsed or {}).get("ingame_rank")
+        if r is not None:
+            try:
+                known[sid] = int(r)
+            except (TypeError, ValueError):
+                continue
+    out = dict(known)
+    base = max(known.values(), default=0)
+    k = 0
+    for sid in fallback_order:
+        if sid not in out:
+            k += 1
+            out[sid] = base + k
+    for sid in per_pokemon:
+        if sid not in out:
+            k += 1
+            out[sid] = base + k
+    return out
 
 
 def fetch_usage_stats(fmt: str = USAGE_TARGET_FORMAT, use_dummy: bool = False,
