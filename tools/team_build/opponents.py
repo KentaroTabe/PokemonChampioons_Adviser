@@ -16,7 +16,8 @@ from pathlib import Path
 from typing import Optional
 
 from champions_agent.config import (
-    BUILD_FAMILY_JACCARD, BUILD_POOL_TOP_N, BUILD_SEARCH_FOLDS, BUILD_SPLIT_RATIOS)
+    BUILD_FAMILY_JACCARD, BUILD_MAX_MEGA_STONES, BUILD_POOL_SOURCE, BUILD_POOL_TEAMMATE_MIX, BUILD_POOL_TOP_N,
+    BUILD_SEARCH_FOLDS, BUILD_SPLIT_RATIOS)
 from tools.team_build import families as F
 
 
@@ -53,8 +54,114 @@ def team_id_of(text: str) -> str:
     return "t" + hashlib.sha1(text.strip().encode("utf-8")).hexdigest()[:10]
 
 
-def pool_teams(top_n: int = BUILD_POOL_TOP_N, meta_snapshot_id: Optional[int] = None) -> tuple:
-    """(Team 一覧, team_id → チーム本文)。順位はプールの並び順 (上位が先)"""
+def compose_team(rng: random.Random, weights: dict, teammates: dict, base_key, stone_of: dict, size: int = 6,
+                 max_megas: int = BUILD_MAX_MEGA_STONES, mix: float = BUILD_POOL_TEAMMATE_MIX) -> list:
+    """最新の環境から 1 チーム分の種 id を選ぶ (純粋)。先頭は重み (使用率% ∪ ゲーム内順位の読み替え) で、以降は
+    (1 − mix) × 重み + mix × 選んだ種との共起 (teammate_usage、0..100 を 0..1 に) の得点で抽選する。
+    ベース種の重複なし (base_key)、メガ石を持つ種 (stone_of[sid] が石) は max_megas まで。候補が尽きたら size 未満で返す"""
+    ids = [s for s, w in weights.items() if w > 0]
+    if not ids:
+        return []
+    wmax = max(weights[s] for s in ids) or 1.0
+    chosen: list = []
+    used_base: set = set()
+    n_mega = 0
+    while len(chosen) < size:
+        cands, scores = [], []
+        for s in ids:
+            if s in chosen or base_key(s) in used_base:
+                continue
+            if stone_of.get(s) and n_mega >= max_megas:
+                continue
+            w = weights[s] / wmax
+            if chosen:
+                co = sum(float((teammates.get(m) or {}).get(s, 0.0)) for m in chosen) / (100.0 * len(chosen))
+                score = (1.0 - mix) * w + mix * min(1.0, co)
+            else:
+                score = w
+            if score > 0:
+                cands.append(s)
+                scores.append(score)
+        if not cands:
+            break
+        pick = rng.choices(cands, weights=scores, k=1)[0]
+        chosen.append(pick)
+        used_base.add(base_key(pick))
+        if stone_of.get(pick):
+            n_mega += 1
+    return chosen
+
+
+def synthetic_pool(n: int = BUILD_POOL_TOP_N, seed: int = 0, snapshot_id: Optional[int] = None) -> tuple:
+    """最新の使用率スナップショットの全種から合成した相手プール (Team 一覧, team_id → 本文, snapshot_id)。
+    種の重みは meta_snapshot.merge_ranked (使用率% ∪ ゲーム内順位)、型は meta_sets (技は champions mod の learnset で検査)、
+    共起は teammate_usage。同じ seed なら同じプール。ブラックリスト (所持の方針) は適用しない (2026-09-18 ユーザー決定)"""
+    from champions_agent.data import database as db
+    from champions_agent.env import team_builder as TB
+    from champions_agent.env.legality import fill_moves
+    from tools.team_build.meta_snapshot import merge_ranked
+    with db.get_connection() as conn:
+        snap = snapshot_id if snapshot_id is not None else db.latest_snapshot_id(conn)
+        if snap is None:
+            raise RuntimeError("usage_snapshot が無い (bash champions_agent/scripts/update_usage_db.sh)")
+        usage_rows = [(r[0], float(r[1])) for r in conn.execute(
+            "SELECT pokemon_name, usage_percent FROM pokemon_usage WHERE snapshot_id=?", (snap,))]
+        rank_rows = [(r[0], int(r[1])) for r in conn.execute(
+            "SELECT pokemon_name, rank FROM pokemon_usage WHERE snapshot_id=? AND rank IS NOT NULL", (snap,))]
+        pool = TB._fetch_meta_pool(conn, snap)
+        move_pool = TB._fetch_move_pool(conn, snap)
+        fallback_items = TB._fetch_fallback_items(conn, snap)
+        teammates: dict = {}
+        for r in conn.execute("SELECT pokemon_name, teammate_name, usage_percent FROM teammate_usage WHERE snapshot_id=?",
+                              (snap,)):
+            teammates.setdefault(r[0], {})[r[1]] = float(r[2])
+    merged = merge_ranked(usage_rows, rank_rows, top_n=len(usage_rows), ingame_n=len(rank_rows))
+    weights = {e["id"]: float(e["weight"]) for e in merged}
+    rows_by: dict = {}
+    for r in pool:
+        r = dict(r)
+        moves = fill_moves(r["pokemon_name"], [r["move1"], r["move2"], r["move3"], r["move4"]],
+                           move_pool.get(r["pokemon_name"], []))
+        if not moves:
+            continue
+        for i in range(4):
+            r[f"move{i + 1}"] = moves[i] if i < len(moves) else None
+        rows_by.setdefault(r["pokemon_name"], r)
+    stones = _mega_stone_ids()
+    stone_of = {s: (r.get("item_name") if (r.get("item_name") or "") in stones else None) for s, r in rows_by.items()}
+    weights = {s: w for s, w in weights.items() if s in rows_by}
+    rng = random.Random(seed)
+    teams, by_id = [], {}
+    attempts = 0
+    while len(teams) < n and attempts < n * 4:
+        attempts += 1
+        ids = compose_team(rng, weights, teammates, TB._base_species_key, stone_of)
+        if len(ids) < 6:
+            continue
+        sets = [TB.PokemonSet(species=TB.to_showdown_name(TB._sanitize_species(s)), ability=rows_by[s]["ability_name"],
+                              item=TB._sanitize_item(rows_by[s]["item_name"]), tera_type=rows_by[s]["tera_type"],
+                              nature=rows_by[s]["nature"], evs=rows_by[s]["evs"],
+                              moves=[m for m in (rows_by[s][f"move{k}"] for k in (1, 2, 3, 4)) if m]) for s in ids]
+        TB._enforce_item_clause(sets, fallback_items)
+        text = "\n\n".join(p.to_showdown_text() for p in sets)
+        tid = team_id_of(text)
+        if tid in by_id:
+            continue
+        species, mega = parse_team_text(text, stones)
+        teams.append(F.Team(team_id=tid, species=species, mega=mega, rank=len(teams) + 1))
+        by_id[tid] = text
+    return teams, by_id, snap
+
+
+def pool_teams(top_n: int = BUILD_POOL_TOP_N, meta_snapshot_id: Optional[int] = None,
+               source: Optional[str] = None, seed: int = 0) -> tuple:
+    """(Team 一覧, team_id → チーム本文)。順位はプールの並び順 (上位が先)。
+    source: ranked = POOL_PIN の上位ランカー構築 (型は meta_snapshot_id の meta_sets) / latest = 最新スナップショットからの合成
+    (既定 config BUILD_POOL_SOURCE)"""
+    source = source or BUILD_POOL_SOURCE
+    if source == "latest":
+        teams, by_id, _snap = synthetic_pool(n=top_n or BUILD_POOL_TOP_N, seed=seed)
+        return teams, by_id
     from champions_agent.env.ranked_teams import build_ranked_teams
     texts = build_ranked_teams(top_n=top_n, include_external=False,
                                meta_snapshot_id=meta_snapshot_id)
@@ -73,10 +180,17 @@ def pool_teams(top_n: int = BUILD_POOL_TOP_N, meta_snapshot_id: Optional[int] = 
 def build_split(run_id: str, out_dir: Path, seed: int, top_n: int = BUILD_POOL_TOP_N,
                 meta_snapshot_id: Optional[int] = None, ratios: dict = BUILD_SPLIT_RATIOS,
                 min_jaccard: float = BUILD_FAMILY_JACCARD, folds: int = BUILD_SEARCH_FOLDS,
-                teams: Optional[list] = None, by_id: Optional[dict] = None) -> dict:
-    """系統化 → 層化分割 → fold → 封印。結果を out_dir/opponent_families.json に保存して返す。"""
+                teams: Optional[list] = None, by_id: Optional[dict] = None,
+                pool_source: Optional[str] = None) -> dict:
+    """系統化 → 層化分割 → fold → 封印。結果を out_dir/opponent_families.json に保存して返す。
+    pool_source: ranked (POOL_PIN の上位構築) / latest (最新スナップショットからの合成)。既定 config BUILD_POOL_SOURCE"""
+    pool_source = pool_source or BUILD_POOL_SOURCE
+    pool_snapshot = meta_snapshot_id
     if teams is None or by_id is None:
-        teams, by_id = pool_teams(top_n=top_n, meta_snapshot_id=meta_snapshot_id)
+        if pool_source == "latest":
+            teams, by_id, pool_snapshot = synthetic_pool(n=top_n, seed=seed)
+        else:
+            teams, by_id = pool_teams(top_n=top_n, meta_snapshot_id=meta_snapshot_id, source=pool_source)
     fams = F.cluster_families(teams, min_jaccard=min_jaccard)
     split = F.stratified_split(fams, ratios=ratios, seed=seed)
     search_fams = [f for f in fams if split["families"][f.family_id] == "search"]
@@ -88,7 +202,8 @@ def build_split(run_id: str, out_dir: Path, seed: int, top_n: int = BUILD_POOL_T
                  "teams": [t.team_id for t in f.teams]} for f in fams]
     doc = {
         "schema_version": "1", "run_id": run_id, "seed": seed, "top_n": top_n,
-        "meta_snapshot_id": meta_snapshot_id, "min_jaccard": min_jaccard, "ratios": ratios,
+        "meta_snapshot_id": meta_snapshot_id, "pool_source": pool_source, "pool_snapshot": pool_snapshot,
+        "min_jaccard": min_jaccard, "ratios": ratios,
         "n_teams": len(teams), "n_families": len(fams),
         "tiers": {"search": split["search"], "selection": split["selection"],
                   "holdout": split["holdout"]},

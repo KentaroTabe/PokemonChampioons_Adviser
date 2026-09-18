@@ -38,6 +38,30 @@ def test_parse_and_ids():
     print("test_parse_and_ids OK")
 
 
+def test_compose_team_latest_pool():
+    """最新環境からの合成 (2026-09-18): 重みと共起で抽選、ベース種の重複なし、メガ石は上限まで、候補が尽きたら短く返す"""
+    rng = random.Random(7)
+    weights = {"garchomp": 59.0, "salamence": 59.0, "primarina": 27.0, "rotomwash": 5.0, "rotomheat": 2.0,
+               "gengar": 16.0, "lopunny": 14.0, "metagross": 11.0, "hippowdon": 22.0, "mimikyu": 21.0, "zero": 0.0}
+    teammates = {"garchomp": {"primarina": 76.0}, "salamence": {"garchomp": 40.0}}
+    base = {"rotomwash": "rotom", "rotomheat": "rotom"}
+    stone_of = {"salamence": "salamencite", "gengar": "gengarite", "lopunny": "lopunnite", "metagross": "metagrossite"}
+    for _ in range(20):
+        ids = O.compose_team(rng, weights, teammates, lambda s: base.get(s, s), stone_of, size=6, max_megas=2, mix=0.5)
+        assert len(ids) == 6 and len(set(ids)) == 6 and "zero" not in ids
+        assert not ({"rotomwash", "rotomheat"} <= set(ids))                       # ベース種の重複なし
+        assert sum(1 for s in ids if stone_of.get(s)) <= 2                        # メガ石は上限まで
+    # 候補が尽きたら size 未満: 石持ちしか残らないと上限で止まる
+    ids = O.compose_team(random.Random(1), {"salamence": 1.0, "gengar": 1.0, "lopunny": 1.0}, {}, lambda s: s,
+                         stone_of, size=6, max_megas=1)
+    assert len(ids) == 1 and stone_of.get(ids[0])
+    # 同じ seed なら同じ結果、共起の重みで相方が寄る (ガブリアス選出後はアシレーヌの得点が上がる)
+    a = O.compose_team(random.Random(3), weights, teammates, lambda s: base.get(s, s), stone_of)
+    b = O.compose_team(random.Random(3), weights, teammates, lambda s: base.get(s, s), stone_of)
+    assert a == b
+    print("test_compose_team_latest_pool OK")
+
+
 def test_build_split_and_sequence():
     rng = random.Random(3)
     pool = [f"s{i}" for i in range(30)]
@@ -121,6 +145,7 @@ def test_user_model():
 
 if __name__ == "__main__":
     test_parse_and_ids()
+    test_compose_team_latest_pool()
     test_build_split_and_sequence()
     test_event_summary_and_records()
     test_user_model()

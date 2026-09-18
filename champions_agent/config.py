@@ -362,6 +362,12 @@ BUILD_ARCHETYPE_MIN_FIT = 0.35             # 環境適合 (0..1) がこれ未満
 BUILD_ARCHETYPE_ROLE_TOP = 4               # 役割ごとに core の組み合わせに使う候補数
 BUILD_ARCHETYPE_LLM_ROUNDS = 11            # LLM を軸ごとに回す上限 (coverage 停止あり)
 BUILD_ARCHETYPE_SPECIAL_MAX_CORES = 3      # 特殊な勝ち筋 (ほろびのうた等) は全分岐で合計この数まで (一覧・候補を膨らませない)
+BUILD_ARCHETYPE_SPECIAL_HYBRIDS = 3        # 特殊な勝ち筋を他の軸の core に 1 役足した併用案 (special_branch) の数 (ユーザー決定 9/18)
+# 測定の相手プール (S2、tools/team_build/opponents.py)。ranked = POOL_PIN の上位ランカー構築 (従来)、
+# latest = 最新の使用率スナップショットの全種から「使用率% ∪ ゲーム内順位」の重みと共起 (teammate_usage) で合成
+# (2026-09-18 ユーザー決定: ブラックリストなしの最新ポケモン全体。上位構築に載らない今期の主役も相手に出る)
+BUILD_POOL_SOURCE = "latest"
+BUILD_POOL_TEAMMATE_MIX = 0.5              # 合成の 2 体目以降: (1 − mix) × 種の重み + mix × 選んだ種との共起
 BUILD_ARCHETYPE_TR_SPEED_SHARE = 0.3       # トリックルームのエース: 上位脅威への先手率がこれ以下
 BUILD_ARCHETYPE_FAST_SPEED_SHARE = 0.6     # 速攻役: 先手率がこれ以上 (タスキ / スカーフでも可)
 BUILD_ARCHETYPE_WALL_BULK = 0.45           # 受け役の耐久 (S3 roles.bulk)

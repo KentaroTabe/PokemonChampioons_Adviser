@@ -182,6 +182,41 @@ def test_build_context_and_cores():
     print("test_build_context_and_cores OK")
 
 
+def test_special_hybrids():
+    """併用案 (ユーザー決定 9/18): 他の軸の core に特殊な勝ち筋の役を足した core (special_branch) を上限まで出す。
+    S5 の検査と S6 の型反映も special_branch を見る"""
+    th = _threats()
+    pool = _pool()
+    threats = list(th)
+    weights = {t: v["weight"] for t, v in th.items()}
+    ctx = A.build_context(pool, th, threats, threat_weights=weights, coverage_fn=lambda core: 0.5, min_fit=0.0, k=1,
+                          special_max=1, special_hybrids=2)
+    hybrids = [c for c in ctx["cores"] if c.get("special_branch")]
+    assert len(hybrids) == 2 and all(c["archetype"] != "special" for c in hybrids)
+    h = hybrids[0]
+    assert h["special_branch"] in A.ARCHETYPES["special"]["branches"] and "special" in h["source"]
+    assert 2 <= len(h["core_ids"]) <= 4 and "politoed" in h["core_ids"]         # ほろびのうた役 (ニョロトノ) が足される
+    assert set(h["roles"]) >= {"perish_singer"} and h["name"].endswith("+special:perish_trap")
+    assert h["fit"] <= ctx["fits"][("special", "perish_trap")]["fit"]
+    assert A.label_ja(h["archetype"], h["branch"], h["special_branch"]).endswith("+ 特殊: ほろびのうた + 交代封じ")
+    # 併用なし (上限 0) なら出ない
+    ctx0 = A.build_context(pool, th, threats, threat_weights=weights, coverage_fn=lambda core: 0.5, min_fit=0.0, k=1,
+                           special_max=1, special_hybrids=0)
+    assert not [c for c in ctx0["cores"] if c.get("special_branch")]
+    # S5: 併用の並びは特殊の役も要る
+    q = ctx["qualified"]
+    base_members = ["grimmsnarl", "blaziken", "mimikyu", "x", "y", "z"]
+    assert A.lineup_ok(base_members, "setup_sweep", "screens_dual", q)
+    assert not A.lineup_ok(base_members, "setup_sweep", "screens_dual", q, "perish_trap")
+    assert A.lineup_ok(base_members[:5] + ["politoed"], "setup_sweep", "screens_dual", q, "perish_trap")
+    # LLM 向けの一覧に併用の材料 (special_options) が付く
+    axes = A.llm_axes(ctx)
+    sw = next(a for a in axes if a["id"] == "setup_sweep")
+    assert any(o["id"] == "perish_trap" and o["candidates"]["perish_singer"] == ["politoed"] for o in sw["special_options"])
+    assert "special_options" not in next(a for a in axes if a["id"] == "special")
+    print("test_special_hybrids OK")
+
+
 def test_assign_roles_and_lineup_ok():
     q = {"screens_dual": {"grimmsnarl": 0.6, "meganium": 0.4}, "setup_ace": {"blaziken": 0.8, "mimikyu": 0.7, "grimmsnarl": 0.3}}
     reqs = [("screens_dual", 1), ("setup_ace", 2)]
@@ -200,7 +235,8 @@ def test_assign_roles_and_lineup_ok():
 def test_apply_to_team():
     learn = {"meganium": {"reflect", "lightscreen"}, "slowkinggalar": {"trickroom"}, "torkoal": set()}
     can_learn = lambda sid, m: m in learn.get(sid, set())
-    cat = lambda m: "status" if m in ("reflect", "lightscreen", "synthesis", "trickroom", "leechseed", "toxic", "chillyreception") else "physical"
+    cat = lambda m: "status" if m in ("reflect", "lightscreen", "synthesis", "trickroom", "leechseed", "toxic", "chillyreception",
+                                      "encore", "protect", "perishsong", "meanlook", "swordsdance", "roost", "rest") else "physical"
     team = [SetCandidate("meganium", "overgrow", "leftovers", "modest", "32/0/0/32/0/2", ["gigadrain", "earthpower", "synthesis", "leechseed"]),
             SetCandidate("blaziken", "speedboost", "blazikenite", "adamant", "2/32/0/0/0/32", ["swordsdance", "flareblitz", "closecombat", "protect"]),
             SetCandidate("mimikyu", "disguise", "lifeorb", "adamant", "2/32/0/0/0/32", ["swordsdance", "playrough", "shadowsneak", "shadowclaw"])]
@@ -231,6 +267,20 @@ def test_apply_to_team():
     # 役割を満たせない並びは注記だけ
     out4, a4, n4 = A.apply_to_team(sk, "setup_sweep", "screens_dual", {"screens_dual": {}, "setup_ace": {}}, can_learn, cat, (), stones)
     assert a4 is None and n4 == ["arch:unsatisfied"] and out4 == sk
+    # 併用案: 特殊な勝ち筋の役 (ほろびのうた) も型に差し込む
+    learn["politoed"] = {"perishsong", "meanlook"}
+    pt = team + [SetCandidate("politoed", "drizzle", "leftovers", "bold", "32/0/32/0/2/0", ["scald", "icebeam", "encore", "protect"])]
+    sq = {"perish_singer": {"politoed": 0.4}, "trapper": {"politoed": 0.3}}
+    out5, a5, n5 = A.apply_to_team(pt, "setup_sweep", "screens_dual", q, can_learn, cat, ("swordsdance",), stones,
+                                   legal_item=lambda i: True, special_branch="perish_trap", special_qualified=sq)
+    assert a5["perish_singer"] == ["politoed"] and a5["trapper"] == ["politoed"]
+    p5 = out5[3]
+    assert "perishsong" in p5.moves and "meanlook" in p5.moves and len(p5.moves) == 4, p5.moves
+    assert any(n.startswith("arch:perish_singer:perishsong<-") for n in n5) and any(n.startswith("arch:trapper:meanlook<-") for n in n5)
+    # 特殊の役が並びに無ければ注記だけで基本の役は反映する
+    out6, a6, n6 = A.apply_to_team(team, "setup_sweep", "screens_dual", q, can_learn, cat, ("swordsdance",), stones,
+                                   legal_item=lambda i: True, special_branch="perish_trap", special_qualified=sq)
+    assert "perish_singer" not in a6 and "arch:special_unsatisfied" in n6 and out6[0].item == "lightclay"
     print("test_apply_to_team OK")
 
 
@@ -239,5 +289,6 @@ if __name__ == "__main__":
     test_role_score_now_can_none()
     test_branch_fit()
     test_build_context_and_cores()
+    test_special_hybrids()
     test_assign_roles_and_lineup_ok()
     test_apply_to_team()

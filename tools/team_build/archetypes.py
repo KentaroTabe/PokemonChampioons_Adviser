@@ -22,7 +22,8 @@ from typing import Callable, Optional
 from champions_agent.config import (BUILD_ARCHETYPE_ANSWER_COVERAGE, BUILD_ARCHETYPE_CORES_PER_BRANCH,
                                     BUILD_ARCHETYPE_FAST_SPEED_SHARE, BUILD_ARCHETYPE_FAST_THREAT_SPE,
                                     BUILD_ARCHETYPE_MIN_FIT, BUILD_ARCHETYPE_PRIORITY_BULK, BUILD_ARCHETYPE_ROLE_TOP,
-                                    BUILD_ARCHETYPE_SPECIAL_MAX_CORES, BUILD_ARCHETYPE_TR_SPEED_SHARE,
+                                    BUILD_ARCHETYPE_SPECIAL_HYBRIDS, BUILD_ARCHETYPE_SPECIAL_MAX_CORES,
+                                    BUILD_ARCHETYPE_TR_SPEED_SHARE,
                                     BUILD_ARCHETYPE_WALL_BULK, BUILD_RULE_ACE_MIN_ATTACK_MOVES,
                                     BUILD_RULE_ACE_MIN_ATTACK_TYPES, BUILD_RULE_ACE_MIN_COVERAGE, BUILD_RULE_ACE_MIN_OFFENSE)
 
@@ -498,8 +499,14 @@ def assign_roles(members, requirements: list, qualified: dict, overlap_ok: bool 
     return assign if rec(0) else None
 
 
-def lineup_ok(members, axis_id: str, branch_id: Optional[str], qualified_by: dict) -> bool:
-    """軸つきコンセプトの並びが役割の最小数を満たすか。分岐が無ければ制約なし (True)。純粋"""
+def lineup_ok(members, axis_id: str, branch_id: Optional[str], qualified_by: dict,
+              special_branch: Optional[str] = None) -> bool:
+    """軸つきコンセプトの並びが役割の最小数を満たすか。分岐が無ければ制約なし (True)。
+    special_branch (併用案) があれば、特殊な勝ち筋の役 (兼任可) も並びに要る。純粋"""
+    if special_branch and special_branch in ARCHETYPES["special"]["branches"]:
+        q = qualified_by.get(("special", special_branch)) or qualified_by.get(f"special:{special_branch}") or {}
+        if assign_roles(members, ARCHETYPES["special"]["branches"][special_branch]["roles"], q, True) is None:
+            return False
     if not branch_id or axis_id not in ARCHETYPES or branch_id not in ARCHETYPES[axis_id]["branches"]:
         return True
     q = qualified_by.get((axis_id, branch_id)) or qualified_by.get(f"{axis_id}:{branch_id}") or {}
@@ -726,8 +733,11 @@ def branch_cores(axis_id: str, branch_id: str, qualified: dict, caps_by: dict, f
 def build_context(caps_by: dict, threat_info: dict, threats: list, threat_weights: Optional[dict] = None,
                   coverage_fn: Optional[Callable] = None, type_mult: Optional[Callable] = None,
                   min_fit: float = BUILD_ARCHETYPE_MIN_FIT, k: int = BUILD_ARCHETYPE_CORES_PER_BRANCH,
-                  special_max: int = BUILD_ARCHETYPE_SPECIAL_MAX_CORES, axes: Optional[list] = None) -> dict:
-    """全軸 × 分岐の 適合 / 役割の候補 / core。特殊な勝ち筋は合計 special_max まで (適合 × core 得点の順)。純粋
+                  special_max: int = BUILD_ARCHETYPE_SPECIAL_MAX_CORES, axes: Optional[list] = None,
+                  special_hybrids: int = BUILD_ARCHETYPE_SPECIAL_HYBRIDS) -> dict:
+    """全軸 × 分岐の 適合 / 役割の候補 / core。特殊な勝ち筋は合計 special_max まで (適合 × core 得点の順)。
+    併用案 (special_hybrids、ユーザー決定 9/18): 他の軸の core に特殊な勝ち筋の役を 1 体足した core (special_branch つき) を
+    合計 special_hybrids まで。純粋
     戻り値: {"fits": {(axis, branch): {"fit", "notes"}}, "qualified": {(axis, branch): {role: {sid: score}}},
              "cores": [concept], "skipped": [{axis, branch, reason}]}"""
     top_threats = sorted(threats, key=lambda t: -float((threat_weights or {}).get(t, 0.0)))
@@ -756,6 +766,45 @@ def build_context(caps_by: dict, threat_info: dict, threats: list, threat_weight
     kept_branches = {c["branch"] for c in kept}
     for bid in sorted({c["branch"] for c in special_pool[max(0, special_max):]} - kept_branches):
         skipped.append({"axis": "special", "branch": bid, "reason": f"特殊な勝ち筋の上限 {special_max} 超"})
+    # 併用案: 他の軸の core (得点順) に、適合が下限以上の特殊な分岐の役 (各役割の最良候補、兼任可) を足す
+    hybrids = []
+    if special_hybrids > 0 and "special" in ARCHETYPES:
+        base_sorted = sorted(cores, key=lambda c: (-c["core_score"], c["name"]))[:max(1, special_hybrids) * 2]
+        for bid in ARCHETYPES["special"]["branches"]:
+            f = (fits.get(("special", bid)) or {}).get("fit", 0.0)
+            q = qualified.get(("special", bid)) or {}
+            if f < min_fit:
+                continue
+            best: dict = {}
+            for role, _n in branch_requirements("special", bid):
+                cands = sorted((q.get(role) or {}).items(), key=lambda kv: (-kv[1], kv[0]))
+                if not cands:
+                    best = {}
+                    break
+                best[role] = cands[0][0]
+            if not best:
+                continue
+            extra = list(dict.fromkeys(best.values()))
+            for c in base_sorted:
+                core = tuple(sorted(set(c["core_ids"]) | set(extra)))
+                if len(core) > 4:
+                    continue
+                sc = float(c["core_score"]) + 0.5 * f
+                hybrids.append((sc, dict(c, name=f"{c['name']}+special:{bid}", core_ids=list(core),
+                                         roles=dict(c.get("roles") or {}, **{r: [s] for r, s in best.items()}),
+                                         special_branch=bid, source=f"{c['source']}+special", fit=min(float(c["fit"]), f),
+                                         core_score=round(sc, 4))))
+        hybrids.sort(key=lambda x: (-x[0], x[1]["name"]))
+        seen_h, kept_h = set(), []
+        for _sc, h in hybrids:
+            key = tuple(h["core_ids"])
+            if key in seen_h:
+                continue
+            seen_h.add(key)
+            kept_h.append(h)
+            if len(kept_h) >= special_hybrids:
+                break
+        cores.extend(kept_h)
     cores.extend(kept)
     return {"fits": fits, "qualified": qualified, "cores": cores, "skipped": skipped}
 
@@ -768,12 +817,16 @@ def qualified_lookup(ctx: dict) -> dict:
     return ctx.get("qualified") or {}
 
 
-def label_ja(axis_id: Optional[str], branch_id: Optional[str] = None) -> str:
+def label_ja(axis_id: Optional[str], branch_id: Optional[str] = None, special_branch: Optional[str] = None) -> str:
     axis = ARCHETYPES.get(axis_id or "")
     if not axis:
         return ""
     br = axis["branches"].get(branch_id or "")
-    return f"{axis['label']} / {br['label']}" if br else axis["label"]
+    out = f"{axis['label']} / {br['label']}" if br else axis["label"]
+    sb = ARCHETYPES["special"]["branches"].get(special_branch or "") if axis_id != "special" else None
+    if sb:
+        out += f" + 特殊: {sb['label']}"
+    return out
 
 
 def llm_axes(ctx: dict, top: int = 3) -> list:
@@ -791,20 +844,36 @@ def llm_axes(ctx: dict, top: int = 3) -> list:
                 roles.append({"role": role, "label": ROLE_SPECS[role]["label"], "min": n, "candidates": [s for s, _ in cands]})
             branches.append({"id": branch_id, "label": br["label"], "fit": f.get("fit"), "notes": f.get("notes") or [],
                              "roles": roles})
-        out.append({"id": axis_id, "label": axis["label"], "description": axis["description"],
-                    "switching": axis["switching"], "switching_ja": SWITCHING_JA.get(axis["switching"], axis["switching"]),
-                    "special": bool(axis.get("special")), "branches": branches})
+        entry = {"id": axis_id, "label": axis["label"], "description": axis["description"],
+                 "switching": axis["switching"], "switching_ja": SWITCHING_JA.get(axis["switching"], axis["switching"]),
+                 "special": bool(axis.get("special")), "branches": branches}
+        if not axis.get("special") and "special" in ARCHETYPES:
+            # 併用案の材料: 適合が下限以上の特殊な分岐と、その役の候補 (concept に special_branch を書ける)
+            opts = []
+            for bid, sb in ARCHETYPES["special"]["branches"].items():
+                f = (ctx.get("fits") or {}).get(("special", bid)) or {}
+                if (f.get("fit") or 0.0) < BUILD_ARCHETYPE_MIN_FIT:
+                    continue
+                q = (ctx.get("qualified") or {}).get(("special", bid)) or {}
+                cands = {role: [s for s, _ in sorted((q.get(role) or {}).items(), key=lambda kv: (-kv[1], kv[0]))[:top]]
+                         for role, _n in sb["roles"]}
+                if all(cands.values()):
+                    opts.append({"id": bid, "label": sb["label"], "fit": f.get("fit"), "candidates": cands})
+            entry["special_options"] = opts
+        out.append(entry)
     return out
 
 
 # ---------------------------------------------------------------- 型への反映 (S6)
 def apply_to_team(team: list, axis_id: str, branch_id: Optional[str], qualified: dict, can_learn: Callable,
                   category_of=None, setup_moves=(), stones=frozenset(), legal_item: Optional[Callable] = None,
-                  alternatives: Optional[dict] = None, abilities_of: Optional[Callable] = None) -> tuple:
+                  alternatives: Optional[dict] = None, abilities_of: Optional[Callable] = None,
+                  special_branch: Optional[str] = None, special_qualified: Optional[dict] = None) -> tuple:
     """並びの型に役割の技・特性・持ち物を保証する。役割の割り当ては assign_roles (最小数)。
     条件の群ごとに、型が既に満たしていなければ 特性 (その種が持てる) → 技 (覚える。差し込みは sets.inject_move) → 持ち物 の順で
     満たす。役割の item (壁役の ひかりのねんど 等) は メガ石・こだわり系でなければ持たせる。こだわり系の型に変化技を差し込むときは
-    代替の持ち物 (alt:item) に替える。元の SetCandidate は変更しない。戻り値 (team, assignment or None, notes)"""
+    代替の持ち物 (alt:item) に替える。special_branch (併用案) があれば特殊な勝ち筋の役 (special_qualified、兼任可) も同様に
+    保証する。元の SetCandidate は変更しない。戻り値 (team, assignment or None, notes)"""
     from tools.team_build.sets import inject_move
     if not branch_id or axis_id not in ARCHETYPES or branch_id not in ARCHETYPES[axis_id]["branches"]:
         return team, None, []
@@ -813,8 +882,14 @@ def apply_to_team(team: list, axis_id: str, branch_id: Optional[str], qualified:
     assign = assign_roles(members, br["roles"], qualified, bool(br.get("overlap_ok")))
     if assign is None:
         return team, None, ["arch:unsatisfied"]
-    by_sid = {c.species_id: c for c in team}
     notes: list = []
+    if special_branch and special_branch in ARCHETYPES["special"]["branches"]:
+        sa = assign_roles(members, ARCHETYPES["special"]["branches"][special_branch]["roles"], special_qualified or {}, True)
+        if sa is None:
+            notes.append("arch:special_unsatisfied")
+        else:
+            assign = dict(assign, **sa)
+    by_sid = {c.species_id: c for c in team}
     # 同じ個体が複数の役割を兼ねるとき、別の役割の技 (回復技 等) を差し込みで潰さないよう、その個体の全役割の技を守る
     keep_by_sid: dict = {}
     for role, sids in assign.items():
@@ -856,7 +931,10 @@ def apply_to_team(team: list, axis_id: str, branch_id: Optional[str], qualified:
                                 break
                             if m in moves:
                                 continue
-                            moves, replaced = inject_move(moves, m, category_of, protected)
+                            moves, replaced = _inject_protected(moves, m, category_of, protected, inject_move)
+                            if replaced == "" and m not in moves:
+                                notes.append(f"arch:{role}:{m}:no_slot")
+                                continue
                             notes.append(f"arch:{role}:{m}<-{replaced}")
                         c = dc_replace(c, moves=moves, source=c.source + "+arch", notes=list(c.notes) + [f"arch:{role}"])
                         if (c.item or "") in CHOICE_ITEMS:
@@ -874,6 +952,28 @@ def apply_to_team(team: list, axis_id: str, branch_id: Optional[str], qualified:
                 c = dc_replace(c, item=pref, source=c.source + "+arch", notes=list(c.notes) + [f"arch:{role}:item"])
             by_sid[sid] = c
     return [by_sid[c.species_id] for c in team], assign, notes
+
+
+def _inject_protected(moves: list, move: str, category_of, protected, inject_move: Callable) -> tuple:
+    """守る技 (protected: 積み技・この個体の役割の技) を潰さずに技を差し込む。sets.inject_move は最後の手段で末尾を
+    差し替えるので、末尾が守る技のときは「守らない技のうち末尾側の変化技 → 末尾側の技」を自分で選ぶ。
+    枠が無ければ (moves, "") を返す (差し込まない)。純粋"""
+    ms = list(moves)
+    if move in ms:
+        return ms, None
+    if len(ms) < 4:
+        return ms + [move], None
+    new, replaced = inject_move(ms, move, category_of, protected)
+    if replaced is None or replaced not in protected:
+        return new, replaced
+    cats = [(category_of(m) if category_of else "") for m in ms]
+    free = [k for k in range(len(ms) - 1, -1, -1) if ms[k] not in protected]
+    if not free:
+        return ms, ""
+    idx = next((k for k in free if cats[k] == "status"), free[0])
+    replaced = ms[idx]
+    ms[idx] = move
+    return ms, replaced
 
 
 def _alt_holds_set(c, alt: dict, can_learn: Callable) -> tuple:
@@ -932,9 +1032,13 @@ def render_context_md(ctx: dict, species_ja: Optional[Callable] = None, top: int
             for role, n in br["roles"]:
                 cands = sorted((q.get(role) or {}).items(), key=lambda kv: (-kv[1], kv[0]))[:top]
                 lines.append(f"  - {ROLE_SPECS[role]['label']} ×{n}: " + ("、".join(f"{ja(s)} {sc:.2f}" for s, sc in cands) or "候補なし"))
-        cores = [c for c in (ctx.get("cores") or []) if c.get("archetype") == axis_id]
+        cores = [c for c in (ctx.get("cores") or []) if c.get("archetype") == axis_id and not c.get("special_branch")]
         if cores:
             lines.append("  - core: " + " / ".join(f"{c['branch']}: {'+'.join(ja(s) for s in c['core_ids'])} ({c.get('core_score')})" for c in cores))
+        hybrids = [c for c in (ctx.get("cores") or []) if c.get("archetype") == axis_id and c.get("special_branch")]
+        if hybrids:
+            lines.append("  - 併用 (特殊な勝ち筋の役を足す): " + " / ".join(
+                f"{c['branch']}+{c['special_branch']}: {'+'.join(ja(s) for s in c['core_ids'])} ({c.get('core_score')})" for c in hybrids))
     sk = ctx.get("skipped") or []
     if sk:
         lines.append("")

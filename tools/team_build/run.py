@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from champions_agent.config import BUILD_ARCHETYPES, BUILD_POOL_TOP_N
+from champions_agent.config import BUILD_ARCHETYPES, BUILD_POOL_SOURCE, BUILD_POOL_TOP_N
 from champions_agent.data import database as db
 from tools.team_build import archetypes as ARCH
 from tools.team_build import candidates as C
@@ -62,6 +62,16 @@ def mega_capable_ids(owned: list) -> set:
 
 
 def stage_s0(run_dir: Path, spec: BuildSpec, legal: set) -> BuildSpec:
+    # 所持の方針 (config/owned_policy.json): 明示された owned にも適用する (今期の追加種を所持扱い、ブラックリストを外す)
+    from tools.team_build.spec import apply_owned_policy, new_species_ids, owned_policy
+    policy = owned_policy()
+    new = [s for s in (new_species_ids() if policy.get("new_species_owned") else []) if not legal or s in legal]
+    before = list(spec.owned)
+    spec.owned = apply_owned_policy(spec.owned, new, policy)
+    added = [s for s in spec.owned if s not in before]
+    removed = [s for s in before if s not in spec.owned]
+    if added or removed:
+        log(run_dir, f"S0 owned policy: 追加種を所持扱い +{len(added)} {added} / ブラックリスト −{len(removed)} {removed}")
     problems = validate_spec(spec, legal)
     if problems:
         raise SystemExit("BuildSpec の問題: " + "; ".join(problems))
@@ -72,7 +82,7 @@ def stage_s0(run_dir: Path, spec: BuildSpec, legal: set) -> BuildSpec:
 
 
 def stage_s1_s3(run_dir: Path, spec: BuildSpec, prof: dict, seed: int, top_n: int,
-                extra_threats: Optional[list] = None) -> tuple:
+                extra_threats: Optional[list] = None, pool_source: Optional[str] = None) -> tuple:
     doc = build_snapshot()
     save_snapshot(doc, run_dir)
     ingame_only = (doc.get("threat_source") or {}).get("ingame_only") or []
@@ -80,10 +90,13 @@ def stage_s1_s3(run_dir: Path, spec: BuildSpec, prof: dict, seed: int, top_n: in
                  f"threats={len(doc['threats'])} ゲーム内順位だけで入った種={ingame_only} "
                  f"local_battles={doc['local_meta'].get('n_battles')}")
     from champions_agent.env.ranked_teams import pinned_meta_snapshot_id
+    pool_source = pool_source or BUILD_POOL_SOURCE
+    # 相手プール: latest = 最新スナップショット (この run の S1 と同じ) の全種から合成 (ピンを使わない)、ranked = POOL_PIN の上位構築
     split = build_split(run_dir.name, run_dir, seed=seed, top_n=top_n,
-                        meta_snapshot_id=pinned_meta_snapshot_id())
-    log(run_dir, f"S2 opponents: teams={split['n_teams']} families={split['n_families']} "
-                 f"split={split['summary']} sealed={split['sealed_id']}")
+                        meta_snapshot_id=(None if pool_source == "latest" else pinned_meta_snapshot_id()),
+                        pool_source=pool_source)
+    log(run_dir, f"S2 opponents: source={pool_source} snapshot={split.get('pool_snapshot')} teams={split['n_teams']} "
+                 f"families={split['n_families']} split={split['summary']} sealed={split['sealed_id']}")
     tv = threat_sets(doc, prof["threats"])
     # セッションの相手など、脅威リストに無い種を代表型で足す (改善案の測定: 動きづらかった相手を脅威に含める)
     added = []
@@ -367,7 +380,7 @@ def archetype_context(run_dir: Path, spec: BuildSpec, feats: dict, threats: list
 
 def stage_s4(run_dir: Path, spec: BuildSpec, feats: dict, threats: list, legal: set,
              llm_mode: str, threat_weights: Optional[dict] = None, rule_ctx: Optional[dict] = None,
-             arch_ctx: Optional[dict] = None) -> list:
+             arch_ctx: Optional[dict] = None, pool_source: Optional[str] = None, seed: int = 0) -> list:
     mega = mega_capable_ids(list(feats))
     provider = None
     if llm_mode == "headless":
@@ -379,11 +392,11 @@ def stage_s4(run_dir: Path, spec: BuildSpec, feats: dict, threats: list, legal: 
                               log=lambda m: log(run_dir, m), threat_weights=threat_weights,
                               rules=(rule_ctx or {}).get("llm"), archetypes=axes,
                               rounds=(BUILD_ARCHETYPE_LLM_ROUNDS if axes else K.MAX_ROUNDS))
-    # 候補源の多系統化: 上位実構築の所持部分集合 (historical) も軸として加える
+    # 候補源の多系統化: 上位実構築 (latest なら合成プール) の所持部分集合 (historical) も軸として加える
     try:
         from tools.team_build.opponents import pool_teams
         from tools.team_build.sources import historical_cores
-        teams, _ = pool_teams()
+        teams, _ = pool_teams(source=pool_source, seed=seed)
         hist = historical_cores(teams, set(feats))
         hist = [h for h in hist if not any(set(h["core_ids"]) <= set(spec.banned) for _ in [0])]
         before = len(res["families"])
@@ -524,7 +537,8 @@ def stage_s5(run_dir: Path, spec: BuildSpec, fams: list, feats: dict, threats: l
         kept = []
         for l in all_lineups:
             fam = fam_by.get(l.concept) or {}
-            if fam.get("archetype") and not ARCH.lineup_ok(l.members, fam["archetype"], fam.get("branch"), q):
+            if fam.get("archetype") and not ARCH.lineup_ok(l.members, fam["archetype"], fam.get("branch"), q,
+                                                           fam.get("special_branch")):
                 continue
             kept.append(l)
         all_lineups = kept
@@ -700,14 +714,18 @@ def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv
                 # 役割の持ち物はクローズで残す側
                 fam = fam_by.get(l.concept) or {}
                 if fam.get("archetype") and fam.get("branch"):
-                    q = ARCH.qualified_lookup(arch_ctx).get((fam["archetype"], fam["branch"])) or {}
+                    q_all = ARCH.qualified_lookup(arch_ctx)
+                    q = q_all.get((fam["archetype"], fam["branch"])) or {}
+                    sb = fam.get("special_branch")
                     team, assign, a_notes = ARCH.apply_to_team(team, fam["archetype"], fam["branch"], q,
                                                                arch_kw["can_learn"], arch_kw["category_of"],
                                                                arch_kw["setup_moves"], arch_kw["stones"],
                                                                legal_item=arch_kw["legal_item"], alternatives=alternatives,
-                                                               abilities_of=arch_kw["abilities_of"])
-                    arch_info = {"axis": fam["archetype"], "branch": fam["branch"], "roles": assign, "notes": a_notes,
-                                 "label": ARCH.label_ja(fam["archetype"], fam["branch"])}
+                                                               abilities_of=arch_kw["abilities_of"],
+                                                               special_branch=sb,
+                                                               special_qualified=(q_all.get(("special", sb)) if sb else None))
+                    arch_info = {"axis": fam["archetype"], "branch": fam["branch"], "special_branch": sb, "roles": assign,
+                                 "notes": a_notes, "label": ARCH.label_ja(fam["archetype"], fam["branch"], sb)}
                     for sids in (assign or {}).values():
                         for s in sids:
                             prefer[s] = max(prefer.get(s, 0), 1)
@@ -808,6 +826,9 @@ def main() -> None:
     ap.add_argument("--action-eval", type=int, default=None, help="adapter の chunk ごとの対応比較戦数 (既定 100)")
     ap.add_argument("--article-file", default=None,
                     help="構築記事の本文 (ユーザーが貼ったもの)。LLM で structured claims にして軸の候補に加える (要 --llm headless)")
+    ap.add_argument("--pool-source", choices=["ranked", "latest"], default=BUILD_POOL_SOURCE,
+                    help="測定の相手プール: ranked = POOL_PIN の上位ランカー構築 / latest = 最新スナップショットの全種から合成 "
+                         "(既定 config BUILD_POOL_SOURCE)")
     ap.add_argument("--archetypes", choices=["on", "off"], default=("on" if BUILD_ARCHETYPES else "off"),
                     help="構築の軸 (docs/TEAM_BUILD_ARCHETYPES.md): S3 で役割判定、S4 で軸 × 分岐の core と LLM の軸ごとの提案、"
                          "S5 で役割の最小数、S6 で役割の技・持ち物 (既定 config BUILD_ARCHETYPES)")
@@ -857,7 +878,8 @@ def main() -> None:
             sid = resolve_species_token(tok)
             if sid:
                 session_w[sid] = max(session_w.get(sid, 0.0), 1.0)
-    doc, split, tv, feats = stage_s1_s3(run_dir, spec, prof, args.seed, args.top_n, extra_threats=list(session_w))
+    doc, split, tv, feats = stage_s1_s3(run_dir, spec, prof, args.seed, args.top_n, extra_threats=list(session_w),
+                                        pool_source=args.pool_source)
     threats = list(tv.keys())
     threat_weights = {t["id"]: threat_weight(t) for t in doc["top"] if t["id"] in tv}
     if session_w:
@@ -882,7 +904,8 @@ def main() -> None:
         fams = json.loads((run_dir / "s04_concepts.json").read_text(encoding="utf-8"))["families"]
         log(run_dir, f"S4 concepts: 既存を再利用 families={len(fams)}")
     else:
-        fams = stage_s4(run_dir, spec, feats, threats, legal, args.llm, threat_weights, rule_ctx=rule_ctx, arch_ctx=arch_ctx)
+        fams = stage_s4(run_dir, spec, feats, threats, legal, args.llm, threat_weights, rule_ctx=rule_ctx, arch_ctx=arch_ctx,
+                        pool_source=args.pool_source, seed=args.seed)
     if args.article_file and args.llm == "headless" and not args.reuse_concepts:
         try:
             from tools.team_build.articles import claims_to_cores, extract_claims
@@ -901,6 +924,7 @@ def main() -> None:
                        arch_ctx=arch_ctx, fams=fams)
     from champions_agent.env.ranked_teams import pinned_meta_snapshot_id
     manifest.update({"meta_snapshot": doc["snapshot"]["id"], "meta_pin": pinned_meta_snapshot_id(),
+                     "pool_source": split.get("pool_source"), "pool_snapshot": split.get("pool_snapshot"),
                      "opponent_split": {"sealed_id": split["sealed_id"], "n_teams": split["n_teams"],
                                         "n_families": split["n_families"]},
                      "n_concepts": len(fams), "n_lineups": len(lineups),

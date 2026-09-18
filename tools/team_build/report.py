@@ -46,7 +46,7 @@ def facts_from_run(run_dir: Path, candidate_id: str) -> dict:
     return {
         "candidate_id": candidate_id, "members": team.get("members"), "sets": team.get("sets"),
         "concept": {k: fam.get(k) for k in ("family_id", "core_ids", "mega_id", "win_condition", "support_roles", "weak_to",
-                                            "archetype", "branch", "switching")},
+                                            "archetype", "branch", "switching", "special_branch")},
         "archetype": team.get("archetype"),
         "rule_setter": team.get("rule_setter"), "rule_pair": team.get("rule_pair"),
         "holdout": holdout, "ablation": summary.get("ablation") if (mine is None or mine.get("rank", 1) == 1) else None,
@@ -145,7 +145,7 @@ def template_report(facts: dict) -> str:
             from tools.team_build.archetypes import SWITCHING_JA, label_ja
             arch = facts.get("archetype") or {}
             roles = arch.get("roles") or {}
-            lines.append(f"- 構築の軸: {label_ja(concept.get('archetype'), concept.get('branch'))} / 交代方針: "
+            lines.append(f"- 構築の軸: {label_ja(concept.get('archetype'), concept.get('branch'), concept.get('special_branch'))} / 交代方針: "
                          f"{SWITCHING_JA.get(concept.get('switching') or '', concept.get('switching'))} / 役割: "
                          + ", ".join(f"{r}={_ja(v)}" for r, v in roles.items()))
         except Exception:

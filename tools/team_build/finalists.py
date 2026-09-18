@@ -43,7 +43,8 @@ def direction_of(family: Optional[dict], members) -> dict:
     return {"win_condition": fam.get("win_condition"), "source": fam.get("source"),
             "core_ids": list(fam.get("core_ids") or []), "mega_id": fam.get("mega_id"),
             "family_id": fam.get("family_id"), "members": list(members or []),
-            "archetype": fam.get("archetype"), "branch": fam.get("branch"), "switching": fam.get("switching")}
+            "archetype": fam.get("archetype"), "branch": fam.get("branch"), "switching": fam.get("switching"),
+            "special_branch": fam.get("special_branch")}
 
 
 def _species_ja(sid: str) -> str:
@@ -62,7 +63,7 @@ def direction_label_ja(direction: dict, ja=None) -> str:
         # 構築の軸 (2026-09-18): 軸 / 分岐 と交代方針を先頭に
         try:
             from tools.team_build.archetypes import SWITCHING_JA, label_ja
-            lab = label_ja(direction.get("archetype"), direction.get("branch"))
+            lab = label_ja(direction.get("archetype"), direction.get("branch"), direction.get("special_branch"))
         except Exception:
             lab, SWITCHING_JA = "", {}
         if lab:

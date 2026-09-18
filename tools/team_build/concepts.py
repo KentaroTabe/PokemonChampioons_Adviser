@@ -41,6 +41,9 @@ def validate_concepts(auth: dict, owned: set, legal: set, mega_capable: set,
                 problems.append(f"concepts[{i}]: archetype {ax} は {sorted(archetypes)} のいずれか")
             elif c.get("branch") and c.get("branch") not in archetypes[ax]:
                 problems.append(f"concepts[{i}]: branch {c.get('branch')} は {archetypes[ax]} のいずれか")
+        if archetypes is not None and c.get("special_branch"):
+            if c.get("special_branch") not in (archetypes.get("special") or []):
+                problems.append(f"concepts[{i}]: special_branch {c.get('special_branch')} は {archetypes.get('special')} のいずれか")
         core = c.get("core_ids") or []
         if not (CONCEPT_MIN_CORE <= len(set(core)) <= CONCEPT_MAX_CORE):
             problems.append(f"concepts[{i}]: core_ids は {CONCEPT_MIN_CORE}〜{CONCEPT_MAX_CORE} 体")
@@ -173,7 +176,8 @@ def generate_concepts(spec, feats: dict, threats: list, legal: set, mega_capable
             "output_schema": {"authoritative": {"concepts": [{"name": "str", "core_ids": ["id"], "mega_id": "id|null",
                                                              "win_condition": "enum", "support_roles": ["enum"],
                                                              "weak_to": ["id"],
-                                                             **({"archetype": "id|null", "branch": "id|null"} if archetypes else {})}]},
+                                                             **({"archetype": "id|null", "branch": "id|null",
+                                                                 "special_branch": "id|null"} if archetypes else {})}]},
                               "display": {"explanations": {"<name>": "str"}}},
         }
         if archetypes:
@@ -193,7 +197,9 @@ def generate_concepts(spec, feats: dict, threats: list, legal: set, mega_capable
                     f"既出 (already_found) と core が 4/6 以上重ならない新しいコンセプトを {per_round} 個。"
                     f"分岐 (branches) の環境適合 (fit、根拠 notes) が高いものを優先し、各分岐の roles (必要な役割と候補 candidates) を "
                     f"core_ids に含める。concept には archetype と branch (この軸の分岐 id) を書く。core_ids は owned の id のみ。"
-                    + (" この軸は特殊な勝ち筋の集まりなので、分岐ごとに 1 個までにする。" if ax.get("special") else ""))
+                    + (" この軸は特殊な勝ち筋の集まりなので、分岐ごとに 1 個までにする。" if ax.get("special") else
+                       " special_options (特殊な勝ち筋の分岐と役の候補) があれば、その役を 1 体足した併用案も出してよい"
+                       " (concept に special_branch を書き、その役を core_ids に含める)。"))
             else:
                 payload["instruction"] = (f"framing={framing} の観点で、既出 (already_found) と core が 4/6 以上重ならない"
                                           f"新しいコンセプトを {per_round} 個。core_ids は owned の id のみ。")

@@ -121,8 +121,69 @@ def parse_custom_sets(value) -> dict:
                   "source": c.source} for sid, c in parse_set_text(str(value)).items()}
 
 
+REPO = Path(__file__).resolve().parent.parent.parent
+OWNED_POLICY_PATH = REPO / "config" / "owned_policy.json"
+FORMATS_DATA_CURRENT = REPO / "pokemon-showdown" / "data" / "mods" / "champions" / "formats-data.ts"
+FORMATS_DATA_PREVIOUS = REPO / "pokemon-showdown" / "data" / "mods" / "championsregmb" / "formats-data.ts"
+
+
+def illegal_ids_from_text(text: str) -> set:
+    """formats-data.ts の本文 → tier Illegal の種族 id 集合 (vision.normalize.champions_illegal_ids と同じ規則)。純粋"""
+    out = set()
+    for m in re.finditer(r"^\t(\w+): \{([^}]*)\}", text or "", flags=re.M):
+        if '"Illegal"' in m.group(2):
+            out.add(m.group(1))
+    return out
+
+
+def new_species_from_texts(current_text: str, previous_text: str) -> list:
+    """前レギュレーションで Illegal、今のレギュレーションで合法になった id (昇順)。純粋"""
+    return sorted(illegal_ids_from_text(previous_text) - illegal_ids_from_text(current_text))
+
+
+def new_species_ids(current_path: Path = FORMATS_DATA_CURRENT, previous_path: Path = FORMATS_DATA_PREVIOUS) -> list:
+    """今期に追加された基本種の id (champions mod と前レギュの凍結 mod の formats-data の差。メガフォルムと図鑑に無い id は除く)。
+    どちらかが読めなければ空 (所持の補完をしない)"""
+    try:
+        cur = Path(current_path).read_text(encoding="utf-8")
+        prev = Path(previous_path).read_text(encoding="utf-8")
+    except OSError:
+        return []
+    ids = new_species_from_texts(cur, prev)
+    try:
+        from advisor.dex import get_dex
+        from advisor.gimmick import is_mega_form
+        dex = get_dex()
+        return [s for s in ids if dex.species(s) and not is_mega_form(s)]
+    except Exception:
+        return ids
+
+
+def owned_policy(path: Path = OWNED_POLICY_PATH) -> dict:
+    """config/owned_policy.json: {"new_species_owned": bool, "blacklist": [id]}。無ければ補完なし"""
+    try:
+        d = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"new_species_owned": False, "blacklist": []}
+    return {"new_species_owned": bool(d.get("new_species_owned", False)),
+            "blacklist": [_toid(str(s)) for s in (d.get("blacklist") or []) if _toid(str(s))]}
+
+
+def apply_owned_policy(owned: list, new_species: list, policy: dict) -> list:
+    """所持 = 登録 ∪ (new_species_owned なら今期の追加種) − blacklist。順序は登録 → 追加種。純粋
+    (2026-09-18 ユーザー決定: 新規追加ポケモンは基本すべて所持扱い、ブラックリスト方式)"""
+    black = set(policy.get("blacklist") or [])
+    out = [s for s in owned if s not in black]
+    if policy.get("new_species_owned"):
+        for s in new_species:
+            if s not in out and s not in black:
+                out.append(s)
+    return out
+
+
 def owned_species_ids() -> list:
-    """config/my_team.json の登録種 → showdown id (種族ID があればそれ、無ければ名前解決)"""
+    """所持種の id: config/my_team.json の登録種 (種族ID があればそれ、無ければ名前解決) に、所持の方針
+    (config/owned_policy.json: 今期の追加種を所持扱い、ブラックリスト) を適用したもの"""
     from advisor.my_team import _load, registered_species_id
     from vision.normalize import NameResolver
     resolver = NameResolver()
@@ -134,7 +195,9 @@ def owned_species_ids() -> list:
             sid = r[1] if r else None
         if sid and sid not in out:
             out.append(sid)
-    return out
+    policy = owned_policy()
+    new = new_species_ids() if policy.get("new_species_owned") else []
+    return apply_owned_policy(out, new, policy)
 
 
 def legal_species_ids() -> set:
