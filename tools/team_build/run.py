@@ -16,8 +16,9 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from champions_agent.config import BUILD_POOL_TOP_N
+from champions_agent.config import BUILD_ARCHETYPES, BUILD_POOL_TOP_N
 from champions_agent.data import database as db
+from tools.team_build import archetypes as ARCH
 from tools.team_build import candidates as C
 from tools.team_build import concepts as K
 from tools.team_build import sets as S
@@ -171,23 +172,42 @@ def set_library_kwargs(spec: BuildSpec, sid: str, gen=None, conn=None, snapshot_
     return out
 
 
+def species_abilities(sid: str) -> tuple:
+    """その種が持ちうる特性 id (メガ後のフォルムを含む。champions_dex)。構築の軸の役割判定 (天候始動 等) に使う"""
+    import re
+    from advisor.gimmick import mega_forms
+    from tools.team_build.interaction import _cdex_species
+    cdex = _cdex_species()
+    out: list = []
+    for form in [sid] + list(mega_forms(sid)):
+        for v in ((cdex.get(form) or {}).get("abilities") or {}).values():
+            a = re.sub(r"[^a-z0-9]", "", str(v).lower())
+            if a and a not in out:
+                out.append(a)
+    return tuple(out)
+
+
 def rule_context(run_dir: Path, spec: BuildSpec, feats: dict, snapshot_id: int, tv: Optional[dict] = None,
-                 gen=None) -> Optional[dict]:
+                 gen=None, extra_moves=(), capture: Optional[dict] = None) -> Optional[dict]:
     """S0 の rules → 種ごとの判定材料 (型ライブラリ + 図鑑 + champions mod の learnset) → 設置役/エースの集合。
     エースの火力・技範囲は 代表型 + 単独入替の代替 (使用率 5% 以上) のうち門を通る最初の型で判定し、代表型と違えば
     その型を ace_sets に残して S6 で採用する (2026-09-10 ユーザー決定)。規則が無ければ None。
-    満たせる個体がプールに足りなければ止まる (勝手に緩めない)"""
-    if not spec.rules:
+    満たせる個体がプールに足りなければ止まる (勝手に緩めない)。
+    extra_moves / capture (2026-09-18): 構築の軸 (archetypes) も同じ判定材料を使う。capture (dict) を渡すと規則の有無に
+    かかわらず種ごとの材料 (RuleInfo + 基準の型の技/持ち物/特性、持ちうる特性、積み技の有無、接地) を capture[sid] に入れる"""
+    if not spec.rules and capture is None:
         return None
     from advisor.dex import get_dex
-    from champions_agent.config import BUILD_TRICK_ROOM_MOVES
+    from champions_agent.config import BUILD_SPEED_SETUP_MOVES, BUILD_TRICK_ROOM_MOVES
     from tools.check_mega_items import mega_stones
     from tools.team_build import rules as RU
     from tools.team_build.features import boost_multiplier
-    from tools.team_build.learnsets import can_learn
+    from tools.team_build.learnsets import can_learn, learnset_of
     dex = get_dex()
     stone_form = {item_id: sid for (sid, _n, _r, item_id) in mega_stones() if item_id}
-    moves_needed = sorted({RU.RULES[n]["setter_move"] for n in spec.rules})
+    moves_needed = sorted({RU.RULES[n]["setter_move"] for n in spec.rules} | set(extra_moves or ()))
+    from advisor.search import SETUP_MOVES as _SETUP
+    setup_all = tuple(_SETUP) + tuple(m for m in BUILD_SPEED_SETUP_MOVES if m not in _SETUP)
 
     def move_info(m: str):
         mv = dex.move(m)
@@ -257,6 +277,18 @@ def rule_context(run_dir: Path, spec: BuildSpec, feats: dict, snapshot_id: int, 
                                      has_tr=any(m in BUILD_TRICK_ROOM_MOVES for m in rep.moves),
                                      offense=offense, attack_moves=n_atk, attack_types=n_types,
                                      coverage_mean=float(cov_mean))
+            if capture is not None:
+                ls = learnset_of(sid)
+                capture[sid] = {
+                    "info": infos[sid], "moves": tuple(basis.moves), "item": basis.item or "", "ability": basis.ability or "",
+                    "abilities": species_abilities(sid) or ((basis.ability,) if basis.ability else ()),
+                    "usage": float(feats[sid].usage), "mega": bool(feats[sid].mega), "coverage": dict(cov),
+                    "has_setup": any(m in setup_all for m in basis.moves) or boost_multiplier(basis.ability, basis.item, basis.moves) > 1.0,
+                    "can_setup": any(m in ls for m in setup_all),
+                    "grounded": RU.grounded(infos[sid], RU.RULES["psychic_terrain_priority_ace"]),
+                }
+    if not spec.rules:
+        return None
     ctx = RU.build_context(spec.rules, infos)
     ctx["ace_sets"] = ace_sets
     (run_dir / "s03_rules.json").write_text(json.dumps(
@@ -280,16 +312,73 @@ def rule_context(run_dir: Path, spec: BuildSpec, feats: dict, snapshot_id: int, 
     return ctx
 
 
+def archetype_context(run_dir: Path, spec: BuildSpec, feats: dict, threats: list, threat_weights: Optional[dict],
+                      tv: dict, capture: dict, snapshot_id: int) -> dict:
+    """構築の軸 (archetypes): 種ごとの判定材料 (rule_context の capture) → Caps、脅威ごとの技・特性・タイプ・素早さ・重み →
+    threat_info、軸 × 分岐の 環境適合 / 役割の候補 / core を s03_archetypes.json に保存する"""
+    from advisor.dex import get_dex
+    from champions_agent.config import BUILD_ARCHETYPE_THREAT_MOVE_PCT
+    dex = get_dex()
+    caps_by = {}
+    for sid, c in capture.items():
+        info = c["info"]
+        caps_by[sid] = ARCH.Caps(sid, tuple(c["moves"]), c["ability"], c["item"], tuple(c["abilities"]), tuple(info.types),
+                                 int(info.spe), dict(info.can_learn), speed_share=info.speed_share, boost_share=info.boost_share,
+                                 boost_mult=info.boost_mult, bulk=info.bulk, offense=info.offense, attack_moves=info.attack_moves,
+                                 attack_types=info.attack_types, coverage_mean=info.coverage_mean, coverage=dict(c["coverage"]),
+                                 usage=c["usage"], mega=c["mega"], grounded=c["grounded"], has_setup=c["has_setup"],
+                                 can_setup=c["can_setup"])
+    threat_info = {}
+    with db.get_connection() as conn:
+        for tid, (view, moves) in tv.items():
+            mv = set(moves)
+            for r in conn.execute("SELECT move_name, usage_percent FROM move_usage WHERE snapshot_id=? AND pokemon_name=?",
+                                  (snapshot_id, tid)):
+                if float(r[1]) >= BUILD_ARCHETYPE_THREAT_MOVE_PCT:
+                    mv.add(r[0])
+            ab = {view.ability} if view.ability else set()
+            for r in conn.execute("SELECT ability_name, usage_percent FROM ability_usage WHERE snapshot_id=? AND pokemon_name=?",
+                                  (snapshot_id, tid)):
+                if float(r[1]) >= BUILD_ARCHETYPE_THREAT_MOVE_PCT:
+                    ab.add(r[0])
+            try:
+                rock = float(dex.effectiveness("Rock", list(view.types)))
+            except Exception:
+                rock = 1.0
+            threat_info[tid] = {"moves": sorted(mv), "abilities": sorted(ab), "ability": view.ability,
+                                "types": list(view.types), "spe": int((view.base or {}).get("spe") or 0),
+                                "weight": float((threat_weights or {}).get(tid, 0.0)), "rock_mult": rock}
+    ctx = ARCH.build_context(caps_by, threat_info, list(tv), threat_weights=threat_weights,
+                             coverage_fn=lambda core: C.team_coverage(tuple(core), feats, threats, threat_weights),
+                             type_mult=dex.effectiveness)
+    doc = ARCH.context_to_json(ctx)
+    doc["threat_info"] = threat_info
+    doc["caps"] = {sid: {"moves": list(c.moves), "ability": c.ability, "item": c.item, "abilities": list(c.abilities),
+                         "speed_share": c.speed_share, "bulk": c.bulk, "offense": c.offense, "coverage_mean": round(c.coverage_mean, 3),
+                         "usage": c.usage, "mega": c.mega, "grounded": c.grounded, "has_setup": c.has_setup, "can_setup": c.can_setup}
+                   for sid, c in caps_by.items()}
+    (run_dir / "s03_archetypes.json").write_text(json.dumps(doc, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    fits = ctx["fits"]
+    ok = sorted(((v["fit"], a, b) for (a, b), v in fits.items()), reverse=True)
+    log(run_dir, f"S3 archetypes: core={len(ctx['cores'])} (特殊 {sum(1 for c in ctx['cores'] if c['archetype'] == 'special')}) "
+                 f"見送り={len(ctx['skipped'])} 適合上位: " + ", ".join(f"{a}/{b}={f}" for f, a, b in ok[:6]))
+    return ctx
+
+
 def stage_s4(run_dir: Path, spec: BuildSpec, feats: dict, threats: list, legal: set,
-             llm_mode: str, threat_weights: Optional[dict] = None, rule_ctx: Optional[dict] = None) -> list:
+             llm_mode: str, threat_weights: Optional[dict] = None, rule_ctx: Optional[dict] = None,
+             arch_ctx: Optional[dict] = None) -> list:
     mega = mega_capable_ids(list(feats))
     provider = None
     if llm_mode == "headless":
         from tools.team_build.llm.provider import ClaudeCLIProvider
         provider = ClaudeCLIProvider(run_dir / "llm")
+    axes = ARCH.llm_axes(arch_ctx) if arch_ctx else None
+    from champions_agent.config import BUILD_ARCHETYPE_LLM_ROUNDS
     res = K.generate_concepts(spec, feats, threats, legal, mega, provider=provider,
                               log=lambda m: log(run_dir, m), threat_weights=threat_weights,
-                              rules=(rule_ctx or {}).get("llm"))
+                              rules=(rule_ctx or {}).get("llm"), archetypes=axes,
+                              rounds=(BUILD_ARCHETYPE_LLM_ROUNDS if axes else K.MAX_ROUNDS))
     # 候補源の多系統化: 上位実構築の所持部分集合 (historical) も軸として加える
     try:
         from tools.team_build.opponents import pool_teams
@@ -302,6 +391,12 @@ def stage_s4(run_dir: Path, spec: BuildSpec, feats: dict, threats: list, legal: 
         res["historical_added"] = len(res["families"]) - before
     except Exception as e:
         res["historical_error"] = repr(e)
+    if arch_ctx:
+        # 構築の軸 (軸 × 分岐の core、役割つき) を先頭側に置く (系統の代表になる → S5 の役割検査と S6 の型反映が効く)
+        cores = ARCH.context_cores(arch_ctx)
+        before = len(res["families"])
+        res["families"] = K.cluster_concepts(cores + [dict(f) for f in res["families"]])
+        res["archetype_cores_added"] = len(res["families"]) - before
     if rule_ctx:
         # 規則の軸 (設置役 × エース) を先頭に置く (系統の代表になる)。LLM/ルール/historical の軸で規則を満たさない
         # ものは S5 で機械的に落ちる
@@ -313,7 +408,8 @@ def stage_s4(run_dir: Path, spec: BuildSpec, feats: dict, threats: list, legal: 
     (run_dir / "s04_concepts.json").write_text(
         json.dumps(res, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     log(run_dir, f"S4 concepts: families={len(res['families'])} rounds={res['rounds']} stop={res['stop_reason']} "
-                 f"historical=+{res.get('historical_added', 0)} rules=+{res.get('rule_cores_added', 0)}")
+                 f"historical=+{res.get('historical_added', 0)} rules=+{res.get('rule_cores_added', 0)} "
+                 f"archetypes=+{res.get('archetype_cores_added', 0)}")
     # LLM の呼び出しが失敗していたら隠さず書く (2026-09-13: claude CLI の OAuth 失効で全 18 回が失敗していたのに
     # "rounds=6 stop=max_rounds" としか出ず、規則ベースだけで進んだことが分かりにくかった)
     calls = res.get("llm_calls") or []
@@ -379,7 +475,8 @@ def registered_team() -> tuple:
 
 def stage_s5(run_dir: Path, spec: BuildSpec, fams: list, feats: dict, threats: list, prof: dict,
              threat_weights: Optional[dict] = None, only_incumbent: bool = False,
-             n_neighbors: Optional[int] = None, rule_ctx: Optional[dict] = None) -> list:
+             n_neighbors: Optional[int] = None, rule_ctx: Optional[dict] = None,
+             arch_ctx: Optional[dict] = None) -> list:
     pool = list(feats)
     banned = set(spec.banned)
     all_lineups = []
@@ -419,6 +516,19 @@ def stage_s5(run_dir: Path, spec: BuildSpec, fams: list, feats: dict, threats: l
     fav = set(spec.favorites)
     if fav:
         all_lineups = [l for l in all_lineups if fav <= set(l.members)]
+    if arch_ctx:
+        # 構築の軸つきの系統 (archetype / branch を持つ) の並びは、役割の最小数 (壁役 1 + 積みエース 2 等) を満たすものだけ
+        fam_by = {f.get("family_id"): f for f in fams}
+        q = ARCH.qualified_lookup(arch_ctx)
+        n_before = len(all_lineups)
+        kept = []
+        for l in all_lineups:
+            fam = fam_by.get(l.concept) or {}
+            if fam.get("archetype") and not ARCH.lineup_ok(l.members, fam["archetype"], fam.get("branch"), q):
+                continue
+            kept.append(l)
+        all_lineups = kept
+        log(run_dir, f"S5 archetypes: 役割の最小数で {n_before} → {len(all_lineups)} 並び")
     if rule_ctx:
         # コンセプト規則も hard constraint: 設置役 + エース (別個体) を含まない並びは候補にしない
         from tools.team_build import rules as RU
@@ -513,22 +623,31 @@ def apply_team_field(team: list, alternatives: dict, tv: dict, gen, rule_field: 
 
 
 def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv: dict,
-             concept_mega: Optional[dict] = None, rule_ctx: Optional[dict] = None, gen=None) -> list:
+             concept_mega: Optional[dict] = None, rule_ctx: Optional[dict] = None, gen=None,
+             arch_ctx: Optional[dict] = None, fams: Optional[list] = None) -> list:
     """各並びの型を型ライブラリから決め、メガ枠 1 体・クローズ・合法性を通した Showdown 本文を保存する。
     規則つきなら設置役の型に技を保証する (持ち物・メガ枠の解決後に差し込み、validate-team で合法性を確認)。
-    並びの場 (規則の前提 + 設置役の特性/技) があれば、他のメンバーの型をその場の前提で選び直す (apply_team_field)"""
+    並びの場 (規則の前提 + 設置役の特性/技) があれば、他のメンバーの型をその場の前提で選び直す (apply_team_field)。
+    構築の軸つきの系統 (arch_ctx) は役割の技・持ち物・特性を型に保証する (archetypes.apply_to_team)"""
     out_dir = run_dir / "s06_sets"
     out_dir.mkdir(exist_ok=True)
     results = []
     concept_mega = concept_mega or {}
     rule_kw = None
-    if rule_ctx:
+    arch_kw = None
+    if rule_ctx or arch_ctx:
         from advisor.dex import get_dex
         from advisor.search import SETUP_MOVES
         from tools.team_build.interaction import _mega_stone_ids
         dex = get_dex()
         rule_kw = {"category_of": lambda m: str((dex.move(m) or {}).get("category") or "").lower(),
                    "setup_moves": SETUP_MOVES, "stones": _mega_stone_ids()}
+    if arch_ctx:
+        from tools.team_build.learnsets import can_learn
+        arch_kw = dict(rule_kw, can_learn=can_learn, legal_item=S.legal_item, abilities_of=species_abilities)
+        if not rule_ctx:
+            rule_kw = None
+    fam_by = {f.get("family_id"): f for f in (fams or [])}
     # 現行チームとその近傍: 登録済み個体は登録の型を使い、メガ枠は登録のメガに合わせる
     reg_text, _reg_ids, reg_mega = registered_team()
     with db.get_connection() as conn:
@@ -575,6 +694,23 @@ def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv
                 from tools.team_build import rules as RU
                 team, rule_setter, rule_notes, prefer = RU.apply_to_team(team, rule_ctx, usage_pct=usage_pct,
                                                                          alternatives=alternatives, **rule_kw)
+            arch_info = None
+            if arch_kw and not is_inc:
+                # 構築の軸: 役割の技 (壁技 / トリックルーム / バトンタッチ …)・特性 (天候始動)・持ち物 (ひかりのねんど 等) を保証する。
+                # 役割の持ち物はクローズで残す側
+                fam = fam_by.get(l.concept) or {}
+                if fam.get("archetype") and fam.get("branch"):
+                    q = ARCH.qualified_lookup(arch_ctx).get((fam["archetype"], fam["branch"])) or {}
+                    team, assign, a_notes = ARCH.apply_to_team(team, fam["archetype"], fam["branch"], q,
+                                                               arch_kw["can_learn"], arch_kw["category_of"],
+                                                               arch_kw["setup_moves"], arch_kw["stones"],
+                                                               legal_item=arch_kw["legal_item"], alternatives=alternatives,
+                                                               abilities_of=arch_kw["abilities_of"])
+                    arch_info = {"axis": fam["archetype"], "branch": fam["branch"], "roles": assign, "notes": a_notes,
+                                 "label": ARCH.label_ja(fam["archetype"], fam["branch"])}
+                    for sids in (assign or {}).values():
+                        for s in sids:
+                            prefer[s] = max(prefer.get(s, 0), 1)
             team = S.resolve_item_clause(team, item_map, usage_pct, prefer=prefer)
             text = S.to_showdown_text(team)
             registered = []
@@ -587,7 +723,7 @@ def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv
                             "errors": errs[:5], "tag": l.tag, "score": round(l.score, 4),
                             "registered_sets": registered, "rule_setter": rule_setter, "rule_notes": rule_notes,
                             "rule_pair": (rule_ctx or {}).get("pairs", {}).get(tuple(l.members)),
-                            "team_field": team_field,
+                            "team_field": team_field, "archetype": arch_info,
                             "sets": [{"species": c.species_id, "item": c.item, "nature": c.nature,
                                       "evs": c.evs, "moves": c.moves, "source": c.source,
                                       "coverage": round(c.score, 3), "notes": c.notes} for c in team]})
@@ -672,6 +808,9 @@ def main() -> None:
     ap.add_argument("--action-eval", type=int, default=None, help="adapter の chunk ごとの対応比較戦数 (既定 100)")
     ap.add_argument("--article-file", default=None,
                     help="構築記事の本文 (ユーザーが貼ったもの)。LLM で structured claims にして軸の候補に加える (要 --llm headless)")
+    ap.add_argument("--archetypes", choices=["on", "off"], default=("on" if BUILD_ARCHETYPES else "off"),
+                    help="構築の軸 (docs/TEAM_BUILD_ARCHETYPES.md): S3 で役割判定、S4 で軸 × 分岐の core と LLM の軸ごとの提案、"
+                         "S5 で役割の最小数、S6 で役割の技・持ち物 (既定 config BUILD_ARCHETYPES)")
     args = ap.parse_args()
 
     run_dir = RUNS_DIR / args.run_id
@@ -731,14 +870,19 @@ def main() -> None:
             if sid in tv:
                 threat_weights[sid] = threat_weights.get(sid, median) * (1.0 + BUILD_SESSION_THREAT_BOOST * w)
         log(run_dir, f"S3 session threat weights: {len([s for s in session_w if s in tv])} 種に反映 (boost {BUILD_SESSION_THREAT_BOOST})")
-    # learnset からの型生成 (想定する相手 = 脅威の重み) と、規則の判定材料
+    # learnset からの型生成 (想定する相手 = 脅威の重み) と、規則の判定材料 (構築の軸も同じ材料を使う)
     gen = make_generator(tv, threat_weights)
-    rule_ctx = rule_context(run_dir, spec, feats, doc["snapshot"]["id"], tv, gen=gen)
+    use_arch = args.archetypes == "on"
+    capture: Optional[dict] = {} if use_arch else None
+    rule_ctx = rule_context(run_dir, spec, feats, doc["snapshot"]["id"], tv, gen=gen,
+                            extra_moves=(sorted(ARCH.moves_needed()) if use_arch else ()), capture=capture)
+    arch_ctx = (archetype_context(run_dir, spec, feats, threats, threat_weights, tv, capture, doc["snapshot"]["id"])
+                if use_arch else None)
     if args.reuse_concepts and (run_dir / "s04_concepts.json").exists():
         fams = json.loads((run_dir / "s04_concepts.json").read_text(encoding="utf-8"))["families"]
         log(run_dir, f"S4 concepts: 既存を再利用 families={len(fams)}")
     else:
-        fams = stage_s4(run_dir, spec, feats, threats, legal, args.llm, threat_weights, rule_ctx=rule_ctx)
+        fams = stage_s4(run_dir, spec, feats, threats, legal, args.llm, threat_weights, rule_ctx=rule_ctx, arch_ctx=arch_ctx)
     if args.article_file and args.llm == "headless" and not args.reuse_concepts:
         try:
             from tools.team_build.articles import claims_to_cores, extract_claims
@@ -751,9 +895,10 @@ def main() -> None:
             log(run_dir, f"S4 article error: {e!r}")
     lineups = stage_s5(run_dir, spec, fams, feats, threats, prof, threat_weights,
                        only_incumbent=args.only_incumbent, n_neighbors=args.incumbent_neighbors_s5,
-                       rule_ctx=rule_ctx)
+                       rule_ctx=rule_ctx, arch_ctx=arch_ctx)
     concept_mega = {f["family_id"]: f.get("mega_id") for f in fams}
-    results = stage_s6(run_dir, spec, lineups, doc["snapshot"]["id"], tv, concept_mega, rule_ctx=rule_ctx, gen=gen)
+    results = stage_s6(run_dir, spec, lineups, doc["snapshot"]["id"], tv, concept_mega, rule_ctx=rule_ctx, gen=gen,
+                       arch_ctx=arch_ctx, fams=fams)
     from champions_agent.env.ranked_teams import pinned_meta_snapshot_id
     manifest.update({"meta_snapshot": doc["snapshot"]["id"], "meta_pin": pinned_meta_snapshot_id(),
                      "opponent_split": {"sealed_id": split["sealed_id"], "n_teams": split["n_teams"],

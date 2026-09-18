@@ -59,6 +59,7 @@ TESTS=(
   test_current_party_roster
   test_team_build_rules
   test_team_build_gen_sets
+  test_team_build_archetypes
   test_ja_names
   test_gimmick
   test_usage_ingame_rank

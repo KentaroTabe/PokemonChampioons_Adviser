@@ -42,7 +42,8 @@ def direction_of(family: Optional[dict], members) -> dict:
     fam = family or {}
     return {"win_condition": fam.get("win_condition"), "source": fam.get("source"),
             "core_ids": list(fam.get("core_ids") or []), "mega_id": fam.get("mega_id"),
-            "family_id": fam.get("family_id"), "members": list(members or [])}
+            "family_id": fam.get("family_id"), "members": list(members or []),
+            "archetype": fam.get("archetype"), "branch": fam.get("branch"), "switching": fam.get("switching")}
 
 
 def _species_ja(sid: str) -> str:
@@ -57,11 +58,21 @@ def direction_label_ja(direction: dict, ja=None) -> str:
     """方向性の日本語ラベル: 勝ち筋 / 出どころ / 軸 / メガ (無いものは省く)"""
     ja = ja or _species_ja
     parts = []
+    if direction.get("archetype"):
+        # 構築の軸 (2026-09-18): 軸 / 分岐 と交代方針を先頭に
+        try:
+            from tools.team_build.archetypes import SWITCHING_JA, label_ja
+            lab = label_ja(direction.get("archetype"), direction.get("branch"))
+        except Exception:
+            lab, SWITCHING_JA = "", {}
+        if lab:
+            sw = SWITCHING_JA.get(direction.get("switching") or "", "")
+            parts.append(f"軸 {lab}" + (f" ({sw})" if sw else ""))
     wc = direction.get("win_condition")
     if wc:
         parts.append(WIN_CONDITION_JA.get(wc, str(wc)))
     src = direction.get("source") or ""
-    if src:
+    if src and not direction.get("archetype"):
         parts.append(SOURCE_JA.get(src) or SOURCE_JA.get(src.split(":")[0]) or src)
     core = [c for c in (direction.get("core_ids") or []) if c][:3]
     if core:

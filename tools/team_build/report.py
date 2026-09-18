@@ -45,7 +45,9 @@ def facts_from_run(run_dir: Path, candidate_id: str) -> dict:
         holdout = None if mine.get("rank", 1) != 1 else summary.get("holdout")
     return {
         "candidate_id": candidate_id, "members": team.get("members"), "sets": team.get("sets"),
-        "concept": {k: fam.get(k) for k in ("family_id", "core_ids", "mega_id", "win_condition", "support_roles", "weak_to")},
+        "concept": {k: fam.get(k) for k in ("family_id", "core_ids", "mega_id", "win_condition", "support_roles", "weak_to",
+                                            "archetype", "branch", "switching")},
+        "archetype": team.get("archetype"),
         "rule_setter": team.get("rule_setter"), "rule_pair": team.get("rule_pair"),
         "holdout": holdout, "ablation": summary.get("ablation") if (mine is None or mine.get("rank", 1) == 1) else None,
         "robustness_worst": summary.get("robustness_worst") if (mine is None or mine.get("rank", 1) == 1) else None,
@@ -137,8 +139,18 @@ def template_report(facts: dict) -> str:
     h = facts.get("holdout") or {}
     concept = facts.get("concept") or {}
     lines = [f"# 構築レポート: {facts.get('candidate_id')}", "",
-             "## コンセプト", f"- 軸: {_ja(concept.get('core_ids'))} / 勝ち筋: {concept.get('win_condition')}",
-             "", "## 並び", team_table_ja(facts.get("sets") or []), ""]
+             "## コンセプト", f"- 軸: {_ja(concept.get('core_ids'))} / 勝ち筋: {concept.get('win_condition')}"]
+    if concept.get("archetype"):
+        try:
+            from tools.team_build.archetypes import SWITCHING_JA, label_ja
+            arch = facts.get("archetype") or {}
+            roles = arch.get("roles") or {}
+            lines.append(f"- 構築の軸: {label_ja(concept.get('archetype'), concept.get('branch'))} / 交代方針: "
+                         f"{SWITCHING_JA.get(concept.get('switching') or '', concept.get('switching'))} / 役割: "
+                         + ", ".join(f"{r}={_ja(v)}" for r, v in roles.items()))
+        except Exception:
+            pass
+    lines += ["", "## 並び", team_table_ja(facts.get("sets") or []), ""]
     for st in facts.get("sets") or []:
         if st.get("notes"):
             lines.append(f"- {_ja(st.get('species'))}: {st.get('notes')}")

@@ -70,6 +70,45 @@ def test_generate_with_mock_provider():
     print("test_generate_with_mock_provider OK")
 
 
+def test_generate_with_archetypes():
+    """構築の軸 (2026-09-18): framing は軸ごと (archetype:<id>)、concept の archetype / branch を検証し、系統に残す。
+    特殊な勝ち筋の軸も 1 回にまとまる"""
+    feats, th = _feats()
+    spec = BuildSpec(owned=["a", "b", "c", "d"])
+    legal, mega = {"a", "b", "c", "d", "t1", "t2", "t3"}, {"a"}
+    axes = [{"id": "setup_sweep", "label": "積み展開", "description": "積んで抜く", "switching": "no_switch", "switching_ja": "交代しない",
+             "special": False, "branches": [{"id": "screens_dual", "label": "2 枚壁", "fit": 0.7, "notes": ["崩し手 30%"],
+                                             "roles": [{"role": "screens_dual", "label": "壁役", "min": 1, "candidates": ["c"]},
+                                                       {"role": "setup_ace", "label": "積みエース", "min": 2, "candidates": ["a", "b"]}]}]},
+            {"id": "special", "label": "特殊な勝ち筋", "description": "ほろびのうた等", "switching": "mixed", "switching_ja": "状況次第",
+             "special": True, "branches": [{"id": "perish_trap", "label": "ほろびのうた + 交代封じ", "fit": 0.6, "notes": [],
+                                            "roles": [{"role": "perish_singer", "label": "ほろびのうた役", "min": 1, "candidates": ["d"]}]}]}]
+    good = json.dumps({"authoritative": {"concepts": [
+        {"name": "walls", "core_ids": ["c", "d"], "mega_id": None, "win_condition": "setup_sweep", "support_roles": ["setup"],
+         "weak_to": ["t3"], "archetype": "setup_sweep", "branch": "screens_dual"}]}, "display": {"explanations": {"walls": "壁"}}})
+    bad = json.dumps({"authoritative": {"concepts": [
+        {"name": "x", "core_ids": ["c", "d"], "mega_id": None, "win_condition": "setup_sweep", "support_roles": [], "weak_to": [],
+         "archetype": "nope", "branch": "screens_dual"}]}})
+    dup = json.dumps({"authoritative": {"concepts": [
+        {"name": "perish", "core_ids": ["d", "c"], "mega_id": None, "win_condition": "anti_meta", "support_roles": [], "weak_to": [],
+         "archetype": "special", "branch": "perish_trap"}]}})
+    with tempfile.TemporaryDirectory() as d:
+        prov = MockProvider([bad, good, dup], log_dir=Path(d))
+        res = K.generate_concepts(spec, feats, th, legal, mega, provider=prov, rounds=5, per_round=1, archetypes=axes)
+    calls = res["llm_calls"]
+    assert calls[0]["framing"] == "archetype:setup_sweep" and calls[0]["attempts"] == 2 and calls[0]["ok"]   # 未知の軸は差し戻し
+    assert calls[1]["framing"] == "archetype:special" and res["stop_reason"] == "coverage" and len(calls) == 2
+    fam = next(f for f in res["families"] if f.get("archetype") == "setup_sweep")
+    assert fam["branch"] == "screens_dual" and fam["source"] == "llm:archetype:setup_sweep" and fam["core_ids"] == ["c", "d"]
+    assert K.validate_concepts({"concepts": [{"name": "y", "core_ids": ["a", "b"], "win_condition": "setup_sweep",
+                                             "archetype": "setup_sweep", "branch": "zzz"}]},
+                               {"a", "b"}, legal, mega, archetypes={"setup_sweep": ["screens_dual"]})
+    assert not K.validate_concepts({"concepts": [{"name": "y", "core_ids": ["a", "b"], "win_condition": "setup_sweep"}]},
+                                   {"a", "b"}, legal, mega, archetypes={"setup_sweep": ["screens_dual"]})   # 軸なしは可
+    print("test_generate_with_archetypes OK")
+
+
 if __name__ == "__main__":
     test_validate_and_cluster()
     test_generate_with_mock_provider()
+    test_generate_with_archetypes()

@@ -354,6 +354,21 @@ BUILD_SESSION_THREAT_BOOST = 2.0
 BUILD_META_TOP_N = 60
 BUILD_META_THREATS_N = 30
 BUILD_META_INGAME_N = 30
+# 構築の軸 (tools/team_build/archetypes.py、docs/TEAM_BUILD_ARCHETYPES.md。2026-09-18 ユーザー決定: 積み構築は交代しない・
+# 壁で耐久を補う → 軸ごとに役割の構造を持ち、S4 で軸 × 分岐の core を出し、S5 で役割の最小数を制約、S6 で技・持ち物を保証)
+BUILD_ARCHETYPES = True                    # run.py --archetypes on|off の既定
+BUILD_ARCHETYPE_CORES_PER_BRANCH = 2       # 分岐ごとに S4 へ出す core の数
+BUILD_ARCHETYPE_MIN_FIT = 0.35             # 環境適合 (0..1) がこれ未満の分岐は core を出さない (記録だけ残す)
+BUILD_ARCHETYPE_ROLE_TOP = 4               # 役割ごとに core の組み合わせに使う候補数
+BUILD_ARCHETYPE_LLM_ROUNDS = 11            # LLM を軸ごとに回す上限 (coverage 停止あり)
+BUILD_ARCHETYPE_SPECIAL_MAX_CORES = 3      # 特殊な勝ち筋 (ほろびのうた等) は全分岐で合計この数まで (一覧・候補を膨らませない)
+BUILD_ARCHETYPE_TR_SPEED_SHARE = 0.3       # トリックルームのエース: 上位脅威への先手率がこれ以下
+BUILD_ARCHETYPE_FAST_SPEED_SHARE = 0.6     # 速攻役: 先手率がこれ以上 (タスキ / スカーフでも可)
+BUILD_ARCHETYPE_WALL_BULK = 0.45           # 受け役の耐久 (S3 roles.bulk)
+BUILD_ARCHETYPE_PRIORITY_BULK = 0.35       # 先制技持ちの高火力のうち耐久を求める側
+BUILD_ARCHETYPE_FAST_THREAT_SPE = 100      # トリックルーム / 先制技の適合: 素早さ種族値 (メガ後) がこれ以上の脅威
+BUILD_ARCHETYPE_THREAT_MOVE_PCT = 20.0     # 脅威が技 / 特性を「持つ」と数える使用率 (%)
+BUILD_ARCHETYPE_ANSWER_COVERAGE = 0.6      # 環境上位への回答: 上位 5 脅威への被覆
 # 構築のコンセプト規則 (tools/team_build/rules.py、hard constraint)。psychic_terrain_priority_ace のエース = 接地していて
 # 次のいずれかの型 (2026-09-10 改訂。閾値はより良い値が見つかれば変更してよい: ユーザー合意)。
 #   速攻型: 上位脅威への先手率 (S3 の役割 speed、加速前) ≥ FAST_SPEED_SHARE かつ 防御種族値 (メガ後) ≤ FAST_MAX_DEF
