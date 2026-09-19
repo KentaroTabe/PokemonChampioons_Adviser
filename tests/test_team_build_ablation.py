@@ -47,6 +47,25 @@ def test_effects_from_outcomes():
     print("test_effects_from_outcomes OK")
 
 
+def test_arms_from_json_and_failed():
+    """終わった run の ablation.json から腕を作り直し、失敗した腕 (win_rate None / history に error) を見つける (純粋)"""
+    from tools.team_build.ablation import arms_from_json, failed_arm_ids
+    doc = {"n": 150, "seed": 7, "tier": "selection", "arms": {
+        "T0P0A0": {"team_file": "/r.txt", "selection_model": None, "models_dir": "/pins", "extra_args": [],
+                   "pick_policy": "teampreview", "win_rate": 0.61, "history": [{"offset": 0, "n": 150, "win_rate": 0.61}]},
+        "T1P0A0": {"team_file": "/c.txt", "selection_model": None, "models_dir": "/pins", "extra_args": [],
+                   "pick_policy": "teampreview", "win_rate": None, "history": [{"offset": 0, "n": 150, "error": "rc=124"}]},
+        "T1P1A0": {"team_file": "/c.txt", "selection_model": "/cand.pt", "models_dir": "/pins", "extra_args": ["--x"],
+                   "pick_policy": "advisor", "win_rate": 0.85, "history": [{"offset": 0, "n": 150, "win_rate": 0.85}]}}}
+    arms = arms_from_json(doc)
+    assert set(arms) == {"T0P0A0", "T1P0A0", "T1P1A0"} and arms["T1P1A0"].selection_model == "/cand.pt"
+    assert arms["T1P1A0"].extra_args == ["--x"] and arms["T1P0A0"].pick_policy == "teampreview" and arms["T1P0A0"].outcomes == []
+    assert str(arms["T0P0A0"].team_file) == "/r.txt"
+    assert failed_arm_ids(doc) == ["T1P0A0"]
+    print("test_arms_from_json_and_failed OK")
+
+
 if __name__ == "__main__":
     test_grid_arms()
     test_effects_from_outcomes()
+    test_arms_from_json_and_failed()
