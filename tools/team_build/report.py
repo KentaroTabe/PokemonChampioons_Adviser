@@ -171,8 +171,9 @@ def template_report(facts: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write_report(run_dir: Path, candidate_id: str, provider=None, out_path: Optional[Path] = None) -> Path:
-    """out_path: 書き先 (既定 final/build_report.md。他の最終候補は final/alternatives/<cid>/build_report.md)"""
+def write_report(run_dir: Path, candidate_id: str, provider=None, out_path: Optional[Path] = None, log=None) -> Path:
+    """out_path: 書き先 (既定 final/build_report.md。他の最終候補は final/alternatives/<cid>/build_report.md)。
+    LLM (provider) を渡したのに本文 (display.markdown) が得られなければ、黙ってテンプレートだけにせず log に書く"""
     facts = facts_from_run(run_dir, candidate_id)
     facts["ja"] = ja_facts(facts)
     md = template_report(facts)
@@ -181,6 +182,9 @@ def write_report(run_dir: Path, candidate_id: str, provider=None, out_path: Opti
         text = (res.get("display") or {}).get("markdown") if res.get("ok") else None
         if text:
             md = text + "\n\n---\n(機械生成の数値表)\n\n" + md
+        else:
+            (log or print)(f"[report] {candidate_id}: LLM の本文なし (ok={res.get('ok')} problems={res.get('problems')} "
+                           f"record={res.get('record')}) → テンプレートのみ")
     out = Path(out_path) if out_path else Path(run_dir) / "final" / "build_report.md"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(md, encoding="utf-8")

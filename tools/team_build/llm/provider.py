@@ -34,28 +34,23 @@ def _hash(text: str) -> str:
 
 
 def extract_json(text: str) -> Optional[dict]:
-    """応答本文から最初の JSON オブジェクトを取り出す (前後の説明文や ```json フェンスを許容)"""
+    """応答本文から最初の JSON オブジェクトを取り出す (前後の説明文や ```json フェンスを許容)。
+    2026-09-22: 以前は括弧の深さを数えて切り出していたため、文字列の中に `}` があると途中で切れ、その内側の小さな
+    オブジェクト ({"ok": true}) だけを拾って本文 (display.markdown) を捨てていた (arch_0918 の記事)。
+    json の raw_decode で「その位置から読める最初のオブジェクト」を取る (文字列内の括弧を正しく扱う)。
+    strict=False: モデルは長い本文を文字列に入れるとき生の改行を書くことがある (厳密モードでは制御文字として不正)"""
     if not text:
         return None
     t = text.strip()
-    if t.startswith("{"):
-        try:
-            return json.loads(t)
-        except Exception:
-            pass
+    dec = json.JSONDecoder(strict=False)
     start = t.find("{")
     while start != -1:
-        depth = 0
-        for i in range(start, len(t)):
-            if t[i] == "{":
-                depth += 1
-            elif t[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return json.loads(t[start:i + 1])
-                    except Exception:
-                        break
+        try:
+            obj, _end = dec.raw_decode(t, start)
+            if isinstance(obj, dict):
+                return obj
+        except ValueError:
+            pass
         start = t.find("{", start + 1)
     return None
 
@@ -130,8 +125,13 @@ class LLMProvider:
         if self.log_dir is None:
             return None
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        # 同一秒内の複数呼び出しで上書きしないよう連番を付ける
-        path = self.log_dir / f"{stage}_{tier}_{len(self.calls):03d}_a{attempt}.json"
+        # 同一秒内の複数呼び出しで上書きしないよう連番を付ける。別のプロセス (run 後の記事の再生成) が同じ番号を
+        # 使っていても既存の記録を上書きしない (2026-09-19: arch_0918 の run 中の記事の記録が再生成で消えた)
+        k = len(self.calls)
+        path = self.log_dir / f"{stage}_{tier}_{k:03d}_a{attempt}.json"
+        while path.exists():
+            k += 1
+            path = self.log_dir / f"{stage}_{tier}_{k:03d}_a{attempt}.json"
         path.write_text(json.dumps(rec, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
         return path
 

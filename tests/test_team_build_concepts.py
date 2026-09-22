@@ -70,6 +70,31 @@ def test_generate_with_mock_provider():
     print("test_generate_with_mock_provider OK")
 
 
+def test_extract_json_braces_in_strings_and_record_numbering():
+    """2026-09-22: 文字列の中の括弧で JSON が途中で切れ、内側の {"ok": true} だけを拾って本文を捨てていた (arch_0918 の記事)。
+    フェンスつき・前置きつき・文字列内の { } を正しく扱い、記録の連番は既存ファイルを上書きしない"""
+    fenced = ('```json\n{\n  "authoritative": { "ok": true },\n  "display": {\n    "markdown": "# 記事\\n\\n本文に {x} と } を含む。'
+              '`L69_C029` の話。"\n  }\n}\n```')
+    d = extract_json(fenced)
+    assert d and d["authoritative"] == {"ok": True} and "本文に {x} と } を含む" in d["display"]["markdown"], d
+    assert extract_json('前置き {壊れた} のあと {"a": 1, "b": {"c": "}"}} 後置き') == {"a": 1, "b": {"c": "}"}}
+    assert extract_json('{"a": 1}') == {"a": 1} and extract_json("[1, 2]") is None and extract_json("") is None
+    # 文字列の中の生の改行 (厳密な JSON では不正) も本文として読む (長い記事で実際に起きた)
+    raw_nl = '{"authoritative": {"ok": true}, "display": {"markdown": "# 記事\n\n1 行目\n2 行目 }"}}'
+    d2 = extract_json(raw_nl)
+    assert d2 and d2["display"]["markdown"] == "# 記事\n\n1 行目\n2 行目 }", d2
+    with tempfile.TemporaryDirectory() as tmp:
+        p1 = MockProvider(['{"authoritative": {"x": 1}}'], log_dir=Path(tmp))
+        p1.call("s13_report", "sonnet", "sys", {"q": 1})
+        p2 = MockProvider(['{"authoritative": {"x": 2}}'], log_dir=Path(tmp))    # 別プロセスの再生成を模す
+        r2 = p2.call("s13_report", "sonnet", "sys", {"q": 2})
+        files = sorted(Path(tmp).glob("s13_report_sonnet_*.json"))
+        assert len(files) == 2 and files[0].name == "s13_report_sonnet_001_a1.json" and files[1].name == "s13_report_sonnet_002_a1.json"
+        rec0 = json.loads(files[0].read_text(encoding="utf-8"))
+        assert '"x": 1' in rec0["raw_text"] and r2["record"] == str(files[1])       # 1 つ目の記録が残っている
+    print("test_extract_json_braces_in_strings_and_record_numbering OK")
+
+
 def test_generate_with_archetypes():
     """構築の軸 (2026-09-18): framing は軸ごと (archetype:<id>)、concept の archetype / branch を検証し、系統に残す。
     特殊な勝ち筋の軸も 1 回にまとまる"""
@@ -111,4 +136,5 @@ def test_generate_with_archetypes():
 if __name__ == "__main__":
     test_validate_and_cluster()
     test_generate_with_mock_provider()
+    test_extract_json_braces_in_strings_and_record_numbering()
     test_generate_with_archetypes()
