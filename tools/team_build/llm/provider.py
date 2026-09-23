@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from champions_agent.config import (BUILD_LLM_CLI_TOOLS, BUILD_LLM_EFFORT, BUILD_LLM_MAX_BUDGET_USD,
-                                    BUILD_LLM_MODELS)
+                                    BUILD_LLM_MODELS, BUILD_LLM_STAGE_MODELS)
 
 REPO = Path(__file__).resolve().parent.parent.parent.parent
 MODELS = dict(BUILD_LLM_MODELS)      # tier → モデル id (config)。provider ごとに models=... で上書きできる
@@ -91,11 +91,16 @@ class LLMProvider:
     default_schema: Optional[dict] = None     # 構造化出力の既定 schema (None = 本文の JSON 抽出だけ)
 
     def __init__(self, log_dir: Optional[Path] = None, models: Optional[dict] = None,
-                 effort: Optional[dict] = None):
+                 effort: Optional[dict] = None, stage_models: Optional[dict] = None):
         self.log_dir = Path(log_dir) if log_dir else None
         self.calls: list = []
         self.models = dict(MODELS, **(models or {}))          # tier → モデル id (config + 上書き)
         self.effort = dict(BUILD_LLM_EFFORT, **(effort or {}))  # stage → effort (None = CLI の既定)
+        self.stage_models = dict(BUILD_LLM_STAGE_MODELS, **(stage_models or {}))   # stage → モデル id (None = tier のまま)
+
+    def model_for(self, stage: str, tier: str) -> str:
+        """段のモデル: 段ごとの指定 (config BUILD_LLM_STAGE_MODELS / 上書き) があればそれ、無ければ tier の対応"""
+        return self.stage_models.get(stage) or self.models.get(tier, tier)
 
     def complete(self, model: str, system: str, prompt: str, timeout: int = DEFAULT_TIMEOUT,
                  schema: Optional[dict] = None, effort: Optional[str] = None) -> dict:
@@ -111,7 +116,7 @@ class LLMProvider:
         schema: 構造化出力の JSON Schema (None なら provider の既定 default_schema)。
         effort: この呼び出しの effort (None なら stage の設定 BUILD_LLM_EFFORT、それも None なら CLI の既定)。
         戻り値: {"ok": bool, "authoritative": dict, "display": dict, "problems": [...], "attempts": n, "record": path}"""
-        model = self.models.get(tier, tier)
+        model = self.model_for(stage, tier)
         schema = self.default_schema if schema is None else schema
         effort = effort if effort is not None else self.effort.get(stage)
         prompt = json.dumps(payload, ensure_ascii=False, indent=1)
@@ -171,8 +176,8 @@ class MockProvider(LLMProvider):
     name = "mock"
 
     def __init__(self, responses: list, log_dir: Optional[Path] = None, models: Optional[dict] = None,
-                 effort: Optional[dict] = None):
-        super().__init__(log_dir, models=models, effort=effort)
+                 effort: Optional[dict] = None, stage_models: Optional[dict] = None):
+        super().__init__(log_dir, models=models, effort=effort, stage_models=stage_models)
         self.responses = list(responses)
         self.i = 0
 
@@ -204,8 +209,9 @@ class ClaudeCLIProvider(LLMProvider):
     default_schema = OUTPUT_SCHEMA
 
     def __init__(self, log_dir: Optional[Path] = None, models: Optional[dict] = None, effort: Optional[dict] = None,
-                 max_budget_usd: Optional[float] = BUILD_LLM_MAX_BUDGET_USD, tools: str = BUILD_LLM_CLI_TOOLS):
-        super().__init__(log_dir, models=models, effort=effort)
+                 max_budget_usd: Optional[float] = BUILD_LLM_MAX_BUDGET_USD, tools: str = BUILD_LLM_CLI_TOOLS,
+                 stage_models: Optional[dict] = None):
+        super().__init__(log_dir, models=models, effort=effort, stage_models=stage_models)
         self.max_budget_usd = max_budget_usd
         self.tools = tools
 
@@ -248,7 +254,8 @@ class ClaudeCLIProvider(LLMProvider):
 
 
 def get_provider(mode: str = "headless", log_dir: Optional[Path] = None, mock_responses=None,
-                 models: Optional[dict] = None, effort: Optional[dict] = None) -> LLMProvider:
+                 models: Optional[dict] = None, effort: Optional[dict] = None,
+                 stage_models: Optional[dict] = None) -> LLMProvider:
     if mode == "mock":
-        return MockProvider(mock_responses or [], log_dir, models=models, effort=effort)
-    return ClaudeCLIProvider(log_dir, models=models, effort=effort)
+        return MockProvider(mock_responses or [], log_dir, models=models, effort=effort, stage_models=stage_models)
+    return ClaudeCLIProvider(log_dir, models=models, effort=effort, stage_models=stage_models)

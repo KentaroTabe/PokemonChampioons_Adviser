@@ -370,8 +370,13 @@ BUILD_ARCHETYPE_SPECIAL_HYBRIDS = 3        # 特殊な勝ち筋を他の軸の c
 # 構築の LLM 呼び出し (tools/team_build/llm/provider.py、claude CLI ヘッドレス)。2026-09-24: docs/TECH_WATCH_2026-09.md §A
 # - tier → モデル id。切替は固定入力の regression (python -m tools.team_build.llm.regression) で測ってから
 BUILD_LLM_MODELS = {"opus": "claude-opus-5", "sonnet": "claude-sonnet-5", "haiku": "claude-haiku-4-5-20251001"}
-# - 段ごとの effort (claude CLI --effort: low / medium / high / xhigh / max。None = CLI の既定)。regression で測って決める
-BUILD_LLM_EFFORT = {"s04_concepts": None, "s13_report": None, "interventions": None, "articles": None}
+# - 段ごとのモデル (tier の対応を上書き。None = tier のまま)。2026-09-24 の回帰測定 (arch_0918 の固定入力、11 軸):
+#   S4 は Opus 5 既定で LLM 系統 71 / 74 ($8.5、28 分)、Opus 5.5 既定で 59 ($5.9、10 分、重複が増える)、
+#   Opus 5.5 xhigh で 82 ($10.6、44 分、重複ほぼ 0) → 多様性を優先して S4 だけ 5.5 + xhigh。介入仮説 (opus) は未測定なので据え置き
+BUILD_LLM_STAGE_MODELS = {"s04_concepts": "claude-opus-5-5"}
+# - 段ごとの effort (claude CLI --effort: low / medium / high / xhigh / max。None = CLI の既定)。
+#   S13 記事は Sonnet 5 の既定 119 秒 / $0.23 と low 38 秒 / $0.15 で本文の長さは同じだが low は個体ごとの小見出しが落ちる → 既定のまま
+BUILD_LLM_EFFORT = {"s04_concepts": "xhigh", "s13_report": None, "interventions": None, "articles": None}
 # - 1 呼び出しの費用上限 (USD、CLI --max-budget-usd)。再試行の暴走に対する保険。通常の S4 呼び出しは $1 前後 (Opus 5 実測)
 BUILD_LLM_MAX_BUDGET_USD = 5.0
 # - CLI に載せるツール。空 = ツール定義を system prompt に載せない (9/24 実測: 12.8k トークン。不許可リスト方式は 24.7k)

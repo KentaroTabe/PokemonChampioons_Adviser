@@ -62,7 +62,7 @@ def test_generate_with_mock_provider():
         assert res["rounds"] == 2 and all(c["ok"] for c in res["llm_calls"])
         assert len(list(Path(d).glob("s04_concepts_opus_*.json"))) == 2   # 全入出力を保存
         rec = json.loads(next(Path(d).glob("s04_concepts_opus_*.json")).read_text())
-        assert rec["prompt_hash"] and rec["model"] == "claude-opus-5" and rec["provider"] == "mock"
+        assert rec["prompt_hash"] and rec["model"] == prov.model_for("s04_concepts", "opus") and rec["provider"] == "mock"
     # 不正出力 → 差し戻し → 再試行で通る
     bad = json.dumps({"authoritative": {"concepts": [{"name": "z", "core_ids": ["zzz", "a"], "win_condition": "nope"}]}})
     prov = MockProvider([bad, good])
@@ -137,7 +137,15 @@ def test_claude_cli_provider_uses_json_schema():
     orig = P.subprocess.run
     P.subprocess.run = fake_run
     try:
-        prov = ClaudeCLIProvider()
+        # 段ごとの設定 (config) が効く: S4 は BUILD_LLM_STAGE_MODELS / BUILD_LLM_EFFORT のとおり
+        prov0 = ClaudeCLIProvider()
+        prov0.call("s04_concepts", "opus", "sys", {"x": 0})
+        cmd = seen[-1]
+        assert cmd[cmd.index("--model") + 1] == prov0.model_for("s04_concepts", "opus") == P.BUILD_LLM_STAGE_MODELS["s04_concepts"]
+        if P.BUILD_LLM_EFFORT["s04_concepts"]:
+            assert cmd[cmd.index("--effort") + 1] == P.BUILD_LLM_EFFORT["s04_concepts"]
+        # 段の設定を外して tier の対応で呼ぶ
+        prov = ClaudeCLIProvider(stage_models={"s04_concepts": None}, effort={"s04_concepts": None})
         res = prov.call("s04_concepts", "opus", "sys", {"x": 1})
         cmd = seen[-1]
         assert cmd[:2] == ["claude", "-p"] and "--json-schema" in cmd and "--max-turns" in cmd
@@ -154,12 +162,16 @@ def test_claude_cli_provider_uses_json_schema():
         res3 = prov.call("s04_concepts", "opus", "sys", {"x": 3})
         assert "--json-schema" not in seen[-1] and res3["ok"] and res3["authoritative"] == {"from": "text"}
         assert prov.calls[-1]["structured"] is False and prov.calls[-1]["cost_usd"] is None
-        # モデルの上書き (regression の腕) と段ごとの effort (config / 呼び出し) と費用上限
-        prov2 = ClaudeCLIProvider(models={"opus": "claude-opus-5-5"}, effort={"s04_concepts": "xhigh"}, max_budget_usd=2.5)
+        # モデルの上書き (regression の腕: 段の指定 > tier の対応) と段ごとの effort (config / 呼び出し) と費用上限
+        prov2 = ClaudeCLIProvider(models={"opus": "claude-opus-5-5"}, effort={"s04_concepts": "xhigh"}, max_budget_usd=2.5,
+                                  stage_models={"s04_concepts": None})
         prov2.call("s04_concepts", "opus", "sys", {"x": 4})
         cmd = seen[-1]
         assert cmd[cmd.index("--model") + 1] == "claude-opus-5-5" and cmd[cmd.index("--effort") + 1] == "xhigh"
         assert cmd[cmd.index("--max-budget-usd") + 1] == "2.5" and prov2.calls[-1]["effort"] == "xhigh"
+        prov4 = ClaudeCLIProvider(models={"opus": "claude-opus-5-5"}, stage_models={"s04_concepts": "claude-fable-5-1"})
+        prov4.call("s04_concepts", "opus", "sys", {"x": 8})
+        assert seen[-1][seen[-1].index("--model") + 1] == "claude-fable-5-1"                  # 段の指定が優先
         prov2.call("s13_report", "sonnet", "sys", {"x": 5}, effort="low")           # 呼び出しの指定が優先、他の段は既定
         assert seen[-1][seen[-1].index("--effort") + 1] == "low" and seen[-1][seen[-1].index("--model") + 1] == "claude-sonnet-5"
         prov2.call("s13_report", "sonnet", "sys", {"x": 6})

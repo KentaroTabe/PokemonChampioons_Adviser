@@ -133,6 +133,9 @@ bash scripts/venv_switch.sh --rollback     # 戻す
   動いている Python は古い venv のファイルを掴んでいる
 - 2026-09-24 の確認: 3.12 の venv で CI サブセットと画面認識の実データテストを回し、3.9 と同じ結果 (test_team_proposal の
   `test_myteam_text_completes_missing_evs` と test_look_more の持ち物・特性・技は 3.9 でも失敗する既存の問題で、移行とは無関係)
+- **2026-09-24 に切替済み**: `.venv` → `.venv312` (Python 3.12.14) のリンク、旧環境は `.venv39`。切替後に test_advisor
+  (RL 方策の読込を含む) と test_ocr_parse を確認。問題があれば `bash scripts/venv_switch.sh --rollback`。
+  `.gitignore` は `.venv` だけなので `.venv312` / `.venv39` は未追跡として見える (`.venv*` を足すとよい)
 - launchd の各ジョブは `source .venv/bin/activate` 経由なので、リンクを差し替えれば次回起動から新環境になる
 - `champions_agent/.venv` (3.9) はどのスクリプトからも参照されていない (2026-09-24 確認)。消してよい
 

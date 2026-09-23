@@ -210,9 +210,10 @@ def main() -> None:
     ap.add_argument("--label", default=None, help="腕の名前 (出力先 logs/build_search/regression/<run_id>/<label>)")
     ap.add_argument("--stage", default="s04", choices=["s04", "s13"])
     ap.add_argument("--candidate", default=None, help="s13: 記事を書く候補 id")
-    ap.add_argument("--model-opus", default=None, help="tier opus のモデル id を上書き")
-    ap.add_argument("--model-sonnet", default=None, help="tier sonnet のモデル id を上書き")
-    ap.add_argument("--effort", default=None, help="この段の effort (low/medium/high/xhigh/max)")
+    ap.add_argument("--model", default=None, help="この段のモデル id (段ごとの設定 BUILD_LLM_STAGE_MODELS を上書き)")
+    ap.add_argument("--model-opus", default=None, help="tier opus のモデル id を上書き (段ごとの設定は外す)")
+    ap.add_argument("--model-sonnet", default=None, help="tier sonnet のモデル id を上書き (段ごとの設定は外す)")
+    ap.add_argument("--effort", default=None, help="この段の effort (low/medium/high/xhigh/max。none = CLI の既定)")
     ap.add_argument("--rounds", type=int, default=None, help="s04 のラウンド上限 (既定: run と同じ)")
     ap.add_argument("--per-round", type=int, default=DEFAULT_PER_ROUND)
     ap.add_argument("--replay", action="store_true", help="run の記録を再生する (費用なし。基準の腕)")
@@ -227,17 +228,25 @@ def main() -> None:
     out = arm_dir(args.run_id, args.label)
     stage = S04_STAGE if args.stage == "s04" else S13_STAGE
     models = {}
+    stage_models = None
     if args.model_opus:
         models["opus"] = args.model_opus
     if args.model_sonnet:
         models["sonnet"] = args.model_sonnet
-    effort = {stage: args.effort} if args.effort else None
+    if args.model:
+        stage_models = {stage: args.model}
+    elif models:
+        stage_models = {stage: None}          # tier の上書きを効かせる (段ごとの設定は外す)
+    effort = None
+    if args.effort:
+        effort = {stage: (None if args.effort == "none" else args.effort)}
     if args.replay:
         provider: LLMProvider = replay_provider(run_dir, stage, log_dir=out / "llm")
     else:
-        provider = ClaudeCLIProvider(out / "llm", models=models, effort=effort)
+        provider = ClaudeCLIProvider(out / "llm", models=models, effort=effort, stage_models=stage_models)
+    tier = "opus" if stage == S04_STAGE else "sonnet"
     print(f"[regression] run={args.run_id} label={args.label} stage={stage} provider={provider.name} "
-          f"models={provider.models} effort={provider.effort.get(stage)}", flush=True)
+          f"model={provider.model_for(stage, tier)} effort={provider.effort.get(stage)}", flush=True)
     if stage == S04_STAGE:
         m = run_s04(run_dir, out, provider, rounds=args.rounds, per_round=args.per_round, label=args.label)
     else:
