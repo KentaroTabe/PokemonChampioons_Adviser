@@ -361,6 +361,10 @@ BUILD_ARCHETYPE_CORES_PER_BRANCH = 2       # 分岐ごとに S4 へ出す core �
 BUILD_ARCHETYPE_MIN_FIT = 0.35             # 環境適合 (0..1) がこれ未満の分岐は core を出さない (記録だけ残す)
 BUILD_ARCHETYPE_ROLE_TOP = 4               # 役割ごとに core の組み合わせに使う候補数
 BUILD_ARCHETYPE_LLM_ROUNDS = 11            # LLM を軸ごとに回す上限 (coverage 停止あり)
+# 軸ごとの framing では、全部の軸を 1 回ずつ回し終えるまで coverage 停止 (新系統の割合 / 重複率) を効かせない。
+# 2026-09-24 の回帰測定で Opus 5.5 が stall の軸で重複 75% を出し、残り 4 軸 (hyper_offense / priority_bulky / anti_meta / special)
+# を回さずに止まった。軸は互いに独立なので、1 軸の重複で他の軸を打ち切る理由が無い
+BUILD_ARCHETYPE_FULL_PASS = True
 BUILD_ARCHETYPE_SPECIAL_MAX_CORES = 3      # 特殊な勝ち筋 (ほろびのうた等) は全分岐で合計この数まで (一覧・候補を膨らませない)
 BUILD_ARCHETYPE_SPECIAL_HYBRIDS = 3        # 特殊な勝ち筋を他の軸の core に 1 役足した併用案 (special_branch) の数 (ユーザー決定 9/18)
 # 構築の LLM 呼び出し (tools/team_build/llm/provider.py、claude CLI ヘッドレス)。2026-09-24: docs/TECH_WATCH_2026-09.md §A

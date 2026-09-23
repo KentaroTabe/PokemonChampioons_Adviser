@@ -108,6 +108,34 @@ bash scripts/deploy.sh --force  # 強制反映
   `launchctl unload ~/Library/LaunchAgents/com.championsadviser.daily-deploy.plist`
 - 反映後はブラウザ (http://localhost:3000) を再接続する
 
+## Python 環境 (venv) の作り直しと版の移行
+
+`.venv` は 2026-09 まで Xcode 付属の Python 3.9.6 (EOL) だった。新しい SDK (Anthropic Python SDK 1.0 など) は 3.10 以上を
+要求するため、Homebrew の `python@3.12` で作り直す (2026-09-24、docs/TECH_WATCH_2026-09.md §A-6)。依存は
+`requirements-full.txt` (移行前の venv と同じ主版に固定。poke-env は 0.10 のまま)。
+
+```bash
+brew install python@3.12                                        # 初回のみ
+bash scripts/venv_rebuild.sh /opt/homebrew/bin/python3.12 .venv312   # 使用中の .venv は触らない
+bash scripts/ci_tests.sh .venv312/bin/python                    # CI サブセット + 画面認識の実データテストで確認
+```
+
+切替は **シンボリックリンク** で行う (venv は絶対パスを中に持つので、ディレクトリを rename すると activate と
+console script が壊れる。リンクなら `.venv312` の中のパスはそのまま有効):
+
+```bash
+bash scripts/venv_switch.sh .venv312       # .venv → .venv39 に退避し、.venv を .venv312 へのリンクにする
+bash scripts/run_test.sh test_advisor test_ocr_parse   # 切替後の確認
+bash scripts/venv_switch.sh --rollback     # 戻す
+```
+
+- 切替は常駐 (アドバイザー・学習・構築の測定) が動いていないときに行う (スクリプトは `.venv/bin/python` が動いていれば止まる)。
+  動いている Python は古い venv のファイルを掴んでいる
+- 2026-09-24 の確認: 3.12 の venv で CI サブセットと画面認識の実データテストを回し、3.9 と同じ結果 (test_team_proposal の
+  `test_myteam_text_completes_missing_evs` と test_look_more の持ち物・特性・技は 3.9 でも失敗する既存の問題で、移行とは無関係)
+- launchd の各ジョブは `source .venv/bin/activate` 経由なので、リンクを差し替えれば次回起動から新環境になる
+- `champions_agent/.venv` (3.9) はどのスクリプトからも参照されていない (2026-09-24 確認)。消してよい
+
 ## 生存確認
 
 ```bash

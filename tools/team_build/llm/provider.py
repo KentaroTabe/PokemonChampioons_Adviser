@@ -225,7 +225,9 @@ class ClaudeCLIProvider(LLMProvider):
         cmd = self.command(model, system, prompt, schema, effort)
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=str(REPO))
         if res.returncode != 0:
-            raise RuntimeError(f"claude 実行失敗 (rc={res.returncode}): {res.stderr[-400:]}")
+            # API エラーは --output-format json だと stdout の JSON に入り stderr が空のことがある (2026-09-24 実測) → 両方を残す
+            detail = (res.stderr or "")[-400:] or (res.stdout or "")[-400:]
+            raise RuntimeError(f"claude 実行失敗 (rc={res.returncode}): {detail}")
         raw = None
         text = res.stdout
         structured = None

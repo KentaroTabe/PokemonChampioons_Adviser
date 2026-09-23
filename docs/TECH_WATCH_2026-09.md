@@ -30,27 +30,33 @@ Python 3.9.6 (Xcode 付属)、Apple Silicon、macOS 26.5.1、claude CLI 2.1.270�
   docs/TEAM_BUILDING_IMPLEMENTATION.md §「モデル更新への耐性」) を先に作り、それで切替を判定する。
   視覚監査は 8/18 と同じ同一フレーム 30 枚の比較をやり直す (haiku は幻覚、sonnet は主要な乖離、opus が最良、だった)
 
-### 3. effort の段階を段ごとに設定する — 中
+### 3. effort の段階を段ごとに設定する — 中 → **仕組みは実装済み (2026-09-24)、値は測定後に設定**
 
 - Opus 5 以降は effort (low〜max) が主制御 (7/24)。CLI に `--effort` がある。S4 概念は xhigh / max、S13 記事は low〜medium で
   時間短縮 (今は 1 呼び出し 187 秒)、介入仮説は high など
-- config に段ごとの effort を置き (マジックナンバーを CLI 引数に直書きしない)、2 の regression で測る
+- config `BUILD_LLM_EFFORT` (段ごと、None = CLI 既定) を provider が `--effort` に渡す。値は 2 の regression
+  (`--effort xhigh` / `--stage s13 --effort low` の腕) で測って決める
 
 ### 4. Fable 5.1 (9/1) を S4 だけ試す — 低
 
 - $10 / $50 (Opus 5 の 2 倍、キャッシュ読みは $0.25)。1 run 約 $15 と試算。概念の質が上がるかは未測定。2 の後で
 
-### 5. 呼び出しの衛生 — 低
+### 5. 呼び出しの衛生 — 低 → **実装済み (2026-09-24)**
 
 - `--tools ""` にすると system prompt が 12.8k トークン (今の `--disallowedTools` 列挙は 24.7k、どちらも 9/24 に haiku で実測。
   9/6 の実測は約 17k)。差の約 12k トークンは Opus 5 の 1 時間キャッシュ書込 ($10/M) で 1 呼び出し約 $0.12、1 run (13 呼び出し) 約 $1.5
-- `--max-budget-usd` を 1 呼び出しの上限として付ける (再試行の暴走に対する保険)
-- 記録に CLI の `total_cost_usd` を残す → 9/24 に実装 (記録の cost_usd)。2 の試算を次の run から実測に置き換えられる
+  → config `BUILD_LLM_CLI_TOOLS = ""` で provider が `--tools ""` を渡す
+- `--max-budget-usd` を 1 呼び出しの上限として付ける (再試行の暴走に対する保険) → config `BUILD_LLM_MAX_BUDGET_USD` (5.0)
+- 記録に CLI の `total_cost_usd` を残す → 記録の cost_usd。2 の試算を次の run から実測に置き換えられる
 
-### 6. Python 3.9 からの移行 (前提整備) — 中、SDK を使う必要が出たとき
+### 6. Python 3.9 からの移行 (前提整備) — 中 → **3.12 の venv を構築・確認済み (2026-09-24)、切替は常駐停止時に**
 
-- Anthropic Python SDK 1.0 (8/20) は 3.10+、Jev SDK も 3.10+。3.9 は 2025-10 に EOL。Homebrew には 3.14.2 がある
-- pyobjc / torch / easyocr / poke-env の対応は未確認。champions_agent/.venv も別にある。CLI 経由のままなら急がない
+- Anthropic Python SDK 1.0 (8/20) は 3.10+、Jev SDK も 3.10+。3.9 は 2025-10 に EOL
+- `brew install python@3.12` → `scripts/venv_rebuild.sh /opt/homebrew/bin/python3.12 .venv312` (依存は requirements-full.txt、
+  移行前と同じ主版に固定。pyobjc は 12.2、torch 2.8、opencv 5.0、poke-env 0.10)。CI サブセット + 画面認識の実データテスト
+  (test_advisor / test_ocr_parse / test_rl_bridge / test_my_team / test_frame_intake / test_events) は 3.9 と同じ結果
+  (test_team_proposal の 1 件と test_look_more は 3.9 でも落ちる既存の問題)
+- 切替は `scripts/venv_switch.sh .venv312` (リンク方式、戻しは --rollback)。docs/OPERATIONS.md「Python 環境」
 
 ## B. 新しいが今は使わない (理由つき)
 

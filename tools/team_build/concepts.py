@@ -9,6 +9,7 @@ import itertools
 import json
 from typing import Callable, Optional
 
+from champions_agent.config import BUILD_ARCHETYPE_FULL_PASS
 from tools.team_build.families import jaccard
 
 WIN_CONDITIONS = ("setup_sweep", "offense_trade", "cycle_pressure", "hazard_chip", "speed_control",
@@ -224,6 +225,12 @@ def generate_concepts(spec, feats: dict, threats: list, legal: set, mega_capable
             if log:
                 log(f"[concepts] round {r} framing={framing}: +{gained} 系統 (dup {dup_rate:.0%})")
             if gained / max(1, len(new_items)) < STOP_NEW_YIELD or dup_rate >= STOP_DUP_RATE:
+                # 軸ごとの framing では全部の軸を 1 回ずつ回し終えるまで止めない (config BUILD_ARCHETYPE_FULL_PASS)。
+                # 2026-09-24: 1 軸の重複率で残りの軸 (special を含む) が打ち切られていた
+                if framing.startswith("archetype:") and BUILD_ARCHETYPE_FULL_PASS and r + 1 < len(framings):
+                    if log:
+                        log(f"[concepts] round {r}: coverage 条件だが軸の一巡 ({r + 1}/{len(framings)}) まで続ける")
+                    continue
                 stop_reason = "coverage"
                 break
     return {"families": fams, "rounds": len(calls), "stop_reason": stop_reason, "llm_calls": calls}

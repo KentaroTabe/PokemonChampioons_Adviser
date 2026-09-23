@@ -113,6 +113,7 @@ def metrics(res: dict, records: list, owned: Optional[set] = None, label: str = 
     recs = [r for r in records if r.get("stage") == S04_STAGE] or list(records)
     rounds = int(res.get("rounds") or 0)
     ok_first = sum(1 for r in recs if (r.get("attempt") or 1) == 1 and not r.get("problems"))
+    call_errors = sum(1 for r in recs if r.get("error"))      # CLI / API の失敗 (検証の差し戻しとは別。再試行で救われる)
     n_concepts = sum(_concepts_in_record(r) for r in recs if not r.get("problems"))
     cost = [float(r["cost_usd"]) for r in recs if isinstance(r.get("cost_usd"), (int, float))]
     elapsed = [float(r.get("elapsed_s") or 0.0) for r in recs]
@@ -126,7 +127,7 @@ def metrics(res: dict, records: list, owned: Optional[set] = None, label: str = 
             "species_used": len(used), "species_used_share": (round(len(used) / len(owned), 3) if owned else None),
             "archetypes_covered": len({f.get("archetype") for f in llm if f.get("archetype")}),
             "calls": len(recs), "first_attempt_ok_rate": (round(ok_first / rounds, 3) if rounds else None),
-            "retries": sum(1 for r in recs if (r.get("attempt") or 1) > 1),
+            "retries": sum(1 for r in recs if (r.get("attempt") or 1) > 1), "call_errors": call_errors,
             "elapsed_total_s": round(sum(elapsed), 1),
             "elapsed_mean_s": (round(sum(elapsed) / len(elapsed), 1) if elapsed else None),
             "cost_usd": (round(sum(cost), 3) if cost else None), "tokens": tokens}
@@ -183,7 +184,7 @@ def run_s13(run_dir: Path, out_dir: Path, provider: LLMProvider, candidate_id: s
 COLUMNS = [("label", "腕"), ("stage", "段"), ("model", "モデル"), ("effort", "effort"), ("rounds", "ラウンド"),
            ("stop_reason", "停止"), ("families_llm", "LLM 系統"), ("families_total", "系統計"), ("concepts_returned", "提案数"),
            ("core_mean_jaccard_distance", "core 距離"), ("species_used", "使用種"), ("archetypes_covered", "軸"),
-           ("first_attempt_ok_rate", "1 回通過"), ("retries", "再試行"), ("llm_body_chars", "本文文字"),
+           ("first_attempt_ok_rate", "1 回通過"), ("retries", "再試行"), ("call_errors", "呼出失敗"), ("llm_body_chars", "本文文字"),
            ("elapsed_mean_s", "平均秒"), ("elapsed_total_s", "合計秒"), ("cost_usd", "費用 $")]
 
 

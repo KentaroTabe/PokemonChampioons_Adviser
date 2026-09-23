@@ -210,6 +210,42 @@ def test_generate_with_archetypes():
     print("test_generate_with_archetypes OK")
 
 
+def test_archetype_full_pass_ignores_coverage_stop_until_all_axes():
+    """2026-09-24: 軸ごとの framing では、1 軸の重複率 (coverage 条件) で残りの軸を打ち切らない (BUILD_ARCHETYPE_FULL_PASS)。
+    回帰測定で Opus 5.5 が stall の軸で重複 75% を出し、special を含む 4 軸が回らずに止まった"""
+    feats, th = _feats()
+    spec = BuildSpec(owned=["a", "b", "c", "d"])
+    legal, mega = {"a", "b", "c", "d", "t1", "t2", "t3"}, {"a"}
+    base = K.rule_baseline_concepts(feats, th, mega, favorites=spec.favorites)
+    dup_core = list(base[0]["core_ids"])[:3]                     # ルール baseline と同じ core = 重複 100%
+    axes = [{"id": "setup_sweep", "label": "積み展開", "description": "d", "switching": "no_switch", "switching_ja": "交代しない",
+             "special": False, "branches": []},
+            {"id": "special", "label": "特殊な勝ち筋", "description": "d", "switching": "mixed", "switching_ja": "状況次第",
+             "special": True, "branches": []}]
+    dup = json.dumps({"authoritative": {"concepts": [{"name": "same", "core_ids": dup_core, "mega_id": None,
+                                                      "win_condition": "setup_sweep", "support_roles": [], "weak_to": [],
+                                                      "archetype": "setup_sweep", "branch": None}]}})
+    new = json.dumps({"authoritative": {"concepts": [{"name": "perish", "core_ids": ["c", "d"], "mega_id": None,
+                                                      "win_condition": "anti_meta", "support_roles": [], "weak_to": [],
+                                                      "archetype": "special", "branch": None}]}})
+    res = K.generate_concepts(spec, feats, th, legal, mega, provider=MockProvider([dup, new]), rounds=2, per_round=1,
+                              archetypes=axes)
+    assert res["rounds"] == 2 and res["stop_reason"] == "max_rounds"                   # 一巡は止めない
+    assert any(f.get("archetype") == "special" for f in res["families"])
+    orig = K.BUILD_ARCHETYPE_FULL_PASS
+    K.BUILD_ARCHETYPE_FULL_PASS = False
+    try:
+        res2 = K.generate_concepts(spec, feats, th, legal, mega, provider=MockProvider([dup, new]), rounds=2, per_round=1,
+                                   archetypes=axes)
+    finally:
+        K.BUILD_ARCHETYPE_FULL_PASS = orig
+    assert res2["rounds"] == 1 and res2["stop_reason"] == "coverage"                   # 従来: 1 軸目の重複で停止
+    # 軸ではない framing (style) は従来どおり coverage で止まる
+    res3 = K.generate_concepts(spec, feats, th, legal, mega, provider=MockProvider([dup, new]), rounds=2, per_round=1)
+    assert res3["rounds"] == 1 and res3["stop_reason"] == "coverage"
+    print("test_archetype_full_pass_ignores_coverage_stop_until_all_axes OK")
+
+
 if __name__ == "__main__":
     test_validate_and_cluster()
     test_generate_with_mock_provider()
@@ -217,3 +253,4 @@ if __name__ == "__main__":
     test_structured_output_is_preferred()
     test_claude_cli_provider_uses_json_schema()
     test_generate_with_archetypes()
+    test_archetype_full_pass_ignores_coverage_stop_until_all_axes()

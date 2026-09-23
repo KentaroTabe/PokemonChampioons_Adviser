@@ -31,12 +31,14 @@ def test_metrics_pure():
     recs = [_record(1, 1, [{"core_ids": ["x"]}], problems=["bad"], cost=0.5),
             _record(2, 2, [{"core_ids": ["c", "d"]}, {"core_ids": ["c", "e"]}], cost=0.6),
             _record(3, 1, [{"core_ids": ["f", "g", "h"]}], cost=0.7, elapsed=20.0)]
+    recs[0]["error"] = "RuntimeError('claude 実行失敗 (rc=1)')"      # CLI の失敗 (検証の差し戻しではない)
     m = R.metrics(res, recs, owned={"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}, label="t")
     assert m["families_total"] == 4 and m["families_llm"] == 3 and m["concepts_returned"] == 3
     assert m["species_used"] == 6 and m["species_used_share"] == 0.6 and m["archetypes_covered"] == 2
     # core 距離: {c,d}-{c,e} = 1-1/3, {c,d}-{f,g,h} = 1, {c,e}-{f,g,h} = 1 → 平均 0.889
     assert abs(m["core_mean_jaccard_distance"] - 0.889) < 1e-3
     assert m["calls"] == 3 and m["retries"] == 1 and m["first_attempt_ok_rate"] == 0.5     # 2 ラウンド中、1 回目で通ったのは 1 つ
+    assert m["call_errors"] == 1
     assert m["cost_usd"] == 1.8 and m["elapsed_total_s"] == 40.0 and m["elapsed_mean_s"] == 13.3
     assert m["tokens"]["cache_creation_input_tokens"] == 6000 and m["model"] == "claude-opus-5"
     assert R.metrics({"families": [], "rounds": 0}, [], label="e")["cost_usd"] is None
