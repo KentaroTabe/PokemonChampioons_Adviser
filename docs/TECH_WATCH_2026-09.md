@@ -6,9 +6,11 @@ Python 3.9.6 (Xcode 付属)、Apple Silicon、macOS 26.5.1、claude CLI 2.1.270�
 
 ## A. 提案 (優先順)
 
-### 1. claude CLI の構造化出力 (`--json-schema`) を構築の LLM 呼び出しに使う — 最優先・小
+### 1. claude CLI の構造化出力 (`--json-schema`) を構築の LLM 呼び出しに使う — 最優先・小 → **実装済み (2026-09-24)**
 
-- 状況: 開始時から存在 (v2.1.205、7 月上旬に不正スキーマの無言フォールバックが修正済み)。このリポジトリでは未使用
+- 実装: `ClaudeCLIProvider` が既定 schema `OUTPUT_SCHEMA` を `--json-schema` で渡し、応答の `structured_output` を使う。
+  `call(schema=...)` で段ごとに差し替え。記録に structured / schema_hash / cost_usd。docs/TEAM_BUILDING_IMPLEMENTATION.md §12
+- 状況: 開始時から存在 (v2.1.205、7 月上旬に不正スキーマの無言フォールバックが修正済み)。このリポジトリでは未使用だった
 - 効果: 9/22 のインシデント (extract_json が文字列内の括弧で本文を捨てた) の類が構造的に消える。
   `authoritative` の id / enum をスキーマで縛れるので、検証器の一部もモデル側で保証できる
 - 実測 (2026-09-24): haiku で `claude -p ... --output-format json --json-schema '{...}' --tools ""` →
@@ -40,9 +42,10 @@ Python 3.9.6 (Xcode 付属)、Apple Silicon、macOS 26.5.1、claude CLI 2.1.270�
 
 ### 5. 呼び出しの衛生 — 低
 
-- `--tools ""` にすると system prompt が 12.8k トークン (今の `--disallowedTools` 列挙は約 17k、9/6 実測)。1 呼び出し約 $0.03 の差
+- `--tools ""` にすると system prompt が 12.8k トークン (今の `--disallowedTools` 列挙は 24.7k、どちらも 9/24 に haiku で実測。
+  9/6 の実測は約 17k)。差の約 12k トークンは Opus 5 の 1 時間キャッシュ書込 ($10/M) で 1 呼び出し約 $0.12、1 run (13 呼び出し) 約 $1.5
 - `--max-budget-usd` を 1 呼び出しの上限として付ける (再試行の暴走に対する保険)
-- 記録に CLI の `total_cost_usd` を残す (2 の試算を実測に置き換えられる)
+- 記録に CLI の `total_cost_usd` を残す → 9/24 に実装 (記録の cost_usd)。2 の試算を次の run から実測に置き換えられる
 
 ### 6. Python 3.9 からの移行 (前提整備) — 中、SDK を使う必要が出たとき
 

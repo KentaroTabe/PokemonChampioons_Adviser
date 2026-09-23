@@ -8,9 +8,12 @@ import json
 import tempfile
 from pathlib import Path
 
+import subprocess
+
 from tools.team_build import concepts as K
 from tools.team_build.candidates import SpeciesFeature
-from tools.team_build.llm.provider import MockProvider, extract_json
+from tools.team_build.llm import provider as P
+from tools.team_build.llm.provider import OUTPUT_SCHEMA, ClaudeCLIProvider, MockProvider, extract_json
 from tools.team_build.spec import BuildSpec
 
 
@@ -95,6 +98,65 @@ def test_extract_json_braces_in_strings_and_record_numbering():
     print("test_extract_json_braces_in_strings_and_record_numbering OK")
 
 
+def test_structured_output_is_preferred():
+    """2026-09-24: schema を渡すと構造化出力 (schema 準拠が保証された dict) を使い、本文の JSON 抽出は後備えになる"""
+    body = {"authoritative": {"ok": True}, "display": {"markdown": "本文 } に括弧"}}
+    with tempfile.TemporaryDirectory() as tmp:
+        prov = MockProvider([json.dumps(body)], log_dir=Path(tmp))
+        res = prov.call("s13_report", "sonnet", "sys", {"q": 1}, schema=OUTPUT_SCHEMA)
+        assert res["ok"] and res["display"] == body["display"]
+        rec = json.loads(next(Path(tmp).glob("s13_report_*.json")).read_text(encoding="utf-8"))
+        assert rec["structured"] is True and rec["schema_hash"] == P.schema_hash(OUTPUT_SCHEMA) and rec["cost_usd"] is None
+        # schema を渡しても応答がフェンスつき (構造化出力なし) なら本文から取り出す (structured=False)
+        prov2 = MockProvider(["```json\n" + json.dumps(body) + "\n```"], log_dir=Path(tmp))
+        res2 = prov2.call("s13_report", "sonnet", "sys", {"q": 2}, schema=OUTPUT_SCHEMA)
+        assert res2["ok"] and res2["display"] == body["display"]
+        recs = sorted(Path(tmp).glob("s13_report_*.json"))
+        assert json.loads(recs[-1].read_text(encoding="utf-8"))["structured"] is False
+    # schema 無し (MockProvider の既定) は従来どおり
+    assert MockProvider.default_schema is None and ClaudeCLIProvider.default_schema == OUTPUT_SCHEMA
+    assert json.loads(json.dumps(OUTPUT_SCHEMA))["required"] == ["authoritative"]
+    print("test_structured_output_is_preferred OK")
+
+
+def test_claude_cli_provider_uses_json_schema():
+    """ClaudeCLIProvider は --json-schema を付け、応答の structured_output と total_cost_usd を使う。
+    structured_output が無い応答 (古い CLI) では result の本文から取り出す"""
+    seen: list = []
+
+    def fake_run(cmd, **kw):
+        seen.append(cmd)
+        if "--json-schema" in cmd:
+            out = {"result": "説明つき {\"authoritative\": {\"from\": \"text\"}}",
+                   "structured_output": {"authoritative": {"from": "structured"}, "display": {"t": 1}},
+                   "usage": {"input_tokens": 10, "output_tokens": 5}, "total_cost_usd": 0.0123}
+        else:
+            out = {"result": "前置き\n{\"authoritative\": {\"from\": \"text\"}}", "usage": {"input_tokens": 1}}
+        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(out, ensure_ascii=False), stderr="")
+
+    orig = P.subprocess.run
+    P.subprocess.run = fake_run
+    try:
+        prov = ClaudeCLIProvider()
+        res = prov.call("s04_concepts", "opus", "sys", {"x": 1})
+        cmd = seen[-1]
+        assert cmd[:2] == ["claude", "-p"] and "--json-schema" in cmd and "--max-turns" in cmd
+        assert json.loads(cmd[cmd.index("--json-schema") + 1]) == OUTPUT_SCHEMA
+        assert cmd[cmd.index("--model") + 1] == "claude-opus-5"
+        assert res["ok"] and res["authoritative"] == {"from": "structured"} and res["display"] == {"t": 1}
+        assert prov.calls[-1]["structured"] is True and prov.calls[-1]["cost_usd"] == 0.0123
+        res2 = prov.call("s04_concepts", "opus", "sys", {"x": 2}, schema=None)   # None = 既定 schema (付く)
+        assert "--json-schema" in seen[-1] and res2["authoritative"] == {"from": "structured"}
+        # 構造化出力が無い応答 → 本文から
+        prov.default_schema = None
+        res3 = prov.call("s04_concepts", "opus", "sys", {"x": 3})
+        assert "--json-schema" not in seen[-1] and res3["ok"] and res3["authoritative"] == {"from": "text"}
+        assert prov.calls[-1]["structured"] is False and prov.calls[-1]["cost_usd"] is None
+    finally:
+        P.subprocess.run = orig
+    print("test_claude_cli_provider_uses_json_schema OK")
+
+
 def test_generate_with_archetypes():
     """構築の軸 (2026-09-18): framing は軸ごと (archetype:<id>)、concept の archetype / branch を検証し、系統に残す。
     特殊な勝ち筋の軸も 1 回にまとまる"""
@@ -137,4 +199,6 @@ if __name__ == "__main__":
     test_validate_and_cluster()
     test_generate_with_mock_provider()
     test_extract_json_braces_in_strings_and_record_numbering()
+    test_structured_output_is_preferred()
+    test_claude_cli_provider_uses_json_schema()
     test_generate_with_archetypes()

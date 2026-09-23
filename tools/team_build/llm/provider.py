@@ -8,9 +8,12 @@
   valid candidate rate / downstream WR) — tools/team_build/llm/regression.py (後続)
 
 Provider:
-- ClaudeCLIProvider: `claude -p <prompt> --model <id> --output-format json --system-prompt <file>`
-  (tools/audit_subtask と同じヘッドレス方式)。ツール不使用 (--allowedTools 空)
-- MockProvider: テストと dry-run 用。あらかじめ与えた応答を返す
+- ClaudeCLIProvider: `claude -p <prompt> --model <id> --output-format json --system-prompt <file> --json-schema <schema>`
+  (tools/audit_subtask と同じヘッドレス方式)。ツール不使用 (--allowedTools 空)。
+  2026-09-24: --json-schema (構造化出力) で「schema に合う JSON オブジェクトが返る」ことを CLI 側で保証し、応答の
+  structured_output を使う (本文の JSON 抽出 extract_json は structured_output が無いときの後備え)。
+  既定 schema は OUTPUT_SCHEMA (authoritative 必須の緩い形)、段ごとに call(schema=...) で差し替えられる
+- MockProvider: テストと dry-run 用。あらかじめ与えた応答を返す (schema を渡すと、応答が JSON なら structured として返す)
 - チャット内 (Agent ツール) で動かすときは、主セッションが同じ prompt ファイルを Agent(model=…) に渡し、
   応答 JSON を record() で同じ形式で保存する (AgentToolProvider は主セッション側の手順で代替)
 """
@@ -27,10 +30,20 @@ REPO = Path(__file__).resolve().parent.parent.parent.parent
 MODELS = {"opus": "claude-opus-5", "sonnet": "claude-sonnet-5", "haiku": "claude-haiku-4-5-20251001"}
 MAX_RETRIES = 2
 DEFAULT_TIMEOUT = 600
+# 構造化出力の既定 schema (claude CLI の --json-schema)。authoritative 必須・display 任意の緩い形から始め、
+# 段ごとの条件 (id / enum) は call(schema=...) で順次 schema へ移す。schema が不正だと CLI が失敗するので
+# テスト (test_team_build_concepts) で妥当性を固定する
+OUTPUT_SCHEMA = {"type": "object",
+                 "properties": {"authoritative": {"type": "object"}, "display": {"type": "object"}},
+                 "required": ["authoritative"]}
 
 
 def _hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def schema_hash(schema: Optional[dict]) -> Optional[str]:
+    return _hash(json.dumps(schema, sort_keys=True, ensure_ascii=False)) if schema else None
 
 
 def extract_json(text: str) -> Optional[dict]:
@@ -72,21 +85,27 @@ def normalize_output(parsed) -> tuple:
 
 class LLMProvider:
     name = "base"
+    default_schema: Optional[dict] = None     # 構造化出力の既定 schema (None = 本文の JSON 抽出だけ)
 
     def __init__(self, log_dir: Optional[Path] = None):
         self.log_dir = Path(log_dir) if log_dir else None
         self.calls: list = []
 
-    def complete(self, model: str, system: str, prompt: str, timeout: int = DEFAULT_TIMEOUT) -> dict:
-        """{"text": str, "raw": any, "usage": {...}} を返す (サブクラスで実装)"""
+    def complete(self, model: str, system: str, prompt: str, timeout: int = DEFAULT_TIMEOUT,
+                 schema: Optional[dict] = None) -> dict:
+        """{"text": str, "raw": any, "usage": {...}, "structured": dict|None, "cost_usd": float|None} を返す
+        (サブクラスで実装)。structured は schema に合うことが保証された出力 (無ければ None)"""
         raise NotImplementedError
 
     def call(self, stage: str, tier: str, system: str, payload: dict,
              validator: Optional[Callable[[dict], list]] = None,
-             max_retries: int = MAX_RETRIES, timeout: int = DEFAULT_TIMEOUT) -> dict:
+             max_retries: int = MAX_RETRIES, timeout: int = DEFAULT_TIMEOUT,
+             schema: Optional[dict] = None) -> dict:
         """1 段の呼び出し。validator が問題リストを返したら理由を添えて再試行。
+        schema: 構造化出力の JSON Schema (None なら provider の既定 default_schema)。
         戻り値: {"ok": bool, "authoritative": dict, "display": dict, "problems": [...], "attempts": n, "record": path}"""
         model = MODELS.get(tier, tier)
+        schema = self.default_schema if schema is None else schema
         prompt = json.dumps(payload, ensure_ascii=False, indent=1)
         problems: list = []
         result = {"ok": False, "authoritative": {}, "display": {}, "problems": [], "attempts": 0}
@@ -94,10 +113,12 @@ class LLMProvider:
             p = prompt if not problems else (prompt + "\n\n前回の出力の問題 (直して再出力):\n- " + "\n- ".join(problems))
             t0 = time.time()
             try:
-                res = self.complete(model, system, p, timeout=timeout)
+                res = self.complete(model, system, p, timeout=timeout, schema=schema)
             except Exception as e:
                 res = {"text": "", "raw": None, "usage": {}, "error": repr(e)}
-            parsed = extract_json(res.get("text") or "")
+            structured = res.get("structured")
+            # 構造化出力があればそれを使う (schema 準拠が保証されている)。無ければ本文から JSON を取り出す
+            parsed = structured if isinstance(structured, dict) else extract_json(res.get("text") or "")
             auth, disp = normalize_output(parsed)
             problems = []
             if parsed is None:
@@ -108,7 +129,8 @@ class LLMProvider:
                 problems = list(validator(auth) or [])
             rec = {"stage": stage, "tier": tier, "model": model, "provider": self.name, "attempt": attempt,
                    "prompt_hash": _hash(system + "\n" + p), "system_hash": _hash(system),
-                   "elapsed_s": round(time.time() - t0, 1), "usage": res.get("usage"),
+                   "schema_hash": schema_hash(schema), "structured": isinstance(structured, dict),
+                   "elapsed_s": round(time.time() - t0, 1), "usage": res.get("usage"), "cost_usd": res.get("cost_usd"),
                    "error": res.get("error"), "problems": problems, "prompt": p, "system": system,
                    "raw_text": res.get("text")}
             path = self._record(stage, tier, attempt, rec)
@@ -145,10 +167,18 @@ class MockProvider(LLMProvider):
         self.responses = list(responses)
         self.i = 0
 
-    def complete(self, model, system, prompt, timeout=DEFAULT_TIMEOUT) -> dict:
+    def complete(self, model, system, prompt, timeout=DEFAULT_TIMEOUT, schema=None) -> dict:
         text = self.responses[min(self.i, len(self.responses) - 1)] if self.responses else ""
         self.i += 1
-        return {"text": text, "raw": None, "usage": {"input_tokens": len(prompt) // 4, "output_tokens": len(text) // 4}}
+        structured = None
+        if schema is not None:      # CLI の構造化出力を模す: 応答がそのまま JSON オブジェクトなら structured
+            try:
+                obj = json.loads(text)
+                structured = obj if isinstance(obj, dict) else None
+            except ValueError:
+                structured = None
+        return {"text": text, "raw": None, "usage": {"input_tokens": len(prompt) // 4, "output_tokens": len(text) // 4},
+                "structured": structured, "cost_usd": None}
 
 
 # claude CLI は既定でツール定義を system prompt に載せる (実測: 約 29k トークン/呼び出し、キャッシュ読み)。
@@ -159,27 +189,43 @@ CLI_DISALLOWED_TOOLS = ("Bash,Read,Edit,Write,MultiEdit,Glob,Grep,LS,WebFetch,We
 
 
 class ClaudeCLIProvider(LLMProvider):
-    """claude CLI のヘッドレス実行 (tools/audit_subtask と同方式)。ツールは使わせない (定義も載せない)"""
+    """claude CLI のヘッドレス実行 (tools/audit_subtask と同方式)。ツールは使わせない (定義も載せない)。
+    schema を渡すと --json-schema で構造化出力にし、応答 JSON の structured_output を返す
+    (2026-09-24 実測: --max-turns 1・ツール不許可のままで structured_output が返る。内部で tool_use を 1 回使う)"""
     name = "claude-cli"
+    default_schema = OUTPUT_SCHEMA
 
-    def complete(self, model, system, prompt, timeout=DEFAULT_TIMEOUT) -> dict:
+    @staticmethod
+    def command(model: str, system: str, prompt: str, schema: Optional[dict] = None) -> list:
         cmd = ["claude", "-p", prompt, "--model", model, "--output-format", "json",
                "--system-prompt", system, "--max-turns", "1",
                "--disallowedTools", CLI_DISALLOWED_TOOLS]
+        if schema is not None:
+            cmd += ["--json-schema", json.dumps(schema, ensure_ascii=False)]
+        return cmd
+
+    def complete(self, model, system, prompt, timeout=DEFAULT_TIMEOUT, schema=None) -> dict:
+        cmd = self.command(model, system, prompt, schema)
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=str(REPO))
         if res.returncode != 0:
             raise RuntimeError(f"claude 実行失敗 (rc={res.returncode}): {res.stderr[-400:]}")
         raw = None
         text = res.stdout
+        structured = None
+        cost = None
         try:
             raw = json.loads(res.stdout)
             if isinstance(raw, dict):
                 text = raw.get("result") or raw.get("content") or res.stdout
+                so = raw.get("structured_output")
+                structured = so if isinstance(so, dict) else None
+                cost = raw.get("total_cost_usd")
         except Exception:
             pass
         usage = (raw or {}).get("usage") if isinstance(raw, dict) else None
         return {"text": text if isinstance(text, str) else json.dumps(text, ensure_ascii=False),
-                "raw": raw, "usage": usage}
+                "raw": raw, "usage": usage, "structured": structured,
+                "cost_usd": (float(cost) if isinstance(cost, (int, float)) else None)}
 
 
 def get_provider(mode: str = "headless", log_dir: Optional[Path] = None, mock_responses=None) -> LLMProvider:
