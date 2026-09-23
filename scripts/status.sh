@@ -5,7 +5,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 echo "=== 常駐プロセス ==="
-if ! pgrep -fl "audit_monitor|train_forever|train_battle|smoke_train|uvicorn|human_battle|pokemon-showdown"; then
+if ! pgrep -fl "audit_monitor|train_forever|train_battle|smoke_train|uvicorn|human_battle|pokemon-showdown|tools.control_panel"; then
   echo "(該当なし)"
 fi
 
@@ -20,7 +20,7 @@ echo
 echo "=== ポート (既定 + 前回起動時に決めたもの。[別プロセス] は自分たちの常駐ではない) ==="
 . "$ROOT/scripts/lib/ports.sh"
 load_ports
-for PORT in $(printf '%s\n' "$ADVISOR_PORT_DEFAULT" "$ADVISOR_PORT" 8100 "$FRONTEND_PORT_DEFAULT" "$FRONTEND_PORT" | awk '!seen[$0]++'); do
+for PORT in $(printf '%s\n' "$ADVISOR_PORT_DEFAULT" "$ADVISOR_PORT" "$SHOWDOWN_PORT_DEFAULT" "$FRONTEND_PORT_DEFAULT" "$FRONTEND_PORT" "$CONTROL_PORT_DEFAULT" | awk '!seen[$0]++'); do
   OUT="$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | tail -n +2 | head -1)"
   if [ -z "$OUT" ]; then
     echo "$PORT: (未使用)"
@@ -28,6 +28,8 @@ for PORT in $(printf '%s\n' "$ADVISOR_PORT_DEFAULT" "$ADVISOR_PORT" 8100 "$FRONT
     echo "$PORT: $OUT $([ "$(port_state "$PORT" "$ADVISOR_PATTERN")" = ours ] && echo "[アドバイザー]" || echo "[別プロセス: $(port_owner "$PORT")]")"
   elif [ "$PORT" = "$FRONTEND_PORT" ] || [ "$PORT" = "$FRONTEND_PORT_DEFAULT" ]; then
     echo "$PORT: $OUT $([ "$(port_state "$PORT" "$FRONTEND_PATTERN")" = ours ] && echo "[フロントエンド]" || echo "[別プロセス: $(port_owner "$PORT")]")"
+  elif [ "$PORT" = "$CONTROL_PORT_DEFAULT" ]; then
+    echo "$PORT: $OUT $([ "$(port_state "$PORT" "tools.control_panel")" = ours ] && echo "[操作パネル]" || echo "[別プロセス: $(port_owner "$PORT")]")"
   else
     echo "$PORT: $OUT"
   fi

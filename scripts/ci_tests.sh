@@ -71,6 +71,7 @@ TESTS=(
   test_battle_prune
   test_party_improvements
   test_real_opponents
+  test_control_panel
 )
 
 fail=0

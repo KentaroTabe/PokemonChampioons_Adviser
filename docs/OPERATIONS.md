@@ -18,6 +18,31 @@ bash scripts/start_all_nohup.sh
 アドバイザーのポートを読む) に書かれるので、**起動スクリプトが表示した URL を開く**。手動でアドバイザーの
 ポートを指定するときは URL に `?api=<port>` を付ける。
 
+## 接続テストの操作パネル (ターミナル不要・チャット不要)
+
+接続テストの開始 / 終了、experiment ラベルの ON / OFF、更新の反映を**ブラウザのボタン**で実行する常駐ページ
+(`tools/control_panel.py`、launchd `com.championsadviser.control-panel`、KeepAlive)。アドバイザーは接続テスト中
+しか動かないので、起動役としてアドバイザーとは別の常駐を置いている。実行できるのは固定のスクリプトだけ
+(`start_connection_test.sh` / `end_connection_test.sh [--no-audit]` / `status.sh` / `deploy.sh` /
+`experiment_label.sh` / `canary_summary.sh`)、同時に走るジョブは 1 つ、出力は同じページで読める。
+
+```bash
+bash scripts/control_panel_install.sh install     # 初回のみ (ログイン時に自動起動、落ちても復帰)。plist を変えたときも install
+bash scripts/control_panel_install.sh status      # 実測 (URL を表示)
+bash scripts/control_panel_install.sh uninstall   # 解除
+```
+
+- URL: http://localhost:8010/ (`config/ports.env` の `CONTROL_PORT_DEFAULT`。ずらさない)。LAN の別端末からは
+  install / status が表示する `http://<MacのIP>:8010/`。待ち受けは `config/control_panel.env` の `CONTROL_BIND`
+  (既定 0.0.0.0。認証は無いので、このMacだけにするなら 127.0.0.1)
+- 表示: 常駐の実測 (アドバイザー / フロント / Showdown / 学習 / 構築の測定 run)、接続テストの進行 (開始マーカー以降の
+  対戦数と勝敗、目標 20 戦 = `BUILD_SMOKE_CANARY_BATTLES`)、フレーム統計、experiment ラベルと registry の状態、警告
+  (測定 run との同時実行、マーカーがあるのにアドバイザー停止 など)
+- 手順: 「接続テスト開始」→ 表示されたフロントエンド URL を開いて対戦 → 「終了」(一括監査あり = sonnet 課金 / 監査なし)。
+  終了処理の出力 (サマリー・決定監査・試用中 Package の実戦サマリー) はページの出力欄に残る
+  (`logs/control_panel/<時刻>__<操作>.log`)。ラベルは終了処理で自動では外れない (OFF ボタン)
+- 前景で試す: `bash scripts/control_panel.sh --port 8011 --bind 127.0.0.1`
+
 ## 個別起動
 
 すべてリポジトリルートで実行する。
@@ -89,6 +114,7 @@ bash scripts/deploy.sh --force  # 強制反映
 lsof -nP -iTCP:8000 -sTCP:LISTEN   # アドバイザー
 lsof -nP -iTCP:3000 -sTCP:LISTEN   # フロントエンド
 lsof -nP -iTCP:8100 -sTCP:LISTEN   # Showdown
+lsof -nP -iTCP:8010 -sTCP:LISTEN   # 操作パネル (bash scripts/control_panel_install.sh status でも可)
 pgrep -fl train_forever            # 学習ループ
 ```
 

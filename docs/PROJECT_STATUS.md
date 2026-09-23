@@ -179,7 +179,7 @@ round1 300戦 + round2 600戦の併合): ドドゲザン 0.754 / ガブリアス
 | champions_agent/train/training_changes.json | 学習・評価に影響する全変更の記録 |
 | docs/incidents/reports/ | インシデント正式レポート (5件) |
 | docs/CONNECTION_TEST_CHECKLIST.md | 接続テストの手順と各回の欠陥・採用 |
-| docs/OPERATIONS.md | 常駐プロセスの起動・停止 |
+| docs/OPERATIONS.md | 常駐プロセスの起動・停止、接続テストの操作パネル (ターミナル不要、9/23) |
 | docs/AXIS_GAP_ANALYSIS.md | 測定軸の乖離解析と P1 の事前登録 |
 | docs/TOP_PLAYER_PLAN.md / BELIEF_SEARCH_PLAN.md | 中長期計画・信念つき探索への転換計画 (RL_V7_SET_ENCODER_DESIGN.md は棄却記録) |
 | docs/VISION_LIB_EXTRACTION.md | vision層の切り出し計画 |

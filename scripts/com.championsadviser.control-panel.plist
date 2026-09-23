@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.championsadviser.control-panel</string>
+
+    <!-- 接続テストの操作パネル (tools/control_panel)。ターミナルを使わずにブラウザから
+         開始 / 終了 / experiment ラベルの操作を行うための常駐。
+         登録・解除は scripts/control_panel_install.sh (launchctl の直叩きはしない) -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/kenta/GitHub/PokemonChampioons_Adviser/scripts/control_panel.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/kenta/GitHub/PokemonChampioons_Adviser</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <!-- ログイン時に自動起動、落ちても復帰 (再起動の暴走防止に 10 秒間隔) -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!-- パネルから起動した常駐 (start_connection_test.sh の nohup) を、パネル再起動時の
+         プロセスグループ掃除で巻き添え終了させない (daily-deploy と同じ) -->
+    <key>AbandonProcessGroup</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/kenta/GitHub/PokemonChampioons_Adviser/logs/control_panel.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/kenta/GitHub/PokemonChampioons_Adviser/logs/control_panel.log</string>
+</dict>
+</plist>

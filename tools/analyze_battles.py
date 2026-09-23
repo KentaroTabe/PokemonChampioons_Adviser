@@ -29,6 +29,8 @@ MARKER = REPO / "logs" / ".connection_test_start"   # 接続テスト開始時�
 
 _BATTLE_SCENES = {"command", "move_select", "watch",
                   "field_check", "battle_hud", "field"}
+# 対戦シーンがこれ未満のログは断片 (対戦の合間の誤分類など) とみなして集計から外す
+MIN_BATTLE_SCENES = 3
 
 
 def _parse_battle(path: str) -> dict:
@@ -95,7 +97,7 @@ def load_battles(days: float | None = None, last: int | None = None,
         cutoff = time.time() - days * 86400
         files = [f for f in files if Path(f).stat().st_mtime >= cutoff]
     battles = [_parse_battle(f) for f in files]
-    battles = [b for b in battles if b["n_battle_scenes"] >= 3]
+    battles = [b for b in battles if b["n_battle_scenes"] >= MIN_BATTLE_SCENES]
     if last:
         battles = battles[-last:]
     return battles
