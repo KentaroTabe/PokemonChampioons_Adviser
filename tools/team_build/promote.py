@@ -102,6 +102,9 @@ def main() -> None:
         print(f"rollback → {row['id']} ({row['status']})")
         return
     if args.experiment:
+        if reg.get(args.experiment) is None:
+            print(f"registry に無い id: {args.experiment} (--list --kind package で確認)")
+            return
         EXPERIMENT_MARK.write_text(args.experiment, encoding="utf-8")
         print(f"experiment ラベル ON: {args.experiment}")
         return

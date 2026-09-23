@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
+import time
 from pathlib import Path
 
 from tools.team_build import calibration as CAL
@@ -33,6 +35,30 @@ def test_real_summary_and_compliance():
     print("test_real_summary_and_compliance OK")
 
 
+def test_since_ts_and_formatting():
+    """since_ts (接続テストのマーカー以降) の絞り込みと、canary サマリーの文字列"""
+    with tempfile.TemporaryDirectory() as d:
+        old, new = Path(d) / "battle_20260901_000000.jsonl", Path(d) / "battle_20260902_000000.jsonl"
+        for p, out in ((old, "win"), (new, "loss")):
+            rows = [{"type": "session", "source": "experiment", "package_id": "pkg"}, {"type": "outcome", "outcome": out}]
+            p.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        now = time.time()
+        os.utime(old, (now - 1000, now - 1000))
+        s_all = RE.real_summary(package_id="pkg", battles_dir=Path(d))
+        assert s_all["n_decided"] == 2 and s_all["wins"] == 1
+        s_new = RE.real_summary(package_id="pkg", battles_dir=Path(d), since_ts=now - 10)
+        assert s_new["n_logs"] == 1 and s_new["wins"] == 0
+        assert [r["file"] for r in RE.labeled_rows(Path(d), package_id="pkg", since_ts=now - 10)] == [new.name]
+        txt = RE.format_summary(s_all, "全期間")
+        assert "[全期間] 対戦ログ 2 / 勝敗確定 2 (勝 1 敗 1)" in txt and "勝率 50.0%" in txt and "experiment 2" in txt
+        assert "まだ無い" in RE.format_summary(RE.real_summary(package_id="none", battles_dir=Path(d)), "x")
+    assert "決定なし" in RE.format_audit({"n_battles": 1, "n_decisions": 0})
+    assert "読み込めない" in RE.format_audit(None)
+    a = {"n_battles": 2, "n_decisions": 10, "advice_rate": 0.9, "compliance": 0.5, "timely_rate": None, "n_defects": 3}
+    assert "一致 (遵守率) 50%" in RE.format_audit(a) and "時間内 -" in RE.format_audit(a) and "欠陥 3 件" in RE.format_audit(a)
+    print("test_since_ts_and_formatting OK")
+
+
 def test_transfer_and_calibration():
     assert TR.regulation_distance(["a", "b", "c"], ["a", "b", "c"]) == 0.0
     d = TR.regulation_distance(["a", "b", "c", "d"], ["a", "b", "x", "y"])
@@ -52,4 +78,5 @@ def test_transfer_and_calibration():
 
 if __name__ == "__main__":
     test_real_summary_and_compliance()
+    test_since_ts_and_formatting()
     test_transfer_and_calibration()

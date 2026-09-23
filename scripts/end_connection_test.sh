@@ -12,6 +12,9 @@
 #  4. セッション一括監査 (tools/audit_session): 今回の全対戦を横断して
 #     矛盾候補の機械検出+層化サンプリングで sonnet 1回にまとめて検証する
 #  5. フレーム取りこぼし率の表示 (受信/処理/破棄。改善効果の確認用)
+#  6. 試用中 Package (experiment ラベル) があれば実戦サマリー (scripts/canary_summary.sh --session)
+#
+# ターミナルを使わずに実行するなら操作パネル (tools/control_panel、docs/OPERATIONS.md) の「終了」ボタン。
 cd "$(dirname "$0")/.." || exit 1
 . scripts/lib/ports.sh
 load_ports
@@ -58,6 +61,15 @@ echo ""
 echo "=== 決定監査 (テストAの合格判定) ==="
 python -m tools.decision_audit --session \
   || echo "(決定監査に失敗。手動実行: python -m tools.decision_audit)"
+
+# 試用中の Package (experiment ラベル) があれば、その実戦サマリー (勝敗・勝率の CI・遵守率) を出す
+# (canary の smoke 20 戦の確認用。ラベルは自動では外さない: bash scripts/experiment_label.sh off か操作パネルの OFF)
+if [ -f logs/.experiment_package ]; then
+  echo ""
+  echo "=== 試用中 Package の実戦サマリー (experiment ラベル: $(cat logs/.experiment_package)) ==="
+  bash scripts/canary_summary.sh --session \
+    || echo "(サマリーに失敗。手動実行: bash scripts/canary_summary.sh --session)"
+fi
 
 # 実戦の相手バンク (相手の実際の選出・先発・判明した型) を更新 → 学習環境の相手プールと選出助言の条件づけに使う
 echo ""
