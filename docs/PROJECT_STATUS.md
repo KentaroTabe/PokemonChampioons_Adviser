@@ -180,6 +180,8 @@ round1 300戦 + round2 600戦の併合): ドドゲザン 0.754 / ガブリアス
 | docs/incidents/reports/ | インシデント正式レポート (5件) |
 | docs/CONNECTION_TEST_CHECKLIST.md | 接続テストの手順と各回の欠陥・採用 |
 | docs/OPERATIONS.md | 常駐プロセスの起動・停止、接続テストの操作パネル (ターミナル不要、9/23) |
+| docs/JEV_RESEARCH.md / JEV_EVALUATION.md | Jev (System One model) の調査メモと、アドバイザーでの適用判断 (9/24: 採用しない、再検討条件つき) |
+| docs/TECH_WATCH_2026-09.md | 開始以降の技術動向の棚卸しと提案 (9/24: --json-schema の構造化出力、Opus 5.5 の測定つき切替、effort の段階) |
 | docs/AXIS_GAP_ANALYSIS.md | 測定軸の乖離解析と P1 の事前登録 |
 | docs/TOP_PLAYER_PLAN.md / BELIEF_SEARCH_PLAN.md | 中長期計画・信念つき探索への転換計画 (RL_V7_SET_ENCODER_DESIGN.md は棄却記録) |
 | docs/VISION_LIB_EXTRACTION.md | vision層の切り出し計画 |
