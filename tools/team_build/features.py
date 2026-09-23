@@ -134,3 +134,14 @@ def save_features(res: dict, run_dir: Path) -> Path:
     p = Path(run_dir) / "species_features.json"
     p.write_text(json.dumps(features_to_json(res), ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     return p
+
+
+def features_from_json(doc: dict) -> dict:
+    """features_to_json の逆 (run の species_features.json → {sid: SpeciesFeature})。固定入力での回帰測定 (llm/regression) が使う"""
+    out = {}
+    for sid, f in (doc.get("features") or {}).items():
+        out[sid] = SpeciesFeature(sid, dict(f.get("coverage") or {}), roles=dict(f.get("roles") or {}),
+                                  types=tuple(f.get("types") or ()), mega=bool(f.get("mega")), speed=int(f.get("speed") or 0),
+                                  usage=float(f.get("usage") or 0.0), teammates=dict(f.get("teammates") or {}),
+                                  coverage_base=f.get("coverage_base"))
+    return out

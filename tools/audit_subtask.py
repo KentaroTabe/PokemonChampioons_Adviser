@@ -20,6 +20,9 @@
   - opus:   sonnetの検出を全て包含し、上記2クラス+アイコン誤同定を追加検出。
             フレーム間の相互参照 (「19秒前のフレームでは169/169」) と
             確度の較正も明確に上。セッション1回の監査なのでコスト増は許容
+  - 2026-09-24: 同一の 5 対戦 20 枚で claude-opus-5 と claude-opus-5-5 を比較 (logs/audit_reports/session_20260924_0230*.md)。
+            検出はほぼ同じ集合 (5.5 は自分 active の取り違えとひんし後の HP 48% を追加検出、5 はシーン誤判定を 2 件多く列挙)、
+            所要 331 秒 → 112 秒、料金 20% 減 → モデルは config の AUDIT_MODEL (claude-opus-5-5) に
 """
 from __future__ import annotations
 
@@ -29,11 +32,12 @@ import subprocess
 import time
 from pathlib import Path
 
+from champions_agent.config import AUDIT_MODEL
 from tools.audit_extraction import collect_pairs
 
 REPO = Path(__file__).resolve().parent.parent
 REPORT_DIR = REPO / "logs" / "audit_reports"
-MODEL = "claude-opus-5"
+MODEL = AUDIT_MODEL
 
 PROMPT_HEADER = """\
 あなたはポケモンチャンピオンズ(Switch対戦ゲーム)の画面認識システムの監査員です。

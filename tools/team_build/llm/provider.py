@@ -26,8 +26,11 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
+from champions_agent.config import (BUILD_LLM_CLI_TOOLS, BUILD_LLM_EFFORT, BUILD_LLM_MAX_BUDGET_USD,
+                                    BUILD_LLM_MODELS)
+
 REPO = Path(__file__).resolve().parent.parent.parent.parent
-MODELS = {"opus": "claude-opus-5", "sonnet": "claude-sonnet-5", "haiku": "claude-haiku-4-5-20251001"}
+MODELS = dict(BUILD_LLM_MODELS)      # tier → モデル id (config)。provider ごとに models=... で上書きできる
 MAX_RETRIES = 2
 DEFAULT_TIMEOUT = 600
 # 構造化出力の既定 schema (claude CLI の --json-schema)。authoritative 必須・display 任意の緩い形から始め、
@@ -87,12 +90,15 @@ class LLMProvider:
     name = "base"
     default_schema: Optional[dict] = None     # 構造化出力の既定 schema (None = 本文の JSON 抽出だけ)
 
-    def __init__(self, log_dir: Optional[Path] = None):
+    def __init__(self, log_dir: Optional[Path] = None, models: Optional[dict] = None,
+                 effort: Optional[dict] = None):
         self.log_dir = Path(log_dir) if log_dir else None
         self.calls: list = []
+        self.models = dict(MODELS, **(models or {}))          # tier → モデル id (config + 上書き)
+        self.effort = dict(BUILD_LLM_EFFORT, **(effort or {}))  # stage → effort (None = CLI の既定)
 
     def complete(self, model: str, system: str, prompt: str, timeout: int = DEFAULT_TIMEOUT,
-                 schema: Optional[dict] = None) -> dict:
+                 schema: Optional[dict] = None, effort: Optional[str] = None) -> dict:
         """{"text": str, "raw": any, "usage": {...}, "structured": dict|None, "cost_usd": float|None} を返す
         (サブクラスで実装)。structured は schema に合うことが保証された出力 (無ければ None)"""
         raise NotImplementedError
@@ -100,12 +106,14 @@ class LLMProvider:
     def call(self, stage: str, tier: str, system: str, payload: dict,
              validator: Optional[Callable[[dict], list]] = None,
              max_retries: int = MAX_RETRIES, timeout: int = DEFAULT_TIMEOUT,
-             schema: Optional[dict] = None) -> dict:
+             schema: Optional[dict] = None, effort: Optional[str] = None) -> dict:
         """1 段の呼び出し。validator が問題リストを返したら理由を添えて再試行。
         schema: 構造化出力の JSON Schema (None なら provider の既定 default_schema)。
+        effort: この呼び出しの effort (None なら stage の設定 BUILD_LLM_EFFORT、それも None なら CLI の既定)。
         戻り値: {"ok": bool, "authoritative": dict, "display": dict, "problems": [...], "attempts": n, "record": path}"""
-        model = MODELS.get(tier, tier)
+        model = self.models.get(tier, tier)
         schema = self.default_schema if schema is None else schema
+        effort = effort if effort is not None else self.effort.get(stage)
         prompt = json.dumps(payload, ensure_ascii=False, indent=1)
         problems: list = []
         result = {"ok": False, "authoritative": {}, "display": {}, "problems": [], "attempts": 0}
@@ -113,7 +121,7 @@ class LLMProvider:
             p = prompt if not problems else (prompt + "\n\n前回の出力の問題 (直して再出力):\n- " + "\n- ".join(problems))
             t0 = time.time()
             try:
-                res = self.complete(model, system, p, timeout=timeout, schema=schema)
+                res = self.complete(model, system, p, timeout=timeout, schema=schema, effort=effort)
             except Exception as e:
                 res = {"text": "", "raw": None, "usage": {}, "error": repr(e)}
             structured = res.get("structured")
@@ -129,7 +137,7 @@ class LLMProvider:
                 problems = list(validator(auth) or [])
             rec = {"stage": stage, "tier": tier, "model": model, "provider": self.name, "attempt": attempt,
                    "prompt_hash": _hash(system + "\n" + p), "system_hash": _hash(system),
-                   "schema_hash": schema_hash(schema), "structured": isinstance(structured, dict),
+                   "schema_hash": schema_hash(schema), "structured": isinstance(structured, dict), "effort": effort,
                    "elapsed_s": round(time.time() - t0, 1), "usage": res.get("usage"), "cost_usd": res.get("cost_usd"),
                    "error": res.get("error"), "problems": problems, "prompt": p, "system": system,
                    "raw_text": res.get("text")}
@@ -162,12 +170,13 @@ class MockProvider(LLMProvider):
     """テスト / dry-run: responses は呼び出し順に返す文字列 (JSON テキスト) のリスト"""
     name = "mock"
 
-    def __init__(self, responses: list, log_dir: Optional[Path] = None):
-        super().__init__(log_dir)
+    def __init__(self, responses: list, log_dir: Optional[Path] = None, models: Optional[dict] = None,
+                 effort: Optional[dict] = None):
+        super().__init__(log_dir, models=models, effort=effort)
         self.responses = list(responses)
         self.i = 0
 
-    def complete(self, model, system, prompt, timeout=DEFAULT_TIMEOUT, schema=None) -> dict:
+    def complete(self, model, system, prompt, timeout=DEFAULT_TIMEOUT, schema=None, effort=None) -> dict:
         text = self.responses[min(self.i, len(self.responses) - 1)] if self.responses else ""
         self.i += 1
         structured = None
@@ -182,30 +191,38 @@ class MockProvider(LLMProvider):
 
 
 # claude CLI は既定でツール定義を system prompt に載せる (実測: 約 29k トークン/呼び出し、キャッシュ読み)。
-# 全ツールを disallow すると約 17k に減る (2026-09-06 実測)。--bare は OAuth が外れて使えない
-CLI_DISALLOWED_TOOLS = ("Bash,Read,Edit,Write,MultiEdit,Glob,Grep,LS,WebFetch,WebSearch,Task,Agent,NotebookEdit,"
-                        "NotebookRead,TodoWrite,Skill,KillShell,BashOutput,ExitPlanMode,EnterPlanMode,AskUserQuestion,"
-                        "SendMessage,ListAgents,Monitor,Workflow")
+# 全ツールを disallow すると約 17k〜25k に減り、--tools "" (ツール定義を載せない) で 12.8k (2026-09-24 haiku 実測)。
+# --bare は OAuth が外れて使えない。構造化出力 (--json-schema) は --tools "" でも動く
 
 
 class ClaudeCLIProvider(LLMProvider):
-    """claude CLI のヘッドレス実行 (tools/audit_subtask と同方式)。ツールは使わせない (定義も載せない)。
+    """claude CLI のヘッドレス実行 (tools/audit_subtask と同方式)。ツールは使わせない (定義も載せない: --tools "")。
     schema を渡すと --json-schema で構造化出力にし、応答 JSON の structured_output を返す
-    (2026-09-24 実測: --max-turns 1・ツール不許可のままで structured_output が返る。内部で tool_use を 1 回使う)"""
+    (2026-09-24 実測: --max-turns 1・ツール無しで structured_output が返る。内部で tool_use を 1 回使う)。
+    effort (段ごと、config BUILD_LLM_EFFORT) は --effort、費用上限は --max-budget-usd (config BUILD_LLM_MAX_BUDGET_USD)"""
     name = "claude-cli"
     default_schema = OUTPUT_SCHEMA
 
-    @staticmethod
-    def command(model: str, system: str, prompt: str, schema: Optional[dict] = None) -> list:
+    def __init__(self, log_dir: Optional[Path] = None, models: Optional[dict] = None, effort: Optional[dict] = None,
+                 max_budget_usd: Optional[float] = BUILD_LLM_MAX_BUDGET_USD, tools: str = BUILD_LLM_CLI_TOOLS):
+        super().__init__(log_dir, models=models, effort=effort)
+        self.max_budget_usd = max_budget_usd
+        self.tools = tools
+
+    def command(self, model: str, system: str, prompt: str, schema: Optional[dict] = None,
+                effort: Optional[str] = None) -> list:
         cmd = ["claude", "-p", prompt, "--model", model, "--output-format", "json",
-               "--system-prompt", system, "--max-turns", "1",
-               "--disallowedTools", CLI_DISALLOWED_TOOLS]
+               "--system-prompt", system, "--max-turns", "1", "--tools", self.tools]
         if schema is not None:
             cmd += ["--json-schema", json.dumps(schema, ensure_ascii=False)]
+        if effort:
+            cmd += ["--effort", str(effort)]
+        if self.max_budget_usd:
+            cmd += ["--max-budget-usd", str(self.max_budget_usd)]
         return cmd
 
-    def complete(self, model, system, prompt, timeout=DEFAULT_TIMEOUT, schema=None) -> dict:
-        cmd = self.command(model, system, prompt, schema)
+    def complete(self, model, system, prompt, timeout=DEFAULT_TIMEOUT, schema=None, effort=None) -> dict:
+        cmd = self.command(model, system, prompt, schema, effort)
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=str(REPO))
         if res.returncode != 0:
             raise RuntimeError(f"claude 実行失敗 (rc={res.returncode}): {res.stderr[-400:]}")
@@ -228,7 +245,8 @@ class ClaudeCLIProvider(LLMProvider):
                 "cost_usd": (float(cost) if isinstance(cost, (int, float)) else None)}
 
 
-def get_provider(mode: str = "headless", log_dir: Optional[Path] = None, mock_responses=None) -> LLMProvider:
+def get_provider(mode: str = "headless", log_dir: Optional[Path] = None, mock_responses=None,
+                 models: Optional[dict] = None, effort: Optional[dict] = None) -> LLMProvider:
     if mode == "mock":
-        return MockProvider(mock_responses or [], log_dir)
-    return ClaudeCLIProvider(log_dir)
+        return MockProvider(mock_responses or [], log_dir, models=models, effort=effort)
+    return ClaudeCLIProvider(log_dir, models=models, effort=effort)

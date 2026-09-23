@@ -143,8 +143,10 @@ def test_claude_cli_provider_uses_json_schema():
         assert cmd[:2] == ["claude", "-p"] and "--json-schema" in cmd and "--max-turns" in cmd
         assert json.loads(cmd[cmd.index("--json-schema") + 1]) == OUTPUT_SCHEMA
         assert cmd[cmd.index("--model") + 1] == "claude-opus-5"
+        assert cmd[cmd.index("--tools") + 1] == "" and "--disallowedTools" not in cmd          # ツール定義を載せない
+        assert cmd[cmd.index("--max-budget-usd") + 1] == str(P.BUILD_LLM_MAX_BUDGET_USD) and "--effort" not in cmd
         assert res["ok"] and res["authoritative"] == {"from": "structured"} and res["display"] == {"t": 1}
-        assert prov.calls[-1]["structured"] is True and prov.calls[-1]["cost_usd"] == 0.0123
+        assert prov.calls[-1]["structured"] is True and prov.calls[-1]["cost_usd"] == 0.0123 and prov.calls[-1]["effort"] is None
         res2 = prov.call("s04_concepts", "opus", "sys", {"x": 2}, schema=None)   # None = 既定 schema (付く)
         assert "--json-schema" in seen[-1] and res2["authoritative"] == {"from": "structured"}
         # 構造化出力が無い応答 → 本文から
@@ -152,6 +154,19 @@ def test_claude_cli_provider_uses_json_schema():
         res3 = prov.call("s04_concepts", "opus", "sys", {"x": 3})
         assert "--json-schema" not in seen[-1] and res3["ok"] and res3["authoritative"] == {"from": "text"}
         assert prov.calls[-1]["structured"] is False and prov.calls[-1]["cost_usd"] is None
+        # モデルの上書き (regression の腕) と段ごとの effort (config / 呼び出し) と費用上限
+        prov2 = ClaudeCLIProvider(models={"opus": "claude-opus-5-5"}, effort={"s04_concepts": "xhigh"}, max_budget_usd=2.5)
+        prov2.call("s04_concepts", "opus", "sys", {"x": 4})
+        cmd = seen[-1]
+        assert cmd[cmd.index("--model") + 1] == "claude-opus-5-5" and cmd[cmd.index("--effort") + 1] == "xhigh"
+        assert cmd[cmd.index("--max-budget-usd") + 1] == "2.5" and prov2.calls[-1]["effort"] == "xhigh"
+        prov2.call("s13_report", "sonnet", "sys", {"x": 5}, effort="low")           # 呼び出しの指定が優先、他の段は既定
+        assert seen[-1][seen[-1].index("--effort") + 1] == "low" and seen[-1][seen[-1].index("--model") + 1] == "claude-sonnet-5"
+        prov2.call("s13_report", "sonnet", "sys", {"x": 6})
+        assert "--effort" not in seen[-1]
+        prov3 = ClaudeCLIProvider(max_budget_usd=None)
+        prov3.call("s04_concepts", "opus", "sys", {"x": 7})
+        assert "--max-budget-usd" not in seen[-1]
     finally:
         P.subprocess.run = orig
     print("test_claude_cli_provider_uses_json_schema OK")

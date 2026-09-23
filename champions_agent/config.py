@@ -363,6 +363,19 @@ BUILD_ARCHETYPE_ROLE_TOP = 4               # 役割ごとに core の組み合�
 BUILD_ARCHETYPE_LLM_ROUNDS = 11            # LLM を軸ごとに回す上限 (coverage 停止あり)
 BUILD_ARCHETYPE_SPECIAL_MAX_CORES = 3      # 特殊な勝ち筋 (ほろびのうた等) は全分岐で合計この数まで (一覧・候補を膨らませない)
 BUILD_ARCHETYPE_SPECIAL_HYBRIDS = 3        # 特殊な勝ち筋を他の軸の core に 1 役足した併用案 (special_branch) の数 (ユーザー決定 9/18)
+# 構築の LLM 呼び出し (tools/team_build/llm/provider.py、claude CLI ヘッドレス)。2026-09-24: docs/TECH_WATCH_2026-09.md §A
+# - tier → モデル id。切替は固定入力の regression (python -m tools.team_build.llm.regression) で測ってから
+BUILD_LLM_MODELS = {"opus": "claude-opus-5", "sonnet": "claude-sonnet-5", "haiku": "claude-haiku-4-5-20251001"}
+# - 段ごとの effort (claude CLI --effort: low / medium / high / xhigh / max。None = CLI の既定)。regression で測って決める
+BUILD_LLM_EFFORT = {"s04_concepts": None, "s13_report": None, "interventions": None, "articles": None}
+# - 1 呼び出しの費用上限 (USD、CLI --max-budget-usd)。再試行の暴走に対する保険。通常の S4 呼び出しは $1 前後 (Opus 5 実測)
+BUILD_LLM_MAX_BUDGET_USD = 5.0
+# - CLI に載せるツール。空 = ツール定義を system prompt に載せない (9/24 実測: 12.8k トークン。不許可リスト方式は 24.7k)
+BUILD_LLM_CLI_TOOLS = ""
+# 視覚監査 (tools/audit_subtask, audit_session) のモデル。8/18 に haiku / sonnet / opus を同一フレーム 30 枚で比較して opus に固定、
+# 9/24 に同一の 5 対戦 20 枚で claude-opus-5 (331 秒) と claude-opus-5-5 (112 秒) を比較: 主要な乖離 (7 匹化、ひんし後の HP
+# 再表示、HP の誤読、シーン誤判定) は両方が検出し、5.5 は技欄・メガ表示の記述がより具体的で幻覚なし → 安い 5.5 に切替
+AUDIT_MODEL = "claude-opus-5-5"
 # 測定の相手プール (S2、tools/team_build/opponents.py)。ranked = POOL_PIN の上位ランカー構築 (従来)、
 # latest = 最新の使用率スナップショットの全種から「使用率% ∪ ゲーム内順位」の重みと共起 (teammate_usage) で合成
 # (2026-09-18 ユーザー決定: ブラックリストなしの最新ポケモン全体。上位構築に載らない今期の主役も相手に出る)

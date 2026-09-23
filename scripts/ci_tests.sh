@@ -72,6 +72,7 @@ TESTS=(
   test_party_improvements
   test_real_opponents
   test_control_panel
+  test_team_build_regression
 )
 
 fail=0
