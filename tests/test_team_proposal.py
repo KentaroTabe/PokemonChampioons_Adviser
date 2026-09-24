@@ -242,11 +242,17 @@ def test_myteam_text_completes_missing_evs():
                     "abilities": [("protean", 80.0)],
                     "found": True}
 
+    import tools.evaluate_team as et
+
     orig_load = mt._load
     orig_pred = sets_mod.get_predictor
     orig_cache = ev._usage_cache
+    orig_roster = et._latest_selection_roster
     mt._load = lambda: {"マスカーニャ": {}}
     sets_mod.get_predictor = lambda: _Pred()
+    # 直近の対戦ログの選出ロスターが登録より優先される (2026-09-16)。このテストは登録の補完を見るので、
+    # 実ログのロスターに引きずられないよう空にする (2026-09-24: 実ログがある環境で落ちていた)
+    et._latest_selection_roster = lambda log_dir=None: []
     ev._usage_cache = {"meowscarada": {
         "moves": [("flowertrick", 90.0), ("knockoff", 80.0),
                   ("uturn", 70.0), ("tripleaxel", 60.0)],
@@ -263,6 +269,7 @@ def test_myteam_text_completes_missing_evs():
         mt._load = orig_load
         sets_mod.get_predictor = orig_pred
         ev._usage_cache = orig_cache
+        et._latest_selection_roster = orig_roster
     print("test_myteam_text_completes_missing_evs OK")
 
 
@@ -282,10 +289,14 @@ def test_myteam_text_completes_ability_and_item():
                     "abilities": [("protean", 80.0), ("overgrow", 20.0)],
                     "found": True}
 
+    import tools.evaluate_team as et
+
     orig_load, orig_pred = mt._load, sets_mod.get_predictor
     orig_cache = ev._usage_cache
+    orig_roster = et._latest_selection_roster
     mt._load = lambda: {"マスカーニャ": {}}
     sets_mod.get_predictor = lambda: _Pred()
+    et._latest_selection_roster = lambda log_dir=None: []      # 実ログのロスターに引きずられない (上と同じ)
     ev._usage_cache = {"meowscarada": {
         "moves": [], "items": [],
         "spreads": [("jolly", "2/32/0/0/0/32", 57.7)]}}
@@ -300,6 +311,7 @@ def test_myteam_text_completes_ability_and_item():
         mt._load = orig_load
         sets_mod.get_predictor = orig_pred
         ev._usage_cache = orig_cache
+        et._latest_selection_roster = orig_roster
     print("test_myteam_text_completes_ability_and_item OK")
 
 

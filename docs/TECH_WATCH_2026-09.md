@@ -81,7 +81,9 @@ Python 3.9.6 (Xcode 付属)、Apple Silicon、macOS 26.5.1、claude CLI 2.1.270�
 - `brew install python@3.12` → `scripts/venv_rebuild.sh /opt/homebrew/bin/python3.12 .venv312` (依存は requirements-full.txt、
   移行前と同じ主版に固定。pyobjc は 12.2、torch 2.8、opencv 5.0、poke-env 0.10)。CI サブセット + 画面認識の実データテスト
   (test_advisor / test_ocr_parse / test_rl_bridge / test_my_team / test_frame_intake / test_events) は 3.9 と同じ結果
-  (test_team_proposal の 1 件と test_look_more は 3.9 でも落ちる既存の問題)
+  (test_team_proposal の 1 件と test_look_more は 3.9 でも落ちていた既存の問題。同日に修正済み)
+- 切替後の初回の日次ジョブ (9/24): 5:00 deploy (停止中のため起動せず)、6:30 使用率更新 (snapshot 46、262 種、エラーなし)、
+  13:00 evolve (run_20260924_130713、エラーなし) はいずれも 3.12 で正常
 - 切替は `scripts/venv_switch.sh .venv312` (リンク方式、戻しは --rollback)。docs/OPERATIONS.md「Python 環境」
 
 ## B. 新しいが今は使わない (理由つき)
