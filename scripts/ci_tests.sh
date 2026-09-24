@@ -73,6 +73,7 @@ TESTS=(
   test_real_opponents
   test_control_panel
   test_team_build_regression
+  test_track_progress
 )
 
 fail=0

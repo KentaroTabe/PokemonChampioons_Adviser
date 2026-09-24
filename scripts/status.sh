@@ -41,6 +41,38 @@ if ! launchctl list 2>/dev/null | grep championsadviser; then
   echo "(登録なし)"
 fi
 
+# 日次定点 (tools.track_progress) の経過時間。launchd の calendar ジョブは前回が生きている間は再発火せず、
+# 評価がハングすると定点が黙って欠測する (2026-09-18〜23、docs/incidents/reports/2026-09-18-track-progress-hang-no-timeout.md)
+etime_minutes() {
+  local et="$1" days=0 rest="$1" a b c h m
+  case "$et" in *-*) days="${et%%-*}"; rest="${et#*-}";; esac
+  IFS=: read -r a b c <<< "$rest"
+  if [ -n "$c" ]; then h="$a"; m="$b"; else h=0; m="$a"; fi
+  echo $(( (10#$days * 24 + 10#$h) * 60 + 10#$m ))
+}
+echo
+echo "=== 日次定点 (tools.track_progress) ==="
+. "$ROOT/config/jobs.env"
+TP_PID="$(pgrep -f 'tools.track_progress' | head -1)"
+if [ -z "$TP_PID" ]; then
+  echo "(停止中) 日次ログの最終行: $(tail -n 1 "$ROOT/logs/track_progress_daily.log" 2>/dev/null)"
+else
+  TP_ET="$(ps -o etime= -p "$TP_PID" | tr -d ' ')"
+  TP_MIN="$(etime_minutes "$TP_ET")"
+  if [ "$TP_MIN" -ge "${TRACK_PROGRESS_MAX_MINUTES:-240}" ]; then
+    echo "⚠ pid $TP_PID が $TP_ET ($TP_MIN 分) 走り続けている (上限 ${TRACK_PROGRESS_MAX_MINUTES:-240} 分)。評価のハングを疑う:"
+    pgrep -fl "champions_agent.train.evaluate" || echo "  (evaluate プロセスなし)"
+  else
+    echo "実行中: pid $TP_PID 経過 $TP_ET"
+  fi
+fi
+
 echo
 echo "=== 最新の対戦ログ ==="
-ls -lt "$ROOT/logs/battles"/*.jsonl 2>/dev/null | head -3 || echo "(なし)"
+# pipefail 下では head が先に閉じると ls が SIGPIPE で非 0 になり、結果の後に "(なし)" が出ることがあった → 変数に受ける
+LATEST_BATTLES="$(ls -lt "$ROOT/logs/battles"/*.jsonl 2>/dev/null | head -3)"
+if [ -n "$LATEST_BATTLES" ]; then
+  echo "$LATEST_BATTLES"
+else
+  echo "(なし)"
+fi

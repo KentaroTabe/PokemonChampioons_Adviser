@@ -106,6 +106,14 @@ META_THIN_LOG_MIN_USAGE = 5.0
 # この標準誤差倍数を超えて動いたら警告する。凍結重みの定点が動くのは
 # 測定軸側の変化のサイン (同上インシデントで11SEの段差を見逃した)。
 FROZEN_REF_WARN_SIGMA = 3.0
+# 日次定点の評価 1 回 (champions_agent.train.evaluate) の打ち切り。戦数に比例した秒数を
+# evaluate の --timeout と subprocess の timeout の両方に渡す (後者は前者 + 猶予)。
+# 2026-09-18: agents 軸の 3,000 戦が Showdown との通信待ちで 5 日間止まり、launchd の
+# 日次ジョブが再発火せず 9/18〜9/23 の定点が欠測した
+# (docs/incidents/reports/2026-09-18-track-progress-hang-no-timeout.md)。
+# 通常は 1,000 戦あたり約 130 秒 (9/17 実測: 11,000 戦 24 分)。構築 run と重なると約 1.6 倍
+TRACK_PROGRESS_EVAL_TIMEOUT_PER_1K = 900   # 1,000 戦あたりの秒数 (通常の約 7 倍)
+TRACK_PROGRESS_TIMEOUT_GRACE_S = 60        # evaluate 側の自己終了を待つ猶予
 
 
 @dataclass
