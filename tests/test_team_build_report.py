@@ -90,8 +90,19 @@ def test_report_lineage():
         (run / "s06_sets.json").write_text(json.dumps(rows))
         for r in rows:
             (run / "s06_sets" / f"{r['candidate_id']}.txt").write_text("x @ y\nLevel: 50\nAbility: ab\nEVs: 32 HP\nAdamant Nature\n- m1\n")
+        # summary の最終候補には旧コードが保存した系統のラベル (軸: カイリュー+サザンドラ) が残っている想定
+        (run / "evaluation" / "summary.json").write_text(json.dumps({
+            "finalists": [{"rank": 1, "candidate_id": "L06_C020", "direction_ja": "サイクルで圧をかける / 軸: カイリュー+サザンドラ / メガ: カイリュー",
+                           "delta_s10": 0.317, "holdout": {"verdict": "PASS", "delta": 0.1, "ci": [0.05, 0.15], "n": 600}},
+                          {"rank": 2, "candidate_id": "L69_C029_from_arch_src", "direction_ja": "方向性ラベルなし", "delta_s10": 0.253},
+                          {"rank": 3, "candidate_id": "L99_gone", "direction_ja": "行が無い候補", "delta_s10": 0.1}],
+            "holdout": {"verdict": "PASS", "delta": 0.1, "ci": [0.05, 0.15], "n": 600}}))
         stones = {"charizarditey", "metagrossite", "dragoninite"}
         facts = facts_from_run(run, "L06_C020", stones=stones)
+        labels = {f["candidate_id"]: f["direction_ja"] for f in facts["finalists"]}
+        assert "近傍: " in labels["L06_C020"] and "カイリュー+サザンドラ" not in labels["L06_C020"], labels   # 保存値ではなく計算し直す
+        assert "先制技で詰める" in labels["L69_C029_from_arch_src"], labels                                  # 持ち込みも元 run の系統で
+        assert labels["L99_gone"] == "行が無い候補"                                                          # 行が無ければ保存値
         c = facts["concept"]
         assert c["core_ids"] == ["hydreigon"] and c["core_missing"] == ["dragonite"] and c["concept_core_ids"] == ["dragonite", "hydreigon"]
         assert c["mega_id"] is None and c["mega_ids"] == ["charizard", "metagross"] and c["origin"]["swap"] == ["dragonite", "charizard"]

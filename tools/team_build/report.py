@@ -45,17 +45,23 @@ def facts_from_run(run_dir: Path, candidate_id: str, stones: Optional[set] = Non
     team = next((r for r in sets if r.get("candidate_id") == candidate_id), {})
     _fill_abilities(team.get("sets") or [], run_dir / "s06_sets" / f"{candidate_id}.txt")
     fams = _families_of_run(run_dir)
-    # 系統: 通常 (L06_C020) / 交配 (L07_C028xC026 は親系統) / 持ち込み (…_from_<run> は元 run の系統)。
-    # 軸とメガは系統の記録ではなく並びに実際に居る個体で書く (finalists.direction_of、2026-09-25)
-    fam, parents = FN.family_of(candidate_id, fams), FN.parent_families(candidate_id, fams)
-    if fam is None and not parents and team.get("imported_from"):
-        fam, parents = FN.imported_family(team["imported_from"], lambda rid: _families_of_run(run_dir.parent / rid))
-    fam = fam or {}
     if stones is None:
         from tools.team_build.interaction import _mega_stone_ids
         stones = _mega_stone_ids()
-    direction = FN.direction_of(fam or None, team.get("members") or [], megas=FN.mega_holders(team.get("sets") or [], stones),
-                                origin=team.get("origin"), parents=parents)
+
+    def _direction(cid: str, row: dict) -> tuple:
+        """(系統, 方向性)。系統: 通常 (L06_C020) / 交配 (L07_C028xC026 は親系統) / 持ち込み (…_from_<run> は元 run の系統)。
+        軸とメガは系統の記録ではなく並びに実際に居る個体で書く (finalists.direction_of、2026-09-25)"""
+        f, parents = FN.family_of(cid, fams), FN.parent_families(cid, fams)
+        if f is None and not parents and row.get("imported_from"):
+            f, parents = FN.imported_family(row["imported_from"], lambda rid: _families_of_run(run_dir.parent / rid))
+        f = f or {}
+        d = FN.direction_of(f or None, row.get("members") or [], megas=FN.mega_holders(row.get("sets") or [], stones),
+                            origin=row.get("origin"), parents=parents)
+        return f, d
+
+    fam, direction = _direction(candidate_id, team)
+    rows_of = {r.get("candidate_id"): r for r in sets}
     summary = load("evaluation/summary.json") or {}
     # 複数の最終候補 (2026-09-17): 自分の順位・holdout は finalists の行から、比較表は全員ぶん
     finalists = summary.get("finalists") or []
@@ -81,7 +87,10 @@ def facts_from_run(run_dir: Path, candidate_id: str, stones: Optional[set] = Non
         "s10": {a["arm_id"]: {"win_rate": a.get("win_rate"), "state": a.get("state"), "delta": (a.get("result") or {}).get("mean")}
                 for a in (load("evaluation/s10.json") or {}).get("arms", [])},
         "finalist_rank": (mine or {}).get("rank"),
-        "finalists": [{"rank": f.get("rank"), "candidate_id": f.get("candidate_id"), "direction_ja": f.get("direction_ja"),
+        # 比較表のラベルは summary の保存値ではなく run のデータから計算し直す (保存値は系統の軸で書かれていることがある)
+        "finalists": [{"rank": f.get("rank"), "candidate_id": f.get("candidate_id"),
+                       "direction_ja": (FN.direction_label_ja(_direction(f.get("candidate_id"), rows_of[f.get("candidate_id")])[1])
+                                        if f.get("candidate_id") in rows_of else f.get("direction_ja")),
                        "delta_s10": f.get("delta_s10"), "holdout": f.get("holdout"),
                        "members": members_of.get(f.get("candidate_id"), [])} for f in finalists],
     }
