@@ -53,10 +53,16 @@ class Lineup:
     score: float
     parts: dict
     tag: str = ""
+    # 探索の由来 (mutation の入替 {kind, parent_concept, swap: [出, 入]} / crossover の親 {kind, parents})。
+    # concept id は元の系統のまま引き継ぐので、系統の core が並びに居ないことがある → 方向性ラベルはこれで補正する (2026-09-25)
+    origin: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        return {"members": list(self.members), "concept": self.concept, "score": round(self.score, 4),
-                "parts": {k: round(v, 4) for k, v in self.parts.items()}, "tag": self.tag}
+        d = {"members": list(self.members), "concept": self.concept, "score": round(self.score, 4),
+             "parts": {k: round(v, 4) for k, v in self.parts.items()}, "tag": self.tag}
+        if self.origin:
+            d["origin"] = dict(self.origin)
+        return d
 
 
 MIN_DISTANCE = 0.5     # 保持する候補同士は 6 体中 3 体以上違う

@@ -477,10 +477,25 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
     eligible = [cid for cid in ranked
                 if not BUILD_REPRO_GATE or repro_gate_ok(chosen[cid].get("delta"), deltas10.get(cid))]
     sets_rows = json.loads((run_dir / "s06_sets.json").read_text(encoding="utf-8"))
-    members_by = {r.get("candidate_id"): list(r.get("members") or []) for r in sets_rows}
+    rows_by = {r.get("candidate_id"): r for r in sets_rows}
+    members_by = {cid: list(r.get("members") or []) for cid, r in rows_by.items()}
     fam_doc = _load_json(run_dir / "s04_concepts.json") or {}
-    fam_by = {cid: FN.family_of(cid, fam_doc.get("families") or []) for cid in eligible}
-    picks = FN.pick_finalists(eligible, deltas10, members_by, fam_by, k=finalists_k, max_shared=finalist_max_shared)
+    fams = fam_doc.get("families") or []
+    # 方向性ラベルは並びに実際に居る個体で書く (2026-09-25): 近傍・交配は元の concept id を引き継ぐので系統の core が居ないことがある。
+    # 持ち込んだ並び (…_from_<run>) は元 run の s04_concepts.json から系統を引く
+    from tools.team_build.interaction import _mega_stone_ids
+    fam_by, parents_by = {}, {}
+    for cid in eligible:
+        fam, par = FN.family_of(cid, fams), FN.parent_families(cid, fams)
+        imp = (rows_by.get(cid) or {}).get("imported_from")
+        if fam is None and not par and imp:
+            fam, par = FN.imported_family(imp, lambda rid: (_load_json(run_dir.parent / rid / "s04_concepts.json") or {}).get("families") or [])
+        fam_by[cid], parents_by[cid] = fam, par
+    stones = _mega_stone_ids()
+    megas_by = {cid: FN.mega_holders((rows_by.get(cid) or {}).get("sets") or [], stones) for cid in eligible}
+    origins_by = {cid: (rows_by.get(cid) or {}).get("origin") or {} for cid in eligible}
+    picks = FN.pick_finalists(eligible, deltas10, members_by, fam_by, k=finalists_k, max_shared=finalist_max_shared,
+                              megas_by=megas_by, origins_by=origins_by, parents_by=parents_by)
     summary["finalists"] = picks
     summary["finalists_skipped_similar"] = FN.skipped_as_similar(eligible, picks, members_by, finalist_max_shared)
     log(f"最終候補 (方向性の違う並び、共通メンバー ≤ {finalist_max_shared}): "
