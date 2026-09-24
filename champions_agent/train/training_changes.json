@@ -2,6 +2,12 @@
  "_comment": "学習に影響する変更の記録。watch_training が推移グラフに赤い縦線として描画し、履歴表示にも差し込む。新しい変更を入れたら追記すること (at はローカル時刻 'YYYY-MM-DD HH:MM')。kind: net=ネット構成 / reward=報酬 / opponent=相手構成 / env=環境仕様 / eval=評価方法 / fix=不具合修正",
  "changes": [
   {
+   "at": "2026-09-24 20:30",
+   "kind": "eval",
+   "label": "日次定点が 9/18〜9/23 欠測 (agents 軸の評価がハング、timeout なし) → 評価 1 回に timeout",
+   "detail": "9/18 21:50 の日次定点で 3 本目の評価 (current vs agents 3,000 戦) が Showdown との通信待ちのまま止まり (CPU 0%、TCP 接続なし)、launchd の calendar ジョブは前回が生きている間は再発火しないため 9/19〜9/23 も走らなかった。学習は 9/17 20:37 で停止中なので重みは不変、チェックポイントと既存 47 行は無傷。週次アンカー (9/23 予定) は次回の定点で保存される。対策: TRACK_PROGRESS_EVAL_TIMEOUT_PER_1K=900 秒/1,000 戦を evaluate --timeout と subprocess timeout の二段で渡し、打ち切りを行の eval_timeouts に残す。status.sh に日次定点の経過時間警告 (config/jobs.env TRACK_PROGRESS_MAX_MINUTES=240)。詳細 docs/incidents/reports/2026-09-18-track-progress-hang-no-timeout.md"
+  },
+  {
    "at": "2026-09-17 20:37",
    "kind": "env",
    "label": "常時学習を停止 (ユーザー決定): 以後は必要なときだけ回す (on_demand)",

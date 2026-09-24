@@ -92,7 +92,10 @@ round1 300戦 + round2 600戦の併合): ドドゲザン 0.754 / ガブリアス
 ### 2.5 運用
 - 学習: 稼働中 (`scripts/status.sh` で実測)。アドバイザー(8000)/フロント(3000)は接続テスト時のみ起動。
 - CI: GitHub Actions で純粋ロジック20ファイルを実行 (9/5 に test_meta_thin_guard 追加)。
-- 日次ジョブ: 使用率更新 (JST 06:31)、進化探索 (13:00)、deploy (05:00、現在無効)。
+- 日次ジョブ: 使用率更新 (JST 06:31)、進化探索 (13:00)、deploy (05:00、現在無効)、進捗定点 (21:50)。
+  **進捗定点は 9/18〜9/23 欠測** (agents 軸の評価 3,000 戦が timeout なしで 5 日間ハング、launchd が再発火せず。
+  9/24 に評価ごとの timeout と status.sh の経過時間警告を追加。ハングしたプロセスの停止は構築 run の終了後。
+  docs/incidents/reports/2026-09-18-track-progress-hang-no-timeout.md)
 
 ## 3. 課題と対応策 (領域別)
 
@@ -145,6 +148,7 @@ round1 300戦 + round2 600戦の併合): ドドゲザン 0.754 / ガブリアス
 | 学習停止で Showdown が巻き添え (9/2) | Showdown を切り離し起動に変更 (train_nightly)、evolve は不在時に明示中止、`stop/start_training.sh` | ✅ (9/2) |
 | ローカル緑≠CI緑 | `scripts/ci_local.sh` (クローン検証) を push 前に必須化 | ✅ (9/2) |
 | Actions の Node.js 非推奨 | checkout/setup-python を v7 へ (次回 push で検証) | 🔜 |
+| 日次定点の評価がハングして 6 日欠測 (9/18〜23) | 評価 1 回に戦数比例の timeout (config)、打ち切りの記録、status.sh の経過時間警告、test_track_progress | ✅ (9/24)。他の timeout 無し subprocess (reward_sweep / audit の claude / validate_teams) は未対応 |
 | vision層のライブラリ公開 | 境界確定済み、公開は承認待ち | 承認待ち |
 | 9/9 シーズン切替 | docs/REGULATION_CHANGE_RUNBOOK.md に従う | 🔜 |
 
@@ -177,7 +181,7 @@ round1 300戦 + round2 600戦の併合): ドドゲザン 0.754 / ガブリアス
 | docs/KNOWN_ISSUES.md | 課題台帳 (ファミリー別・状態つき) |
 | docs/training_policy_history.md | 学習方針の変遷 (§I に 8/18〜9/2 の判定と教訓) |
 | champions_agent/train/training_changes.json | 学習・評価に影響する全変更の記録 |
-| docs/incidents/reports/ | インシデント正式レポート (5件) |
+| docs/incidents/reports/ | インシデント正式レポート (11件、最新 9/18 日次定点のハング) |
 | docs/CONNECTION_TEST_CHECKLIST.md | 接続テストの手順と各回の欠陥・採用 |
 | docs/OPERATIONS.md | 常駐プロセスの起動・停止、接続テストの操作パネル (ターミナル不要、9/23) |
 | docs/JEV_RESEARCH.md / JEV_EVALUATION.md | Jev (System One model) の調査メモと、アドバイザーでの適用判断 (9/24: 採用しない、再検討条件つき) |

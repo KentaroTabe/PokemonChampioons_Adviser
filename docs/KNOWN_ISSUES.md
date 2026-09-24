@@ -145,3 +145,8 @@ docs/CONNECTION_TEST_CHECKLIST.md と docs/incidents/ を参照。
   👁 長時間ジョブは nohup/launchd 側に寄せる余地 (要求が再発したら対応)
 - CIはコミット済みデータで閉じる — ローカル緑≠CI緑 (9/2に2テストの隠れDB依存で失敗)。
   `scripts/ci_local.sh` でクローン検証してから push する運用 — ✅
+- 外部プロセス (Showdown / claude CLI / node) を待つ subprocess の timeout — 日次定点の評価が
+  9/18 から 5 日間ハングし定点が 6 日欠測 (launchd の calendar ジョブは前回が生きていると発火しない。
+  docs/incidents/reports/2026-09-18-track-progress-hang-no-timeout.md)。9/24 に定点は timeout 化 ✅、
+  status.sh に経過時間警告 ✅。👁 未対応: `tools/reward_sweep.py` の evaluate、`tools/audit_subtask.py` /
+  `tools/audit_session.py` の claude 呼び出し、`tools/validate_teams.py` の node
