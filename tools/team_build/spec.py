@@ -52,8 +52,9 @@ class BuildSpec:
     objective: str = "max_wr"
     favorites: list = field(default_factory=list)     # hard constraint (必ず入れる)
     locked: list = field(default_factory=list)        # favorites と同義の入力互換
-    banned: list = field(default_factory=list)        # 使わない (未所持など)
-    owned: list = field(default_factory=list)         # 所持 (空なら my_team.json から)
+    banned: list = field(default_factory=list)        # 使わない (config/banned_species.txt + 依頼の追加)
+    owned: list = field(default_factory=list)         # 使える候補を限定するとき (空なら 参戦種 − banned)
+    banned_source: dict = field(default_factory=dict)  # 使わないリストの出どころ (file / sha256 / file_count / extra / unknown)
     style: str = "any"
     user_policy: str = "full"                         # easy のときの遵守モデル既定
     profile: str = "full"
@@ -122,7 +123,8 @@ def parse_custom_sets(value) -> dict:
 
 
 REPO = Path(__file__).resolve().parent.parent.parent
-OWNED_POLICY_PATH = REPO / "config" / "owned_policy.json"
+BANNED_FILE = REPO / "config" / "banned_species.txt"
+POKEDEX_TS = REPO / "pokemon-showdown" / "data" / "pokedex.ts"
 FORMATS_DATA_CURRENT = REPO / "pokemon-showdown" / "data" / "mods" / "champions" / "formats-data.ts"
 FORMATS_DATA_PREVIOUS = REPO / "pokemon-showdown" / "data" / "mods" / "championsregmb" / "formats-data.ts"
 
@@ -159,45 +161,106 @@ def new_species_ids(current_path: Path = FORMATS_DATA_CURRENT, previous_path: Pa
         return ids
 
 
-def owned_policy(path: Path = OWNED_POLICY_PATH) -> dict:
-    """config/owned_policy.json: {"new_species_owned": bool, "blacklist": [id]}。無ければ補完なし"""
-    try:
-        d = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {"new_species_owned": False, "blacklist": []}
-    return {"new_species_owned": bool(d.get("new_species_owned", False)),
-            "blacklist": [_toid(str(s)) for s in (d.get("blacklist") or []) if _toid(str(s))]}
+# ---- 使わないポケモン (config/banned_species.txt) ----
+# 2026-09-25 ユーザー決定: 所持リストは持たず「使わないリスト」だけで管理する。提案される構築にはリストの種を使わない。
+# 相手のパーティには適用しない (opponents.synthetic_pool は最新環境の全種から合成する)。
 
 
-def apply_owned_policy(owned: list, new_species: list, policy: dict) -> list:
-    """所持 = 登録 ∪ (new_species_owned なら今期の追加種) − blacklist。順序は登録 → 追加種。純粋
-    (2026-09-18 ユーザー決定: 新規追加ポケモンは基本すべて所持扱い、ブラックリスト方式)"""
-    black = set(policy.get("blacklist") or [])
-    out = [s for s in owned if s not in black]
-    if policy.get("new_species_owned"):
-        for s in new_species:
-            if s not in out and s not in black:
-                out.append(s)
+def parse_banned_text(text: str) -> list:
+    """ファイル本文 → 名前の列 (1 行 1 体、# 以降は注記、空行は無視、重複は最初だけ)。純粋"""
+    out = []
+    for line in (text or "").splitlines():
+        token = line.split("#", 1)[0].strip()
+        if token and token not in out:
+            out.append(token)
     return out
 
 
-def owned_species_ids() -> list:
-    """所持種の id: config/my_team.json の登録種 (種族ID があればそれ、無ければ名前解決) に、所持の方針
-    (config/owned_policy.json: 今期の追加種を所持扱い、ブラックリスト) を適用したもの"""
-    from advisor.my_team import _load, registered_species_id
-    from vision.normalize import NameResolver
-    resolver = NameResolver()
-    out = []
-    for ja in _load().keys():
-        sid = registered_species_id(ja)
-        if not sid:
-            r = resolver.resolve_species(ja, cutoff=0.9)
-            sid = r[1] if r else None
-        if sid and sid not in out:
-            out.append(sid)
-    policy = owned_policy()
-    new = new_species_ids() if policy.get("new_species_owned") else []
-    return apply_owned_policy(out, new, policy)
+def resolve_banned(tokens: list, legal: Optional[set] = None) -> tuple:
+    """名前の列 → (id の列, 解決できない名前の列)。日本語名は NameResolver で id に。
+    legal (参戦種) を渡すと、参戦種に無い id (綴り違いなど) も「解決できない」に入れる。純粋 (名前解決を除く)"""
+    ids, unknown = [], []
+    for tok in tokens:
+        sid = resolve_species_token(tok)
+        ok = bool(sid) and re.fullmatch(r"[a-z0-9]+", sid) is not None and (legal is None or sid in legal)
+        if not ok:
+            unknown.append(tok)
+        elif sid not in ids:
+            ids.append(sid)
+    return ids, unknown
+
+
+def _sha256(text: str) -> str:
+    import hashlib
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()[:12]
+
+
+def read_banned_file(path: Path = BANNED_FILE, legal: Optional[set] = None) -> dict:
+    """使わないポケモンのファイル → {"path", "exists", "tokens", "ids", "unknown", "sha256"}。無ければ空のリスト"""
+    p = Path(path)
+    try:
+        text = p.read_text(encoding="utf-8")
+        exists = True
+    except OSError:
+        text, exists = "", False
+    tokens = parse_banned_text(text)
+    ids, unknown = resolve_banned(tokens, legal)
+    return {"path": str(p), "exists": exists, "tokens": tokens, "ids": ids, "unknown": unknown, "sha256": _sha256(text)}
+
+
+def _merge_banned(spec: "BuildSpec", info: dict) -> None:
+    """ファイルの id を spec.banned の先頭に (依頼の指定は extra として後ろに残す)、明示の owned からも外す"""
+    extra = [s for s in spec.banned if s not in info["ids"]]
+    spec.banned = list(info["ids"]) + extra
+    spec.banned_source = {"file": info["path"], "exists": info["exists"], "sha256": info["sha256"],
+                          "file_count": len(info["ids"]), "unknown": list(info["unknown"]), "extra": extra}
+    if spec.owned:
+        spec.owned = [s for s in spec.owned if s not in set(spec.banned)]
+
+
+def apply_banned_file(spec: "BuildSpec", path: Path = BANNED_FILE, legal: Optional[set] = None) -> dict:
+    """読み込んだ spec (古い request.json など) にも使わないリストを常に効かせる。戻り値: 読み込み結果"""
+    info = read_banned_file(path, legal)
+    _merge_banned(spec, info)
+    if spec.banned:
+        spec.provenance["banned"] = "resolved"
+    return info
+
+
+def battle_only_ids_from_text(text: str) -> set:
+    """Showdown の pokedex.ts の本文 → battleOnly (戦闘中だけのフォルム: ギルガルド ブレード等) の id 集合。純粋"""
+    out = set()
+    for m in re.finditer(r"^\t(\w+): \{(.*?)^\t\},", text or "", flags=re.M | re.S):
+        if "battleOnly" in m.group(2):
+            out.add(m.group(1))
+    return out
+
+
+def battle_only_ids(path: Path = POKEDEX_TS) -> set:
+    try:
+        return battle_only_ids_from_text(Path(path).read_text(encoding="utf-8"))
+    except OSError:
+        return set()
+
+
+def selectable_species_ids(legal: Optional[set] = None) -> list:
+    """選べる種 = 参戦種 − メガ後のフォルム − 戦闘中だけのフォルム (昇順)。legal 省略時は legal_species_ids()"""
+    from advisor.gimmick import is_mega_form
+    legal = set(legal) if legal is not None else legal_species_ids()
+    bo = battle_only_ids()
+    return sorted(s for s in legal if s not in bo and not is_mega_form(s))
+
+
+def usable_species_ids(banned, legal: Optional[set] = None) -> list:
+    """使える候補 = 選べる種 − 使わないリスト"""
+    b = set(banned or ())
+    return [s for s in selectable_species_ids(legal) if s not in b]
+
+
+def banned_in_members(members, banned) -> list:
+    """並び (id の列) に含まれる使わない種 (順序保持)。不変条件の検査に使う。純粋"""
+    b = set(banned or ())
+    return [m for m in (members or []) if m in b]
 
 
 def legal_species_ids() -> set:
@@ -210,8 +273,11 @@ def legal_species_ids() -> set:
         else set()
 
 
-def parse_form(form: dict, owned: Optional[list] = None) -> BuildSpec:
-    """フロント/チャットの構造入力 → BuildSpec (明示された項目は resolved)"""
+def parse_form(form: dict, owned: Optional[list] = None, banned_path: Path = BANNED_FILE,
+               legal: Optional[set] = None) -> BuildSpec:
+    """フロント/チャットの構造入力 → BuildSpec (明示された項目は resolved)。
+    使わないポケモンは常に banned_path のファイルから読み、依頼の banned はその run だけの追加。
+    owned (使える候補) は省略時 参戦種 − banned"""
     spec = BuildSpec()
     prov = {}
     for key in ("objective", "style", "user_policy", "profile", "regulation", "notes"):
@@ -237,9 +303,13 @@ def parse_form(form: dict, owned: Optional[list] = None) -> BuildSpec:
     if form.get("sets"):
         spec.custom_sets = parse_custom_sets(form["sets"])
         prov["custom_sets"] = "resolved"
+    _merge_banned(spec, read_banned_file(banned_path, legal))
+    if spec.banned:
+        prov["banned"] = "resolved"
     if not spec.owned:
-        spec.owned = list(owned) if owned is not None else owned_species_ids()
+        spec.owned = list(owned) if owned is not None else usable_species_ids(spec.banned, legal)
         prov["owned"] = "inferred"
+    spec.owned = [s for s in spec.owned if s not in set(spec.banned)]
     spec.favorites = sorted(set(spec.favorites) | set(spec.locked))
     spec.locked = list(spec.favorites)
     if spec.favorites and spec.objective == "max_wr" and "objective" not in prov:
@@ -263,9 +333,12 @@ def validate_spec(spec: BuildSpec, legal: Optional[set] = None) -> list:
         problems.append(f"profile が不正: {spec.profile}")
     owned = set(spec.owned)
     if not owned:
-        problems.append("所持ポケモンが空 (config/my_team.json に登録するか owned を指定)")
+        problems.append("使える種が空 (参戦種の読み込みに失敗したか、owned の指定が空)")
     if len(owned) < 6:
-        problems.append(f"所持が 6 体未満 ({len(owned)}): 6 体構築を組めない")
+        problems.append(f"使える種が 6 体未満 ({len(owned)}): 6 体構築を組めない")
+    unknown_banned = (spec.banned_source or {}).get("unknown") or []
+    if unknown_banned:
+        problems.append(f"使わないリストに解決できない名前: {unknown_banned} ({(spec.banned_source or {}).get('file')})")
     for sid in spec.favorites:
         if sid not in owned:
             problems.append(f"固定枠 {sid} が所持にない")

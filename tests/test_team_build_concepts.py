@@ -36,6 +36,10 @@ def test_validate_and_cluster():
                          "support_roles": ["fly"], "weak_to": ["qq"]}]}
     probs = K.validate_concepts(bad, owned, legal, mega)
     assert len(probs) >= 4, probs
+    # 使わないポケモン (config/banned_species.txt) が core にあれば、所持にあっても差し戻す
+    banned_probs = K.validate_concepts(ok, owned, legal, mega, banned={"b"})
+    assert len(banned_probs) == 1 and "使わない" in banned_probs[0] and "b" in banned_probs[0], banned_probs
+    assert K.validate_concepts(ok, owned, legal, mega, banned={"zzz"}) == []
     fams = K.cluster_concepts([{"name": "1", "core_ids": ["a", "b"]}, {"name": "2", "core_ids": ["b", "a"]},
                                {"name": "3", "core_ids": ["c", "d"]}])
     assert len(fams) == 2 and fams[0]["members"] == 2 and fams[0]["family_id"] == "C001"

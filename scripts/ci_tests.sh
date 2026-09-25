@@ -60,7 +60,7 @@ TESTS=(
   test_team_build_rules
   test_team_build_gen_sets
   test_team_build_archetypes
-  test_team_build_spec_owned
+  test_team_build_banned
   test_ja_names
   test_gimmick
   test_usage_ingame_rank

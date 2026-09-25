@@ -51,10 +51,22 @@ def gate_check(reg: Registry, artifact_id: str) -> dict:
     return {"ok": not problems, "problems": problems, "status": row["status"], "kind": row["kind"]}
 
 
-def install_package(reg: Registry, package_id: str) -> None:
-    """Package の構築を config/my_team.json に登録する (手入力ベースの登録経路を使う)"""
+def banned_in_team_text(text: str, banned) -> list:
+    """Package の構築本文 (Showdown 形式) に含まれる使わないポケモンの id。純粋 (解析は sets.parse_set_text)"""
+    from tools.team_build.sets import parse_set_text
+    b = set(banned or ())
+    return [sid for sid in parse_set_text(text or "") if sid in b]
+
+
+def install_package(reg: Registry, package_id: str, allow_banned: bool = False) -> None:
+    """Package の構築を config/my_team.json に登録する (手入力ベースの登録経路を使う)。
+    使わないポケモン (config/banned_species.txt) を含む Package は止める (--allow-banned で承知の上なら通す)"""
     final = reg.resolve(package_id)
     team = json.loads((final / "team.json").read_text(encoding="utf-8"))
+    from tools.team_build.spec import read_banned_file
+    found = banned_in_team_text(team.get("text") or "", read_banned_file()["ids"])
+    if found and not allow_banned:
+        raise SystemExit(f"install 中止: 使わないポケモン {found} が含まれる (config/banned_species.txt)。承知の上なら --allow-banned")
     tmp = final / "team.txt"
     tmp.write_text(team["text"], encoding="utf-8")
     import subprocess
@@ -69,6 +81,7 @@ def main() -> None:
     ap.add_argument("--gate", default=None)
     ap.add_argument("--to", default=None, choices=["validation", "canary", "production", "retired"])
     ap.add_argument("--install", default=None)
+    ap.add_argument("--allow-banned", action="store_true", help="使わないポケモンを含む Package でも --install する (承知の上で)")
     ap.add_argument("--rollback", action="store_true")
     ap.add_argument("--experiment", default=None)
     ap.add_argument("--experiment-off", action="store_true")
@@ -95,7 +108,7 @@ def main() -> None:
         print(f"{row['id']} → {row['status']}")
         return
     if args.install:
-        install_package(reg, args.install)
+        install_package(reg, args.install, allow_banned=args.allow_banned)
         return
     if args.rollback:
         row = reg.rollback(args.kind or "package", note=args.note or "rollback")

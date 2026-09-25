@@ -466,11 +466,12 @@ def current_team_sets() -> tuple:
 
 def build_report(battles: list, hypothetical: Optional[list] = None) -> dict:
     from advisor.dex import get_dex
-    from tools.team_build.spec import owned_species_ids
+    from tools.team_build.spec import read_banned_file, usable_species_ids
     dex = get_dex()
     resolver = _resolver()
     current, cur_sets = current_team_sets()
-    owned = [s for s in owned_species_ids() if s not in current]
+    # 入替候補 = 使える候補 (参戦種 − 使わないリスト、2026-09-25) のうち現行に居ない種
+    owned = [s for s in usable_species_ids(read_banned_file()["ids"]) if s not in current]
     owned_sets = load_meta_sets(owned)
     owned_sets.update(cur_sets)          # 現行は登録の型、それ以外は代表型
     owned_views = _views(owned_sets)

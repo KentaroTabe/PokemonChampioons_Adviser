@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from tools.team_build import rules as RU
 from tools.team_build.candidates import SpeciesFeature
 from tools.team_build.learnsets import can_learn, learnsets, parse_learnsets, resolve_species
@@ -361,7 +363,9 @@ def test_spec_rules_parse_and_validate():
     assert spec2.required_moves == {"delphox": ["psychicterrain"]} and spec2.provenance["required_moves"] == "resolved"
     assert spec2.custom_sets["indeedee"]["moves"] == ["expandingforce", "protect"] and spec2.provenance["custom_sets"] == "resolved"
     assert not [p for p in validate_spec(spec2) if "指定" in p], validate_spec(spec2)
-    bad2 = parse_form({"moves": "gengar:shadowball", "sets": "delphox @ delphoxite\n- notamove\n"}, owned=owned2)
+    # gengar は使える候補 (owned2) に無いので技指定が弾かれる (banned のファイルは読まない: 無いパスを渡す)
+    bad2 = parse_form({"moves": "gengar:shadowball", "sets": "delphox @ delphoxite\n- notamove\n"}, owned=owned2,
+                      banned_path=Path("/nonexistent/banned.txt"))
     probs = validate_spec(bad2)
     assert any("gengar" in p and "所持" in p for p in probs) and any("notamove" in p for p in probs), probs
     print("test_spec_rules_parse_and_validate OK")

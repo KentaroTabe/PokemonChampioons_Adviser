@@ -28,9 +28,9 @@ def concept_key(core_ids: list) -> tuple:
 
 
 def validate_concepts(auth: dict, owned: set, legal: set, mega_capable: set,
-                      archetypes: Optional[dict] = None) -> list:
+                      archetypes: Optional[dict] = None, banned: Optional[set] = None) -> list:
     """authoritative の検証: 問題の一覧 (空なら OK)。archetypes ({axis_id: [branch_id]}) を渡すと、concept の
-    archetype / branch (任意) が既知の id であることも検査する"""
+    archetype / branch (任意) が既知の id であることも検査する。banned (使わないポケモン) が core にあれば差し戻す"""
     problems = []
     items = auth.get("concepts")
     if not isinstance(items, list) or not items:
@@ -49,7 +49,9 @@ def validate_concepts(auth: dict, owned: set, legal: set, mega_capable: set,
         if not (CONCEPT_MIN_CORE <= len(set(core)) <= CONCEPT_MAX_CORE):
             problems.append(f"concepts[{i}]: core_ids は {CONCEPT_MIN_CORE}〜{CONCEPT_MAX_CORE} 体")
         for sid in core:
-            if sid not in owned:
+            if banned and sid in banned:
+                problems.append(f"concepts[{i}]: {sid} は使わないポケモン (banned) なので使えない")
+            elif sid not in owned:
                 problems.append(f"concepts[{i}]: {sid} は所持にない (所持リストの id だけを使う)")
             elif legal and sid not in legal:
                 problems.append(f"concepts[{i}]: {sid} は使用不可")
@@ -152,7 +154,8 @@ def generate_concepts(spec, feats: dict, threats: list, legal: set, mega_capable
     archetypes (archetypes.llm_axes の一覧) を渡すと、LLM の framing は軸ごと (archetype:<id>) になり、軸の説明・分岐の環境適合・
     役割の候補を渡して concept に archetype / branch を書かせる (2026-09-18)。特殊な勝ち筋も 1 回にまとめる。
     戻り値: {"families": [...], "raw": [...], "rounds": n, "stop_reason": str, "llm_calls": [...]}"""
-    owned = set(spec.owned)
+    banned = set(spec.banned)
+    owned = set(spec.owned) - banned          # LLM に渡す所持 (使える候補) は使わないポケモンを含まない
     raw = rule_baseline_concepts(feats, threats, mega_capable, favorites=spec.favorites,
                                  threat_weights=threat_weights)
     fams = cluster_concepts(raw)
@@ -206,7 +209,8 @@ def generate_concepts(spec, feats: dict, threats: list, legal: set, mega_capable
                                           f"新しいコンセプトを {per_round} 個。core_ids は owned の id のみ。")
             res = provider.call("s04_concepts", "opus", system_prompt or DEFAULT_SYSTEM, payload,
                                 validator=lambda a: validate_concepts(a, owned, legal, mega_capable,
-                                                                      archetypes=arch_ids if archetypes else None))
+                                                                      archetypes=arch_ids if archetypes else None,
+                                                                      banned=banned))
             calls.append({"round": r, "framing": framing, "ok": res["ok"], "attempts": res["attempts"],
                           "problems": res.get("problems"), "record": res.get("record")})
             if not res["ok"]:

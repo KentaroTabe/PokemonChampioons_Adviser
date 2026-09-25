@@ -212,6 +212,13 @@ def test_import_lineups():
             assert False, "無い並びは止まる"
         except SystemExit:
             pass
+        # 使わないポケモン (config/banned_species.txt) を含む並びは持ち込めない (2026-09-25)
+        try:
+            import_lineups(dst / "b", [], [("rule_0910", "L26_C003")], "x", validate=lambda t: (True, []), runs_dir=runs,
+                           log=logs.append, banned={"delphox"})
+            assert False, "使わないポケモンを含む並びは止まる"
+        except SystemExit as e:
+            assert "delphox" in str(e) and "使わない" in str(e), e
     print("test_import_lineups OK")
 
 

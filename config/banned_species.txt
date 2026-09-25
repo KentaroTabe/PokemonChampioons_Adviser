@@ -1,0 +1,23 @@
+# 構築提案で使わないポケモン (1 行 1 体。日本語名か Showdown の id。# 以降は注記)
+# - ここに書いた種は、提案される構築 (S4 のコンセプト、S5 の並び、S6 の型、持ち込み、install) に入らない。
+# - 相手のパーティには一切適用しない (相手は最新環境の全種から合成する)。
+# - 使える候補は「参戦種 (メガ後・戦闘中だけのフォルムを除く) − このリスト」。所持リストは持たない (2026-09-25)。
+# - 解決できない名前があると run は S0 で止まり、その行を表示する。
+# - 行を足す / 消すだけで登録・解除になる (日付や理由は要らない)。
+カメックス  # blastoise
+ピクシー  # clefable
+アーマーガア  # corviknight
+ドラパルト  # dragapult
+ドリュウズ  # excadrill
+ゲンガー  # gengar
+グソクムシャ  # golisopod
+ルカリオ  # lucario
+ハッサム  # scizor
+ペンドラー  # scolipede
+スコヴィラン  # scovillain
+ラウドボーン  # skeledirge
+ニンフィア  # sylveon
+ドヒドイデ  # toxapex
+バンギラス  # tyranitar
+バイバニラ  # vanilluxe
+フシギバナ  # venusaur
