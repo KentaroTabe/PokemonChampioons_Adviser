@@ -145,9 +145,13 @@ def test_claude_cli_provider_uses_json_schema():
         prov0 = ClaudeCLIProvider()
         prov0.call("s04_concepts", "opus", "sys", {"x": 0})
         cmd = seen[-1]
-        assert cmd[cmd.index("--model") + 1] == prov0.model_for("s04_concepts", "opus") == P.BUILD_LLM_STAGE_MODELS["s04_concepts"]
-        if P.BUILD_LLM_EFFORT["s04_concepts"]:
+        # config の現在値に結び付けない: 段の指定があればそれ、無ければ tier の対応 (2026-09-25 に S4 を Opus 5 既定へ戻した)
+        expected = P.BUILD_LLM_STAGE_MODELS.get("s04_concepts") or P.MODELS["opus"]
+        assert cmd[cmd.index("--model") + 1] == prov0.model_for("s04_concepts", "opus") == expected
+        if P.BUILD_LLM_EFFORT.get("s04_concepts"):
             assert cmd[cmd.index("--effort") + 1] == P.BUILD_LLM_EFFORT["s04_concepts"]
+        else:
+            assert "--effort" not in cmd
         # 段の設定を外して tier の対応で呼ぶ
         prov = ClaudeCLIProvider(stage_models={"s04_concepts": None}, effort={"s04_concepts": None})
         res = prov.call("s04_concepts", "opus", "sys", {"x": 1})
