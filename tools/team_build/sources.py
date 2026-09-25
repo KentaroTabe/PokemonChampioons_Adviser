@@ -48,7 +48,8 @@ def mutations(lineups: list, pool: list, feats: dict, threats: list, style: str,
             for in_m in cands[:12]:
                 new = tuple(sorted([in_m if m == out_m else m for m in members]))
                 sc, parts = lineup_score(new, feats, threats, style)
-                scored.append(Lineup(new, l.concept, sc, parts, tag="mutation"))
+                scored.append(Lineup(new, l.concept, sc, parts, tag="mutation",
+                                     origin={"kind": "mutation", "parent_concept": l.concept, "swap": [out_m, in_m]}))
         scored.sort(key=lambda x: -x.score)
         out.extend(scored[:per_lineup])
     return out
@@ -67,7 +68,8 @@ def crossovers(lineups: list, feats: dict, threats: list, style: str, max_pairs:
         if len(set(new)) != 6:
             continue
         sc, parts = lineup_score(new, feats, threats, style)
-        out.append(Lineup(new, f"{a.concept}x{b.concept}", sc, parts, tag="crossover"))
+        out.append(Lineup(new, f"{a.concept}x{b.concept}", sc, parts, tag="crossover",
+                          origin={"kind": "crossover", "parents": [a.concept, b.concept]}))
     return sorted(out, key=lambda x: -x.score)
 
 

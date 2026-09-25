@@ -739,6 +739,7 @@ def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv
             (out_dir / f"{cid}.txt").write_text(text, encoding="utf-8")
             results.append({"index": idx, "candidate_id": cid, "members": list(l.members), "ok": ok,
                             "errors": errs[:5], "tag": l.tag, "score": round(l.score, 4),
+                            "origin": dict(getattr(l, "origin", None) or {}),
                             "registered_sets": registered, "rule_setter": rule_setter, "rule_notes": rule_notes,
                             "rule_pair": (rule_ctx or {}).get("pairs", {}).get(tuple(l.members)),
                             "team_field": team_field, "archetype": arch_info,

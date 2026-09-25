@@ -19,11 +19,22 @@ REPORT_SYSTEM = (
     "notes の `rule:X<-Y` は「規則により Y を X に置き換えた」の意味 (例: rule:ace_item<-sitrusberry は持ち物をオボンのみから今の持ち物に替えた)。"
     "holdout.delta と s10 の delta は参照 (今使っている登録チーム) との勝率差で、前回との差ではない。"
     "robustness_worst は条件 (行動の乱れ・選出の乱れ・相手の方策) を変えたときの勝率の落ち幅の最悪値で、優位の下限ではない。"
+    "concept.core_ids はこの並びに実際に居る軸、concept.core_missing は系統の軸のうち並びに居ない種 (探索で入れ替わった) で、"
+    "軸として書かない。メガは concept.mega_ids (実際に石を持つ個体) を根拠にし、石が 2 個なら 1 試合に 1 体だけメガシンカできると書く。"
     "authoritative は {\"ok\": true} だけ、本文は display.markdown に入れる。出力は JSON オブジェクト 1 つ。"
 )
 
 
-def facts_from_run(run_dir: Path, candidate_id: str) -> dict:
+def _families_of_run(run_dir: Path) -> list:
+    try:
+        return json.loads((Path(run_dir) / "s04_concepts.json").read_text(encoding="utf-8")).get("families") or []
+    except Exception:
+        return []
+
+
+def facts_from_run(run_dir: Path, candidate_id: str, stones: Optional[set] = None) -> dict:
+    """stones: メガ石の item id の集合 (省略時は図鑑から。テストでは注入)"""
+    from tools.team_build import finalists as FN
     run_dir = Path(run_dir)
     def load(p):
         try:
@@ -33,8 +44,24 @@ def facts_from_run(run_dir: Path, candidate_id: str) -> dict:
     sets = load("s06_sets.json") or []
     team = next((r for r in sets if r.get("candidate_id") == candidate_id), {})
     _fill_abilities(team.get("sets") or [], run_dir / "s06_sets" / f"{candidate_id}.txt")
-    concepts = load("s04_concepts.json") or {}
-    fam = next((f for f in concepts.get("families", []) if team.get("candidate_id", "").endswith(f.get("family_id", "?"))), {})
+    fams = _families_of_run(run_dir)
+    if stones is None:
+        from tools.team_build.interaction import _mega_stone_ids
+        stones = _mega_stone_ids()
+
+    def _direction(cid: str, row: dict) -> tuple:
+        """(系統, 方向性)。系統: 通常 (L06_C020) / 交配 (L07_C028xC026 は親系統) / 持ち込み (…_from_<run> は元 run の系統)。
+        軸とメガは系統の記録ではなく並びに実際に居る個体で書く (finalists.direction_of、2026-09-25)"""
+        f, parents = FN.family_of(cid, fams), FN.parent_families(cid, fams)
+        if f is None and not parents and row.get("imported_from"):
+            f, parents = FN.imported_family(row["imported_from"], lambda rid: _families_of_run(run_dir.parent / rid))
+        f = f or {}
+        d = FN.direction_of(f or None, row.get("members") or [], megas=FN.mega_holders(row.get("sets") or [], stones),
+                            origin=row.get("origin"), parents=parents)
+        return f, d
+
+    fam, direction = _direction(candidate_id, team)
+    rows_of = {r.get("candidate_id"): r for r in sets}
     summary = load("evaluation/summary.json") or {}
     # 複数の最終候補 (2026-09-17): 自分の順位・holdout は finalists の行から、比較表は全員ぶん
     finalists = summary.get("finalists") or []
@@ -45,8 +72,13 @@ def facts_from_run(run_dir: Path, candidate_id: str) -> dict:
         holdout = None if mine.get("rank", 1) != 1 else summary.get("holdout")
     return {
         "candidate_id": candidate_id, "members": team.get("members"), "sets": team.get("sets"),
-        "concept": {k: fam.get(k) for k in ("family_id", "core_ids", "mega_id", "win_condition", "support_roles", "weak_to",
-                                            "archetype", "branch", "switching", "special_branch")},
+        # core_ids / mega_id は並びに実際に居るものだけ。concept_core_ids = 系統の記録、core_missing = 居ない軸、mega_ids = 石持ち
+        "concept": dict({k: fam.get(k) for k in ("family_id", "core_ids", "mega_id", "win_condition", "support_roles", "weak_to",
+                                                 "archetype", "branch", "switching", "special_branch")},
+                        family_id=direction.get("family_id"), core_ids=direction.get("core_ids"), mega_id=direction.get("mega_id"),
+                        concept_core_ids=list(fam.get("core_ids") or []), core_missing=direction.get("core_missing"),
+                        mega_ids=direction.get("mega_ids"), parents=direction.get("parents"), origin=direction.get("origin")),
+        "direction_ja": FN.direction_label_ja(direction),
         "archetype": team.get("archetype"),
         "rule_setter": team.get("rule_setter"), "rule_pair": team.get("rule_pair"),
         "holdout": holdout, "ablation": summary.get("ablation") if (mine is None or mine.get("rank", 1) == 1) else None,
@@ -55,7 +87,10 @@ def facts_from_run(run_dir: Path, candidate_id: str) -> dict:
         "s10": {a["arm_id"]: {"win_rate": a.get("win_rate"), "state": a.get("state"), "delta": (a.get("result") or {}).get("mean")}
                 for a in (load("evaluation/s10.json") or {}).get("arms", [])},
         "finalist_rank": (mine or {}).get("rank"),
-        "finalists": [{"rank": f.get("rank"), "candidate_id": f.get("candidate_id"), "direction_ja": f.get("direction_ja"),
+        # 比較表のラベルは summary の保存値ではなく run のデータから計算し直す (保存値は系統の軸で書かれていることがある)
+        "finalists": [{"rank": f.get("rank"), "candidate_id": f.get("candidate_id"),
+                       "direction_ja": (FN.direction_label_ja(_direction(f.get("candidate_id"), rows_of[f.get("candidate_id")])[1])
+                                        if f.get("candidate_id") in rows_of else f.get("direction_ja")),
                        "delta_s10": f.get("delta_s10"), "holdout": f.get("holdout"),
                        "members": members_of.get(f.get("candidate_id"), [])} for f in finalists],
     }
@@ -103,7 +138,9 @@ def ja_facts(facts: dict) -> dict:
     pair = facts.get("rule_pair") or {}
     concept = facts.get("concept") or {}
     for sid in list(pair.get("shared_weak") or []) + list(pair.get("ace_checks") or []) + list(concept.get("weak_to") or []) \
-            + list((pair.get("covered_by") or {}).values()) + list(concept.get("core_ids") or []):
+            + list((pair.get("covered_by") or {}).values()) + list(concept.get("core_ids") or []) \
+            + list(concept.get("core_missing") or []) + list(concept.get("mega_ids") or []) \
+            + list((concept.get("origin") or {}).get("swap") or []):
         out["species"].setdefault(sid, species_ja(sid))
     for f in facts.get("finalists") or []:
         for sid in f.get("members") or []:
@@ -139,7 +176,22 @@ def template_report(facts: dict) -> str:
     h = facts.get("holdout") or {}
     concept = facts.get("concept") or {}
     lines = [f"# 構築レポート: {facts.get('candidate_id')}", "",
-             "## コンセプト", f"- 軸: {_ja(concept.get('core_ids'))} / 勝ち筋: {concept.get('win_condition')}"]
+             "## コンセプト", f"- 軸: {_ja(concept.get('core_ids')) if concept.get('core_ids') else 'なし'} / 勝ち筋: {concept.get('win_condition')}"
+             + (f" / 方向性: {facts['direction_ja']}" if facts.get("direction_ja") else "")]
+    if concept.get("core_missing"):
+        # 系統の軸が並びに居ない (S5 の近傍・交配は元の concept id を引き継ぐ)。記事で系統の軸を書かせないため明記する
+        origin = concept.get("origin") or {}
+        swap = origin.get("swap") or []
+        if origin.get("kind") == "mutation" and len(swap) == 2:
+            how = f"探索の近傍で {_ja(swap[0])} → {_ja(swap[1])} に入替"
+        elif concept.get("parents"):
+            how = "交配 (" + "×".join(str(p) for p in concept["parents"]) + ")"
+        else:
+            how = "探索で入替"
+        lines.append(f"- 系統 {concept.get('family_id')} の軸のうち {_ja(concept['core_missing'])} はこの並びに含まれない ({how})")
+    if concept.get("mega_ids"):
+        lines.append(f"- メガ石: {_ja(concept['mega_ids'])}"
+                     + (" (1 試合にメガシンカできるのは 1 体)" if len(concept["mega_ids"]) > 1 else ""))
     if concept.get("archetype"):
         try:
             from tools.team_build.archetypes import SWITCHING_JA, label_ja

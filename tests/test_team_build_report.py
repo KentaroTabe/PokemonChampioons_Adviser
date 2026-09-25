@@ -66,6 +66,64 @@ def test_report_finalists():
     print("test_report_finalists OK")
 
 
+def test_report_lineage():
+    """系統の軸が並びに居ない近傍 (arch_0924 の L06_C020) と持ち込みの並び: 軸・メガは実際の個体で書き、入替を明記する"""
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        src = root / "arch_src"
+        run = root / "arch_new"
+        for r in (src, run):
+            (r / "evaluation").mkdir(parents=True)
+            (r / "s06_sets").mkdir()
+        (src / "s04_concepts.json").write_text(json.dumps({"families": [{"family_id": "C029", "core_ids": ["dragonite", "kingambit"],
+                                                                          "mega_id": "dragonite", "win_condition": "priority_cleanup"}]}))
+        (run / "s04_concepts.json").write_text(json.dumps({"families": [{"family_id": "C020", "core_ids": ["dragonite", "hydreigon"],
+                                                                          "mega_id": "dragonite", "win_condition": "cycle_pressure"}]}))
+        rows = [{"candidate_id": "L06_C020", "members": ["charizard", "hydreigon", "metagross"], "tag": "concept",
+                 "origin": {"kind": "mutation", "parent_concept": "C020", "swap": ["dragonite", "charizard"]},
+                 "sets": [{"species": "charizard", "item": "charizarditey", "nature": "modest", "evs": "2/0/0/32/0/32", "moves": ["m1"]},
+                          {"species": "hydreigon", "item": "choicescarf", "nature": "timid", "evs": "2/0/0/32/0/32", "moves": ["m1"]},
+                          {"species": "metagross", "item": "metagrossite", "nature": "adamant", "evs": "2/32/0/0/0/32", "moves": ["m1"]}]},
+                {"candidate_id": "L69_C029_from_arch_src", "members": ["dragonite", "kingambit", "slurpuff"], "tag": "imported",
+                 "imported_from": {"run_id": "arch_src", "candidate_id": "L69_C029"},
+                 "sets": [{"species": "dragonite", "item": "dragoninite", "nature": "adamant", "evs": "2/32/0/0/0/32", "moves": ["m1"]}]}]
+        (run / "s06_sets.json").write_text(json.dumps(rows))
+        for r in rows:
+            (run / "s06_sets" / f"{r['candidate_id']}.txt").write_text("x @ y\nLevel: 50\nAbility: ab\nEVs: 32 HP\nAdamant Nature\n- m1\n")
+        # summary の最終候補には旧コードが保存した系統のラベル (軸: カイリュー+サザンドラ) が残っている想定
+        (run / "evaluation" / "summary.json").write_text(json.dumps({
+            "finalists": [{"rank": 1, "candidate_id": "L06_C020", "direction_ja": "サイクルで圧をかける / 軸: カイリュー+サザンドラ / メガ: カイリュー",
+                           "delta_s10": 0.317, "holdout": {"verdict": "PASS", "delta": 0.1, "ci": [0.05, 0.15], "n": 600}},
+                          {"rank": 2, "candidate_id": "L69_C029_from_arch_src", "direction_ja": "方向性ラベルなし", "delta_s10": 0.253},
+                          {"rank": 3, "candidate_id": "L99_gone", "direction_ja": "行が無い候補", "delta_s10": 0.1}],
+            "holdout": {"verdict": "PASS", "delta": 0.1, "ci": [0.05, 0.15], "n": 600}}))
+        stones = {"charizarditey", "metagrossite", "dragoninite"}
+        facts = facts_from_run(run, "L06_C020", stones=stones)
+        labels = {f["candidate_id"]: f["direction_ja"] for f in facts["finalists"]}
+        assert "近傍: " in labels["L06_C020"] and "カイリュー+サザンドラ" not in labels["L06_C020"], labels   # 保存値ではなく計算し直す
+        assert "先制技で詰める" in labels["L69_C029_from_arch_src"], labels                                  # 持ち込みも元 run の系統で
+        assert labels["L99_gone"] == "行が無い候補"                                                          # 行が無ければ保存値
+        c = facts["concept"]
+        assert c["core_ids"] == ["hydreigon"] and c["core_missing"] == ["dragonite"] and c["concept_core_ids"] == ["dragonite", "hydreigon"]
+        assert c["mega_id"] is None and c["mega_ids"] == ["charizard", "metagross"] and c["origin"]["swap"] == ["dragonite", "charizard"]
+        assert facts["ja"]["species"]["dragonite"] if "ja" in facts else True
+        md = template_report(facts)
+        assert "はこの並びに含まれない (探索の近傍で" in md and "メガ石:" in md and "1 試合にメガシンカできるのは 1 体" in md, md
+        assert "軸: サザンドラ (hydreigon)" in md or "軸: hydreigon" in md, md
+        from tools.team_build.report import ja_facts
+        names = ja_facts(facts)["species"]
+        assert "dragonite" in names and "charizard" in names and "metagross" in names      # 入替前後と石持ちを対応表に
+        # 持ち込み: 元 run の系統 (C029) で軸とメガを書く。系統の kingambit は居る、slurpuff は軸外
+        imp = facts_from_run(run, "L69_C029_from_arch_src", stones=stones)
+        assert imp["concept"]["family_id"] == "C029" and imp["concept"]["core_ids"] == ["dragonite", "kingambit"]
+        assert imp["concept"]["core_missing"] == [] and imp["concept"]["mega_ids"] == ["dragonite"]
+        assert "先制技で詰める" in imp["direction_ja"] and "メガ: " in imp["direction_ja"]
+        md2 = template_report(imp)
+        assert "含まれない" not in md2 and "メガ石:" in md2
+    print("test_report_lineage OK")
+
+
 if __name__ == "__main__":
     test_report()
     test_report_finalists()
+    test_report_lineage()
