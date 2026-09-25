@@ -33,6 +33,7 @@ CLAUDE.md
 
 # --- その他 ---
 config/ports.local.js
+.venv*
 
 # 対戦ログ (自動記録)
 logs/
