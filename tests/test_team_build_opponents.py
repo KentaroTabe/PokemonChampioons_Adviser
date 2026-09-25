@@ -143,9 +143,22 @@ def test_user_model():
     print("test_user_model OK")
 
 
+def test_pool_ignores_banned():
+    """相手のパーティには使わないリスト (config/banned_species.txt) を適用しない (2026-09-25 ユーザー決定):
+    合成に banned の入口が無く、重みのある種はすべて相手の候補になる"""
+    import inspect
+    assert "banned" not in inspect.signature(O.synthetic_pool).parameters
+    assert "banned" not in inspect.signature(O.compose_team).parameters
+    weights = {"gengar": 90.0, "scizor": 50.0, "garchomp": 40.0, "primarina": 30.0, "hippowdon": 20.0, "mimikyu": 10.0, "lopunny": 5.0}
+    ids = O.compose_team(random.Random(5), weights, {}, lambda s: s, {}, size=7)
+    assert "gengar" in ids and "scizor" in ids and len(ids) == 7
+    print("test_pool_ignores_banned OK")
+
+
 if __name__ == "__main__":
     test_parse_and_ids()
     test_compose_team_latest_pool()
+    test_pool_ignores_banned()
     test_build_split_and_sequence()
     test_event_summary_and_records()
     test_user_model()

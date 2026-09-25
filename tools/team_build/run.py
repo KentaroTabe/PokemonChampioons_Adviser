@@ -61,17 +61,26 @@ def mega_capable_ids(owned: list) -> set:
             if mega_forms(s) or any(dex.species(s + suf) for suf in ("mega", "megax", "megay", "megaz"))}
 
 
+def _assert_no_banned(run_dir: Path, stage: str, items: list, banned) -> None:
+    """hard invariant: 使わないポケモン (config/banned_species.txt) が並びに入っていたら止める
+    (S4 の検証・S5 の探索・持ち込みの検査をすり抜けた場合の安全装置)。items = [(id, members)]"""
+    from tools.team_build.spec import banned_in_members
+    bad = [(cid, banned_in_members(members, banned)) for cid, members in items if banned_in_members(members, banned)]
+    if bad:
+        log(run_dir, f"{stage} invariant 違反: 使わないポケモンが並びに入っている {bad}")
+        raise SystemExit(f"{stage}: 使わないポケモンが並びに入っている {bad} (config/banned_species.txt)")
+
+
 def stage_s0(run_dir: Path, spec: BuildSpec, legal: set) -> BuildSpec:
-    # 所持の方針 (config/owned_policy.json): 明示された owned にも適用する (今期の追加種を所持扱い、ブラックリストを外す)
-    from tools.team_build.spec import apply_owned_policy, new_species_ids, owned_policy
-    policy = owned_policy()
-    new = [s for s in (new_species_ids() if policy.get("new_species_owned") else []) if not legal or s in legal]
-    before = list(spec.owned)
-    spec.owned = apply_owned_policy(spec.owned, new, policy)
-    added = [s for s in spec.owned if s not in before]
-    removed = [s for s in before if s not in spec.owned]
-    if added or removed:
-        log(run_dir, f"S0 owned policy: 追加種を所持扱い +{len(added)} {added} / ブラックリスト −{len(removed)} {removed}")
+    # 使わないポケモン (config/banned_species.txt) は parse_form / apply_banned_file で spec.banned に入っている。
+    # 明示の owned (使える候補の限定) からも外す (2026-09-25 ユーザー決定: 所持リストは持たない)
+    from tools.team_build.spec import banned_in_members
+    removed = banned_in_members(spec.owned, spec.banned)
+    spec.owned = [s for s in spec.owned if s not in set(spec.banned)]
+    src = spec.banned_source or {}
+    log(run_dir, f"S0 banned: {len(spec.banned)} 種 (ファイル {src.get('file_count', '?')} 種 sha={src.get('sha256', '?')}"
+                 f"{', 依頼の追加 ' + str(src['extra']) if src.get('extra') else ''}) / 使える種 {len(spec.owned)}"
+                 + (f" / owned から除いた {removed}" if removed else ""))
     problems = validate_spec(spec, legal)
     if problems:
         raise SystemExit("BuildSpec の問題: " + "; ".join(problems))
@@ -586,6 +595,7 @@ def stage_s5(run_dir: Path, spec: BuildSpec, fams: list, feats: dict, threats: l
         chosen = branch + chosen
         log(run_dir, f"S5 incumbent branch: 現行={'あり' if inc else 'なし (除外/プール外/未登録)'} 近傍={len(neigh)} "
                      f"(登録 {len(reg_ids)} 体)")
+    _assert_no_banned(run_dir, "S5", [(f"L{idx:02d}_{l.concept}", l.members) for idx, l in enumerate(chosen)], banned)
     (run_dir / "s05_candidates.json").write_text(
         json.dumps({"n_generated": len(all_lineups), "lineups": [l.to_dict() for l in chosen]},
                    ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
@@ -745,6 +755,7 @@ def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv
                             "sets": [{"species": c.species_id, "item": c.item, "nature": c.nature,
                                       "evs": c.evs, "moves": c.moves, "source": c.source,
                                       "coverage": round(c.score, 3), "notes": c.notes} for c in team]})
+    _assert_no_banned(run_dir, "S6", [(r["candidate_id"], r["members"]) for r in results], set(spec.banned))
     (run_dir / "s06_sets.json").write_text(json.dumps(results, ensure_ascii=False, indent=1) + "\n",
                                            encoding="utf-8")
     n_ok = sum(1 for r in results if r["ok"])
@@ -843,9 +854,18 @@ def main() -> None:
     sets_text = Path(args.sets_file).read_text(encoding="utf-8") if args.sets_file else ""
     if args.spec:
         raw = json.loads(Path(args.spec).read_text(encoding="utf-8"))
-        spec = load_spec(Path(args.spec)) if "schema_version" in raw else parse_form(raw)
+        spec = load_spec(Path(args.spec)) if "schema_version" in raw else parse_form(raw, legal=legal)
+        # 使わないポケモンのファイルは --spec (古い request.json) でも常に効かせる
+        from tools.team_build.spec import apply_banned_file, parse_custom_sets, parse_required_moves
+        apply_banned_file(spec, legal=legal)
+        if args.banned:
+            # --spec と併用した --banned はその run だけの追加 (extra)
+            extra = [s for s in parse_form({"banned": args.banned}, owned=[], legal=legal).banned_source["extra"]
+                     if s not in spec.banned]
+            spec.banned += extra
+            spec.banned_source["extra"] = list(spec.banned_source.get("extra") or []) + extra
+            spec.owned = [s for s in spec.owned if s not in set(spec.banned)]
         # --spec と併用した --rules / --moves / --sets-file は spec に足す (spec の値は残す)
-        from tools.team_build.spec import parse_custom_sets, parse_required_moves
         if args.rules:
             spec.rules = sorted(set(spec.rules) | {r for r in args.rules.split(",") if r.strip()})
             spec.provenance["rules"] = "resolved"
@@ -860,7 +880,7 @@ def main() -> None:
     else:
         spec = parse_form({"favorites": args.favorites, "banned": args.banned, "style": args.style,
                            "objective": args.objective, "profile": args.profile, "rules": args.rules,
-                           "moves": args.moves, "sets": sets_text})
+                           "moves": args.moves, "sets": sets_text}, legal=legal)
     spec.profile = args.profile
     prof = PROFILE_DEFAULTS[args.profile]
     manifest = build_manifest(args.run_id, {"profile": args.profile, "llm": args.llm, "seed": args.seed,
@@ -989,10 +1009,12 @@ def imported_candidate_id(run_id: str, cid: str) -> str:
 
 
 def import_lineups(run_dir: Path, rows: list, extra: list, regulation: str, validate=None,
-                   runs_dir: Path = RUNS_DIR, log=print) -> list:
+                   runs_dir: Path = RUNS_DIR, log=print, banned=None) -> list:
     """別の run の並び (s06_sets/<cid>.txt と s06_sets.json の行) をこの run の s06_sets に写し、この run のレギュレーションで
     validate-team する (前の run の勝者を新しい手順・新しい相手列で候補と同じ土俵に乗せる)。写してあれば再利用。
-    rows は書き換える (呼び出し側が s06_sets.json に書き戻す)。戻り値: 持ち込んだ candidate_id の列"""
+    rows は書き換える (呼び出し側が s06_sets.json に書き戻す)。戻り値: 持ち込んだ candidate_id の列。
+    banned (使わないポケモン) を含む並びは持ち込めない (止める)"""
+    from tools.team_build.spec import banned_in_members
     validate = validate or (lambda text: S.validate_team_text(text, regulation))
     have = {r.get("candidate_id") for r in rows}
     ids = []
@@ -1010,6 +1032,9 @@ def import_lineups(run_dir: Path, rows: list, extra: list, regulation: str, vali
         src_txt = src_dir / "s06_sets" / f"{cid}.txt"
         if src is None or not src_txt.exists():
             raise SystemExit(f"--extra-lineups: {src_run} に {cid} が無い")
+        found = banned_in_members(src.get("members") or [], banned)
+        if found:
+            raise SystemExit(f"--extra-lineups: {src_run}:{cid} に使わないポケモン {found} が含まれる (config/banned_species.txt)")
         text = src_txt.read_text(encoding="utf-8")
         ok, errs = validate(text)
         (run_dir / "s06_sets").mkdir(parents=True, exist_ok=True)
@@ -1041,7 +1066,7 @@ def _measure(run_dir: Path, args) -> None:
         except Exception:
             req = {}
         imported = import_lineups(run_dir, rows, extra, req.get("regulation") or TRAINING_BATTLE_FORMAT,
-                                  log=lambda m: log(run_dir, m))
+                                  log=lambda m: log(run_dir, m), banned=set(req.get("banned") or []))
         (run_dir / "s06_sets.json").write_text(json.dumps(rows, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     subset = resolve_candidate_subset(rows, args.candidates, args.strata,
                                       args.include_incumbent, args.incumbent_neighbors)

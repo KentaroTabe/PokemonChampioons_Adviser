@@ -1,5 +1,0 @@
-{
-  "_comment": "所持の判定 (tools/team_build/spec.owned_species_ids)。new_species_owned: 今期に追加された種 (champions mod の formats-data で前レギュレーション (championsregmb) は Illegal、今は合法な基本種) を所持扱いにする (2026-09-18 ユーザー決定: ブラックリスト方式)。blacklist: 所持扱いから外す種の id (自分の構築だけ。測定の相手プールには適用しない)",
-  "new_species_owned": true,
-  "blacklist": ["golisopod"]
-}

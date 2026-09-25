@@ -43,6 +43,18 @@ bash scripts/control_panel_install.sh uninstall   # 解除
   (`logs/control_panel/<時刻>__<操作>.log`)。ラベルは終了処理で自動では外れない (OFF ボタン)
 - 前景で試す: `bash scripts/control_panel.sh --port 8011 --bind 127.0.0.1`
 
+## 構築提案で使わないポケモン (config/banned_species.txt)
+
+- 1 行 1 体 (日本語名か Showdown の id、`#` 以降は注記)。行を足す / 消すだけで登録・解除になる
+  (2026-09-25 ユーザー決定: 所持リストは持たず、使わないリストだけで管理する)。
+- 提案される構築 (S4 のコンセプト、S5 の並び、S6 の型、`--extra-lineups` の持ち込み、`promote --install`) には
+  ここに書いた種が入らない。使える候補は「参戦種 (メガ後・戦闘中だけのフォルムを除く) − このリスト」。
+- 相手のパーティには一切適用しない (相手は最新環境の全種から合成する)。
+- 解決できない名前があると run は S0 で止まり、その行を表示する。run の request.json に解決結果 (`banned`) と
+  ファイルのハッシュ (`banned_source`) が残る。古い request.json を `--spec` で使い回してもファイルは常に効く。
+- チャット / フォームの「除外」と `--banned` は、その run だけの追加 (ファイルは変えない)。
+- 使わないポケモンを含む Package を承知の上で登録するときだけ `python -m tools.team_build.promote --install <id> --allow-banned`。
+
 ## 個別起動
 
 すべてリポジトリルートで実行する。
