@@ -42,6 +42,9 @@ bash scripts/control_panel_install.sh uninstall   # 解除
   終了処理の出力 (サマリー・決定監査・試用中 Package の実戦サマリー) はページの出力欄に残る
   (`logs/control_panel/<時刻>__<操作>.log`)。ラベルは終了処理で自動では外れない (OFF ボタン)
 - 前景で試す: `bash scripts/control_panel.sh --port 8011 --bind 127.0.0.1`
+- experiment ラベルが ON で、その Package に同梱の選出モデル (`logs/registry/package/<id>/advisor_policy/selection_model.pt`)
+  があれば、助言サーバーの選出の推し (model_pick) はそのモデルを使う (登録パーティが Package の 6 体に含まれるときだけ。
+  2026-09-25、測定と同じモデルで試すため)。OFF で配布版に戻る。評価・日次定点はこの経路を通らない
 
 ## 構築提案で使わないポケモン (config/banned_species.txt)
 

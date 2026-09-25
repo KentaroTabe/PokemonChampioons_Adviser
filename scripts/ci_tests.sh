@@ -74,6 +74,7 @@ TESTS=(
   test_control_panel
   test_team_build_regression
   test_track_progress
+  test_selection_experiment
 )
 
 fail=0

@@ -580,8 +580,12 @@ def attach_model_pick(advice: dict, my_party: list, opp_party: list) -> None:
         mine = [my_party[i]["species_id"] for i in idx]
         if len(mine) < 3:
             return
+        # 試用中 Package (experiment ラベル) に同梱の選出モデルがあり、パーティがその 6 体なら、それを使う (2026-09-25)。
+        # 無ければ配布版 (my_team に寄せた微調整済み)
+        from champions_agent.agent.selection_dispatch import advisor_model_path
+        model_path, package_id = advisor_model_path(mine)
         best = predict_best(
-            mine, [p.get("species_id") for p in opp_party if p.get("species_id")])
+            mine, [p.get("species_id") for p in opp_party if p.get("species_id")], path=model_path)
         if best is None:
             return
         perm, prob = best
@@ -590,7 +594,9 @@ def attach_model_pick(advice: dict, my_party: list, opp_party: list) -> None:
         from champions_agent.agent.selection_model import is_in_distribution
         advice["model_pick"] = {
             "names": names, "win_prob": round(prob, 3),
-            "trained": is_in_distribution(mine),
+            # Package のモデルはそのパーティで適応済み。配布版は学習分布に入っているかで参考値かどうかを示す
+            "trained": True if package_id else is_in_distribution(mine),
+            "model": f"experiment:{package_id}" if package_id else "deployed",
         }
         # 実戦の選出傾向に条件づけた推し (条件付きモデル + バンクの選出率)。前提を満たさなければ出さない
         try:
