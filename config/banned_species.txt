@@ -10,14 +10,10 @@
 ドラパルト  # dragapult
 ドリュウズ  # excadrill
 ゲンガー  # gengar
-グソクムシャ  # golisopod
-ルカリオ  # lucario
 ハッサム  # scizor
 ペンドラー  # scolipede
-スコヴィラン  # scovillain
 ラウドボーン  # skeledirge
 ニンフィア  # sylveon
 ドヒドイデ  # toxapex
-バンギラス  # tyranitar
 バイバニラ  # vanilluxe
 フシギバナ  # venusaur
