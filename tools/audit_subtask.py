@@ -90,8 +90,9 @@ def run(battle_log: str, max_frames: int, timeout: int) -> Path:
     print(f"[audit_subtask] {Path(battle_log).name}: "
           f"{len(pairs)}ペア → フレーム{n}枚を監査 (model={MODEL})", flush=True)
     t0 = time.time()
+    from tools.claude_cli import claude_command
     res = subprocess.run(
-        ["claude", "-p", prompt, "--model", MODEL,
+        [claude_command(), "-p", prompt, "--model", MODEL,
          "--allowedTools", "Read", "--max-turns", str(max_frames * 2 + 10)],
         capture_output=True, text=True, timeout=timeout, cwd=str(REPO))
     if res.returncode != 0:

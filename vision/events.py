@@ -527,6 +527,20 @@ class EventParser:
             else:
                 self.state.protect_streak[side] = 0
 
+        # 技の使用文を取り逃し、自分への確定的な能力変化の文だけ読めたとき、その変化を起こす技が自分の技に
+        # 1 つしか無ければ、その技の使用と推定して last_move (こだわり/アンコールの技固定) を埋める
+        # (2026-09-29 第16回: こだわりスカーフのサザンドラの「りゅうせいぐん」の使用文を落とし、「特攻ががくっと
+        # 下がった」だけ読めていたため、ロックを知らずに別の技 (あくのはどう / とんぼがえり) を推奨した)。
+        # 能力変化は文の側で反映済みなので、ここでは技イベントと last_move だけを足す (二重適用しない)
+        if not any(f.startswith("move_player_") for f in fired):
+            inferred = self._infer_move_from_boosts("player", fired)
+            if inferred and not self._recently(f"move_player_{inferred}"):
+                self._dedup(f"move_player_{inferred}")
+                fired.append(f"move_player_{inferred}")
+                self.state.last_move["player"] = inferred
+                self.state.log_event("system", f"能力変化から自分の技を推定: {inferred}",
+                                     event_id=f"move_inferred_{inferred}")
+
         # とんぼがえり系の交代先選択コンテキスト (engineが交代限定助言に使う)。
         # 使用で立て、交代完了/対戦終了で下ろす (次ターン到達時は pipeline 側)
         for f in fired:
@@ -910,6 +924,50 @@ class EventParser:
             "system",
             f"判明技{move_id}は{form}の排他技のため形態を訂正 ({old}→{form})",
             event_id=f"form_fix_{form}")
+
+    def _infer_move_from_boosts(self, side_name: str, fired: list) -> Optional[str]:
+        """この解析で読めた自陣の能力変化 (boost_{side}_{stat}_{±n}) の組が、その側の active の技のうち
+        ちょうど 1 つの確定的な自分への効果 (advisor/data/boost_moves.json の self) と一致すれば、その技 id を返す。
+
+        相手由来の単発 -1 (いかく、追加効果) と紛れないよう、2 能力以上か 2 段以上か上昇のみの組に限る。
+        技は画面から読めた技 (moves)、無ければ my_team の登録技 (自分側のみ)。候補が 0 か 2 つ以上なら None
+        """
+        prefix = f"boost_{side_name}_"
+        observed: dict = {}
+        for f in fired:
+            if not f.startswith(prefix):
+                continue
+            stat, _, delta = f[len(prefix):].rpartition("_")
+            try:
+                observed[stat] = int(delta)
+            except ValueError:
+                return None
+        if not observed:
+            return None
+        strong = (len(observed) >= 2 or any(abs(v) >= 2 for v in observed.values())
+                  or all(v > 0 for v in observed.values()))
+        if not strong:
+            return None
+        mon = self.state.side(side_name).active()
+        if mon is None:
+            return None
+        candidates = [m.move_id for m in (mon.moves or []) if getattr(m, "move_id", None)]
+        if not candidates and side_name == "player":
+            try:
+                from advisor.my_team import get_my_moves
+                for ja in get_my_moves(mon.species_ja):
+                    r = self.resolver.resolve(ja, "moves", cutoff=0.7)
+                    if r:
+                        candidates.append(r[1])
+            except Exception:
+                candidates = []
+        from advisor.dex import move_boost_effects
+        matches = []
+        for mid in dict.fromkeys(candidates):
+            eff = move_boost_effects(mid)
+            if eff and (eff.get("self") or {}) == observed:
+                matches.append(mid)
+        return matches[0] if len(matches) == 1 else None
 
     def _apply_move_boosts(self, move_id: str, user_side: str, user_mon):
         """技の確定的な能力ランク変化 (100%発動のみ) を使用イベントで反映する。

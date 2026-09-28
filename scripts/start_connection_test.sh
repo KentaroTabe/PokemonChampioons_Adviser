@@ -10,9 +10,9 @@
 #  3. セッション開始マーカーを記録 (終了時の一括監査 audit_session が
 #     このマーカー以降の対戦をまとめてsonnet 1回で検証する)
 #
-# 学習ループは止めない: 実測 (tools/bench_pipeline) で学習ON/OFFの差は
-# 平均95→102ms・予算超過率は27%で同じだった (2026-07-27)。止めると
-# 30分のテストで約30万ステップを失うため、継続したまま行う。
+# 学習ループは自動では止めない (2026-07-27 の実測では学習 ON/OFF で助言の遅延に差が無かった)。
+# ただし 2026-09-29 第16回で、学習 (4 環境) + Showdown + 助言サーバーの同時実行が 1 時間続くと熱圧迫 (thermal-pressure
+# Heavy) で CPU が絞られ、フレーム処理率が 9% まで落ちて助言が止まった。学習が動いていれば警告を出す。
 cd "$(dirname "$0")/.." || exit 1
 mkdir -p logs
 . scripts/lib/ports.sh
@@ -20,10 +20,14 @@ load_ports
 
 echo "=== 接続テスト開始準備 ==="
 date +%s > logs/.connection_test_start
+TRAINING_MODE=continuous
+[ -f config/training.env ] && . config/training.env
 if pgrep -f train_forever >/dev/null; then
-  echo "学習ループ: 稼働中のまま継続 (停止不要と実測で確認済み)"
+  echo "学習ループ: 稼働中 (TRAINING_MODE=$TRAINING_MODE)"
+  echo "  ⚠ 学習と同時のテストは 1 時間ほどで熱圧迫により助言が止まることがある (2026-09-29 第16回: 処理率 9%)。"
+  echo "    止めるなら: bash scripts/stop_training.sh  (テスト後の再開: bash scripts/start_training.sh)"
 else
-  echo "学習ループ: 停止中 (必要なら launchctl load -w で開始)"
+  echo "学習ループ: 停止中 (再開は bash scripts/start_training.sh)"
 fi
 
 # 1. Showdown の確保

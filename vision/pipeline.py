@@ -326,12 +326,14 @@ class VisionPipeline:
         # 連結され続けた (2026-08-11の実測: 1ファイルに約3試合)。
         # turn>0 を「前の対戦が載っている」証拠として併用する。turn は選出
         # 画面滞在中には増えないため、訪問エッジ判定 (_sel_visit) と合わせて
-        # 同一選出内での再リセット (抽出済みロスターの消去) は起きない
+        # 同一選出内での再リセット (抽出済みロスターの消去) は起きない。
+        # outcome / battle_ended も根拠に入れる (2026-09-29 第16回: 処理率 9% で command 画面を一度も取れず turn=0 の
+        # まま終局 → 選出でリセットされず outcome が残って次戦の助言が止まり、ログも 2 戦連結。判定は state 側)
         if scene == "selection":
             self._sel_leave = 0
             if selection_confirmed and not self._sel_visit:
                 self._sel_visit = True
-                if self.state.turn > 0 or self.state.battle_active:
+                if self.state.needs_reset_for_new_battle():
                     self.reset()
                     self._selection_streak = 3
                     self.state.scene = scene

@@ -59,6 +59,46 @@ def test_since_ts_and_formatting():
     print("test_since_ts_and_formatting OK")
 
 
+def test_team_match_excludes_other_party():
+    """experiment ラベルが付いたまま別のパーティで対戦したログは Package の勝敗に入れない (2026-09-29 第16回:
+    13 ログ中 10 が別パーティ)。選出画面で 6 枠読めた種、読めなければ場に出た種で照合する"""
+    pkg = ["charizard", "hippowdon", "hydreigon", "metagross", "primarina", "sneasler"]
+
+    def scene(scene_name, party, active=None):
+        return {"type": "scene", "scene": scene_name,
+                "state": {"player": {"active": active, "party": [{"species": s} for s in party]}}}
+
+    with tempfile.TemporaryDirectory() as d:
+        logs = {
+            "battle_20260929_000001.jsonl": [scene("selection", pkg), {"type": "outcome", "outcome": "win"}],           # Package
+            "battle_20260929_000002.jsonl": [scene("selection", ["archaludon", "garchomp", "lopunny", "slurpuff",
+                                                                  "basculegion", "primarina"]),
+                                             {"type": "outcome", "outcome": "loss"}],                                   # 別パーティ
+            "battle_20260929_000003.jsonl": [scene("selection", []), scene("field", ["metagross", "hydreigon"], active=1),
+                                             {"type": "outcome", "outcome": "win"}],                                    # 選出未読、場の種で照合
+            "battle_20260929_000004.jsonl": [scene("selection", []), scene("field", ["garchomp"], active=0),
+                                             {"type": "outcome", "outcome": "loss"}],                                   # 場の種が Package 外
+            "battle_20260929_000005.jsonl": [{"type": "outcome", "outcome": "win"}],                                    # 何も読めない
+        }
+        for name, rows in logs.items():
+            rows = [{"type": "session", "source": "experiment", "package_id": "pkg"}] + rows
+            (Path(d) / name).write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        rows = RE.labeled_rows(Path(d), package_id="pkg", package_species=pkg)
+        assert [r["team_match"] for r in rows] == [True, False, True, False, None], [r["team_match"] for r in rows]
+        assert rows[0]["party_read"] and not rows[2]["party_read"] and rows[2]["species"] == ["hydreigon"]
+        s = RE.real_summary(package_id="pkg", battles_dir=Path(d), package_species=pkg)
+        assert s["n_logs"] == 5 and s["n_decided"] == 3 and s["wins"] == 3, s      # 別パーティの 2 敗は除外
+        assert s["n_team_mismatch"] == 2 and s["n_team_unknown"] == 1, s
+        txt = RE.format_summary(s, "x")
+        assert "別のパーティで対戦: 2 ログ" in txt and "読めなかったログ: 1" in txt, txt
+        # 種の照合なし (registry に種が無い) なら従来どおり全部数える
+        s0 = RE.real_summary(package_id="pkg", battles_dir=Path(d))
+        assert s0["n_decided"] == 5 and s0["n_team_mismatch"] == 0
+    assert RE.team_match([], pkg) is None and RE.team_match(["garchomp"], None) is None
+    assert RE.team_match(["metagross"], pkg) is True and RE.team_match(["metagross", "garchomp"], pkg) is False
+    print("test_team_match_excludes_other_party OK")
+
+
 def test_transfer_and_calibration():
     assert TR.regulation_distance(["a", "b", "c"], ["a", "b", "c"]) == 0.0
     d = TR.regulation_distance(["a", "b", "c", "d"], ["a", "b", "x", "y"])
@@ -79,4 +119,5 @@ def test_transfer_and_calibration():
 if __name__ == "__main__":
     test_real_summary_and_compliance()
     test_since_ts_and_formatting()
+    test_team_match_excludes_other_party()
     test_transfer_and_calibration()
