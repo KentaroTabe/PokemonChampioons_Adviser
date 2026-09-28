@@ -126,6 +126,7 @@ round1 300戦 + round2 600戦の併合): ドドゲザン 0.754 / ガブリアス
 | run arch_0924 (9/24〜25、S4 = Opus 5.5 xhigh の確認) | 最終候補 3 並び全部 holdout PASS: 1 位 L06_C020 +0.288 / 2 位 L05_C028 +0.282 / 3 位 持ち込み L69_C029 +0.252 (同じ環境で前回 1 位と判別できる差なし → S4 は Opus 5 既定に戻した)。採用 (promote / canary) はユーザー判断 | ✅ (9/25) |
 | 使わないポケモンの管理 (除外が 3 か所に分散) | `config/banned_species.txt` 1 つ (1 行 1 体)。所持リストは廃止、相手には適用しない。S4 検証・持ち込み・install にも検査 | ✅ (9/25) |
 | 近傍・交配の並びが系統の軸でラベルされる (1 位が「軸 カイリュー」なのにカイリュー不在) | 実際に居る個体で軸・メガを書き、入替を明記 (fix/lineup-lineage)。arch_0924 の記事は再生成 | ✅ (9/25) |
+| L06_C020 の実戦 (9/29 第16回、canary + experiment) | 3 戦 2 勝 1 敗 (残り 12 戦はユーザー自身のパーティ 7 勝 5 敗)。実戦サマリーはラベルが付いた別パーティの対戦を除くよう修正。判断材料としてはまだ少ない (次回は学習を止めて L06 で回す) | 👁 |
 | 現パーティの技未登録 | 選出/パーティ画面を数秒映せば自動登録 | 🟡 (ユーザー作業) |
 
 ### D. 学習・測定
@@ -153,6 +154,7 @@ round1 300戦 + round2 600戦の併合): ドドゲザン 0.754 / ガブリアス
 | ローカル緑≠CI緑 | `scripts/ci_local.sh` (クローン検証) を push 前に必須化 | ✅ (9/2) |
 | Actions の Node.js 非推奨 | checkout/setup-python を v7 へ (次回 push で検証) | 🔜 |
 | 日次定点の評価がハングして 6 日欠測 (9/18〜23) | 評価 1 回に戦数比例の timeout (config)、打ち切りの記録、status.sh の経過時間警告、test_track_progress | ✅ (9/24)。他の timeout 無し subprocess (reward_sweep / audit の claude / validate_teams) は未対応 |
+| 第16回接続テスト (9/29): 熱圧迫で処理率 9% → 状態リセット不発 → 助言停止、Package 集計に別パーティ混入、一括監査の `claude` 未検出 | リセット判定に outcome / battle_ended、能力変化からの技推定 (こだわりロック)、助言の無効化通知と処理時間の統計、Package 集計のパーティ照合、`tools/claude_cli`、開始処理の学習警告。docs/incidents/reports/2026-09-29-thermal-throttle-missed-reset-and-label-mismatch.md | ✅ (9/29)。学習を止めるかはユーザー判断 |
 | vision層のライブラリ公開 | 境界確定済み、公開は承認待ち | 承認待ち |
 | 9/9 シーズン切替 | docs/REGULATION_CHANGE_RUNBOOK.md に従う | 🔜 |
 

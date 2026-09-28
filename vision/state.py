@@ -394,6 +394,15 @@ class BattleStateV2:
     def side(self, name: str) -> SideState:
         return self.player if name == "player" else self.opponent
 
+    def needs_reset_for_new_battle(self) -> bool:
+        """確定選出画面に入ったとき、前の対戦の内容が載っているか (= reset_battle が要るか)。純粋。
+
+        turn > 0 と battle_active は従来の根拠 (2026-08-11)。outcome / battle_ended は「対戦は終わった (勝敗文言や
+        ランク画面は取れた) が command 画面を一度も取れず turn が 0 のまま」の根拠: 2026-09-29 第16回で熱圧迫により
+        処理率 9% に落ち、この状態から次戦の選出でリセットされず、outcome が残って助言が止まり、ログも 2 戦連結した
+        """
+        return bool(self.turn > 0 or self.battle_active or self.outcome or self.battle_ended)
+
     def reset_battle(self):
         """新しい対戦の開始 (選出画面検知時など) に呼ぶ"""
         keep_rate = self.last_rate   # レートは対戦を跨ぐ情報なので保持

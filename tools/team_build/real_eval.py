@@ -28,9 +28,12 @@ SESSION_MARKER = REPO / "logs" / ".connection_test_start"    # start_connection_
 
 
 def read_battle_labels(path: Path) -> dict:
-    """1 対戦ログの由来ラベル (session 行) と勝敗、助言/実行の件数"""
+    """1 対戦ログの由来ラベル (session 行) と勝敗、助言/実行の件数、自分のパーティ (species: 選出画面で 6 枠読めた種、
+    読めなければ対戦中に場に出た自分の種)。party_read = 選出画面で読めたか"""
     out = {"file": Path(path).name, "path": str(path), "source": "organic", "package_id": None, "outcome": None,
-           "n_advice": 0, "n_manual_fix": 0}
+           "n_advice": 0, "n_manual_fix": 0, "species": [], "party_read": False}
+    party_species = None
+    actives: list = []
     try:
         for line in Path(path).read_text(encoding="utf-8").splitlines():
             if not line.strip():
@@ -46,14 +49,35 @@ def read_battle_labels(path: Path) -> dict:
                 out["n_advice"] += 1
             elif t == "manual_fix":
                 out["n_manual_fix"] += 1
+            elif t == "scene":
+                pl = ((d.get("state") or {}).get("player") or {})
+                party = pl.get("party") or []
+                ids = [p.get("species") for p in party if p.get("species")]
+                if d.get("scene") == "selection" and party_species is None and party and len(ids) == len(party):
+                    party_species = ids
+                idx = pl.get("active")
+                if isinstance(idx, int) and 0 <= idx < len(party) and party[idx].get("species"):
+                    actives.append(party[idx]["species"])
     except Exception:
         pass
+    out["species"] = sorted(set(party_species or actives))
+    out["party_read"] = party_species is not None
     return out
 
 
+def team_match(species: list, package_species) -> Optional[bool]:
+    """対戦ログの自分の種 (species) が Package の 6 体に収まるか。どちらかが無ければ None (判定不能)。純粋"""
+    if not species or not package_species:
+        return None
+    return set(species) <= set(package_species)
+
+
 def labeled_rows(battles_dir: Path = BATTLES_DIR, package_id: Optional[str] = None, source: Optional[str] = None,
-                 since_ts: Optional[float] = None) -> list:
-    """由来ラベルで絞った対戦ログの行 (since_ts はファイルの更新時刻で絞る。analyze_battles --session と同じ規則)"""
+                 since_ts: Optional[float] = None, package_species=None) -> list:
+    """由来ラベルで絞った対戦ログの行 (since_ts はファイルの更新時刻で絞る。analyze_battles --session と同じ規則)。
+    package_species (Package の 6 体) を渡すと各行に team_match (True / False / None) を付ける:
+    experiment ラベルは切り忘れると別のパーティの対戦にも付く (2026-09-29 第16回: 13 ログ中 10 が別パーティ) ので、
+    集計 (summarize_rows) は team_match=False の行を勝敗から除く"""
     rows = []
     for p in sorted(Path(battles_dir).glob("battle_*.jsonl")):
         if since_ts is not None and p.stat().st_mtime < since_ts:
@@ -63,12 +87,15 @@ def labeled_rows(battles_dir: Path = BATTLES_DIR, package_id: Optional[str] = No
             continue
         if source and r["source"] != source:
             continue
+        r["team_match"] = team_match(r["species"], package_species)
         rows.append(r)
     return rows
 
 
 def summarize_rows(rows: list) -> dict:
-    decided = [r for r in rows if r["outcome"]]
+    """勝敗の集計。team_match=False (ラベルは付いているが Package と別のパーティ) の行は勝敗から除き、件数だけ残す"""
+    usable = [r for r in rows if r.get("team_match") is not False]
+    decided = [r for r in usable if r["outcome"]]
     n = len(decided)
     wins = sum(1 for r in decided if r["outcome"] == "win")
     wr = wins / n if n else None
@@ -76,12 +103,25 @@ def summarize_rows(rows: list) -> dict:
     return {"n_logs": len(rows), "n_decided": n, "wins": wins, "win_rate": wr,
             "ci_halfwidth": (round(hw, 4) if hw is not None else None),
             "weight": (real_weight(n, hw) if n else 0.0),
+            "n_team_mismatch": sum(1 for r in rows if r.get("team_match") is False),
+            "n_team_unknown": sum(1 for r in usable if r.get("team_match") is None and not r.get("species")),
             "by_source": {s: sum(1 for r in rows if r["source"] == s) for s in ("organic", "recommended", "experiment")}}
 
 
 def real_summary(package_id: Optional[str] = None, source: Optional[str] = None,
-                 battles_dir: Path = BATTLES_DIR, since_ts: Optional[float] = None) -> dict:
-    return summarize_rows(labeled_rows(battles_dir, package_id=package_id, source=source, since_ts=since_ts))
+                 battles_dir: Path = BATTLES_DIR, since_ts: Optional[float] = None, package_species=None) -> dict:
+    return summarize_rows(labeled_rows(battles_dir, package_id=package_id, source=source, since_ts=since_ts,
+                                       package_species=package_species))
+
+
+def package_species_of(package_id: str) -> Optional[list]:
+    """registry の Package の 6 体 (meta.species)。registry に無い / 読めないときは None"""
+    try:
+        from tools.team_build.registry import Registry
+        row = Registry().get(package_id)
+        return list((row or {}).get("meta", {}).get("species") or []) or None
+    except Exception:
+        return None
 
 
 def compliance_from_audit(audit_rows: list) -> Optional[float]:
@@ -129,6 +169,11 @@ def format_summary(s: dict, title: str) -> str:
         lines.append("  勝率: 勝敗確定の対戦がまだ無い")
     bs = s["by_source"]
     lines.append(f"  由来: experiment {bs['experiment']} / recommended {bs['recommended']} / organic {bs['organic']}")
+    if s.get("n_team_mismatch"):
+        lines.append(f"  ⚠ ラベルは付いているが Package と別のパーティで対戦: {s['n_team_mismatch']} ログ (勝敗の集計から除外。"
+                     "別のパーティを使うときは experiment ラベルを OFF に)")
+    if s.get("n_team_unknown"):
+        lines.append(f"  パーティを読めなかったログ: {s['n_team_unknown']} (集計に含む)")
     return "\n".join(lines)
 
 
@@ -164,19 +209,28 @@ def main() -> None:
     if not package_id:
         raise SystemExit("experiment ラベルが無い (logs/.experiment_package)。--package <id> を指定してください")
     bdir = Path(args.battles_dir)
-    out: dict = {"package_id": package_id, "all": real_summary(package_id=package_id, battles_dir=bdir)}
+    species = package_species_of(package_id)
+    out: dict = {"package_id": package_id, "package_species": species,
+                 "all": real_summary(package_id=package_id, battles_dir=bdir, package_species=species)}
     since = None
     if args.session:
         since = _read_ts(SESSION_MARKER)
         out["session_start"] = since
-        out["session"] = real_summary(package_id=package_id, battles_dir=bdir, since_ts=since) if since else None
+        out["session"] = (real_summary(package_id=package_id, battles_dir=bdir, since_ts=since, package_species=species)
+                          if since else None)
     if not args.no_audit:
-        rows = labeled_rows(bdir, package_id=package_id, since_ts=since)
+        # 決定監査も Package のパーティで対戦したログだけを対象にする
+        rows = [r for r in labeled_rows(bdir, package_id=package_id, since_ts=since, package_species=species)
+                if r.get("team_match") is not False]
         out["audit"] = audit_aggregate([r["path"] for r in rows])
     if args.json:
         print(json.dumps(out, ensure_ascii=False, indent=1))
         return
-    print(f"Package {package_id} の実戦 (session 行の package_id が一致する対戦ログ)")
+    print(f"Package {package_id} の実戦 (session 行の package_id が一致し、自分のパーティが Package の 6 体に収まる対戦ログ)")
+    if species:
+        print(f"  Package のパーティ: {' / '.join(species)}")
+    else:
+        print("  (registry に Package の種が無いためパーティの照合なし)")
     print(format_summary(out["all"], "全期間"))
     if args.session:
         if out["session"] is None:

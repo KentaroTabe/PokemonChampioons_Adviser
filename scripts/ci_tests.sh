@@ -75,6 +75,8 @@ TESTS=(
   test_team_build_regression
   test_track_progress
   test_selection_experiment
+  test_session_split
+  test_claude_cli
 )
 
 fail=0

@@ -15,6 +15,7 @@ import base64
 import json
 import os
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -97,6 +98,29 @@ _last_advice_key = ""
 _last_dump_time = 0.0
 _last_scene_log = 0.0
 _last_scene = "unknown"
+# 処理時間の実測 (2026-09-29 第16回: 処理率が 9% に落ちた原因を後から切り分けられなかった → 5 秒ごとの統計行に
+# フレーム処理 (pipeline.process) と助言計算 (advisor.advise) の所要 ms を残す)
+_proc_ms: deque = deque(maxlen=200)
+_advise_ms: deque = deque(maxlen=50)
+# 直近の対戦助言が対象にした自分の場のポケモン (種族 id) と、交代後の無効化通知を出したか
+_last_advice_species = None
+_stale_notified = False
+BATTLE_SCENES_FOR_STALE = ("field", "battle_hud", "command", "move_select", "watch", "field_check")
+
+
+def _pct(values, q: float) -> float:
+    """所要時間の分位点 (ms)。空なら 0"""
+    if not values:
+        return 0.0
+    xs = sorted(values)
+    return xs[min(len(xs) - 1, int(round((len(xs) - 1) * q / 100.0)))]
+
+
+def _active_mon(state: dict) -> dict:
+    pl = state.get("player") or {}
+    idx = pl.get("active_index")
+    party = pl.get("party") or []
+    return party[idx] if isinstance(idx, int) and 0 <= idx < len(party) else {}
 _last_frame_ts = 0.0
 
 # デバッグフレームの保存は1枚あたり約46ms (1920x1080 PNG) かかり、
@@ -198,6 +222,7 @@ async def _handle_one_frame(sid, data):
     global processed_counter
     global _last_state_json, _last_advice_time, _last_advice_key
     global _last_dump_time, _last_scene_log
+    global _last_advice_species, _stale_notified
     try:
         encoded_data = data.split(',')[1]
         nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
@@ -211,7 +236,9 @@ async def _handle_one_frame(sid, data):
 
         # CPU重処理はexecutorで実行し、イベントループ (受信/送信) を塞がない
         loop = asyncio.get_event_loop()
+        _t_proc = time.time()
         state, fired = await loop.run_in_executor(None, pipeline.process, img)
+        _proc_ms.append((time.time() - _t_proc) * 1000.0)
         processed_counter += 1
         battle_log.on_frame(state, fired)
         spread_tracker.on_frame(state, fired)   # 相手の型推定 (先後/ダメージ観測)
@@ -236,7 +263,9 @@ async def _handle_one_frame(sid, data):
             print(f"[server] scene={state['scene']} 受信={frame_counter} "
                   f"処理={processed_counter} 破棄={dropped_counter} "
                   f"救出={rs['stashed']}/OCR{rs['ocr']}/発火{rs['events']} "
-                  f"events={len(state['events'])}")
+                  f"events={len(state['events'])} "
+                  f"処理時間 p50={_pct(_proc_ms, 50):.0f}ms p95={_pct(_proc_ms, 95):.0f}ms "
+                  f"助言 p50={_pct(_advise_ms, 50):.0f}ms max={max(_advise_ms) if _advise_ms else 0:.0f}ms")
 
         if fired:
             for f in fired:
@@ -314,7 +343,11 @@ async def _handle_one_frame(sid, data):
             if key and (key != _last_advice_key or now - _last_advice_time > 10.0):
                 _last_advice_key = key
                 _last_advice_time = now
+                _t_adv = time.time()
                 advice = await loop.run_in_executor(None, advisor.advise, state)
+                _advise_ms.append((time.time() - _t_adv) * 1000.0)
+                _last_advice_species = _active_mon(state).get("species_id")
+                _stale_notified = False
                 advice["text"] = advisor.format_advice(advice)
                 battle_log.on_advice(advice, "battle")
                 await sio.emit('advice_update', advice, room=sid)
@@ -327,6 +360,20 @@ async def _handle_one_frame(sid, data):
                     print(advice["text"])
                 else:
                     print(f"[server] アドバイス保留: {advice.get('reason')}")
+
+        # 場のポケモンが助言の対象と変わったのに新しい決定画面を取れていない間 (処理落ちで command を取りこぼす等)、
+        # 前の個体向けの助言が表示に残る (2026-09-29 第16回: こだわりスカーフのサザンドラに交代したあと、アシレーヌ向けの
+        # 技の推奨が出たままだった)。一度だけ無効化の通知を出す (次の決定画面で通常の助言に戻る。対戦ログには残さない)
+        if state["scene"] in BATTLE_SCENES_FOR_STALE and state.get("battle_active") and not state.get("outcome"):
+            cur = _active_mon(state)
+            if cur.get("species_id") and _last_advice_species and cur["species_id"] != _last_advice_species \
+                    and not _stale_notified:
+                _stale_notified = True
+                name = cur.get("species_ja") or cur["species_id"]
+                notice = {"ok": False, "stale": True, "kind": "battle",
+                          "reason": f"場のポケモンが {name} に代わりました。前の助言は無効です (次の決定画面で更新します)"}
+                await sio.emit('advice_update', notice, room=sid)
+                print(f"[server] 助言を無効化: {notice['reason']}")
 
     except Exception as e:
         print(f"[server] 画像処理エラー: {e}")

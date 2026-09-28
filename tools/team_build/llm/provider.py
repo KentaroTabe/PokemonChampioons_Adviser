@@ -217,7 +217,8 @@ class ClaudeCLIProvider(LLMProvider):
 
     def command(self, model: str, system: str, prompt: str, schema: Optional[dict] = None,
                 effort: Optional[str] = None) -> list:
-        cmd = ["claude", "-p", prompt, "--model", model, "--output-format", "json",
+        from tools.claude_cli import claude_command
+        cmd = [claude_command(), "-p", prompt, "--model", model, "--output-format", "json",
                "--system-prompt", system, "--max-turns", "1", "--tools", self.tools]
         if schema is not None:
             cmd += ["--json-schema", json.dumps(schema, ensure_ascii=False)]

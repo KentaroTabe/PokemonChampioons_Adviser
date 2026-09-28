@@ -156,7 +156,8 @@ def test_claude_cli_provider_uses_json_schema():
         prov = ClaudeCLIProvider(stage_models={"s04_concepts": None}, effort={"s04_concepts": None})
         res = prov.call("s04_concepts", "opus", "sys", {"x": 1})
         cmd = seen[-1]
-        assert cmd[:2] == ["claude", "-p"] and "--json-schema" in cmd and "--max-turns" in cmd
+        # 実行ファイルは tools.claude_cli が解決する (PATH に無い launchd 環境でも動くよう絶対パスになりうる)
+        assert cmd[0].endswith("claude") and cmd[1] == "-p" and "--json-schema" in cmd and "--max-turns" in cmd
         assert json.loads(cmd[cmd.index("--json-schema") + 1]) == OUTPUT_SCHEMA
         assert cmd[cmd.index("--model") + 1] == "claude-opus-5"
         assert cmd[cmd.index("--tools") + 1] == "" and "--disallowedTools" not in cmd          # ツール定義を載せない
