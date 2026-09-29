@@ -27,6 +27,7 @@ from fastapi import FastAPI
 from vision import ocr
 from vision.pipeline import VisionPipeline
 from vision.scenes import SCENE_SELECTION, SCENE_STANDBY
+from vision.end_notice import battle_end_notice
 
 
 def should_advise_selection(state: dict) -> bool:
@@ -222,7 +223,7 @@ async def _handle_one_frame(sid, data):
     global processed_counter
     global _last_state_json, _last_advice_time, _last_advice_key
     global _last_dump_time, _last_scene_log
-    global _last_advice_species, _stale_notified
+    global _last_advice_species, _stale_notified, _end_notice_seq
     try:
         encoded_data = data.split(',')[1]
         nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
@@ -270,6 +271,16 @@ async def _handle_one_frame(sid, data):
         if fired:
             for f in fired:
                 print(f"[server] イベント検知: {f}")
+            # 対戦終了 (とその見込み) を検知した瞬間に助言欄へ出す (終了の確定は 1 対戦 1 回)
+            notice = battle_end_notice(state, fired)
+            if notice and notice.get("battle_end"):
+                if _end_notice_seq == state.get("battle_seq"):
+                    notice = None
+                else:
+                    _end_notice_seq = state.get("battle_seq")
+            if notice:
+                await sio.emit('advice_update', notice, room=sid)
+                print(f"[server] {notice['reason']}")
 
         # 対戦状態スナップショット (5秒毎。再起動時の対戦中リカバリ用)
         global _last_snapshot_time
@@ -379,6 +390,9 @@ async def _handle_one_frame(sid, data):
         print(f"[server] 画像処理エラー: {e}")
 
 
+_end_notice_seq = None   # 対戦終了の通知 (vision.end_notice.battle_end_notice) を出した battle_seq (1 対戦 1 回)
+
+
 def _attach_candidates(state: dict) -> None:
     """相手の未確定ポケモンにタイプ推論の候補リストを付与する (プルダウン用)。
 
@@ -388,7 +402,8 @@ def _attach_candidates(state: dict) -> None:
     try:
         from advisor.infer import get_inference
         for i, p in enumerate(state["opponent"]["party"]):
-            if p.get("species_ja") or not p.get("types"):
+            # 未確定枠と、選出画面の推定 (species_guess) の枠に候補を付ける (推定は手動で直せるように)
+            if (p.get("species_ja") and not p.get("species_guess")) or not p.get("types"):
                 continue
             cands = get_inference().candidates(p["types"], top_k=8)
             if cands:
