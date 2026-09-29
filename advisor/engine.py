@@ -961,7 +961,9 @@ def _mega_timing_note(my_p, my_view, opp_view, my_field, resolver):
     form = stone_form_of(base_id, r_item[1] if r_item else my_p.get("item_id"), item_ja)
     mega_sp = dex.species(form) if form else None
     if mega_sp is None:
-        suffix = "x" if item_ja.endswith("X") else ("y" if item_ja.endswith("Y") else ("z" if item_ja.endswith("Z") else ""))
+        from vision.normalize import parse_mega_stone_name
+        parsed = parse_mega_stone_name(item_ja)
+        suffix = parsed[1] if parsed else ""
         mega_sp = dex.species(base_id + "mega" + suffix) or dex.species(base_id + "mega")
     if mega_sp is None:
         return None

@@ -70,14 +70,36 @@ def stone_form_of(species_id: str, item_id: Optional[str] = None, item_ja: Optio
         form = stone_table().get(_toid(item_id))
         if form in forms:
             return form
-    text = (item_ja or item_id or "").strip()
-    suffix = text[-1].lower() if text and text[-1] in ("X", "Y", "Z", "x", "y", "z") else ""
+    suffix = ""
+    if item_ja:
+        # 名前は構文で読む: 「ガブリアスナイトZ」も「メガガブリアスZナイト」(手入力の並び) も接尾辞 z (2026-09-29)
+        from vision.normalize import parse_mega_stone_name
+        parsed = parse_mega_stone_name(item_ja)
+        if parsed:
+            suffix = parsed[1]
+    if not suffix:
+        text = (item_id or "").strip()
+        suffix = text[-1].lower() if text and text[-1] in ("X", "Y", "Z", "x", "y", "z") else ""
     if suffix and base + "mega" + suffix in forms:
         return base + "mega" + suffix
     for cand in (base + "mega", base + "megax", base + "megay"):
         if cand in forms:
             return cand
     return forms[0]
+
+
+def stone_base_species(item_id: Optional[str]) -> Optional[str]:
+    """メガ石 id → その石でメガシンカする基本種 id (石でなければ None)"""
+    form = stone_table().get(_toid(item_id)) if item_id else None
+    return _base_of(form) if form else None
+
+
+def same_species_stones(item_a: Optional[str], item_b: Optional[str]) -> bool:
+    """2 つの持ち物 id が同じ種のメガ石 (フォルム違い: ガブリアスナイト と ガブリアスナイトZ 等) か。純粋"""
+    if not item_a or not item_b or _toid(item_a) == _toid(item_b):
+        return False
+    a, b = stone_base_species(item_a), stone_base_species(item_b)
+    return bool(a) and a == b
 
 
 @lru_cache(maxsize=4)
