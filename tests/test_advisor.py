@@ -92,6 +92,11 @@ def test_weather_and_screens():
     base = calc_damage(atk, dfn, "flamethrower")
     sun = calc_damage(atk, dfn, "flamethrower", FieldView(weather="sun"))
     approx(sun["avg"], base["avg"] * 1.5, 2.0)
+    # 天候の補正は理由に残す (2026-09-29 第17回: 晴れ下で いまひとつ のフェアリー技が 等倍 の水技を上回った理由が見えなかった)
+    assert any("晴れ" in n and "ほのお" in n and "1.5" in n for n in sun["notes"]), sun["notes"]
+    assert not any("晴れ" in n for n in base["notes"]), base["notes"]
+    sun_water = calc_damage(atk, dfn, "hydropump", FieldView(weather="sun"))
+    assert any("晴れ" in n and "みず" in n and "0.5" in n for n in sun_water["notes"]), sun_water["notes"]
     wall = calc_damage(atk, dfn, "flamethrower", FieldView(light_screen=True))
     approx(wall["avg"], base["avg"] * 0.5, 2.0)
     # メガメガニウムの Mega Sol: 天候が無くても自分の攻撃は晴れ扱い (ほのお 1.5 倍、みず 0.5 倍)

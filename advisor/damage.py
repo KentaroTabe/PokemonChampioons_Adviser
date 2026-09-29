@@ -151,6 +151,9 @@ PINCH_ABILITIES = {"blaze": "Fire", "torrent": "Water",
                    "overgrow": "Grass", "swarm": "Bug"}
 
 # 攻撃を無効化する特性
+# 天候の表示名 (助言の理由文用)
+_WEATHER_JA = {"sun": "晴れ", "rain": "雨", "sandstorm": "砂あらし", "snow": "雪"}
+
 IMMUNITY_ABILITIES = {
     "levitate": ("Ground",),
     "flashfire": ("Fire",),
@@ -305,7 +308,13 @@ def calc_damage(attacker: MonView, defender: MonView, move_id: str,
     # 天候のタイプ別補正 (晴れ/雨。表から)。メガメガニウムの特性 Mega Sol は自分の攻撃を常に晴れ扱いにする (2026-09-11 上流更新)
     weather = "sun" if a_ab == "megasol" else fv.weather
     if weather:
-        mult *= float((type_boost.get("weather") or {}).get(weather, {}).get(mtype, 1.0))
+        w_mult = float((type_boost.get("weather") or {}).get(weather, {}).get(mtype, 1.0))
+        if w_mult != 1.0:
+            mult *= w_mult
+            # 理由に残す: 晴れ下で「いまひとつのフェアリー技」が「等倍の水技」を上回るのは正しいが、補正を書かないと
+            # 相性だけ見た読み手には誤りに見える (2026-09-29 第17回: 晴れ下のアシレーヌ vs ハッサム でムーンフォース推奨)
+            from advisor.ja_names import type_ja
+            notes.append(f"{_WEATHER_JA.get(weather, weather)}で{type_ja(mtype)}技×{w_mult:g}")
 
     # STAB
     atypes = attacker.types or (dex.species(attacker.species_id) or {}).get("types", [])
