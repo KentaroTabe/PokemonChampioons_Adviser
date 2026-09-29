@@ -28,6 +28,7 @@ from champions_agent.config import (PARTY_IMPROVE_DEFAULT_LAST, PARTY_IMPROVE_FR
                                     PARTY_IMPROVE_MEASURE_NEIGHBORS, PARTY_IMPROVE_MEASURE_PROFILE,
                                     PARTY_IMPROVE_MIN_DECISIONS, PARTY_IMPROVE_SLOW_SPE, PARTY_IMPROVE_TOP_PARTIES,
                                     PARTY_IMPROVE_TOP_PROPOSALS, PARTY_IMPROVE_TOP_THREATS, USAGE_TARGET_FORMAT)
+from tools.battle_outcome import OutcomeTracker
 
 REPO = Path(__file__).resolve().parent.parent
 BATTLE_DIR = REPO / "logs" / "battles"
@@ -105,7 +106,7 @@ def set_row_from_candidate(c) -> dict:
 # ------------------------------------------------------------------ 対戦ログ (副作用: 読み取りのみ)
 def parse_battle(path: str) -> dict:
     """1 対戦のログ → 相手ロースター・選出・勝敗・決定ごとの助言 (相手の場の個体つき)・相手側の観測イベント"""
-    outcome, inferred = None, False
+    ot = OutcomeTracker()   # 勝敗: outcome 行 (最後) + ランク画面前の勝負文言 (tools.battle_outcome)
     opp_roster, opp_fielded, my_picked = [], set(), set()
     slot_last: dict = {}   # 相手の枠 index → 最後に見えた種。途中で別の種に置き換わった枠の前の種は選出画面の誤同定
     opp_active_ja, my_active_ja = None, None
@@ -120,9 +121,8 @@ def parse_battle(path: str) -> dict:
             continue
         t0 = t0 or d.get("t")
         typ = d.get("type")
-        if typ == "outcome":
-            outcome, inferred = d.get("outcome"), bool(d.get("inferred"))
-        elif typ == "scene":
+        ot.feed(d)
+        if typ == "scene":
             st = d.get("state") or {}
             in_battle = d.get("scene") in _BATTLE_SCENES
             if in_battle:
@@ -171,7 +171,8 @@ def parse_battle(path: str) -> dict:
     # 実体が セグレイブ)。場に出た種は残す。guess の印が無い古いログにも効く
     final = set(slot_last.values())
     opp_roster = [ja for ja in opp_roster if ja in final or ja in opp_fielded]
-    return {"file": Path(path).name, "t0": t0 or 0.0, "outcome": outcome, "inferred": inferred,
+    outcome, inferred, corrected = ot.result()
+    return {"file": Path(path).name, "t0": t0 or 0.0, "outcome": outcome, "inferred": inferred, "corrected": corrected,
             "opp_roster": opp_roster, "opp_fielded": sorted(opp_fielded), "my_picked": sorted(my_picked),
             "opp_lead": opp_lead_ja, "opp_mega_ja": sorted(opp_mega_ja),
             "decisions": decisions, "events": events, "n_battle_scenes": n_battle_scenes, "opp_mega": opp_mega}

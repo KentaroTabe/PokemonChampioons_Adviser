@@ -23,6 +23,9 @@ import time
 from collections import Counter
 from pathlib import Path
 
+from champions_agent.config import RATE_MAX_DELTA_PER_BATTLE
+from tools.battle_outcome import OutcomeTracker
+
 REPO = Path(__file__).resolve().parent.parent
 BATTLE_DIR = REPO / "logs" / "battles"
 MARKER = REPO / "logs" / ".connection_test_start"   # 接続テスト開始時刻
@@ -34,7 +37,8 @@ MIN_BATTLE_SCENES = 3
 
 
 def _parse_battle(path: str) -> dict:
-    outcome, inferred, rates = None, False, []
+    rates = []
+    ot = OutcomeTracker()         # 勝敗: outcome 行 (最後) + ランク画面前の勝負文言 (tools.battle_outcome)
     opp_species: set = set()      # 相手ロースター (選出画面の6匹)
     opp_fielded: set = set()      # 実際に選出された相手 (対戦中にHP観測/場に出た)
     my_picked: set = set()
@@ -48,10 +52,8 @@ def _parse_battle(path: str) -> dict:
             continue
         t0 = t0 or d.get("t")
         typ = d.get("type")
-        if typ == "outcome":
-            outcome = d.get("outcome")
-            inferred = bool(d.get("inferred"))
-        elif typ == "rate":
+        ot.feed(d)
+        if typ == "rate":
             rates.append(d.get("value"))
         elif typ == "scene":
             st = d.get("state") or {}
@@ -80,8 +82,10 @@ def _parse_battle(path: str) -> dict:
     # セグレイブ)。場に出た種は残す。guess の印が無い古いログにも効く
     final = set(slot_last.values())
     opp_species = {ja for ja in opp_species if ja in final or ja in opp_fielded}
+    # 勝負の文言は最も強い根拠 (2026-09-29 第17回 15:53: 3 体目のひんしからの誤った「負け」の後に「勝負に勝った」)
+    outcome, inferred, corrected = ot.result()
     return {"file": Path(path).name, "t0": t0 or 0.0,
-            "outcome": outcome, "inferred": inferred,
+            "outcome": outcome, "inferred": inferred, "corrected": corrected,
             "rate": rates[-1] if rates else None,
             "opp_species": sorted(opp_species),
             "opp_fielded": sorted(opp_fielded),
@@ -114,6 +118,30 @@ def load_battles(days: float | None = None, last: int | None = None,
     return battles
 
 
+def rate_flags(battles: list, max_delta: float = RATE_MAX_DELTA_PER_BATTLE) -> list:
+    """連続する対戦 (時系列順、レート観測ありのもの) のレート差から、読み違いの疑い (|Δ| が 1 戦の変動 max_delta を超える) と
+    勝敗との矛盾 (記録は勝ちなのに下がった / 負けなのに上がった) を出す (純粋)。自動では直さない。
+    (2026-09-29 第17回: 15:25 → 15:34 の差 −38 は数字の誤読、15:53 の +15.6 は「負け」の誤記録を示していた)
+    戻り値: [{"file", "delta", "outcome", "flag"}] (flag は None か説明文)"""
+    out, prev = [], None
+    for b in battles:
+        r = b.get("rate")
+        if r is None:
+            continue
+        if prev is not None:
+            delta = r - prev
+            flag = None
+            if abs(delta) > max_delta:
+                flag = f"読み違いの疑い (1 戦の変動 {max_delta:.0f} を超える)"
+            elif b.get("outcome") == "win" and delta < 0:
+                flag = "勝敗と矛盾 (記録は勝ちだがレートが下がった)"
+            elif b.get("outcome") == "loss" and delta > 0:
+                flag = "勝敗と矛盾 (記録は負けだがレートが上がった)"
+            out.append({"file": b.get("file"), "delta": round(delta, 1), "outcome": b.get("outcome"), "flag": flag})
+        prev = r
+    return out
+
+
 def summarize(battles: list) -> dict:
     decided = [b for b in battles if b["outcome"] in ("win", "loss")]
     wins = sum(1 for b in decided if b["outcome"] == "win")
@@ -144,7 +172,9 @@ def summarize(battles: list) -> dict:
     return {"n": len(battles), "n_decided": len(decided), "wins": wins,
             "losses": len(decided) - wins,
             "win_rate": wins / len(decided) if decided else None,
-            "rates": rates, "opp_stats": opp_stats,
+            "rates": rates, "rate_flags": rate_flags(battles),
+            "n_corrected": sum(1 for b in battles if b.get("corrected")),
+            "opp_stats": opp_stats,
             "opp_fielded_stats": opp_fielded_stats,
             "opp_benched_stats": opp_benched_stats,
             "pick_stats": pick_stats, "trio_stats": trio_stats,
@@ -172,6 +202,11 @@ def report(s: dict) -> str:
         lines.append(f"レート: {vals[0]:.0f} → {vals[-1]:.0f} "
                      f"(最高{max(vals):.0f} / 最低{min(vals):.0f}, "
                      f"観測{len(vals)}回)")
+        for r in s.get("rate_flags") or []:
+            if r.get("flag"):
+                lines.append(f"  ⚠ {r['file']}: 前戦比 {r['delta']:+.1f}: {r['flag']}")
+    if s.get("n_corrected"):
+        lines.append(f"勝敗の訂正: {s['n_corrected']}戦 (勝負の文言が先の記録と食い違い、文言を採用)")
 
     if s["pick_stats"]:
         lines.append("\n🎯 自分の選出3匹ベースの勝率 (全件):")

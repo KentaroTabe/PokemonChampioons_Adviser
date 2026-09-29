@@ -81,6 +81,7 @@ TESTS=(
   test_opp_roster_guess
   test_mega_evolve_attribution
   test_end_notice
+  test_outcome_correction
 )
 
 fail=0

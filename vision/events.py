@@ -590,7 +590,8 @@ class EventParser:
         side_name = (st.last_faint or {}).get("side")
         if side_name not in ("player", "opponent"):
             return None
-        fainted = sum(1 for p in st.side(side_name).party if p.status == "fainted")
+        # ロスターの枠だけ、自分側は選出が分かっていれば選出 3 体だけを数える (誤読で生えた枠を数えない。state.fainted_count)
+        fainted = st.side(side_name).fainted_count(picked_only=(side_name == "player"))
         if fainted < BSS_PICK_COUNT:
             return None
         st.end_hint = {"side": side_name, "ts": time.time(), "fainted": fainted}
@@ -613,7 +614,7 @@ class EventParser:
         if time.time() - hint["ts"] < BATTLE_END_FAINT_CONFIRM_SEC:
             return None
         other = "opponent" if hint["side"] == "player" else "player"
-        other_fainted = sum(1 for p in st.side(other).party if p.status == "fainted")
+        other_fainted = st.side(other).fainted_count(picked_only=(other == "player"))
         if not st.outcome and other_fainted < BSS_PICK_COUNT:
             st.outcome = "loss" if hint["side"] == "player" else "win"
         st.battle_active = False

@@ -2345,7 +2345,8 @@ def _extract_watch_side_columns(img, state: BattleStateV2, resolver) -> None:
         frac = ocr.parse_fraction(hp_text)
         if not name_text or not frac or not frac[1] or frac[1] < 50:
             continue
-        sp = resolver.resolve_species(name_text, cutoff=0.72)
+        known = [p.species_ja for p in state.player.party if p.species_ja]
+        sp = resolve_my_species(resolver, name_text, cutoff=0.72, roster=known)
         idx = None
         if sp:
             idx = state.player.find_by_species(sp[0])
@@ -2353,6 +2354,14 @@ def _extract_watch_side_columns(img, state: BattleStateV2, resolver) -> None:
             idx = state.player.find_by_display_name(name_text)
         if idx is None:
             if not sp:
+                continue
+            if len(known) >= PARTY_SIZE:
+                # ロスターが判明済みなら、そこに無い名前は誤読 (2026-09-29 第17回 15:53: ひんしのブリジュラスの行が
+                # フレフワンに解決されて 7 体目 (HP 0) が生え、3 体目のひんしに数えられて勝った対戦が負けで終了扱い)
+                if not any(e.get("event") == "watch_name_ignored" and e.get("target") == name_text
+                           for e in state.events[-100:]):
+                    state.log_event("system", f"様子見画面の名前 {name_text} ({sp[0]}) はロスター外のため無視",
+                                    event_id="watch_name_ignored", target=name_text)
                 continue
             # 選出画面を経ずに起動した場合でもパーティに登録する
             mon = PokemonState(species_ja=sp[0], species_id=sp[1],

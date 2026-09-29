@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
-from champions_agent.config import SELECTION_GUESS_REPLACE_MARGIN
+from champions_agent.config import BSS_PICK_COUNT, PARTY_SIZE, SELECTION_GUESS_REPLACE_MARGIN
 
 STAT_KEYS = ("atk", "def", "spa", "spd", "spe", "acc", "eva")
 
@@ -189,6 +189,18 @@ class SideState:
         if self.active_index is not None and 0 <= self.active_index < len(self.party):
             return self.party[self.active_index]
         return None
+
+    def fainted_count(self, picked_only: bool = False) -> int:
+        """ひんし数 (純粋)。ロスターの枠 (PARTY_SIZE) だけを数え、余剰の枠 (誤読で生えた 7 体目等) は数えない。
+        picked_only=True で選出 (is_picked) が BSS_PICK_COUNT 体分かっていればその中だけを数える。
+        (2026-09-29 第17回 15:53: 様子見画面の名前の誤読で生えた 7 体目 (HP 0) が 3 体目のひんしに数えられ、
+        自分のガブリアスが残っているのに負けで終了扱い → 助言が止まり、勝った対戦が負けで記録された)"""
+        roster = self.party[:PARTY_SIZE]
+        if picked_only:
+            picked = [p for p in roster if p.is_picked]
+            if len(picked) >= BSS_PICK_COUNT:
+                roster = picked
+        return sum(1 for p in roster if p.status == "fainted")
 
     def ensure_active(self) -> PokemonState:
         """場に出ているポケモンを返す。未確定ならプレースホルダを作る。
