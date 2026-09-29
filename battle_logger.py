@@ -29,7 +29,7 @@ BATTLE_END_EVENTS = ("battle_end_rank", "battle_end_result", "battle_end_faint_c
 def _compact_state(state: dict) -> dict:
     """ログ用の簡約状態 (イベント履歴を除き、パーティは主要フィールドのみ)"""
     def mon(p):
-        return {
+        d = {
             "species": p.get("species_id"),
             "ja": p.get("species_ja"),
             "types": p.get("types"),
@@ -44,6 +44,10 @@ def _compact_state(state: dict) -> dict:
             "revealed": p.get("revealed_moves"),
             "picked": p.get("is_picked"),
         }
+        # 選出画面の推定 (確定ではない) の印。分析・実戦バンクは推定を「相手の 6 体」に数えない (2026-09-29)
+        if p.get("species_guess"):
+            d["guess"] = True
+        return d
 
     return {
         "scene": state.get("scene"),

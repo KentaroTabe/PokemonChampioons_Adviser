@@ -38,6 +38,7 @@ def _parse_battle(path: str) -> dict:
     opp_species: set = set()      # 相手ロースター (選出画面の6匹)
     opp_fielded: set = set()      # 実際に選出された相手 (対戦中にHP観測/場に出た)
     my_picked: set = set()
+    slot_last: dict = {}          # 相手の枠 index → 最後に見えた種 (途中で置き換わった枠の前の種は誤同定)
     n_battle_scenes = 0
     t0 = None
     for line in open(path):
@@ -61,6 +62,12 @@ def _parse_battle(path: str) -> dict:
             for i, p in enumerate(opp.get("party", [])):
                 if not p.get("ja"):
                     continue
+                slot_last[i] = p["ja"]
+                if p.get("guess"):
+                    # guess = 選出画面の推定 (タイプアイコン + スプライト照合、未確定)。相手の 6 体には数えない
+                    # (2026-09-29 第17回: 推定の誤り (セグレイブ→カイリュー、ゴリランダー→メガニウム) が
+                    # 「相手パーティ 7 種」として集計に混ざった)
+                    continue
                 opp_species.add(p["ja"])
                 # 対戦中シーンでHPが観測された/場に出ていた個体 = 選出された
                 if in_battle and (p.get("hp") is not None
@@ -69,6 +76,10 @@ def _parse_battle(path: str) -> dict:
             for p in (st.get("player") or {}).get("party", []):
                 if p.get("picked") and p.get("ja"):
                     my_picked.add(p["ja"])
+    # 枠の種が途中で別の種に置き換わったら前の種は誤同定 (2026-09-29 第17回: カイリュー と推定した枠の実体が
+    # セグレイブ)。場に出た種は残す。guess の印が無い古いログにも効く
+    final = set(slot_last.values())
+    opp_species = {ja for ja in opp_species if ja in final or ja in opp_fielded}
     return {"file": Path(path).name, "t0": t0 or 0.0,
             "outcome": outcome, "inferred": inferred,
             "rate": rates[-1] if rates else None,

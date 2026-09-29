@@ -14,6 +14,8 @@ import time
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
+from champions_agent.config import SELECTION_GUESS_REPLACE_MARGIN
+
 STAT_KEYS = ("atk", "def", "spa", "spd", "spe", "acc", "eva")
 
 MAJOR_STATUSES = ("poison", "toxic", "burn", "paralysis", "sleep", "freeze", "drowsy")
@@ -103,11 +105,25 @@ class PokemonState:
     # 登録バックフィル・使用率予測による持ち物の再設定を抑止する
     # (2026-08-21 第7回: はたき後も持ち物を保持したまま計算していた)
     item_removed: bool = False
+    # 選出画面の推定 (タイプアイコン + スプライト照合) で入れた種族か。True の間は「相手の 6 体」として数えず
+    # (分析・実戦バンク)、場に出た種が来たら置き換えてよい。名前が読めた/場に出た時点で確定 (False) に上書きされる
+    # (2026-09-29 第17回: 推定の カイリュー が 2 枠に入り、実体は セグレイブ。表示と集計に他の対戦の顔ぶれが混ざって見えた)
+    species_guess: bool = False
+    guess_score: Optional[float] = None   # 推定時の視覚照合スコア (同種の重複でどちらを残すか)
 
-    def merge_species(self, species_ja: str, species_id: Optional[str]):
+    def merge_species(self, species_ja: str, species_id: Optional[str], guess: bool = False,
+                      score: Optional[float] = None):
+        """種族を設定する。guess=True は選出画面の推定 (確定ではない)。既定 (確定) は推定の印を消す"""
         self.species_ja = species_ja
         if species_id:
             self.species_id = species_id
+        self.species_guess = bool(guess)
+        self.guess_score = float(score) if (guess and score is not None) else None
+
+    def clear_species_guess(self):
+        """推定の種族を取り消す (タイプアイコン由来のタイプは残す)"""
+        self.species_ja, self.species_id = None, None
+        self.species_guess, self.guess_score = False, None
 
     def set_boost(self, stat: str, delta: int):
         if stat in self.boosts:
@@ -128,6 +144,25 @@ class PokemonState:
         d["moves"] = [m if isinstance(m, dict) else asdict(m) for m in
                       (self.moves or [])]
         return d
+
+
+def adopt_selection_guess(party: list, idx: int, species_id: str, species_ja: str, score: float,
+                          margin: float = SELECTION_GUESS_REPLACE_MARGIN) -> str:
+    """選出画面の推定 (タイプアイコン + スプライト照合) を枠 idx に入れる (純粋)。
+    同じ種が別枠に既にあるとき (同種 2 体はルール上あり得ない): 別枠が推定でスコアが margin 以上低ければそちらを
+    取り消して入れる ("replaced")、そうでなければ入れない ("skip")。戻り値: "adopt" / "replaced" / "skip"
+    (2026-09-29 第17回: 3 戦でセグレイブがカイリューと推定され、実物のカイリューと 2 枠になった)"""
+    slot = party[idx]
+    dup = next((j for j, q in enumerate(party) if j != idx and q.species_id == species_id), None)
+    if dup is not None:
+        q = party[dup]
+        if q.species_guess and (q.guess_score or 0.0) + margin < score:
+            q.clear_species_guess()
+            slot.merge_species(species_ja, species_id, guess=True, score=score)
+            return "replaced"
+        return "skip"
+    slot.merge_species(species_ja, species_id, guess=True, score=score)
+    return "adopt"
 
 
 @dataclass
@@ -226,35 +261,55 @@ class SideState:
         self.active_index = index
         self.party[index].is_active = True
 
+    def replacement_slot(self, new_types: Optional[set]) -> Optional[int]:
+        """満枠で初登場の種が来たとき置き換える枠を選ぶ (純粋)。候補は非アクティブ・技未判明・非ひんし。優先順:
+        1) 選出画面の推定 (species_guess) で同じ種が 2 枠以上ある重複のうちスコアが低い枠 (同種 2 体はルール上あり得ない。
+           2026-09-29 第17回: セグレイブ が カイリュー と推定され、実物の カイリュー と 2 枠になった)
+        2) 図鑑タイプが一致する推定枠 / 未特定枠、次いでタイプが一致する枠
+        3) 推定枠のうち視覚照合スコアが最も低いもの
+        4) 未特定枠
+        5) それ以外の候補の先頭"""
+        elig = [(i, p) for i, p in enumerate(self.party)
+                if i != self.active_index and not p.revealed_moves and p.status != "fainted"]
+        if not elig:
+            return None
+        counts: dict = {}
+        for p in self.party:
+            if p.species_id:
+                counts[p.species_id] = counts.get(p.species_id, 0) + 1
+        dups = [((p.guess_score or 0.0), i) for i, p in elig
+                if p.species_guess and counts.get(p.species_id, 0) >= 2]
+        if dups:
+            return min(dups)[1]
+        if new_types:
+            for only_unconfirmed in (True, False):
+                for i, p in elig:
+                    if p.types and set(p.types) == new_types and \
+                            (not only_unconfirmed or p.species_guess or not p.species_ja):
+                        return i
+        guesses = [((p.guess_score or 0.0), i) for i, p in elig if p.species_guess]
+        if guesses:
+            return min(guesses)[1]
+        for i, p in elig:
+            if not p.species_ja:
+                return i
+        return elig[0][0]
+
     def switch_to_species(self, species_ja: str, species_id: Optional[str]) -> PokemonState:
         idx = self.find_by_species(species_ja, species_id)
         if idx is None and len(self.party) >= 6:
             # 満枠での「初登場」= 既存枠の視覚同定ミスが濃厚 (実測:
             # ラフレシアと誤同定した枠の実体がフシギバナで、appendにより
-            # ルール上あり得ない7匹構成になった)。図鑑タイプが一致し
-            # 技未判明の非アクティブ枠を新種で置き換える。ロスターは
-            # 対戦中に6を超えない
+            # ルール上あり得ない7匹構成になった)。置き換える枠は
+            # replacement_slot (推定の重複 → タイプ一致 → 推定 → 未特定)。
+            # ロスターは対戦中に6を超えない
             new_types = _dex_types_ja_of(species_id)
-            cand = None
-            for i, p in enumerate(self.party):
-                if i == self.active_index or p.revealed_moves or \
-                        p.status == "fainted":
-                    continue
-                if new_types and p.types and set(p.types) == new_types:
-                    cand = i
-                    break
-                if cand is None and not p.species_ja:
-                    cand = i
-            if cand is None:
-                for i, p in enumerate(self.party):
-                    if i != self.active_index and not p.revealed_moves and \
-                            p.status != "fainted":
-                        cand = i
-                        break
+            cand = self.replacement_slot(new_types)
             if cand is not None:
                 p = self.party[cand]
                 p.species_ja, p.species_id = species_ja, species_id
                 p.types = list(new_types) if new_types else []
+                p.species_guess, p.guess_score = False, None   # 場に出た = 確定
                 idx = cand
         if idx is None:
             if len(self.party) >= 6:
@@ -429,7 +484,7 @@ class BattleStateV2:
                       "status", "volatiles", "boosts", "ability_ja",
                       "ability_id", "item_ja", "item_id", "item_consumed",
                       "revealed_moves", "aliases", "is_mega", "is_active",
-                      "is_picked", "pick_order"):
+                      "is_picked", "pick_order", "species_guess", "guess_score"):
                 if k in md and md[k] is not None:
                     setattr(mon, k, md[k])
             mon.moves = [MoveSlot(**{kk: m.get(kk) for kk in

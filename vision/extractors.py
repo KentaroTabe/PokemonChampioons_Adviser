@@ -17,7 +17,7 @@ import numpy as np
 
 from vision import zones, ocr
 from vision.zones import crop
-from vision.state import BattleStateV2, MoveSlot, PokemonState
+from vision.state import BattleStateV2, MoveSlot, PokemonState, adopt_selection_guess
 from vision.typeicons import classify_type_icon
 from champions_agent.config import (MY_EXACT_RESOLVE_CUTOFF, MY_REGISTERED_MATCH_RATIO,
                                     MY_ROSTER_MATCH_RATIO, PARTY_SIZE)
@@ -663,7 +663,9 @@ def extract_selection(img, state: BattleStateV2, resolver) -> None:
             if types:
                 slot.types = types
 
-        # 種族特定: タイプから候補を絞り、パネルのアイコンで視覚照合
+        # 種族の推定: タイプから候補を絞り、パネルのアイコンで視覚照合。結果は「推定」(species_guess) であり、
+        # 場に出て名前が読めた時点で確定に置き換わる。同じ種が別枠に既にあれば入れない/スコアの低い方を取り消す
+        # (adopt_selection_guess。2026-09-29 第17回: 推定の カイリュー が 2 枠、実体は セグレイブ)
         if slot.types and not slot.species_ja:
             try:
                 from advisor.infer import get_inference
@@ -671,9 +673,17 @@ def extract_selection(img, state: BattleStateV2, resolver) -> None:
                 cands = get_inference().candidates(slot.types)
                 hit = identify_species(crop(img, z["icon"]), cands)
                 if hit:
-                    slot.merge_species(hit[1], hit[0])
-                    state.log_event("selection", f"相手枠{i + 1}を{hit[1]}と特定 "
-                                    f"(視覚照合{hit[2]})", event_id="species_identified")
+                    verdict = adopt_selection_guess(state.opponent.party, i, hit[0], hit[1], float(hit[2]))
+                    note = (verdict, hit[0])
+                    if getattr(slot, "_guess_note", None) != note:   # 同じ結論を毎フレーム書かない
+                        slot._guess_note = note
+                        if verdict == "skip":
+                            state.log_event("selection", f"相手枠{i + 1}の{hit[1]}推定は保留 (別枠に同種の推定あり、"
+                                            f"視覚照合{hit[2]})", event_id="species_guess_dup")
+                        else:
+                            extra = "、同種の別枠の推定を取り消し" if verdict == "replaced" else ""
+                            state.log_event("selection", f"相手枠{i + 1}を{hit[1]}と推定 (視覚照合{hit[2]}{extra})",
+                                            event_id="species_identified")
             except Exception:
                 pass
 
@@ -1033,7 +1043,7 @@ def backfill_player_static(state: BattleStateV2, resolver) -> None:
         t = _species_types_ja(p.species_id)
         if t and set(p.types or []) != set(t):
             p.types = t
-        if p.item_id and p.ability_id:
+        if p.item_id and p.ability_id and getattr(p, "_registered_stone_checked", None) == p.item_id:
             continue
         try:
             from advisor.my_team import get_my_build
@@ -1042,11 +1052,22 @@ def backfill_player_static(state: BattleStateV2, resolver) -> None:
             build = None
         if not build:
             continue
-        if not p.item_id and not p.item_removed and build.get("item_ja"):
+        reg = None
+        if build.get("item_ja") and not p.item_removed:
             # item_removed (はたきおとす被弾) 中は登録から復活させない
-            it = resolver.resolve(build["item_ja"], "items", cutoff=0.9)
-            if it:
-                p.item_ja, p.item_id = it[0], it[1]
+            reg = resolver.resolve(build["item_ja"], "items", cutoff=0.9)
+        if reg and not p.item_id:
+            p.item_ja, p.item_id = reg[0], reg[1]
+        elif reg and p.item_id and reg[1] != p.item_id:
+            # 画面の読み (選出画面の持ち物欄) と登録が「同じ種のメガ石のフォルム違い」なら登録を採る。OCR は石名の末尾
+            # X/Y/Z を落とす (2026-09-29 第17回: 「ガブリアスナイトZ」が ガブリアスナイト と読まれ、手入力の登録より
+            # 画面の読みが優先されて通常のメガガブリアスとして助言された)。登録は手入力なので石の種類は登録が正
+            from advisor.gimmick import same_species_stones
+            if same_species_stones(p.item_id, reg[1]):
+                state.log_event("system", f"{p.species_ja} の持ち物: 画面の {p.item_ja} ではなく登録の {reg[0]} を採用 "
+                                f"(同じ種の石のフォルム違い)", event_id="item_registered_override")
+                p.item_ja, p.item_id = reg[0], reg[1]
+        p._registered_stone_checked = p.item_id
         if not p.ability_id and build.get("ability_ja"):
             ab = resolver.resolve(build["ability_ja"], "abilities", cutoff=0.9)
             if ab:
