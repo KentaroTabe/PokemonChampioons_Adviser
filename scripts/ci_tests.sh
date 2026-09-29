@@ -77,6 +77,10 @@ TESTS=(
   test_selection_experiment
   test_session_split
   test_claude_cli
+  test_mega_stone_names
+  test_opp_roster_guess
+  test_mega_evolve_attribution
+  test_end_notice
 )
 
 fail=0
