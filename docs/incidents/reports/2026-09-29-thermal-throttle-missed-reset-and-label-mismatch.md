@@ -164,12 +164,19 @@ bash scripts/run_test.sh test_claude_cli
 | `server.py` | 場のポケモンが助言の対象と変わったのに決定画面を取れていない間、前の助言を「無効」と通知 (一度だけ)。5 秒ごとの統計行にフレーム処理 (p50/p95) と助言計算 (p50/max) の所要 ms を追加 (次に処理率が落ちたとき、どちらが重いかを切り分けるため) | (サーバー本体、単体テストなし) |
 | `tools/team_build/real_eval.py` | Package 実戦サマリーは対戦ログの自分の 6 体 (選出画面、読めなければ場に出た種) が Package の 6 体に収まるログだけを勝敗に数え、別パーティのログ数を警告に出す。決定監査も同じ範囲 | `tests/test_team_build_real_eval.py::test_team_match_excludes_other_party` |
 | `tools/claude_cli.py` | claude CLI を PATH → `~/.local/bin/claude` → `~/.claude/local/claude` → Homebrew の順に解決 (audit_session / audit_subtask / 構築の LLM provider が使う) | `tests/test_claude_cli.py` |
-| `scripts/start_connection_test.sh` | 学習ループが動いていれば熱圧迫の警告と停止コマンドを出す (自動では止めない) | - |
+| `scripts/start_connection_test.sh` | TRAINING_MODE=on_demand で学習が動いていればテスト開始時に止める (2026-09-29 ユーザー決定「次は学習ループを止めて良い」)。continuous なら警告のみ | - |
+| `scripts/stop_training.sh`, `scripts/start_training.sh` | 停止時に `launchctl disable` (再起動後の自動起動を止める)、再開時に `enable`。9/27 の再起動後に学習が自動再開していた原因への対策 | - |
 
 ## 8. 教訓 / 未対応の課題
 
-- **処理率が落ちる要因は増える一方なので、負荷の判断は毎回実測する**: 統計行に処理時間を入れた。次回のテストで学習 ON/OFF の
-  処理率を比べ、必要なら「テスト中は学習を止める」を開始処理に組み込む (ユーザー判断)
+- **学習が動いていた経緯 (2026-09-29 13:2x に判明)**: 9/27 10:06 シャットダウン → 10:07 再起動 → 13:40 ログインで、launchd が
+  `~/Library/LaunchAgents/com.championsadviser.train.plist` (RunAtLoad) を読み込み、9/17 に `launchctl bootout` で外した学習が
+  自動再開した (`last reboot` と `launchctl print-disabled` で確認。ユーザーは起動した覚えなし)。9/27 13:40〜9/29 13:2x に
+  108 サイクル走り、`battle_policy_*.zip` / `_ema.zip` が更新された。構築の測定はピン止めしたモデルを使うので影響なし、
+  9/29 の助言サーバーはその時点の EMA 方策を読んだ。9/29 13:2x に停止し、`launchctl disable` で再発を止めた
+  (training_changes.json 2026-09-29 13:25)
+- **処理率が落ちる要因は増える一方なので、負荷の判断は毎回実測する**: 統計行に処理時間を入れた。次回のテストは学習なしで回し、
+  ON/OFF の処理率を比べる
 - **「画面 X を 1 回は取れる」前提の判定は、取れなかった場合の別の根拠を持つ**: リセット判定は勝敗の記録で補った。ターン数
   そのものも取り逃しに弱い (turn 0 のまま終局) — ターンの根拠に「行動解決の観測」以外を足すのは未対応
 - **メッセージの取り逃しは、その事象の副作用から推定できることがある** (自己能力変化 → 技)。相手側の技の推定 (相手のりゅうせいぐん →
@@ -178,4 +185,4 @@ bash scripts/run_test.sh test_claude_cli
   検知したら外す) は未対応 (次のテストでパーティを戻したときに困るため、警告に留めた)
 - 一括視覚監査は手動で実行できる状態。パネル経由の全ジョブが同じ PATH 問題を持ちうる (node は /opt/homebrew/bin にあるので
   影響なし、`claude` だけが `~/.local/bin`)
-- 学習ループは `config/training.env` が on_demand なのに 9/27 から稼働している。起動の経緯は未確認 (ユーザー確認待ち)
+- 終了処理が自動起動する改善案の測定 (`improve_*`、5 並列) は数時間かかるが、ユーザー判断 (2026-09-29) で止めずに流す

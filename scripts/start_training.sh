@@ -6,6 +6,8 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 PLIST="$HOME/Library/LaunchAgents/com.championsadviser.train.plist"
+# stop_training.sh が launchctl disable で無効化している (再起動後も自動起動しない状態) ので、先に有効化する
+launchctl enable "gui/$(id -u)/com.championsadviser.train" 2>/dev/null || true
 if launchctl print "gui/$(id -u)/com.championsadviser.train" >/dev/null 2>&1; then
   echo "[start_training] 既に登録済みです"
 else

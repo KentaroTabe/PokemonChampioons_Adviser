@@ -2,6 +2,12 @@
  "_comment": "学習に影響する変更の記録。watch_training が推移グラフに赤い縦線として描画し、履歴表示にも差し込む。新しい変更を入れたら追記すること (at はローカル時刻 'YYYY-MM-DD HH:MM')。kind: net=ネット構成 / reward=報酬 / opponent=相手構成 / env=環境仕様 / eval=評価方法 / fix=不具合修正",
  "changes": [
   {
+   "at": "2026-09-29 13:25",
+   "kind": "env",
+   "label": "学習が 9/27 13:40〜9/29 13:2x に意図せず再開していた (再起動後の launchd RunAtLoad) → 停止し、ログイン時の自動起動を無効化",
+   "detail": "9/17 20:37 の停止 (launchctl bootout) は今のセッションから外すだけで、9/27 10:07 の再起動 → 13:40 のログインで plist (RunAtLoad) が読まれて train_forever が再開した (ユーザーは起動した覚えなし)。108 サイクル (約 1,190 万ステップ相当、N_ENVS=4) 走り、battle_policy_{balance,offense,cycle}.zip と _ema.zip が更新された (_best は 9/12 のまま)。構築の測定 (arch_0924、improve_20260929_0215) はピン止めしたモデルを使うので影響なし。9/29 0:17〜2:13 の接続テストの助言サーバーはその時点の EMA 方策を読んだ。日次定点 9/25〜9/28 の current の動きはこの学習によるもの。対策: stop_training.sh が launchctl disable (再起動を跨いで残る) を行い、start_training.sh が enable する。start_connection_test.sh は on_demand で動いていれば止める。詳細 docs/incidents/reports/2026-09-29-thermal-throttle-missed-reset-and-label-mismatch.md §8"
+  },
+  {
    "at": "2026-09-24 20:30",
    "kind": "eval",
    "label": "日次定点が 9/18〜9/23 欠測 (agents 軸の評価がハング、timeout なし) → 評価 1 回に timeout",

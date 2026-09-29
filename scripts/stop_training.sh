@@ -18,6 +18,14 @@ launchctl bootout "gui/$(id -u)/com.championsadviser.train" 2>/dev/null \
   && echo "[stop_training] launchd ジョブを外しました" \
   || echo "[stop_training] launchd ジョブは登録されていませんでした"
 
+# 再起動・再ログイン後の自動起動も止める。bootout は今のセッションから外すだけで、plist (RunAtLoad) が
+# ~/Library/LaunchAgents にある限り次のログインで再び読まれる (2026-09-27 10:07 の再起動 → 13:40 のログインで、
+# 9/17 に外した学習が誰も知らないうちに再開し、9/29 の接続テストで熱圧迫を招いた)。disable は再起動を跨いで残る
+# (再開は start_training.sh が enable する)
+launchctl disable "gui/$(id -u)/com.championsadviser.train" \
+  && echo "[stop_training] ログイン時の自動起動を無効化しました (launchctl disable。再開は bash scripts/start_training.sh)" \
+  || echo "[stop_training] ⚠ launchctl disable に失敗 (次のログインで自動起動しうる)"
+
 sleep 2
 if pgrep -fl "train_forever|train_nightly|smoke_train|train_battle" >/dev/null; then
   echo "[stop_training] 残存プロセスに TERM を送ります"

@@ -109,6 +109,13 @@ bash scripts/stop_training.sh showdown   # Showdown も止める (メモリ解�
 (train_forever.sh が鮮度40分で自動解除する)。Showdown は
 `scripts/ensure_showdown.sh` で切り離し起動され、学習の停止に巻き込まれない。
 
+**再起動・再ログイン後の自動再開に注意 (2026-09-29 に判明)**: `stop_training.sh` の `launchctl bootout` は今のログイン
+セッションから外すだけで、plist (`RunAtLoad`) が `~/Library/LaunchAgents` にある限り次のログインで再び読まれる。
+9/27 10:07 の再起動 → 13:40 のログインで、9/17 に止めた学習が誰も気付かないまま再開し (108 サイクル、チェックポイントが
+更新された)、9/29 の接続テストで熱圧迫を招いた。`stop_training.sh` は `launchctl disable` (再起動を跨いで残る) も行い、
+`start_training.sh` が `enable` してから登録するようにした。`start_connection_test.sh` は on_demand で学習が動いていれば
+テスト開始時に止める (終了処理は on_demand では再開しない)。
+
 ## 更新の反映 (コード修正・最新学習チェックポイント)
 
 ```bash

@@ -10,9 +10,10 @@
 #  3. セッション開始マーカーを記録 (終了時の一括監査 audit_session が
 #     このマーカー以降の対戦をまとめてsonnet 1回で検証する)
 #
-# 学習ループは自動では止めない (2026-07-27 の実測では学習 ON/OFF で助言の遅延に差が無かった)。
-# ただし 2026-09-29 第16回で、学習 (4 環境) + Showdown + 助言サーバーの同時実行が 1 時間続くと熱圧迫 (thermal-pressure
-# Heavy) で CPU が絞られ、フレーム処理率が 9% まで落ちて助言が止まった。学習が動いていれば警告を出す。
+# 学習ループ: 2026-09-29 第16回で、学習 (4 環境) + Showdown + 助言サーバーの同時実行が 1 時間続くと熱圧迫 (thermal-pressure
+# Heavy) で CPU が絞られ、フレーム処理率が 9% まで落ちて助言が止まった (7/27 の「学習 ON/OFF で差なし」はもう当てはまらない)。
+# TRAINING_MODE=on_demand (必要時のみ回す) のときに動いていれば、テストのために止める (2026-09-29 ユーザー決定。
+# 終了処理は on_demand では再開しない)。continuous のときは止めずに警告だけ出す。
 cd "$(dirname "$0")/.." || exit 1
 mkdir -p logs
 . scripts/lib/ports.sh
@@ -23,9 +24,14 @@ date +%s > logs/.connection_test_start
 TRAINING_MODE=continuous
 [ -f config/training.env ] && . config/training.env
 if pgrep -f train_forever >/dev/null; then
-  echo "学習ループ: 稼働中 (TRAINING_MODE=$TRAINING_MODE)"
-  echo "  ⚠ 学習と同時のテストは 1 時間ほどで熱圧迫により助言が止まることがある (2026-09-29 第16回: 処理率 9%)。"
-  echo "    止めるなら: bash scripts/stop_training.sh  (テスト後の再開: bash scripts/start_training.sh)"
+  if [ "$TRAINING_MODE" = "on_demand" ]; then
+    echo "学習ループ: 稼働中だが TRAINING_MODE=on_demand → テスト中の熱圧迫を避けるため止める (再開は bash scripts/start_training.sh)"
+    bash scripts/stop_training.sh
+  else
+    echo "学習ループ: 稼働中 (TRAINING_MODE=$TRAINING_MODE)"
+    echo "  ⚠ 学習と同時のテストは 1 時間ほどで熱圧迫により助言が止まることがある (2026-09-29 第16回: 処理率 9%)。"
+    echo "    止めるなら: bash scripts/stop_training.sh  (テスト後の再開: bash scripts/start_training.sh)"
+  fi
 else
   echo "学習ループ: 停止中 (再開は bash scripts/start_training.sh)"
 fi
