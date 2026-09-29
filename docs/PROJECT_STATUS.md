@@ -157,7 +157,7 @@ round1 300戦 + round2 600戦の併合): ドドゲザン 0.754 / ガブリアス
 | Actions の Node.js 非推奨 | checkout/setup-python を v7 へ (次回 push で検証) | 🔜 |
 | 日次定点の評価がハングして 6 日欠測 (9/18〜23) | 評価 1 回に戦数比例の timeout (config)、打ち切りの記録、status.sh の経過時間警告、test_track_progress | ✅ (9/24)。他の timeout 無し subprocess (reward_sweep / audit の claude / validate_teams) は未対応 |
 | 第16回接続テスト (9/29): 熱圧迫で処理率 9% → 状態リセット不発 → 助言停止、Package 集計に別パーティ混入、一括監査の `claude` 未検出 | リセット判定に outcome / battle_ended、能力変化からの技推定 (こだわりロック)、助言の無効化通知と処理時間の統計、Package 集計のパーティ照合、`tools/claude_cli`、開始処理の学習警告。docs/incidents/reports/2026-09-29-thermal-throttle-missed-reset-and-label-mismatch.md | ✅ (9/29)。学習を止めるかはユーザー判断 |
-| 第17回接続テスト (9/29 夕方、自分のパーティ 7 戦、学習停止): 登録の Z 石 (メガガブリアスZナイト) が無印の石に解決、選出画面の相手推定が確定扱いで集計・バンクに混入 (全ログ 224 件中 57 件)、ニックネームの相手が不明のまま、天候補正が理由に無い、終了検知後の表示 | 石名は構文で解決 (接尾辞 X/Y/Z 厳密) + 石 → フォルムの表引きに統一 + 登録の石を画面より優先、相手の推定を `species_guess` で区別 (重複排除・置換順・集計除外・表示)、文言からの場の個体の確定、天候の理由、終了の即時通知。docs/incidents/reports/2026-09-29-selection-guess-roster-and-z-stone-name.md | ✅ 実装 (9/29、fix/connection-test-0929b)。マージは測定 run 終了後、その後にバンク再生成 |
+| 第17回接続テスト (9/29 夕方、自分のパーティ 7 戦、学習停止): 登録の Z 石 (メガガブリアスZナイト) が無印の石に解決、選出画面の相手推定が確定扱いで集計・バンクに混入 (全ログ 224 件中 57 件)、ニックネームの相手が不明のまま、天候補正が理由に無い、終了検知後の表示、**勝った対戦が負けで記録** (誤読で生えた 7 体目を 3 体目のひんしに数えた。3 勝 4 敗が 2 勝 5 敗に) | 石名は構文で解決 (接尾辞 X/Y/Z 厳密) + 石 → フォルムの表引きに統一 + 登録の石を画面より優先、相手の推定を `species_guess` で区別 (重複排除・置換順・集計除外・表示)、文言からの場の個体の確定、天候の理由、終了の即時通知、ひんし数はロスター/選出内だけ + 勝負文言による勝敗の訂正行 + 読み手の文言優先 + レート差の妥当性チェック。docs/incidents/reports/2026-09-29-selection-guess-roster-and-z-stone-name.md | ✅ 実装 (9/29、fix/connection-test-0929b)。マージは測定 run 終了後、その後にバンク再生成 |
 | vision層のライブラリ公開 | 境界確定済み、公開は承認待ち | 承認待ち |
 | 9/9 シーズン切替 | docs/REGULATION_CHANGE_RUNBOOK.md に従う | 🔜 |
 
