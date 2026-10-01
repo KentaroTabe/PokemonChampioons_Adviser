@@ -19,6 +19,7 @@ import json
 from pathlib import Path
 from typing import Optional
 
+from tools.battle_outcome import OutcomeTracker
 from tools.team_build.verdict import binomial_halfwidth, blended_score, real_weight
 
 REPO = Path(__file__).resolve().parent.parent.parent
@@ -34,17 +35,17 @@ def read_battle_labels(path: Path) -> dict:
            "n_advice": 0, "n_manual_fix": 0, "species": [], "party_read": False}
     party_species = None
     actives: list = []
+    ot = OutcomeTracker()   # 勝敗: outcome 行 (最後) + ランク画面前の勝負文言 (tools.battle_outcome)
     try:
         for line in Path(path).read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
             d = json.loads(line)
             t = d.get("type")
+            ot.feed(d)
             if t == "session":
                 out["source"] = d.get("source", "organic")
                 out["package_id"] = d.get("package_id")
-            elif t == "outcome" and d.get("outcome") in ("win", "loss"):
-                out["outcome"] = d["outcome"]
             elif t == "advice":
                 out["n_advice"] += 1
             elif t == "manual_fix":
@@ -60,6 +61,9 @@ def read_battle_labels(path: Path) -> dict:
                     actives.append(party[idx]["species"])
     except Exception:
         pass
+    outcome, _inferred, corrected = ot.result()
+    out["outcome"] = outcome if outcome in ("win", "loss") else None
+    out["corrected"] = corrected
     out["species"] = sorted(set(party_species or actives))
     out["party_read"] = party_species is not None
     return out

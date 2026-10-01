@@ -429,6 +429,8 @@
             let tags = (p.types || []).map(t => `<span class="tag">${t}</span>`).join('');
             if (p.status && STATUS_JA[p.status]) tags += `<span class="tag" style="background:#833">${STATUS_JA[p.status]}</span>`;
             if (p.is_mega) tags += '<span class="tag" style="background:#a3a">メガ</span>';
+            // 選出画面の推定 (タイプアイコン + スプライト照合)。場に出て名前が読めるまで確定ではない
+            if (p.species_guess) tags += `<span class="tag" style="background:#556" title="選出画面のアイコンからの推定。場に出た時点で確定します">推定${p.guess_score != null ? ' ' + Math.round(p.guess_score * 100) + '%' : ''}</span>`;
             const STAT_ABBR = {hp:'H', atk:'A', def:'B', spa:'C', spd:'D', spe:'S',
                                acc:'命中', eva:'回避'};
             const boosts = Object.entries(p.boosts || {}).filter(([k,v]) => v)
@@ -450,7 +452,7 @@
                 moves += `<div style="font-size:11px;color:#c98">判明技: ${p.revealed_moves.join(' / ')}</div>`;
             // 相手の未確定ポケモン: タイプ推論の候補から手動で確定できる
             let picker = '';
-            if (side === 'opp' && !p.species_ja && p.candidates && p.candidates.length) {
+            if (side === 'opp' && (!p.species_ja || p.species_guess) && p.candidates && p.candidates.length) {
                 const opts = p.candidates.map(c =>
                     `<option value="${c.id}|${c.ja}">${c.ja} (${c.pct}%)</option>`).join('');
                 picker = `<select onchange="setSpecies(${i}, this.value, this)"

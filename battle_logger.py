@@ -20,6 +20,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from tools.battle_outcome import text_outcome_of
+
 LOG_DIR = Path(__file__).resolve().parent / "logs" / "battles"
 # 対戦終了を確定させるイベント (どれか 1 つで勝敗レコードを書く): ランク画面の文言 / リザルト画面のシーン分類 /
 # 3体目のひんしの確定 (2026-09-16: 勝負文言・ランク文言の取り逃しでも終了を取れるように)
@@ -29,7 +31,7 @@ BATTLE_END_EVENTS = ("battle_end_rank", "battle_end_result", "battle_end_faint_c
 def _compact_state(state: dict) -> dict:
     """ログ用の簡約状態 (イベント履歴を除き、パーティは主要フィールドのみ)"""
     def mon(p):
-        return {
+        d = {
             "species": p.get("species_id"),
             "ja": p.get("species_ja"),
             "types": p.get("types"),
@@ -44,6 +46,10 @@ def _compact_state(state: dict) -> dict:
             "revealed": p.get("revealed_moves"),
             "picked": p.get("is_picked"),
         }
+        # 選出画面の推定 (確定ではない) の印。分析・実戦バンクは推定を「相手の 6 体」に数えない (2026-09-29)
+        if p.get("species_guess"):
+            d["guess"] = True
+        return d
 
     return {
         "scene": state.get("scene"),
@@ -113,6 +119,7 @@ class BattleLogger:
         self._prev_scene: Optional[str] = None
         self._prev_pick_key = None
         self._outcome_logged = False
+        self._outcome_value = None  # 記録済みの勝敗 (勝負文言と食い違えば訂正の行を足す)
         self._hp_seen_ts = 0.0   # 記録済みHP変化イベントの最終時刻
         self._last_seq = None       # 前フレームの対戦世代番号 (battle_seq)
         self._opened_ts = 0.0       # 現在のログファイルを開いた時刻
@@ -134,6 +141,7 @@ class BattleLogger:
         self._file = path
         self._opened_ts = time.time()
         self._outcome_logged = False
+        self._outcome_value = None
         self._rate_open = self._rate_last   # この対戦に入る時点のレート
         print(f"[battle_log] 新しい対戦ログ: {self._file.name}")
         # 由来ラベル (2026-09-06 構築システムの安全装置): 実戦ログは dataset_kind=real。
@@ -192,6 +200,7 @@ class BattleLogger:
                     rec["inferred"] = True
                 self._write(rec)
             self._outcome_logged = True
+        self._outcome_value = None
         self._file = None
         self._prev_scene = None
         self._hp_seen_ts = 0.0
@@ -253,6 +262,15 @@ class BattleLogger:
                     rec["inferred"] = True
                 self._write(rec)
                 self._outcome_logged = True
+                self._outcome_value = rec["outcome"]
+            # 勝負の文言は最も強い根拠: 先に記録した勝敗 (3 体目のひんしからの確定等) と食い違えば訂正の行を足す
+            # (読み手は最後の outcome 行を採る。2026-09-29 第17回 15:53: 誤読の 7 体目で「負け」と記録した後に
+            # 「勝負に勝った」を読んだが、記録は負けのままだった)
+            text_out = text_outcome_of(fired)
+            if self._outcome_logged and text_out and text_out != self._outcome_value:
+                self._write({"type": "outcome", "outcome": text_out,
+                             "corrected_from": self._outcome_value, "basis": "battle_text"})
+                self._outcome_value = text_out
 
         # HP変化 (extractorsの_set_hpがsource="hp"でstate.eventsに積む) を
         # 専用レコードで記録し、技イベントとのダメージ対応付けを可能にする。
@@ -293,6 +311,7 @@ class BattleLogger:
         if state.get("outcome") and not self._outcome_logged:
             self._write({"type": "outcome", "outcome": state["outcome"]})
             self._outcome_logged = True
+            self._outcome_value = state["outcome"]
 
         # 勝敗推定用: 両側のひんし数を毎フレーム控える。ローテーションの
         # フレームでは state が次戦へリセット済みのため、_finalize は

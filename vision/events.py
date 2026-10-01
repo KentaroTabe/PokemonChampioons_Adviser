@@ -361,6 +361,7 @@ class EventParser:
                     matches.append(mon)
             act = side.active()
             mon = act if act in matches else matches[0]
+            self._activate_if_no_active(side, mon)
             return side_name, side, mon, True
         # ファジー照合: プレフィックスを除いた先頭セグメント vs パーティ名
         seg = re.sub(r"^(相手の|あいての|.手の)", "", norm).split("の")[0][:8]
@@ -376,8 +377,18 @@ class EventParser:
             m = difflib.get_close_matches(seg, list(names.keys()),
                                           n=1, cutoff=0.6)
             if m:
-                return side_name, side, names[m[0]], True
+                mon = names[m[0]]
+                self._activate_if_no_active(side, mon)
+                return side_name, side, mon, True
         return side_name, side, side.ensure_active(), False
+
+    @staticmethod
+    def _activate_if_no_active(side, mon) -> None:
+        """名前で帰属できた個体がその陣営のロスターにあり、場の個体が未確定 (active なし) なら、その個体を場に出ている
+        扱いにする。ニックネームの相手は HUD 名から種族を引けず active が決まらない (2026-09-29 第17回 16:12 の対戦:
+        7 ターン相手不明のまま助言が相手なしで計算された) が、「相手の<名前>の<技>」等の文言はその個体が場にいる根拠"""
+        if side.active() is None and mon in side.party:
+            side.switch_to(side.party.index(mon))
 
     def _target_mon(self, cleaned: str, source: str):
         side_name, side, mon, _matched = self._target_mon_checked(cleaned, source)
@@ -579,7 +590,8 @@ class EventParser:
         side_name = (st.last_faint or {}).get("side")
         if side_name not in ("player", "opponent"):
             return None
-        fainted = sum(1 for p in st.side(side_name).party if p.status == "fainted")
+        # ロスターの枠だけ、自分側は選出が分かっていれば選出 3 体だけを数える (誤読で生えた枠を数えない。state.fainted_count)
+        fainted = st.side(side_name).fainted_count(picked_only=(side_name == "player"))
         if fainted < BSS_PICK_COUNT:
             return None
         st.end_hint = {"side": side_name, "ts": time.time(), "fainted": fainted}
@@ -602,7 +614,7 @@ class EventParser:
         if time.time() - hint["ts"] < BATTLE_END_FAINT_CONFIRM_SEC:
             return None
         other = "opponent" if hint["side"] == "player" else "player"
-        other_fainted = sum(1 for p in st.side(other).party if p.status == "fainted")
+        other_fainted = st.side(other).fainted_count(picked_only=(other == "player"))
         if not st.outcome and other_fainted < BSS_PICK_COUNT:
             st.outcome = "loss" if hint["side"] == "player" else "win"
         st.battle_active = False
@@ -1331,16 +1343,44 @@ class EventParser:
                                      if not v.startswith("disable_")]
         elif action == "mega":
             side_name, side, mon = self._target_mon(cleaned, source)
+            sp = self.resolver.find_species_in_text(cleaned, cutoff=0.7)
+            if sp and sp[0].startswith("メガ") and mon not in side.party:
+                # 帰属先が使い捨て枠 (満枠でニックネームの相手: HUD 名から種族を引けず active が無い) でも、文言の
+                # メガ名でロスターの枠を引けるならその枠を場の個体にする (2026-09-29 第17回 16:12 の対戦)
+                from advisor.gimmick import _base_of as _mega_base
+                base_ja = re.sub(r"[XYZ]$", "", sp[0][len("メガ"):])
+                idx = side.find_by_species(base_ja, _mega_base(sp[1]))
+                if idx is not None:
+                    side.switch_to(idx)
+                    mon = side.party[idx]
             mon.is_mega = True
             self.state.mega_used[side_name] = True
-            sp = self.resolver.find_species_in_text(cleaned, cutoff=0.7)
-            if sp and sp[0].startswith("メガ"):
+            # 石が分かっていれば石でフォルムを決める (requiredItem の表)。文言のメガ名は末尾 X/Y/Z が OCR で落ちる
+            # (2026-09-29 第17回: 「ガブリアスはメガガブリアスにメガシンカした」と読まれ、Z 石の個体が無印のメガ
+            # (別の種族値・タイプ・特性) になった)
+            stone_form = None
+            if mon.item_id:
+                from advisor.gimmick import stone_table, _base_of as _mega_base, _toid as _stone_id
+                cand = stone_table().get(_stone_id(mon.item_id))
+                if cand and (not mon.species_id or _mega_base(cand) == _mega_base(mon.species_id)):
+                    stone_form = cand
+            if stone_form:
+                mon.species_id = stone_form
+                mon.species_guess = False
+                if not mon.species_ja:
+                    from advisor.infer import species_ja_name
+                    mon.species_ja = species_ja_name(_mega_base(stone_form))
+                for alias in ([sp[0]] if (sp and sp[0].startswith("メガ")) else []) + [f"メガ{mon.species_ja}"]:
+                    if alias not in (mon.aliases or []):
+                        mon.aliases.append(alias)
+            elif sp and sp[0].startswith("メガ"):
                 # species_id はメガ後 (種族値/特性計算用) にするが、
                 # species_ja はメガ前の名前を維持する: 画面のHUD表示は
                 # メガ後も元の名前のままなので、メガ名に変えると以後の
                 # 名前照合が失敗して別枠が生える (実戦で重複を観測)
                 mon.species_id = sp[1]
-                base_ja = re.sub(r"[XY]$", "", sp[0][len("メガ"):])
+                mon.species_guess = False   # 文言に種族名がある = 確定
+                base_ja = re.sub(r"[XYZ]$", "", sp[0][len("メガ"):])
                 if not mon.species_ja:
                     mon.species_ja = base_ja
                 # メガ名でも照合できるよう別名に登録

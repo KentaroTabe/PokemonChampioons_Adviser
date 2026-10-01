@@ -26,6 +26,7 @@ import json
 import time
 from pathlib import Path
 
+from tools.battle_outcome import outcome_from_records
 from vision.scenes import (
     SCENE_COMMAND, SCENE_FIELD_CHECK, SCENE_MOVE_SELECT, SCENE_STANDBY,
     SCENE_WATCH,
@@ -176,8 +177,8 @@ def _selection_audit(records: list) -> dict | None:
 def audit_battle(records: list, late_sec: float = LATE_SEC,
                  heavy_swing: float = HEAVY_SWING) -> dict:
     """1対戦分のレコード列から決定監査の結果を作る (純粋関数)"""
-    outcome = next((d.get("outcome") for d in records
-                    if d.get("type") == "outcome"), "unknown")
+    # outcome 行は最後のもの、勝負の文言があればそれを採る (訂正の行と文言優先。tools.battle_outcome)
+    outcome = outcome_from_records(records)[0] or "unknown"
     swings = _hp_swing_by_turn(records)
 
     # 決定画面の追跡。行動イベントは解決シーン (field) に入ってから記録される
