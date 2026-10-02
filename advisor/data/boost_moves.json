@@ -14,6 +14,7 @@
     "noretreat": {"atk": 1, "def": 1, "spa": 1, "spd": 1, "spe": 1},
     "clangoroussoul": {"atk": 1, "def": 1, "spa": 1, "spd": 1, "spe": 1},
     "tidyup": {"atk": 1, "spe": 1},
+    "shiftgear": {"atk": 1, "spe": 2},
     "irondefense": {"def": 2},
     "acidarmor": {"def": 2},
     "barrier": {"def": 2},

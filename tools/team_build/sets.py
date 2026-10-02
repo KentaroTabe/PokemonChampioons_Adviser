@@ -12,6 +12,7 @@ from __future__ import annotations
 import itertools
 import subprocess
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
@@ -25,9 +26,32 @@ ALT_MIN_PCT = 5.0          # 代替候補に採る最低使用率 (%) — config
 MAX_ALTERNATIVES = 12      # 種族ごとの型候補の上限
 REP_MARGIN = 0.05          # 代替が代表型をこの被覆差以上で上回らなければ代表型を採る
 CHOICE_ITEMS = ("choicescarf", "choiceband", "choicespecs")
-SETUP_OR_HAZARD_OR_RECOVERY = ("swordsdance", "nastyplot", "dragondance", "calmmind", "bulkup", "irondefense",
-                               "stealthrock", "spikes", "toxicspikes", "stickyweb", "roost", "recover",
-                               "slackoff", "softboiled", "rest", "protect", "substitute")
+
+
+@lru_cache(maxsize=1)
+def setup_move_ids() -> frozenset:
+    """積み技 (自分の能力を上げる変化技) の id: advisor/data/boost_moves.json の self に上昇のある変化技 +
+    advisor.search.SETUP_MOVES (のろい等、表に無いもの)。2026-10-02 ユーザー指摘: 常識フィルタの手書きの一覧に
+    ちょうのまい / からをやぶる / こうそくいどう / はらだいこ 等が無かった → データから作る"""
+    from advisor.dex import _boost_moves, get_dex
+    from advisor.search import SETUP_MOVES
+    from champions_agent.config import BUILD_GEN_SETUP_BOOSTS
+    dex = get_dex()
+    out = set(SETUP_MOVES)
+    rows = list((_boost_moves().get("self") or {}).items()) + list(BUILD_GEN_SETUP_BOOSTS.items())
+    for m, delta in rows:
+        if any(int(v or 0) > 0 for v in (delta or {}).values()) \
+                and str((dex.move(m) or {}).get("category") or "").lower() == "status":
+            out.add(m)
+    return frozenset(out)
+
+
+@lru_cache(maxsize=1)
+def choice_lock_moves() -> frozenset:
+    """こだわり系の持ち物と組ませない変化技: 積み技 (setup_move_ids) + config BUILD_SET_CHOICE_LOCK_MOVES
+    (設置 / 回復 / まもる / みがわり)"""
+    from champions_agent.config import BUILD_SET_CHOICE_LOCK_MOVES
+    return setup_move_ids() | frozenset(BUILD_SET_CHOICE_LOCK_MOVES)
 
 
 @dataclass
@@ -316,7 +340,7 @@ def set_sanity(c: "SetCandidate") -> list:
     if item in OFFENSIVE_ITEM_IDS and c.evs and not _is_offensive_spread(c.evs) \
             and move_categories(c.moves).count("status") < len(c.moves):
         problems.append("攻撃的持ち物 + 耐久配分 (build_meta の整合規則と同じ)")
-    if item in CHOICE_ITEMS and any(m in SETUP_OR_HAZARD_OR_RECOVERY for m in c.moves):
+    if item in CHOICE_ITEMS and any(m in choice_lock_moves() for m in c.moves):
         problems.append("こだわり系 + 積み/設置/回復/まもる")
     if item == "chestoberry" and "rest" not in c.moves:
         problems.append("カゴのみ + ねむる無し")

@@ -479,6 +479,13 @@ BUILD_GEN_SETUP_BOOSTS = {"rockpolish": {"spe": 2}, "autotomize": {"spe": 2}, "s
                           "aquastep": {"spe": 1}}
 # 型の常識フィルタ (sets.set_sanity): きのみを食べた後しか出せない技は、きのみ以外の持ち物と組ませない
 BUILD_SET_BERRY_MOVES = ("belch",)
+# こだわり系の持ち物と組ませない変化技のうち積み技以外 (設置 / 回復 / まもる / みがわり)。積み技は sets.setup_move_ids
+# (advisor/data/boost_moves.json + advisor.search.SETUP_MOVES) から作る (2026-10-02: 手書きの一覧の漏れをなくした)
+BUILD_SET_CHOICE_LOCK_MOVES = ("stealthrock", "spikes", "toxicspikes", "stickyweb",
+                               "roost", "recover", "slackoff", "softboiled", "milkdrink", "shoreup", "moonlight",
+                               "morningsun", "synthesis", "strengthsap", "rest", "wish",
+                               "protect", "detect", "banefulbunker", "spikyshield", "burningbulwark", "silktrap",
+                               "substitute")
 # テンプレート: attacks = 攻撃技の本数、utility = 補助技の役割 (順に埋める。埋まらなければそのテンプレートは捨てる)
 BUILD_GEN_TEMPLATES = (
     {"name": "attack3_setup", "attacks": 3, "utility": ("setup",)},

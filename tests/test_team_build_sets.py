@@ -205,6 +205,29 @@ def test_set_sanity_berry_moves():
     print("test_set_sanity_berry_moves OK")
 
 
+def test_choice_lock_covers_all_setup_moves():
+    """こだわり系 + 積み技 の積み技一覧は手書きでなく boost_moves.json + SETUP_MOVES から作る (2026-10-02 ユーザー指摘:
+    ちょうのまい / からをやぶる 等が漏れていた)"""
+    from tools.team_build.sets import choice_lock_moves, set_sanity, setup_move_ids
+    ids = setup_move_ids()
+    for m in ("quiverdance", "shellsmash", "agility", "bellydrum", "amnesia", "coil", "curse", "swordsdance", "victorydance",
+              "tidyup", "rockpolish", "autotomize", "shiftgear", "workup", "growth", "irondefense", "calmmind"):
+        assert m in ids, m
+    for m in ("flamecharge", "overheat", "closecombat", "scaleshot", "rapidspin", "protect", "stealthrock"):
+        assert m not in ids, m                       # 攻撃技 / 下降だけの技 / 積み技以外は入らない
+    lock = choice_lock_moves()
+    for m in ("stealthrock", "spikes", "roost", "recover", "rest", "protect", "substitute", "quiverdance"):
+        assert m in lock, m
+    for m in ("quiverdance", "shellsmash", "bellydrum", "agility"):
+        bad = SetCandidate("volcarona", "flamebody", "choicespecs", "modest", "2/0/0/32/0/32",
+                           ["fierydance", "bugbuzz", "gigadrain", m])
+        assert any("こだわり" in p for p in set_sanity(bad)), (m, set_sanity(bad))
+    ok = SetCandidate("volcarona", "flamebody", "choicespecs", "modest", "2/0/0/32/0/32",
+                      ["fierydance", "bugbuzz", "gigadrain", "flamecharge"])
+    assert not [p for p in set_sanity(ok) if "こだわり" in p], set_sanity(ok)
+    print("test_choice_lock_covers_all_setup_moves OK")
+
+
 if __name__ == "__main__":
     test_item_clause_and_text()
     test_order_candidates_usage_prior()
@@ -216,3 +239,4 @@ if __name__ == "__main__":
     test_splice_registered_sets()
     test_prefer_registered_keeps_registered_items()
     test_set_sanity_berry_moves()
+    test_choice_lock_covers_all_setup_moves()
