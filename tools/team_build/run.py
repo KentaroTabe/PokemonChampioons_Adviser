@@ -149,7 +149,7 @@ def stage_s1_s3(run_dir: Path, spec: BuildSpec, prof: dict, seed: int, top_n: in
         log(run_dir, f"S3 extra threats: +{len(added)} {added}")
     owned = [s for s in spec.owned if s not in set(spec.banned)]
     usage_w = {t["id"]: threat_weight(t) for t in doc["top"] if t["id"] in tv}
-    gen = make_generator(tv, usage_w)
+    gen = make_generator(tv, usage_w, doc["snapshot"]["id"])
     res = species_features(owned, doc, tv, custom_sets=custom_sets_of(spec), required_moves=spec.required_moves,
                            generator=gen)
     save_features(res, run_dir)
@@ -169,12 +169,25 @@ def custom_sets_of(spec: BuildSpec) -> dict:
     return {sid: S.candidate_from_row(sid, row) for sid, row in (spec.custom_sets or {}).items()}
 
 
-def make_generator(tv: dict, threat_weights: Optional[dict]):
+def make_generator(tv: dict, threat_weights: Optional[dict], snapshot_id: Optional[int] = None):
     """learnset からの型生成 (gen_sets.generate_for_species) を種ごとにキャッシュする callable。
-    BUILD_GEN_SETS=off なら常に空。戻り値の callable は sid → [SetCandidate]、.items(sid) → 持ち物の候補"""
+    BUILD_GEN_SETS=off なら常に空。戻り値の callable は sid → [SetCandidate]、.items(sid) → 持ち物の候補。
+    snapshot_id があれば使用率 DB のその種の技の使用率を渡す (補助技は使用率の高いものを先に採る。2026-10-02)"""
     from champions_agent.config import BUILD_GEN_SETS
     from tools.team_build import gen_sets as G
     cache: dict = {}
+    usage_cache: dict = {}
+
+    def usage_of(sid: str) -> Optional[dict]:
+        if snapshot_id is None:
+            return None
+        if sid not in usage_cache:
+            try:
+                with db.get_connection() as conn:
+                    usage_cache[sid] = S.move_usage_pct(conn, snapshot_id, sid)
+            except Exception:
+                usage_cache[sid] = None
+        return usage_cache[sid]
 
     def _run(sid: str, field: Optional[dict] = None) -> dict:
         """field = 並びの場 (設置役が張るフィールド/天候) の前提。種 × 場ごとにキャッシュ"""
@@ -184,7 +197,8 @@ def make_generator(tv: dict, threat_weights: Optional[dict]):
                 cache[key] = {"sets": [], "items": []}
             else:
                 try:
-                    cache[key] = G.generate_for_species(sid, tv, threat_weights, assumed_field=field)
+                    cache[key] = G.generate_for_species(sid, tv, threat_weights, assumed_field=field,
+                                                        move_pct=usage_of(sid))
                 except Exception as e:  # 生成できない種は空 (使用率の型だけで進む)
                     cache[key] = {"sets": [], "items": [], "error": repr(e)}
         return cache[key]
@@ -1012,7 +1026,7 @@ def main() -> None:
                 threat_weights[sid] = threat_weights.get(sid, median) * (1.0 + BUILD_SESSION_THREAT_BOOST * w)
         log(run_dir, f"S3 session threat weights: {len([s for s in session_w if s in tv])} 種に反映 (boost {BUILD_SESSION_THREAT_BOOST})")
     # learnset からの型生成 (想定する相手 = 脅威の重み) と、規則の判定材料 (構築の軸も同じ材料を使う)
-    gen = make_generator(tv, threat_weights)
+    gen = make_generator(tv, threat_weights, doc["snapshot"]["id"])
     use_arch = args.archetypes == "on"
     capture: Optional[dict] = {} if use_arch else None
     rule_ctx = rule_context(run_dir, spec, feats, doc["snapshot"]["id"], tv, gen=gen,

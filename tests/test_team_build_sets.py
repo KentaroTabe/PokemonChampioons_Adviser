@@ -191,6 +191,20 @@ def test_prefer_registered_keeps_registered_items():
     print("test_prefer_registered_keeps_registered_items OK")
 
 
+def test_set_sanity_berry_moves():
+    """ゲップはきのみを食べた後しか出せない: きのみ以外の持ち物と組んだ型は常識フィルタで落とす (2026-10-02)"""
+    from tools.team_build.sets import set_sanity
+    moves = ["belch", "flamethrower", "slackoff", "chillyreception"]
+    bad = SetCandidate("slowkinggalar", "regenerator", "leftovers", "modest", "32/0/0/32/0/2", moves)
+    assert any("ゲップ" in p for p in set_sanity(bad)), set_sanity(bad)
+    ok = SetCandidate("slowkinggalar", "regenerator", "sitrusberry", "modest", "32/0/0/32/0/2", moves)
+    assert not [p for p in set_sanity(ok) if "ゲップ" in p], set_sanity(ok)
+    plain = SetCandidate("slowkinggalar", "regenerator", "leftovers", "modest", "32/0/0/32/0/2",
+                         ["sludgebomb", "flamethrower", "slackoff", "chillyreception"])
+    assert not [p for p in set_sanity(plain) if "ゲップ" in p]
+    print("test_set_sanity_berry_moves OK")
+
+
 if __name__ == "__main__":
     test_item_clause_and_text()
     test_order_candidates_usage_prior()
@@ -201,3 +215,4 @@ if __name__ == "__main__":
     test_parse_set_text_and_candidate_row()
     test_splice_registered_sets()
     test_prefer_registered_keeps_registered_items()
+    test_set_sanity_berry_moves()

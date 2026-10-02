@@ -20,8 +20,9 @@ from champions_agent.config import (BUILD_GEN_ABILITY_PRIORITY, BUILD_GEN_ARCHET
                                     BUILD_GEN_EV_STEP, BUILD_GEN_EV_THREATS, BUILD_GEN_EV_TUNE, BUILD_GEN_EV_WEIGHTS,
                                     BUILD_GEN_FAST_SPEED_SHARE, BUILD_GEN_MAX_ATTACKS,
                                     BUILD_GEN_MAX_SETS, BUILD_GEN_MEGA_SETS, BUILD_GEN_POINT_BUDGET,
-                                    BUILD_GEN_SETUP_ITEMS, BUILD_GEN_SPEED_GAIN_MIN, BUILD_GEN_TEMPLATES,
-                                    BUILD_GEN_UTILITY_MOVES, BUILD_GEN_WALL_OFFENSE_MAX, BUILD_TRICK_ROOM_MOVES)
+                                    BUILD_GEN_SETUP_BOOSTS, BUILD_GEN_SETUP_ITEMS, BUILD_GEN_SETUP_RANK,
+                                    BUILD_GEN_SPEED_GAIN_MIN, BUILD_GEN_TEMPLATES, BUILD_GEN_UTILITY_MOVES,
+                                    BUILD_GEN_UTILITY_USAGE_MIN, BUILD_GEN_WALL_OFFENSE_MAX, BUILD_TRICK_ROOM_MOVES)
 from tools.team_build.sets import SetCandidate
 
 STAB_MULT = 1.5
@@ -435,6 +436,70 @@ def assemble_sets(species_id: str, pool: dict, pick_attacks: Callable, archetype
     return out
 
 
+def setup_boosts(move: str, setup_moves: Optional[dict] = None, extra: dict = BUILD_GEN_SETUP_BOOSTS) -> dict:
+    """積み技の能力変化 (段数)。advisor.search.SETUP_MOVES → 無ければ config の補完表 → 無ければ {}"""
+    if setup_moves is None:
+        from advisor.search import SETUP_MOVES
+        setup_moves = SETUP_MOVES
+    return dict(setup_moves.get(move) or extra.get(move) or {})
+
+
+def setup_rank_key(archetype: str) -> tuple:
+    """型の定型 → (主能力, 速攻型か, 壁型か)。攻撃型の主能力は型の分類の攻撃、壁型は守る側 (wall_physical = 防御、
+    wall_special = 特防)"""
+    wall = str(archetype or "").startswith("wall")
+    special = str(archetype or "").endswith("special")
+    main = ("spd" if special else "def") if wall else ("spa" if special else "atk")
+    return main, str(archetype or "").startswith("fast"), wall
+
+
+def setup_score(boosts: dict, archetype: str, weights: dict = BUILD_GEN_SETUP_RANK) -> float:
+    """積み技の点: 主能力の上昇 × attack + 素早さの上昇 × speed_fast/speed_bulky (壁型は other) + 他の上昇 × other
+    − 下降 × down"""
+    main, fast, wall = setup_rank_key(archetype)
+    score = float(weights["attack"]) * max(0, int(boosts.get(main, 0) or 0))
+    for k, v in boosts.items():
+        v = int(v or 0)
+        if k == main or v == 0:
+            continue
+        if v < 0:
+            score -= float(weights["down"]) * (-v)
+        elif k == "spe" and not wall:
+            score += float(weights["speed_fast"] if fast else weights["speed_bulky"]) * v
+        else:
+            score += float(weights["other"]) * v
+    return score
+
+
+def rank_setup_moves(moves, archetype: str, boosts_of: Optional[Callable] = None,
+                     weights: dict = BUILD_GEN_SETUP_RANK) -> list:
+    """積み技を型の定型に合う順に並べる (2026-10-02: それまでは役割辞書の並び順で、ウルガモスにめいそうが入った)。
+    攻撃型で主攻撃が上がらない技は最後。同点は元の順 (安定ソート)"""
+    boosts_of = boosts_of or setup_boosts
+    main, _fast, wall = setup_rank_key(archetype)
+
+    def key(m: str) -> tuple:
+        b = boosts_of(m) or {}
+        no_main = 0 if (wall or int(b.get(main, 0) or 0) > 0) else 1
+        return (no_main, -setup_score(b, archetype, weights))
+    return sorted(moves, key=key)
+
+
+def order_utility(utility: dict, archetype: str, move_pct: Optional[dict] = None,
+                  usage_min: float = BUILD_GEN_UTILITY_USAGE_MIN, boosts_of: Optional[Callable] = None) -> dict:
+    """役割ごとの補助技の候補を並べ替える: 使用率 usage_min % 以上の技を使用率順で先に、残りは積み技なら
+    rank_setup_moves、他の役割は元の順。テンプレートは先頭から採るので、この順が生成型の補助技を決める"""
+    pct = {k: float(v or 0.0) for k, v in (move_pct or {}).items()}
+    out: dict = {}
+    for role, moves in utility.items():
+        used = sorted((m for m in moves if pct.get(m, 0.0) >= float(usage_min)), key=lambda m: -pct[m])
+        rest = [m for m in moves if m not in used]
+        if role == "setup":
+            rest = rank_setup_moves(rest, archetype, boosts_of)
+        out[role] = used + rest
+    return out
+
+
 def generated_usage_gap(moves, rep_moves, move_pct: dict) -> float:
     """使用率がある種の生成型の罰則材料: 代表型に無い技それぞれの (代表型で最も使用率の低い技 − その技の使用率)+ の平均 (0..1)"""
     novel = [m for m in moves if m not in rep_moves]
@@ -504,10 +569,10 @@ def legal_item_tables(archetypes=BUILD_GEN_ARCHETYPES, setup_items=BUILD_GEN_SET
 def _generate_form(species_id: str, learnset, base: dict, types: list, eval_abilities: list,
                    set_ability: Optional[str], fixed_item: Optional[str], extra_notes, threat_views: dict,
                    weights: dict, dex, max_sets: int = BUILD_GEN_MAX_SETS,
-                   team_field: Optional[dict] = None) -> dict:
+                   team_field: Optional[dict] = None, move_pct: Optional[dict] = None) -> dict:
     """1 フォルム (通常 / メガ後) の型生成。評価 (フィールド・接地・与ダメ・配分) は base/types/eval_abilities で、
     型に書く特性は set_ability (メガ型はメガ前の特性)。team_field = 並びの場 (味方の設置役・規則の前提)。
-    戻り値 {"sets", "items", "archetype"}"""
+    move_pct = その種の技の使用率 (補助技の並べ替え。無ければ能力変化で並べる)。戻り値 {"sets", "items", "archetype"}"""
     from advisor.damage import MonView, _is_grounded, calc_damage, effective_speed
     from advisor.ev_infer import _nature_mult
     from tools.team_build.interaction import _points_to_ev
@@ -549,6 +614,8 @@ def _generate_form(species_id: str, learnset, base: dict, types: list, eval_abil
             else:
                 spec_p += w * d
     archetype = choose_archetype(base, share_plus, phys_p, spec_p)
+    # 補助技の候補の順 = 使用率順 → 積み技は型の定型に合う能力変化の順 (テンプレートは先頭から採る)
+    pool = dict(pool, utility=order_utility(pool["utility"], archetype, move_pct))
     archetypes, setup_items = legal_item_tables()
     arch = archetypes[archetype]
     if archetype.startswith("wall"):
@@ -681,12 +748,13 @@ def tune_set_spread(s: SetCandidate, base: dict, types: list, ability: Optional[
 
 def generate_for_species(species_id: str, threat_views: dict, threat_weights: Optional[dict] = None,
                          learnset_table: Optional[dict] = None, cdex_species: Optional[dict] = None,
-                         assumed_field: Optional[dict] = None) -> dict:
+                         assumed_field: Optional[dict] = None, move_pct: Optional[dict] = None) -> dict:
     """{"sets": [SetCandidate], "items": [item ids], "archetype": str, "megas": [メガ後の種族 id]}。learnset が無ければ空。
     threat_views: {threat_id: (MonView, moves)} (想定する相手)。threat_weights で特定の相手を重くできる。
     メガ石を持てる種は、メガ後の種族値・タイプ・特性 (メガリザードン Y のひでり等) でメガ型を別に生成する
     (フォルムごと BUILD_GEN_MEGA_SETS 型、持ち物はその石、型に書く特性はメガ前のもの)。
-    assumed_field = 並びの場 (味方の設置役・規則の前提: {"terrain", "weather"})。その前提で技・配分を選び、注記 under: を付ける"""
+    assumed_field = 並びの場 (味方の設置役・規則の前提: {"terrain", "weather"})。その前提で技・配分を選び、注記 under: を付ける。
+    move_pct = その種の技の使用率 {move: %} (補助技は使用率の高いものを先に採る。無ければ能力変化で並べる)"""
     import json
     from pathlib import Path
 
@@ -719,7 +787,7 @@ def generate_for_species(species_id: str, threat_views: dict, threat_weights: Op
     team_field = assumed_field if has_field(assumed_field) else None
     under = tuple(f"under:{k}={v}" for k, v in (team_field or {}).items() if v)
     res = _generate_form(species_id, learnset, dict(sp["baseStats"]), list(sp["types"]), abilities, None, None, under,
-                         threat_views, weights, dex, team_field=team_field)
+                         threat_views, weights, dex, team_field=team_field, move_pct=move_pct)
     sets = list(res["sets"])
     set_ability = choose_ability(abilities)
     for sid2, stone, e2 in megas:
@@ -727,7 +795,7 @@ def generate_for_species(species_id: str, threat_views: dict, threat_weights: Op
         mab = [_toid(v) for k, v in sorted((e2.get("abilities") or {}).items())] or abilities
         mres = _generate_form(species_id, learnset, dict(msp["baseStats"]), list(msp["types"]), mab, set_ability, stone,
                               (f"gen:mega:{sid2}",) + under, threat_views, weights, dex, max_sets=BUILD_GEN_MEGA_SETS,
-                              team_field=team_field)
+                              team_field=team_field, move_pct=move_pct)
         sets += mres["sets"]
     return {"sets": sets, "items": res["items"], "archetype": res["archetype"], "megas": [m[0] for m in megas],
             "mega": megas[0][0] if megas else None}

@@ -269,6 +269,71 @@ def test_ev_tuning_helpers():
     print("test_ev_tuning_helpers OK")
 
 
+def test_setup_move_ranking_and_usage_order():
+    """補助技の優先 (2026-10-02 ユーザー指摘: ウルガモスの生成型にちょうのまいでなくめいそうが入った)。
+    積み技は役割辞書の並び順でなく、型の定型に合う能力変化の段数で並べる。使用率があればそれを先に"""
+    boosts = {"swordsdance": {"atk": 2}, "nastyplot": {"spa": 2}, "dragondance": {"atk": 1, "spe": 1},
+              "calmmind": {"spa": 1, "spd": 1}, "quiverdance": {"spa": 1, "spd": 1, "spe": 1}, "agility": {"spe": 2},
+              "irondefense": {"def": 2}, "bulkup": {"atk": 1, "def": 1}, "curse": {"atk": 1, "def": 1, "spe": -1},
+              "shellsmash": {"atk": 2, "spa": 2, "spe": 2, "def": -1, "spd": -1}}
+    of = boosts.get
+    # ウルガモス: めいそう (辞書で先) より ちょうのまい (特攻 + 素早さ)。速攻型でも耐久型でも
+    assert G.rank_setup_moves(["calmmind", "quiverdance", "agility"], "fast_special", of) == ["quiverdance", "calmmind", "agility"]
+    assert G.rank_setup_moves(["calmmind", "quiverdance"], "bulky_special", of) == ["quiverdance", "calmmind"]
+    # 攻撃型で主攻撃が上がらない積み技は最後 (その中では素早さが上がる方が先)
+    assert G.rank_setup_moves(["agility", "swordsdance", "nastyplot"], "fast_special", of) == ["nastyplot", "agility", "swordsdance"]
+    # 物理: からをやぶる > つるぎのまい = りゅうのまい (同点は元の順) > ビルドアップ > のろい。耐久型は素早さの重みが半分
+    assert G.rank_setup_moves(["dragondance", "swordsdance", "shellsmash", "bulkup", "curse"], "fast_physical", of) == \
+        ["shellsmash", "dragondance", "swordsdance", "bulkup", "curse"]
+    assert G.rank_setup_moves(["dragondance", "swordsdance", "bulkup", "curse"], "bulky_physical", of) == \
+        ["swordsdance", "dragondance", "bulkup", "curse"]
+    # 壁型は守る側が主: 物理壁は てっぺき > ビルドアップ > のろい、特殊壁は ちょうのまい > めいそう
+    assert G.rank_setup_moves(["curse", "bulkup", "irondefense"], "wall_physical", of) == ["irondefense", "bulkup", "curse"]
+    assert G.rank_setup_moves(["calmmind", "quiverdance"], "wall_special", of) == ["quiverdance", "calmmind"]
+    assert G.setup_score({"spa": 1, "spd": 1, "spe": 1}, "fast_special") == 2.25
+    assert G.setup_score({"spa": 1, "spd": 1, "spe": 1}, "bulky_special") == 1.75
+    assert G.setup_score({"spa": 1, "spd": 1}, "fast_special") == 1.25
+    # 使用率があればその順が先 (10% 以上)、残りは能力変化の順。他の役割は使用率順の後は元の順
+    utility = {"setup": ("calmmind", "quiverdance"), "status": ("willowisp", "toxic", "thunderwave"), "protect": ("protect",)}
+    pct = {"quiverdance": 97.2, "calmmind": 0.5, "thunderwave": 30.0, "toxic": 2.0}
+    ordered = G.order_utility(utility, "bulky_special", pct, usage_min=10.0, boosts_of=of)
+    assert ordered["setup"] == ["quiverdance", "calmmind"] and ordered["status"] == ["thunderwave", "willowisp", "toxic"]
+    assert ordered["protect"] == ["protect"]
+    # 使用率が無い種: 積み技は能力変化の順、他はそのまま
+    none = G.order_utility({"setup": ("calmmind", "quiverdance"), "status": ("willowisp", "toxic")}, "fast_special", None, boosts_of=of)
+    assert none["setup"] == ["quiverdance", "calmmind"] and none["status"] == ["willowisp", "toxic"]
+    # 使用率がめいそうに付いていても閾値未満なら能力変化が勝つ
+    low = G.order_utility({"setup": ("calmmind", "quiverdance")}, "fast_special", {"calmmind": 9.9}, usage_min=10.0, boosts_of=of)
+    assert low["setup"] == ["quiverdance", "calmmind"]
+    # 実データ: advisor.search.SETUP_MOVES に無い積み技は config の補完表、知らない技は {}
+    assert G.setup_boosts("quiverdance") == {"spa": 1, "spd": 1, "spe": 1}
+    assert G.setup_boosts("shiftgear") == {"atk": 1, "spe": 2} and G.setup_boosts("nosuchmove") == {}
+    assert G.rank_setup_moves(["calmmind", "quiverdance"], "fast_special")[0] == "quiverdance"
+    # テンプレートは並べ替えた先頭を採る
+    pool = G.prune_moves(set(MOVES), MOVES.get, DELPHOX, ("Fire", "Psychic"), ROLES)
+    pool = dict(pool, utility=G.order_utility(pool["utility"], "fast_special", {"calmmind": 55.0}, boosts_of=of))
+    table = {"flamethrower": {"t1": 0.9}, "psychic": {"t1": 0.3}, "dazzlinggleam": {"t1": 0.4}}
+
+    def pick(n, exclude):
+        return G.greedy_attacks({m: r for m, r in table.items() if m not in exclude}, n)
+
+    sets = G.assemble_sets("delphox", pool, pick, "fast_special", "timid", "blaze",
+                           templates=({"name": "attack3_setup", "attacks": 3, "utility": ("setup",)},))
+    assert sets[0].moves[3] == "calmmind"
+    print("test_setup_move_ranking_and_usage_order OK")
+
+
+def test_avoid_belch():
+    """ゲップ (きのみを食べた後しか出せない) は生成型の攻撃技に入れない (2026-10-02 ユーザー指摘)"""
+    assert "belch" in G.BUILD_GEN_AVOID_MOVES
+    moves = dict(MOVES, belch={"type": "Poison", "category": "Special", "power": 120, "accuracy": 90},
+                 sludgebomb={"type": "Poison", "category": "Special", "power": 90, "accuracy": 100})
+    pool = G.prune_moves(set(moves), moves.get, DELPHOX, ("Fire", "Psychic"), ROLES)
+    names = [a.move for a in pool["attacks"]]
+    assert "belch" not in names and "sludgebomb" in names, names
+    print("test_avoid_belch OK")
+
+
 if __name__ == "__main__":
     test_prune_moves()
     test_greedy_attacks_and_shares()
@@ -277,3 +342,5 @@ if __name__ == "__main__":
     test_prune_moves_with_field()
     test_assemble_field_dependent_pick()
     test_ev_tuning_helpers()
+    test_setup_move_ranking_and_usage_order()
+    test_avoid_belch()

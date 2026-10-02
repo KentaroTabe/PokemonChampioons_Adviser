@@ -166,6 +166,14 @@ def _rows(conn, table: str, col: str, snapshot_id: int, name: str, min_pct: floa
     return rows
 
 
+def move_usage_pct(conn, snapshot_id: int, species_id: str) -> dict:
+    """その種の技の使用率 {move_id: usage_percent} (無ければ {})。生成型の補助技の並べ替えに使う"""
+    out: dict = {}
+    for m, p in _rows(conn, "move_usage", "move_name", snapshot_id, species_id, 0.0):
+        out[m] = max(out.get(m, 0.0), float(p or 0.0))
+    return out
+
+
 def representative_set(conn, snapshot_id: int, species_id: str) -> Optional[SetCandidate]:
     r = conn.execute(
         "SELECT ability_name, item_name, nature, evs, move1, move2, move3, move4 FROM meta_sets "
@@ -301,7 +309,7 @@ def _mega_stones() -> set:
 
 def set_sanity(c: "SetCandidate") -> list:
     """型の常識フィルタ (問題の一覧、空なら OK)。データ由来の単独入替が作る不整合だけを落とす"""
-    from champions_agent.config import OFFENSIVE_ITEM_IDS
+    from champions_agent.config import BUILD_SET_BERRY_MOVES, OFFENSIVE_ITEM_IDS
     from champions_agent.data.build_meta import _is_offensive_spread
     problems = []
     item = (c.item or "").lower()
@@ -314,6 +322,8 @@ def set_sanity(c: "SetCandidate") -> list:
         problems.append("カゴのみ + ねむる無し")
     if item == "lumberry" and c.source.startswith("alt:item") and "rest" in c.moves:
         problems.append("ラムのみ + ねむる (カゴが本来)")
+    if any(m in BUILD_SET_BERRY_MOVES for m in c.moves) and not item.endswith("berry"):
+        problems.append("ゲップ + きのみ無し (きのみを食べた後しか出せない)")
     return problems
 
 

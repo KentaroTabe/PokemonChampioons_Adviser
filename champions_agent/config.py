@@ -461,7 +461,24 @@ BUILD_GEN_AVOID_MOVES = ("hyperbeam", "gigaimpact", "explosion", "selfdestruct",
                          "mistyexplosion", "steelbeam", "mindblown", "chloroblast", "finalgambit", "memento",
                          # 反動 (次のターン動けない) と 2 ターン技 (生成型では扱わない)
                          "blastburn", "frenzyplant", "hydrocannon", "rockwrecker", "roaroftime", "eternabeam",
-                         "fly", "dig", "dive", "bounce", "phantomforce", "shadowforce", "skydrop")
+                         "fly", "dig", "dive", "bounce", "phantomforce", "shadowforce", "skydrop",
+                         # きのみを食べた後しか出せず 1 試合に実質 1 回 (2026-10-02 ユーザー指摘: ガラルヤドキングの生成型に入った)
+                         "belch")
+# 生成型の補助技の優先 (2026-10-02 ユーザー指摘: ウルガモスの生成型にちょうのまいでなくめいそうが入った。役割辞書
+# (advisor.search.SETUP_MOVES) の並び順をそのまま先頭から採っていた)。役割ごとに、使用率がある種は使用率が
+# UTILITY_USAGE_MIN % 以上の技を使用率順で先に、残り (使用率が無い種は全部) の積み技は能力変化の段数の重みつき和で並べる:
+#   主能力の上昇 × attack (攻撃型は型の分類の攻撃、壁型は守る側: wall_physical = 防御 / wall_special = 特防)、
+#   素早さの上昇 × speed_fast (速攻型) / speed_bulky (耐久型)、他の上昇 × other、下降 × down (引く)。
+#   攻撃型で主攻撃が上がらない積み技 (こうそくいどう等) は最後。他の役割は使用率順の後は辞書の順のまま
+BUILD_GEN_UTILITY_USAGE_MIN = 10.0
+BUILD_GEN_SETUP_RANK = {"attack": 1.0, "speed_fast": 1.0, "speed_bulky": 0.5, "other": 0.25, "down": 0.25}
+# advisor.search.SETUP_MOVES に無い積み技の能力変化 (生成型の並べ替えだけに使う。助言の探索の辞書は変えない)
+BUILD_GEN_SETUP_BOOSTS = {"rockpolish": {"spe": 2}, "autotomize": {"spe": 2}, "shiftgear": {"atk": 1, "spe": 2},
+                          "tidyup": {"atk": 1, "spe": 1}, "geomancy": {"spa": 2, "spd": 2, "spe": 2},
+                          "flamecharge": {"spe": 1}, "trailblaze": {"spe": 1}, "rapidspin": {"spe": 1},
+                          "aquastep": {"spe": 1}}
+# 型の常識フィルタ (sets.set_sanity): きのみを食べた後しか出せない技は、きのみ以外の持ち物と組ませない
+BUILD_SET_BERRY_MOVES = ("belch",)
 # テンプレート: attacks = 攻撃技の本数、utility = 補助技の役割 (順に埋める。埋まらなければそのテンプレートは捨てる)
 BUILD_GEN_TEMPLATES = (
     {"name": "attack3_setup", "attacks": 3, "utility": ("setup",)},
