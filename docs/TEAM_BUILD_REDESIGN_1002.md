@@ -534,6 +534,19 @@ lineups = select_with_quotas(lineups)
   マージ (--no-ff) は 1002d の終了後。最初の本 run は 1002d と同じ条件で回し、結果を比べる。
 - 助言側に効く変更 (damage.py の特性・命中・条件つき技) は training_changes.json に記録する。
 
+### 17.1 実装状況 (2026-10-02 夜、worktree feat/gen-sets-design、マージ前)
+
+| 段階 | 状態 | コミット / 成果物 |
+|---|---|---|
+| 1. データ | 済 | 03de850f (move_effects / move_priority、tools/build_move_data.py)、c2a186fa (ability_effects 226、tools/build_ability_data.py)、03b0666c (advisor/effects.py → damage.py: 連続・急所・可変・条件・天候命中、expected) |
+| 2. 型の一体生成 | 済 (2a) | c808ced0 (tools/team_build/role_sets.py、config BUILD_ROLE_TEMPLATES 他)。残り: pokedb の種 × 持ち物の順、§12 自爆の費用 (BUILD_SELFKO_COST) |
+| 3. S5 統合段 | 済 | 54add0a2 (lineup_search.py / joint_stage.py、run.py --search-mode joint 既定、S4 スキーマ core[].role / complement_requirements / plan、legal_item が mod の "Past" 持ち物を除く)。煙試験: 1002d の成果物で 4 構想 113 秒、9/9 合法。残り: §4.2 LLM 入力の軽量化 |
+| 4. 戻り | 済 (実対戦は未確認) | 9cd59dfd (repair.py: 診断 → 制約 → 修理モード B/A → 系譜、pipeline.py の S9 を S8a 後 / S8b 後に。--repairs 既定 2)。煙試験: 1002d の screening 記録 300 戦の診断 → 変種 1 |
+| 5. 文書 | 済 (この節と実装文書 §12、DEV_COMMANDS、training_changes.json) | 記事の担当・系譜の表示は未 (s06 の roles / assignments / fills / selection_plan を記事が読む変更は次回) |
+
+- 1002d の終了後: `git merge --no-ff feat/gen-sets-design` → 1002d と同じ条件 (medium、--ace ミミロップ、--sets-file、--reuse-concepts は不可: S4 の
+  スキーマが変わったので S4 からやり直す) で本 run → 1002d と比べる。初回は S5 の所要時間 (96 構想) と S9 のログ (変種数・生存数) を見る。
+
 ## 18. 未決事項 (2026-10-02 夕方に全部解決)
 
 1. 核が 2 体の構想の 3 体目 → 順に選ぶ (D-24、§5.2)。
