@@ -23,6 +23,10 @@ def test_template_resolution_and_bulk():
     assert R.classify_bulk("2/32/0/0/0/32", item="leftovers") == "bulky" and R.classify_bulk("0/0/0/0/0/0", item="focussash") == "fast"
     assert R.classify_bulk("2/32/0/0/0/32", template_spread="wall_auto") == "bulky"
     assert R.classify_bulk("10/32/0/0/0/24") == "fast" and R.classify_bulk("16/16/0/0/0/16") == "bulky"
+    # 微調整した配分は雛形の性格を保つものだけ採る (速攻: 素早さと主攻撃 ≥ 24、耐久: HP か防御側 ≥ 24)
+    assert R.spread_keeps_class("10/32/0/0/0/24", "fast") and not R.spread_keeps_class("8/24/0/0/19/15", "fast")
+    assert R.spread_keeps_class("32/0/10/8/0/16", "bulky") and not R.spread_keeps_class("0/32/0/0/16/18", "bulky")
+    assert not R.spread_keeps_class("bad", "fast")
     print("test_template_resolution_and_bulk OK")
 
 

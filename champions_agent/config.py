@@ -628,6 +628,7 @@ BUILD_ROLE_OFFENSE_MIN = 90          # 役割の指定が無い種に攻撃役 (
 BUILD_ROLE_WALL_OFFENSE_MAX = 110    # 役割の指定が無い種に壁役を試す攻撃種族値の上限 (回復技を覚えるとき)
 BUILD_ARCHETYPE_SPEED_PLAN = {"trick_room": "trick_room", "speed": "outspeed"}   # 軸 → 速度の計画 (他は neutral)
 BUILD_JOINT_REFINE_TARGETS = True    # 仕上げ: 並びが決まった後、各個体の型を担当 (選出計画の相手) に合わせて作り直す (点が上がるときだけ。D-04)
+BUILD_SELFKO_COST = 1.0              # 自爆・捨て技 (だいばくはつ / おきみやげ / みちづれ / いのちがけ) の費用 (§12): 被覆の行では 1 回だけ数え (最も効く相手 1 体にだけ技の利得を足す)、利得をその個体の他の相手への被覆の平均 × この値だけ割り引く
 # テンプレート: attacks = 攻撃技の本数、utility = 補助技の役割 (順に埋める。埋まらなければそのテンプレートは捨てる)
 BUILD_GEN_TEMPLATES = (
     {"name": "attack3_setup", "attacks": 3, "utility": ("setup",)},

@@ -351,13 +351,14 @@ class LineupSearch:
     prefilter(species_ids, hole_species: list, unmet_roles: list, k) → 種の順 (None なら先頭 k)"""
 
     def __init__(self, pool: OppPool, candidates_fn: Callable, row_fn: Callable, prefilter: Optional[Callable] = None,
-                 log: Optional[Callable] = None, capable: Optional[Callable] = None):
+                 log: Optional[Callable] = None, capable: Optional[Callable] = None, row_post: Optional[Callable] = None):
         self.pool = pool
         self.fam_matrix, self.fam_w = pool.family_matrix()
         self.lib = Library()
         self.candidates_fn = candidates_fn
         self.row_fn = row_fn
         self.prefilter = prefilter
+        self.row_post = row_post             # row_post(entry, 行ベクトル, pool) → 行ベクトル (自爆技の 1 回だけの費用など、任意)
         self.capable = capable               # capable(sid, role) → 役割の指定が無い核に、要求された役割を試すか (None なら試さない)
         self.log = log or (lambda m: None)
         self.n_rows_computed = 0
@@ -369,8 +370,10 @@ class LineupSearch:
         for i in idxs:
             if not self.lib.done[i]:
                 e = self.lib.entries[i]
-                for j, opp in enumerate(self.pool.sets):
-                    self.lib.cov[i, j] = float(self.row_fn(e, opp))
+                vec = np.array([float(self.row_fn(e, opp)) for opp in self.pool.sets], dtype=np.float32)
+                if self.row_post is not None:
+                    vec = np.asarray(self.row_post(e, vec, self.pool), dtype=np.float32)
+                self.lib.cov[i, :] = vec
                 self.lib.done[i] = True
                 self.n_rows_computed += len(self.pool.sets)
         return self.lib.cov[idxs]

@@ -304,6 +304,19 @@ def test_joint_stage_pure():
         [("screens_dual", 1), ("setup_ace", 2), ("ohko_user", 1)]
     assert J.branch_roles_of({"name": "llm"}, arch) == []
     assert J.family_weight(2, {"a", "b"}, {"b": 1.0}, boost=2.0) == 6.0 and J.family_weight(1, {"a"}, None) == 1.0
+    # 自爆技の 1 回だけの費用 (§12): 利得が最大の相手 1 体にだけ足し、個体の他の相手への被覆の平均 × cost で割り引く
+    adj = J.selfko_adjust([0.9, 0.8, 0.5], [0.2, 0.6, 0.5], cost=1.0)
+    close = lambda a, b: abs(float(a) - float(b)) < 1e-5     # noqa: E731 (float32)
+    assert close(adj[0], 0.2 + 0.7 * (1.0 - (0.2 + 0.6 + 0.5) / 3)) and close(adj[1], 0.6) and close(adj[2], 0.5)
+    adj0 = J.selfko_adjust([0.9, 0.8], [0.2, 0.6], cost=0.0)
+    assert close(adj0[0], 0.9) and close(adj0[1], 0.6)
+    assert all(close(v, 0.3) for v in J.selfko_adjust([0.1, 0.1], [0.3, 0.3]))
+    assert J.selfko_moves(["explosion", "tackle", "memento", "destinybond"]) == ["explosion", "memento"]     # みちづれは自爆ではない
+    # 探索器の行の後処理: 自爆技を持つ型の行は技なしの行 + 1 体分の利得
+    s = _search()
+    s.row_post = lambda e, vec, pool: vec * 0.5
+    i = s.lib.add(_entry("core1", "breaker", "core1_x", "lifeorb", False, {}))
+    assert abs(float(s.rows_for([i])[0][0]) - 0.45) < 1e-6
     print("test_joint_stage_pure OK")
 
 

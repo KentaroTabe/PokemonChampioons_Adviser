@@ -18,8 +18,8 @@ from typing import Callable, Optional
 
 from champions_agent.config import (BUILD_ARCHETYPE_SPEED_PLAN, BUILD_COMPLEMENT_ROLE_SPECIES_K, BUILD_INCUMBENT_NEIGHBORS,
                                     BUILD_JOINT_REFINE_TARGETS, BUILD_ROLE_FIELD_MOVES, BUILD_ROLE_OFFENSE_MIN,
-                                    BUILD_ROLE_UTILITY_MOVES, BUILD_ROLE_WALL_OFFENSE_MAX, BUILD_SESSION_THREAT_BOOST,
-                                    BUILD_WALL_SPEED_MAX)
+                                    BUILD_ROLE_UTILITY_MOVES, BUILD_ROLE_WALL_OFFENSE_MAX, BUILD_SELFKO_COST,
+                                    BUILD_SESSION_THREAT_BOOST, BUILD_WALL_SPEED_MAX)
 from tools.team_build import candidates as C
 from tools.team_build import sets as S
 from tools.team_build.lineup_search import (TEAM_SIZE, LineupResult, LineupSearch, OppPool, OppSet, SearchConfig, SetEntry,
@@ -192,6 +192,40 @@ def pool_from_split(doc: dict, tier: str = "search", session_weights: Optional[d
         species = {s for t in f.get("teams", []) for s in ((doc.get("teams") or {}).get(t) or {}).get("species", [])}
         fams.append((f["family_id"], family_weight(len(f.get("teams", [])), species, session_weights), list(f.get("teams", []))))
     return OppPool.build(teams, fams)
+
+
+def selfko_adjust(with_move, without_move, cost: float = BUILD_SELFKO_COST):
+    """自爆・捨て技の 1 回だけの費用 (§12、純粋): 行 = 技なしの行に、利得 (技あり − 技なし) が最大の相手 1 体へだけ利得を足す。
+    利得は「使った個体を失う費用」としてその個体の他の相手への被覆の平均 × cost だけ割り引く (負にはしない)"""
+    import numpy as np
+    w = np.asarray(with_move, dtype=np.float32)
+    wo = np.asarray(without_move, dtype=np.float32)
+    gain = np.clip(w - wo, 0.0, None)
+    out = wo.copy()
+    if gain.size and float(gain.max()) > 0.0:
+        j = int(np.argmax(gain))
+        out[j] = wo[j] + float(gain[j]) * max(0.0, 1.0 - float(cost) * float(wo.mean()))
+    return out
+
+
+def selfko_moves(moves: list) -> list:
+    from advisor.effects import move_entry
+    return [m for m in moves if move_entry(m).get("selfdestruct") or move_entry(m).get("condition") == "selfko"]
+
+
+def make_row_post(row_fn: Callable) -> Callable:
+    """自爆技を持つ型の行の後処理 (selfko_adjust)。技なしの行を別に計算する (自爆技を持つ型だけ、行の計算が 2 倍)"""
+    from dataclasses import replace as _replace
+
+    def post(entry: SetEntry, vec, pool: OppPool):
+        ko = selfko_moves(entry.moves)
+        rest = [m for m in entry.moves if m not in ko]
+        if not ko or not rest:
+            return vec
+        alt = _replace(entry, moves=rest)
+        without = [float(row_fn(alt, opp)) for opp in pool.sets]
+        return selfko_adjust(vec, without)
+    return post
 
 
 def make_row_fn() -> Callable:
@@ -447,8 +481,9 @@ def build_search(spec, feats: dict, tv: dict, threat_weights: dict, split: dict,
     info, field_of = _species_tables()
     roles_of = make_roles_of(info)
     capable = make_capable(info, field_of)
-    search = LineupSearch(pool, make_candidates_fn(tv, threat_weights, snapshot_id, custom, log), make_row_fn(),
-                          make_prefilter(feats, threat_weights, capable), log, capable=capable)
+    row_fn = make_row_fn()
+    search = LineupSearch(pool, make_candidates_fn(tv, threat_weights, snapshot_id, custom, log), row_fn,
+                          make_prefilter(feats, threat_weights, capable), log, capable=capable, row_post=make_row_post(row_fn))
     banned = set(spec.banned)
     species_pool = [s for s in feats if s not in banned]
     rule_field = RU.rule_field(rule_names) if rule_names else {}

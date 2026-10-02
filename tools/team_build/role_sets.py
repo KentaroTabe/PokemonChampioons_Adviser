@@ -19,7 +19,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-from champions_agent.config import (BUILD_BULK_POINTS_MIN, BUILD_DEMERIT_NEED_MIN, BUILD_FAST_POINTS_MIN, BUILD_ITEM_CLASSES,
+from champions_agent.config import (BUILD_BULK_POINTS_MIN, BUILD_DEMERIT_NEED_MIN, BUILD_FAST_POINTS_MIN, BUILD_GEN_EV_TUNE,
+                                    BUILD_ITEM_CLASSES,
                                     BUILD_OHKO_BONUS, BUILD_OHKO_THREAT_MIN_W, BUILD_ROLE_ALIASES, BUILD_ROLE_FAST_SHARE,
                                     BUILD_ROLE_FIELD_MOVES, BUILD_ROLE_SPREADS, BUILD_ROLE_TEMPLATES, BUILD_ROLE_UTILITY_MOVES,
                                     BUILD_SET_CANDIDATES_PER_ROLE, BUILD_TYPE_ITEMS, BUILD_WALL_SPEED_MAX, BUILD_WEATHER_ROCKS)
@@ -89,6 +90,18 @@ def classify_bulk(evs: str, item: Optional[str] = None, template_spread: str = "
     if sp >= fast_min or item in ("focussash", "lifeorb", "choicescarf", "choiceband", "choicespecs"):
         return "fast"
     return "bulky"
+
+
+def spread_keeps_class(evs: str, bulk: str, bulk_min: int = BUILD_BULK_POINTS_MIN, fast_min: int = BUILD_FAST_POINTS_MIN) -> bool:
+    """微調整した配分が雛形の性格を保つか (純粋): 速攻は素早さと主攻撃 (攻撃か特攻の大きい方) が fast_min 以上、
+    耐久は HP か防御側のどれかが bulk_min 以上"""
+    try:
+        hp, at, de, sa, sd, sp = [int(x) for x in (evs or "").split("/")]
+    except ValueError:
+        return False
+    if bulk == "fast":
+        return sp >= fast_min and max(at, sa) >= fast_min
+    return hp >= bulk_min or de >= bulk_min or sd >= bulk_min
 
 
 def effective_accuracy(entry: dict, has_field: Optional[dict] = None):
@@ -618,6 +631,18 @@ def generate_role_sets(species_id: str, role: str, ctx: RoleContext) -> list:
             best = max((use_scored[m].get(t, 0.0) for m in chosen), default=0.0)
             cov += norm_w[t] * min(1.0, best)
         c.score = round(cov / (sum(norm_w.values()) or 1.0), 4)
+        if BUILD_GEN_EV_TUNE and targets and ctx.speed_plan != "trick_room" and not spread_name.startswith("tr"):
+            # 配分の微調整 (§11): 想定する相手 = 担当。定型より良い配分 (上を取る / 耐える / 倒す) があれば置き換える (注記 ev:tuned)。
+            # 雛形の性格 (速攻 = 素早さと主攻撃に投資、耐久 = HP か防御側に投資) を壊す配分は採らない。トリックルーム計画は素早さ 0 のまま
+            try:
+                tbl_for = (use_scored if use_scored is not scored else table)
+                tuned = G.tune_set_spread(c, base, types, ability, {t: ctx.threat_views[t] for t in targets}, norm_w, profile["speeds"],
+                                          attacker_view(item, nature, evs), {m: attack_pool[m]["cat"] for m in attack_pool},
+                                          lambda fld: tbl_for, dex, team_field=field_have)
+                if tuned.evs != c.evs and spread_keeps_class(tuned.evs, bulk):
+                    c = tuned
+            except Exception:
+                pass
         return c
 
     setup_choices = [setup_order[0]] if setup_order else [None]
