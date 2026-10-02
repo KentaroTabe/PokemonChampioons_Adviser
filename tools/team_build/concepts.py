@@ -28,9 +28,11 @@ def concept_key(core_ids: list) -> tuple:
 
 
 def validate_concepts(auth: dict, owned: set, legal: set, mega_capable: set,
-                      archetypes: Optional[dict] = None, banned: Optional[set] = None) -> list:
+                      archetypes: Optional[dict] = None, banned: Optional[set] = None,
+                      ace: Optional[str] = None, ace_mega: bool = False) -> list:
     """authoritative の検証: 問題の一覧 (空なら OK)。archetypes ({axis_id: [branch_id]}) を渡すと、concept の
-    archetype / branch (任意) が既知の id であることも検査する。banned (使わないポケモン) が core にあれば差し戻す"""
+    archetype / branch (任意) が既知の id であることも検査する。banned (使わないポケモン) が core にあれば差し戻す。
+    ace (指定エース) があれば各 concept の core_ids に含め、ace_mega (エースがメガ石を持てる) なら mega_id はエース"""
     problems = []
     items = auth.get("concepts")
     if not isinstance(items, list) or not items:
@@ -58,6 +60,11 @@ def validate_concepts(auth: dict, owned: set, legal: set, mega_capable: set,
         mega = c.get("mega_id")
         if mega and (mega not in core or mega not in mega_capable):
             problems.append(f"concepts[{i}]: mega_id {mega} は core に含まれメガ石を持てる種でなければならない")
+        if ace:
+            if ace not in core:
+                problems.append(f"concepts[{i}]: エース {ace} を core_ids に必ず含める")
+            elif ace_mega and mega != ace:
+                problems.append(f"concepts[{i}]: mega_id はエース {ace} (エースだけがメガ石を持つ)")
         if c.get("win_condition") not in WIN_CONDITIONS:
             problems.append(f"concepts[{i}]: win_condition は {WIN_CONDITIONS} のいずれか")
         for r in c.get("support_roles") or []:
@@ -125,6 +132,14 @@ def rule_baseline_concepts(feats: dict, threats: list, mega_capable: set, top_k:
     return out
 
 
+def apply_ace(families: list, ace: Optional[str], ace_mega: bool) -> list:
+    """指定エース: 系統の mega_id をエースにそろえる (ace_mega のとき。ルール生成・historical・軸の core は別のメガを
+    mega_id に持ちうるが、S6 ではエースだけが石を持つ)。core_ids は S5 が固定枠として足す。純粋"""
+    if not ace or not ace_mega:
+        return families
+    return [dict(f, mega_id=ace) for f in families]
+
+
 def cluster_concepts(concepts: list, min_jaccard: float = 0.5) -> list:
     """core の Jaccard で系統にまとめ、代表 (先に出た方) だけ残す。family_id と members 数を付ける"""
     fams: list = []
@@ -156,6 +171,8 @@ def generate_concepts(spec, feats: dict, threats: list, legal: set, mega_capable
     戻り値: {"families": [...], "raw": [...], "rounds": n, "stop_reason": str, "llm_calls": [...]}"""
     banned = set(spec.banned)
     owned = set(spec.owned) - banned          # LLM に渡す所持 (使える候補) は使わないポケモンを含まない
+    ace = getattr(spec, "ace", "") or None     # 指定エース: core_ids に必須、メガ石を持てるなら mega_id もエース
+    ace_mega = bool(ace) and ace in mega_capable
     raw = rule_baseline_concepts(feats, threats, mega_capable, favorites=spec.favorites,
                                  threat_weights=threat_weights)
     fams = cluster_concepts(raw)
@@ -175,8 +192,14 @@ def generate_concepts(spec, feats: dict, threats: list, legal: set, mega_capable
             "enums": {"win_condition": WIN_CONDITIONS, "support_roles": SUPPORT_ROLES},
             # コンセプト規則 (hard constraint): 設置役/エースの候補を渡し、core_ids に両方を含めさせる (S5 で機械的に検査)
             "rules": rules or [],
-            "constraints": ("各 concept の core_ids には、rules ごとに setters から 1 体と aces から 1 体 (別個体) を必ず含める"
-                            if rules else ""),
+            # 指定エース (hard constraint): 全 concept の core_ids に含め、メガ石を持てるなら mega_id もエース (S4 検証 / S6 で機械的に保証)
+            "ace": ace,
+            "constraints": " ".join(x for x in (
+                ("各 concept の core_ids には、rules ごとに setters から 1 体と aces から 1 体 (別個体) を必ず含める" if rules else ""),
+                ((f"エース {ace} をこの構築の勝ち筋の中心とし、各 concept の core_ids に必ず含める"
+                  + ("。mega_id は必ずエース (この構築ではエースだけがメガ石を持ち、他のメンバーは持たない)" if ace_mega else ""))
+                 if ace else ""),
+            ) if x),
             "output_schema": {"authoritative": {"concepts": [{"name": "str", "core_ids": ["id"], "mega_id": "id|null",
                                                              "win_condition": "enum", "support_roles": ["enum"],
                                                              "weak_to": ["id"],
@@ -210,7 +233,7 @@ def generate_concepts(spec, feats: dict, threats: list, legal: set, mega_capable
             res = provider.call("s04_concepts", "opus", system_prompt or DEFAULT_SYSTEM, payload,
                                 validator=lambda a: validate_concepts(a, owned, legal, mega_capable,
                                                                       archetypes=arch_ids if archetypes else None,
-                                                                      banned=banned))
+                                                                      banned=banned, ace=ace, ace_mega=ace_mega))
             calls.append({"round": r, "framing": framing, "ok": res["ok"], "attempts": res["attempts"],
                           "problems": res.get("problems"), "record": res.get("record")})
             if not res["ok"]:

@@ -63,6 +63,9 @@ class BuildSpec:
     rules: list = field(default_factory=list)         # コンセプト規則 (tools/team_build/rules.RULES の名前、hard constraint)
     required_moves: dict = field(default_factory=dict)  # 技 + ポケモンの指定 {species_id: [move_id]}: その種を使う型に必ず入れる
     custom_sets: dict = field(default_factory=dict)     # 指定の型 {species_id: {item, ability, nature, evs, moves}}: 使用率より優先
+    # 指定エース (species_id、2026-10-02): 固定枠に入れ、メガ石を持てる種なら探索の並びではエースだけが石を持つ
+    # (config BUILD_ACE_MAX_MEGA_STONES)。S4 の concept は core_ids にエースを含み mega_id はエース
+    ace: str = ""
     provenance: dict = field(default_factory=dict)    # field -> resolved | inferred | unknown
 
     def to_dict(self) -> dict:
@@ -303,6 +306,12 @@ def parse_form(form: dict, owned: Optional[list] = None, banned_path: Path = BAN
     if form.get("sets"):
         spec.custom_sets = parse_custom_sets(form["sets"])
         prov["custom_sets"] = "resolved"
+    ace = form.get("ace")
+    if ace and not isinstance(ace, (list, tuple, dict)):
+        sid = resolve_species_token(str(ace))
+        if sid:
+            spec.ace = sid            # 指定エース: 固定枠にも入れる (下)
+            prov["ace"] = "resolved"
     _merge_banned(spec, read_banned_file(banned_path, legal))
     if spec.banned:
         prov["banned"] = "resolved"
@@ -310,7 +319,7 @@ def parse_form(form: dict, owned: Optional[list] = None, banned_path: Path = BAN
         spec.owned = list(owned) if owned is not None else usable_species_ids(spec.banned, legal)
         prov["owned"] = "inferred"
     spec.owned = [s for s in spec.owned if s not in set(spec.banned)]
-    spec.favorites = sorted(set(spec.favorites) | set(spec.locked))
+    spec.favorites = sorted(set(spec.favorites) | set(spec.locked) | ({spec.ace} if spec.ace else set()))
     spec.locked = list(spec.favorites)
     if spec.favorites and spec.objective == "max_wr" and "objective" not in prov:
         spec.objective, prov["objective"] = "favorites", "inferred"
@@ -346,6 +355,13 @@ def validate_spec(spec: BuildSpec, legal: Optional[set] = None) -> list:
             problems.append(f"固定枠 {sid} が除外にも入っている")
     if len(spec.favorites) > 6:
         problems.append("固定枠が 6 体を超えている")
+    if spec.ace:
+        if spec.ace not in owned:
+            problems.append(f"エース {spec.ace} が使える種にない")
+        if spec.ace in spec.banned:
+            problems.append(f"エース {spec.ace} が除外 (使わないポケモン) に入っている")
+        if spec.ace not in spec.favorites:
+            problems.append(f"エース {spec.ace} が固定枠に入っていない (parse_form を通す)")
     if legal:
         for sid in list(spec.favorites) + list(spec.banned):
             if sid not in legal:

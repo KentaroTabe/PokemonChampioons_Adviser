@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from champions_agent.config import BUILD_ARCHETYPES, BUILD_POOL_SOURCE, BUILD_POOL_TOP_N
+from champions_agent.config import BUILD_ACE_MAX_MEGA_STONES, BUILD_ARCHETYPES, BUILD_POOL_SOURCE, BUILD_POOL_TOP_N
 from champions_agent.data import database as db
 from tools.team_build import archetypes as ARCH
 from tools.team_build import candidates as C
@@ -71,6 +71,27 @@ def _assert_no_banned(run_dir: Path, stage: str, items: list, banned) -> None:
         raise SystemExit(f"{stage}: 使わないポケモンが並びに入っている {bad} (config/banned_species.txt)")
 
 
+def ace_stone_violations(results: list, max_stones: int = BUILD_ACE_MAX_MEGA_STONES) -> list:
+    """指定エース (メガ) の並びで「エースが石を持ち、石の総数が max_stones 以下」に反する行 → [(candidate_id, 石持ちの列)]。純粋"""
+    bad = []
+    for r in results:
+        ace = r.get("ace")
+        if not ace or not r.get("ok"):
+            continue
+        holders = [s.get("species") for s in (r.get("sets") or []) if S.has_mega_stone(s.get("item"))]
+        if ace not in holders or len(holders) > max_stones:
+            bad.append((r.get("candidate_id"), holders))
+    return bad
+
+
+def _assert_ace_mega(run_dir: Path, results: list) -> None:
+    """hard invariant: 指定エース (メガ) の並びでは、エースが石を持ち、他のメンバーは石を持たない (S6 の出力で検査)"""
+    bad = ace_stone_violations(results)
+    if bad:
+        log(run_dir, f"S6 ace: エースの石の不変条件に反する並び {bad}")
+        raise SystemExit(f"S6: 指定エースの並びでエースが石を持てないか、エース以外が石を持つ {bad}")
+
+
 def stage_s0(run_dir: Path, spec: BuildSpec, legal: set) -> BuildSpec:
     # 使わないポケモン (config/banned_species.txt) は parse_form / apply_banned_file で spec.banned に入っている。
     # 明示の owned (使える候補の限定) からも外す (2026-09-25 ユーザー決定: 所持リストは持たない)
@@ -86,7 +107,8 @@ def stage_s0(run_dir: Path, spec: BuildSpec, legal: set) -> BuildSpec:
         raise SystemExit("BuildSpec の問題: " + "; ".join(problems))
     save_spec(spec, run_dir)
     log(run_dir, f"S0 spec: objective={spec.objective} style={spec.style} owned={len(spec.owned)} "
-                 f"favorites={spec.favorites} banned={spec.banned} rules={spec.rules} profile={spec.profile}")
+                 f"favorites={spec.favorites} ace={spec.ace or '-'} banned={spec.banned} rules={spec.rules} "
+                 f"profile={spec.profile}")
     return spec
 
 
@@ -427,6 +449,12 @@ def stage_s4(run_dir: Path, spec: BuildSpec, feats: dict, threats: list, legal: 
         before = len(res["families"])
         res["families"] = K.cluster_concepts(cores + [dict(f) for f in res["families"]])
         res["rule_cores_added"] = len(res["families"]) - before
+    if spec.ace:
+        # 指定エース: 全系統の mega_id をエースにそろえる (S6 でエースだけが石を持つ)。core には S5 が固定枠として足す
+        ace_mega = spec.ace in mega
+        res["families"] = K.apply_ace(res["families"], spec.ace, ace_mega)
+        res["ace"] = {"species_id": spec.ace, "mega": ace_mega}
+        log(run_dir, f"S4 ace: {spec.ace} (メガ石を{'持てる → 全系統の mega_id をエースに' if ace_mega else '持てない種'})")
     (run_dir / "s04_concepts.json").write_text(
         json.dumps(res, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     log(run_dir, f"S4 concepts: families={len(res['families'])} rounds={res['rounds']} stop={res['stop_reason']} "
@@ -674,6 +702,9 @@ def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv
     fam_by = {f.get("family_id"): f for f in (fams or [])}
     # 現行チームとその近傍: 登録済み個体は登録の型を使い、メガ枠は登録のメガに合わせる
     reg_text, _reg_ids, reg_mega = registered_team()
+    # 指定エース (spec.ace): メガ石を持てる種なら、探索の並びではエースだけが石を持つ (config BUILD_ACE_MAX_MEGA_STONES)
+    ace_sid = spec.ace or None
+    ace_mega = bool(ace_sid) and ace_sid in mega_capable_ids([ace_sid])
     with db.get_connection() as conn:
         members_all = sorted({m for l in lineups for m in l.members})
         item_map = S.item_usage_map(conn, snapshot_id, members_all)
@@ -697,7 +728,21 @@ def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv
                 results.append({"index": idx, "members": list(l.members), "ok": False, "errors": ["型が無い種を含む"]})
                 continue
             is_inc = l.tag in ("incumbent", "incumbent_mut") and bool(reg_text)
-            keep_mega = (reg_mega if is_inc and reg_mega in l.members else None) or concept_mega.get(l.concept)
+            # 指定エース (メガ): 探索の並びではエースの型を石持ちにし、エースだけが石を持つ。現行チーム枝 (登録の型) には
+            # 適用しない (参照と同じ条件で測る)。型の選び直し (場の前提・役割の反映) のたびに保証し直す
+            ace_on = bool(ace_sid) and ace_mega and (ace_sid in l.members) and not is_inc
+            keep_mega = (ace_sid if ace_on else None) or (reg_mega if is_inc and reg_mega in l.members else None) \
+                or concept_mega.get(l.concept)
+            ace_notes: list = []
+
+            def ace_fix(team_: list, alts_: dict, on: bool = ace_on, notes_: list = ace_notes) -> list:
+                if not on:
+                    return team_
+                team_, holds = S.prefer_mega_set(team_, alts_, ace_sid)
+                if not holds and "ace_mega:no_stone_set" not in notes_:
+                    notes_.append("ace_mega:no_stone_set")
+                return S.enforce_max_megas(team_, alts_, keep=ace_sid, max_n=BUILD_ACE_MAX_MEGA_STONES)
+
             prefer: dict = {}
             if is_inc:
                 # 登録個体を先頭に置き持ち物を登録に合わせる (クローズ解決で新規個体側が譲る)
@@ -705,6 +750,7 @@ def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv
                 team = S.prefer_registered(team, reg_items)
                 prefer = {c.species_id: 1 for c in team if c.species_id in reg_items}
             team = S.enforce_max_megas(team, alternatives, keep=keep_mega)
+            team = ace_fix(team, alternatives)
             team_field = None
             if not is_inc:
                 from tools.team_build import rules as RU
@@ -712,6 +758,7 @@ def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv
                 team, alternatives, team_field = apply_team_field(team, alternatives, tv, gen, rf)
                 if team_field:
                     team = S.enforce_max_megas(team, alternatives, keep=keep_mega)
+                    team = ace_fix(team, alternatives)
             rule_setter, rule_notes = None, []
             if rule_kw and not is_inc:
                 # 規則: 設置役の技と、エースの持ち物 (クローズでは設置役/エースが残す側)
@@ -739,6 +786,10 @@ def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv
                     for sids in (assign or {}).values():
                         for s in sids:
                             prefer[s] = max(prefer.get(s, 0), 1)
+            if ace_on:
+                # 規則・軸の反映後にもエースの石を保証し、クローズではエースが残す側 (規則のエースと同じ優先度 2)
+                team = ace_fix(team, alternatives)
+                prefer[ace_sid] = 2
             team = S.resolve_item_clause(team, item_map, usage_pct, prefer=prefer)
             text = S.to_showdown_text(team)
             registered = []
@@ -753,10 +804,12 @@ def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv
                             "registered_sets": registered, "rule_setter": rule_setter, "rule_notes": rule_notes,
                             "rule_pair": (rule_ctx or {}).get("pairs", {}).get(tuple(l.members)),
                             "team_field": team_field, "archetype": arch_info,
+                            "ace": (ace_sid if ace_on else None), "ace_notes": ace_notes,
                             "sets": [{"species": c.species_id, "item": c.item, "nature": c.nature,
                                       "evs": c.evs, "moves": c.moves, "source": c.source,
                                       "coverage": round(c.score, 3), "notes": c.notes} for c in team]})
     _assert_no_banned(run_dir, "S6", [(r["candidate_id"], r["members"]) for r in results], set(spec.banned))
+    _assert_ace_mega(run_dir, results)
     (run_dir / "s06_sets.json").write_text(json.dumps(results, ensure_ascii=False, indent=1) + "\n",
                                            encoding="utf-8")
     n_ok = sum(1 for r in results if r["ok"])
@@ -769,6 +822,10 @@ def main() -> None:
     ap.add_argument("--run-id", required=True)
     ap.add_argument("--spec", help="BuildSpec JSON (request.json 形式 or フォーム形式)")
     ap.add_argument("--favorites", default="", help="固定枠 (カンマ区切り、日本語名可)")
+    ap.add_argument("--ace", default="",
+                    help="指定エース (日本語名可、1 体): 固定枠にし、メガ石を持てる種なら探索の並びではエースだけがメガ石を持つ "
+                         "(config BUILD_ACE_MAX_MEGA_STONES)。S4 の concept は core_ids にエースを含み mega_id もエース。"
+                         "型を固定するなら --sets-file でその種の型を渡す")
     ap.add_argument("--banned", default="", help="除外 (カンマ区切り)")
     ap.add_argument("--rules", default="",
                     help="コンセプト規則 (カンマ区切り、tools/team_build/rules.py の RULES)。例: psychic_terrain_priority_ace")
@@ -878,8 +935,14 @@ def main() -> None:
         if sets_text:
             spec.custom_sets.update(parse_custom_sets(sets_text))
             spec.provenance["custom_sets"] = "resolved"
+        if args.ace:
+            from tools.team_build.spec import resolve_species_token
+            spec.ace = resolve_species_token(args.ace)
+            spec.favorites = sorted(set(spec.favorites) | {spec.ace})
+            spec.locked = list(spec.favorites)
+            spec.provenance["ace"] = "resolved"
     else:
-        spec = parse_form({"favorites": args.favorites, "banned": args.banned, "style": args.style,
+        spec = parse_form({"favorites": args.favorites, "ace": args.ace, "banned": args.banned, "style": args.style,
                            "objective": args.objective, "profile": args.profile, "rules": args.rules,
                            "moves": args.moves, "sets": sets_text}, legal=legal)
     spec.profile = args.profile

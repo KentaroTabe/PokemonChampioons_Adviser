@@ -532,6 +532,10 @@ BUILD_UNBURDEN_TRIGGERS = {"whiteherb": "self_stat_drop", "normalgem": "normal_a
 # 以前は「1 試合 1 回のメガシンカ」を「1 構築 1 個の石」と取り違えて 1 個に制限していた。石が 2 個までは冗長の罰則なし、上限 3
 BUILD_MAX_MEGA_STONES = 3
 BUILD_MEGA_FREE_STONES = 2
+# 指定エース (BuildSpec.ace、run.py --ace): エースがメガ石を持てる種なら、探索の並びではエースだけが石を持つ (他のメンバーは
+# メガ石以外の最良代替)。「エース = 固定枠 + その構築の唯一のメガ」という読み (2026-10-02 ユーザー依頼「メガミミロップをエースと
+# する構築」)。2 個目の石を許すならここを増やす。現行チーム枝と参照 (登録の型) には適用しない
+BUILD_ACE_MAX_MEGA_STONES = 1
 # 1 試合 1 回の資源 (メガシンカ) の推定 (advisor/gimmick.py。2026-09-11 ユーザー指摘「相手がメガ先を読まないのは致命的」):
 # 相手の種族ごとの「メガ石を持つ確率」は使用率 DB の石の使用率。石を持てるが使用率が無い種の既定値と、無視する下限
 GIMMICK_DEFAULT_STONE_PRIOR = 0.5

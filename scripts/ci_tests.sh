@@ -82,6 +82,7 @@ TESTS=(
   test_mega_evolve_attribution
   test_end_notice
   test_outcome_correction
+  test_team_build_ace
 )
 
 fail=0

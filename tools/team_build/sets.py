@@ -348,6 +348,35 @@ def enforce_single_mega(team: list, alternatives: dict, keep: Optional[str] = No
     return enforce_max_megas(team, alternatives, keep, 1)
 
 
+def has_mega_stone(item: Optional[str]) -> bool:
+    """持ち物 id がメガ石か"""
+    return bool(item) and item in _mega_stones()
+
+
+def prefer_mega_set(team: list, alternatives: dict, species_id: str) -> tuple:
+    """指定エース (2026-10-02): species_id の型をメガ石を持つ型にする (純粋)。今の型が石を持っていればそのまま。
+    持っていなければ alternatives[species_id] (被覆降順) の石持ち型の先頭に差し替える (notes に ace_mega:<前>-><後>)。
+    石持ちの型が無ければそのまま (呼び出し側が記録する)。戻り値 (team, エースが石を持っているか)"""
+    stones = _mega_stones()
+    out, holds = [], False
+    for c in team:
+        if c.species_id != species_id:
+            out.append(c)
+            continue
+        if (c.item or "") in stones:
+            out.append(c)
+            holds = True
+            continue
+        alt = next((a for a in alternatives.get(species_id, []) if (a.item or "") in stones), None)
+        if alt is None:
+            out.append(c)
+            continue
+        out.append(SetCandidate(alt.species_id, alt.ability, alt.item, alt.nature, alt.evs, list(alt.moves), alt.source,
+                                alt.score, list(alt.notes) + [f"ace_mega:{c.item}->{alt.item}"], alt.usage_gap, alt.adj))
+        holds = True
+    return out, holds
+
+
 def _with_item(c: "SetCandidate", item: Optional[str], note: str) -> "SetCandidate":
     return SetCandidate(c.species_id, c.ability, item, c.nature, c.evs, list(c.moves), c.source, c.score,
                         c.notes + [note], c.usage_gap, c.adj)
