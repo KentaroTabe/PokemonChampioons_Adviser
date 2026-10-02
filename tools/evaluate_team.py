@@ -21,6 +21,7 @@ import asyncio
 import re
 import sys
 from pathlib import Path
+from typing import Optional
 
 from champions_agent.data import database as db
 from champions_agent.env.team_builder import (
@@ -297,6 +298,23 @@ def current_team_entries(roster=None) -> dict:
     return {ja: team[ja] for ja in picked}
 
 
+def nature_en_of(value) -> Optional[str]:
+    """登録の性格 (日本語 25 種 or 英語 id) → Showdown の表記 (Naive 等)。解決できなければ None。
+    名前表 (jp_names.json の natures) を唯一の源にする (2026-10-02: 手書きの 12 種の表に むじゃき が無く、登録ガブリアスの
+    性格行が落ちて参照チームが無補正で測られていた。9/22 の登録以降の run の参照に影響)"""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    from vision.normalize import NameResolver
+    r = NameResolver().resolve(text, "natures", cutoff=0.9)
+    if r:
+        return str(r[1]).capitalize()
+    en = _to_id(text)
+    if en and NameResolver().ja_of("natures", en):
+        return en.capitalize()
+    return None
+
+
 def build_myteam_text() -> str:
     """config/my_team.json の登録型 (性格/能力ポイント/持ち物/技/特性) で
     チームテキストを作る (meta_setsではなく実際の自分の型で評価する)"""
@@ -309,10 +327,6 @@ def build_myteam_text() -> str:
     ev_keys = {"h": "HP", "a": "Atk", "b": "Def", "c": "SpA", "d": "SpD",
                "s": "Spe", "hp": "HP", "atk": "Atk", "def": "Def",
                "spa": "SpA", "spd": "SpD", "spe": "Spe"}
-    nature_en = {"いじっぱり": "Adamant", "ようき": "Jolly", "ひかえめ": "Modest",
-                 "おくびょう": "Timid", "ずぶとい": "Bold", "わんぱく": "Impish",
-                 "おだやか": "Calm", "しんちょう": "Careful", "のんき": "Relaxed",
-                 "なまいき": "Sassy", "ゆうかん": "Brave", "れいせい": "Quiet"}
     blocks, used_items = [], set()
     from advisor.my_team import registered_species_id
     for ja, entry in team.items():
@@ -375,7 +389,9 @@ def build_myteam_text() -> str:
         evs = " / ".join(f"{v} {ev_keys[str(k).lower()]}"
                          for k, v in pts.items()
                          if str(k).lower() in ev_keys)
-        nat = nature_en.get(entry.get("性格") or "")
+        nat = nature_en_of(entry.get("性格"))
+        if entry.get("性格") and not nat:
+            print(f"  ! {ja}: 性格 {entry.get('性格')!r} を解決できないため性格行なし (無補正で評価される)")
         if not evs:
             # 能力ポイント未登録 (種族のみの最小エントリ等) は使用率の
             # 最頻配分・性格で補完する。0ポイントのままだとShowdownの

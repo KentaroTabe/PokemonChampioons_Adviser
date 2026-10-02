@@ -273,6 +273,22 @@ def test_myteam_text_completes_missing_evs():
     print("test_myteam_text_completes_missing_evs OK")
 
 
+def test_nature_en_covers_all_natures():
+    """登録の性格 → Showdown 表記。名前表の 25 種すべて (2026-10-02: 手書きの 12 種の表に むじゃき が無く、登録ガブリアスの
+    性格行が落ちて参照チームが無補正で測られていた)"""
+    import json
+    from tools.evaluate_team import nature_en_of
+    from vision.normalize import JP_NAMES_PATH
+    natures = json.loads(JP_NAMES_PATH.read_text(encoding="utf-8"))["natures"]
+    assert len(natures) == 25
+    for ja, en in natures.items():
+        assert nature_en_of(ja) == en.capitalize(), (ja, nature_en_of(ja))
+    assert nature_en_of("むじゃき") == "Naive" and nature_en_of("ようき") == "Jolly"
+    assert nature_en_of("naive") == "Naive" and nature_en_of("Jolly") == "Jolly"      # 英語 id も受ける
+    assert nature_en_of("") is None and nature_en_of(None) is None and nature_en_of("ほげ") is None
+    print("test_nature_en_covers_all_natures OK")
+
+
 def test_myteam_text_completes_ability_and_item():
     """特性・持ち物未登録は使用率最頻で補完する (2026-08-25 第9回:
     特性が五十音順先頭の「しんりょく」になり、持ち物なしのまま提案された)"""
@@ -388,6 +404,7 @@ def main() -> None:
     test_latest_selection_roster_reads_newest_log()
     test_myteam_text_completes_missing_evs()
     test_myteam_text_completes_ability_and_item()
+    test_nature_en_covers_all_natures()
     test_mutate_set_item_change_ignores_change_limit()
     test_item_clause_prefers_species_alternatives()
     print("\nALL OK")
