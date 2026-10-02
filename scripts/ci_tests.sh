@@ -64,6 +64,7 @@ TESTS=(
   test_effects
   test_role_sets
   test_lineup_search
+  test_team_build_repair
   test_team_build_archetypes
   test_team_build_banned
   test_ja_names

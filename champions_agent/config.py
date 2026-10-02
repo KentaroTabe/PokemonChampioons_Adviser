@@ -316,6 +316,7 @@ BUILD_MAX_CHANGES = 2                  # 1 反復あたりの入替枠数。3 �
 # 測定からの戻り (S8a / S8b → S5 修理モード。docs/TEAM_BUILD_REDESIGN_1002.md §14 / §16.2。LLM の仮説は使わない: D-28)
 BUILD_REPAIR_ROUNDS = BUILD_MAX_REPAIRS   # 周回数 (S8a 後と S8b 後の 1 周ずつ)。run.py --repairs の既定
 BUILD_REPAIR_ARMS = 6                  # 1 周あたりに racing へ加える変種の上限 (親が複数なら分け合う)
+BUILD_REPAIR_PARENTS = 2               # 1 周あたりに診断して修理する親の並びの数 (Δ の上位から)
 BUILD_REPAIR_MIN_N = 20                # 診断に使う対戦数の下限 (系統は負けの多い順に束ねてこの数に達するまで)
 BUILD_REPAIR_LOSS_RATE_MIN = 0.5       # 「負けに効いた」系統 / 相手種の敗率の下限
 BUILD_REPAIR_UNUSED_RATE = 0.05        # 選出率がこれ以下の個体は差し替え対象 (一度も選出されなかった個体を含む)

@@ -940,7 +940,9 @@ def main() -> None:
                     help="途中で落ちた run の続き: S8a の結果と完了済みの適応 (adapt_result.json) を再利用する")
     ap.add_argument("--validate-n", type=int, default=None, help="S7 の checkpoint 検証の戦数 (既定 config)")
     ap.add_argument("--validate-max", type=int, default=None, help="S7 で検証する checkpoint 数 (既定 config)")
-    ap.add_argument("--repairs", type=int, default=0)
+    ap.add_argument("--repairs", type=int, default=None,
+                    help="測定からの戻りの周回数 (S8a 後 / S8b 後の修理モード、docs/TEAM_BUILD_REDESIGN_1002.md §14)。"
+                         "既定 config BUILD_REPAIR_ROUNDS。0 で無効")
     ap.add_argument("--registry", default=None, help="registry のディレクトリ (既定 logs/registry)")
     ap.add_argument("--adapt-action", choices=["auto", "on", "off"], default="auto",
                     help="行動方策 adapter (S11b)。auto = full プロファイルのみ")
@@ -1179,7 +1181,7 @@ def import_lineups(run_dir: Path, rows: list, extra: list, regulation: str, vali
 
 
 def _measure(run_dir: Path, args) -> None:
-    from champions_agent.config import (BUILD_ADAPT_MIN_BATTLES, BUILD_RACE_DEFAULT_MAX, BUILD_RACE_STEPS,
+    from champions_agent.config import (BUILD_ADAPT_MIN_BATTLES, BUILD_RACE_DEFAULT_MAX, BUILD_RACE_STEPS, BUILD_REPAIR_ROUNDS,
                                         TRAINING_BATTLE_FORMAT)
     from tools.team_build import ablation as AB, adapt as AD, racing as R, stress as ST
     from tools.team_build.pipeline import run_measurement
@@ -1219,7 +1221,9 @@ def _measure(run_dir: Path, args) -> None:
                     adapt_min=args.adapt_min or BUILD_ADAPT_MIN_BATTLES, adapt_chunk=args.adapt_chunk or AD.CHUNK,
                     adapt_max=args.adapt_max or AD.MAX_BATTLES, stress_n=args.stress_n or ST.STRESS_BATTLES,
                     ablation_n=args.ablation_n or AB.ABLATION_BATTLES, parallel=args.parallel or R.PARALLEL,
-                    repairs=args.repairs, max_candidates=args.max_candidates, registry=reg, llm_provider=provider,
+                    repairs=(BUILD_REPAIR_ROUNDS if args.repairs is None else args.repairs),
+                    n_threats=PROFILE_DEFAULTS.get(getattr(args, "profile", "full"), PROFILE_DEFAULTS["full"])["threats"],
+                    max_candidates=args.max_candidates, registry=reg, llm_provider=provider,
                     # 行動 adapter (構築と連動した学習): auto は medium 以上で有効 (2026-09-17 常時学習の停止で CPU が空いた)
                     adapt_action=(args.adapt_action == "on"
                                   or (args.adapt_action == "auto" and args.profile in ("medium", "full"))),

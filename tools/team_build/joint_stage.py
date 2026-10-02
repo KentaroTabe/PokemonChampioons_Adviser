@@ -23,7 +23,7 @@ from champions_agent.config import (BUILD_ARCHETYPE_SPEED_PLAN, BUILD_COMPLEMENT
 from tools.team_build import candidates as C
 from tools.team_build import sets as S
 from tools.team_build.lineup_search import (TEAM_SIZE, LineupResult, LineupSearch, OppPool, OppSet, SearchConfig, SetEntry,
-                                            concept_requirements, role_matches, team_field_from)
+                                            concept_requirements, role_matches, team_field_from)  # noqa: F401 (repair が使う)
 from tools.team_build.role_sets import TERRAINS, WEATHER_FIELD_NAME, WEATHERS, pick_utility, template_of
 
 FIELD_WEATHER_ROLE = {v: k for k, v in WEATHER_FIELD_NAME.items()}      # 場の名前 → 役割 id の接頭辞 (sandstorm → sand)
@@ -429,6 +429,91 @@ def registered_entries(reg_text: str, log: Optional[Callable] = None) -> list:
     return out if len(out) == TEAM_SIZE else []
 
 
+def load_json(p: Path):
+    try:
+        return json.loads(Path(p).read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def build_search(spec, feats: dict, tv: dict, threat_weights: dict, split: dict, snapshot_id: Optional[int],
+                 session_weights: Optional[dict] = None, rule_names: Optional[list] = None, log: Optional[Callable] = None):
+    """探索器の束 (SimpleNamespace): pool / search / roles_of / capable / species_pool / cfg / custom / tv / threat_weights"""
+    from types import SimpleNamespace
+    from tools.team_build import rules as RU
+    log = log or (lambda m: None)
+    pool = pool_from_split(split, "search", session_weights)
+    custom = {sid: S.candidate_from_row(sid, row) for sid, row in (spec.custom_sets or {}).items()}
+    info, field_of = _species_tables()
+    roles_of = make_roles_of(info)
+    capable = make_capable(info, field_of)
+    search = LineupSearch(pool, make_candidates_fn(tv, threat_weights, snapshot_id, custom, log), make_row_fn(),
+                          make_prefilter(feats, threat_weights, capable), log, capable=capable)
+    banned = set(spec.banned)
+    species_pool = [s for s in feats if s not in banned]
+    rule_field = RU.rule_field(rule_names) if rule_names else {}
+    cfg = SearchConfig(ace=(spec.ace or None), favorites=tuple(spec.favorites), banned=frozenset(banned),
+                       required_roles=rule_roles(rule_field), rule_field=dict(rule_field))
+    return SimpleNamespace(pool=pool, search=search, roles_of=roles_of, capable=capable, species_pool=species_pool, cfg=cfg,
+                           custom=custom, tv=tv, threat_weights=threat_weights, fams=[])
+
+
+def load_search(run_dir: Path, spec, n_threats: int, session_weights: Optional[dict] = None, log: Optional[Callable] = None):
+    """run の成果物 (meta_snapshot / opponent_families / species_features / s04_concepts) から探索器を組み直す (測定段の修理モード用)"""
+    from tools.team_build.features import features_from_json
+    from tools.team_build.meta_snapshot import load_snapshot, threat_sets, threat_weight
+    run_dir = Path(run_dir)
+    doc = load_snapshot(run_dir / "meta_snapshot.json")
+    split = load_json(run_dir / "opponent_families.json") or {}
+    feats = features_from_json(load_json(run_dir / "species_features.json") or {})
+    tv = threat_sets(doc, n_threats)
+    weights = {t["id"]: threat_weight(t) for t in doc["top"] if t["id"] in tv}
+    ctx = build_search(spec, feats, tv, weights, split, doc["snapshot"]["id"], session_weights, rule_names=list(spec.rules or []), log=log)
+    ctx.fams = (load_json(run_dir / "s04_concepts.json") or {}).get("families") or []
+    return ctx
+
+
+def result_from_row(search: LineupSearch, row: dict, cfg: SearchConfig, custom_sets: Optional[dict] = None) -> LineupResult:
+    """s06_sets.json の行 (roles つき) → LineupResult (型は行のまま、評価の場は並びの始動源)。指定の型と登録の型は locked"""
+    sets = row.get("sets") or []
+    roles = row.get("roles") or {}
+    cands = [S.SetCandidate(s["species"], s.get("ability"), s.get("item"), s.get("nature"), s.get("evs"), list(s.get("moves") or []),
+                            s.get("source") or "row", float(s.get("coverage") or 0.0), list(s.get("notes") or [])) for s in sets]
+    first = [entry_from_candidate(c, roles.get(c.species_id) or "breaker", None) for c in cands]
+    tfield = team_field_from(first)
+    entries = [entry_from_candidate(c, e.role, tfield, locked=(c.source == "custom" or c.species_id in (custom_sets or {})))
+               for c, e in zip(cands, first)]
+    combo = [search.lib.add(e) for e in entries]
+    cid = str(row.get("candidate_id") or "")
+    concept = cid.split("_", 1)[1] if "_" in cid else str(row.get("concept") or "")
+    sc, _info = search.score_of(combo, [], cfg)
+    return search._finalize(sc, combo, dict(row.get("fills") or {}), concept, [], cfg, tag=str(row.get("tag") or ""),
+                            origin=dict(row.get("origin") or {}))
+
+
+def make_row(index: int, cid: str, r: LineupResult, tag: str, ok: bool, errs: list, ace_sid: Optional[str], is_inc: bool,
+             registered: Optional[list] = None) -> dict:
+    """s06_sets.json の行 (従来の項目 + roles / assignments / fills / selection_plan)"""
+    from tools.team_build.archetypes import label_ja
+    team = [e.cand for e in r.entries]
+    tf = team_field_from(r.entries)
+    role_groups: dict = {}
+    for sid, role in r.roles.items():
+        role_groups.setdefault(role, []).append(sid)
+    return {"index": index, "candidate_id": cid, "members": list(r.members), "ok": ok, "errors": list(errs)[:5],
+            "tag": tag, "score": round(float(r.score), 4), "origin": dict(r.origin or {}),
+            "registered_sets": list(registered or []), "rule_setter": None, "rule_notes": [], "rule_pair": None,
+            "team_field": (tf if (tf.get("terrain") or tf.get("weather")) else None),
+            "archetype": {"roles": role_groups, "label": label_ja(None)} if role_groups else None,
+            "ace": (ace_sid if (ace_sid and ace_sid in r.members and not is_inc) else None), "ace_notes": [],
+            "locked_restored": [],
+            "roles": dict(r.roles), "assignments": dict(r.assignments), "fills": dict(r.fills),
+            "selection_plan": dict(r.selection_plan),
+            "sets": [{"species": c.species_id, "ability": c.ability, "item": c.item, "nature": c.nature, "evs": c.evs,
+                      "moves": list(c.moves), "source": c.source, "coverage": round(float(c.score), 3),
+                      "role": r.roles.get(c.species_id), "notes": list(c.notes)} for c in team]}
+
+
 # ------------------------------------------------------------------ 段の本体
 def stage_s5_joint(run_dir: Path, spec, fams: list, feats: dict, tv: dict, threat_weights: dict, split: dict, prof: dict,
                    snapshot_id: Optional[int], session_weights: Optional[dict] = None, n_neighbors: Optional[int] = None,
@@ -439,19 +524,10 @@ def stage_s5_joint(run_dir: Path, spec, fams: list, feats: dict, tv: dict, threa
     selection_plan) を保存する。validate-team は run.py 側の不変条件 (除外・エースの石) の前に通す"""
     log = log or print
     t0 = time.time()
-    from tools.team_build import rules as RU
-    pool = pool_from_split(split, "search", session_weights)
-    custom = {sid: S.candidate_from_row(sid, row) for sid, row in (spec.custom_sets or {}).items()}
-    info, field_of = _species_tables()
-    roles_of = make_roles_of(info)
-    capable = make_capable(info, field_of)
-    search = LineupSearch(pool, make_candidates_fn(tv, threat_weights, snapshot_id, custom, log), make_row_fn(),
-                          make_prefilter(feats, threat_weights, capable), log, capable=capable)
+    ctx = build_search(spec, feats, tv, threat_weights, split, snapshot_id, session_weights,
+                       rule_names=(rule_ctx or {}).get("names") if rule_ctx else None, log=log)
+    pool, search, roles_of, species_pool, cfg = ctx.pool, ctx.search, ctx.roles_of, ctx.species_pool, ctx.cfg
     banned = set(spec.banned)
-    species_pool = [s for s in feats if s not in banned]
-    rule_field = RU.rule_field(rule_ctx["names"]) if rule_ctx else {}
-    cfg = SearchConfig(ace=(spec.ace or None), favorites=tuple(spec.favorites), banned=frozenset(banned),
-                       required_roles=rule_roles(rule_field), rule_field=dict(rule_field))
     log(f"S5 joint: 相手プール 系統 {len(pool.families)} 型 {len(pool.sets)}、所持 {len(species_pool)} 種、構想 {len(fams)}")
     results: list = []
     if not only_incumbent:
@@ -540,7 +616,6 @@ def stage_s5_joint(run_dir: Path, spec, fams: list, feats: dict, tv: dict, threa
 
 def write_sets(run_dir: Path, spec, chosen: list, by_members: dict, reg_text: str, log: Callable) -> list:
     """s06_sets.json / s06_sets/<並び>.txt (従来の行の形 + roles / assignments / fills / selection_plan)"""
-    from tools.team_build.archetypes import label_ja
     out_dir = run_dir / "s06_sets"
     out_dir.mkdir(exist_ok=True)
     ace_sid = spec.ace or None
@@ -556,22 +631,9 @@ def write_sets(run_dir: Path, spec, chosen: list, by_members: dict, reg_text: st
         ok, errs = S.validate_team_text(text, spec.regulation)
         cid = f"L{idx:02d}_{l.concept}"
         (out_dir / f"{cid}.txt").write_text(text, encoding="utf-8")
-        tf = team_field_from(r.entries)
-        role_groups: dict = {}
-        for sid, role in r.roles.items():
-            role_groups.setdefault(role, []).append(sid)
-        rows.append({"index": idx, "candidate_id": cid, "members": list(l.members), "ok": ok, "errors": errs[:5],
-                     "tag": l.tag, "score": round(l.score, 4), "origin": dict(l.origin or {}),
-                     "registered_sets": registered, "rule_setter": None, "rule_notes": [], "rule_pair": None,
-                     "team_field": (tf if (tf.get("terrain") or tf.get("weather")) else None),
-                     "archetype": {"roles": role_groups, "label": label_ja(None)} if role_groups else None,
-                     "ace": (ace_sid if (ace_sid and ace_sid in l.members and not is_inc) else None), "ace_notes": [],
-                     "locked_restored": [],
-                     "roles": dict(r.roles), "assignments": dict(r.assignments), "fills": dict(r.fills),
-                     "selection_plan": dict(r.selection_plan),
-                     "sets": [{"species": c.species_id, "ability": c.ability, "item": c.item, "nature": c.nature, "evs": c.evs,
-                               "moves": list(c.moves), "source": c.source, "coverage": round(float(c.score), 3),
-                               "role": r.roles.get(c.species_id), "notes": list(c.notes)} for c in team]})
+        r.score = float(l.score)
+        r.origin = dict(l.origin or {})
+        rows.append(make_row(idx, cid, r, l.tag, ok, errs, ace_sid, is_inc, registered))
     (run_dir / "s06_sets.json").write_text(json.dumps(rows, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     n_ok = sum(1 for x in rows if x["ok"])
     log(f"S6 sets: {n_ok}/{len(rows)} 並びが合法 (validate-team)")
