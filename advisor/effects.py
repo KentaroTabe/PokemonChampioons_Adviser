@@ -224,7 +224,8 @@ def crit_chance(attacker_ability: Optional[str], defender_ability: Optional[str]
         return 0.0
     if entry.get("will_crit"):
         return 1.0
-    stage = int(entry.get("crit_ratio") or 0)
+    # Showdown の critRatio は 1 = 通常 (段階 0)、2 = 段階 +1 (1/8)、3 = 段階 +2 (1/2)
+    stage = max(0, int(entry.get("crit_ratio") or 1) - 1)
     for f in ability_formulas(attacker_ability):
         if f.get("kind") == "crit_stage" and when_matches(f.get("when"), ctx):
             stage += int(f.get("delta", 0))

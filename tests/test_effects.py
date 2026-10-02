@@ -51,6 +51,8 @@ def test_pure_evaluators():
     assert E.has_effect("moldbreaker", "ignore_target_ability") and E.has_effect("unaware", "ignore_foe_boosts")
     assert E.misc_value("megasol", "self_weather", "weather") == "sun"
     assert E.crit_chance("superluck", None, {}, {}) == 1 / 8 and E.crit_chance(None, "battlearmor", {"will_crit": True}, {}) == 0.0
+    assert E.crit_chance(None, None, {"crit_ratio": 2}, {}) == 1 / 8          # つじぎり等 (Showdown の critRatio 2 = 段階 +1)
+    assert E.crit_chance("superluck", None, {"crit_ratio": 2}, {}) == 1 / 2 and E.crit_chance(None, None, {}, {}) == 1 / 24
     assert E.crit_chance("merciless", None, {}, {"target_status": "poison"}) == 1.0 and E.crit_multiplier("sniper") == 2.25
     # 技の条件・可変威力
     assert E.move_usable(E.move_entry("steelroller"), {"terrain": None}) == (False, "フィールドが無いと失敗")

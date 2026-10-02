@@ -486,6 +486,124 @@ BUILD_SET_CHOICE_LOCK_MOVES = ("stealthrock", "spikes", "toxicspikes", "stickywe
                                "morningsun", "synthesis", "strengthsap", "rest", "wish",
                                "protect", "detect", "banefulbunker", "spikyshield", "burningbulwark", "silktrap",
                                "substitute")
+# ---- 役割の雛形 (docs/TEAM_BUILD_REDESIGN_1002.md §6、2026-10-02): 役割 → 特性・持ち物・技・性格・配分を一体で作る
+# (tools/team_build/role_sets.py)。attacks = 攻撃技の本数、utility = 補助枠の種類 (順に埋める。"a|b" は先に見つかった方)、
+# items = 持ち物のクラスの順 (BUILD_ITEM_CLASSES、§10)、spread = 配分の方針 (fast / bulky / auto = 担当への先手率で決める /
+# wall_physical / wall_special / wall_auto = 被ダメの偏りで決める / tr = 素早さ 0 で下を取る / tr_bulky)、
+# setup_kind = 積み技で上げる側 (offense / defense / none)、ability_tags = 特性の適合で優先するタグ (§9.2、ability_effects.json の
+# tags)、offensive = 攻撃技の被覆 (担当) で評価する役割か、field_moves = 天候・フィールド依存技を並びの始動源があれば許すか
+BUILD_ROLE_TEMPLATES = {
+    "sweeper_setup":   {"attacks": 3, "utility": ("setup",), "items": ("setup_berry", "sash", "orb", "stone"), "spread": "auto",
+                        "setup_kind": "offense", "ability_tags": ("offense", "speed", "setup", "immunity", "defense", "contact_punish"),
+                        "offensive": True},
+    "breaker":         {"attacks": 4, "utility": (), "items": ("choice", "orb", "stone", "type_item"), "spread": "auto",
+                        "setup_kind": "none", "ability_tags": ("offense", "type_change", "immunity", "defense", "contact_punish"),
+                        "offensive": True},
+    "cleaner":         {"attacks": 3, "utility": ("priority",), "items": ("sash", "orb", "scarf", "stone"), "spread": "fast",
+                        "setup_kind": "none", "ability_tags": ("speed", "offense", "priority", "type_change", "immunity", "contact_punish"),
+                        "offensive": True},
+    "tr_ace":          {"attacks": 4, "utility": (), "items": ("orb", "choice_power", "stone", "type_item"), "spread": "tr",
+                        "setup_kind": "none", "ability_tags": ("offense", "slow_offense", "immunity", "defense"),
+                        "offensive": True},
+    "weather_ace":     {"attacks": 3, "utility": ("setup|protect|pivot",), "items": ("orb", "sash", "stone", "choice"), "spread": "auto",
+                        "setup_kind": "offense", "ability_tags": ("weather_user", "offense", "speed", "defense"), "offensive": True,
+                        "field_moves": True},
+    "terrain_ace":     {"attacks": 3, "utility": ("setup|protect|pivot",), "items": ("orb", "sash", "stone", "choice"), "spread": "auto",
+                        "setup_kind": "offense", "ability_tags": ("terrain_user", "offense", "speed", "defense"), "offensive": True,
+                        "field_moves": True},
+    "hazard_lead":     {"attacks": 2, "utility": ("hazard", "status|protect|phaze"), "items": ("sash", "helmet", "leftovers"),
+                        "spread": "wall_auto", "setup_kind": "none", "ability_tags": ("immunity", "defense", "hazard"), "offensive": False},
+    "hazard_removal":  {"attacks": 2, "utility": ("removal", "heal|pivot"), "items": ("leftovers", "helmet", "berry_heal"),
+                        "spread": "wall_auto", "setup_kind": "none", "ability_tags": ("regenerator", "defense", "immunity"), "offensive": False},
+    "speed_control":   {"attacks": 2, "utility": ("speed_control", "status|protect|hazard"), "items": ("mental_herb", "sash", "leftovers"),
+                        "spread": "tr_bulky", "setup_kind": "none", "ability_tags": ("priority", "defense"), "offensive": False},
+    "weather_setter":  {"attacks": 2, "utility": ("field", "pivot|status|heal"), "items": ("weather_rock", "leftovers", "sash"),
+                        "spread": "wall_auto", "setup_kind": "none", "ability_tags": ("weather_setter", "defense"), "offensive": False},
+    "terrain_setter":  {"attacks": 2, "utility": ("field", "pivot|status|heal"), "items": ("terrain_extender", "leftovers", "sash"),
+                        "spread": "wall_auto", "setup_kind": "none", "ability_tags": ("terrain_setter", "defense"), "offensive": False},
+    "pivot":           {"attacks": 2, "utility": ("pivot", "heal|status|hazard"), "items": ("leftovers", "helmet", "scarf"),
+                        "spread": "wall_auto", "setup_kind": "none", "ability_tags": ("regenerator", "intimidate", "immunity"), "offensive": False},
+    "wall":            {"attacks": 2, "utility": ("heal", "status|protect|phaze"), "items": ("leftovers", "helmet", "berry_heal"),
+                        "spread": "wall_auto", "setup_kind": "defense", "ability_tags": ("regenerator", "wall", "defense", "immunity"), "offensive": False},
+    "status_spreader": {"attacks": 2, "utility": ("status", "heal|protect"), "items": ("leftovers", "berry_heal", "sash"),
+                        "spread": "wall_auto", "setup_kind": "none", "ability_tags": ("defense", "immunity", "priority"), "offensive": False},
+    "support_screens": {"attacks": 1, "utility": ("screens", "screens", "selfko|pivot|status"), "items": ("lightclay",),
+                        "spread": "wall_auto", "setup_kind": "none", "ability_tags": ("priority", "speed", "defense"), "offensive": False},
+    "support_veil":    {"attacks": 2, "utility": ("auroraveil", "field|status|pivot"), "items": ("lightclay",),
+                        "spread": "wall_auto", "setup_kind": "none", "ability_tags": ("weather_setter", "defense"), "offensive": False},
+    "phazer":          {"attacks": 2, "utility": ("phaze", "heal|hazard"), "items": ("leftovers", "helmet"),
+                        "spread": "wall_auto", "setup_kind": "none", "ability_tags": ("defense", "immunity"), "offensive": False},
+    "trapper":         {"attacks": 2, "utility": ("trap", "status|setup|protect"), "items": ("leftovers", "sash"),
+                        "spread": "wall_auto", "setup_kind": "offense", "ability_tags": ("trapper", "defense"), "offensive": True},
+    "suicide_lead":    {"attacks": 1, "utility": ("hazard|status", "status|protect", "selfko|destinybond|pivot"), "items": ("sash",),
+                        "spread": "fast", "setup_kind": "none", "ability_tags": ("speed", "priority"), "offensive": False},
+}
+# 軸 (archetypes.ROLE_SPECS) と S4 の役割 id → 雛形。天候・フィールドの始動役 / エース (sun_setter / psychic_abuser 等) は接尾辞で解決する
+BUILD_ROLE_ALIASES = {
+    "setup_ace": "sweeper_setup", "self_booster": "sweeper_setup", "baton": "sweeper_setup",
+    "partner": "breaker", "answer": "breaker", "receiver": "breaker", "ohko_user": "breaker",
+    "fast_attacker": "cleaner", "priority_attacker": "cleaner", "priority_bulky": "cleaner", "sucker": "cleaner",
+    "steel_priority": "cleaner",
+    "tr_setter": "speed_control", "tailwind": "speed_control", "web_setter": "hazard_lead",
+    "rocks_setter": "hazard_lead", "spikes_setter": "hazard_lead", "hazard_setter": "hazard_lead",
+    "lead_support": "suicide_lead", "destiny_bond": "suicide_lead", "endeavor_sash": "suicide_lead",
+    "regen_wall": "wall", "counter_user": "wall", "curse_ghost": "wall", "leech_seeder": "wall", "wall_physical": "wall",
+    "wall_special": "wall",
+    "status_user": "status_spreader", "screens_dual": "support_screens", "screens_veil": "support_veil",
+    "snow_source": "weather_setter", "perish_singer": "trapper", "hazard_removal": "hazard_removal",
+}
+# 補助枠の種類 → 技の候補 (順 = 同評価のときの選好。状態異常は担当の物理/特殊の偏りで並べ替える)
+BUILD_ROLE_UTILITY_MOVES = {
+    "hazard": ("stealthrock", "spikes", "stickyweb", "toxicspikes"),
+    "removal": ("rapidspin", "defog", "tidyup", "mortalspin"),
+    "status": ("spore", "willowisp", "thunderwave", "yawn", "toxic", "glare", "sleeppowder", "stunspore", "nuzzle", "hypnosis"),
+    "heal": ("recover", "roost", "slackoff", "softboiled", "milkdrink", "shoreup", "synthesis", "moonlight", "morningsun",
+             "strengthsap", "wish", "rest"),
+    "protect": ("protect", "detect", "spikyshield", "banefulbunker", "burningbulwark", "silktrap", "kingsshield"),
+    "pivot": ("uturn", "voltswitch", "flipturn", "partingshot", "teleport", "chillyreception", "batonpass"),
+    "priority": ("suckerpunch", "bulletpunch", "shadowsneak", "aquajet", "extremespeed", "machpunch", "iceshard", "quickattack",
+                 "accelerock", "vacuumwave", "firstimpression", "jetpunch", "thunderclap", "grassyglide", "upperhand"),
+    "screens": ("reflect", "lightscreen"),
+    "auroraveil": ("auroraveil",),
+    "speed_control": ("trickroom", "tailwind", "stickyweb", "thunderwave", "icywind", "electroweb"),
+    "phaze": ("roar", "whirlwind", "dragontail", "circlethrow", "haze"),
+    "trap": ("meanlook", "block", "jawlock", "spiritshackle", "anchorshot", "thousandwaves", "octolock", "spiderweb"),
+    "selfko": ("explosion", "selfdestruct", "mistyexplosion", "memento", "finalgambit", "healingwish"),
+    "destinybond": ("destinybond",),
+    "trick": ("trick", "switcheroo"),
+}
+BUILD_ROLE_FIELD_MOVES = {"sun": ("sunnyday",), "rain": ("raindance",), "sand": ("sandstorm",), "snow": ("snowscape", "chillyreception"),
+                          "psychic": ("psychicterrain",), "grassy": ("grassyterrain",), "electric": ("electricterrain",),
+                          "misty": ("mistyterrain",)}
+# 持ち物のクラス → 候補 (順 = 選好。使用率 (pokedb の種 × 持ち物) があればその順を先に)。choice は攻撃技の分類で決める
+BUILD_ITEM_CLASSES = {
+    "setup_berry": ("sitrusberry", "lumberry"), "sash": ("focussash",), "orb": ("lifeorb",),
+    "choice": ("choiceband", "choicespecs", "choicescarf"), "choice_power": ("choiceband", "choicespecs"), "scarf": ("choicescarf",),
+    "leftovers": ("leftovers",), "helmet": ("rockyhelmet",), "berry_heal": ("sitrusberry",), "lightclay": ("lightclay",),
+    "mental_herb": ("mentalherb",), "terrain_extender": ("terrainextender",), "white_herb": ("whiteherb",), "chesto": ("chestoberry",),
+    "weather_rock": ("heatrock", "damprock", "smoothrock", "icyrock"), "stone": (), "type_item": (),
+}
+BUILD_WEATHER_ROCKS = {"sun": "heatrock", "rain": "damprock", "sand": "smoothrock", "snow": "icyrock"}
+BUILD_TYPE_ITEMS = {"Normal": "silkscarf", "Fire": "charcoal", "Water": "mysticwater", "Electric": "magnet", "Grass": "miracleseed",
+                    "Ice": "nevermeltice", "Fighting": "blackbelt", "Poison": "poisonbarb", "Ground": "softsand", "Flying": "sharpbeak",
+                    "Psychic": "twistedspoon", "Bug": "silverpowder", "Rock": "hardstone", "Ghost": "spelltag", "Dragon": "dragonfang",
+                    "Dark": "blackglasses", "Steel": "metalcoat", "Fairy": "fairyfeather"}
+# 配分の定型 (役割の雛形の spread)。能力ポイント (0-32) "hp/atk/def/spa/spd/spe"
+BUILD_ROLE_SPREADS = {
+    "fast_physical": ("2/32/0/0/0/32", ("jolly", "adamant")), "fast_special": ("2/0/0/32/0/32", ("timid", "modest")),
+    "bulky_physical": ("32/32/0/0/0/2", ("adamant",)), "bulky_special": ("32/0/0/32/0/2", ("modest",)),
+    "wall_physical": ("32/0/32/0/2/0", ("impish", "bold")), "wall_special": ("32/0/0/0/32/2", ("careful", "calm")),
+    "tr_physical": ("32/32/2/0/0/0", ("brave",)), "tr_special": ("32/0/2/32/0/0", ("quiet",)),
+    "tr_bulky_physical": ("32/0/32/0/2/0", ("relaxed",)), "tr_bulky_special": ("32/0/2/0/32/0", ("sassy",)),
+}
+BUILD_SET_CANDIDATES_PER_ROLE = 3    # 種 × 役割ごとの候補型の上限 (雛形の生成型 + 使用率の型)
+BUILD_WALL_SPEED_MAX = 95            # 素早さ種族値がこれ以上の種は壁型の候補にしない (D-17。使用率の壁型は一体の候補として入る)
+BUILD_BULK_POINTS_MIN = 24           # HP または防御側への投資がこれ以上なら「耐久」(安定技を優先。D-03)
+BUILD_FAST_POINTS_MIN = 24           # 素早さへの投資がこれ以上で耐久投資が無ければ「速攻」(1 発化のデメリット技を許す)
+BUILD_OHKO_BONUS = 0.5               # 担当する相手を 2 発 → 1 発にできる技への加点 (被覆 1 体分の半分。D-04)
+BUILD_OHKO_THREAT_MIN_W = 0.3        # 1 発化の加点を数える相手の重みの下限 (最大を 1 に正規化)
+BUILD_DEMERIT_NEED_MIN = 0.15        # 耐久型でデメリット技を許す「安定技だけでは担当に空く穴」の最小 (被覆の差)
+BUILD_ROLE_FAST_SHARE = 0.5          # spread=auto: +Spe 振り切りで担当の半分以上に先手なら fast、でなければ bulky
 # テンプレート: attacks = 攻撃技の本数、utility = 補助技の役割 (順に埋める。埋まらなければそのテンプレートは捨てる)
 BUILD_GEN_TEMPLATES = (
     {"name": "attack3_setup", "attacks": 3, "utility": ("setup",)},
