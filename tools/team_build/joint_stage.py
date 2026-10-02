@@ -1,0 +1,578 @@
+"""S5 統合段 (並びと型の同時探索) の配線: run の成果物 (相手プールの分割、脅威、S3 の特徴、S4 の構想、仕様) から
+lineup_search を動かし、従来の s05_candidates.json / s06_sets.json / s06_sets/<並び>.txt と同じ形で保存する。
+
+- 相手プール = opponent_families.json の探索 tier (系統 = チーム、重み = チーム数 × セッションの指定)
+- 型の候補 = 役割の雛形 (role_sets.generate_role_sets) + 使用率の代表型 (合成の印つき 1 候補) + 指定の型 (その種はそれだけ)
+- 被覆の行 = interaction_row (型の場込み) → coverage_value
+- 種の事前の絞り込み = S3 の特徴 (代表型の被覆) で穴の相手に強い順 + 未充足の役割を満たせる種
+- 現行チーム枝 = 登録の型を一体の候補として固定 (役割は型から逆引き) し近傍 (1 枠入替) と同じ評価で測る
+純粋な判断 (役割の逆引き、役割を満たせるか、要求の導出) はこのモジュールの関数に置き、DB・図鑑・learnset は閉じた callable にする。
+"""
+from __future__ import annotations
+
+import json
+import time
+from dataclasses import replace
+from pathlib import Path
+from typing import Callable, Optional
+
+from champions_agent.config import (BUILD_ARCHETYPE_SPEED_PLAN, BUILD_COMPLEMENT_ROLE_SPECIES_K, BUILD_INCUMBENT_NEIGHBORS,
+                                    BUILD_JOINT_REFINE_TARGETS, BUILD_ROLE_FIELD_MOVES, BUILD_ROLE_OFFENSE_MIN,
+                                    BUILD_ROLE_UTILITY_MOVES, BUILD_ROLE_WALL_OFFENSE_MAX, BUILD_SESSION_THREAT_BOOST,
+                                    BUILD_WALL_SPEED_MAX)
+from tools.team_build import candidates as C
+from tools.team_build import sets as S
+from tools.team_build.lineup_search import (TEAM_SIZE, LineupResult, LineupSearch, OppPool, OppSet, SearchConfig, SetEntry,
+                                            concept_requirements, role_matches, team_field_from)
+from tools.team_build.role_sets import TERRAINS, WEATHER_FIELD_NAME, WEATHERS, pick_utility, template_of
+
+FIELD_WEATHER_ROLE = {v: k for k, v in WEATHER_FIELD_NAME.items()}      # 場の名前 → 役割 id の接頭辞 (sandstorm → sand)
+TR_NATURES = ("brave", "quiet", "relaxed", "sassy")
+
+
+# ------------------------------------------------------------------ 純粋な判断
+def infer_role(cand, category_of: Optional[Callable] = None, setup_of: Optional[Callable] = None,
+               field_of: Optional[Callable] = None) -> str:
+    """型 → 役割 id (登録の型・指定の型・代表型の逆引き)。技と持ち物と性格から機械的に:
+    トリックルーム → tr_setter、壁技 → screens_*、設置 → hazard_lead、除去 → hazard_removal、天候・フィールドの始動 (特性/技) →
+    <場>_setter、積み技 → sweeper_setup、交代技 → pivot、回復 + 攻撃技 2 本以下 → wall、状態異常 + 攻撃技 2 本以下 →
+    status_spreader、スカーフ / 先制技 → cleaner、−Spe の性格 → tr_ace、それ以外 → breaker"""
+    moves = list(cand.moves or [])
+    ms = set(moves)
+    util = BUILD_ROLE_UTILITY_MOVES
+    cat = category_of or (lambda m: "")
+    n_attacks = sum(1 for m in moves if cat(m) not in ("status", ""))
+    if "trickroom" in ms:
+        return "tr_setter"
+    if "auroraveil" in ms:
+        return "screens_veil"
+    if len(ms & set(util["screens"])) >= 2 or (ms & set(util["screens"]) and cand.item == "lightclay"):
+        return "screens_dual"
+    if field_of is not None:
+        f = field_of(cand.ability, moves) or {}
+        if f.get("terrain"):
+            return f"{f['terrain']}_setter"
+        if f.get("weather"):
+            return f"{FIELD_WEATHER_ROLE.get(f['weather'], f['weather'])}_setter"
+    if ms & set(util["hazard"]):
+        return "hazard_lead"
+    if ms & set(util["removal"]):
+        return "hazard_removal"
+    if setup_of is not None and any(setup_of(m) for m in moves):
+        return "sweeper_setup"
+    if ms & set(util["pivot"]):
+        return "pivot"
+    if ms & set(util["heal"]) and n_attacks <= 2:
+        return "wall"
+    if ms & set(util["status"]) and n_attacks <= 2:
+        return "status_spreader"
+    if cand.item == "choicescarf" or (ms & set(util["priority"]) and n_attacks >= 3):
+        return "cleaner"
+    if (cand.nature or "") in TR_NATURES:
+        return "tr_ace"
+    return "breaker"
+
+
+def role_capable(role: str, learnset: set, abilities: list, base: dict, field_of: Callable) -> bool:
+    """種がその役割の型を作れそうか (雛形の必須の補助枠・始動源・火力・速さ)。事前の絞り込み用の軽い判定"""
+    try:
+        tname, template, rfield = template_of(role)
+    except KeyError:
+        return False
+    atk, spa, spe = int(base.get("atk") or 0), int(base.get("spa") or 0), int(base.get("spe") or 0)
+    if template.get("offensive", True) and max(atk, spa) < BUILD_ROLE_OFFENSE_MIN:
+        return False
+    if tname == "wall" and spe >= BUILD_WALL_SPEED_MAX:
+        return False
+    if tname in ("weather_setter", "terrain_setter", "support_veil"):
+        want = WEATHER_FIELD_NAME.get(rfield, rfield) if rfield in WEATHERS else rfield
+        kind = "weather" if rfield in WEATHERS else "terrain"
+        by_ability = any((field_of(a, ()) or {}).get(kind) == want for a in abilities)
+        by_move = bool(set(BUILD_ROLE_FIELD_MOVES.get(rfield or "", ())) & learnset)
+        if tname != "support_veil" and not (by_ability or by_move):
+            return False
+    prefs = {"status_order": list(BUILD_ROLE_UTILITY_MOVES["status"]),
+             "speed_control_order": list(BUILD_ROLE_UTILITY_MOVES["speed_control"])}
+    for kind in template.get("utility", ()):
+        if "|" in kind or kind in ("setup", "field"):
+            continue
+        if pick_utility(kind, learnset, [], prefs, rfield) is None:
+            return False
+    return True
+
+
+def default_roles(base: dict, learnset: set, max_roles: int = 3) -> list:
+    """役割の指定が無い種に試す役割 (雛形名、最大 max_roles)。火力があれば 積みエース (積み技を覚えれば) と breaker、
+    交代技があれば pivot、設置技があれば hazard_lead、火力が控えめで回復技があり速くなければ wall"""
+    from advisor.effects import move_entry
+    atk, spa, spe = int(base.get("atk") or 0), int(base.get("spa") or 0), int(base.get("spe") or 0)
+    util = BUILD_ROLE_UTILITY_MOVES
+    off = max(atk, spa)
+    roles: list = []
+    if off >= BUILD_ROLE_OFFENSE_MIN:
+        if any(move_entry(m).get("setup_boosts") for m in learnset):
+            roles.append("sweeper_setup")
+        roles.append("breaker")
+    if off <= BUILD_ROLE_WALL_OFFENSE_MAX and spe < BUILD_WALL_SPEED_MAX and (set(util["heal"]) & learnset):
+        roles.append("wall")
+    if set(util["pivot"]) & learnset:
+        roles.append("pivot")
+    if set(util["hazard"]) & learnset:
+        roles.append("hazard_lead")
+    if not roles:
+        roles.append("breaker" if off >= spe else "status_spreader")
+    return roles[:max_roles]
+
+
+def rule_roles(rule_field: Optional[dict]) -> list:
+    """規則の場 → 要求する役割 [(role, n)] (始動役 1 + 恩恵を受ける役 1)"""
+    out: list = []
+    t = (rule_field or {}).get("terrain")
+    w = (rule_field or {}).get("weather")
+    if t in TERRAINS:
+        out += [(f"{t}_setter", 1), (f"{t}_abuser", 1)]
+    if w:
+        p = FIELD_WEATHER_ROLE.get(w, w)
+        if p in WEATHERS:
+            out += [(f"{p}_setter", 1), (f"{p}_abuser", 1)]
+    return out
+
+
+def branch_roles_of(concept: dict, archetypes: Optional[dict] = None) -> list:
+    """軸つきの構想 → 分岐の役割の最小数 [(role, n)] (特殊な分岐の併用も足す)"""
+    if archetypes is None:
+        from tools.team_build.archetypes import ARCHETYPES
+        archetypes = ARCHETYPES
+    out: list = []
+    axis, branch = concept.get("archetype"), concept.get("branch")
+    br = ((archetypes.get(axis or "") or {}).get("branches") or {}).get(branch or "")
+    if br:
+        out += [(r, int(n)) for r, n in br.get("roles", [])]
+    sb = concept.get("special_branch")
+    sbr = ((archetypes.get("special") or {}).get("branches") or {}).get(sb or "")
+    if sbr and axis != "special":
+        out += [(r, int(n)) for r, n in sbr.get("roles", [])]
+    return out
+
+
+def to_lineup(r: LineupResult) -> C.Lineup:
+    return C.Lineup(tuple(r.members), r.concept, float(r.score), dict(r.parts), tag=r.tag, origin=dict(r.origin))
+
+
+def family_weight(n_teams: int, species: set, session_weights: Optional[dict], boost: float = BUILD_SESSION_THREAT_BOOST) -> float:
+    """系統の重み = チーム数 × (1 + boost × セッションの指定の最大)"""
+    w = float(n_teams)
+    if session_weights:
+        m = max((float(session_weights.get(s, 0.0)) for s in species), default=0.0)
+        w *= 1.0 + boost * m
+    return w
+
+
+# ------------------------------------------------------------------ 配線 (DB・図鑑・learnset を閉じる)
+def pool_from_split(doc: dict, tier: str = "search", session_weights: Optional[dict] = None) -> OppPool:
+    """opponent_families.json → OppPool (その tier の系統とチーム本文から)"""
+    from tools.team_build.interaction import view_from_set
+    fam_rows = [f for f in doc.get("families", []) if f.get("tier") == tier]
+    teams: dict = {}
+    for f in fam_rows:
+        for tid in f.get("teams", []):
+            text = (doc.get("texts") or {}).get(tid)
+            if not text or tid in teams:
+                continue
+            lst = []
+            for sid, c in S.parse_set_text(text).items():
+                try:
+                    view, moves = view_from_set(sid, c.as_row())
+                except Exception:
+                    continue
+                lst.append(OppSet(c.key(), sid, view, moves))
+            teams[tid] = lst
+    fams = []
+    for f in fam_rows:
+        species = {s for t in f.get("teams", []) for s in ((doc.get("teams") or {}).get(t) or {}).get("species", [])}
+        fams.append((f["family_id"], family_weight(len(f.get("teams", [])), species, session_weights), list(f.get("teams", []))))
+    return OppPool.build(teams, fams)
+
+
+def make_row_fn() -> Callable:
+    from advisor.damage import FieldView
+    from tools.team_build.gen_sets import has_field
+    from tools.team_build.interaction import _mega_stone_ids, coverage_value, interaction_row
+    stones = _mega_stone_ids()
+
+    def row_fn(entry: SetEntry, opp: OppSet) -> float:
+        fv = FieldView(terrain=entry.field.get("terrain"), weather=entry.field.get("weather")) if has_field(entry.field) else None
+        try:
+            row = interaction_row(entry.species_id, entry.view, entry.moves, opp.species_id, opp.view, opp.moves, stones, fieldv=fv)
+        except Exception:
+            return 0.0
+        return coverage_value(row)
+    return row_fn
+
+
+def entry_from_candidate(cand, role: str, team_field: Optional[dict], locked: bool = False) -> SetEntry:
+    """SetCandidate → SetEntry (メガ石なら メガ後のビュー、評価の場 = 自分の場を優先して並びの始動源で埋める)"""
+    from tools.team_build import gen_sets as G
+    from tools.team_build.interaction import view_from_set
+    view, moves = view_from_set(cand.species_id, cand.as_row())
+    own = G.own_field(view.ability, moves)
+    fld = G.merge_fields(own, team_field)
+    return SetEntry((cand.key(), G.field_key(fld)), cand.species_id, role, cand, view, moves, cand.item,
+                    S.has_mega_stone(cand.item), fld, own, locked)
+
+
+def _species_tables():
+    """図鑑・learnset・特性を引く callable の束 (種ごとにキャッシュ)"""
+    from advisor.dex import get_dex
+    from tools.team_build import gen_sets as G
+    from tools.team_build.learnsets import learnset_of
+    from tools.team_build.role_sets import _species_abilities
+    dex = get_dex()
+    cache: dict = {}
+
+    def info(sid: str) -> dict:
+        """base = 役割判定用の種族値: メガ石を持てる種はメガ後の方が高い能力をそのまま (エースの役割はメガ後の火力で決まる)"""
+        if sid not in cache:
+            from advisor.gimmick import mega_forms
+            sp = dex.species(sid) or {}
+            base = dict(sp.get("baseStats") or {})
+            for msid in mega_forms(sid):
+                mb = (dex.species(msid) or {}).get("baseStats") or {}
+                for k, v in mb.items():
+                    if k != "spe":
+                        base[k] = max(int(base.get(k) or 0), int(v or 0))
+            cache[sid] = {"base": base, "learnset": set(learnset_of(sid)), "abilities": list(_species_abilities(sid))}
+        return cache[sid]
+    return info, (lambda ability, moves: G.own_field(ability, moves))
+
+
+def make_roles_of(info: Callable) -> Callable:
+    cache: dict = {}
+
+    def roles_of(sid: str) -> list:
+        if sid not in cache:
+            i = info(sid)
+            cache[sid] = default_roles(i["base"], i["learnset"]) if i["base"] else []
+        return cache[sid]
+    return roles_of
+
+
+def make_capable(info: Callable, field_of: Callable) -> Callable:
+    cache: dict = {}
+
+    def capable(sid: str, role: str) -> bool:
+        key = (sid, role)
+        if key not in cache:
+            i = info(sid)
+            cache[key] = bool(i["base"]) and role_capable(role, i["learnset"], i["abilities"], i["base"], field_of)
+        return cache[key]
+    return capable
+
+
+def make_prefilter(feats: dict, threat_weights: dict, capable: Callable, role_k: int = BUILD_COMPLEMENT_ROLE_SPECIES_K) -> Callable:
+    """S3 の特徴 (代表型の脅威への被覆) で、穴の相手 (脅威リストに居るもの) に強い順。未充足の役割 1 つにつき、
+    役割を満たせる種を role_k 体まで先頭に足す"""
+    wmax = max(threat_weights.values(), default=1.0) or 1.0
+
+    def score(sid: str, targets: list) -> float:
+        f = feats.get(sid)
+        if f is None:
+            return 0.0
+        ts = targets or list(f.coverage)
+        tot = sum(threat_weights.get(t, 0.0) / wmax for t in ts) or 1.0
+        return sum(threat_weights.get(t, 0.0) / wmax * float(f.coverage.get(t, 0.0)) for t in ts) / tot
+
+    def prefilter(species_ids: list, hole_species: list, unmet: list, k: int) -> list:
+        targets = [t for t in hole_species if t in threat_weights]
+        ranked = sorted(species_ids, key=lambda s: -score(s, targets))
+        out: list = []
+        for role in dict.fromkeys(unmet):
+            n = 0
+            for s in ranked:
+                if s in out:
+                    continue
+                if capable(s, role):
+                    out.append(s)
+                    n += 1
+                if n >= role_k:
+                    break
+        for s in ranked:
+            if len(out) >= k:
+                break
+            if s not in out:
+                out.append(s)
+        return out
+    return prefilter
+
+
+def make_candidates_fn(tv: dict, threat_weights: dict, snapshot_id: Optional[int], custom_sets: dict,
+                       log: Optional[Callable] = None) -> Callable:
+    """candidates_fn(sid, role, used_items, mega_allowed, team_field, speed_plan) → [SetEntry]。
+    指定の型の種はその型だけ (役割は逆引き)。それ以外は役割の雛形の型 (≤ BUILD_SET_CANDIDATES_PER_ROLE) + 代表型 (合成の印、
+    役割が一致するときだけ)。(種, 役割, メガ可否, 場, 速度計画) でキャッシュし、持ち物が全部使用済みのときだけ使用済みを除いて作り直す"""
+    from champions_agent.data import database as db
+    from tools.team_build import gen_sets as G
+    from tools.team_build.role_sets import RoleContext, generate_role_sets
+    log = log or (lambda m: None)
+    cache: dict = {}
+    usage: dict = {}
+    locked: dict = {}
+    cat_of = S.default_category_of()
+    setup_moves = S.default_setup_moves()
+
+    def usage_of(sid: str) -> tuple:
+        if sid not in usage:
+            item_pct, move_pct, ability_pct, rep = {}, {}, {}, None
+            if snapshot_id is not None:
+                try:
+                    with db.get_connection() as conn:
+                        item_pct = (S.item_usage_pct_map(conn, snapshot_id, [sid]) or {}).get(sid) or {}
+                        move_pct = S.move_usage_pct(conn, snapshot_id, sid)
+                        ability_pct = {a: float(p or 0.0) for a, p in S._rows(conn, "ability_usage", "ability_name", snapshot_id, sid, 0.0)}
+                        rep = S.representative_set(conn, snapshot_id, sid)
+                except Exception as e:
+                    log(f"S5 usage {sid}: {e!r}")
+            usage[sid] = (item_pct, move_pct, ability_pct, rep)
+        return usage[sid]
+
+    def rep_entry(sid: str, role: str, team_field: dict, mega_allowed: bool) -> Optional[SetEntry]:
+        rep = usage_of(sid)[3]
+        if rep is None or S.set_sanity(rep) or not S.legal_item(rep.item):
+            return None
+        if S.has_mega_stone(rep.item) and not mega_allowed:
+            return None
+        rrole = infer_role(rep, cat_of, lambda m: m in setup_moves, G.own_field)
+        if not role_matches(rrole, role):
+            return None
+        c = S.SetCandidate(rep.species_id, rep.ability, rep.item, rep.nature, rep.evs, list(rep.moves), "representative", 0.0,
+                           ["representative:synthesized", f"role:{rrole}"])
+        try:
+            return entry_from_candidate(c, rrole, team_field)
+        except Exception:
+            return None
+
+    def build(sid: str, role: str, used_items: frozenset, mega_allowed: bool, team_field: dict, speed_plan: str,
+              targets: Optional[list] = None) -> list:
+        item_pct, move_pct, ability_pct, _rep = usage_of(sid)
+        tgt = [t for t in (targets or []) if t in tv] or None
+        ctx = RoleContext(threat_views=tv, weights=dict(threat_weights), targets=tgt, team_field=dict(team_field),
+                          speed_plan=speed_plan, used_items=set(used_items), mega_allowed=mega_allowed, item_pct=item_pct,
+                          move_pct=move_pct, ability_pct=ability_pct)
+        try:
+            sets = generate_role_sets(sid, role, ctx)
+        except Exception as e:
+            log(f"S5 role_sets {sid}/{role}: {e!r}")
+            sets = []
+        out: list = []
+        for c in sets:
+            try:
+                out.append(entry_from_candidate(c, role, team_field))
+            except Exception:
+                continue
+        r = rep_entry(sid, role, team_field, mega_allowed)
+        if r is not None:
+            out.append(r)
+        return out
+
+    def candidates_fn(sid: str, role: str, used_items: frozenset, mega_allowed: bool, team_field: dict, speed_plan: str,
+                      targets: Optional[list] = None) -> list:
+        fkey = G.field_key(team_field)
+        if targets:
+            # 仕上げ (担当に合わせた型): 担当の相手の組ごとに作る (キャッシュは担当のキー込み。使用済みの持ち物は除いて作る)
+            tkey = tuple(sorted(t for t in targets if t in tv))
+            if not tkey:
+                return candidates_fn(sid, role, used_items, mega_allowed, team_field, speed_plan)
+            key = (sid, role, mega_allowed, fkey, speed_plan, tkey, tuple(sorted(used_items)))
+            if key not in cache:
+                cache[key] = build(sid, role, used_items, mega_allowed, team_field, speed_plan, list(tkey))
+            return list(cache[key])
+        if sid in custom_sets:
+            k = (sid, fkey)
+            if k not in locked:
+                c = custom_sets[sid]
+                rrole = infer_role(c, cat_of, lambda m: m in setup_moves, G.own_field)
+                try:
+                    locked[k] = [entry_from_candidate(c, rrole, team_field, locked=True)]
+                except Exception as e:
+                    log(f"S5 custom set {sid}: {e!r}")
+                    locked[k] = []
+            return list(locked[k])
+        key = (sid, role, mega_allowed, fkey, speed_plan)
+        if key not in cache:
+            cache[key] = build(sid, role, frozenset(), mega_allowed, team_field, speed_plan)
+        out = [e for e in cache[key] if not (e.item and e.item in used_items)]
+        if not out and cache[key] and used_items:
+            key2 = key + (tuple(sorted(used_items)),)
+            if key2 not in cache:
+                cache[key2] = build(sid, role, used_items, mega_allowed, team_field, speed_plan)
+            out = list(cache[key2])
+        return out
+
+    candidates_fn.cache = cache          # type: ignore[attr-defined]
+    return candidates_fn
+
+
+def registered_entries(reg_text: str, log: Optional[Callable] = None) -> list:
+    """登録チーム本文 → [SetEntry] (型は固定、役割は逆引き)。6 体に満たなければ空"""
+    from tools.team_build import gen_sets as G
+    log = log or (lambda m: None)
+    cat_of = S.default_category_of()
+    setup_moves = S.default_setup_moves()
+    out: list = []
+    for sid, c in S.parse_set_text(reg_text).items():
+        role = infer_role(c, cat_of, lambda m: m in setup_moves, G.own_field)
+        try:
+            out.append(entry_from_candidate(c, role, None, locked=True))
+        except Exception as e:
+            log(f"S5 registered {sid}: {e!r}")
+            return []
+    return out if len(out) == TEAM_SIZE else []
+
+
+# ------------------------------------------------------------------ 段の本体
+def stage_s5_joint(run_dir: Path, spec, fams: list, feats: dict, tv: dict, threat_weights: dict, split: dict, prof: dict,
+                   snapshot_id: Optional[int], session_weights: Optional[dict] = None, n_neighbors: Optional[int] = None,
+                   only_incumbent: bool = False, rule_ctx: Optional[dict] = None, registered: Optional[tuple] = None,
+                   log: Optional[Callable] = None, refine: bool = BUILD_JOINT_REFINE_TARGETS) -> tuple:
+    """S5 統合段。戻り値 (選んだ並び [candidates.Lineup], s06_sets.json の行)。
+    s05_candidates.json (従来 + mode=joint) と s06_sets.json / s06_sets/<並び>.txt (従来 + roles / assignments / fills /
+    selection_plan) を保存する。validate-team は run.py 側の不変条件 (除外・エースの石) の前に通す"""
+    log = log or print
+    t0 = time.time()
+    from tools.team_build import rules as RU
+    pool = pool_from_split(split, "search", session_weights)
+    custom = {sid: S.candidate_from_row(sid, row) for sid, row in (spec.custom_sets or {}).items()}
+    info, field_of = _species_tables()
+    roles_of = make_roles_of(info)
+    capable = make_capable(info, field_of)
+    search = LineupSearch(pool, make_candidates_fn(tv, threat_weights, snapshot_id, custom, log), make_row_fn(),
+                          make_prefilter(feats, threat_weights, capable), log, capable=capable)
+    banned = set(spec.banned)
+    species_pool = [s for s in feats if s not in banned]
+    rule_field = RU.rule_field(rule_ctx["names"]) if rule_ctx else {}
+    cfg = SearchConfig(ace=(spec.ace or None), favorites=tuple(spec.favorites), banned=frozenset(banned),
+                       required_roles=rule_roles(rule_field), rule_field=dict(rule_field))
+    log(f"S5 joint: 相手プール 系統 {len(pool.families)} 型 {len(pool.sets)}、所持 {len(species_pool)} 種、構想 {len(fams)}")
+    results: list = []
+    if not only_incumbent:
+        for n, fam in enumerate(fams, 1):
+            core_ok = [c for c in fam.get("core_ids", []) if c in feats and c not in banned]
+            if not core_ok:
+                continue
+            cfg_f = replace(cfg, speed_plan=BUILD_ARCHETYPE_SPEED_PLAN.get(fam.get("archetype") or "", "neutral"))
+            try:
+                res = search.search(fam, cfg_f, species_pool, roles_of, branch_roles=branch_roles_of(fam))
+            except Exception as e:
+                log(f"S5 joint {fam.get('family_id')}: error {e!r}")
+                res = []
+            results.extend(res)
+            if n % 10 == 0 or n == len(fams):
+                log(f"S5 joint: 構想 {n}/{len(fams)} 並び {len(results)} 型 {len(search.lib.entries)} "
+                    f"行 {search.n_rows_computed} 評価 {search.n_evals} {time.time() - t0:.0f} 秒")
+    by_members: dict = {}
+    for r in results:
+        if r.members not in by_members or r.score > by_members[r.members].score:
+            by_members[r.members] = r
+    lineups = [to_lineup(r) for r in by_members.values()]
+    fav = set(spec.favorites)
+    if fav:
+        lineups = [l for l in lineups if fav <= set(l.members)]
+    chosen = C.select_with_quotas(lineups, prof["quotas"]) if lineups else []
+    rest = sorted((l for l in lineups if l not in chosen), key=lambda l: -l.score)
+    for l in rest:
+        if len(chosen) >= prof["n_lineups"]:
+            break
+        if all(C.distance(l.members, c.members) >= C.MIN_DISTANCE for c in chosen):
+            l.tag = "fill"
+            chosen.append(l)
+    if refine and chosen:
+        # 仕上げ: 担当 (選出計画でその個体を出す系統の相手) に合わせて型を作り直す (点が上がるときだけ)
+        fam_species = {fid: pool.species_of_families([i]) for i, (fid, _w, _rows) in enumerate(pool.families)}
+
+        def targets_of(res: LineupResult, sid: str) -> Optional[list]:
+            out: list = []
+            for fid in res.assignments.get(sid, []):
+                out.extend(s for s in fam_species.get(fid, []) if s not in out)
+            return out or None
+        n_changed = 0
+        for l in chosen:
+            r = by_members[tuple(l.members)]
+            req = list(cfg.required_roles) + concept_requirements(next((f for f in fams if f.get("family_id") == r.concept), {}),
+                                                                  branch_roles_of(next((f for f in fams if f.get("family_id") == r.concept), {})))
+            try:
+                new, changed = search.refine(r, cfg, req, targets_of)
+            except Exception as e:
+                log(f"S5 refine {r.concept}: error {e!r}")
+                continue
+            if changed:
+                by_members[tuple(l.members)] = new
+                l.score = float(new.score)
+                l.parts = dict(new.parts)
+                n_changed += len(changed)
+        log(f"S5 refine: 担当に合わせて型を作り直した個体 {n_changed} ({time.time() - t0:.0f} 秒)")
+    reg_text, reg_ids, reg_mega = registered or ("", [], None)
+    if rule_ctx:
+        log("S5 incumbent branch: 規則つきのため入れない (参照との比較は S8a/S8b で行う)")
+    elif reg_text:
+        entries = registered_entries(reg_text, log)
+        inc, neigh = (search.incumbent(entries, cfg, species_pool, roles_of, n_neighbors or BUILD_INCUMBENT_NEIGHBORS, reg_mega)
+                      if entries else (None, []))
+        existing = {l.members for l in chosen}
+        branch = []
+        for r in ([inc] if inc else []) + neigh:
+            if r.members in existing:
+                continue
+            by_members[r.members] = r
+            branch.append(to_lineup(r))
+            existing.add(r.members)
+        chosen = branch + chosen
+        log(f"S5 incumbent branch: 現行={'あり' if inc else 'なし (除外/プール外/未登録)'} 近傍={len(neigh)} (登録 {len(reg_ids)} 体)")
+    (run_dir / "s05_candidates.json").write_text(
+        json.dumps({"n_generated": len(results), "lineups": [l.to_dict() for l in chosen], "mode": "joint",
+                    "only_incumbent": bool(only_incumbent),
+                    "stats": {"entries": len(search.lib.entries), "rows": search.n_rows_computed, "evals": search.n_evals,
+                              "seconds": round(time.time() - t0, 1)}},
+                   ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    log(f"S5 candidates: generated={len(results)} kept={len(chosen)} ({time.time() - t0:.0f} 秒)")
+    rows = write_sets(run_dir, spec, chosen, by_members, reg_text, log)
+    return chosen, rows
+
+
+def write_sets(run_dir: Path, spec, chosen: list, by_members: dict, reg_text: str, log: Callable) -> list:
+    """s06_sets.json / s06_sets/<並び>.txt (従来の行の形 + roles / assignments / fills / selection_plan)"""
+    from tools.team_build.archetypes import label_ja
+    out_dir = run_dir / "s06_sets"
+    out_dir.mkdir(exist_ok=True)
+    ace_sid = spec.ace or None
+    rows: list = []
+    for idx, l in enumerate(chosen):
+        r = by_members[tuple(l.members)]
+        team = [e.cand for e in r.entries]
+        text = S.to_showdown_text(team)
+        is_inc = l.tag in ("incumbent", "incumbent_mut") and bool(reg_text)
+        registered: list = []
+        if is_inc:
+            text, registered = S.splice_registered_sets(text, reg_text)
+        ok, errs = S.validate_team_text(text, spec.regulation)
+        cid = f"L{idx:02d}_{l.concept}"
+        (out_dir / f"{cid}.txt").write_text(text, encoding="utf-8")
+        tf = team_field_from(r.entries)
+        role_groups: dict = {}
+        for sid, role in r.roles.items():
+            role_groups.setdefault(role, []).append(sid)
+        rows.append({"index": idx, "candidate_id": cid, "members": list(l.members), "ok": ok, "errors": errs[:5],
+                     "tag": l.tag, "score": round(l.score, 4), "origin": dict(l.origin or {}),
+                     "registered_sets": registered, "rule_setter": None, "rule_notes": [], "rule_pair": None,
+                     "team_field": (tf if (tf.get("terrain") or tf.get("weather")) else None),
+                     "archetype": {"roles": role_groups, "label": label_ja(None)} if role_groups else None,
+                     "ace": (ace_sid if (ace_sid and ace_sid in l.members and not is_inc) else None), "ace_notes": [],
+                     "locked_restored": [],
+                     "roles": dict(r.roles), "assignments": dict(r.assignments), "fills": dict(r.fills),
+                     "selection_plan": dict(r.selection_plan),
+                     "sets": [{"species": c.species_id, "ability": c.ability, "item": c.item, "nature": c.nature, "evs": c.evs,
+                               "moves": list(c.moves), "source": c.source, "coverage": round(float(c.score), 3),
+                               "role": r.roles.get(c.species_id), "notes": list(c.notes)} for c in team]})
+    (run_dir / "s06_sets.json").write_text(json.dumps(rows, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    n_ok = sum(1 for x in rows if x["ok"])
+    log(f"S6 sets: {n_ok}/{len(rows)} 並びが合法 (validate-team)")
+    return rows

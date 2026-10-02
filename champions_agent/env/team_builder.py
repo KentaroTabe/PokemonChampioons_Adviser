@@ -268,6 +268,58 @@ def _legal_item_ids() -> set:
     return _LEGAL_ITEM_IDS
 
 
+_AVAILABLE_ITEM_IDS = None
+
+
+def parse_item_status(text: str) -> dict:
+    """items.ts の本文 → {item_id: isNonstandard の値 (None = 標準)}。1 タブの `id: {` ブロックごとに isNonstandard を読む (純粋)"""
+    import re as _re
+    out: dict = {}
+    cur = None
+    for line in text.splitlines():
+        m = _re.match(r"^\t(\w+): \{", line)
+        if m:
+            cur = m.group(1)
+            out[cur] = None
+            continue
+        if cur is None or not line.startswith("\t\t"):
+            continue
+        m = _re.match(r'^\t\tisNonstandard: (?:"([A-Za-z]+)"|null)', line)
+        if m:
+            out[cur] = m.group(1)
+    return out
+
+
+def available_items(base: dict, mod: dict) -> set:
+    """Champions で使える持ち物: 本体で標準 (isNonstandard 無し) のものに mod の指定を重ねる (mod の null = 使える、
+    "Past" 等 = 使えない)。本体に無く mod にだけある id はその mod の指定で決める (純粋)"""
+    out: set = set()
+    for item, status in base.items():
+        st = mod[item] if item in mod else status
+        if st is None:
+            out.add(item)
+    for item, status in mod.items():
+        if item not in base and status is None:
+            out.add(item)
+    return out
+
+
+def _available_item_ids() -> set:
+    """Champions で実際に使える持ち物 id (champions mod で isNonstandard: "Past" のこだわりハチマキ / メガネ / じゃくてんほけん /
+    とつげきチョッキ等を除く。2026-10-02: 生成型のこだわりハチマキが validate-team で落ちた)。読めなければ _legal_item_ids"""
+    global _AVAILABLE_ITEM_IDS
+    if _AVAILABLE_ITEM_IDS is None:
+        from pathlib import Path
+        repo = Path(__file__).resolve().parents[2]
+        try:
+            base = parse_item_status((repo / "pokemon-showdown" / "data" / "items.ts").read_text())
+            mod = parse_item_status((repo / "pokemon-showdown" / "data" / "mods" / "champions" / "items.ts").read_text())
+            _AVAILABLE_ITEM_IDS = available_items(base, mod)
+        except Exception:
+            _AVAILABLE_ITEM_IDS = set(_legal_item_ids())
+    return _AVAILABLE_ITEM_IDS
+
+
 def _sanitize_species(name: str) -> str:
     for suf in ("megax", "megay", "megaz", "mega"):
         if name.endswith(suf) and len(name) > len(suf) + 2:

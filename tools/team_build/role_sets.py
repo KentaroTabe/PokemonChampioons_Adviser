@@ -202,10 +202,31 @@ def drops_boosted_stat(entry: dict, boosted: dict) -> bool:
     return bool(drops & {k for k, v in boosted.items() if int(v) > 0})
 
 
+FIELD_TO_WHEN = {"sandstorm": "sand"}      # 場の名前 → 効果表の when.weather の語
+
+
+def ability_field_ok(info: dict, tag: str, field: Optional[dict]) -> bool:
+    """天候・フィールド依存のタグ (weather_user / terrain_user / weather_setter …) は、特性の式の条件 (when.weather /
+    when.terrain) が並びの場と一致するときだけ数える (2026-10-02: 晴れ構築の始動役にすながくれが選ばれていた)。
+    式に条件が無い特性 (ひでり等の始動) や場の指定が無いときはそのまま"""
+    if not tag.startswith(("weather", "terrain")):
+        return True
+    kind = "weather" if tag.startswith("weather") else "terrain"
+    whens = [w for w in ((f or {}).get("when") or {} for f in (info.get("formula") or [])) if w.get(kind)]
+    if not whens:
+        return True
+    have = (field or {}).get(kind)
+    if not have:
+        return True
+    have = FIELD_TO_WHEN.get(have, have)
+    return any(FIELD_TO_WHEN.get(w[kind], w[kind]) == have for w in whens)
+
+
 def choose_ability_fit(abilities: list, template: dict, ctx_tags: dict, ability_tags_of: Callable,
-                       ability_pct: Optional[dict] = None) -> tuple:
+                       ability_pct: Optional[dict] = None, field: Optional[dict] = None) -> tuple:
     """特性を並びへの適合で選ぶ (§9.2)。点 = 雛形のタグとの一致 (順位の重み) + 文脈のタグ (ctx_tags: tag → 重み、
     例: intimidate 1.0 (担当が物理寄り)、weather_user 1.0 (並びの天候と一致)、immunity:<Type> (担当の技に多いタイプ))。
+    天候・フィールド依存のタグは特性の条件が並びの場 (field) と一致するときだけ (ability_field_ok)。
     価値 0 の特性は 0。同点は使用率 (ability_pct) → 先頭。戻り値 (特性, 点, 理由)"""
     best = (None, -1.0, "")
     want = list(template.get("ability_tags") or ())
@@ -218,11 +239,11 @@ def choose_ability_fit(abilities: list, template: dict, ctx_tags: dict, ability_
             score = 0.0
         else:
             for i, t in enumerate(want):
-                if t in tags:
+                if t in tags and ability_field_ok(info, t, field):
                     score += 1.0 - 0.1 * i
                     why.append(t)
             for t, w in ctx_tags.items():
-                if t in tags or any(t == f"{tag}" for tag in tags):
+                if t in tags and ability_field_ok(info, t, field):
                     score += float(w)
                     why.append(t)
             if "no_item" in tags:
@@ -410,7 +431,7 @@ def generate_role_sets(species_id: str, role: str, ctx: RoleContext) -> list:
     abilities = list(ctx.abilities) if ctx.abilities is not None else _species_abilities(species_id)
     stone = _stone_of(species_id) if ctx.mega_allowed else None
     ability, _ab_score, ab_why = choose_ability_fit(abilities, template, _ctx_tags(profile, ctx, role_field), _ability_info,
-                                                   ctx.ability_pct)
+                                                   ctx.ability_pct, field=field_have)
     own = G.own_field(ability, ())
     field_have = G.merge_fields(field_have, own)
     fv = FieldView(terrain=field_have.get("terrain"), weather=field_have.get("weather"))

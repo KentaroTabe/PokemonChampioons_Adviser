@@ -86,9 +86,21 @@ def test_item_clause_by_usage_and_prefer():
 
 def test_legal_item():
     """シムに無い持ち物 id (cbd の未対応 id unknownitem…) は使用率の行と代表型から落とす"""
+    from champions_agent.env.team_builder import available_items, parse_item_status
     from tools.team_build.sets import legal_item
     assert legal_item(None) and legal_item("") and legal_item("focussash") and legal_item("delphoxite")
     assert not legal_item("unknownitem542")
+    # champions mod で isNonstandard "Past" の持ち物 (こだわりハチマキ / メガネ / じゃくてんほけん / とつげきチョッキ) は使えない。
+    # スカーフ・いのちのたま・メガ石 (mod で null に戻している) は使える
+    assert not legal_item("choiceband") and not legal_item("choicespecs") and not legal_item("weaknesspolicy") and not legal_item("assaultvest")
+    assert legal_item("choicescarf") and legal_item("lifeorb") and legal_item("garchompitez") and legal_item("lightclay")
+    base = parse_item_status('export const Items = {\n\tlifeorb: {\n\t\tname: "Life Orb",\n\t},\n\tchoiceband: {\n\t\tname: "x",\n\t},\n'
+                             '\toldberry: {\n\t\tisNonstandard: "Past",\n\t},\n\tabsolite: {\n\t\tisNonstandard: "Past",\n\t},\n};\n')
+    mod = parse_item_status('export const Items = {\n\tchoiceband: {\n\t\tinherit: true,\n\t\tisNonstandard: "Past",\n\t},\n'
+                            '\tabsolite: {\n\t\tinherit: true,\n\t\tisNonstandard: null,\n\t},\n\tnewstone: {\n\t\tname: "n",\n\t},\n};\n')
+    assert base == {"lifeorb": None, "choiceband": None, "oldberry": "Past", "absolite": "Past"}
+    assert mod == {"choiceband": "Past", "absolite": None, "newstone": None}
+    assert available_items(base, mod) == {"lifeorb", "absolite", "newstone"}
     print("test_legal_item OK")
 
 

@@ -313,6 +313,16 @@ BUILD_FINALIST_MAX_SHARED = 3       # 「方向性が違う」= 既に選んだ�
 BUILD_FINALIST_HOLDOUT_ALL = True   # 全最終候補に封印 holdout を行う (False なら 1 位だけ。STRESS と ablation は常に 1 位だけ)
 BUILD_MAX_REPAIRS = 2                  # 同じ系統の改修反復。3 回目以降は新しい concept branch
 BUILD_MAX_CHANGES = 2                  # 1 反復あたりの入替枠数。3 枠以上は新系統
+# 測定からの戻り (S8a / S8b → S5 修理モード。docs/TEAM_BUILD_REDESIGN_1002.md §14 / §16.2。LLM の仮説は使わない: D-28)
+BUILD_REPAIR_ROUNDS = BUILD_MAX_REPAIRS   # 周回数 (S8a 後と S8b 後の 1 周ずつ)。run.py --repairs の既定
+BUILD_REPAIR_ARMS = 6                  # 1 周あたりに racing へ加える変種の上限 (親が複数なら分け合う)
+BUILD_REPAIR_MIN_N = 20                # 診断に使う対戦数の下限 (系統は負けの多い順に束ねてこの数に達するまで)
+BUILD_REPAIR_LOSS_RATE_MIN = 0.5       # 「負けに効いた」系統 / 相手種の敗率の下限
+BUILD_REPAIR_UNUSED_RATE = 0.05        # 選出率がこれ以下の個体は差し替え対象 (一度も選出されなかった個体を含む)
+BUILD_REPAIR_KO_MIN_N = 3              # 「誰に何で倒されたか」の集中とみなす回数の下限
+BUILD_REPAIR_ITEM_UNUSED_RATE = 0.1    # 消費アイテムが発動した割合 (選出あたり) がこれ未満なら型の変更対象
+BUILD_REPAIR_FAMILY_BOOST = 2.0        # 修理モードで「負けに効いた」系統の重みに掛ける倍率 (1 + この値)
+BUILD_REPAIR_MIN_GAIN = 0.005          # 変種として採る点の増分の下限 (親より上がらない変種は作らない)
 BUILD_STRESS_ACTION_NOISE = (0.05, 0.10)
 BUILD_SMOKE_CANARY_BATTLES = 20        # 性能判定には使わない (crash / illegal action / 読込 / ログ / latency)
 BUILD_PROMOTE_MIN_FULL_RUNS = 3        # 昇格条件: 独立 full run 3 回 + 全 gate PASS + 重大 regression 0 + 人手 approve
@@ -604,6 +614,19 @@ BUILD_OHKO_BONUS = 0.5               # 担当する相手を 2 発 → 1 発に�
 BUILD_OHKO_THREAT_MIN_W = 0.3        # 1 発化の加点を数える相手の重みの下限 (最大を 1 に正規化)
 BUILD_DEMERIT_NEED_MIN = 0.15        # 耐久型でデメリット技を許す「安定技だけでは担当に空く穴」の最小 (被覆の差)
 BUILD_ROLE_FAST_SHARE = 0.5          # spread=auto: +Spe 振り切りで担当の半分以上に先手なら fast、でなければ bulky
+# 並びと型の同時探索 (S5 統合段。docs/TEAM_BUILD_REDESIGN_1002.md §5 / §16.2。初期値は実測で見直す: D-27)
+BUILD_SEARCH_MODE = "joint"          # joint = 核の型を同時に決め補完を順に足す (S5 統合段) / legacy = 従来の S5 (種の並び) → S6 (型)
+BUILD_CORE_BEAM = 3                  # 核の型の組 (≤ 27) のうち残す数
+BUILD_COMPLEMENT_BEAM = 3            # 補完 1 枠ごとに残す並びの数 (純粋な貪欲の詰まりを避ける最小幅)
+BUILD_COMPLEMENT_SPECIES_K = 24      # 補完 1 枠で型まで作る種の数 (S3 の特徴で穴の相手への被覆が高い順 + 未充足の役割を満たせる種)
+BUILD_COMPLEMENT_ROLE_SPECIES_K = 6  # そのうち、未充足の役割 1 つにつき役割を満たせる種を先頭に入れる数
+BUILD_LINEUP_MAX_MEGA_STONES = 1     # 同時探索の並びのメガ石の上限 (1 試合に 1 体。構想の mega_id が持ち、他の個体の石持ち型は候補にしない)
+BUILD_WEATHER_CONFLICT_PENALTY = 0.05  # 並びの始動源 (天候 / フィールド) が 2 系統衝突するときの減点 (被覆 0.05 相当。禁止ではない)
+BUILD_ROLE_FULFIL_BONUS = 0.05       # 構想・規則が要求する役割を全部満たした並びの加点 (被覆 0.05 相当。充足率に比例)
+BUILD_ROLE_OFFENSE_MIN = 90          # 役割の指定が無い種に攻撃役 (breaker / sweeper_setup) を試す攻撃種族値 (A か C) の下限
+BUILD_ROLE_WALL_OFFENSE_MAX = 110    # 役割の指定が無い種に壁役を試す攻撃種族値の上限 (回復技を覚えるとき)
+BUILD_ARCHETYPE_SPEED_PLAN = {"trick_room": "trick_room", "speed": "outspeed"}   # 軸 → 速度の計画 (他は neutral)
+BUILD_JOINT_REFINE_TARGETS = True    # 仕上げ: 並びが決まった後、各個体の型を担当 (選出計画の相手) に合わせて作り直す (点が上がるときだけ。D-04)
 # テンプレート: attacks = 攻撃技の本数、utility = 補助技の役割 (順に埋める。埋まらなければそのテンプレートは捨てる)
 BUILD_GEN_TEMPLATES = (
     {"name": "attack3_setup", "attacks": 3, "utility": ("setup",)},

@@ -99,6 +99,21 @@ def test_ability_fit_and_utility_and_items():
     assert ab == "intimidate"
     ab, _s, _w = R.choose_ability_fit(["klutz", "limber"], {"ability_tags": ()}, {}, infos.get)
     assert ab == "limber"                                                           # ぶきよう は減点
+    # 天候依存のタグは並びの天候と特性の条件が一致するときだけ (晴れの始動役にすながくれを選ばない)
+    infos2 = {"sandveil": {"tags": ["weather_user"], "formula": [{"kind": "evasion_mult", "when": {"weather": "sand"}}]},
+              "roughskin": {"tags": ["contact_punish"]},
+              "chlorophyll": {"tags": ["weather_user", "speed"], "formula": [{"kind": "speed_mult", "when": {"weather": "sun"}}]}}
+    tpl_w = {"ability_tags": ("weather_setter", "defense")}
+    ab, _s, _w = R.choose_ability_fit(["sandveil", "roughskin"], tpl_w, {"weather_user": 1.0}, infos2.get,
+                                      {"roughskin": 99.0, "sandveil": 1.0}, field={"weather": "sun"})
+    assert ab == "roughskin"
+    ab, _s, _w = R.choose_ability_fit(["sandveil", "roughskin"], tpl_w, {"weather_user": 1.0}, infos2.get,
+                                      {"roughskin": 99.0, "sandveil": 1.0}, field={"weather": "sandstorm"})
+    assert ab == "sandveil"
+    ab, _s, w = R.choose_ability_fit(["chlorophyll", "roughskin"], {"ability_tags": ("weather_user",)}, {}, infos2.get,
+                                     field={"weather": "sun"})
+    assert ab == "chlorophyll" and w == "weather_user"
+    assert R.ability_field_ok(infos2["sandveil"], "weather_user", None) and R.ability_field_ok(infos2["roughskin"], "weather_user", {"weather": "sun"})
     # 補助枠
     ls = {"stealthrock", "spikes", "willowisp", "thunderwave", "recover", "protect", "uturn", "trickroom", "tailwind"}
     prefs = {"status_order": ["thunderwave", "willowisp"], "speed_control_order": ["trickroom", "tailwind"], "setup_order": []}

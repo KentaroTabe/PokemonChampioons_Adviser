@@ -169,13 +169,14 @@ def candidate_from_row(species_id: str, row: dict) -> "SetCandidate":
 
 
 def legal_item(item: Optional[str]) -> bool:
-    """シムに存在する持ち物 id か (2026-09-13: cbd の未対応 id "unknownitem542" が代表型に入り validate-team で不合法になった)。
+    """Champions で使える持ち物 id か (2026-09-13: cbd の未対応 id "unknownitem542" が代表型に入り validate-team で不合法になった。
+    2026-10-02: champions mod で isNonstandard "Past" のこだわりハチマキ / メガネ / じゃくてんほけん等も除く)。
     持ち物なし (None/空) は True"""
     if not item:
         return True
     try:
-        from champions_agent.env.team_builder import _legal_item_ids
-        ids = _legal_item_ids()
+        from champions_agent.env.team_builder import _available_item_ids
+        ids = _available_item_ids()
     except Exception:
         return not str(item).startswith("unknownitem")
     return item in ids if ids else not str(item).startswith("unknownitem")

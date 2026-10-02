@@ -16,7 +16,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from champions_agent.config import BUILD_ACE_MAX_MEGA_STONES, BUILD_ARCHETYPES, BUILD_POOL_SOURCE, BUILD_POOL_TOP_N
+from champions_agent.config import (BUILD_ACE_MAX_MEGA_STONES, BUILD_ARCHETYPES, BUILD_POOL_SOURCE, BUILD_POOL_TOP_N,
+                                    BUILD_SEARCH_MODE)
 from champions_agent.data import database as db
 from tools.team_build import archetypes as ARCH
 from tools.team_build import candidates as C
@@ -926,6 +927,9 @@ def main() -> None:
                     help="この段で止める (ablation 拡張: S8a/S8b の結果だけ取る)")
     ap.add_argument("--s08b-seed-offset", type=int, default=1,
                     help="S8b の相手列 seed のオフセット (既定 1 = S8a と別の列。ablation 拡張では 0 で同一列)")
+    ap.add_argument("--search-mode", choices=["joint", "legacy"], default=BUILD_SEARCH_MODE,
+                    help="joint = 並びと型の同時探索 (S5 統合段: 核の型を同時に決め補完を順に足す、docs/TEAM_BUILD_REDESIGN_1002.md §5) / "
+                         "legacy = 従来の S5 (種の並び) → S6 (型) (既定 config BUILD_SEARCH_MODE)")
     ap.add_argument("--s11", choices=["on", "off"], default="off",
                     help="S11 (勝者の SEARCH+SELECTION 再学習)。既定 off = S7 の検証済み checkpoint を最終モデルにする")
     ap.add_argument("--reference-adapt", choices=["on", "off"], default=None,
@@ -1049,12 +1053,24 @@ def main() -> None:
             log(run_dir, f"S4 article: claims={len(claims)} cores={len(cores)} → families={len(fams)}")
         except Exception as e:
             log(run_dir, f"S4 article error: {e!r}")
-    lineups = stage_s5(run_dir, spec, fams, feats, threats, prof, threat_weights,
-                       only_incumbent=args.only_incumbent, n_neighbors=args.incumbent_neighbors_s5,
-                       rule_ctx=rule_ctx, arch_ctx=arch_ctx)
-    concept_mega = {f["family_id"]: f.get("mega_id") for f in fams}
-    results = stage_s6(run_dir, spec, lineups, doc["snapshot"]["id"], tv, concept_mega, rule_ctx=rule_ctx, gen=gen,
-                       arch_ctx=arch_ctx, fams=fams)
+    if args.search_mode == "joint":
+        # S5 統合段 (2026-10-02 再設計): 並びと型を同時に探索し、s05_candidates / s06_sets を同じ形で保存する。
+        # 不変条件 (除外・エースの石) は従来どおりここで検査する
+        from tools.team_build.joint_stage import stage_s5_joint
+        lineups, results = stage_s5_joint(run_dir, spec, fams, feats, tv, threat_weights, split, prof, doc["snapshot"]["id"],
+                                          session_weights=session_w, n_neighbors=args.incumbent_neighbors_s5,
+                                          only_incumbent=args.only_incumbent, rule_ctx=rule_ctx,
+                                          registered=registered_team(), log=lambda m: log(run_dir, m))
+        _assert_no_banned(run_dir, "S5", [(r["candidate_id"], r["members"]) for r in results], set(spec.banned))
+        _assert_ace_mega(run_dir, results)
+    else:
+        lineups = stage_s5(run_dir, spec, fams, feats, threats, prof, threat_weights,
+                           only_incumbent=args.only_incumbent, n_neighbors=args.incumbent_neighbors_s5,
+                           rule_ctx=rule_ctx, arch_ctx=arch_ctx)
+        concept_mega = {f["family_id"]: f.get("mega_id") for f in fams}
+        results = stage_s6(run_dir, spec, lineups, doc["snapshot"]["id"], tv, concept_mega, rule_ctx=rule_ctx, gen=gen,
+                           arch_ctx=arch_ctx, fams=fams)
+    manifest["search_mode"] = args.search_mode
     from champions_agent.env.ranked_teams import pinned_meta_snapshot_id
     manifest.update({"meta_snapshot": doc["snapshot"]["id"], "meta_pin": pinned_meta_snapshot_id(),
                      "pool_source": split.get("pool_source"), "pool_snapshot": split.get("pool_snapshot"),
