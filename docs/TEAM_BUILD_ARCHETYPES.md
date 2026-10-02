@@ -237,5 +237,5 @@ can = champions mod の learnset で覚える (S6 で差し込める)。数値�
   S5 で軸つきの系統の並びに役割の最小数を hard constraint。S6 で役割の技・特性・持ち物を保証 (壁役の ひかりのねんど、
   トリックルーム、バトンタッチ、天候始動の特性 等。こだわり系は代替の持ち物へ)。`--archetypes on|off` (既定 config BUILD_ARCHETYPES)
 - 記事 (concept の archetype / branch / switching、S6 の役割の割り当て) と最終候補の「方向性」ラベル (軸 / 分岐 + 交代方針)
-- 補足: 名前表 (vision/data/jp_names.json) にフラエッテ (えいえんのはな) の種族名が無く、表示が id (floetteeternal) になる → 追加が必要
+- 補足: 名前表 (vision/data/jp_names.json) にフラエッテ (えいえんのはな) の種族名が無く、表示が id (floetteeternal) になる → 2026-10-02 に `advisor/infer._FORM_EXPLICIT` (フラエッテ(えいえんのはな)、パンプジン / バケッチャ のサイズ) で表示し、除外・固定枠・エースの指定でも組み立てた日本語名で解決できるようにした (`tools/team_build/spec._form_name_index`)
 - 未実装 (§5-6): 積み展開の「交代しない」を測定の行動方策に反映すること (S11b の報酬か助言の交代評価)。別作業

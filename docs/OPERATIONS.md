@@ -55,6 +55,11 @@ bash scripts/control_panel_install.sh uninstall   # 解除
 - 相手のパーティには一切適用しない (相手は最新環境の全種から合成する)。
 - 解決できない名前があると run は S0 で止まり、その行を表示する。run の request.json に解決結果 (`banned`) と
   ファイルのハッシュ (`banned_source`) が残る。古い request.json を `--spec` で使い回してもファイルは常に効く。
+- フォルムは組み立てた日本語名で書ける (2026-10-02): `フラエッテ えいえんのはな` / `パンプジン(ちいさいサイズ)` / `ヒスイバクフーン` /
+  `ガラルヤドキング` / `ウォッシュロトム` など (空白・括弧の有無は問わない。正規化後の完全一致だけで、曖昧一致はしない)。
+  id (`floetteeternal`) でもよい。`--favorites` / `--ace` も同じ解決。
+- ファイルを変えても実行中の run には効かない (S0 で読んだ spec で最後まで進む)。反映するには run をやり直す
+  (`--reuse-concepts` で S4 の LLM 呼び出しは省ける)。
 - チャット / フォームの「除外」と `--banned` は、その run だけの追加 (ファイルは変えない)。
 - 使わないポケモンを含む Package を承知の上で登録するときだけ `python -m tools.team_build.promote --install <id> --allow-banned`。
 
