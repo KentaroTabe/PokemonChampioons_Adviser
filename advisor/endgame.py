@@ -28,6 +28,9 @@ def _best_dmg(attacker: MonView, defender: MonView, moves: list, fieldv=None) ->
             d = calc_damage(attacker, defender, mid, fieldv)
         except Exception:
             continue
+        if "expected" in d:          # 命中 (天候・特性・連続技の 1 発ごとの判定込み) まで掛けた期待値 (advisor.damage)
+            best = max(best, d["expected"])
+            continue
         mv = _gd().move(mid)
         acc = ((mv.get("accuracy") or 100) / 100.0) if mv else 1.0
         best = max(best, d["avg"] * acc)

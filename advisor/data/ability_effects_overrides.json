@@ -103,7 +103,7 @@
  "magmaarmor": {"formula": [{"kind": "status_immune", "status": ["frz"]}], "tags": ["status_immune"]},
  "marvelscale": {"formula": [{"kind": "defense_mult", "mult": 0.6667, "when": {"category": "Physical", "user_status": true}}], "tags": ["defense", "status_synergy"]},
  "megalauncher": {"formula": [{"kind": "offense_mult", "mult": 1.5, "when": {"move_flag": "pulse"}}], "tags": ["offense"]},
- "megasol": {"formula": [{"kind": "offense_mult", "mult": 1.5, "when": {"move_type": "Fire"}}, {"kind": "offense_mult", "mult": 0.5, "when": {"move_type": "Water"}}, {"kind": "misc", "effect": "self_weather", "weather": "sun"}], "tags": ["weather_user"], "note": "メガメガニウム: 自分だけ晴れ扱い (ソーラービームはため無し、ウェザーボールは炎)"},
+ "megasol": {"formula": [{"kind": "misc", "effect": "self_weather", "weather": "sun"}], "tags": ["weather_user"], "note": "メガメガニウム: 自分だけ晴れ扱い (炎 1.5 倍・水 0.5 倍は天候の表、ソーラービームはため無し、ウェザーボールは炎)"},
  "merciless": {"formula": [{"kind": "crit_stage", "delta": 5, "when": {"target_poisoned": true}}], "tags": ["crit", "status_synergy"]},
  "mimicry": {"formula": [{"kind": "misc", "effect": "type_by_terrain"}], "tags": ["terrain_user"]},
  "minus": {"formula": [{"kind": "none"}], "tags": [], "value_zero": true, "note": "シングルでは効かない"},

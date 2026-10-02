@@ -291,35 +291,8 @@ def _ts_key(field: str) -> str:
     return _TS_KEYS.get(field, field)
 
 
-def expected_hits(entry: dict, skill_link: bool = False) -> float:
-    """連続技の期待回数 (2〜5 回は 35/35/15/15 %、スキルリンクで 5 回)。連続技でなければ 1。命中は掛けない"""
-    mh = entry.get("multihit")
-    if mh is None:
-        return 1.0
-    if isinstance(mh, list):
-        lo, hi = mh
-        if skill_link:
-            return float(hi)
-        if (lo, hi) == (2, 5):
-            return 2 * 0.35 + 3 * 0.35 + 4 * 0.15 + 5 * 0.15
-        return (lo + hi) / 2.0
-    return float(mh)
-
-
-def expected_power(entry: dict, skill_link: bool = False, accuracy_mult: float = 1.0) -> float:
-    """命中込みの期待威力 (補正前)。1 発ごとに命中判定する技 (multiaccuracy) は外した時点で止まるので Σ_k 威力_k × acc^k、
-    威力が発ごとに増える技 (hit_count: トリプルアクセル / トリプルキック) は 威力_k = 威力 × k。それ以外は 威力 × 回数 × acc。
-    確定急所は 1.5 倍。必中 (accuracy None) は acc = 1"""
-    power = float(entry.get("power") or 0)
-    acc = entry.get("accuracy")
-    acc_f = 1.0 if acc is None else min(1.0, acc / 100.0 * accuracy_mult)
-    crit = 1.5 if entry.get("will_crit") else 1.0
-    mh = entry.get("multihit")
-    if entry.get("multiaccuracy") and isinstance(mh, int):
-        grow = entry.get("variable_power") == "hit_count"
-        total = sum(power * (k if grow else 1) * (acc_f ** k) for k in range(1, mh + 1))
-        return total * crit
-    return power * expected_hits(entry, skill_link) * acc_f * crit
+# 期待回数・期待威力は計算側 (advisor.effects) と同じ関数を使う (表の生成と計算で定義がずれないように)
+from advisor.effects import expected_hits, expected_power  # noqa: E402
 
 
 DEMERIT_TAGS = ("selfdrop", "recoil", "crash", "locked", "charge", "recharge", "selfdestruct", "lowacc", "condition", "hp_cost",

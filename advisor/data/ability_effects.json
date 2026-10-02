@@ -3604,20 +3604,6 @@
    "flags": [],
    "formula": [
     {
-     "kind": "offense_mult",
-     "mult": 1.5,
-     "when": {
-      "move_type": "Fire"
-     }
-    },
-    {
-     "kind": "offense_mult",
-     "mult": 0.5,
-     "when": {
-      "move_type": "Water"
-     }
-    },
-    {
      "effect": "self_weather",
      "kind": "misc",
      "weather": "sun"
@@ -3633,7 +3619,7 @@
    "n_holders": 1,
    "name": "Mega Sol",
    "nonstandard": null,
-   "note": "メガメガニウム: 自分だけ晴れ扱い (ソーラービームはため無し、ウェザーボールは炎)",
+   "note": "メガメガニウム: 自分だけ晴れ扱い (炎 1.5 倍・水 0.5 倍は天候の表、ソーラービームはため無し、ウェザーボールは炎)",
    "numbers": {},
    "source": "curated",
    "tags": [
