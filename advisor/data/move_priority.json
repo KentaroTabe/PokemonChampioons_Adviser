@@ -1,0 +1,2966 @@
+{
+ "_meta": {
+  "note": "物理/特殊 × タイプの優先表の下書き (tools/build_move_data.py が生成、安定技 = デメリット無し・命中 90 以上)。人手の修正は move_effects_overrides.json 経由 (この表は再生成で上書きされる)",
+  "tags": [
+   "selfdrop",
+   "recoil",
+   "crash",
+   "locked",
+   "charge",
+   "recharge",
+   "selfdestruct",
+   "lowacc",
+   "condition",
+   "hp_cost",
+   "selfvolatile",
+   "variable"
+  ]
+ },
+ "table": {
+  "Physical": {
+   "Bug": [
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "leechlife",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "lunge",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "xscissor",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 95,
+     "base": 73.6,
+     "move": "pinmissile",
+     "power": 25,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 70.0,
+     "move": "uturn",
+     "power": 70,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 63.0,
+     "move": "skittersmack",
+     "power": 70,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 60.0,
+     "move": "bugbite",
+     "power": 60,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 50.0,
+     "move": "fellstinger",
+     "power": 50,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 50.0,
+     "move": "pounce",
+     "power": 50,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 85,
+     "base": 102.0,
+     "move": "megahorn",
+     "power": 120,
+     "tags": [
+      "lowacc"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 100,
+     "base": 100.0,
+     "move": "firstimpression",
+     "power": 100,
+     "tags": [
+      "condition"
+     ],
+     "tier": "other"
+    }
+   ],
+   "Dark": [
+    {
+     "accuracy": 100,
+     "base": 95.0,
+     "move": "foulplay",
+     "power": 95,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 85.0,
+     "move": "darkestlariat",
+     "power": 85,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": null,
+     "base": 85.0,
+     "move": "kowtowcleave",
+     "power": 85,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "crunch",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "jawlock",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "throatchop",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 75.0,
+     "move": "lashout",
+     "power": 75,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 70.0,
+     "move": "nightslash",
+     "power": 70,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 65.0,
+     "move": "knockoff",
+     "power": 65,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 60.0,
+     "move": "assurance",
+     "power": 60,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 60.0,
+     "move": "bite",
+     "power": 60,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 60.0,
+     "move": "brutalswing",
+     "power": 60,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 60.0,
+     "move": "thief",
+     "power": 60,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 58.5,
+     "move": "ceaselessedge",
+     "power": 65,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 50.0,
+     "move": "payback",
+     "power": 50,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 20.0,
+     "move": "powertrip",
+     "power": 20,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 0.0,
+     "move": "beatup",
+     "power": 0,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 70.0,
+     "move": "suckerpunch",
+     "power": 70,
+     "tags": [
+      "condition"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 100,
+     "base": 0.0,
+     "move": "fling",
+     "power": 0,
+     "tags": [
+      "condition",
+      "variable"
+     ],
+     "tier": "other"
+    }
+   ],
+   "Dragon": [
+    {
+     "accuracy": 100,
+     "base": 100.0,
+     "move": "dragondarts",
+     "power": 50,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "dragonclaw",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 60.0,
+     "move": "breakingswipe",
+     "power": 60,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 54.0,
+     "move": "dragontail",
+     "power": 60,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 120.0,
+     "move": "glaiverush",
+     "power": 120,
+     "tags": [
+      "selfvolatile"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 100,
+     "base": 120.0,
+     "move": "outrage",
+     "power": 120,
+     "tags": [
+      "locked"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 75,
+     "base": 75.0,
+     "move": "dragonrush",
+     "power": 100,
+     "tags": [
+      "lowacc"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 90,
+     "base": 69.7,
+     "move": "scaleshot",
+     "power": 25,
+     "tags": [
+      "selfdrop"
+     ],
+     "tier": "other"
+    }
+   ],
+   "Electric": [
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "zingzap",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 75.0,
+     "move": "thunderpunch",
+     "power": 75,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 95,
+     "base": 61.8,
+     "move": "thunderfang",
+     "power": 65,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 20.0,
+     "move": "nuzzle",
+     "power": 20,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 120.0,
+     "move": "doubleshock",
+     "power": 120,
+     "tags": [
+      "condition"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 100,
+     "base": 120.0,
+     "move": "volttackle",
+     "power": 120,
+     "tags": [
+      "recoil"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 100,
+     "base": 110.0,
+     "move": "aurawheel",
+     "power": 110,
+     "tags": [
+      "condition"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 95,
+     "base": 95.0,
+     "move": "supercellslam",
+     "power": 100,
+     "tags": [
+      "crash"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 100,
+     "base": 90.0,
+     "move": "wildcharge",
+     "power": 90,
+     "tags": [
+      "recoil"
+     ],
+     "tier": "other"
+    }
+   ],
+   "Fairy": [
+    {
+     "accuracy": 90,
+     "base": 81.0,
+     "move": "playrough",
+     "power": 90,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 75.0,
+     "move": "spiritbreak",
+     "power": 75,
+     "tags": [],
+     "tier": "stable"
+    }
+   ],
+   "Fighting": [
+    {
+     "accuracy": 95,
+     "base": 95.0,
+     "move": "flyingpress",
+     "power": 100,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 90.0,
+     "move": "sacredsword",
+     "power": 90,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 90.0,
+     "move": "stormthrow",
+     "power": 60,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 90.0,
+     "move": "triplearrows",
+     "power": 90,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "bodypress",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 75.0,
+     "move": "brickbreak",
+     "power": 75,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 75.0,
+     "move": "drainpunch",
+     "power": 75,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 65.0,
+     "move": "lowsweep",
+     "power": 65,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 54.0,
+     "move": "circlethrow",
+     "power": 60,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 40.0,
+     "move": "machpunch",
+     "power": 40,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 0.0,
+     "move": "lowkick",
+     "power": 0,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 0.0,
+     "move": "reversal",
+     "power": 0,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 0.0,
+     "move": "seismictoss",
+     "power": 0,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 150.0,
+     "move": "focuspunch",
+     "power": 150,
+     "tags": [
+      "condition"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 100,
+     "base": 120.0,
+     "move": "closecombat",
+     "power": 120,
+     "tags": [
+      "selfdrop"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 100,
+     "base": 120.0,
+     "move": "superpower",
+     "power": 120,
+     "tags": [
+      "selfdrop"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 90,
+     "base": 117.0,
+     "move": "highjumpkick",
+     "power": 130,
+     "tags": [
+      "crash"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 90,
+     "base": 108.0,
+     "move": "axekick",
+     "power": 120,
+     "tags": [
+      "crash"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 90,
+     "base": 90.0,
+     "move": "hammerarm",
+     "power": 100,
+     "tags": [
+      "selfdrop"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 80,
+     "base": 80.0,
+     "move": "crosschop",
+     "power": 100,
+     "tags": [
+      "lowacc"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 100,
+     "base": 65.0,
+     "move": "upperhand",
+     "power": 65,
+     "tags": [
+      "condition"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 50,
+     "base": 50.0,
+     "move": "dynamicpunch",
+     "power": 100,
+     "tags": [
+      "lowacc"
+     ],
+     "tier": "other"
+    }
+   ],
+   "Fire": [
+    {
+     "accuracy": 90,
+     "base": 108.0,
+     "move": "pyroball",
+     "power": 120,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 90.0,
+     "move": "bitterblade",
+     "power": 90,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 90.0,
+     "move": "firelash",
+     "power": 90,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 76.5,
+     "move": "blazekick",
+     "power": 85,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 75.0,
+     "move": "firepunch",
+     "power": 75,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 75.0,
+     "move": "temperflare",
+     "power": 75,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 95,
+     "base": 61.8,
+     "move": "firefang",
+     "power": 65,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 50.0,
+     "move": "flamecharge",
+     "power": 50,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 0.0,
+     "move": "heatcrash",
+     "power": 0,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 120.0,
+     "move": "flareblitz",
+     "power": 120,
+     "tags": [
+      "recoil"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 100,
+     "base": 120.0,
+     "move": "ragingfury",
+     "power": 120,
+     "tags": [
+      "locked"
+     ],
+     "tier": "other"
+    }
+   ],
+   "Flying": [
+    {
+     "accuracy": 100,
+     "base": 120.0,
+     "move": "beakblast",
+     "power": 120,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "drillpeck",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 72.0,
+     "move": "dualwingbeat",
+     "power": 40,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": null,
+     "base": 60.0,
+     "move": "aerialace",
+     "power": 60,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 60.0,
+     "move": "pluck",
+     "power": 60,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 55.0,
+     "move": "acrobatics",
+     "power": 55,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 126.0,
+     "move": "skyattack",
+     "power": 140,
+     "tags": [
+      "charge"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 100,
+     "base": 120.0,
+     "move": "bravebird",
+     "power": 120,
+     "tags": [
+      "recoil"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 95,
+     "base": 85.5,
+     "move": "fly",
+     "power": 90,
+     "tags": [
+      "charge"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 85,
+     "base": 72.2,
+     "move": "bounce",
+     "power": 85,
+     "tags": [
+      "charge",
+      "lowacc"
+     ],
+     "tier": "other"
+    }
+   ],
+   "Ghost": [
+    {
+     "accuracy": 100,
+     "base": 90.0,
+     "move": "spiritshackle",
+     "power": 90,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 70.0,
+     "move": "shadowclaw",
+     "power": 70,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": null,
+     "base": 60.0,
+     "move": "shadowpunch",
+     "power": 60,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 50.0,
+     "move": "lastrespects",
+     "power": 50,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 50.0,
+     "move": "ragefist",
+     "power": 50,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 40.0,
+     "move": "shadowsneak",
+     "power": 40,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 99.0,
+     "move": "poltergeist",
+     "power": 110,
+     "tags": [
+      "condition"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 100,
+     "base": 90.0,
+     "move": "phantomforce",
+     "power": 90,
+     "tags": [
+      "charge"
+     ],
+     "tier": "other"
+    }
+   ],
+   "Grass": [
+    {
+     "accuracy": null,
+     "base": 105.0,
+     "move": "flowertrick",
+     "power": 70,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 90.0,
+     "move": "gravapple",
+     "power": 90,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 90.0,
+     "move": "leafblade",
+     "power": 90,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 90.0,
+     "move": "petalblizzard",
+     "power": 90,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 85.0,
+     "move": "tropkick",
+     "power": 85,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "drumbeating",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "seedbomb",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 77.5,
+     "move": "bulletseed",
+     "power": 25,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 75.0,
+     "move": "hornleech",
+     "power": 75,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 55.0,
+     "move": "grassyglide",
+     "power": 55,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 50.0,
+     "move": "trailblaze",
+     "power": 50,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 125.0,
+     "move": "solarblade",
+     "power": 125,
+     "tags": [
+      "charge"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 100,
+     "base": 120.0,
+     "move": "woodhammer",
+     "power": 120,
+     "tags": [
+      "recoil"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 85,
+     "base": 102.0,
+     "move": "powerwhip",
+     "power": 120,
+     "tags": [
+      "lowacc"
+     ],
+     "tier": "other"
+    }
+   ],
+   "Ground": [
+    {
+     "accuracy": 100,
+     "base": 100.0,
+     "move": "earthquake",
+     "power": 100,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 95,
+     "base": 90.2,
+     "move": "highhorsepower",
+     "power": 95,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 83.7,
+     "move": "bonerush",
+     "power": 30,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 95,
+     "base": 76.0,
+     "move": "drillrun",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 75.0,
+     "move": "stompingtantrum",
+     "power": 75,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 60.0,
+     "move": "bulldoze",
+     "power": 60,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 120.0,
+     "move": "headlongrush",
+     "power": 120,
+     "tags": [
+      "selfdrop"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "dig",
+     "power": 80,
+     "tags": [
+      "charge"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 85,
+     "base": 29.8,
+     "move": "sandtomb",
+     "power": 35,
+     "tags": [
+      "lowacc"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 30,
+     "base": 0.0,
+     "move": "fissure",
+     "power": 0,
+     "tags": [
+      "lowacc",
+      "variable"
+     ],
+     "tier": "other"
+    }
+   ],
+   "Ice": [
+    {
+     "accuracy": 90,
+     "base": 94.1,
+     "move": "tripleaxel",
+     "power": 20,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "icespinner",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 77.5,
+     "move": "iciclespear",
+     "power": 25,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 76.5,
+     "move": "iciclecrash",
+     "power": 85,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 75.0,
+     "move": "icepunch",
+     "power": 75,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 95,
+     "base": 61.8,
+     "move": "icefang",
+     "power": 65,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 60.0,
+     "move": "avalanche",
+     "power": 60,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 40.0,
+     "move": "iceshard",
+     "power": 40,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 85,
+     "base": 102.0,
+     "move": "mountaingale",
+     "power": 120,
+     "tags": [
+      "lowacc"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 90,
+     "base": 90.0,
+     "move": "icehammer",
+     "power": 100,
+     "tags": [
+      "selfdrop"
+     ],
+     "tier": "other"
+    }
+   ],
+   "Normal": [
+    {
+     "accuracy": 90,
+     "base": 117.2,
+     "move": "populationbomb",
+     "power": 20,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 90.0,
+     "move": "ragingbull",
+     "power": 90,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 85.0,
+     "move": "bodyslam",
+     "power": 85,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "extremespeed",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "slash",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 95,
+     "base": 71.2,
+     "move": "crushclaw",
+     "power": 75,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 70.0,
+     "move": "facade",
+     "power": 70,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 63.0,
+     "move": "doublehit",
+     "power": 35,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 60.0,
+     "move": "covet",
+     "power": 60,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 50.0,
+     "move": "rapidspin",
+     "power": 50,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 40.0,
+     "move": "quickattack",
+     "power": 40,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 30.0,
+     "move": "feint",
+     "power": 30,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 13.5,
+     "move": "wrap",
+     "power": 15,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 0.0,
+     "move": "flail",
+     "power": 0,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 250.0,
+     "move": "explosion",
+     "power": 250,
+     "tags": [
+      "selfdestruct"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 100,
+     "base": 200.0,
+     "move": "selfdestruct",
+     "power": 200,
+     "tags": [
+      "selfdestruct"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 100,
+     "base": 140.0,
+     "move": "lastresort",
+     "power": 140,
+     "tags": [
+      "condition"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 90,
+     "base": 135.0,
+     "move": "gigaimpact",
+     "power": 150,
+     "tags": [
+      "selfvolatile",
+      "recharge"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 100,
+     "base": 120.0,
+     "move": "doubleedge",
+     "power": 120,
+     "tags": [
+      "recoil"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 100,
+     "base": 120.0,
+     "move": "thrash",
+     "power": 120,
+     "tags": [
+      "locked"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 75,
+     "base": 90.0,
+     "move": "megakick",
+     "power": 120,
+     "tags": [
+      "lowacc"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 85,
+     "base": 65.9,
+     "move": "tailslap",
+     "power": 25,
+     "tags": [
+      "lowacc"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 100,
+     "base": 40.0,
+     "move": "fakeout",
+     "power": 40,
+     "tags": [
+      "condition"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 85,
+     "base": 12.8,
+     "move": "bind",
+     "power": 15,
+     "tags": [
+      "lowacc"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 30,
+     "base": 0.0,
+     "move": "guillotine",
+     "power": 0,
+     "tags": [
+      "lowacc",
+      "variable"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 30,
+     "base": 0.0,
+     "move": "horndrill",
+     "power": 0,
+     "tags": [
+      "lowacc",
+      "variable"
+     ],
+     "tier": "other"
+    }
+   ],
+   "Poison": [
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "direclaw",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "poisonjab",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 70.0,
+     "move": "crosspoison",
+     "power": 70,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 60.0,
+     "move": "barbbarrage",
+     "power": 60,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 50.0,
+     "move": "poisonfang",
+     "power": 50,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 30.0,
+     "move": "mortalspin",
+     "power": 30,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 80,
+     "base": 96.0,
+     "move": "gunkshot",
+     "power": 120,
+     "tags": [
+      "lowacc"
+     ],
+     "tier": "other"
+    }
+   ],
+   "Psychic": [
+    {
+     "accuracy": 100,
+     "base": 85.0,
+     "move": "psychicfangs",
+     "power": 85,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 81.0,
+     "move": "psyshieldbash",
+     "power": 90,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 72.0,
+     "move": "zenheadbutt",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 70.0,
+     "move": "psychocut",
+     "power": 70,
+     "tags": [],
+     "tier": "stable"
+    }
+   ],
+   "Rock": [
+    {
+     "accuracy": 90,
+     "base": 69.7,
+     "move": "rockblast",
+     "power": 25,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 67.5,
+     "move": "rockslide",
+     "power": 75,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 58.5,
+     "move": "stoneaxe",
+     "power": 65,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 95,
+     "base": 57.0,
+     "move": "rocktomb",
+     "power": 60,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 50.0,
+     "move": "smackdown",
+     "power": 50,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 40.0,
+     "move": "accelerock",
+     "power": 40,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 40.0,
+     "move": "saltcure",
+     "power": 40,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 135.0,
+     "move": "rockwrecker",
+     "power": 150,
+     "tags": [
+      "selfvolatile",
+      "recharge"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 80,
+     "base": 120.0,
+     "move": "headsmash",
+     "power": 150,
+     "tags": [
+      "recoil",
+      "lowacc"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 80,
+     "base": 80.0,
+     "move": "stoneedge",
+     "power": 100,
+     "tags": [
+      "lowacc"
+     ],
+     "tier": "other"
+    }
+   ],
+   "Steel": [
+    {
+     "accuracy": 100,
+     "base": 160.0,
+     "move": "gigatonhammer",
+     "power": 160,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 81.0,
+     "move": "meteormash",
+     "power": 90,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "ironhead",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": null,
+     "base": 70.0,
+     "move": "smartstrike",
+     "power": 70,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 63.0,
+     "move": "steelwing",
+     "power": 70,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 40.0,
+     "move": "bulletpunch",
+     "power": 40,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 35.0,
+     "move": "snaptrap",
+     "power": 35,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 0.0,
+     "move": "gyroball",
+     "power": 0,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 0.0,
+     "move": "hardpress",
+     "power": 0,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 0.0,
+     "move": "heavyslam",
+     "power": 0,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 130.0,
+     "move": "steelroller",
+     "power": 130,
+     "tags": [
+      "condition"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 75,
+     "base": 75.0,
+     "move": "irontail",
+     "power": 100,
+     "tags": [
+      "lowacc"
+     ],
+     "tier": "other"
+    }
+   ],
+   "Water": [
+    {
+     "accuracy": 95,
+     "base": 95.0,
+     "move": "crabhammer",
+     "power": 100,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 85.0,
+     "move": "liquidation",
+     "power": 85,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 81.0,
+     "move": "aquatail",
+     "power": 90,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "aquastep",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "waterfall",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 95,
+     "base": 71.2,
+     "move": "razorshell",
+     "power": 75,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 70.0,
+     "move": "aquacutter",
+     "power": 70,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 60.0,
+     "move": "flipturn",
+     "power": 60,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 60.0,
+     "move": "jetpunch",
+     "power": 60,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 40.0,
+     "move": "aquajet",
+     "power": 40,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 120.0,
+     "move": "wavecrash",
+     "power": 120,
+     "tags": [
+      "recoil"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "dive",
+     "power": 80,
+     "tags": [
+      "charge"
+     ],
+     "tier": "other"
+    }
+   ]
+  },
+  "Special": {
+   "Bug": [
+    {
+     "accuracy": 100,
+     "base": 90.0,
+     "move": "bugbuzz",
+     "power": 90,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 90.0,
+     "move": "pollenpuff",
+     "power": 90,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 50.0,
+     "move": "strugglebug",
+     "power": 50,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 20.0,
+     "move": "infestation",
+     "power": 20,
+     "tags": [],
+     "tier": "stable"
+    }
+   ],
+   "Dark": [
+    {
+     "accuracy": 95,
+     "base": 85.5,
+     "move": "nightdaze",
+     "power": 90,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "darkpulse",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 95,
+     "base": 52.2,
+     "move": "snarl",
+     "power": 55,
+     "tags": [],
+     "tier": "stable"
+    }
+   ],
+   "Dragon": [
+    {
+     "accuracy": 100,
+     "base": 85.0,
+     "move": "dragonpulse",
+     "power": 85,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "ficklebeam",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 117.0,
+     "move": "dracometeor",
+     "power": 130,
+     "tags": [
+      "selfdrop"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 100,
+     "base": 110.0,
+     "move": "clangingscales",
+     "power": 110,
+     "tags": [
+      "selfdrop"
+     ],
+     "tier": "other"
+    }
+   ],
+   "Electric": [
+    {
+     "accuracy": 100,
+     "base": 90.0,
+     "move": "thunderbolt",
+     "power": 90,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "discharge",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "overdrive",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 70.0,
+     "move": "risingvoltage",
+     "power": 70,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 70.0,
+     "move": "voltswitch",
+     "power": 70,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 65.0,
+     "move": "paraboliccharge",
+     "power": 65,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 95,
+     "base": 52.2,
+     "move": "electroweb",
+     "power": 55,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 45.0,
+     "move": "chargebeam",
+     "power": 50,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 0.0,
+     "move": "electroball",
+     "power": 0,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 130.0,
+     "move": "electroshot",
+     "power": 130,
+     "tags": [
+      "charge"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 70,
+     "base": 77.0,
+     "move": "thunder",
+     "power": 110,
+     "tags": [
+      "lowacc"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 50,
+     "base": 60.0,
+     "move": "zapcannon",
+     "power": 120,
+     "tags": [
+      "lowacc"
+     ],
+     "tier": "other"
+    }
+   ],
+   "Fairy": [
+    {
+     "accuracy": 100,
+     "base": 95.0,
+     "move": "moonblast",
+     "power": 95,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "alluringvoice",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "dazzlinggleam",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 50.0,
+     "move": "drainingkiss",
+     "power": 50,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 126.0,
+     "move": "lightofruin",
+     "power": 140,
+     "tags": [
+      "recoil"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 100,
+     "base": 100.0,
+     "move": "mistyexplosion",
+     "power": 100,
+     "tags": [
+      "selfdestruct"
+     ],
+     "tier": "other"
+    }
+   ],
+   "Fighting": [
+    {
+     "accuracy": null,
+     "base": 80.0,
+     "move": "aurasphere",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 40.0,
+     "move": "vacuumwave",
+     "power": 40,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 70,
+     "base": 84.0,
+     "move": "focusblast",
+     "power": 120,
+     "tags": [
+      "lowacc"
+     ],
+     "tier": "other"
+    }
+   ],
+   "Fire": [
+    {
+     "accuracy": 100,
+     "base": 150.0,
+     "move": "eruption",
+     "power": 150,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 90.0,
+     "move": "flamethrower",
+     "power": 90,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 85.5,
+     "move": "heatwave",
+     "power": 95,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "fierydance",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "lavaplume",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "torchsong",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 75.0,
+     "move": "mysticalfire",
+     "power": 75,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 70.0,
+     "move": "burningjealousy",
+     "power": 70,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 135.0,
+     "move": "blastburn",
+     "power": 150,
+     "tags": [
+      "selfvolatile",
+      "recharge"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 100,
+     "base": 130.0,
+     "move": "burnup",
+     "power": 130,
+     "tags": [
+      "condition"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 100,
+     "base": 120.0,
+     "move": "armorcannon",
+     "power": 120,
+     "tags": [
+      "selfdrop"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 90,
+     "base": 117.0,
+     "move": "overheat",
+     "power": 130,
+     "tags": [
+      "selfdrop"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 85,
+     "base": 93.5,
+     "move": "fireblast",
+     "power": 110,
+     "tags": [
+      "lowacc"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 50,
+     "base": 50.0,
+     "move": "inferno",
+     "power": 100,
+     "tags": [
+      "lowacc"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 85,
+     "base": 29.8,
+     "move": "firespin",
+     "power": 35,
+     "tags": [
+      "lowacc"
+     ],
+     "tier": "other"
+    }
+   ],
+   "Flying": [
+    {
+     "accuracy": 95,
+     "base": 71.2,
+     "move": "airslash",
+     "power": 75,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 95,
+     "base": 57.0,
+     "move": "aircutter",
+     "power": 60,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 70,
+     "base": 77.0,
+     "move": "hurricane",
+     "power": 110,
+     "tags": [
+      "lowacc"
+     ],
+     "tier": "other"
+    }
+   ],
+   "Ghost": [
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "shadowball",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 75.0,
+     "move": "bittermalice",
+     "power": 75,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 65.0,
+     "move": "hex",
+     "power": 65,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 65.0,
+     "move": "infernalparade",
+     "power": 65,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 0.0,
+     "move": "nightshade",
+     "power": 0,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    }
+   ],
+   "Grass": [
+    {
+     "accuracy": 100,
+     "base": 90.0,
+     "move": "appleacid",
+     "power": 90,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 90.0,
+     "move": "energyball",
+     "power": 90,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 75.0,
+     "move": "gigadrain",
+     "power": 75,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 72.0,
+     "move": "matchagotcha",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 54.0,
+     "move": "syrupbomb",
+     "power": 60,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 0.0,
+     "move": "grassknot",
+     "power": 0,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 135.0,
+     "move": "frenzyplant",
+     "power": 150,
+     "tags": [
+      "selfvolatile",
+      "recharge"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 100,
+     "base": 120.0,
+     "move": "petaldance",
+     "power": 120,
+     "tags": [
+      "locked"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 100,
+     "base": 120.0,
+     "move": "solarbeam",
+     "power": 120,
+     "tags": [
+      "charge"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 90,
+     "base": 117.0,
+     "move": "leafstorm",
+     "power": 130,
+     "tags": [
+      "selfdrop"
+     ],
+     "tier": "other"
+    }
+   ],
+   "Ground": [
+    {
+     "accuracy": 100,
+     "base": 90.0,
+     "move": "earthpower",
+     "power": 90,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 70.0,
+     "move": "scorchingsands",
+     "power": 70,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 95,
+     "base": 52.2,
+     "move": "mudshot",
+     "power": 55,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 20.0,
+     "move": "mudslap",
+     "power": 20,
+     "tags": [],
+     "tier": "stable"
+    }
+   ],
+   "Ice": [
+    {
+     "accuracy": 100,
+     "base": 90.0,
+     "move": "icebeam",
+     "power": 90,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 81.0,
+     "move": "frostbreath",
+     "power": 60,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 70.0,
+     "move": "freezedry",
+     "power": 70,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 95,
+     "base": 52.2,
+     "move": "icywind",
+     "power": 55,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 70,
+     "base": 77.0,
+     "move": "blizzard",
+     "power": 110,
+     "tags": [
+      "lowacc"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 30,
+     "base": 0.0,
+     "move": "sheercold",
+     "power": 0,
+     "tags": [
+      "lowacc",
+      "variable"
+     ],
+     "tier": "other"
+    }
+   ],
+   "Normal": [
+    {
+     "accuracy": 100,
+     "base": 140.0,
+     "move": "boomburst",
+     "power": 140,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 90.0,
+     "move": "hypervoice",
+     "power": 90,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "triattack",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 60.0,
+     "move": "round",
+     "power": 60,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 50.0,
+     "move": "terrainpulse",
+     "power": 50,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 50.0,
+     "move": "weatherball",
+     "power": 50,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 135.0,
+     "move": "hyperbeam",
+     "power": 150,
+     "tags": [
+      "selfvolatile",
+      "recharge"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 100,
+     "base": 90.0,
+     "move": "uproar",
+     "power": 90,
+     "tags": [
+      "selfvolatile"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 100,
+     "base": 50.0,
+     "move": "snore",
+     "power": 50,
+     "tags": [
+      "condition"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 100,
+     "base": 0.0,
+     "move": "spitup",
+     "power": 0,
+     "tags": [
+      "condition",
+      "variable"
+     ],
+     "tier": "other"
+    }
+   ],
+   "Poison": [
+    {
+     "accuracy": 100,
+     "base": 95.0,
+     "move": "sludgewave",
+     "power": 95,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 90.0,
+     "move": "shellsidearm",
+     "power": 90,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 90.0,
+     "move": "sludgebomb",
+     "power": 90,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 65.0,
+     "move": "venoshock",
+     "power": 65,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    },
+    {
+     "accuracy": null,
+     "base": 50.0,
+     "move": "clearsmog",
+     "power": 50,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 40.0,
+     "move": "acidspray",
+     "power": 40,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 108.0,
+     "move": "belch",
+     "power": 120,
+     "tags": [
+      "condition"
+     ],
+     "tier": "other"
+    }
+   ],
+   "Psychic": [
+    {
+     "accuracy": 100,
+     "base": 90.0,
+     "move": "psychic",
+     "power": 90,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "eeriespell",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "expandingforce",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "extrasensory",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "luminacrash",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "psyshock",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "twinbeam",
+     "power": 40,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 75.0,
+     "move": "psychicnoise",
+     "power": 75,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 20.0,
+     "move": "storedpower",
+     "power": 20,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 120.0,
+     "move": "futuresight",
+     "power": 120,
+     "tags": [
+      "condition"
+     ],
+     "tier": "other"
+    }
+   ],
+   "Rock": [
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "powergem",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 60.0,
+     "move": "ancientpower",
+     "power": 60,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 108.0,
+     "move": "meteorbeam",
+     "power": 120,
+     "tags": [
+      "charge"
+     ],
+     "tier": "other"
+    }
+   ],
+   "Steel": [
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "flashcannon",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 95,
+     "base": 133.0,
+     "move": "steelbeam",
+     "power": 140,
+     "tags": [
+      "recoil",
+      "hp_cost"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 95,
+     "base": 114.0,
+     "move": "makeitrain",
+     "power": 120,
+     "tags": [
+      "selfdrop"
+     ],
+     "tier": "other"
+    }
+   ],
+   "Water": [
+    {
+     "accuracy": 100,
+     "base": 150.0,
+     "move": "waterspout",
+     "power": 150,
+     "tags": [
+      "variable"
+     ],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 90.0,
+     "move": "sparklingaria",
+     "power": 90,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 90.0,
+     "move": "surf",
+     "power": 90,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 85.0,
+     "move": "snipeshot",
+     "power": 85,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 80.0,
+     "move": "scald",
+     "power": 80,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 60.0,
+     "move": "waterpulse",
+     "power": 60,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 50.0,
+     "move": "chillingwater",
+     "power": 50,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 100,
+     "base": 46.5,
+     "move": "watershuriken",
+     "power": 15,
+     "tags": [],
+     "tier": "stable"
+    },
+    {
+     "accuracy": 90,
+     "base": 135.0,
+     "move": "hydrocannon",
+     "power": 150,
+     "tags": [
+      "selfvolatile",
+      "recharge"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 80,
+     "base": 88.0,
+     "move": "hydropump",
+     "power": 110,
+     "tags": [
+      "lowacc"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 85,
+     "base": 76.5,
+     "move": "muddywater",
+     "power": 90,
+     "tags": [
+      "lowacc"
+     ],
+     "tier": "other"
+    },
+    {
+     "accuracy": 85,
+     "base": 29.8,
+     "move": "whirlpool",
+     "power": 35,
+     "tags": [
+      "lowacc"
+     ],
+     "tier": "other"
+    }
+   ]
+  }
+ }
+}
