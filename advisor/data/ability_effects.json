@@ -1,0 +1,7924 @@
+{
+ "_meta": {
+  "formula_kinds": [
+   "offense_mult",
+   "defense_mult",
+   "type_change",
+   "stab_any",
+   "immune",
+   "accuracy_mult",
+   "evasion_mult",
+   "no_miss",
+   "crit_stage",
+   "crit_mult",
+   "no_crit_taken",
+   "multihit_max",
+   "extra_hit",
+   "recoil_none",
+   "secondary_none",
+   "secondary_chance_mult",
+   "speed_mult",
+   "priority_delta",
+   "weather_set",
+   "terrain_set",
+   "weather_negate",
+   "switch_in_boost",
+   "on_ko_boost",
+   "contact_effect",
+   "status_immune",
+   "stat_drop_immune",
+   "heal_on_switch",
+   "heal_turn",
+   "damage_turn",
+   "item_effect",
+   "misc",
+   "none"
+  ],
+  "note": "python -m tools.build_ability_data で生成。式 (formula) と選択のタグは overrides に書く",
+  "overrides": "advisor/data/ability_effects_overrides.json",
+  "source": [
+   "pokemon-showdown/data/abilities.ts",
+   "pokemon-showdown/data/mods/champions/abilities.ts",
+   "champions_agent/data/champions_dex.json"
+  ],
+  "todo": []
+ },
+ "abilities": {
+  "adaptability": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "offense_mult",
+     "mult": 1.3333,
+     "when": {
+      "stab": true
+     }
+    }
+   ],
+   "holders": [
+    "basculegion",
+    "basculinbluestriped",
+    "basculinwhitestriped",
+    "beedrillmega(mega)",
+    "dragalge",
+    "glimmoramega(mega)",
+    "lucariomega(mega)"
+   ],
+   "hooks": [
+    "onModifySTAB"
+   ],
+   "n_holders": 7,
+   "name": "Adaptability",
+   "nonstandard": null,
+   "note": "タイプ一致 2 倍 (1.5 の 4/3)",
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "aerilate": {
+   "categories": [
+    "タイプ付与・変更",
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "from": "Normal",
+     "kind": "type_change",
+     "mult": 1.2,
+     "to": "Flying"
+    }
+   ],
+   "holders": [
+    "pinsirmega(mega)",
+    "salamencemega(mega)"
+   ],
+   "hooks": [
+    "onBasePower",
+    "onBasePowerPriority",
+    "onModifyType",
+    "onModifyTypePriority"
+   ],
+   "n_holders": 2,
+   "name": "Aerilate",
+   "nonstandard": null,
+   "numbers": {
+    "onBasePower": [
+     1.2
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "offense",
+    "type_change"
+   ],
+   "value_zero": false
+  },
+  "aftermath": {
+   "categories": [
+    "被弾時の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "damage_on_faint",
+     "fraction": 0.25,
+     "kind": "contact_effect"
+    }
+   ],
+   "holders": [
+    "garbodor"
+   ],
+   "hooks": [
+    "onDamagingHit",
+    "onDamagingHitOrder"
+   ],
+   "n_holders": 1,
+   "name": "Aftermath",
+   "nonstandard": null,
+   "note": "接触で倒されたとき相手に最大 HP の 1/4",
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "contact_punish"
+   ],
+   "value_zero": false
+  },
+  "analytic": {
+   "categories": [
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "offense_mult",
+     "mult": 1.3,
+     "when": {
+      "moves_last": true
+     }
+    }
+   ],
+   "holders": [
+    "starmie",
+    "watchog"
+   ],
+   "hooks": [
+    "onBasePower",
+    "onBasePowerPriority"
+   ],
+   "n_holders": 2,
+   "name": "Analytic",
+   "nonstandard": null,
+   "numbers": {
+    "onBasePower": [
+     1.3
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "offense",
+    "slow_offense"
+   ],
+   "value_zero": false
+  },
+  "angerpoint": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "atk_max_when_crit",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "camerupt",
+    "crabominable",
+    "krookodile",
+    "tauros"
+   ],
+   "hooks": [
+    "onHit"
+   ],
+   "n_holders": 4,
+   "name": "Anger Point",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": false
+  },
+  "anticipation": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "none"
+    }
+   ],
+   "holders": [
+    "hatterene",
+    "toxicroak"
+   ],
+   "hooks": [
+    "onStart"
+   ],
+   "n_holders": 2,
+   "name": "Anticipation",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": true
+  },
+  "armortail": {
+   "categories": [
+    "無効・吸収・妨害"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "effect": "block_priority",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "farigiraf"
+   ],
+   "hooks": [
+    "onFoeTryMove"
+   ],
+   "n_holders": 1,
+   "name": "Armor Tail",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "priority_block"
+   ],
+   "value_zero": false
+  },
+  "aromaveil": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "status_immune",
+     "volatile": [
+      "taunt",
+      "encore",
+      "torment",
+      "disable",
+      "attract",
+      "healblock"
+     ]
+    }
+   ],
+   "holders": [
+    "alcremie",
+    "aromatisse"
+   ],
+   "hooks": [
+    "onAllyTryAddVolatile"
+   ],
+   "n_holders": 2,
+   "name": "Aroma Veil",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "status_immune"
+   ],
+   "value_zero": false
+  },
+  "auraguard": {
+   "categories": [
+    "被ダメ・反動の補正"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "defense_mult",
+     "mult": 0.5,
+     "when": {
+      "move_flag": "contact"
+     }
+    }
+   ],
+   "holders": [
+    "lucariomegaz(mega)"
+   ],
+   "hooks": [
+    "onSourceModifyDamage"
+   ],
+   "n_holders": 1,
+   "name": "Aura Guard",
+   "nonstandard": "Future",
+   "numbers": {
+    "onSourceModifyDamage": [
+     0.5
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "defense"
+   ],
+   "value_zero": false
+  },
+  "battlearmor": {
+   "categories": [
+    "被ダメ・反動の補正"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "no_crit_taken"
+    }
+   ],
+   "holders": [
+    "falinks",
+    "perrserker"
+   ],
+   "hooks": [
+    "onCriticalHit"
+   ],
+   "n_holders": 2,
+   "name": "Battle Armor",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "defense"
+   ],
+   "value_zero": false
+  },
+  "battlebond": {
+   "categories": [
+    "火力・追加効果",
+    "撃破・技後の能力変化"
+   ],
+   "flags": [
+    "cantsuppress",
+    "failroleplay",
+    "failskillswap",
+    "noentrain",
+    "noreceiver",
+    "notrace"
+   ],
+   "formula": [
+    {
+     "boosts": {
+      "atk": 1,
+      "spa": 1,
+      "spe": 1
+     },
+     "kind": "on_ko_boost",
+     "once": true
+    }
+   ],
+   "holders": [
+    "greninja"
+   ],
+   "hooks": [
+    "onModifyMove",
+    "onModifyMovePriority",
+    "onSourceAfterFaint"
+   ],
+   "n_holders": 1,
+   "name": "Battle Bond",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "berserk": {
+   "categories": [
+    "被ダメ・反動の補正"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "boosts": {
+      "spa": 1
+     },
+     "effect": "boost_when_below_half",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "drampa",
+    "drampamega(mega)"
+   ],
+   "hooks": [
+    "onAfterMoveSecondary",
+    "onDamage",
+    "onTryEatItem"
+   ],
+   "n_holders": 2,
+   "name": "Berserk",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "bigpecks": {
+   "categories": [
+    "無効・吸収・妨害"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "stat_drop_immune",
+     "stats": [
+      "def"
+     ]
+    }
+   ],
+   "holders": [
+    "pidgeot"
+   ],
+   "hooks": [
+    "onTryBoost"
+   ],
+   "n_holders": 1,
+   "name": "Big Pecks",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "stat_drop_immune"
+   ],
+   "value_zero": false
+  },
+  "blaze": {
+   "categories": [
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "offense_mult",
+     "mult": 1.5,
+     "when": {
+      "move_type": "Fire",
+      "user_hp_below": 0.3334
+     }
+    }
+   ],
+   "holders": [
+    "blaziken",
+    "charizard",
+    "cinderace",
+    "delphox",
+    "emboar",
+    "incineroar",
+    "infernape",
+    "simisear",
+    "skeledirge",
+    "typhlosion",
+    "typhlosionhisui"
+   ],
+   "hooks": [
+    "onModifyAtk",
+    "onModifyAtkPriority",
+    "onModifySpA",
+    "onModifySpAPriority"
+   ],
+   "n_holders": 11,
+   "name": "Blaze",
+   "nonstandard": null,
+   "numbers": {
+    "onModifyAtk": [
+     1.5
+    ],
+    "onModifySpA": [
+     1.5
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "bulletproof": {
+   "categories": [
+    "無効・吸収・妨害"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "immune",
+     "move_flag": "bullet"
+    }
+   ],
+   "holders": [
+    "chesnaught",
+    "chesnaughtmega(mega)",
+    "kommoo"
+   ],
+   "hooks": [
+    "onTryHit"
+   ],
+   "n_holders": 3,
+   "name": "Bulletproof",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "immunity"
+   ],
+   "value_zero": false
+  },
+  "cheekpouch": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "berry_heal",
+     "fraction": 0.3333,
+     "kind": "item_effect"
+    }
+   ],
+   "holders": [
+    "dedenne",
+    "diggersby",
+    "maushold"
+   ],
+   "hooks": [
+    "onEatItem"
+   ],
+   "n_holders": 3,
+   "name": "Cheek Pouch",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "item"
+   ],
+   "value_zero": false
+  },
+  "chlorophyll": {
+   "categories": [
+    "素早さ・優先度"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "speed_mult",
+     "mult": 2.0,
+     "when": {
+      "weather": "sun"
+     }
+    }
+   ],
+   "holders": [
+    "leafeon",
+    "scovillain",
+    "venusaur",
+    "victreebel",
+    "vileplume",
+    "whimsicott"
+   ],
+   "hooks": [
+    "onModifySpe"
+   ],
+   "n_holders": 6,
+   "name": "Chlorophyll",
+   "nonstandard": null,
+   "numbers": {
+    "onModifySpe": [
+     2.0
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "speed",
+    "weather_user"
+   ],
+   "value_zero": false
+  },
+  "clearbody": {
+   "categories": [
+    "無効・吸収・妨害"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "stat_drop_immune",
+     "stats": [
+      "all"
+     ]
+    }
+   ],
+   "holders": [
+    "dragapult",
+    "garganacl",
+    "metagross"
+   ],
+   "hooks": [
+    "onTryBoost"
+   ],
+   "n_holders": 3,
+   "name": "Clear Body",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "stat_drop_immune",
+    "anti_intimidate"
+   ],
+   "value_zero": false
+  },
+  "cloudnine": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "weather_negate"
+    }
+   ],
+   "holders": [
+    "altaria",
+    "drampa"
+   ],
+   "hooks": [
+    "onEnd",
+    "onStart",
+    "onSwitchIn"
+   ],
+   "n_holders": 2,
+   "name": "Cloud Nine",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "weather_negate"
+   ],
+   "value_zero": false
+  },
+  "commander": {
+   "categories": [
+    "状態異常・交代・その他"
+   ],
+   "flags": [
+    "failroleplay",
+    "failskillswap",
+    "noentrain",
+    "noreceiver",
+    "notrace"
+   ],
+   "formula": [
+    {
+     "kind": "none"
+    }
+   ],
+   "holders": [
+    "tatsugiridroopy",
+    "tatsugiristretchy"
+   ],
+   "hooks": [
+    "onAnySwitchIn",
+    "onAnySwitchInPriority",
+    "onStart",
+    "onUpdate"
+   ],
+   "n_holders": 2,
+   "name": "Commander",
+   "nonstandard": null,
+   "note": "シングルでは効かない",
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": true
+  },
+  "competitive": {
+   "categories": [
+    "状態異常・交代・その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "boosts": {
+      "spa": 2
+     },
+     "effect": "boost_when_lowered_by_foe",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "empoleon",
+    "milotic",
+    "wigglytuff"
+   ],
+   "hooks": [
+    "onAfterEachBoost"
+   ],
+   "n_holders": 3,
+   "name": "Competitive",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "anti_intimidate",
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "compoundeyes": {
+   "categories": [
+    "命中・回避"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "accuracy_mult",
+     "mult": 1.3
+    }
+   ],
+   "holders": [
+    "vivillon"
+   ],
+   "hooks": [
+    "onSourceModifyAccuracy",
+    "onSourceModifyAccuracyPriority"
+   ],
+   "n_holders": 1,
+   "name": "Compound Eyes",
+   "nonstandard": null,
+   "numbers": {
+    "onSourceModifyAccuracy": [
+     1.3
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "accuracy"
+   ],
+   "value_zero": false
+  },
+  "contrary": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "effect": "invert_boosts",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "malamar",
+    "malamarmega(mega)",
+    "serperior",
+    "staraptormega(mega)"
+   ],
+   "hooks": [
+    "onChangeBoost"
+   ],
+   "n_holders": 4,
+   "name": "Contrary",
+   "nonstandard": null,
+   "note": "自己能力低下の技が上昇になる (型の選択で低下技を最優先)",
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "contrary"
+   ],
+   "value_zero": false
+  },
+  "corrosion": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "poison_steel_and_poison",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "glimmora",
+    "salazzle"
+   ],
+   "hooks": [],
+   "n_holders": 2,
+   "name": "Corrosion",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "status"
+   ],
+   "value_zero": false
+  },
+  "cudchew": {
+   "categories": [
+    "ターン経過・場の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "berry_twice",
+     "kind": "item_effect"
+    }
+   ],
+   "holders": [
+    "farigiraf"
+   ],
+   "hooks": [
+    "onEatItem",
+    "onResidual",
+    "onResidualOrder",
+    "onResidualSubOrder"
+   ],
+   "n_holders": 1,
+   "name": "Cud Chew",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "item"
+   ],
+   "value_zero": false
+  },
+  "curiousmedicine": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "none"
+    }
+   ],
+   "holders": [
+    "slowkinggalar"
+   ],
+   "hooks": [
+    "onStart"
+   ],
+   "n_holders": 1,
+   "name": "Curious Medicine",
+   "nonstandard": null,
+   "note": "シングルでは効かない",
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": true
+  },
+  "cursedbody": {
+   "categories": [
+    "被弾時の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "chance": 30,
+     "effect": "disable_when_hit",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "banette",
+    "dragapult",
+    "froslass",
+    "gengar",
+    "polteageist"
+   ],
+   "hooks": [
+    "onDamagingHit"
+   ],
+   "n_holders": 5,
+   "name": "Cursed Body",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "defense"
+   ],
+   "value_zero": false
+  },
+  "cutecharm": {
+   "categories": [
+    "被弾時の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "chance": 30,
+     "effect": "attract",
+     "kind": "contact_effect"
+    }
+   ],
+   "holders": [
+    "clefable",
+    "lopunny",
+    "milotic",
+    "sylveon",
+    "wigglytuff"
+   ],
+   "hooks": [
+    "onDamagingHit"
+   ],
+   "n_holders": 5,
+   "name": "Cute Charm",
+   "nonstandard": null,
+   "note": "性別依存",
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": false
+  },
+  "damp": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "effect": "block_explosion",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "bellibolt",
+    "politoed",
+    "swampert"
+   ],
+   "hooks": [
+    "onAnyDamage",
+    "onAnyTryMove"
+   ],
+   "n_holders": 3,
+   "name": "Damp",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": false
+  },
+  "defiant": {
+   "categories": [
+    "状態異常・交代・その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "boosts": {
+      "atk": 2
+     },
+     "effect": "boost_when_lowered_by_foe",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "annihilape",
+    "falinks",
+    "falinksmega(mega)",
+    "farfetchd",
+    "kingambit",
+    "passimian"
+   ],
+   "hooks": [
+    "onAfterEachBoost"
+   ],
+   "n_holders": 6,
+   "name": "Defiant",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "anti_intimidate",
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "disguise": {
+   "categories": [
+    "無効・吸収・妨害",
+    "被ダメ・反動の補正",
+    "状態異常・交代・その他"
+   ],
+   "flags": [
+    "breakable",
+    "cantsuppress",
+    "failroleplay",
+    "failskillswap",
+    "noentrain",
+    "noreceiver",
+    "notrace",
+    "notransform"
+   ],
+   "formula": [
+    {
+     "effect": "free_hit",
+     "kind": "misc",
+     "self_damage_fraction": 0.125
+    }
+   ],
+   "holders": [
+    "mimikyu",
+    "mimikyubusted"
+   ],
+   "hooks": [
+    "onCriticalHit",
+    "onDamage",
+    "onDamagePriority",
+    "onEffectiveness",
+    "onUpdate"
+   ],
+   "n_holders": 2,
+   "name": "Disguise",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "defense",
+    "setup"
+   ],
+   "value_zero": false
+  },
+  "dragonize": {
+   "categories": [
+    "タイプ付与・変更",
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "from": "Normal",
+     "kind": "type_change",
+     "mult": 1.2,
+     "to": "Dragon"
+    }
+   ],
+   "holders": [
+    "feraligatrmega(mega)"
+   ],
+   "hooks": [
+    "onBasePower",
+    "onBasePowerPriority",
+    "onModifyType",
+    "onModifyTypePriority"
+   ],
+   "n_holders": 1,
+   "name": "Dragonize",
+   "nonstandard": null,
+   "numbers": {
+    "onBasePower": [
+     1.2
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "offense",
+    "type_change"
+   ],
+   "value_zero": false
+  },
+  "drizzle": {
+   "categories": [
+    "天候・フィールド始動"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "weather_set",
+     "weather": "rain"
+    }
+   ],
+   "holders": [
+    "pelipper",
+    "politoed"
+   ],
+   "hooks": [
+    "onStart"
+   ],
+   "n_holders": 2,
+   "name": "Drizzle",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "weather_setter"
+   ],
+   "value_zero": false
+  },
+  "drought": {
+   "categories": [
+    "天候・フィールド始動"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "weather_set",
+     "weather": "sun"
+    }
+   ],
+   "holders": [
+    "charizardmegay(mega)",
+    "ninetales",
+    "torkoal"
+   ],
+   "hooks": [
+    "onStart"
+   ],
+   "n_holders": 3,
+   "name": "Drought",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "weather_setter"
+   ],
+   "value_zero": false
+  },
+  "dryskin": {
+   "categories": [
+    "無効・吸収・妨害",
+    "被ダメ・反動の補正",
+    "ターン経過・場の効果"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "effect": "heal",
+     "fraction": 0.25,
+     "kind": "immune",
+     "move_type": "Water"
+    },
+    {
+     "kind": "defense_mult",
+     "mult": 1.25,
+     "when": {
+      "move_type": "Fire"
+     }
+    },
+    {
+     "fraction": 0.125,
+     "kind": "heal_turn",
+     "when": {
+      "weather": "rain"
+     }
+    },
+    {
+     "fraction": 0.125,
+     "kind": "damage_turn",
+     "when": {
+      "weather": "sun"
+     }
+    }
+   ],
+   "holders": [
+    "heliolisk",
+    "toxicroak"
+   ],
+   "hooks": [
+    "onSourceBasePower",
+    "onSourceBasePowerPriority",
+    "onTryHit",
+    "onWeather"
+   ],
+   "n_holders": 2,
+   "name": "Dry Skin",
+   "nonstandard": null,
+   "numbers": {
+    "onSourceBasePower": [
+     1.25
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "immunity",
+    "defense"
+   ],
+   "value_zero": false
+  },
+  "earlybird": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "sleep_half",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "houndoom",
+    "kangaskhan"
+   ],
+   "hooks": [],
+   "n_holders": 2,
+   "name": "Early Bird",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "status"
+   ],
+   "value_zero": false
+  },
+  "eartheater": {
+   "categories": [
+    "無効・吸収・妨害"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "effect": "heal",
+     "fraction": 0.25,
+     "kind": "immune",
+     "move_type": "Ground"
+    }
+   ],
+   "holders": [
+    "orthworm"
+   ],
+   "hooks": [
+    "onTryHit"
+   ],
+   "n_holders": 1,
+   "name": "Earth Eater",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "immunity"
+   ],
+   "value_zero": false
+  },
+  "eelevate": {
+   "categories": [
+    "撃破・技後の能力変化"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "immune",
+     "move_type": "Ground"
+    },
+    {
+     "boosts": {
+      "best": 1
+     },
+     "kind": "on_ko_boost"
+    }
+   ],
+   "holders": [
+    "eelektrossmega(mega)"
+   ],
+   "hooks": [
+    "onSourceAfterFaint"
+   ],
+   "n_holders": 1,
+   "name": "Eelevate",
+   "nonstandard": null,
+   "note": "メガシビルドン: 浮いている + 倒すと最も高い能力 +1",
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "immunity",
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "effectspore": {
+   "categories": [
+    "被弾時の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "chance": 30,
+     "effect": "status_random",
+     "kind": "contact_effect"
+    }
+   ],
+   "holders": [
+    "vileplume"
+   ],
+   "hooks": [
+    "onDamagingHit"
+   ],
+   "n_holders": 1,
+   "name": "Effect Spore",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "contact_punish"
+   ],
+   "value_zero": false
+  },
+  "electricsurge": {
+   "categories": [
+    "天候・フィールド始動"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "terrain_set",
+     "terrain": "electric"
+    }
+   ],
+   "holders": [
+    "pincurchin",
+    "raichumegax(mega)"
+   ],
+   "hooks": [
+    "onStart"
+   ],
+   "n_holders": 2,
+   "name": "Electric Surge",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "terrain_setter"
+   ],
+   "value_zero": false
+  },
+  "electromorphosis": {
+   "categories": [
+    "被弾時の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "charge_when_hit",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "bellibolt"
+   ],
+   "hooks": [
+    "onDamagingHit",
+    "onDamagingHitOrder"
+   ],
+   "n_holders": 1,
+   "name": "Electromorphosis",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "emergencyexit": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "switch_out_below_half",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "golisopod"
+   ],
+   "hooks": [
+    "onEmergencyExit"
+   ],
+   "n_holders": 1,
+   "name": "Emergency Exit",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": false
+  },
+  "fairyaura": {
+   "categories": [
+    "被ダメ・反動の補正"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "offense_mult",
+     "mult": 1.3333,
+     "when": {
+      "move_type": "Fairy"
+     }
+    }
+   ],
+   "holders": [
+    "floettemega(mega)"
+   ],
+   "hooks": [
+    "onAnyBasePower",
+    "onAnyBasePowerPriority",
+    "onStart"
+   ],
+   "n_holders": 1,
+   "name": "Fairy Aura",
+   "nonstandard": null,
+   "note": "相手のフェアリー技も強まる",
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "filter": {
+   "categories": [
+    "被ダメ・反動の補正"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "defense_mult",
+     "mult": 0.75,
+     "when": {
+      "super_effective": true
+     }
+    }
+   ],
+   "holders": [
+    "aggronmega(mega)",
+    "mrmime"
+   ],
+   "hooks": [
+    "onSourceModifyDamage"
+   ],
+   "n_holders": 2,
+   "name": "Filter",
+   "nonstandard": null,
+   "numbers": {
+    "onSourceModifyDamage": [
+     0.75
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "defense"
+   ],
+   "value_zero": false
+  },
+  "firemane": {
+   "categories": [
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "offense_mult",
+     "mult": 1.5,
+     "when": {
+      "move_type": "Fire"
+     }
+    }
+   ],
+   "holders": [
+    "pyroarmega(mega)"
+   ],
+   "hooks": [
+    "onModifyAtk",
+    "onModifyAtkPriority",
+    "onModifySpA",
+    "onModifySpAPriority"
+   ],
+   "n_holders": 1,
+   "name": "Fire Mane",
+   "nonstandard": null,
+   "note": "メガカエンジシ",
+   "numbers": {
+    "onModifyAtk": [
+     1.5
+    ],
+    "onModifySpA": [
+     1.5
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "flamebody": {
+   "categories": [
+    "被弾時の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "chance": 30,
+     "effect": "burn",
+     "kind": "contact_effect"
+    }
+   ],
+   "holders": [
+    "chandelure",
+    "talonflame",
+    "volcarona"
+   ],
+   "hooks": [
+    "onDamagingHit"
+   ],
+   "n_holders": 3,
+   "name": "Flame Body",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "contact_punish",
+    "wall"
+   ],
+   "value_zero": false
+  },
+  "flashfire": {
+   "categories": [
+    "無効・吸収・妨害"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "effect": "boost_fire",
+     "kind": "immune",
+     "move_type": "Fire",
+     "mult": 1.5
+    }
+   ],
+   "holders": [
+    "arcanine",
+    "arcaninehisui",
+    "armarouge",
+    "ceruledge",
+    "chandelure",
+    "flareon",
+    "houndoom",
+    "ninetales",
+    "typhlosion"
+   ],
+   "hooks": [
+    "onEnd",
+    "onTryHit"
+   ],
+   "n_holders": 9,
+   "name": "Flash Fire",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "immunity"
+   ],
+   "value_zero": false
+  },
+  "flowerveil": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "none"
+    }
+   ],
+   "holders": [
+    "floetteeternal",
+    "florges"
+   ],
+   "hooks": [
+    "onAllySetStatus",
+    "onAllyTryAddVolatile",
+    "onAllyTryBoost"
+   ],
+   "n_holders": 2,
+   "name": "Flower Veil",
+   "nonstandard": null,
+   "note": "くさタイプの味方 (自分がくさなら自分) だけ。フラージェス / フラエッテは対象外",
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": true
+  },
+  "fluffy": {
+   "categories": [
+    "被ダメ・反動の補正"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "defense_mult",
+     "mult": 0.5,
+     "when": {
+      "move_flag": "contact"
+     }
+    },
+    {
+     "kind": "defense_mult",
+     "mult": 2.0,
+     "when": {
+      "move_type": "Fire"
+     }
+    }
+   ],
+   "holders": [
+    "houndstone"
+   ],
+   "hooks": [
+    "onSourceModifyDamage"
+   ],
+   "n_holders": 1,
+   "name": "Fluffy",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "defense"
+   ],
+   "value_zero": false
+  },
+  "forecast": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [
+    "failroleplay",
+    "noentrain",
+    "noreceiver",
+    "notrace"
+   ],
+   "formula": [
+    {
+     "effect": "form_by_weather",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "castform",
+    "castformrainy",
+    "castformsnowy",
+    "castformsunny"
+   ],
+   "hooks": [
+    "onStart",
+    "onSwitchInPriority",
+    "onWeatherChange"
+   ],
+   "n_holders": 4,
+   "name": "Forecast",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "weather_user"
+   ],
+   "value_zero": false
+  },
+  "forewarn": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "none"
+    }
+   ],
+   "holders": [
+    "musharna"
+   ],
+   "hooks": [
+    "onStart"
+   ],
+   "n_holders": 1,
+   "name": "Forewarn",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": true
+  },
+  "friendguard": {
+   "categories": [
+    "被ダメ・反動の補正"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "none"
+    }
+   ],
+   "holders": [
+    "maushold",
+    "vivillon"
+   ],
+   "hooks": [
+    "onAnyModifyDamage"
+   ],
+   "n_holders": 2,
+   "name": "Friend Guard",
+   "nonstandard": null,
+   "note": "シングルでは効かない",
+   "numbers": {
+    "onAnyModifyDamage": [
+     0.75
+    ]
+   },
+   "source": "curated",
+   "tags": [],
+   "value_zero": true
+  },
+  "frisk": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "none"
+    }
+   ],
+   "holders": [
+    "banette",
+    "espathra",
+    "gourgeist",
+    "gourgeistlarge",
+    "gourgeistsmall",
+    "gourgeistsuper",
+    "grimmsnarl",
+    "noivern",
+    "pumpkaboolarge",
+    "pumpkaboosmall",
+    "pumpkaboosuper",
+    "trevenant",
+    "typhlosionhisui",
+    "wigglytuff",
+    "wyrdeer"
+   ],
+   "hooks": [
+    "onStart"
+   ],
+   "n_holders": 15,
+   "name": "Frisk",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": true
+  },
+  "furcoat": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "defense_mult",
+     "mult": 0.5,
+     "when": {
+      "category": "Physical"
+     }
+    }
+   ],
+   "holders": [
+    "furfrou",
+    "persianalola"
+   ],
+   "hooks": [
+    "onModifyDef",
+    "onModifyDefPriority"
+   ],
+   "n_holders": 2,
+   "name": "Fur Coat",
+   "nonstandard": null,
+   "numbers": {
+    "onModifyDef": [
+     2.0
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "defense",
+    "wall"
+   ],
+   "value_zero": false
+  },
+  "galewings": {
+   "categories": [
+    "素早さ・優先度"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "delta": 1,
+     "kind": "priority_delta",
+     "when": {
+      "full_hp": true,
+      "move_type": "Flying"
+     }
+    }
+   ],
+   "holders": [
+    "talonflame"
+   ],
+   "hooks": [
+    "onModifyPriority"
+   ],
+   "n_holders": 1,
+   "name": "Gale Wings",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "priority"
+   ],
+   "value_zero": false
+  },
+  "gluttony": {
+   "categories": [
+    "被ダメ・反動の補正"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "pinch_berry_at_half",
+     "kind": "item_effect"
+    }
+   ],
+   "holders": [
+    "appletun",
+    "flapple",
+    "simipour",
+    "simisage",
+    "simisear",
+    "snorlax",
+    "swalot",
+    "victreebel"
+   ],
+   "hooks": [
+    "onDamage",
+    "onStart"
+   ],
+   "n_holders": 8,
+   "name": "Gluttony",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "item"
+   ],
+   "value_zero": false
+  },
+  "goodasgold": {
+   "categories": [
+    "無効・吸収・妨害"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "immune",
+     "status_moves": true
+    }
+   ],
+   "holders": [
+    "gholdengo"
+   ],
+   "hooks": [
+    "onTryHit"
+   ],
+   "n_holders": 1,
+   "name": "Good as Gold",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "immunity",
+    "wall"
+   ],
+   "value_zero": false
+  },
+  "gooey": {
+   "categories": [
+    "被弾時の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "boosts": {
+      "spe": -1
+     },
+     "effect": "boosts",
+     "kind": "contact_effect"
+    }
+   ],
+   "holders": [
+    "goodra",
+    "goodrahisui"
+   ],
+   "hooks": [
+    "onDamagingHit"
+   ],
+   "n_holders": 2,
+   "name": "Gooey",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "contact_punish"
+   ],
+   "value_zero": false
+  },
+  "grasspelt": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "defense_mult",
+     "mult": 0.6667,
+     "when": {
+      "category": "Physical",
+      "terrain": "grassy"
+     }
+    }
+   ],
+   "holders": [
+    "gogoat"
+   ],
+   "hooks": [
+    "onModifyDef",
+    "onModifyDefPriority"
+   ],
+   "n_holders": 1,
+   "name": "Grass Pelt",
+   "nonstandard": null,
+   "numbers": {
+    "onModifyDef": [
+     1.5
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "defense",
+    "terrain_user"
+   ],
+   "value_zero": false
+  },
+  "grassysurge": {
+   "categories": [
+    "天候・フィールド始動"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "terrain_set",
+     "terrain": "grassy"
+    }
+   ],
+   "holders": [
+    "rillaboom"
+   ],
+   "hooks": [
+    "onStart"
+   ],
+   "n_holders": 1,
+   "name": "Grassy Surge",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "terrain_setter"
+   ],
+   "value_zero": false
+  },
+  "guarddog": {
+   "categories": [
+    "無効・吸収・妨害"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "boosts": {
+      "atk": 1
+     },
+     "effect": "boost_instead",
+     "kind": "stat_drop_immune",
+     "stats": [
+      "intimidate"
+     ]
+    },
+    {
+     "effect": "no_force_switch",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "mabosstiff"
+   ],
+   "hooks": [
+    "onDragOut",
+    "onDragOutPriority",
+    "onTryBoost",
+    "onTryBoostPriority"
+   ],
+   "n_holders": 1,
+   "name": "Guard Dog",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "anti_intimidate"
+   ],
+   "value_zero": false
+  },
+  "gulpmissile": {
+   "categories": [
+    "被弾時の効果"
+   ],
+   "flags": [
+    "cantsuppress",
+    "notransform"
+   ],
+   "formula": [
+    {
+     "effect": "gulp_missile",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "cramorantgorging",
+    "cramorantgulping"
+   ],
+   "hooks": [
+    "onDamagingHit",
+    "onSourceTryPrimaryHit"
+   ],
+   "n_holders": 2,
+   "name": "Gulp Missile",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": false
+  },
+  "guts": {
+   "categories": [
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "offense_mult",
+     "mult": 1.5,
+     "when": {
+      "category": "Physical",
+      "user_status": true
+     }
+    },
+    {
+     "effect": "no_burn_attack_drop",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "conkeldurr",
+    "flareon",
+    "heracross",
+    "luxray",
+    "machamp",
+    "squawkabilly"
+   ],
+   "hooks": [
+    "onModifyAtk",
+    "onModifyAtkPriority"
+   ],
+   "n_holders": 6,
+   "name": "Guts",
+   "nonstandard": null,
+   "numbers": {
+    "onModifyAtk": [
+     1.5
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "offense",
+    "status_synergy"
+   ],
+   "value_zero": false
+  },
+  "harvest": {
+   "categories": [
+    "ターン経過・場の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "chance": 50,
+     "chance_sun": 100,
+     "effect": "berry_restore",
+     "kind": "item_effect"
+    }
+   ],
+   "holders": [
+    "arboliva",
+    "trevenant"
+   ],
+   "hooks": [
+    "onResidual",
+    "onResidualOrder",
+    "onResidualSubOrder"
+   ],
+   "n_holders": 2,
+   "name": "Harvest",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "item",
+    "weather_user"
+   ],
+   "value_zero": false
+  },
+  "healer": {
+   "categories": [
+    "ターン経過・場の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "none"
+    }
+   ],
+   "holders": [
+    "aromatisse",
+    "audino",
+    "audinomega(mega)",
+    "hatterene"
+   ],
+   "hooks": [
+    "onResidual",
+    "onResidualOrder",
+    "onResidualSubOrder"
+   ],
+   "n_holders": 4,
+   "name": "Healer",
+   "nonstandard": null,
+   "note": "シングルでは効かない",
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": true
+  },
+  "heatproof": {
+   "categories": [
+    "被ダメ・反動の補正"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "defense_mult",
+     "mult": 0.5,
+     "when": {
+      "move_type": "Fire"
+     }
+    },
+    {
+     "effect": "burn_damage_half",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "sinistcha"
+   ],
+   "hooks": [
+    "onDamage",
+    "onSourceModifyAtk",
+    "onSourceModifyAtkPriority",
+    "onSourceModifySpA",
+    "onSourceModifySpAPriority"
+   ],
+   "n_holders": 1,
+   "name": "Heatproof",
+   "nonstandard": null,
+   "numbers": {
+    "onSourceModifyAtk": [
+     0.5
+    ],
+    "onSourceModifySpA": [
+     0.5
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "defense"
+   ],
+   "value_zero": false
+  },
+  "heavymetal": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "effect": "weight_mult",
+     "kind": "misc",
+     "mult": 2.0
+    }
+   ],
+   "holders": [
+    "aggron"
+   ],
+   "hooks": [
+    "onModifyWeight",
+    "onModifyWeightPriority"
+   ],
+   "n_holders": 1,
+   "name": "Heavy Metal",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "weight"
+   ],
+   "value_zero": false
+  },
+  "hospitality": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "none"
+    }
+   ],
+   "holders": [
+    "sinistcha"
+   ],
+   "hooks": [
+    "onStart",
+    "onSwitchInPriority"
+   ],
+   "n_holders": 1,
+   "name": "Hospitality",
+   "nonstandard": null,
+   "note": "シングルでは効かない",
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": true
+  },
+  "hugepower": {
+   "categories": [
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "offense_mult",
+     "mult": 2.0,
+     "when": {
+      "category": "Physical"
+     }
+    }
+   ],
+   "holders": [
+    "azumarill",
+    "diggersby",
+    "mawilemega(mega)",
+    "starmiemega(mega)"
+   ],
+   "hooks": [
+    "onModifyAtk",
+    "onModifyAtkPriority"
+   ],
+   "n_holders": 4,
+   "name": "Huge Power",
+   "nonstandard": null,
+   "numbers": {
+    "onModifyAtk": [
+     2.0
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "hungerswitch": {
+   "categories": [
+    "ターン経過・場の効果"
+   ],
+   "flags": [
+    "failroleplay",
+    "failskillswap",
+    "noentrain",
+    "noreceiver",
+    "notrace",
+    "notransform"
+   ],
+   "formula": [
+    {
+     "effect": "form_alternate",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "morpeko",
+    "morpekohangry"
+   ],
+   "hooks": [
+    "onResidual",
+    "onResidualOrder"
+   ],
+   "n_holders": 2,
+   "name": "Hunger Switch",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": false
+  },
+  "hustle": {
+   "categories": [
+    "火力・追加効果",
+    "命中・回避"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "offense_mult",
+     "mult": 1.5,
+     "when": {
+      "category": "Physical"
+     }
+    },
+    {
+     "kind": "accuracy_mult",
+     "mult": 0.8,
+     "when": {
+      "category": "Physical"
+     }
+    }
+   ],
+   "holders": [
+    "flapple",
+    "squawkabilly"
+   ],
+   "hooks": [
+    "onModifyAtk",
+    "onModifyAtkPriority",
+    "onSourceModifyAccuracy",
+    "onSourceModifyAccuracyPriority"
+   ],
+   "n_holders": 2,
+   "name": "Hustle",
+   "nonstandard": null,
+   "numbers": {
+    "onSourceModifyAccuracy": [
+     0.8
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "hydration": {
+   "categories": [
+    "ターン経過・場の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "cure_status",
+     "kind": "misc",
+     "when": {
+      "weather": "rain"
+     }
+    }
+   ],
+   "holders": [
+    "goodra",
+    "vaporeon"
+   ],
+   "hooks": [
+    "onResidual",
+    "onResidualOrder",
+    "onResidualSubOrder"
+   ],
+   "n_holders": 2,
+   "name": "Hydration",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "weather_user"
+   ],
+   "value_zero": false
+  },
+  "hypercutter": {
+   "categories": [
+    "無効・吸収・妨害"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "stat_drop_immune",
+     "stats": [
+      "atk"
+     ]
+    }
+   ],
+   "holders": [
+    "crabominable",
+    "gliscor",
+    "mawile",
+    "pinsir"
+   ],
+   "hooks": [
+    "onTryBoost"
+   ],
+   "n_holders": 4,
+   "name": "Hyper Cutter",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "stat_drop_immune",
+    "anti_intimidate"
+   ],
+   "value_zero": false
+  },
+  "icebody": {
+   "categories": [
+    "無効・吸収・妨害",
+    "ターン経過・場の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "fraction": 0.0625,
+     "kind": "heal_turn",
+     "when": {
+      "weather": "snow"
+     }
+    }
+   ],
+   "holders": [
+    "avalugg",
+    "avalugghisui",
+    "baxcalibur",
+    "baxcaliburmega(mega)",
+    "glaceon",
+    "glalie",
+    "mrrime",
+    "vanilluxe"
+   ],
+   "hooks": [
+    "onImmunity",
+    "onWeather"
+   ],
+   "n_holders": 8,
+   "name": "Ice Body",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "weather_user"
+   ],
+   "value_zero": false
+  },
+  "iceface": {
+   "categories": [
+    "無効・吸収・妨害",
+    "被ダメ・反動の補正",
+    "状態異常・交代・その他"
+   ],
+   "flags": [
+    "breakable",
+    "cantsuppress",
+    "failroleplay",
+    "failskillswap",
+    "noentrain",
+    "noreceiver",
+    "notrace",
+    "notransform"
+   ],
+   "formula": [
+    {
+     "effect": "free_physical_hit",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "eiscuenoice"
+   ],
+   "hooks": [
+    "onCriticalHit",
+    "onDamage",
+    "onDamagePriority",
+    "onEffectiveness",
+    "onStart",
+    "onSwitchInPriority",
+    "onUpdate",
+    "onWeatherChange"
+   ],
+   "n_holders": 1,
+   "name": "Ice Face",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "defense"
+   ],
+   "value_zero": false
+  },
+  "illuminate": {
+   "categories": [
+    "火力・追加効果",
+    "無効・吸収・妨害"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "stat_drop_immune",
+     "stats": [
+      "accuracy"
+     ]
+    },
+    {
+     "effect": "ignore_evasion",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "starmie",
+    "watchog"
+   ],
+   "hooks": [
+    "onModifyMove",
+    "onTryBoost"
+   ],
+   "n_holders": 2,
+   "name": "Illuminate",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": false
+  },
+  "illusion": {
+   "categories": [
+    "被弾時の効果",
+    "状態異常・交代・その他"
+   ],
+   "flags": [
+    "failroleplay",
+    "failskillswap",
+    "noentrain",
+    "noreceiver",
+    "notrace"
+   ],
+   "formula": [
+    {
+     "effect": "illusion",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "zoroark",
+    "zoroarkhisui"
+   ],
+   "hooks": [
+    "onBeforeSwitchIn",
+    "onDamagingHit",
+    "onEnd",
+    "onFaint"
+   ],
+   "n_holders": 2,
+   "name": "Illusion",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": false
+  },
+  "immunity": {
+   "categories": [
+    "状態異常・交代・その他"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "status_immune",
+     "status": [
+      "psn",
+      "tox"
+     ]
+    }
+   ],
+   "holders": [
+    "snorlax"
+   ],
+   "hooks": [
+    "onSetStatus",
+    "onUpdate"
+   ],
+   "n_holders": 1,
+   "name": "Immunity",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "status_immune"
+   ],
+   "value_zero": false
+  },
+  "imposter": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [
+    "failroleplay",
+    "noentrain",
+    "noreceiver",
+    "notrace"
+   ],
+   "formula": [
+    {
+     "effect": "transform",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "ditto"
+   ],
+   "hooks": [
+    "onSwitchIn"
+   ],
+   "n_holders": 1,
+   "name": "Imposter",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": false
+  },
+  "infiltrator": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "ignore_screens_substitute",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "chandelure",
+    "chandeluremega(mega)",
+    "dragapult",
+    "malamar",
+    "meowstic",
+    "noivern",
+    "spiritomb",
+    "whimsicott"
+   ],
+   "hooks": [
+    "onModifyMove"
+   ],
+   "n_holders": 8,
+   "name": "Infiltrator",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "innardsout": {
+   "categories": [
+    "被弾時の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "damage_on_faint_equal_last_hit",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "victreebelmega(mega)"
+   ],
+   "hooks": [
+    "onDamagingHit",
+    "onDamagingHitOrder"
+   ],
+   "n_holders": 1,
+   "name": "Innards Out",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": false
+  },
+  "innerfocus": {
+   "categories": [
+    "無効・吸収・妨害",
+    "状態異常・交代・その他"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "status_immune",
+     "volatile": [
+      "flinch"
+     ]
+    },
+    {
+     "kind": "stat_drop_immune",
+     "stats": [
+      "intimidate"
+     ]
+    }
+   ],
+   "holders": [
+    "alakazam",
+    "annihilape",
+    "dragonite",
+    "farfetchd",
+    "gallademega(mega)",
+    "glalie",
+    "indeedee",
+    "kangaskhan",
+    "lucario",
+    "mudsdale",
+    "oranguru",
+    "umbreon"
+   ],
+   "hooks": [
+    "onTryAddVolatile",
+    "onTryBoost"
+   ],
+   "n_holders": 12,
+   "name": "Inner Focus",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "anti_intimidate"
+   ],
+   "value_zero": false
+  },
+  "insomnia": {
+   "categories": [
+    "状態異常・交代・その他"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "status_immune",
+     "status": [
+      "slp"
+     ]
+    }
+   ],
+   "holders": [
+    "ariados",
+    "banette",
+    "gourgeist",
+    "gourgeistlarge",
+    "gourgeistsmall",
+    "gourgeistsuper",
+    "pumpkaboolarge",
+    "pumpkaboosmall",
+    "pumpkaboosuper",
+    "scovillain"
+   ],
+   "hooks": [
+    "onSetStatus",
+    "onTryAddVolatile",
+    "onUpdate"
+   ],
+   "n_holders": 10,
+   "name": "Insomnia",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "status_immune"
+   ],
+   "value_zero": false
+  },
+  "intimidate": {
+   "categories": [
+    "着地時の能力変化"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "boosts": {
+      "atk": -1
+     },
+     "kind": "switch_in_boost",
+     "target": "foe"
+    }
+   ],
+   "holders": [
+    "arbok",
+    "arcanine",
+    "arcaninehisui",
+    "gyarados",
+    "incineroar",
+    "krookodile",
+    "luxray",
+    "mabosstiff",
+    "manectricmega(mega)",
+    "mawile",
+    "overqwil",
+    "qwilfish",
+    "salamence",
+    "scrafty",
+    "scraftymega(mega)",
+    "squawkabilly",
+    "staraptor",
+    "tauros",
+    "wyrdeer"
+   ],
+   "hooks": [
+    "onStart"
+   ],
+   "n_holders": 19,
+   "name": "Intimidate",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "intimidate",
+    "defense"
+   ],
+   "value_zero": false
+  },
+  "ironfist": {
+   "categories": [
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "offense_mult",
+     "mult": 1.2,
+     "when": {
+      "move_flag": "punch"
+     }
+    }
+   ],
+   "holders": [
+    "conkeldurr",
+    "crabominable",
+    "crabominablemega(mega)",
+    "golurk",
+    "infernape",
+    "pangoro",
+    "pawmot"
+   ],
+   "hooks": [
+    "onBasePower",
+    "onBasePowerPriority"
+   ],
+   "n_holders": 7,
+   "name": "Iron Fist",
+   "nonstandard": null,
+   "numbers": {
+    "onBasePower": [
+     1.2
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "justified": {
+   "categories": [
+    "被弾時の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "boosts": {
+      "atk": 1
+     },
+     "effect": "boost_when_hit_by_type",
+     "kind": "misc",
+     "move_type": "Dark"
+    }
+   ],
+   "holders": [
+    "absol",
+    "arcanine",
+    "gallade",
+    "keldeoresolute",
+    "lucario"
+   ],
+   "hooks": [
+    "onDamagingHit"
+   ],
+   "n_holders": 5,
+   "name": "Justified",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "keeneye": {
+   "categories": [
+    "火力・追加効果",
+    "無効・吸収・妨害"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "stat_drop_immune",
+     "stats": [
+      "accuracy"
+     ]
+    },
+    {
+     "effect": "ignore_evasion",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "farfetchd",
+    "lycanroc",
+    "lycanrocmidnight",
+    "meowstic",
+    "pelipper",
+    "pidgeot",
+    "sableye",
+    "skarmory",
+    "toucannon",
+    "watchog"
+   ],
+   "hooks": [
+    "onModifyMove",
+    "onTryBoost"
+   ],
+   "n_holders": 10,
+   "name": "Keen Eye",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": false
+  },
+  "klutz": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "item_disabled",
+     "kind": "item_effect"
+    }
+   ],
+   "holders": [
+    "audino",
+    "golurk",
+    "lopunny"
+   ],
+   "hooks": [
+    "onStart",
+    "onSwitchInPriority"
+   ],
+   "n_holders": 3,
+   "name": "Klutz",
+   "nonstandard": null,
+   "note": "持ち物が効かない (型の選択では避ける)",
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "no_item"
+   ],
+   "value_zero": false
+  },
+  "leafguard": {
+   "categories": [
+    "状態異常・交代・その他"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "status_immune",
+     "status": [
+      "all"
+     ],
+     "when": {
+      "weather": "sun"
+     }
+    }
+   ],
+   "holders": [
+    "leafeon",
+    "meganium",
+    "tsareena",
+    "zarudedada"
+   ],
+   "hooks": [
+    "onSetStatus",
+    "onTryAddVolatile"
+   ],
+   "n_holders": 4,
+   "name": "Leaf Guard",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "weather_user"
+   ],
+   "value_zero": false
+  },
+  "levitate": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "immune",
+     "move_type": "Ground"
+    }
+   ],
+   "holders": [
+    "chimecho",
+    "chimechomega(mega)",
+    "delphoxmega(mega)",
+    "eelektross",
+    "garchompmegaz(mega)",
+    "hydreigon",
+    "rotom",
+    "rotomfan",
+    "rotomfrost",
+    "rotomheat",
+    "rotommow",
+    "rotomwash"
+   ],
+   "hooks": [],
+   "n_holders": 12,
+   "name": "Levitate",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "immunity"
+   ],
+   "value_zero": false
+  },
+  "libero": {
+   "categories": [
+    "タイプ付与・変更"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "stab_any",
+     "once_per_switch": true
+    }
+   ],
+   "holders": [
+    "cinderace"
+   ],
+   "hooks": [
+    "onPrepareHit"
+   ],
+   "n_holders": 1,
+   "name": "Libero",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "offense",
+    "type_change"
+   ],
+   "value_zero": false
+  },
+  "lightmetal": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "effect": "weight_mult",
+     "kind": "misc",
+     "mult": 0.5
+    }
+   ],
+   "holders": [
+    "metagross",
+    "scizor"
+   ],
+   "hooks": [
+    "onModifyWeight"
+   ],
+   "n_holders": 2,
+   "name": "Light Metal",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "weight"
+   ],
+   "value_zero": false
+  },
+  "lightningrod": {
+   "categories": [
+    "無効・吸収・妨害"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "boosts": {
+      "spa": 1
+     },
+     "effect": "boost",
+     "kind": "immune",
+     "move_type": "Electric"
+    }
+   ],
+   "holders": [
+    "manectric",
+    "pikachu",
+    "pincurchin",
+    "raichu",
+    "rhyperior",
+    "sceptilemega(mega)"
+   ],
+   "hooks": [
+    "onAnyRedirectTarget",
+    "onTryHit"
+   ],
+   "n_holders": 6,
+   "name": "Lightning Rod",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "immunity"
+   ],
+   "value_zero": false
+  },
+  "limber": {
+   "categories": [
+    "状態異常・交代・その他"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "status_immune",
+     "status": [
+      "par"
+     ]
+    }
+   ],
+   "holders": [
+    "ditto",
+    "grapploct",
+    "hawlucha",
+    "liepard",
+    "lopunny",
+    "persian",
+    "stunfisk",
+    "toxapex"
+   ],
+   "hooks": [
+    "onSetStatus",
+    "onUpdate"
+   ],
+   "n_holders": 8,
+   "name": "Limber",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "status_immune"
+   ],
+   "value_zero": false
+  },
+  "liquidooze": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "drain_reversed",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "swalot"
+   ],
+   "hooks": [
+    "onSourceTryHeal"
+   ],
+   "n_holders": 1,
+   "name": "Liquid Ooze",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": false
+  },
+  "liquidvoice": {
+   "categories": [
+    "タイプ付与・変更"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "from": "sound",
+     "kind": "type_change",
+     "mult": 1.0,
+     "to": "Water"
+    }
+   ],
+   "holders": [
+    "primarina"
+   ],
+   "hooks": [
+    "onModifyType",
+    "onModifyTypePriority"
+   ],
+   "n_holders": 1,
+   "name": "Liquid Voice",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "type_change"
+   ],
+   "value_zero": false
+  },
+  "longreach": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "no_contact",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "decidueye"
+   ],
+   "hooks": [
+    "onModifyMove"
+   ],
+   "n_holders": 1,
+   "name": "Long Reach",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": false
+  },
+  "magicbounce": {
+   "categories": [
+    "無効・吸収・妨害"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "effect": "reflect",
+     "kind": "immune",
+     "status_moves": true
+    }
+   ],
+   "holders": [
+    "absolmega(mega)",
+    "clefablemega(mega)",
+    "espeon",
+    "hatterene",
+    "sableyemega(mega)"
+   ],
+   "hooks": [
+    "onAllyTryHitSide",
+    "onTryHit",
+    "onTryHitPriority"
+   ],
+   "n_holders": 5,
+   "name": "Magic Bounce",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "immunity",
+    "wall",
+    "anti_hazard"
+   ],
+   "value_zero": false
+  },
+  "magicguard": {
+   "categories": [
+    "被ダメ・反動の補正"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "recoil_none"
+    },
+    {
+     "effect": "no_indirect_damage",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "alakazam",
+    "clefable",
+    "reuniclus"
+   ],
+   "hooks": [
+    "onDamage"
+   ],
+   "n_holders": 3,
+   "name": "Magic Guard",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "defense",
+    "no_indirect"
+   ],
+   "value_zero": false
+  },
+  "magician": {
+   "categories": [
+    "撃破・技後の能力変化"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "steal_on_hit",
+     "kind": "item_effect"
+    }
+   ],
+   "holders": [
+    "delphox",
+    "klefki"
+   ],
+   "hooks": [
+    "onAfterMoveSecondarySelf"
+   ],
+   "n_holders": 2,
+   "name": "Magician",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "item"
+   ],
+   "value_zero": false
+  },
+  "magmaarmor": {
+   "categories": [
+    "無効・吸収・妨害",
+    "状態異常・交代・その他"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "status_immune",
+     "status": [
+      "frz"
+     ]
+    }
+   ],
+   "holders": [
+    "camerupt"
+   ],
+   "hooks": [
+    "onImmunity",
+    "onUpdate"
+   ],
+   "n_holders": 1,
+   "name": "Magma Armor",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "status_immune"
+   ],
+   "value_zero": false
+  },
+  "marvelscale": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "defense_mult",
+     "mult": 0.6667,
+     "when": {
+      "category": "Physical",
+      "user_status": true
+     }
+    }
+   ],
+   "holders": [
+    "milotic"
+   ],
+   "hooks": [
+    "onModifyDef",
+    "onModifyDefPriority"
+   ],
+   "n_holders": 1,
+   "name": "Marvel Scale",
+   "nonstandard": null,
+   "numbers": {
+    "onModifyDef": [
+     1.5
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "defense",
+    "status_synergy"
+   ],
+   "value_zero": false
+  },
+  "megalauncher": {
+   "categories": [
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "offense_mult",
+     "mult": 1.5,
+     "when": {
+      "move_flag": "pulse"
+     }
+    }
+   ],
+   "holders": [
+    "blastoisemega(mega)",
+    "clawitzer"
+   ],
+   "hooks": [
+    "onBasePower",
+    "onBasePowerPriority"
+   ],
+   "n_holders": 2,
+   "name": "Mega Launcher",
+   "nonstandard": null,
+   "numbers": {
+    "onBasePower": [
+     1.5
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "megasol": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "offense_mult",
+     "mult": 1.5,
+     "when": {
+      "move_type": "Fire"
+     }
+    },
+    {
+     "kind": "offense_mult",
+     "mult": 0.5,
+     "when": {
+      "move_type": "Water"
+     }
+    },
+    {
+     "effect": "self_weather",
+     "kind": "misc",
+     "weather": "sun"
+    }
+   ],
+   "holders": [
+    "meganiummega(mega)"
+   ],
+   "hooks": [
+    "onWeatherModifyDamage",
+    "onWeatherModifyDamagePriority"
+   ],
+   "n_holders": 1,
+   "name": "Mega Sol",
+   "nonstandard": null,
+   "note": "メガメガニウム: 自分だけ晴れ扱い (ソーラービームはため無し、ウェザーボールは炎)",
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "weather_user"
+   ],
+   "value_zero": false
+  },
+  "merciless": {
+   "categories": [
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "delta": 5,
+     "kind": "crit_stage",
+     "when": {
+      "target_poisoned": true
+     }
+    }
+   ],
+   "holders": [
+    "toxapex"
+   ],
+   "hooks": [
+    "onModifyCritRatio"
+   ],
+   "n_holders": 1,
+   "name": "Merciless",
+   "nonstandard": null,
+   "numbers": {
+    "onModifyCritRatio": [
+     5.0
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "crit",
+    "status_synergy"
+   ],
+   "value_zero": false
+  },
+  "mimicry": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "type_by_terrain",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "stunfiskgalar"
+   ],
+   "hooks": [
+    "onStart",
+    "onSwitchInPriority",
+    "onTerrainChange"
+   ],
+   "n_holders": 1,
+   "name": "Mimicry",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "terrain_user"
+   ],
+   "value_zero": false
+  },
+  "minus": {
+   "categories": [
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "none"
+    }
+   ],
+   "holders": [
+    "manectric",
+    "toxtricitylowkey",
+    "toxtricitylowkeygmax"
+   ],
+   "hooks": [
+    "onModifySpA",
+    "onModifySpAPriority"
+   ],
+   "n_holders": 3,
+   "name": "Minus",
+   "nonstandard": null,
+   "note": "シングルでは効かない",
+   "numbers": {
+    "onModifySpA": [
+     1.5
+    ]
+   },
+   "source": "curated",
+   "tags": [],
+   "value_zero": true
+  },
+  "mirrorarmor": {
+   "categories": [
+    "無効・吸収・妨害"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "effect": "reflect",
+     "kind": "stat_drop_immune",
+     "stats": [
+      "all"
+     ]
+    }
+   ],
+   "holders": [
+    "corviknight"
+   ],
+   "hooks": [
+    "onTryBoost"
+   ],
+   "n_holders": 1,
+   "name": "Mirror Armor",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "stat_drop_immune",
+    "anti_intimidate"
+   ],
+   "value_zero": false
+  },
+  "moldbreaker": {
+   "categories": [
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "ignore_target_ability",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "ampharosmega(mega)",
+    "basculegion",
+    "basculinbluestriped",
+    "basculinwhitestriped",
+    "emboarmega(mega)",
+    "excadrill",
+    "gyaradosmega(mega)",
+    "hawlucha",
+    "pangoro",
+    "pinsir",
+    "rampardos",
+    "tinkaton"
+   ],
+   "hooks": [
+    "onModifyMove",
+    "onStart"
+   ],
+   "n_holders": 12,
+   "name": "Mold Breaker",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "moody": {
+   "categories": [
+    "ターン経過・場の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "random_boosts",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "glalie",
+    "scovillain"
+   ],
+   "hooks": [
+    "onResidual",
+    "onResidualOrder",
+    "onResidualSubOrder"
+   ],
+   "n_holders": 2,
+   "name": "Moody",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": false
+  },
+  "motordrive": {
+   "categories": [
+    "無効・吸収・妨害"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "boosts": {
+      "spe": 1
+     },
+     "effect": "boost",
+     "kind": "immune",
+     "move_type": "Electric"
+    }
+   ],
+   "holders": [
+    "emolga"
+   ],
+   "hooks": [
+    "onTryHit"
+   ],
+   "n_holders": 1,
+   "name": "Motor Drive",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "immunity"
+   ],
+   "value_zero": false
+  },
+  "moxie": {
+   "categories": [
+    "撃破・技後の能力変化"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "boosts": {
+      "atk": 1
+     },
+     "kind": "on_ko_boost"
+    }
+   ],
+   "holders": [
+    "gyarados",
+    "heracross",
+    "krookodile",
+    "pinsir",
+    "pyroar",
+    "quaquaval",
+    "salamence",
+    "scrafty"
+   ],
+   "hooks": [
+    "onSourceAfterFaint"
+   ],
+   "n_holders": 8,
+   "name": "Moxie",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "multiscale": {
+   "categories": [
+    "被ダメ・反動の補正"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "defense_mult",
+     "mult": 0.5,
+     "when": {
+      "full_hp": true
+     }
+    }
+   ],
+   "holders": [
+    "dragonite",
+    "dragonitemega(mega)"
+   ],
+   "hooks": [
+    "onSourceModifyDamage"
+   ],
+   "n_holders": 2,
+   "name": "Multiscale",
+   "nonstandard": null,
+   "numbers": {
+    "onSourceModifyDamage": [
+     0.5
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "defense",
+    "setup"
+   ],
+   "value_zero": false
+  },
+  "mummy": {
+   "categories": [
+    "被弾時の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "ability_mummy",
+     "kind": "contact_effect"
+    }
+   ],
+   "holders": [
+    "cofagrigus"
+   ],
+   "hooks": [
+    "onDamagingHit"
+   ],
+   "n_holders": 1,
+   "name": "Mummy",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "contact_punish"
+   ],
+   "value_zero": false
+  },
+  "naturalcure": {
+   "categories": [
+    "状態異常・交代・その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "cure_status_on_switch",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "altaria",
+    "pawmot",
+    "roserade",
+    "starmie",
+    "trevenant"
+   ],
+   "hooks": [
+    "onCheckShow",
+    "onSwitchOut"
+   ],
+   "n_holders": 5,
+   "name": "Natural Cure",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "wall",
+    "pivot"
+   ],
+   "value_zero": false
+  },
+  "noguard": {
+   "categories": [
+    "命中・回避"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "no_miss"
+    }
+   ],
+   "holders": [
+    "golurk",
+    "hawluchamega(mega)",
+    "lycanrocmidnight",
+    "machamp",
+    "pidgeotmega(mega)",
+    "raichumegay(mega)"
+   ],
+   "hooks": [
+    "onAnyAccuracy",
+    "onAnyInvulnerability",
+    "onAnyInvulnerabilityPriority"
+   ],
+   "n_holders": 6,
+   "name": "No Guard",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "accuracy"
+   ],
+   "value_zero": false
+  },
+  "oblivious": {
+   "categories": [
+    "無効・吸収・妨害",
+    "状態異常・交代・その他"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "status_immune",
+     "volatile": [
+      "attract",
+      "taunt"
+     ]
+    },
+    {
+     "kind": "stat_drop_immune",
+     "stats": [
+      "intimidate"
+     ]
+    }
+   ],
+   "holders": [
+    "mamoswine",
+    "salazzle",
+    "slowbro",
+    "slowking"
+   ],
+   "hooks": [
+    "onImmunity",
+    "onTryBoost",
+    "onTryHit",
+    "onUpdate"
+   ],
+   "n_holders": 4,
+   "name": "Oblivious",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "anti_intimidate"
+   ],
+   "value_zero": false
+  },
+  "opportunist": {
+   "categories": [
+    "ターン経過・場の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "copy_foe_boosts",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "espathra"
+   ],
+   "hooks": [
+    "onAnyAfterMega",
+    "onAnyAfterMove",
+    "onAnyAfterTerastallization",
+    "onAnySwitchIn",
+    "onAnySwitchInPriority",
+    "onEnd",
+    "onFoeAfterBoost",
+    "onResidual",
+    "onResidualOrder"
+   ],
+   "n_holders": 1,
+   "name": "Opportunist",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": false
+  },
+  "overcoat": {
+   "categories": [
+    "無効・吸収・妨害"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "immune",
+     "move_flag": "powder"
+    },
+    {
+     "effect": "no_weather_damage",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "forretress",
+    "kommoo",
+    "reuniclus"
+   ],
+   "hooks": [
+    "onImmunity",
+    "onTryHit",
+    "onTryHitPriority"
+   ],
+   "n_holders": 3,
+   "name": "Overcoat",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "immunity"
+   ],
+   "value_zero": false
+  },
+  "overgrow": {
+   "categories": [
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "offense_mult",
+     "mult": 1.5,
+     "when": {
+      "move_type": "Grass",
+      "user_hp_below": 0.3334
+     }
+    }
+   ],
+   "holders": [
+    "chesnaught",
+    "decidueye",
+    "decidueyehisui",
+    "meganium",
+    "meowscarada",
+    "rillaboom",
+    "sceptile",
+    "serperior",
+    "simisage",
+    "torterra",
+    "venusaur"
+   ],
+   "hooks": [
+    "onModifyAtk",
+    "onModifyAtkPriority",
+    "onModifySpA",
+    "onModifySpAPriority"
+   ],
+   "n_holders": 11,
+   "name": "Overgrow",
+   "nonstandard": null,
+   "numbers": {
+    "onModifyAtk": [
+     1.5
+    ],
+    "onModifySpA": [
+     1.5
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "owntempo": {
+   "categories": [
+    "無効・吸収・妨害",
+    "状態異常・交代・その他"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "status_immune",
+     "volatile": [
+      "confusion"
+     ]
+    },
+    {
+     "kind": "stat_drop_immune",
+     "stats": [
+      "intimidate"
+     ]
+    }
+   ],
+   "holders": [
+    "avalugg",
+    "mudsdale",
+    "slowbro",
+    "slowbrogalar",
+    "slowking",
+    "slowkinggalar",
+    "tinkaton"
+   ],
+   "hooks": [
+    "onHit",
+    "onTryAddVolatile",
+    "onTryBoost",
+    "onUpdate"
+   ],
+   "n_holders": 7,
+   "name": "Own Tempo",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "anti_intimidate"
+   ],
+   "value_zero": false
+  },
+  "parentalbond": {
+   "categories": [
+    "被ダメ・反動の補正"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "extra_hit",
+     "mult": 0.25
+    }
+   ],
+   "holders": [
+    "kangaskhanmega(mega)"
+   ],
+   "hooks": [
+    "onPrepareHit",
+    "onSourceModifySecondaries"
+   ],
+   "n_holders": 1,
+   "name": "Parental Bond",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "pickpocket": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "steal_on_contact",
+     "kind": "item_effect"
+    }
+   ],
+   "holders": [
+    "barbaracle",
+    "grimmsnarl",
+    "tinkaton",
+    "weavile"
+   ],
+   "hooks": [
+    "onAfterMoveSecondary"
+   ],
+   "n_holders": 4,
+   "name": "Pickpocket",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "item"
+   ],
+   "value_zero": false
+  },
+  "pickup": {
+   "categories": [
+    "ターン経過・場の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "none"
+    }
+   ],
+   "holders": [
+    "dedenne",
+    "diggersby",
+    "gourgeist",
+    "gourgeistlarge",
+    "gourgeistsmall",
+    "gourgeistsuper",
+    "pumpkaboolarge",
+    "pumpkaboosmall",
+    "pumpkaboosuper"
+   ],
+   "hooks": [
+    "onResidual",
+    "onResidualOrder",
+    "onResidualSubOrder"
+   ],
+   "n_holders": 9,
+   "name": "Pickup",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": true
+  },
+  "piercingdrill": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "contact_bypass_protect",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "excadrillmega(mega)"
+   ],
+   "hooks": [
+    "onHitProtect"
+   ],
+   "n_holders": 1,
+   "name": "Piercing Drill",
+   "nonstandard": null,
+   "note": "メガドリュウズ",
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "pixilate": {
+   "categories": [
+    "タイプ付与・変更",
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "from": "Normal",
+     "kind": "type_change",
+     "mult": 1.2,
+     "to": "Fairy"
+    }
+   ],
+   "holders": [
+    "altariamega(mega)",
+    "gardevoirmega(mega)",
+    "sylveon"
+   ],
+   "hooks": [
+    "onBasePower",
+    "onBasePowerPriority",
+    "onModifyType",
+    "onModifyTypePriority"
+   ],
+   "n_holders": 3,
+   "name": "Pixilate",
+   "nonstandard": null,
+   "numbers": {
+    "onBasePower": [
+     1.2
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "offense",
+    "type_change"
+   ],
+   "value_zero": false
+  },
+  "plus": {
+   "categories": [
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "none"
+    }
+   ],
+   "holders": [
+    "ampharos",
+    "dedenne",
+    "toxtricity"
+   ],
+   "hooks": [
+    "onModifySpA",
+    "onModifySpAPriority"
+   ],
+   "n_holders": 3,
+   "name": "Plus",
+   "nonstandard": null,
+   "note": "シングルでは効かない",
+   "numbers": {
+    "onModifySpA": [
+     1.5
+    ]
+   },
+   "source": "curated",
+   "tags": [],
+   "value_zero": true
+  },
+  "poisonheal": {
+   "categories": [
+    "被ダメ・反動の補正"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "fraction": 0.125,
+     "kind": "heal_turn",
+     "when": {
+      "user_poisoned": true
+     }
+    }
+   ],
+   "holders": [
+    "gliscor"
+   ],
+   "hooks": [
+    "onDamage",
+    "onDamagePriority"
+   ],
+   "n_holders": 1,
+   "name": "Poison Heal",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "status_synergy",
+    "wall"
+   ],
+   "value_zero": false
+  },
+  "poisonpoint": {
+   "categories": [
+    "被弾時の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "chance": 30,
+     "effect": "psn",
+     "kind": "contact_effect"
+    }
+   ],
+   "holders": [
+    "dragalge",
+    "overqwil",
+    "qwilfish",
+    "roserade",
+    "scolipede"
+   ],
+   "hooks": [
+    "onDamagingHit"
+   ],
+   "n_holders": 5,
+   "name": "Poison Point",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "contact_punish"
+   ],
+   "value_zero": false
+  },
+  "poisontouch": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "chance": 30,
+     "effect": "contact_moves_poison",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "dragalge",
+    "sneasler",
+    "toxicroak"
+   ],
+   "hooks": [
+    "onSourceDamagingHit"
+   ],
+   "n_holders": 3,
+   "name": "Poison Touch",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "prankster": {
+   "categories": [
+    "素早さ・優先度"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "delta": 1,
+     "kind": "priority_delta",
+     "when": {
+      "category": "Status"
+     }
+    }
+   ],
+   "holders": [
+    "banettemega(mega)",
+    "grimmsnarl",
+    "klefki",
+    "liepard",
+    "meowstic",
+    "sableye",
+    "whimsicott"
+   ],
+   "hooks": [
+    "onModifyPriority"
+   ],
+   "n_holders": 7,
+   "name": "Prankster",
+   "nonstandard": null,
+   "note": "あくタイプには無効",
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "priority",
+    "support"
+   ],
+   "value_zero": false
+  },
+  "pressure": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "none"
+    }
+   ],
+   "holders": [
+    "absol",
+    "aerodactyl",
+    "corviknight",
+    "kingambit",
+    "sneasler",
+    "spiritomb",
+    "weavile"
+   ],
+   "hooks": [
+    "onDeductPP",
+    "onStart"
+   ],
+   "n_holders": 7,
+   "name": "Pressure",
+   "nonstandard": null,
+   "note": "PP 減少のみ",
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": true
+  },
+  "protean": {
+   "categories": [
+    "タイプ付与・変更"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "stab_any",
+     "once_per_switch": true
+    }
+   ],
+   "holders": [
+    "greninja",
+    "greninjamega(mega)",
+    "meowscarada"
+   ],
+   "hooks": [
+    "onPrepareHit"
+   ],
+   "n_holders": 3,
+   "name": "Protean",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "offense",
+    "type_change"
+   ],
+   "value_zero": false
+  },
+  "psychicsurge": {
+   "categories": [
+    "天候・フィールド始動"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "terrain_set",
+     "terrain": "psychic"
+    }
+   ],
+   "holders": [
+    "indeedee"
+   ],
+   "hooks": [
+    "onStart"
+   ],
+   "n_holders": 1,
+   "name": "Psychic Surge",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "terrain_setter",
+    "priority_block"
+   ],
+   "value_zero": false
+  },
+  "punkrock": {
+   "categories": [
+    "火力・追加効果",
+    "被ダメ・反動の補正"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "offense_mult",
+     "mult": 1.3,
+     "when": {
+      "move_flag": "sound"
+     }
+    },
+    {
+     "kind": "defense_mult",
+     "mult": 0.5,
+     "when": {
+      "move_flag": "sound"
+     }
+    }
+   ],
+   "holders": [
+    "toxtricity",
+    "toxtricitylowkey",
+    "toxtricitylowkeygmax"
+   ],
+   "hooks": [
+    "onBasePower",
+    "onBasePowerPriority",
+    "onSourceModifyDamage"
+   ],
+   "n_holders": 3,
+   "name": "Punk Rock",
+   "nonstandard": null,
+   "numbers": {
+    "onBasePower": [
+     1.3
+    ],
+    "onSourceModifyDamage": [
+     0.5
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "purepower": {
+   "categories": [
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "offense_mult",
+     "mult": 2.0,
+     "when": {
+      "category": "Physical"
+     }
+    }
+   ],
+   "holders": [
+    "medicham",
+    "medichammega(mega)"
+   ],
+   "hooks": [
+    "onModifyAtk",
+    "onModifyAtkPriority"
+   ],
+   "n_holders": 2,
+   "name": "Pure Power",
+   "nonstandard": null,
+   "numbers": {
+    "onModifyAtk": [
+     2.0
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "purifyingsalt": {
+   "categories": [
+    "被ダメ・反動の補正",
+    "状態異常・交代・その他"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "status_immune",
+     "status": [
+      "all"
+     ]
+    },
+    {
+     "kind": "defense_mult",
+     "mult": 0.5,
+     "when": {
+      "move_type": "Ghost"
+     }
+    }
+   ],
+   "holders": [
+    "garganacl"
+   ],
+   "hooks": [
+    "onSetStatus",
+    "onSourceModifyAtk",
+    "onSourceModifyAtkPriority",
+    "onSourceModifySpA",
+    "onSourceModifySpAPriority",
+    "onTryAddVolatile"
+   ],
+   "n_holders": 1,
+   "name": "Purifying Salt",
+   "nonstandard": null,
+   "numbers": {
+    "onSourceModifyAtk": [
+     0.5
+    ],
+    "onSourceModifySpA": [
+     0.5
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "status_immune",
+    "defense",
+    "wall"
+   ],
+   "value_zero": false
+  },
+  "queenlymajesty": {
+   "categories": [
+    "無効・吸収・妨害"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "effect": "block_priority",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "tsareena"
+   ],
+   "hooks": [
+    "onFoeTryMove"
+   ],
+   "n_holders": 1,
+   "name": "Queenly Majesty",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "priority_block"
+   ],
+   "value_zero": false
+  },
+  "quickdraw": {
+   "categories": [
+    "素早さ・優先度"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "chance": 30,
+     "effect": "move_first_chance",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "slowbrogalar"
+   ],
+   "hooks": [
+    "onFractionalPriority",
+    "onFractionalPriorityPriority"
+   ],
+   "n_holders": 1,
+   "name": "Quick Draw",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "speed"
+   ],
+   "value_zero": false
+  },
+  "quickfeet": {
+   "categories": [
+    "素早さ・優先度"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "speed_mult",
+     "mult": 1.5,
+     "when": {
+      "user_status": true
+     }
+    }
+   ],
+   "holders": [
+    "jolteon"
+   ],
+   "hooks": [
+    "onModifySpe"
+   ],
+   "n_holders": 1,
+   "name": "Quick Feet",
+   "nonstandard": null,
+   "numbers": {
+    "onModifySpe": [
+     1.5
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "speed",
+    "status_synergy"
+   ],
+   "value_zero": false
+  },
+  "raindish": {
+   "categories": [
+    "ターン経過・場の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "fraction": 0.0625,
+     "kind": "heal_turn",
+     "when": {
+      "weather": "rain"
+     }
+    }
+   ],
+   "holders": [
+    "blastoise",
+    "pelipper"
+   ],
+   "hooks": [
+    "onWeather"
+   ],
+   "n_holders": 2,
+   "name": "Rain Dish",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "weather_user"
+   ],
+   "value_zero": false
+  },
+  "rattled": {
+   "categories": [
+    "被弾時の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "boosts": {
+      "spe": 1
+     },
+     "effect": "boost_when_hit_by_types",
+     "kind": "misc",
+     "move_types": [
+      "Bug",
+      "Ghost",
+      "Dark"
+     ]
+    }
+   ],
+   "holders": [
+    "basculinwhitestriped",
+    "dudunsparcethreesegment",
+    "persianalola"
+   ],
+   "hooks": [
+    "onAfterBoost",
+    "onDamagingHit"
+   ],
+   "n_holders": 3,
+   "name": "Rattled",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": false
+  },
+  "receiver": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [
+    "failroleplay",
+    "noentrain",
+    "noreceiver",
+    "notrace"
+   ],
+   "formula": [
+    {
+     "kind": "none"
+    }
+   ],
+   "holders": [
+    "passimian"
+   ],
+   "hooks": [
+    "onAllyFaint"
+   ],
+   "n_holders": 1,
+   "name": "Receiver",
+   "nonstandard": null,
+   "note": "シングルでは効かない",
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": true
+  },
+  "reckless": {
+   "categories": [
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "offense_mult",
+     "mult": 1.2,
+     "when": {
+      "recoil_move": true
+     }
+    }
+   ],
+   "holders": [
+    "emboar",
+    "rhyperior",
+    "staraptor"
+   ],
+   "hooks": [
+    "onBasePower",
+    "onBasePowerPriority"
+   ],
+   "n_holders": 3,
+   "name": "Reckless",
+   "nonstandard": null,
+   "numbers": {
+    "onBasePower": [
+     1.2
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "refrigerate": {
+   "categories": [
+    "タイプ付与・変更",
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "from": "Normal",
+     "kind": "type_change",
+     "mult": 1.2,
+     "to": "Ice"
+    }
+   ],
+   "holders": [
+    "aurorus",
+    "glaliemega(mega)"
+   ],
+   "hooks": [
+    "onBasePower",
+    "onBasePowerPriority",
+    "onModifyType",
+    "onModifyTypePriority"
+   ],
+   "n_holders": 2,
+   "name": "Refrigerate",
+   "nonstandard": null,
+   "numbers": {
+    "onBasePower": [
+     1.2
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "offense",
+    "type_change"
+   ],
+   "value_zero": false
+  },
+  "regenerator": {
+   "categories": [
+    "状態異常・交代・その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "fraction": 0.3333,
+     "kind": "heal_on_switch"
+    }
+   ],
+   "holders": [
+    "audino",
+    "dragalgemega(mega)",
+    "hydrapple",
+    "reuniclus",
+    "slowbro",
+    "slowbrogalar",
+    "slowking",
+    "slowkinggalar",
+    "toxapex"
+   ],
+   "hooks": [
+    "onSwitchOut"
+   ],
+   "n_holders": 9,
+   "name": "Regenerator",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "regenerator",
+    "pivot",
+    "wall"
+   ],
+   "value_zero": false
+  },
+  "ripen": {
+   "categories": [
+    "被ダメ・反動の補正"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "berry_double",
+     "kind": "item_effect"
+    }
+   ],
+   "holders": [
+    "appletun",
+    "flapple"
+   ],
+   "hooks": [
+    "onChangeBoost",
+    "onEatItem",
+    "onSourceModifyDamage",
+    "onSourceModifyDamagePriority",
+    "onTryEatItem",
+    "onTryEatItemPriority",
+    "onTryHeal"
+   ],
+   "n_holders": 2,
+   "name": "Ripen",
+   "nonstandard": null,
+   "numbers": {
+    "onSourceModifyDamage": [
+     0.5
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "item"
+   ],
+   "value_zero": false
+  },
+  "rivalry": {
+   "categories": [
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "gender_mult",
+     "kind": "misc",
+     "opposite": 0.75,
+     "same": 1.25
+    }
+   ],
+   "holders": [
+    "luxray",
+    "pyroar"
+   ],
+   "hooks": [
+    "onBasePower",
+    "onBasePowerPriority"
+   ],
+   "n_holders": 2,
+   "name": "Rivalry",
+   "nonstandard": null,
+   "note": "性別依存。計算は 1.0",
+   "numbers": {
+    "onBasePower": [
+     1.25,
+     0.75
+    ]
+   },
+   "source": "curated",
+   "tags": [],
+   "value_zero": false
+  },
+  "rockhead": {
+   "categories": [
+    "被ダメ・反動の補正"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "recoil_none"
+    }
+   ],
+   "holders": [
+    "aerodactyl",
+    "aggron",
+    "arcaninehisui",
+    "basculinbluestriped",
+    "steelix",
+    "tyrantrum"
+   ],
+   "hooks": [
+    "onDamage"
+   ],
+   "n_holders": 6,
+   "name": "Rock Head",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "roughskin": {
+   "categories": [
+    "被弾時の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "damage",
+     "fraction": 0.125,
+     "kind": "contact_effect"
+    }
+   ],
+   "holders": [
+    "garchomp",
+    "sharpedo"
+   ],
+   "hooks": [
+    "onDamagingHit",
+    "onDamagingHitOrder"
+   ],
+   "n_holders": 2,
+   "name": "Rough Skin",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "contact_punish",
+    "wall"
+   ],
+   "value_zero": false
+  },
+  "runaway": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "none"
+    }
+   ],
+   "holders": [
+    "dudunsparcethreesegment",
+    "thievul"
+   ],
+   "hooks": [
+    "onMaybeTrapPokemon",
+    "onMaybeTrapPokemonPriority",
+    "onTrapPokemon",
+    "onTrapPokemonPriority"
+   ],
+   "n_holders": 2,
+   "name": "Run Away",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": true
+  },
+  "sandforce": {
+   "categories": [
+    "火力・追加効果",
+    "無効・吸収・妨害"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "offense_mult",
+     "mult": 1.3,
+     "when": {
+      "move_types": [
+       "Rock",
+       "Ground",
+       "Steel"
+      ],
+      "weather": "sand"
+     }
+    },
+    {
+     "effect": "no_sand_damage",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "excadrill",
+    "garchompmega(mega)",
+    "hippowdon",
+    "steelixmega(mega)"
+   ],
+   "hooks": [
+    "onBasePower",
+    "onBasePowerPriority",
+    "onImmunity"
+   ],
+   "n_holders": 4,
+   "name": "Sand Force",
+   "nonstandard": null,
+   "numbers": {
+    "onBasePower": [
+     1.3
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "offense",
+    "weather_user"
+   ],
+   "value_zero": false
+  },
+  "sandrush": {
+   "categories": [
+    "無効・吸収・妨害",
+    "素早さ・優先度"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "speed_mult",
+     "mult": 2.0,
+     "when": {
+      "weather": "sand"
+     }
+    }
+   ],
+   "holders": [
+    "excadrill",
+    "houndstone",
+    "lycanroc"
+   ],
+   "hooks": [
+    "onImmunity",
+    "onModifySpe"
+   ],
+   "n_holders": 3,
+   "name": "Sand Rush",
+   "nonstandard": null,
+   "numbers": {
+    "onModifySpe": [
+     2.0
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "speed",
+    "weather_user"
+   ],
+   "value_zero": false
+  },
+  "sandspit": {
+   "categories": [
+    "被弾時の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "weather_when_hit",
+     "kind": "misc",
+     "weather": "sand"
+    }
+   ],
+   "holders": [
+    "sandaconda"
+   ],
+   "hooks": [
+    "onDamagingHit"
+   ],
+   "n_holders": 1,
+   "name": "Sand Spit",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "weather_setter"
+   ],
+   "value_zero": false
+  },
+  "sandstream": {
+   "categories": [
+    "天候・フィールド始動"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "weather_set",
+     "weather": "sand"
+    }
+   ],
+   "holders": [
+    "hippowdon",
+    "tyranitar",
+    "tyranitarmega(mega)"
+   ],
+   "hooks": [
+    "onStart"
+   ],
+   "n_holders": 3,
+   "name": "Sand Stream",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "weather_setter"
+   ],
+   "value_zero": false
+  },
+  "sandveil": {
+   "categories": [
+    "無効・吸収・妨害",
+    "命中・回避"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "evasion_mult",
+     "mult": 0.8,
+     "when": {
+      "weather": "sand"
+     }
+    }
+   ],
+   "holders": [
+    "garchomp",
+    "gliscor",
+    "heliolisk",
+    "orthworm",
+    "sandaconda",
+    "stunfisk"
+   ],
+   "hooks": [
+    "onImmunity",
+    "onModifyAccuracy",
+    "onModifyAccuracyPriority"
+   ],
+   "n_holders": 6,
+   "name": "Sand Veil",
+   "nonstandard": null,
+   "numbers": {
+    "onModifyAccuracy": [
+     0.8
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "defense",
+    "weather_user"
+   ],
+   "value_zero": false
+  },
+  "sapsipper": {
+   "categories": [
+    "無効・吸収・妨害"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "boosts": {
+      "atk": 1
+     },
+     "effect": "boost",
+     "kind": "immune",
+     "move_type": "Grass"
+    }
+   ],
+   "holders": [
+    "azumarill",
+    "drampa",
+    "farigiraf",
+    "gogoat",
+    "goodra",
+    "goodrahisui",
+    "wyrdeer"
+   ],
+   "hooks": [
+    "onAllyTryHitSide",
+    "onTryHit",
+    "onTryHitPriority"
+   ],
+   "n_holders": 7,
+   "name": "Sap Sipper",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "immunity"
+   ],
+   "value_zero": false
+  },
+  "schooling": {
+   "categories": [
+    "ターン経過・場の効果"
+   ],
+   "flags": [
+    "cantsuppress",
+    "failroleplay",
+    "failskillswap",
+    "noentrain",
+    "noreceiver",
+    "notrace"
+   ],
+   "formula": [
+    {
+     "effect": "form_by_hp",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "wishiwashischool"
+   ],
+   "hooks": [
+    "onResidual",
+    "onResidualOrder",
+    "onStart",
+    "onSwitchInPriority"
+   ],
+   "n_holders": 1,
+   "name": "Schooling",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": false
+  },
+  "scrappy": {
+   "categories": [
+    "無効・吸収・妨害"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "hit_ghost_with_normal_fighting",
+     "kind": "misc"
+    },
+    {
+     "kind": "stat_drop_immune",
+     "stats": [
+      "intimidate"
+     ]
+    }
+   ],
+   "holders": [
+    "decidueyehisui",
+    "kangaskhan",
+    "lopunnymega(mega)",
+    "pangoro",
+    "sirfetchd"
+   ],
+   "hooks": [
+    "onModifyMove",
+    "onModifyMovePriority",
+    "onTryBoost"
+   ],
+   "n_holders": 5,
+   "name": "Scrappy",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "offense",
+    "anti_intimidate"
+   ],
+   "value_zero": false
+  },
+  "screencleaner": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "remove_screens_on_switch",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "mrrime"
+   ],
+   "hooks": [
+    "onStart"
+   ],
+   "n_holders": 1,
+   "name": "Screen Cleaner",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "support"
+   ],
+   "value_zero": false
+  },
+  "seedsower": {
+   "categories": [
+    "被弾時の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "terrain_when_hit",
+     "kind": "misc",
+     "terrain": "grassy"
+    }
+   ],
+   "holders": [
+    "arboliva"
+   ],
+   "hooks": [
+    "onDamagingHit"
+   ],
+   "n_holders": 1,
+   "name": "Seed Sower",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "terrain_setter"
+   ],
+   "value_zero": false
+  },
+  "serenegrace": {
+   "categories": [
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "secondary_chance_mult",
+     "mult": 2.0
+    }
+   ],
+   "holders": [
+    "dudunsparcethreesegment",
+    "meloettapirouette"
+   ],
+   "hooks": [
+    "onModifyMove",
+    "onModifyMovePriority"
+   ],
+   "n_holders": 2,
+   "name": "Serene Grace",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "shadowtag": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "trap_foes",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "gengarmega(mega)"
+   ],
+   "hooks": [
+    "onFoeMaybeTrapPokemon",
+    "onFoeTrapPokemon"
+   ],
+   "n_holders": 1,
+   "name": "Shadow Tag",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "trapper"
+   ],
+   "value_zero": false
+  },
+  "sharpness": {
+   "categories": [
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "offense_mult",
+     "mult": 1.5,
+     "when": {
+      "move_flag": "slicing"
+     }
+    }
+   ],
+   "holders": [
+    "absolmegaz(mega)",
+    "gallade",
+    "kleavor",
+    "samurotthisui"
+   ],
+   "hooks": [
+    "onBasePower",
+    "onBasePowerPriority"
+   ],
+   "n_holders": 4,
+   "name": "Sharpness",
+   "nonstandard": null,
+   "numbers": {
+    "onBasePower": [
+     1.5
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "shedskin": {
+   "categories": [
+    "ターン経過・場の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "chance": 33,
+     "effect": "cure_status_chance",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "arbok",
+    "sandaconda",
+    "scrafty"
+   ],
+   "hooks": [
+    "onResidual",
+    "onResidualOrder",
+    "onResidualSubOrder"
+   ],
+   "n_holders": 3,
+   "name": "Shed Skin",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "status"
+   ],
+   "value_zero": false
+  },
+  "sheerforce": {
+   "categories": [
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "secondary_none",
+     "mult": 1.3,
+     "when": {
+      "has_secondary": true
+     }
+    }
+   ],
+   "holders": [
+    "cameruptmega(mega)",
+    "conkeldurr",
+    "feraligatr",
+    "kleavor",
+    "mawile",
+    "rampardos",
+    "steelix",
+    "tauros",
+    "toucannon"
+   ],
+   "hooks": [
+    "onBasePower",
+    "onBasePowerPriority",
+    "onModifyMove"
+   ],
+   "n_holders": 9,
+   "name": "Sheer Force",
+   "nonstandard": null,
+   "numbers": {
+    "onBasePower": [
+     1.3
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "shellarmor": {
+   "categories": [
+    "被ダメ・反動の補正"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "no_crit_taken"
+    }
+   ],
+   "holders": [
+    "goodrahisui",
+    "samurott",
+    "scolipedemega(mega)",
+    "slowbromega(mega)",
+    "torkoal",
+    "torterra"
+   ],
+   "hooks": [
+    "onCriticalHit"
+   ],
+   "n_holders": 6,
+   "name": "Shell Armor",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "defense"
+   ],
+   "value_zero": false
+  },
+  "shielddust": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "effect": "no_secondary_taken",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "vivillon"
+   ],
+   "hooks": [
+    "onModifySecondaries"
+   ],
+   "n_holders": 1,
+   "name": "Shield Dust",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "defense"
+   ],
+   "value_zero": false
+  },
+  "shieldsdown": {
+   "categories": [
+    "ターン経過・場の効果",
+    "状態異常・交代・その他"
+   ],
+   "flags": [
+    "cantsuppress",
+    "failroleplay",
+    "failskillswap",
+    "noentrain",
+    "noreceiver",
+    "notrace"
+   ],
+   "formula": [
+    {
+     "effect": "form_by_hp",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "miniorblue",
+    "miniorgreen",
+    "miniorindigo",
+    "miniororange",
+    "miniorviolet",
+    "minioryellow"
+   ],
+   "hooks": [
+    "onResidual",
+    "onResidualOrder",
+    "onSetStatus",
+    "onStart",
+    "onSwitchInPriority",
+    "onTryAddVolatile"
+   ],
+   "n_holders": 6,
+   "name": "Shields Down",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": false
+  },
+  "skilllink": {
+   "categories": [
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "multihit_max"
+    }
+   ],
+   "holders": [
+    "heracrossmega(mega)",
+    "toucannon"
+   ],
+   "hooks": [
+    "onModifyMove"
+   ],
+   "n_holders": 2,
+   "name": "Skill Link",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "slushrush": {
+   "categories": [
+    "素早さ・優先度"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "speed_mult",
+     "mult": 2.0,
+     "when": {
+      "weather": "snow"
+     }
+    }
+   ],
+   "holders": [
+    "beartic"
+   ],
+   "hooks": [
+    "onModifySpe"
+   ],
+   "n_holders": 1,
+   "name": "Slush Rush",
+   "nonstandard": null,
+   "numbers": {
+    "onModifySpe": [
+     2.0
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "speed",
+    "weather_user"
+   ],
+   "value_zero": false
+  },
+  "sniper": {
+   "categories": [
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "crit_mult",
+     "mult": 2.25
+    }
+   ],
+   "holders": [
+    "ariados",
+    "barbaracle",
+    "beedrill",
+    "inteleon"
+   ],
+   "hooks": [
+    "onModifyDamage"
+   ],
+   "n_holders": 4,
+   "name": "Sniper",
+   "nonstandard": null,
+   "numbers": {
+    "onModifyDamage": [
+     1.5
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "crit"
+   ],
+   "value_zero": false
+  },
+  "snowcloak": {
+   "categories": [
+    "無効・吸収・妨害",
+    "命中・回避"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "evasion_mult",
+     "mult": 0.8,
+     "when": {
+      "weather": "snow"
+     }
+    }
+   ],
+   "holders": [
+    "beartic",
+    "froslass",
+    "glaceon",
+    "mamoswine",
+    "ninetalesalola"
+   ],
+   "hooks": [
+    "onImmunity",
+    "onModifyAccuracy",
+    "onModifyAccuracyPriority"
+   ],
+   "n_holders": 5,
+   "name": "Snow Cloak",
+   "nonstandard": null,
+   "numbers": {
+    "onModifyAccuracy": [
+     0.8
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "defense",
+    "weather_user"
+   ],
+   "value_zero": false
+  },
+  "snowwarning": {
+   "categories": [
+    "天候・フィールド始動"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "weather_set",
+     "weather": "snow"
+    }
+   ],
+   "holders": [
+    "abomasnow",
+    "abomasnowmega(mega)",
+    "aurorus",
+    "froslassmega(mega)",
+    "ninetalesalola",
+    "vanilluxe"
+   ],
+   "hooks": [
+    "onStart"
+   ],
+   "n_holders": 6,
+   "name": "Snow Warning",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "weather_setter"
+   ],
+   "value_zero": false
+  },
+  "solarpower": {
+   "categories": [
+    "火力・追加効果",
+    "ターン経過・場の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "offense_mult",
+     "mult": 1.5,
+     "when": {
+      "category": "Special",
+      "weather": "sun"
+     }
+    },
+    {
+     "fraction": 0.125,
+     "kind": "damage_turn",
+     "when": {
+      "weather": "sun"
+     }
+    }
+   ],
+   "holders": [
+    "charizard",
+    "heliolisk",
+    "houndoommega(mega)"
+   ],
+   "hooks": [
+    "onModifySpA",
+    "onModifySpAPriority",
+    "onWeather"
+   ],
+   "n_holders": 3,
+   "name": "Solar Power",
+   "nonstandard": null,
+   "numbers": {
+    "onModifySpA": [
+     1.5
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "offense",
+    "weather_user"
+   ],
+   "value_zero": false
+  },
+  "solidrock": {
+   "categories": [
+    "被ダメ・反動の補正"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "defense_mult",
+     "mult": 0.75,
+     "when": {
+      "super_effective": true
+     }
+    }
+   ],
+   "holders": [
+    "camerupt",
+    "rhyperior"
+   ],
+   "hooks": [
+    "onSourceModifyDamage"
+   ],
+   "n_holders": 2,
+   "name": "Solid Rock",
+   "nonstandard": null,
+   "numbers": {
+    "onSourceModifyDamage": [
+     0.75
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "defense"
+   ],
+   "value_zero": false
+  },
+  "soulheart": {
+   "categories": [
+    "撃破・技後の能力変化"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "any_faint": true,
+     "boosts": {
+      "spa": 1
+     },
+     "kind": "on_ko_boost"
+    }
+   ],
+   "holders": [
+    "magearnamega(mega)",
+    "magearnaoriginal",
+    "magearnaoriginalmega(mega)"
+   ],
+   "hooks": [
+    "onAnyFaint",
+    "onAnyFaintPriority"
+   ],
+   "n_holders": 3,
+   "name": "Soul-Heart",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "soundproof": {
+   "categories": [
+    "無効・吸収・妨害"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "immune",
+     "move_flag": "sound"
+    }
+   ],
+   "holders": [
+    "abomasnow",
+    "bastiodon",
+    "kommoo",
+    "mrmime"
+   ],
+   "hooks": [
+    "onAllyTryHitSide",
+    "onTryHit"
+   ],
+   "n_holders": 4,
+   "name": "Soundproof",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "immunity"
+   ],
+   "value_zero": false
+  },
+  "speedboost": {
+   "categories": [
+    "ターン経過・場の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "boosts": {
+      "spe": 1
+     },
+     "effect": "boost_each_turn",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "blaziken",
+    "blazikenmega(mega)",
+    "espathra",
+    "scolipede",
+    "sharpedo"
+   ],
+   "hooks": [
+    "onResidual",
+    "onResidualOrder",
+    "onResidualSubOrder"
+   ],
+   "n_holders": 5,
+   "name": "Speed Boost",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "speed",
+    "setup"
+   ],
+   "value_zero": false
+  },
+  "spicyspray": {
+   "categories": [
+    "被弾時の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "chance": 100,
+     "contact_only": false,
+     "effect": "burn",
+     "kind": "contact_effect"
+    }
+   ],
+   "holders": [
+    "scovillainmega(mega)"
+   ],
+   "hooks": [
+    "onDamagingHit"
+   ],
+   "n_holders": 1,
+   "name": "Spicy Spray",
+   "nonstandard": null,
+   "note": "メガスコヴィラン: 技で殴った相手をやけど",
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "contact_punish"
+   ],
+   "value_zero": false
+  },
+  "stakeout": {
+   "categories": [
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "offense_mult",
+     "mult": 2.0,
+     "when": {
+      "target_switched_in": true
+     }
+    }
+   ],
+   "holders": [
+    "mabosstiff",
+    "thievul"
+   ],
+   "hooks": [
+    "onModifyAtk",
+    "onModifyAtkPriority",
+    "onModifySpA",
+    "onModifySpAPriority"
+   ],
+   "n_holders": 2,
+   "name": "Stakeout",
+   "nonstandard": null,
+   "numbers": {
+    "onModifyAtk": [
+     2.0
+    ],
+    "onModifySpA": [
+     2.0
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "stall": {
+   "categories": [
+    "素早さ・優先度"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "moves_last",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "sableye"
+   ],
+   "hooks": [
+    "onFractionalPriority"
+   ],
+   "n_holders": 1,
+   "name": "Stall",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": false
+  },
+  "stalwart": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "none"
+    }
+   ],
+   "holders": [
+    "archaludon",
+    "skarmorymega(mega)"
+   ],
+   "hooks": [
+    "onModifyMove",
+    "onModifyMovePriority"
+   ],
+   "n_holders": 2,
+   "name": "Stalwart",
+   "nonstandard": null,
+   "note": "シングルでは効かない",
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": true
+  },
+  "stamina": {
+   "categories": [
+    "被弾時の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "boosts": {
+      "def": 1
+     },
+     "effect": "boost_when_hit",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "archaludon",
+    "mudsdale"
+   ],
+   "hooks": [
+    "onDamagingHit"
+   ],
+   "n_holders": 2,
+   "name": "Stamina",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "defense",
+    "wall"
+   ],
+   "value_zero": false
+  },
+  "stancechange": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [
+    "cantsuppress",
+    "failroleplay",
+    "failskillswap",
+    "noentrain",
+    "noreceiver",
+    "notrace"
+   ],
+   "formula": [
+    {
+     "effect": "form_by_move",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "aegislash",
+    "aegislashblade"
+   ],
+   "hooks": [
+    "onModifyMove",
+    "onModifyMovePriority"
+   ],
+   "n_holders": 2,
+   "name": "Stance Change",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": false
+  },
+  "static": {
+   "categories": [
+    "被弾時の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "chance": 30,
+     "effect": "par",
+     "kind": "contact_effect"
+    }
+   ],
+   "holders": [
+    "ampharos",
+    "bellibolt",
+    "emolga",
+    "manectric",
+    "pikachu",
+    "raichu",
+    "stunfisk"
+   ],
+   "hooks": [
+    "onDamagingHit"
+   ],
+   "n_holders": 7,
+   "name": "Static",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "contact_punish"
+   ],
+   "value_zero": false
+  },
+  "steadfast": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "boosts": {
+      "spe": 1
+     },
+     "effect": "boost_when_flinched",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "gallade",
+    "lucario",
+    "lycanroc",
+    "machamp",
+    "sirfetchd"
+   ],
+   "hooks": [
+    "onFlinch"
+   ],
+   "n_holders": 5,
+   "name": "Steadfast",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": false
+  },
+  "steelyspirit": {
+   "categories": [
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "offense_mult",
+     "mult": 1.5,
+     "when": {
+      "move_type": "Steel"
+     }
+    }
+   ],
+   "holders": [
+    "perrserker"
+   ],
+   "hooks": [
+    "onAllyBasePower",
+    "onAllyBasePowerPriority"
+   ],
+   "n_holders": 1,
+   "name": "Steely Spirit",
+   "nonstandard": null,
+   "numbers": {
+    "onAllyBasePower": [
+     1.5
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "stench": {
+   "categories": [
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "chance": 10,
+     "effect": "flinch_chance",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "garbodor"
+   ],
+   "hooks": [
+    "onModifyMove",
+    "onModifyMovePriority"
+   ],
+   "n_holders": 1,
+   "name": "Stench",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": false
+  },
+  "stickyhold": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "effect": "keep_item",
+     "kind": "item_effect"
+    }
+   ],
+   "holders": [
+    "hydrapple",
+    "swalot"
+   ],
+   "hooks": [
+    "onTakeItem"
+   ],
+   "n_holders": 2,
+   "name": "Sticky Hold",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "item"
+   ],
+   "value_zero": false
+  },
+  "stormdrain": {
+   "categories": [
+    "無効・吸収・妨害"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "boosts": {
+      "spa": 1
+     },
+     "effect": "boost",
+     "kind": "immune",
+     "move_type": "Water"
+    }
+   ],
+   "holders": [
+    "tatsugiridroopy",
+    "tatsugiristretchy"
+   ],
+   "hooks": [
+    "onAnyRedirectTarget",
+    "onTryHit"
+   ],
+   "n_holders": 2,
+   "name": "Storm Drain",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "immunity"
+   ],
+   "value_zero": false
+  },
+  "strongjaw": {
+   "categories": [
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "offense_mult",
+     "mult": 1.5,
+     "when": {
+      "move_flag": "bite"
+     }
+    }
+   ],
+   "holders": [
+    "avalugghisui",
+    "sharpedomega(mega)",
+    "tyrantrum"
+   ],
+   "hooks": [
+    "onBasePower",
+    "onBasePowerPriority"
+   ],
+   "n_holders": 3,
+   "name": "Strong Jaw",
+   "nonstandard": null,
+   "numbers": {
+    "onBasePower": [
+     1.5
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "sturdy": {
+   "categories": [
+    "無効・吸収・妨害",
+    "被ダメ・反動の補正"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "effect": "survive_ohko_at_full_hp",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "aggron",
+    "archaludon",
+    "avalugg",
+    "avalugghisui",
+    "bastiodon",
+    "forretress",
+    "garganacl",
+    "skarmory",
+    "steelix"
+   ],
+   "hooks": [
+    "onDamage",
+    "onDamagePriority",
+    "onTryHit"
+   ],
+   "n_holders": 9,
+   "name": "Sturdy",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "defense",
+    "sash_like"
+   ],
+   "value_zero": false
+  },
+  "suctioncups": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "effect": "no_force_switch",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "malamar"
+   ],
+   "hooks": [
+    "onDragOut",
+    "onDragOutPriority"
+   ],
+   "n_holders": 1,
+   "name": "Suction Cups",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "defense"
+   ],
+   "value_zero": false
+  },
+  "superluck": {
+   "categories": [
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "delta": 1,
+     "kind": "crit_stage"
+    }
+   ],
+   "holders": [
+    "absol"
+   ],
+   "hooks": [
+    "onModifyCritRatio"
+   ],
+   "n_holders": 1,
+   "name": "Super Luck",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "crit"
+   ],
+   "value_zero": false
+  },
+  "supersweetsyrup": {
+   "categories": [
+    "着地時の能力変化"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "boosts": {
+      "evasion": -1
+     },
+     "kind": "switch_in_boost",
+     "once": true,
+     "target": "foe"
+    }
+   ],
+   "holders": [
+    "hydrapple"
+   ],
+   "hooks": [
+    "onStart"
+   ],
+   "n_holders": 1,
+   "name": "Supersweet Syrup",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": false
+  },
+  "supremeoverlord": {
+   "categories": [
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "offense_mult",
+     "max_allies": 5,
+     "per_fainted_ally": 0.1
+    }
+   ],
+   "holders": [
+    "kingambit"
+   ],
+   "hooks": [
+    "onBasePower",
+    "onBasePowerPriority",
+    "onEnd",
+    "onStart"
+   ],
+   "n_holders": 1,
+   "name": "Supreme Overlord",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "offense",
+    "late_game"
+   ],
+   "value_zero": false
+  },
+  "surgesurfer": {
+   "categories": [
+    "素早さ・優先度"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "speed_mult",
+     "mult": 2.0,
+     "when": {
+      "terrain": "electric"
+     }
+    }
+   ],
+   "holders": [
+    "raichualola"
+   ],
+   "hooks": [
+    "onModifySpe"
+   ],
+   "n_holders": 1,
+   "name": "Surge Surfer",
+   "nonstandard": null,
+   "numbers": {
+    "onModifySpe": [
+     2.0
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "speed",
+    "terrain_user"
+   ],
+   "value_zero": false
+  },
+  "swarm": {
+   "categories": [
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "offense_mult",
+     "mult": 1.5,
+     "when": {
+      "move_type": "Bug",
+      "user_hp_below": 0.3334
+     }
+    }
+   ],
+   "holders": [
+    "ariados",
+    "beedrill",
+    "heracross",
+    "kleavor",
+    "scizor",
+    "scolipede",
+    "volcarona"
+   ],
+   "hooks": [
+    "onModifyAtk",
+    "onModifyAtkPriority",
+    "onModifySpA",
+    "onModifySpAPriority"
+   ],
+   "n_holders": 7,
+   "name": "Swarm",
+   "nonstandard": null,
+   "numbers": {
+    "onModifyAtk": [
+     1.5
+    ],
+    "onModifySpA": [
+     1.5
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "sweetveil": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "status_immune",
+     "status": [
+      "slp"
+     ]
+    }
+   ],
+   "holders": [
+    "alcremie",
+    "slurpuff",
+    "tsareena"
+   ],
+   "hooks": [
+    "onAllySetStatus",
+    "onAllyTryAddVolatile"
+   ],
+   "n_holders": 3,
+   "name": "Sweet Veil",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "status_immune"
+   ],
+   "value_zero": false
+  },
+  "swiftswim": {
+   "categories": [
+    "素早さ・優先度"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "speed_mult",
+     "mult": 2.0,
+     "when": {
+      "weather": "rain"
+     }
+    }
+   ],
+   "holders": [
+    "basculegion",
+    "beartic",
+    "overqwil",
+    "qwilfish",
+    "swampertmega(mega)"
+   ],
+   "hooks": [
+    "onModifySpe"
+   ],
+   "n_holders": 5,
+   "name": "Swift Swim",
+   "nonstandard": null,
+   "numbers": {
+    "onModifySpe": [
+     2.0
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "speed",
+    "weather_user"
+   ],
+   "value_zero": false
+  },
+  "symbiosis": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "none"
+    }
+   ],
+   "holders": [
+    "floetteeternal",
+    "florges",
+    "oranguru"
+   ],
+   "hooks": [
+    "onAllyAfterUseItem"
+   ],
+   "n_holders": 3,
+   "name": "Symbiosis",
+   "nonstandard": null,
+   "note": "シングルでは効かない",
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": true
+  },
+  "synchronize": {
+   "categories": [
+    "状態異常・交代・その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "pass_status_back",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "alakazam",
+    "espeon",
+    "gardevoir",
+    "indeedee",
+    "musharna",
+    "umbreon"
+   ],
+   "hooks": [
+    "onAfterSetStatus"
+   ],
+   "n_holders": 6,
+   "name": "Synchronize",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "status"
+   ],
+   "value_zero": false
+  },
+  "tangledfeet": {
+   "categories": [
+    "命中・回避"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "evasion_mult",
+     "mult": 0.5,
+     "when": {
+      "user_confused": true
+     }
+    }
+   ],
+   "holders": [
+    "mrrime",
+    "pidgeot"
+   ],
+   "hooks": [
+    "onModifyAccuracy",
+    "onModifyAccuracyPriority"
+   ],
+   "n_holders": 2,
+   "name": "Tangled Feet",
+   "nonstandard": null,
+   "numbers": {
+    "onModifyAccuracy": [
+     0.5
+    ]
+   },
+   "source": "curated",
+   "tags": [],
+   "value_zero": false
+  },
+  "technician": {
+   "categories": [
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "offense_mult",
+     "mult": 1.5,
+     "when": {
+      "power_max": 60
+     }
+    }
+   ],
+   "holders": [
+    "grapploct",
+    "maushold",
+    "mrmime",
+    "persian",
+    "persianalola",
+    "roserade",
+    "scizor",
+    "scizormega(mega)",
+    "toxtricity",
+    "toxtricitylowkey",
+    "toxtricitylowkeygmax"
+   ],
+   "hooks": [
+    "onBasePower",
+    "onBasePowerPriority"
+   ],
+   "n_holders": 11,
+   "name": "Technician",
+   "nonstandard": null,
+   "numbers": {
+    "onBasePower": [
+     1.5
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "telepathy": {
+   "categories": [
+    "無効・吸収・妨害"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "none"
+    }
+   ],
+   "holders": [
+    "gardevoir",
+    "medicham",
+    "musharna",
+    "noivern",
+    "oranguru"
+   ],
+   "hooks": [
+    "onTryHit"
+   ],
+   "n_holders": 5,
+   "name": "Telepathy",
+   "nonstandard": null,
+   "note": "シングルでは効かない",
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": true
+  },
+  "terashell": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [
+    "breakable",
+    "failroleplay",
+    "failskillswap",
+    "noentrain",
+    "noreceiver",
+    "notrace"
+   ],
+   "formula": [
+    {
+     "effect": "all_hits_resisted_at_full_hp",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "terapagosterastal"
+   ],
+   "hooks": [],
+   "n_holders": 1,
+   "name": "Tera Shell",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "defense"
+   ],
+   "value_zero": false
+  },
+  "thermalexchange": {
+   "categories": [
+    "被弾時の効果",
+    "状態異常・交代・その他"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "status_immune",
+     "status": [
+      "brn"
+     ]
+    },
+    {
+     "boosts": {
+      "atk": 1
+     },
+     "effect": "boost_when_hit_by_type",
+     "kind": "misc",
+     "move_type": "Fire"
+    }
+   ],
+   "holders": [
+    "baxcalibur",
+    "baxcaliburmega(mega)"
+   ],
+   "hooks": [
+    "onDamagingHit",
+    "onSetStatus",
+    "onUpdate"
+   ],
+   "n_holders": 2,
+   "name": "Thermal Exchange",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "status_immune",
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "thickfat": {
+   "categories": [
+    "被ダメ・反動の補正"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "defense_mult",
+     "mult": 0.5,
+     "when": {
+      "move_types": [
+       "Fire",
+       "Ice"
+      ]
+     }
+    }
+   ],
+   "holders": [
+    "appletun",
+    "azumarill",
+    "mamoswine",
+    "snorlax",
+    "venusaurmega(mega)"
+   ],
+   "hooks": [
+    "onSourceModifyAtk",
+    "onSourceModifyAtkPriority",
+    "onSourceModifySpA",
+    "onSourceModifySpAPriority"
+   ],
+   "n_holders": 5,
+   "name": "Thick Fat",
+   "nonstandard": null,
+   "numbers": {
+    "onSourceModifyAtk": [
+     0.5
+    ],
+    "onSourceModifySpA": [
+     0.5
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "defense"
+   ],
+   "value_zero": false
+  },
+  "torrent": {
+   "categories": [
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "offense_mult",
+     "mult": 1.5,
+     "when": {
+      "move_type": "Water",
+      "user_hp_below": 0.3334
+     }
+    }
+   ],
+   "holders": [
+    "blastoise",
+    "empoleon",
+    "feraligatr",
+    "greninja",
+    "inteleon",
+    "primarina",
+    "quaquaval",
+    "samurott",
+    "samurotthisui",
+    "simipour",
+    "swampert"
+   ],
+   "hooks": [
+    "onModifyAtk",
+    "onModifyAtkPriority",
+    "onModifySpA",
+    "onModifySpAPriority"
+   ],
+   "n_holders": 11,
+   "name": "Torrent",
+   "nonstandard": null,
+   "numbers": {
+    "onModifyAtk": [
+     1.5
+    ],
+    "onModifySpA": [
+     1.5
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "toughclaws": {
+   "categories": [
+    "火力・追加効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "offense_mult",
+     "mult": 1.3,
+     "when": {
+      "move_flag": "contact"
+     }
+    }
+   ],
+   "holders": [
+    "aerodactylmega(mega)",
+    "barbaracle",
+    "barbaraclemega(mega)",
+    "charizardmegax(mega)",
+    "golisopodmega(mega)",
+    "lycanrocdusk",
+    "metagrossmega(mega)",
+    "perrserker"
+   ],
+   "hooks": [
+    "onBasePower",
+    "onBasePowerPriority"
+   ],
+   "n_holders": 8,
+   "name": "Tough Claws",
+   "nonstandard": null,
+   "numbers": {
+    "onBasePower": [
+     1.3
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "toxicdebris": {
+   "categories": [
+    "被弾時の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "toxic_spikes_when_hit_physical",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "glimmora"
+   ],
+   "hooks": [
+    "onDamagingHit"
+   ],
+   "n_holders": 1,
+   "name": "Toxic Debris",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "hazard"
+   ],
+   "value_zero": false
+  },
+  "trace": {
+   "categories": [
+    "状態異常・交代・その他"
+   ],
+   "flags": [
+    "failroleplay",
+    "noentrain",
+    "noreceiver",
+    "notrace"
+   ],
+   "formula": [
+    {
+     "effect": "copy_foe_ability",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "alakazammega(mega)",
+    "gardevoir",
+    "meowsticfmega(mega)",
+    "meowsticmmega(mega)"
+   ],
+   "hooks": [
+    "onStart",
+    "onUpdate"
+   ],
+   "n_holders": 4,
+   "name": "Trace",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": false
+  },
+  "unaware": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "effect": "ignore_foe_boosts",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "clefable",
+    "skeledirge"
+   ],
+   "hooks": [
+    "onAnyModifyBoost"
+   ],
+   "n_holders": 2,
+   "name": "Unaware",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "wall",
+    "anti_setup"
+   ],
+   "value_zero": false
+  },
+  "unburden": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "kind": "speed_mult",
+     "mult": 2.0,
+     "when": {
+      "item_consumed": true
+     }
+    }
+   ],
+   "holders": [
+    "hawlucha",
+    "liepard",
+    "sceptile",
+    "slurpuff",
+    "sneasler",
+    "thievul"
+   ],
+   "hooks": [
+    "onAfterUseItem",
+    "onEnd",
+    "onTakeItem"
+   ],
+   "n_holders": 6,
+   "name": "Unburden",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "speed",
+    "item"
+   ],
+   "value_zero": false
+  },
+  "unnerve": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "foe_no_berries",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "aerodactyl",
+    "arbok",
+    "corviknight",
+    "houndoom",
+    "persian",
+    "pyroar",
+    "tyranitar"
+   ],
+   "hooks": [
+    "onEnd",
+    "onFoeTryEatItem",
+    "onStart",
+    "onSwitchInPriority"
+   ],
+   "n_holders": 7,
+   "name": "Unnerve",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": false
+  },
+  "unseenfist": {
+   "categories": [
+    "その他"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "contact_bypass_protect",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "golurkmega(mega)"
+   ],
+   "hooks": [
+    "onHitProtect",
+    "onModifyMove"
+   ],
+   "n_holders": 1,
+   "name": "Unseen Fist",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "offense"
+   ],
+   "value_zero": false
+  },
+  "vitalspirit": {
+   "categories": [
+    "状態異常・交代・その他"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "status_immune",
+     "status": [
+      "slp"
+     ]
+    }
+   ],
+   "holders": [
+    "annihilape",
+    "lycanrocmidnight"
+   ],
+   "hooks": [
+    "onSetStatus",
+    "onTryAddVolatile",
+    "onUpdate"
+   ],
+   "n_holders": 2,
+   "name": "Vital Spirit",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "status_immune"
+   ],
+   "value_zero": false
+  },
+  "voltabsorb": {
+   "categories": [
+    "無効・吸収・妨害"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "effect": "heal",
+     "fraction": 0.25,
+     "kind": "immune",
+     "move_type": "Electric"
+    }
+   ],
+   "holders": [
+    "jolteon",
+    "pawmot"
+   ],
+   "hooks": [
+    "onTryHit"
+   ],
+   "n_holders": 2,
+   "name": "Volt Absorb",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "immunity"
+   ],
+   "value_zero": false
+  },
+  "wanderingspirit": {
+   "categories": [
+    "被弾時の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "effect": "swap_ability",
+     "kind": "contact_effect"
+    }
+   ],
+   "holders": [
+    "runerigus"
+   ],
+   "hooks": [
+    "onDamagingHit"
+   ],
+   "n_holders": 1,
+   "name": "Wandering Spirit",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "contact_punish"
+   ],
+   "value_zero": false
+  },
+  "waterabsorb": {
+   "categories": [
+    "無効・吸収・妨害"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "effect": "heal",
+     "fraction": 0.25,
+     "kind": "immune",
+     "move_type": "Water"
+    }
+   ],
+   "holders": [
+    "araquanid",
+    "politoed",
+    "vaporeon"
+   ],
+   "hooks": [
+    "onTryHit"
+   ],
+   "n_holders": 3,
+   "name": "Water Absorb",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "immunity"
+   ],
+   "value_zero": false
+  },
+  "waterbubble": {
+   "categories": [
+    "火力・追加効果",
+    "被ダメ・反動の補正",
+    "状態異常・交代・その他"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "offense_mult",
+     "mult": 2.0,
+     "when": {
+      "move_type": "Water"
+     }
+    },
+    {
+     "kind": "defense_mult",
+     "mult": 0.5,
+     "when": {
+      "move_type": "Fire"
+     }
+    },
+    {
+     "kind": "status_immune",
+     "status": [
+      "brn"
+     ]
+    }
+   ],
+   "holders": [
+    "araquanid"
+   ],
+   "hooks": [
+    "onModifyAtk",
+    "onModifySpA",
+    "onSetStatus",
+    "onSourceModifyAtk",
+    "onSourceModifyAtkPriority",
+    "onSourceModifySpA",
+    "onSourceModifySpAPriority",
+    "onUpdate"
+   ],
+   "n_holders": 1,
+   "name": "Water Bubble",
+   "nonstandard": null,
+   "numbers": {
+    "onModifyAtk": [
+     2.0
+    ],
+    "onModifySpA": [
+     2.0
+    ],
+    "onSourceModifyAtk": [
+     0.5
+    ],
+    "onSourceModifySpA": [
+     0.5
+    ]
+   },
+   "source": "curated",
+   "tags": [
+    "offense",
+    "defense",
+    "status_immune"
+   ],
+   "value_zero": false
+  },
+  "weakarmor": {
+   "categories": [
+    "被弾時の効果"
+   ],
+   "flags": [],
+   "formula": [
+    {
+     "boosts": {
+      "def": -1,
+      "spe": 2
+     },
+     "effect": "boost_when_hit_physical",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "armarouge",
+    "ceruledge",
+    "garbodor",
+    "polteageist",
+    "skarmory",
+    "vanilluxe"
+   ],
+   "hooks": [
+    "onDamagingHit"
+   ],
+   "n_holders": 6,
+   "name": "Weak Armor",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "speed",
+    "setup"
+   ],
+   "value_zero": false
+  },
+  "whitesmoke": {
+   "categories": [
+    "無効・吸収・妨害"
+   ],
+   "flags": [
+    "breakable"
+   ],
+   "formula": [
+    {
+     "kind": "stat_drop_immune",
+     "stats": [
+      "all"
+     ]
+    }
+   ],
+   "holders": [
+    "torkoal"
+   ],
+   "hooks": [
+    "onTryBoost"
+   ],
+   "n_holders": 1,
+   "name": "White Smoke",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "stat_drop_immune",
+    "anti_intimidate"
+   ],
+   "value_zero": false
+  },
+  "zenmode": {
+   "categories": [
+    "ターン経過・場の効果"
+   ],
+   "flags": [
+    "cantsuppress",
+    "failroleplay",
+    "failskillswap",
+    "noentrain",
+    "noreceiver",
+    "notrace"
+   ],
+   "formula": [
+    {
+     "effect": "form_by_hp",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "darmanitangalarzen",
+    "darmanitanzen"
+   ],
+   "hooks": [
+    "onEnd",
+    "onResidual",
+    "onResidualOrder"
+   ],
+   "n_holders": 2,
+   "name": "Zen Mode",
+   "nonstandard": null,
+   "numbers": {},
+   "source": "curated",
+   "tags": [],
+   "value_zero": false
+  },
+  "zerotohero": {
+   "categories": [
+    "状態異常・交代・その他"
+   ],
+   "flags": [
+    "cantsuppress",
+    "failroleplay",
+    "failskillswap",
+    "noentrain",
+    "noreceiver",
+    "notrace",
+    "notransform"
+   ],
+   "formula": [
+    {
+     "effect": "form_on_switch",
+     "kind": "misc"
+    }
+   ],
+   "holders": [
+    "palafin",
+    "palafinhero"
+   ],
+   "hooks": [
+    "onSwitchIn",
+    "onSwitchOut"
+   ],
+   "n_holders": 2,
+   "name": "Zero to Hero",
+   "nonstandard": null,
+   "note": "イルカマン: 1 度引っ込むとヒーロー",
+   "numbers": {},
+   "source": "curated",
+   "tags": [
+    "offense",
+    "pivot"
+   ],
+   "value_zero": false
+  }
+ }
+}
