@@ -2,6 +2,12 @@
  "_comment": "学習に影響する変更の記録。watch_training が推移グラフに赤い縦線として描画し、履歴表示にも差し込む。新しい変更を入れたら追記すること (at はローカル時刻 'YYYY-MM-DD HH:MM')。kind: net=ネット構成 / reward=報酬 / opponent=相手構成 / env=環境仕様 / eval=評価方法 / fix=不具合修正",
  "changes": [
   {
+   "at": "2026-10-02 19:45",
+   "kind": "advisor",
+   "label": "助言のダメージ計算に技・特性の効果表を統合 (特性 226 種類、連続技、確定急所、可変威力、条件つき技、天候で変わる命中、命中込みの期待値)",
+   "detail": "worktree feat/gen-sets-design (run ace_lopunny_1002d の終了後に feature/team-build へ --no-ff マージ。マージ前の main 側の助言・測定には影響なし)。advisor/data/move_effects.json / ability_effects.json (tools/build_move_data.py / build_ability_data.py が Showdown 本体 + champions mod から起こす、人手の上書き欄つき) を advisor/effects.py の評価器で読み、advisor/damage.calc_damage が min/max/avg (1 回の使用あたり、連続技は期待ヒット数込み) に加えて expected (命中込み、トリプルアクセルは 1 発ごと、タネマシンガンは 1 回の判定) を返す。従来の特性辞書は効果表に無い特性だけに使う。急所は確率 ≥ 0.5 のときだけ反映。effective_speed も表読み。endgame._best_dmg は expected を使う。構築システム側: 役割の雛形からの型の一体生成 (role_sets)、並びと型の同時探索 (lineup_search / joint_stage、--search-mode joint)、測定からの戻り (repair、--repairs)。学習 (RL) への直接の影響はない (助言の数値が変わるので advisor-as-player の評価値は過去と比較できない: マージ後の日次定点で段差を見る)"
+  },
+  {
    "at": "2026-09-29 13:25",
    "kind": "env",
    "label": "学習が 9/27 13:40〜9/29 13:2x に意図せず再開していた (再起動後の launchd RunAtLoad) → 停止し、ログイン時の自動起動を無効化",

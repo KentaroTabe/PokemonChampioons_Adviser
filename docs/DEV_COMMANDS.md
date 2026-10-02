@@ -134,6 +134,7 @@ sonnetは疑い箇所の検証+少数サンプルの網羅に専念する (タ�
 
 | `python -m tools.evolve_teams --seed-myteam [--locked <種族,..>] [--max-changes 2]` | 制約付き改善: 自分のパーティを種に「少しだけ変える」探索 |
 | `python -m tools.playbook [--opponents 12] [--battles 30]` | プレイブック生成: 相手構築別の選出チャート+勝ち筋 → `logs/playbooks/` |
+| `python -m tools.team_build.run --run-id <id> [--profile fast\|medium\|full] [--llm none\|headless] [--stages search\|measure\|all] [--search-mode joint\|legacy] [--repairs N] [--ace <種>] [--sets-file F]` | 構築システム (S0〜S13。既定 joint = 並びと型の同時探索、repairs = 測定からの戻りの周回。docs/TEAM_BUILD_REDESIGN_1002.md / TEAM_BUILDING_IMPLEMENTATION.md) |
 
 進化探索は相手分布に `--forecast-mix` (使用率トレンドの1期外挿。履歴が
 2ヶ月分たまるまで自動無効) と `--archive-mix` (過去の優勝チーム=PSRO反復)
