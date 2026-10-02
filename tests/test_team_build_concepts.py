@@ -43,6 +43,21 @@ def test_validate_and_cluster():
     fams = K.cluster_concepts([{"name": "1", "core_ids": ["a", "b"]}, {"name": "2", "core_ids": ["b", "a"]},
                                {"name": "3", "core_ids": ["c", "d"]}])
     assert len(fams) == 2 and fams[0]["members"] == 2 and fams[0]["family_id"] == "C001"
+    # 役割の設計図 (§4.1): core (種 + 役割) から core_ids / roles を埋め、役割 id は語彙、要件は最大 3、plan は enum
+    bp = {"concepts": [{"name": "z", "core": [{"species_id": "a", "role": "setup_ace"}, {"species_id": "b", "role": "sun_setter"}],
+                        "mega_id": "a", "win_condition": "setup_sweep",
+                        "complement_requirements": [{"role": "hazard_lead", "targets": ["t1"], "note": "x"}],
+                        "plan": {"field": {"weather": "sun", "terrain": None}, "speed_plan": "outspeed"}}]}
+    assert K.validate_concepts(bp, owned, legal, mega) == []
+    c = bp["concepts"][0]
+    assert c["core_ids"] == ["a", "b"] and c["roles"] == {"setup_ace": ["a"], "sun_setter": ["b"]}
+    bad_bp = {"concepts": [{"name": "z", "core": [{"species_id": "a", "role": "nosuch"}, {"species_id": "b"}], "core_ids": ["a", "c"],
+                            "win_condition": "setup_sweep", "complement_requirements": [{"role": "wall"}] * 4,
+                            "plan": {"field": {"weather": "fog"}, "speed_plan": "slow"}}]}
+    probs = K.validate_concepts(bad_bp, owned, legal, mega)
+    assert any("役割 nosuch" in p for p in probs) and any("食い違う" in p for p in probs)
+    assert any("最大 3" in p for p in probs) and any("speed_plan" in p for p in probs) and any("weather" in p for p in probs), probs
+    assert K.role_id_ok("sweeper_setup") and K.role_id_ok("psychic_abuser") and not K.role_id_ok("") and not K.role_id_ok(3)
     print("test_validate_and_cluster OK")
 
 

@@ -16,7 +16,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from champions_agent.config import BUILD_ACE_MAX_MEGA_STONES, BUILD_ARCHETYPES, BUILD_POOL_SOURCE, BUILD_POOL_TOP_N
+from champions_agent.config import (BUILD_ACE_MAX_MEGA_STONES, BUILD_ARCHETYPES, BUILD_POOL_SOURCE, BUILD_POOL_TOP_N,
+                                    BUILD_SEARCH_MODE)
 from champions_agent.data import database as db
 from tools.team_build import archetypes as ARCH
 from tools.team_build import candidates as C
@@ -926,6 +927,9 @@ def main() -> None:
                     help="この段で止める (ablation 拡張: S8a/S8b の結果だけ取る)")
     ap.add_argument("--s08b-seed-offset", type=int, default=1,
                     help="S8b の相手列 seed のオフセット (既定 1 = S8a と別の列。ablation 拡張では 0 で同一列)")
+    ap.add_argument("--search-mode", choices=["joint", "legacy"], default=BUILD_SEARCH_MODE,
+                    help="joint = 並びと型の同時探索 (S5 統合段: 核の型を同時に決め補完を順に足す、docs/TEAM_BUILD_REDESIGN_1002.md §5) / "
+                         "legacy = 従来の S5 (種の並び) → S6 (型) (既定 config BUILD_SEARCH_MODE)")
     ap.add_argument("--s11", choices=["on", "off"], default="off",
                     help="S11 (勝者の SEARCH+SELECTION 再学習)。既定 off = S7 の検証済み checkpoint を最終モデルにする")
     ap.add_argument("--reference-adapt", choices=["on", "off"], default=None,
@@ -936,7 +940,9 @@ def main() -> None:
                     help="途中で落ちた run の続き: S8a の結果と完了済みの適応 (adapt_result.json) を再利用する")
     ap.add_argument("--validate-n", type=int, default=None, help="S7 の checkpoint 検証の戦数 (既定 config)")
     ap.add_argument("--validate-max", type=int, default=None, help="S7 で検証する checkpoint 数 (既定 config)")
-    ap.add_argument("--repairs", type=int, default=0)
+    ap.add_argument("--repairs", type=int, default=None,
+                    help="測定からの戻りの周回数 (S8a 後 / S8b 後の修理モード、docs/TEAM_BUILD_REDESIGN_1002.md §14)。"
+                         "既定 config BUILD_REPAIR_ROUNDS。0 で無効")
     ap.add_argument("--registry", default=None, help="registry のディレクトリ (既定 logs/registry)")
     ap.add_argument("--adapt-action", choices=["auto", "on", "off"], default="auto",
                     help="行動方策 adapter (S11b)。auto = full プロファイルのみ")
@@ -1049,12 +1055,24 @@ def main() -> None:
             log(run_dir, f"S4 article: claims={len(claims)} cores={len(cores)} → families={len(fams)}")
         except Exception as e:
             log(run_dir, f"S4 article error: {e!r}")
-    lineups = stage_s5(run_dir, spec, fams, feats, threats, prof, threat_weights,
-                       only_incumbent=args.only_incumbent, n_neighbors=args.incumbent_neighbors_s5,
-                       rule_ctx=rule_ctx, arch_ctx=arch_ctx)
-    concept_mega = {f["family_id"]: f.get("mega_id") for f in fams}
-    results = stage_s6(run_dir, spec, lineups, doc["snapshot"]["id"], tv, concept_mega, rule_ctx=rule_ctx, gen=gen,
-                       arch_ctx=arch_ctx, fams=fams)
+    if args.search_mode == "joint":
+        # S5 統合段 (2026-10-02 再設計): 並びと型を同時に探索し、s05_candidates / s06_sets を同じ形で保存する。
+        # 不変条件 (除外・エースの石) は従来どおりここで検査する
+        from tools.team_build.joint_stage import stage_s5_joint
+        lineups, results = stage_s5_joint(run_dir, spec, fams, feats, tv, threat_weights, split, prof, doc["snapshot"]["id"],
+                                          session_weights=session_w, n_neighbors=args.incumbent_neighbors_s5,
+                                          only_incumbent=args.only_incumbent, rule_ctx=rule_ctx,
+                                          registered=registered_team(), log=lambda m: log(run_dir, m))
+        _assert_no_banned(run_dir, "S5", [(r["candidate_id"], r["members"]) for r in results], set(spec.banned))
+        _assert_ace_mega(run_dir, results)
+    else:
+        lineups = stage_s5(run_dir, spec, fams, feats, threats, prof, threat_weights,
+                           only_incumbent=args.only_incumbent, n_neighbors=args.incumbent_neighbors_s5,
+                           rule_ctx=rule_ctx, arch_ctx=arch_ctx)
+        concept_mega = {f["family_id"]: f.get("mega_id") for f in fams}
+        results = stage_s6(run_dir, spec, lineups, doc["snapshot"]["id"], tv, concept_mega, rule_ctx=rule_ctx, gen=gen,
+                           arch_ctx=arch_ctx, fams=fams)
+    manifest["search_mode"] = args.search_mode
     from champions_agent.env.ranked_teams import pinned_meta_snapshot_id
     manifest.update({"meta_snapshot": doc["snapshot"]["id"], "meta_pin": pinned_meta_snapshot_id(),
                      "pool_source": split.get("pool_source"), "pool_snapshot": split.get("pool_snapshot"),
@@ -1163,7 +1181,7 @@ def import_lineups(run_dir: Path, rows: list, extra: list, regulation: str, vali
 
 
 def _measure(run_dir: Path, args) -> None:
-    from champions_agent.config import (BUILD_ADAPT_MIN_BATTLES, BUILD_RACE_DEFAULT_MAX, BUILD_RACE_STEPS,
+    from champions_agent.config import (BUILD_ADAPT_MIN_BATTLES, BUILD_RACE_DEFAULT_MAX, BUILD_RACE_STEPS, BUILD_REPAIR_ROUNDS,
                                         TRAINING_BATTLE_FORMAT)
     from tools.team_build import ablation as AB, adapt as AD, racing as R, stress as ST
     from tools.team_build.pipeline import run_measurement
@@ -1203,7 +1221,9 @@ def _measure(run_dir: Path, args) -> None:
                     adapt_min=args.adapt_min or BUILD_ADAPT_MIN_BATTLES, adapt_chunk=args.adapt_chunk or AD.CHUNK,
                     adapt_max=args.adapt_max or AD.MAX_BATTLES, stress_n=args.stress_n or ST.STRESS_BATTLES,
                     ablation_n=args.ablation_n or AB.ABLATION_BATTLES, parallel=args.parallel or R.PARALLEL,
-                    repairs=args.repairs, max_candidates=args.max_candidates, registry=reg, llm_provider=provider,
+                    repairs=(BUILD_REPAIR_ROUNDS if args.repairs is None else args.repairs),
+                    n_threats=PROFILE_DEFAULTS.get(getattr(args, "profile", "full"), PROFILE_DEFAULTS["full"])["threats"],
+                    max_candidates=args.max_candidates, registry=reg, llm_provider=provider,
                     # 行動 adapter (構築と連動した学習): auto は medium 以上で有効 (2026-09-17 常時学習の停止で CPU が空いた)
                     adapt_action=(args.adapt_action == "on"
                                   or (args.adapt_action == "auto" and args.profile in ("medium", "full"))),

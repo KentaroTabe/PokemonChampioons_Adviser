@@ -59,6 +59,12 @@ TESTS=(
   test_current_party_roster
   test_team_build_rules
   test_team_build_gen_sets
+  test_move_data
+  test_ability_data
+  test_effects
+  test_role_sets
+  test_lineup_search
+  test_team_build_repair
   test_team_build_archetypes
   test_team_build_banned
   test_ja_names

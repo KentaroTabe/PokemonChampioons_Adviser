@@ -10,7 +10,9 @@ S7b 参照 (登録チーム) にも S7 と同じ適応を与え (BUILD_REFERENCE
     2026-09-15: 候補だけ収束まで適応し参照は cheap 1000 戦だけ、という非対称を rule_0913 の対照実験で確認
     (参照 teampreview 0.757 / 参照+適応 0.830 / 勝者 0.788。docs/incidents/reports/2026-09-15-reference-adaptation-asymmetry.md)
 S8b チーム × variant (teampreview / generic / fresh) × 参照の racing (fold B、別 seed)。チームごとに variant を測定で選ぶ
-S9  介入実験 (ルール mutation [+ LLM 仮説]、任意)
+S9  測定からの戻り (repairs 周、既定 config BUILD_REPAIR_ROUNDS): S8a 後と S8b 後に上位の並びを探索 fold の記録で診断し、
+    修理モード (tools/team_build/repair.py: 型だけの変種 B / 個体の入替 A、エースと核は固定、変更 ≤ BUILD_MAX_CHANGES) の変種を
+    cheap adaptation + racing で測って生存したものを次の段の候補に加える。LLM の仮説は使わない (docs/TEAM_BUILD_REDESIGN_1002.md §14)
 S10 SELECTION で contenders を比較
 S11 (任意、既定 off) 勝者の選出モデルを SEARCH + SELECTION で再学習。checkpoint 選択の検証 fold が学習に入るため
     既定では S7 の検証済み checkpoint をそのまま最終モデルにする
@@ -33,15 +35,15 @@ from champions_agent.config import (BUILD_ADAPT_MIN_BATTLES, BUILD_ADAPT_VALIDAT
                                     BUILD_EQUIV_EPS, BUILD_FINALIST_HOLDOUT_ALL, BUILD_FINALIST_MAX_SHARED,
                                     BUILD_FINALISTS, BUILD_FOLD_EVAL, BUILD_FOLD_VALIDATE, BUILD_PICK_VARIANTS,
                                     BUILD_RACE_DEFAULT_MAX, BUILD_RACE_STEPS, BUILD_REFERENCE_FULL_ADAPT,
-                                    BUILD_REFERENCE_PRODUCTION_VARIANT, BUILD_REPRO_GATE, BUILD_SCREEN_ADAPT_BATTLES,
-                                    BUILD_SCREEN_MARGIN, BUILD_SCREEN_MAX, BUILD_SCREEN_STEPS, BUILD_SCREEN_VARIANTS)
+                                    BUILD_REFERENCE_PRODUCTION_VARIANT, BUILD_REPAIR_PARENTS, BUILD_REPAIR_ROUNDS,
+                                    BUILD_REPRO_GATE, BUILD_SCREEN_ADAPT_BATTLES, BUILD_SCREEN_MARGIN, BUILD_SCREEN_MAX,
+                                    BUILD_SCREEN_STEPS, BUILD_SCREEN_VARIANTS)
 from tools.team_build import ablation as AB
 from tools.team_build import adapt as AD
 from tools.team_build import finalists as FN
 from tools.team_build import holdout as HO
 from tools.team_build import racing as R
 from tools.team_build import stress as ST
-from tools.team_build.loss_stats import loss_stats
 from tools.team_build.package import build_package
 from tools.team_build.registry import Registry
 from tools.team_build.verdict import DEGRADED
@@ -160,6 +162,39 @@ def best_by_win_rate(rows: dict, order: tuple) -> Optional[str]:
 
 
 # ------------------------------------------------------------------ 実行
+def _repair_round(run_dir: Path, eval_dir: Path, round_no: int, parents: list, battles_prefix: str, split: Path, seed: int,
+                  models_dir: str, generic: Optional[str], ref_arm, screen_adapt: int, adapt_chunk: int, parallel: int,
+                  screen_variants: tuple, steps: tuple, max_battles: int, eps: float, log, resume: bool,
+                  n_threats: int) -> tuple:
+    """修理モードの 1 周: 診断 → 変種 (s06_sets に追加) → cheap adaptation → 参照との racing。
+    戻り値 (変種の腕 [R.Arm], choose_variants の結果 {candidate_id: ...})。resume では s09_repair<n>.json の変種を再利用する"""
+    from tools.team_build.repair import run_repair_round
+    stage_json = eval_dir / f"s09_repair{round_no}.json"
+    ids: list = []
+    if resume and stage_json.exists():
+        try:
+            ids = list(json.loads(stage_json.read_text(encoding="utf-8")).get("ids") or [])
+            log(f"S9 repair {round_no}: resume (s09_repair{round_no}.json の変種 {len(ids)} を再利用)")
+        except Exception:
+            ids = []
+    if not ids:
+        try:
+            ids = run_repair_round(run_dir, parents, round_no, battles_prefix, log=log, n_threats=n_threats)["ids"]
+        except Exception as e:      # 修理に失敗しても run は続ける (変種なし)
+            log(f"S9 repair {round_no}: error {e!r} (変種なしで続ける)")
+            return [], {}
+    if not ids:
+        log(f"S9 repair {round_no}: 変種なし")
+        return [], {}
+    arms = candidate_arms(run_dir, models_dir, ids=ids)
+    models = _screen_adapt_all(arms, split, run_dir / "advisors_screen", seed + 100 * round_no, screen_adapt, adapt_chunk,
+                               parallel, log)
+    race_arms = [a for c in arms for a in (_variant_arm(c, v, models, generic) for v in screen_variants) if a]
+    res = R.race(race_arms, ref_arm(), split, "search", seed + 100 * round_no, eval_dir, stage=f"s09_repair{round_no}_race",
+                 fold=BUILD_FOLD_EVAL, steps=steps, max_battles=max_battles, eps=eps, parallel=parallel, log=log)
+    return arms, choose_variants(res)
+
+
 def _screen_adapt_all(arms: list, split: Path, out_dir: Path, seed: int, n_battles: int, chunk: int,
                       parallel: int, log) -> dict:
     """全 arm を同じ予算で cheap adaptation する (収集 n_battles 戦 → 1 回学習)。戻り値 {arm_id: model or None}"""
@@ -212,7 +247,7 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
                     resume: bool = False, reference_full_adapt: bool = BUILD_REFERENCE_FULL_ADAPT,
                     reference_production_variant: bool = BUILD_REFERENCE_PRODUCTION_VARIANT,
                     finalists_k: int = BUILD_FINALISTS, finalist_max_shared: int = BUILD_FINALIST_MAX_SHARED,
-                    finalist_holdout_all: bool = BUILD_FINALIST_HOLDOUT_ALL) -> dict:
+                    finalist_holdout_all: bool = BUILD_FINALIST_HOLDOUT_ALL, n_threats: int = 30) -> dict:
     """resume: 途中で落ちた run の続き。evaluation/ の S8a 結果 (cheap モデル・参照 variant・racing) と
     advisors/<cid>/adapt_result.json (完了した適応) をそのまま使い、無いものだけ実行する
     reference_full_adapt: 参照にも S7 と同じ適応を与え、fresh を参照の variant に加える (S7b)
@@ -329,6 +364,25 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
         _write_stage(run_dir, "summary", summary)
         return summary
 
+    # S9 (1 周目): S8a の上位の並びを探索 fold の記録で診断し、修理モードの変種を cheap adaptation + screening で測って
+    # 生存した変種を S7 以降の候補に加える (docs/TEAM_BUILD_REDESIGN_1002.md §14)
+    repair_rounds = min(int(repairs or 0), BUILD_REPAIR_ROUNDS)
+    if repair_rounds >= 1 and survivors:
+        parents = [(c, chosen8a[c]["arm_id"]) for c in survivors[:BUILD_REPAIR_PARENTS]]
+        new_arms, chosen_r = _repair_round(run_dir, eval_dir, 1, parents, "s08a_screen", split, seed, models_dir, generic,
+                                           ref_arm, screen_adapt, adapt_chunk, parallel, screen_variants, screen_steps,
+                                           screen_max, BUILD_EQUIV_EPS + screen_margin, log, resume, n_threats)
+        if new_arms:
+            cands = cands + new_arms
+            chosen8a.update(chosen_r)
+            added = team_survivors(chosen_r, None)
+            survivors = survivors + [c for c in added if c not in survivors]
+            summary["s08a_variants"] = chosen8a
+            summary["s09_repair1"] = {"parents": [p[0] for p in parents], "variants": [a.arm_id for a in new_arms],
+                                      "survivors": added}
+            log(f"S9 repair 1: 変種 {len(new_arms)} のうち生存 {len(added)} を S7 以降の候補に加える: "
+                + ", ".join(f"{c}={chosen_r[c]['variant']}({chosen_r[c]['delta']:+.3f})" for c in added))
+
     # S7: 生存チームの選出モデル適応 (fold A、収束まで、checkpoint 保存) → 独立 fold V の実測で checkpoint を選ぶ。
     # 適応は数チームを並列 (収集は 1 プロセスずつ)、検証は チームごとに checkpoint を並列に測る。
     # S7b: 参照も同じ手順で適応する (候補だけ深く適応する非対称を無くす。advisors/reference/)
@@ -432,16 +486,24 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
         _write_stage(run_dir, "summary", summary)
         return summary
 
-    # S9: 介入実験 (ルール mutation、任意)
-    if repairs > 0 and contenders:
-        log("S9: 介入実験は run.py の --repairs で有効化。この版はルール mutation の記録のみ (検証は次版)")
-        best_id = max(contenders, key=lambda cid: chosen[cid]["delta"])
-        recs = []
-        bl = eval_dir / "battles" / f"s08b_adapted_{chosen[best_id]['arm_id']}.jsonl"
-        if bl.exists():
-            recs = [json.loads(l) for l in bl.read_text(encoding="utf-8").splitlines() if l.strip()]
-        st = loss_stats(recs)
-        _write_stage(run_dir, "s09_loss_stats", st)
+    # S9 (2 周目): S8b の上位の並びを診断 → 修理モードの変種 → cheap adaptation + racing (S8b と同じ段階) → 生存した変種を
+    # S10 の contenders に加える (変種の選出モデルは cheap。LLM の仮説は使わない: D-28)
+    if repair_rounds >= 2 and contenders:
+        parents = [(c, chosen[c]["arm_id"]) for c in contenders[:BUILD_REPAIR_PARENTS]]
+        new_arms, chosen_r = _repair_round(run_dir, eval_dir, 2, parents, "s08b_adapted", split, seed + s08b_seed_offset,
+                                           models_dir, generic, ref_arm, screen_adapt, adapt_chunk, parallel, screen_variants,
+                                           steps, max_battles, BUILD_EQUIV_EPS, log, resume, n_threats)
+        if new_arms:
+            cands = cands + new_arms
+            chosen.update(chosen_r)
+            added = team_survivors(chosen_r, None)
+            contenders = contenders + [c for c in added if c not in contenders]
+            summary["s08b_variants"] = chosen
+            summary["s08b_contenders"] = contenders
+            summary["s09_repair2"] = {"parents": [p[0] for p in parents], "variants": [a.arm_id for a in new_arms],
+                                      "survivors": added}
+            log(f"S9 repair 2: 変種 {len(new_arms)} のうち生存 {len(added)} を S10 の contenders に加える: "
+                + ", ".join(f"{c}={chosen_r[c]['variant']}({chosen_r[c]['delta']:+.3f})" for c in added))
 
     # S10: SELECTION で比較 (チームごとに選んだ variant で)
     team_of = {a.arm_id: a.team_file for a in cands}

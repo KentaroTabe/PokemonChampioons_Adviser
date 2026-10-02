@@ -18,6 +18,22 @@ SUPPORT_ROLES = ("speed_control", "hazard_control", "priority", "pivot", "status
 STYLE_FRAMINGS = ("offense", "balance", "bulky_offense", "cycle", "setup", "speed_control", "anti_meta",
                   "specific_core")
 CONCEPT_MIN_CORE, CONCEPT_MAX_CORE = 2, 3
+# 役割の設計図 (docs/TEAM_BUILD_REDESIGN_1002.md §4.1、2026-10-02): core[].role / complement_requirements[].role は役割の語彙
+# (tools/team_build/role_sets.template_of で解決できる id)、plan は場と速度の計画。どれも任意 (無ければ従来どおり core_ids だけ)
+COMPLEMENT_REQUIREMENTS_MAX = 3
+SPEED_PLANS = ("outspeed", "trick_room", "neutral")
+PLAN_WEATHERS = ("sun", "rain", "sand", "snow")
+PLAN_TERRAINS = ("electric", "grassy", "psychic", "misty")
+ROLE_VOCABULARY_JA = {
+    "sweeper_setup": "積みエース (積んで抜く)", "breaker": "崩し役 (高火力の攻撃 4 本)", "cleaner": "詰め役 (速い / 先制技)",
+    "tr_ace": "トリックルームのエース (低速高火力)", "weather_ace": "天候の恩恵を受けるエース (sun/rain/sand/snow_abuser)",
+    "terrain_ace": "フィールドの恩恵を受けるエース (psychic/grassy/electric/misty_abuser)",
+    "hazard_lead": "設置役 (ステルスロック / まきびし / ねばねばネット)", "hazard_removal": "除去役 (きりばらい / こうそくスピン)",
+    "speed_control": "速度操作 (トリックルーム / おいかぜ)", "weather_setter": "天候の始動役 (sun/rain/sand/snow_setter)",
+    "terrain_setter": "フィールドの始動役 (psychic/grassy/electric/misty_setter)", "pivot": "交代役 (とんぼがえり / ボルトチェンジ)",
+    "wall": "受け (回復技 + 耐久)", "status_spreader": "状態異常のばらまき", "support_screens": "2 枚壁", "support_veil": "オーロラベール",
+    "phazer": "吹き飛ばし (積みの阻止)", "trapper": "交代封じ", "suicide_lead": "捨て駒の先発 (自爆 / みちづれ / 起点作り)",
+}
 STOP_NEW_YIELD = 0.15      # 直近の生成で新系統の割合がこれ未満なら停止
 STOP_DUP_RATE = 0.7        # 重複率がこれ以上でも停止
 MAX_ROUNDS = 6
@@ -25,6 +41,85 @@ MAX_ROUNDS = 6
 
 def concept_key(core_ids: list) -> tuple:
     return tuple(sorted(set(core_ids)))
+
+
+def role_id_ok(role) -> bool:
+    """役割 id が語彙 (雛形名・軸の別名・<場>_setter / <場>_abuser) にあるか"""
+    if not isinstance(role, str) or not role:
+        return False
+    from tools.team_build.role_sets import template_of
+    try:
+        template_of(role)
+        return True
+    except KeyError:
+        return False
+
+
+def normalize_blueprint(c: dict) -> dict:
+    """役割の設計図の正規化 (その場で書き換える): core ([{species_id, role}]) があれば core_ids と roles ({role: [sid]}) を
+    埋める (無ければ従来の core_ids のまま)。純粋"""
+    core = c.get("core")
+    if isinstance(core, list) and core:
+        ids, roles = [], {}
+        for row in core:
+            if not isinstance(row, dict):
+                continue
+            sid = row.get("species_id")
+            if sid and sid not in ids:
+                ids.append(sid)
+            if sid and row.get("role"):
+                roles.setdefault(row["role"], []).append(sid)
+        if not c.get("core_ids"):
+            c["core_ids"] = ids
+        if roles and not c.get("roles"):
+            c["roles"] = roles
+    return c
+
+
+def blueprint_problems(c: dict, i: int) -> list:
+    """役割の設計図の検証 (任意の項目だけ): core[].role と complement_requirements[].role は語彙、要件は最大
+    COMPLEMENT_REQUIREMENTS_MAX、plan の場と速度は enum。純粋"""
+    problems: list = []
+    core = c.get("core")
+    if core is not None:
+        if not isinstance(core, list):
+            problems.append(f"concepts[{i}]: core は [{{species_id, role}}] の配列")
+        else:
+            for row in core:
+                if not isinstance(row, dict) or not row.get("species_id"):
+                    problems.append(f"concepts[{i}]: core の各要素は {{species_id, role}}")
+                elif row.get("role") is not None and not role_id_ok(row.get("role")):
+                    problems.append(f"concepts[{i}]: core の役割 {row.get('role')} は役割の語彙 (role_vocabulary) のいずれか")
+            if c.get("core_ids") and set(c["core_ids"]) != {r.get("species_id") for r in core if isinstance(r, dict)}:
+                problems.append(f"concepts[{i}]: core と core_ids の種が食い違う")
+    reqs = c.get("complement_requirements")
+    if reqs is not None:
+        if not isinstance(reqs, list):
+            problems.append(f"concepts[{i}]: complement_requirements は [{{role, targets, note}}] の配列")
+        else:
+            if len(reqs) > COMPLEMENT_REQUIREMENTS_MAX:
+                problems.append(f"concepts[{i}]: complement_requirements は最大 {COMPLEMENT_REQUIREMENTS_MAX} 件")
+            for r in reqs:
+                role = r.get("role") if isinstance(r, dict) else r
+                if not role_id_ok(role):
+                    problems.append(f"concepts[{i}]: complement_requirements の役割 {role} は役割の語彙のいずれか")
+    plan = c.get("plan")
+    if plan is not None:
+        if not isinstance(plan, dict):
+            problems.append(f"concepts[{i}]: plan は {{field, speed_plan}}")
+        else:
+            sp = plan.get("speed_plan")
+            if sp is not None and sp not in SPEED_PLANS:
+                problems.append(f"concepts[{i}]: plan.speed_plan は {SPEED_PLANS} のいずれか")
+            fld = plan.get("field") or {}
+            if not isinstance(fld, dict):
+                problems.append(f"concepts[{i}]: plan.field は {{weather, terrain}}")
+            else:
+                if fld.get("weather") is not None and fld.get("weather") not in PLAN_WEATHERS:
+                    problems.append(f"concepts[{i}]: plan.field.weather は {PLAN_WEATHERS} か null")
+                if fld.get("terrain") is not None and fld.get("terrain") not in PLAN_TERRAINS:
+                    problems.append(f"concepts[{i}]: plan.field.terrain は {PLAN_TERRAINS} か null")
+    return problems
 
 
 def validate_concepts(auth: dict, owned: set, legal: set, mega_capable: set,
@@ -37,6 +132,10 @@ def validate_concepts(auth: dict, owned: set, legal: set, mega_capable: set,
     items = auth.get("concepts")
     if not isinstance(items, list) or not items:
         return ["concepts が空 (配列で返す)"]
+    for i, c in enumerate(items):
+        if isinstance(c, dict):
+            normalize_blueprint(c)
+            problems += blueprint_problems(c, i)
     for i, c in enumerate(items):
         if archetypes is not None and (c.get("archetype") or c.get("branch")):
             ax = c.get("archetype")
@@ -200,9 +299,21 @@ def generate_concepts(spec, feats: dict, threats: list, legal: set, mega_capable
                   + ("。mega_id は必ずエース (この構築ではエースだけがメガ石を持ち、他のメンバーは持たない)" if ace_mega else ""))
                  if ace else ""),
             ) if x),
-            "output_schema": {"authoritative": {"concepts": [{"name": "str", "core_ids": ["id"], "mega_id": "id|null",
+            # 役割の設計図 (§4.1): 核は種 + 役割、補完枠は種を書かず要件 (役割 + 見る相手) で書く。S5 統合段が役割の雛形から型を作る
+            "role_vocabulary": ROLE_VOCABULARY_JA,
+            "blueprint": "core には核 2〜3 体を {species_id, role} で書く (role は role_vocabulary の id。天候/フィールドは "
+                         "sun_setter / rain_abuser / psychic_setter のように場つきの id)。残りの枠は complement_requirements に "
+                         "役割と見る相手 (threats の id) で書き、種は書かない。plan には前提の場と速度の計画を書く",
+            "output_schema": {"authoritative": {"concepts": [{"name": "str", "core_ids": ["id"],
+                                                             "core": [{"species_id": "id", "role": "role_vocabulary の id"}],
+                                                             "mega_id": "id|null",
                                                              "win_condition": "enum", "support_roles": ["enum"],
                                                              "weak_to": ["id"],
+                                                             "complement_requirements": [{"role": "role_vocabulary の id",
+                                                                                          "targets": ["threat id"], "note": "str"}],
+                                                             "plan": {"field": {"weather": "sun|rain|sand|snow|null",
+                                                                                "terrain": "electric|grassy|psychic|misty|null"},
+                                                                      "speed_plan": "outspeed|trick_room|neutral"},
                                                              **({"archetype": "id|null", "branch": "id|null",
                                                                  "special_branch": "id|null"} if archetypes else {})}]},
                               "display": {"explanations": {"<name>": "str"}}},
