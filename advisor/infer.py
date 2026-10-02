@@ -60,6 +60,16 @@ _FORM_EXPLICIT = {
     "rotommow": "カットロトム",
     "urshifusinglestrikegmax": "ウーラオス(いちげき)",
     "urshifurapidstrikegmax": "ウーラオス(れんげき)",
+    # 2026-10-02: 名前表に無いフォルム (記事で id のまま出ていた。除外ファイル・固定枠・エースの指定にも使えるようにする)
+    "floetteeternal": "フラエッテ(えいえんのはな)",
+    "gourgeistsmall": "パンプジン(ちいさいサイズ)",
+    "gourgeistaverage": "パンプジン(ふつうのサイズ)",
+    "gourgeistlarge": "パンプジン(おおきいサイズ)",
+    "gourgeistsuper": "パンプジン(とくだいサイズ)",
+    "pumpkaboosmall": "バケッチャ(ちいさいサイズ)",
+    "pumpkabooaverage": "バケッチャ(ふつうのサイズ)",
+    "pumpkaboolarge": "バケッチャ(おおきいサイズ)",
+    "pumpkaboosuper": "バケッチャ(とくだいサイズ)",
 }
 
 

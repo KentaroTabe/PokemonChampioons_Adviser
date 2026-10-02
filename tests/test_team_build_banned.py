@@ -54,6 +54,19 @@ def test_parse_and_resolve():
     assert ids == ["scizor", "gengar"] and unknown == ["notapokemon"], (ids, unknown)      # 日本語名は id に、重複は 1 つ
     ids2, unknown2 = SP.resolve_banned(["gengar", "notapokemon", "ほげほげ"])                 # legal 無しは綴りと解決だけ
     assert ids2 == ["gengar", "notapokemon"] and unknown2 == ["ほげほげ"], (ids2, unknown2)
+    # 名前表に無いフォルム名 (組み立てた日本語名との正規化後の完全一致。2026-10-02: 除外ファイルの「フラエッテ えいえんのはな」)
+    from advisor.infer import species_ja_name
+    assert species_ja_name("floetteeternal") == "フラエッテ(えいえんのはな)"
+    assert species_ja_name("gourgeistsmall") == "パンプジン(ちいさいサイズ)"      # 以前は id のまま (記事で「カボチャ」と誤記)
+    assert SP.resolve_species_token("フラエッテ えいえんのはな") == "floetteeternal"
+    assert SP.resolve_species_token("フラエッテ（えいえんのはな）") == "floetteeternal"
+    assert SP.resolve_species_token("パンプジン(ちいさいサイズ)") == "gourgeistsmall"
+    assert SP.resolve_species_token("ヒスイバクフーン") == "typhlosionhisui"
+    assert SP.resolve_species_token("ガラルヤドキング") == "slowkinggalar"
+    assert SP.resolve_species_token("フラエッテ") == "floette"                  # 基本種はこれまでどおり名前表
+    assert SP.resolve_species_token("フラエッテ とこしえのはな") == "フラエッテ とこしえのはな"   # 曖昧一致はしない (未解決で止める)
+    ids3, unknown3 = SP.resolve_banned(["フラエッテ えいえんのはな", "ヒスイバクフーン"], legal={"floetteeternal", "typhlosionhisui"})
+    assert ids3 == ["floetteeternal", "typhlosionhisui"] and unknown3 == [], (ids3, unknown3)
     print("test_parse_and_resolve OK")
 
 

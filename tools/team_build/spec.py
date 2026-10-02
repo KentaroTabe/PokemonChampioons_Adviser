@@ -28,8 +28,37 @@ def _toid(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (name or "").lower())
 
 
+_FORM_NAME_INDEX: Optional[dict] = None
+
+
+def _form_name_index() -> dict:
+    """図鑑の全種について、組み立てた日本語名 (advisor.infer.species_ja_name: ヒスイバクフーン / フラエッテ(えいえんのはな) 等) の
+    正規化キー → id。名前表 (jp_names.json) に無いフォルム名を、除外ファイル・固定枠・エースの指定で使えるようにする
+    (2026-10-02: 除外ファイルの「フラエッテ えいえんのはな」が解決できず run が S0 で止まる状態だった)。
+    一致は正規化後の完全一致だけ (曖昧一致はしない: 別のフォルムに化けるより未解決で止める)"""
+    global _FORM_NAME_INDEX
+    if _FORM_NAME_INDEX is None:
+        idx: dict = {}
+        try:
+            from advisor.dex import get_dex
+            from advisor.infer import species_ja_name
+            from vision.normalize import loose_key, normalize
+            for sid in get_dex().species_ids():
+                ja = species_ja_name(sid)
+                if not ja or ja == sid:
+                    continue
+                for key in (normalize(ja), loose_key(ja)):
+                    if key:
+                        idx.setdefault(key, sid)
+        except Exception:
+            pass
+        _FORM_NAME_INDEX = idx
+    return _FORM_NAME_INDEX
+
+
 def resolve_species_token(token: str) -> str:
-    """"kingambit" / "Kingambit" / "ドドゲザン" → showdown id。解決できなければ元の文字列 (検証で弾く)"""
+    """"kingambit" / "Kingambit" / "ドドゲザン" / "フラエッテ えいえんのはな" → showdown id。解決できなければ元の文字列 (検証で弾く)。
+    名前表に無いフォルム名は、組み立てた日本語名との正規化後の完全一致で解決する (_form_name_index)"""
     token = (token or "").strip()
     if not token:
         return ""
@@ -37,10 +66,14 @@ def resolve_species_token(token: str) -> str:
     if sid:
         return sid
     try:
-        from vision.normalize import NameResolver
+        from vision.normalize import NameResolver, loose_key, normalize
         r = NameResolver().resolve_species(token, cutoff=0.85)
         if r:
             return r[1]
+        idx = _form_name_index()
+        for key in (normalize(token), loose_key(token)):
+            if key and key in idx:
+                return idx[key]
     except Exception:
         pass
     return token
