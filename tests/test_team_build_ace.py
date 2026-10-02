@@ -159,8 +159,33 @@ def test_ace_stone_violations():
     print("test_ace_stone_violations OK")
 
 
+def test_restore_locked_sets():
+    """指定の型 (custom_sets) は S6 で変えない: 規則・軸の差し込みで変わった型を元に戻す。エースの規則で外した石は戻さない"""
+    from tools.team_build.run import restore_locked_sets
+    lop = SetCandidate("lopunny", "limber", "lopunnite", "jolly", "2/32/0/0/0/32",
+                       ["closecombat", "swordsdance", "tripleaxel", "thunderpunch"], "custom", 0.6)
+    lop_arch = SetCandidate("lopunny", "limber", "lopunnite", "jolly", "2/32/0/0/0/32",
+                            ["closecombat", "swordsdance", "tripleaxel", "batonpass"], "custom+arch", 0.6, ["arch:baton"])
+    other = SetCandidate("primarina", "torrent", "leftovers", "modest", "32/0/0/32/0/2", ["moonblast"], "representative", 0.5)
+    other2 = SetCandidate("primarina", "torrent", "leftovers", "modest", "32/0/0/32/0/2", ["moonblast", "yawn"], "representative+arch", 0.5)
+    originals = {"lopunny": lop}
+    team, restored = restore_locked_sets([lop_arch, other2], originals, {"lopunny"}, stone_keeper="lopunny")
+    assert restored == ["lopunny"] and team[0].moves == lop.moves and team[0].item == "lopunnite"
+    assert team[0].notes == ["locked:restored<-custom+arch"] and team[1] is other2      # 指定でない種は触らない
+    # 変わっていなければそのまま (印も付かない)
+    team2, restored2 = restore_locked_sets([lop, other], originals, {"lopunny"})
+    assert restored2 == [] and team2[0] is lop
+    # 指定の型が別のメガ (エースでない) で、エースの規則で石を外されていた → 技は戻すが石は戻さない
+    chomp = SetCandidate("garchomp", "roughskin", "garchompitez", "naive", "0/2/0/32/0/32", ["dracometeor"], "custom", 0.7)
+    chomp_now = SetCandidate("garchomp", "roughskin", None, "naive", "0/2/0/32/0/32", ["dracometeor", "stealthrock"], "custom+arch", 0.7)
+    team3, restored3 = restore_locked_sets([chomp_now], {"garchomp": chomp}, {"garchomp"}, stone_keeper="lopunny")
+    assert restored3 == ["garchomp"] and team3[0].moves == ["dracometeor"] and team3[0].item is None
+    print("test_restore_locked_sets OK")
+
+
 def main() -> None:
     test_parse_form_ace_is_favorite()
+    test_restore_locked_sets()
     test_prefer_mega_set()
     test_ace_is_only_mega_holder()
     test_validate_concepts_with_ace()

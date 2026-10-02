@@ -631,10 +631,31 @@ def stage_s5(run_dir: Path, spec: BuildSpec, fams: list, feats: dict, threats: l
     return chosen
 
 
-def apply_team_field(team: list, alternatives: dict, tv: dict, gen, rule_field: Optional[dict]) -> tuple:
+def restore_locked_sets(team: list, originals: dict, locked: set, stone_keeper: Optional[str] = None) -> tuple:
+    """指定の型 (spec.custom_sets、locked) は S6 で変えない: 規則・軸の反映で型が変わっていたら元 (originals) に戻す (純粋)。
+    元の持ち物がメガ石で、その種が石を残す側 (stone_keeper) でなければ持ち物だけは今の値を保つ (指定エースの規則で外した石を
+    戻さない)。戻り値 (team, 戻した種の一覧)。2026-10-02: 指定エースの型 (ユーザー登録のミミロップ) に軸の役割の技
+    (でんじは / バトンタッチ) が差し込まれていた"""
+    out, restored = [], []
+    for c in team:
+        o = originals.get(c.species_id)
+        if c.species_id not in locked or o is None or c.key() == o.key():
+            out.append(c)
+            continue
+        item = o.item
+        if S.has_mega_stone(o.item) and stone_keeper and c.species_id != stone_keeper:
+            item = c.item
+        out.append(S.SetCandidate(o.species_id, o.ability, item, o.nature, o.evs, list(o.moves), o.source, o.score,
+                                  list(o.notes) + [f"locked:restored<-{c.source}"], o.usage_gap, o.adj))
+        restored.append(c.species_id)
+    return out, restored
+
+
+def apply_team_field(team: list, alternatives: dict, tv: dict, gen, rule_field: Optional[dict],
+                     locked: Optional[set] = None) -> tuple:
     """並びの場 (規則の前提 + メンバーの特性 (メガ後)/技で張る場) があれば、自分で張らないメンバーの型をその場の前提で
     選び直す: 生成型の場つき変種 (gen(sid, field)) を候補に足し、被覆をその場で採点し直す。
-    戻り値 (team, alternatives, team_field or None)。場が無ければそのまま"""
+    locked (指定の型の種) は選び直さない。戻り値 (team, alternatives, team_field or None)。場が無ければそのまま"""
     from advisor.damage import FieldView
     from tools.team_build import gen_sets as G
     from tools.team_build.interaction import view_from_set
@@ -655,6 +676,9 @@ def apply_team_field(team: list, alternatives: dict, tv: dict, gen, rule_field: 
         own = G.own_field(ability, moves)
         if own.get("terrain") == tf.get("terrain") and own.get("weather") == tf.get("weather"):
             new_team.append(c)                      # 自分で張る側 (設置役) はそのまま
+            continue
+        if c.species_id in (locked or ()):
+            new_team.append(c)                      # 指定の型 (custom_sets) は場の前提でも選び直さない
             continue
         cands = list(alternatives.get(c.species_id) or [c])
         keys = {x.key() for x in cands}
@@ -705,6 +729,8 @@ def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv
     # 指定エース (spec.ace): メガ石を持てる種なら、探索の並びではエースだけが石を持つ (config BUILD_ACE_MAX_MEGA_STONES)
     ace_sid = spec.ace or None
     ace_mega = bool(ace_sid) and ace_sid in mega_capable_ids([ace_sid])
+    # 指定の型 (spec.custom_sets) は S6 で変えない: 場の前提の選び直しの対象外、規則・軸の差し込みは元に戻す、クローズでは残す側
+    locked = set(spec.custom_sets or {})
     with db.get_connection() as conn:
         members_all = sorted({m for l in lineups for m in l.members})
         item_map = S.item_usage_map(conn, snapshot_id, members_all)
@@ -751,11 +777,12 @@ def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv
                 prefer = {c.species_id: 1 for c in team if c.species_id in reg_items}
             team = S.enforce_max_megas(team, alternatives, keep=keep_mega)
             team = ace_fix(team, alternatives)
+            locked_originals = {c.species_id: c for c in team if c.species_id in locked}
             team_field = None
             if not is_inc:
                 from tools.team_build import rules as RU
                 rf = RU.rule_field(rule_ctx["names"]) if rule_ctx else None
-                team, alternatives, team_field = apply_team_field(team, alternatives, tv, gen, rf)
+                team, alternatives, team_field = apply_team_field(team, alternatives, tv, gen, rf, locked=locked)
                 if team_field:
                     team = S.enforce_max_megas(team, alternatives, keep=keep_mega)
                     team = ace_fix(team, alternatives)
@@ -786,6 +813,13 @@ def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv
                     for sids in (assign or {}).values():
                         for s in sids:
                             prefer[s] = max(prefer.get(s, 0), 1)
+            locked_restored: list = []
+            if locked_originals and not is_inc:
+                # 指定の型に規則・軸が技や持ち物を差し込んでいたら元に戻す (指定エースの規則で外した石は戻さない)
+                team, locked_restored = restore_locked_sets(team, locked_originals, locked,
+                                                            stone_keeper=(ace_sid if ace_on else keep_mega))
+                for sid in locked:
+                    prefer[sid] = max(prefer.get(sid, 0), 1)
             if ace_on:
                 # 規則・軸の反映後にもエースの石を保証し、クローズではエースが残す側 (規則のエースと同じ優先度 2)
                 team = ace_fix(team, alternatives)
@@ -805,6 +839,7 @@ def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv
                             "rule_pair": (rule_ctx or {}).get("pairs", {}).get(tuple(l.members)),
                             "team_field": team_field, "archetype": arch_info,
                             "ace": (ace_sid if ace_on else None), "ace_notes": ace_notes,
+                            "locked_restored": locked_restored,
                             "sets": [{"species": c.species_id, "item": c.item, "nature": c.nature,
                                       "evs": c.evs, "moves": c.moves, "source": c.source,
                                       "coverage": round(c.score, 3), "notes": c.notes} for c in team]})
