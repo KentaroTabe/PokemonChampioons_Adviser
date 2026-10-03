@@ -1095,7 +1095,8 @@ def resolve_candidate_subset(rows: list, candidates: Optional[str], strata: Opti
     """
     if not candidates and not strata:
         return None
-    ok_rows = [r for r in rows if r.get("ok")]
+    # 修理モードの変種 (tag repair、測定の途中で s06_sets に足される) は strata の順位に入れない (--resume で測定対象が変わらないように)
+    ok_rows = [r for r in rows if r.get("ok") and (r.get("tag") or "") != "repair"]
     ids = []
     if candidates:
         ids += [c.strip() for c in candidates.split(",") if c.strip()]
