@@ -101,6 +101,24 @@ def test_repair_variants():
                              round_no=2, max_changes=1, max_arms=6, boost=2.0, min_gain=0.001)
     assert any(v.origin["variant"] == "A" for v in vs3)
     assert np.allclose(s.fam_w, [1, 1, 1, 1])
+    # 親が石 2 個 (現行チーム) でエース指定があっても、その親の修理ではエースの規則を当てず石の数は親のまま (変種が出る。新しい石は足さない)
+    ents2 = [W._entry("core1", "breaker", "core1_x", "lifeorb", False, {}),
+             W._entry("core2", "sweeper_setup", "core2_stone", "core2ite", True, {}),
+             W._entry("stone2", "breaker", "stone2_s", "stone2ite", True, {}),
+             W._entry("weak", "breaker", "weak_x", "leftovers", False, {}),
+             W._entry("sun", "sun_setter", "sun_x", "heatrock", False, {"weather": "sun"}),
+             W._entry("rain", "rain_setter", "rain_x", "damprock", False, {"weather": "rain"})]
+    for e in ents2:
+        e.locked = True
+    combo2 = [s.lib.add(e) for e in ents2]
+    sc2, _ = s.score_of(combo2, [], cfg)
+    parent2 = s._finalize(sc2, combo2, {}, "INC", [], cfg, tag="incumbent")
+    cfg_ace = L.SearchConfig(species_k=10, ace="core2", favorites=("core2",))
+    vs5 = RP.repair_variants(s, parent2, dict(diag, replace_candidates=["weak"]), cfg_ace, pool_species, W._roles_of, [],
+                             fixed={"core2"}, parent_id="L00_INC", round_no=1, max_changes=1, max_arms=6, boost=2.0, min_gain=0.001)
+    assert vs5, "石 2 個の現行チームからも変種が出る"
+    for v in vs5:
+        assert sum(1 for e in v.entries if e.stone) == 2 and "weak" not in v.members
     # 点が上がる変種が無くても最良の 1 つは forced で測る
     vs4 = RP.repair_variants(s, parent, diag, cfg, pool_species, W._roles_of, [], fixed={"core1", "core2"}, parent_id="L01_C001",
                              round_no=1, max_changes=2, max_arms=6, boost=2.0, min_gain=10.0)

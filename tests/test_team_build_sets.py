@@ -21,6 +21,20 @@ def test_item_clause_and_text():
     assert "garchomp @ focussash" in text and "EVs: 2 HP / 32 Atk / 32 Spe" in text
     assert "Jolly Nature" in text and "- stealthrock" in text and "Level: 50" in text
     assert text.count("\n\n") == 2
+    # 種はシムの id で書く (advisor の図鑑の id がシムに無いとき: indeedeemale → indeedee、taurospaldeablazebreed → taurospaldeablaze)
+    from tools.team_build.sets import parse_sim_species, resolve_sim_species, sim_species_id
+    table = parse_sim_species("export const Pokedex = {\n\tindeedee: {\n\t\tnum: 876,\n\t\tname: \"Indeedee\",\n\t},\n"
+                              "\tindeedeef: {\n\t\tnum: 876,\n\t},\n\ttauros: {\n\t\tnum: 128,\n\t},\n\ttaurospaldeablaze: {\n\t\tnum: 128,\n\t},\n"
+                              "\ttaurospaldeaaqua: {\n\t\tnum: 128,\n\t},\n};\n")
+    assert table == {"indeedee": 876, "indeedeef": 876, "tauros": 128, "taurospaldeablaze": 128, "taurospaldeaaqua": 128}
+    assert resolve_sim_species("indeedeemale", 876, table) == "indeedee"
+    assert resolve_sim_species("taurospaldeablazebreed", 128, table) == "taurospaldeablaze"
+    assert resolve_sim_species("indeedee", 876, table) == "indeedee" and resolve_sim_species("nosuch", None, table) == "nosuch"
+    assert resolve_sim_species("nosuch", 999, table) == "nosuch"
+    assert sim_species_id("indeedeemale") == "indeedee" and sim_species_id("taurospaldeablazebreed") == "taurospaldeablaze"
+    assert sim_species_id("goodrahisui") == "goodrahisui" and sim_species_id("lopunny") == "lopunny"
+    t2 = to_showdown_text([SetCandidate("indeedeemale", "psychicsurge", "lifeorb", "modest", "2/0/0/32/0/32", ["expandingforce"])])
+    assert t2.startswith("indeedee @ lifeorb")
     print("test_item_clause_and_text OK")
 
 

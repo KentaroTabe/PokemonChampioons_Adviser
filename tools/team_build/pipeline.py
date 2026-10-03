@@ -187,12 +187,51 @@ def _repair_round(run_dir: Path, eval_dir: Path, round_no: int, parents: list, b
         log(f"S9 repair {round_no}: 変種なし")
         return [], {}
     arms = candidate_arms(run_dir, models_dir, ids=ids)
-    models = _screen_adapt_all(arms, split, run_dir / "advisors_screen", seed + 100 * round_no, screen_adapt, adapt_chunk,
-                               parallel, log)
+    # resume: 変種の cheap adaptation (s09_repair<n>_models.json) と racing (s09_repair<n>_race.json) も再利用する
+    # (2026-10-03: 2 周目に修正を反映するため run を止めて再開した。1 周目の racing (約 2 時間) をやり直さない)
+    models_json = eval_dir / f"s09_repair{round_no}_models.json"
+    models = None
+    if resume and models_json.exists():
+        try:
+            prev = json.loads(models_json.read_text(encoding="utf-8"))
+            if all(a.arm_id in prev and prev[a.arm_id] and Path(prev[a.arm_id]).exists() for a in arms):
+                models = prev
+                log(f"S9 repair {round_no}: cheap adaptation は resume (s09_repair{round_no}_models.json を再利用)")
+        except Exception:
+            models = None
+    if models is None:
+        models = _screen_adapt_all(arms, split, run_dir / "advisors_screen", seed + 100 * round_no, screen_adapt, adapt_chunk,
+                                   parallel, log)
+        _write_stage(run_dir, f"s09_repair{round_no}_models", models)
     race_arms = [a for c in arms for a in (_variant_arm(c, v, models, generic) for v in screen_variants) if a]
-    res = R.race(race_arms, ref_arm(), split, "search", seed + 100 * round_no, eval_dir, stage=f"s09_repair{round_no}_race",
-                 fold=BUILD_FOLD_EVAL, steps=steps, max_battles=max_battles, eps=eps, parallel=parallel, log=log)
+    race_json = eval_dir / f"s09_repair{round_no}_race.json"
+    res = None
+    if resume and race_json.exists():
+        try:
+            prev = json.loads(race_json.read_text(encoding="utf-8"))
+            if repair_race_reusable(prev, [a.arm_id for a in race_arms]):
+                res = prev
+                log(f"S9 repair {round_no}: racing は resume (s09_repair{round_no}_race.json を再利用)")
+        except Exception:
+            res = None
+    if res is None:
+        res = R.race(race_arms, ref_arm(), split, "search", seed + 100 * round_no, eval_dir, stage=f"s09_repair{round_no}_race",
+                     fold=BUILD_FOLD_EVAL, steps=steps, max_battles=max_battles, eps=eps, parallel=parallel, log=log)
     return arms, choose_variants(res)
+
+
+def repair_race_reusable(res: dict, arm_ids: list) -> bool:
+    """保存済みの racing の結果が、今回の変種の腕を全部含み、測定が終わっている (各腕が確定か上限まで測った) か (純粋)"""
+    arms = {a.get("arm_id"): a for a in (res or {}).get("arms") or []}
+    if not arm_ids or any(aid not in arms for aid in arm_ids):
+        return False
+    max_n = int((res or {}).get("max_battles") or 0)
+    for aid in arm_ids:
+        a = arms[aid]
+        done = a.get("eliminated_at") is not None or a.get("state") != "uncertain" or int(a.get("n_done") or 0) >= max_n
+        if not done:
+            return False
+    return True
 
 
 def _screen_adapt_all(arms: list, split: Path, out_dir: Path, seed: int, n_battles: int, chunk: int,

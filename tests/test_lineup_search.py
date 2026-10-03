@@ -123,6 +123,11 @@ def test_constraints_and_roles():
     assert L.constraints_ok([e1, e2], None, 1)[1] == "持ち物の重複"
     assert L.constraints_ok([e3, e4], None, 1)[1] == "メガ石の上限"
     assert L.constraints_ok([e1, e3], "core2", 1)[0] and not L.constraints_ok([e1, e4], "core2", 1)[0]
+    # Species Clause: base_of が同じ種 (フォルム違い) は 2 体入れない
+    base_of = lambda s: {"core1": "num:1", "dup": "num:1"}.get(s, s)      # noqa: E731
+    e2b = _entry("dup", "breaker", "dup_y", "expertbelt", False, {})
+    assert L.constraints_ok([e1, e2b], None, 1, base_of)[1] == "同じ種 (Species Clause)"
+    assert L.constraints_ok([e1, e2b], None, 1)[0] and L.constraints_ok([e1, e3], None, 1, base_of)[0]
     assert L.mega_allowed_for("x", None, None, False) and not L.mega_allowed_for("x", None, None, True)
     assert L.mega_allowed_for("x", None, "x", False) and not L.mega_allowed_for("y", None, "x", False)
     assert L.mega_allowed_for("ace", "ace", "x", True) and not L.mega_allowed_for("x", "ace", "x", False)
@@ -168,6 +173,11 @@ def test_search_fills_holes_and_respects_constraints():
     assert {"fillC", "fillD"} <= set(best.members), "穴 (C / D) を埋める種が入る"
     assert best.roles["fillD"] == "hazard_lead" and best.parts["roles"] == 1.0
     assert "dup" not in best.members, "持ち物 (いのちのたま) が核と重複する候補は入らない"
+    # 補完の候補からも Species Clause で同じ種を外す (fillC と同じ図鑑番号の種は入らない)
+    cfg_sc = L.SearchConfig(core_beam=3, complement_beam=2, species_k=10, banned=frozenset({"ban"}),
+                            base_of=lambda s: {"fillC": "num:9", "fillD": "num:9"}.get(s, s))
+    res_sc = s.search(concept, cfg_sc, pool, _roles_of)
+    assert res_sc and not ({"fillC", "fillD"} <= set(res_sc[0].members))
     # 核が 2 体 → 3 体目を順に選び、核の型を選び直す。石持ちの core2 (b 0.95) が選ばれるのは mega_id の種だから
     assert any(e.species_id == "core2" and e.stone for e in best.entries)
     # 選出計画: 系統ごとに並びの 3 体、担当は計画から

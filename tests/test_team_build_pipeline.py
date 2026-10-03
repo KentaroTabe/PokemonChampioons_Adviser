@@ -99,6 +99,9 @@ def test_resolve_candidate_subset():
     assert resolve_candidate_subset(rows, None, "1,3,9", False, 2) == ["L03_C001", "L06_C004"]
     assert resolve_candidate_subset(rows, None, "2", True, 1) == ["L05_C003", "L00_INC", "L01_INC"]
     assert resolve_candidate_subset(rows, "L03_C001", "1", False, 0) == ["L03_C001"]      # 重複は除く
+    # 修理モードの変種 (tag repair) は strata の順位に入れない (resume で測定対象が変わらない)
+    rows2 = rows + [{"candidate_id": "L01_INC-R1A1", "ok": True, "tag": "repair", "score": 1.4}]
+    assert resolve_candidate_subset(rows2, None, "1,3,9", False, 2) == ["L03_C001", "L06_C004"]
     print("test_resolve_candidate_subset OK")
 
 
@@ -165,6 +168,20 @@ def test_repro_gate():
     assert not P.repro_gate_ok(0.150, -0.043)          # rule_0909 の L21: S8b improved → S10 degraded
     assert not P.repro_gate_ok(-0.01, 0.05) and not P.repro_gate_ok(None, 0.05) and not P.repro_gate_ok(0.05, None)
     print("test_repro_gate OK")
+
+
+def test_repair_race_reusable():
+    """修理モードの racing の再利用 (resume): 今回の腕を全部含み、各腕が確定か上限まで測っているときだけ"""
+    res = {"max_battles": 300, "arms": [
+        {"arm_id": "L01-R1A1@cheap", "state": "improved", "n_done": 300, "eliminated_at": None},
+        {"arm_id": "L01-R1A1@generic", "state": "degraded", "n_done": 100, "eliminated_at": 100},
+        {"arm_id": "L01-R1A2@cheap", "state": "uncertain", "n_done": 300, "eliminated_at": None},
+        {"arm_id": "L01-R1A3@cheap", "state": "uncertain", "n_done": 100, "eliminated_at": None}]}
+    assert P.repair_race_reusable(res, ["L01-R1A1@cheap", "L01-R1A1@generic", "L01-R1A2@cheap"])
+    assert not P.repair_race_reusable(res, ["L01-R1A1@cheap", "L01-R1A3@cheap"])      # 測り切っていない腕
+    assert not P.repair_race_reusable(res, ["L01-R1A1@cheap", "L01-R1B1@cheap"])      # 無い腕
+    assert not P.repair_race_reusable({}, ["x"]) and not P.repair_race_reusable(res, [])
+    print("test_repair_race_reusable OK")
 
 
 def test_import_lineups():
@@ -241,6 +258,7 @@ if __name__ == "__main__":
     test_variant_arm_production()
     test_import_lineups()
     test_repro_gate()
+    test_repair_race_reusable()
     test_select_survivors_orders_and_caps()
     test_choose_variants_picks_best_non_degraded()
     test_choose_variants_team_x_pickvariant_and_survivors()

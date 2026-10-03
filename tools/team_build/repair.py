@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -132,6 +133,12 @@ def repair_variants(search: LineupSearch, parent: LineupResult, diag: dict, cfg:
     species = list(diag.get("threat_species") or []) + [k["by"] for k in (diag.get("ko") or []) if k.get("by")]
     w, boosted_idx = boosted_weights(search.fam_w, search.pool.families, search.pool.sets, diag.get("must_cover"), species, boost)
     targets = search.pool.species_of_families(boosted_idx) or None
+    # 親が既にエース・石の制約に合わない並び (現行チーム: 登録の石が 2 個など) なら、その親の修理ではエースの規則を当てず、
+    # 石の数は親のまま (S5 の現行チーム枝と同じ扱い。2026-10-03: 石 2 個の現行チームから変種が 1 つも出なかった)
+    ace, max_stones = cfg.ace, cfg.max_stones
+    if not constraints_ok(parent.entries, cfg.ace, cfg.max_stones, cfg.base_of)[0]:
+        ace, max_stones = None, max(cfg.max_stones, sum(1 for e in parent.entries if e.stone))
+    cfg_r = replace(cfg, max_stones=max_stones)
     old_w = search.fam_w
     search.fam_w = w
     found: list = []       # (点, combo, 種別, 変更) 親より点が上がるもの
@@ -158,7 +165,7 @@ def repair_variants(search: LineupSearch, parent: LineupResult, diag: dict, cfg:
                 if i == combo[k]:
                     continue
                 trial = combo[:k] + [i] + combo[k + 1:]
-                if not constraints_ok([search.lib.entries[x] for x in trial], cfg.ace, cfg.max_stones)[0]:
+                if not constraints_ok([search.lib.entries[x] for x in trial], ace, max_stones, cfg.base_of)[0]:
                     continue
                 sc, _ = search.score_of(trial, required, cfg)
                 if best is None or sc > best[0]:
@@ -180,8 +187,8 @@ def repair_variants(search: LineupSearch, parent: LineupResult, diag: dict, cfg:
             k = next(i for i, e in enumerate(parent.entries) if e.species_id == out_sid)
             rest = combo[:k] + combo[k + 1:]
             sc0, _ = search.score_of(rest, required, cfg)
-            mega_id = cfg.ace or (stone_holder if stone_holder != out_sid else None)
-            ext = search._extend([(sc0, rest, {})], cfg, species_pool, roles_of, required, cfg.speed_plan, mega_id, 2, cfg.ace)
+            mega_id = ace or (stone_holder if stone_holder != out_sid else None)
+            ext = search._extend([(sc0, rest, {})], cfg_r, species_pool, roles_of, required, cfg.speed_plan, mega_id, 2, ace)
             for sc, new, _fills in ext:
                 in_e = search.lib.entries[new[-1]]
                 item = (sc, new, "A", [{"out": out_sid, "in": in_e.species_id, "to": _set_summary(in_e.cand)}])
@@ -192,10 +199,10 @@ def repair_variants(search: LineupSearch, parent: LineupResult, diag: dict, cfg:
             ks = [next(i for i, e in enumerate(parent.entries) if e.species_id == s) for s in repl[:2]]
             rest = [i for j, i in enumerate(combo) if j not in ks]
             sc0, _ = search.score_of(rest, required, cfg)
-            mega_id = cfg.ace or (stone_holder if stone_holder not in repl[:2] else None)
+            mega_id = ace or (stone_holder if stone_holder not in repl[:2] else None)
             beam = [(sc0, rest, {})]
             for _slot in range(2):
-                beam = search._extend(beam, cfg, species_pool, roles_of, required, cfg.speed_plan, mega_id, 1, cfg.ace)
+                beam = search._extend(beam, cfg_r, species_pool, roles_of, required, cfg.speed_plan, mega_id, 1, ace)
                 if not beam:
                     break
             for sc, new, _fills in beam:
