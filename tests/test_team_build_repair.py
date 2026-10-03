@@ -119,6 +119,25 @@ def test_repair_variants():
     assert vs5, "石 2 個の現行チームからも変種が出る"
     for v in vs5:
         assert sum(1 for e in v.entries if e.stone) == 2 and "weak" not in v.members
+    # 外した種は候補に戻さない: 親で C を見ている fillC を外すと、最良の候補は fillC 自身だが戻さず別の種を入れる。
+    # 親と同じ型の組は変種にしない (戻せる候補が無ければ変種なし)
+    ents3 = [W._entry("core1", "breaker", "core1_x", "lifeorb", False, {}),
+             W._entry("core2", "sweeper_setup", "core2_x", "sitrusberry", False, {}),
+             W._entry("fillC", "breaker", "fillC_x", "choicescarf", False, {}),
+             W._entry("fillD", "hazard_lead", "fillD_x", "focussash", False, {}),
+             W._entry("weak", "breaker", "weak_x", "leftovers", False, {}),
+             W._entry("sun", "sun_setter", "sun_x", "heatrock", False, {"weather": "sun"})]
+    combo3 = [s.lib.add(e) for e in ents3]
+    sc3, _ = s.score_of(combo3, [], cfg)
+    parent3 = s._finalize(sc3, combo3, {}, "C001", [], cfg)
+    diag3 = dict(diag, replace_candidates=["fillC"], vulnerable=[], must_cover=["C"], threat_species=["c1"], ko=[])
+    vs6 = RP.repair_variants(s, parent3, diag3, cfg, pool_species, W._roles_of, [], fixed={"core1", "core2"}, parent_id="L02_C001",
+                             round_no=2, max_changes=1, max_arms=6, boost=2.0, min_gain=0.001)
+    pkey = tuple(sorted(e.key for e in parent3.entries))
+    for v in vs6:
+        assert tuple(sorted(e.key for e in v.entries)) != pkey, "親と同じ変種は作らない"
+        if v.origin["variant"] == "A":
+            assert "fillC" not in v.members, "外した種を戻さない"
     # 点が上がる変種が無くても最良の 1 つは forced で測る
     vs4 = RP.repair_variants(s, parent, diag, cfg, pool_species, W._roles_of, [], fixed={"core1", "core2"}, parent_id="L01_C001",
                              round_no=1, max_changes=2, max_arms=6, boost=2.0, min_gain=10.0)
