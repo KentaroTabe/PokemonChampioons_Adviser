@@ -188,7 +188,9 @@ def repair_variants(search: LineupSearch, parent: LineupResult, diag: dict, cfg:
             rest = combo[:k] + combo[k + 1:]
             sc0, _ = search.score_of(rest, required, cfg)
             mega_id = ace or (stone_holder if stone_holder != out_sid else None)
-            ext = search._extend([(sc0, rest, {})], cfg_r, species_pool, roles_of, required, cfg.speed_plan, mega_id, 2, ace)
+            # 外した種は候補に戻さない (2026-10-03: 外したヒスイヌメルゴンが同じ型で戻り、親と同じ並びの変種ができた)
+            cfg_x = replace(cfg_r, banned=frozenset(set(cfg_r.banned) | {out_sid}))
+            ext = search._extend([(sc0, rest, {})], cfg_x, species_pool, roles_of, required, cfg.speed_plan, mega_id, 2, ace)
             for sc, new, _fills in ext:
                 in_e = search.lib.entries[new[-1]]
                 item = (sc, new, "A", [{"out": out_sid, "in": in_e.species_id, "to": _set_summary(in_e.cand)}])
@@ -200,9 +202,10 @@ def repair_variants(search: LineupSearch, parent: LineupResult, diag: dict, cfg:
             rest = [i for j, i in enumerate(combo) if j not in ks]
             sc0, _ = search.score_of(rest, required, cfg)
             mega_id = ace or (stone_holder if stone_holder not in repl[:2] else None)
+            cfg_x = replace(cfg_r, banned=frozenset(set(cfg_r.banned) | set(repl[:2])))
             beam = [(sc0, rest, {})]
             for _slot in range(2):
-                beam = search._extend(beam, cfg_r, species_pool, roles_of, required, cfg.speed_plan, mega_id, 1, ace)
+                beam = search._extend(beam, cfg_x, species_pool, roles_of, required, cfg.speed_plan, mega_id, 1, ace)
                 if not beam:
                     break
             for sc, new, _fills in beam:
@@ -219,7 +222,7 @@ def repair_variants(search: LineupSearch, parent: LineupResult, diag: dict, cfg:
         forced = True
     found.sort(key=lambda x: -x[0])
     out: list = []
-    seen: set = set()
+    seen: set = {tuple(sorted(e.key for e in parent.entries))}        # 親と同じ型の組は変種にしない
     summary = {"must_cover": diag.get("must_cover"), "threat_species": diag.get("threat_species"), "ko": diag.get("ko"),
                "replace_candidates": diag.get("replace_candidates"), "notes": diag.get("notes")}
     for sc_boost, new, kind, changes in found:
