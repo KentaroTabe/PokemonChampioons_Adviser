@@ -230,11 +230,16 @@ def role_fulfillment(entries: list, required: list) -> float:
     return 1.0 - len(unmet_roles(entries, required)) / tot
 
 
-def constraints_ok(entries: list, ace: Optional[str], max_stones: int) -> tuple:
-    """並びの制約 (§5.4): 持ち物の一意性、メガ石の上限 (エース指定ならエースだけ)。戻り値 (OK, 理由)"""
+def constraints_ok(entries: list, ace: Optional[str], max_stones: int, base_of: Optional[Callable] = None) -> tuple:
+    """並びの制約 (§5.4): 持ち物の一意性、メガ石の上限 (エース指定ならエースだけ)、同じ種 (Species Clause: base_of(種 id) が同じ
+    フォルム違い、例 ヌメルゴン と ヒスイヌメルゴン) を 2 体入れない。戻り値 (OK, 理由)"""
     items = [e.item for e in entries if e.item]
     if len(items) != len(set(items)):
         return False, "持ち物の重複"
+    if base_of is not None:
+        bases = [base_of(e.species_id) for e in entries]
+        if len(bases) != len(set(bases)):
+            return False, "同じ種 (Species Clause)"
     stones = [e for e in entries if e.stone]
     if ace:
         if any(e.species_id != ace for e in stones):
@@ -341,6 +346,7 @@ class SearchConfig:
     hole_weight: float = BUILD_LINEUP_HOLE_WEIGHT
     field_penalty: float = BUILD_WEATHER_CONFLICT_PENALTY
     role_bonus: float = BUILD_ROLE_FULFIL_BONUS
+    base_of: Optional[Callable] = None       # 種 id → Species Clause の同一視キー (図鑑番号)。None なら種 id そのもの
 
 
 class LineupSearch:
@@ -420,7 +426,9 @@ class LineupSearch:
             hole_species = self.pool.species_of_families(holes)
             unmet = unmet_roles(entries, required)
             tfield = team_field_from(entries)
-            cands = [s for s in species_pool if s not in members and s not in cfg.banned]
+            bases = {cfg.base_of(s) for s in members} if cfg.base_of else set(members)
+            cands = [s for s in species_pool if s not in members and s not in cfg.banned
+                     and (cfg.base_of(s) if cfg.base_of else s) not in bases]
             cands = self.prefilter(cands, hole_species, unmet, cfg.species_k) if self.prefilter else cands[:cfg.species_k]
             tried: list = []
             for sid in cands:
@@ -428,7 +436,7 @@ class LineupSearch:
                 roles = list(dict.fromkeys(unmet + list(roles_of(sid))))
                 for i in self.entries_for(sid, roles, used, allowed, tfield, speed_plan):
                     e = self.lib.entries[i]
-                    ok, _why = constraints_ok(entries + [e], ace, cfg.max_stones)
+                    ok, _why = constraints_ok(entries + [e], ace, cfg.max_stones, cfg.base_of)
                     if not ok:
                         continue
                     new = combo + [i]
@@ -478,7 +486,7 @@ class LineupSearch:
         for combo in itertools.product(*per_species):
             idxs = list(combo) + list(fixed)
             entries = [self.lib.entries[i] for i in idxs]
-            ok, _why = constraints_ok(entries, cfg.ace, cfg.max_stones)
+            ok, _why = constraints_ok(entries, cfg.ace, cfg.max_stones, cfg.base_of)
             if not ok:
                 continue
             sc, _info = self.score_of(idxs, required, cfg)
@@ -577,7 +585,7 @@ class LineupSearch:
                 if i == combo[k]:
                     continue
                 trial = combo[:k] + [i] + combo[k + 1:]
-                ok, _why = constraints_ok([self.lib.entries[x] for x in trial], cfg.ace, cfg.max_stones)
+                ok, _why = constraints_ok([self.lib.entries[x] for x in trial], cfg.ace, cfg.max_stones, cfg.base_of)
                 if not ok:
                     continue
                 sc, _ = self.score_of(trial, required, cfg)

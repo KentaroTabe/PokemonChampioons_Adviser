@@ -463,6 +463,21 @@ def registered_entries(reg_text: str, log: Optional[Callable] = None) -> list:
     return out if len(out) == TEAM_SIZE else []
 
 
+def make_base_of() -> Callable:
+    """種 id → Species Clause の同一視キー (advisor の図鑑の図鑑番号。無ければ種 id)。ヌメルゴン と ヒスイヌメルゴン は同じ 706
+    (2026-10-03: 両方入った並びが validate-team で落ちた)"""
+    from advisor.dex import get_dex
+    dex = get_dex()
+    cache: dict = {}
+
+    def base_of(sid: str) -> str:
+        if sid not in cache:
+            num = (dex.species(sid) or {}).get("num")
+            cache[sid] = f"num:{num}" if num else sid
+        return cache[sid]
+    return base_of
+
+
 def load_json(p: Path):
     try:
         return json.loads(Path(p).read_text(encoding="utf-8"))
@@ -488,7 +503,7 @@ def build_search(spec, feats: dict, tv: dict, threat_weights: dict, split: dict,
     species_pool = [s for s in feats if s not in banned]
     rule_field = RU.rule_field(rule_names) if rule_names else {}
     cfg = SearchConfig(ace=(spec.ace or None), favorites=tuple(spec.favorites), banned=frozenset(banned),
-                       required_roles=rule_roles(rule_field), rule_field=dict(rule_field))
+                       required_roles=rule_roles(rule_field), rule_field=dict(rule_field), base_of=make_base_of())
     return SimpleNamespace(pool=pool, search=search, roles_of=roles_of, capable=capable, species_pool=species_pool, cfg=cfg,
                            custom=custom, tv=tv, threat_weights=threat_weights, fams=[])
 

@@ -158,7 +158,7 @@ def repair_variants(search: LineupSearch, parent: LineupResult, diag: dict, cfg:
                 if i == combo[k]:
                     continue
                 trial = combo[:k] + [i] + combo[k + 1:]
-                if not constraints_ok([search.lib.entries[x] for x in trial], cfg.ace, cfg.max_stones)[0]:
+                if not constraints_ok([search.lib.entries[x] for x in trial], cfg.ace, cfg.max_stones, cfg.base_of)[0]:
                     continue
                 sc, _ = search.score_of(trial, required, cfg)
                 if best is None or sc > best[0]:

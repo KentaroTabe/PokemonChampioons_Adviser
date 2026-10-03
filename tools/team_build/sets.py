@@ -471,13 +471,75 @@ def resolve_item_clause(team: list, item_usage: dict, usage_pct: Optional[dict] 
     return out
 
 
+def parse_sim_species(text: str) -> dict:
+    """pokedex.ts の本文 → {species_id: num} (1 タブの `id: {` ブロックと直後の num 行。純粋)"""
+    import re
+    out: dict = {}
+    cur = None
+    for line in text.splitlines():
+        m = re.match(r"^\t(\w+): \{", line)
+        if m:
+            cur = m.group(1)
+            continue
+        if cur is None or not line.startswith("\t\t"):
+            continue
+        m = re.match(r"^\t\tnum: (-?\d+)", line)
+        if m and cur not in out:
+            out[cur] = int(m.group(1))
+    return out
+
+
+def resolve_sim_species(species_id: str, num: Optional[int], table: dict) -> str:
+    """advisor の図鑑の種 id → シム (Showdown) の種 id (純粋)。シムに同じ id があればそのまま。無ければ同じ図鑑番号の id のうち
+    先頭の一致が最も長いもの (同じなら短い方): indeedeemale → indeedee、taurospaldeablazebreed → taurospaldeablaze。
+    図鑑番号が無い / 候補が無ければそのまま"""
+    if not species_id or species_id in table:
+        return species_id
+    if num is None:
+        return species_id
+    cands = [sid for sid, n in table.items() if n == num]
+    if not cands:
+        return species_id
+
+    def common(a: str, b: str) -> int:
+        k = 0
+        while k < min(len(a), len(b)) and a[k] == b[k]:
+            k += 1
+        return k
+    return sorted(cands, key=lambda s: (-common(s, species_id), len(s), s))[0]
+
+
+@lru_cache(maxsize=1)
+def sim_species_table() -> dict:
+    """シムの種 id → 図鑑番号 (pokemon-showdown/data/pokedex.ts。読めなければ空 = 変換しない)"""
+    p = Path(__file__).resolve().parents[2] / "pokemon-showdown" / "data" / "pokedex.ts"
+    try:
+        return parse_sim_species(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def sim_species_id(species_id: str) -> str:
+    """advisor の図鑑の種 id をシムの種 id に (本文の書き出し用。2026-10-03: indeedeemale / taurospaldeablazebreed が
+    validate-team で "does not exist" になった)"""
+    table = sim_species_table()
+    if not table or species_id in table:
+        return species_id
+    try:
+        from advisor.dex import get_dex
+        num = (get_dex().species(species_id) or {}).get("num")
+    except Exception:
+        num = None
+    return resolve_sim_species(species_id, num, table)
+
+
 def to_showdown_text(team: list, level: int = 50) -> str:
-    """[SetCandidate] → Showdown 形式 (能力ポイント表記のまま EVs 行に書く: 既存ツールと同じ規約)"""
+    """[SetCandidate] → Showdown 形式 (能力ポイント表記のまま EVs 行に書く: 既存ツールと同じ規約)。種はシムの id で書く"""
     from tools.evaluate_team import build_team_text  # noqa: F401  (規約の参照)
     stat_names = ["HP", "Atk", "Def", "SpA", "SpD", "Spe"]
     blocks = []
     for c in team:
-        head = c.species_id + (f" @ {c.item}" if c.item else "")
+        head = sim_species_id(c.species_id) + (f" @ {c.item}" if c.item else "")
         lines = [head, f"Level: {level}"]
         if c.ability:
             lines.append(f"Ability: {c.ability}")
