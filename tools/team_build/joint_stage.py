@@ -238,6 +238,18 @@ def branch_roles_of(concept: dict, archetypes: Optional[dict] = None) -> list:
     return out
 
 
+def role_for_required(role: str, required_moves: list, is_setup: Callable, fallback: str = "sweeper_setup") -> str:
+    """技の指定に積み技がある種の役割 (純粋): 求められた役割の雛形が攻撃役でなければ積みエース (fallback) にする。
+    攻撃役の役割 (breaker / setup_ace / 天候・フィールドのエース等) や未知の役割、積み技の指定が無い種はそのまま"""
+    if not any(is_setup(m) for m in (required_moves or [])):
+        return role
+    try:
+        _tname, template, _f = template_of(role)
+    except KeyError:
+        return role
+    return role if template.get("offensive", True) else fallback
+
+
 def to_lineup(r: LineupResult) -> C.Lineup:
     return C.Lineup(tuple(r.members), r.concept, float(r.score), dict(r.parts), tag=r.tag, origin=dict(r.origin))
 
@@ -469,14 +481,17 @@ def make_prefilter(feats: dict, threat_weights: dict, capable: Callable, role_k:
 
 
 def make_candidates_fn(tv: dict, threat_weights: dict, snapshot_id: Optional[int], custom_sets: dict,
-                       log: Optional[Callable] = None) -> Callable:
+                       log: Optional[Callable] = None, required_moves: Optional[dict] = None) -> Callable:
     """candidates_fn(sid, role, used_items, mega_allowed, team_field, speed_plan) → [SetEntry]。
     指定の型の種はその型だけ (役割は逆引き)。それ以外は役割の雛形の型 (≤ BUILD_SET_CANDIDATES_PER_ROLE) + 代表型 (合成の印、
-    役割が一致するときだけ)。(種, 役割, メガ可否, 場, 速度計画) でキャッシュし、持ち物が全部使用済みのときだけ使用済みを除いて作り直す"""
+    役割が一致するときだけ)。(種, 役割, メガ可否, 場, 速度計画) でキャッシュし、持ち物が全部使用済みのときだけ使用済みを除いて作り直す。
+    required_moves = 技の指定 {種: [技]} (--moves)。その種の雛形の型には必ず入れ、代表型は指定の技を全部持つときだけ候補にする
+    (2026-10-04: 同時探索は技の指定を見ていなかった)"""
     from champions_agent.data import database as db
     from tools.team_build import gen_sets as G
     from tools.team_build.role_sets import RoleContext, generate_role_sets
     log = log or (lambda m: None)
+    req_of = {sid: list(mv) for sid, mv in (required_moves or {}).items() if mv}
     cache: dict = {}
     usage: dict = {}
     locked: dict = {}
@@ -504,6 +519,8 @@ def make_candidates_fn(tv: dict, threat_weights: dict, snapshot_id: Optional[int
             return None
         if S.has_mega_stone(rep.item) and not mega_allowed:
             return None
+        if req_of.get(sid) and not set(req_of[sid]) <= set(rep.moves or []):
+            return None                                  # 技の指定を満たさない代表型は候補にしない
         rrole = infer_role(rep, cat_of, lambda m: m in setup_moves, G.own_field)
         if not role_matches(rrole, role):
             return None
@@ -520,7 +537,10 @@ def make_candidates_fn(tv: dict, threat_weights: dict, snapshot_id: Optional[int
         tgt = [t for t in (targets or []) if t in tv] or None
         ctx = RoleContext(threat_views=tv, weights=dict(threat_weights), targets=tgt, team_field=dict(team_field),
                           speed_plan=speed_plan, used_items=set(used_items), mega_allowed=mega_allowed, item_pct=item_pct,
-                          move_pct=move_pct, ability_pct=ability_pct)
+                          move_pct=move_pct, ability_pct=ability_pct, required_moves=list(req_of.get(sid) or []))
+        # 技の指定に積み技がある種は積み役として作る: 補助・受けの役割 (交代役 / 受け 等) を求められても積みエースの雛形にする
+        # (2026-10-04: つるぎのまい + バトンタッチ指定のバシャーモに、交代役の雛形で ねむる + カゴのみ の型ができた)
+        role = role_for_required(role, req_of.get(sid) or [], lambda m: m in setup_moves)
         try:
             sets = generate_role_sets(sid, role, ctx)
         except Exception as e:
@@ -626,7 +646,8 @@ def build_search(spec, feats: dict, tv: dict, threat_weights: dict, split: dict,
     roles_of = make_roles_of(info)
     capable = make_capable(info, field_of)
     row_fn = make_row_fn()
-    search = LineupSearch(pool, make_candidates_fn(tv, threat_weights, snapshot_id, custom, log), row_fn,
+    search = LineupSearch(pool, make_candidates_fn(tv, threat_weights, snapshot_id, custom, log,
+                                                   required_moves=dict(getattr(spec, "required_moves", None) or {})), row_fn,
                           make_prefilter(feats, threat_weights, capable), log, capable=capable, row_post=make_row_post(row_fn))
     banned = set(spec.banned)
     species_pool = [s for s in feats if s not in banned]

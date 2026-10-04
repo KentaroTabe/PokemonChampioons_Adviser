@@ -304,6 +304,13 @@ def test_variant_arm_production():
     assert P._variant_arm(base, "teampreview", {}, None).pick_policy == "teampreview"  # 既存 variant は不変
     assert P.best_by_win_rate({"teampreview": 0.757, "cheap": 0.72, "production": 0.848, "fresh": 0.83},
                               ("teampreview", "generic", "cheap", "production", "fresh")) == "production"
+    # 選出計画は advisor 方策の variant に引き継ぐ (teampreview は相性順だけなので渡さない)。計画の無い腕 (参照) は None のまま
+    cand = R.Arm("L05_C005", Path("/c.txt"), None, "/pins", plan_file="/runs/x/s06_sets/L05_C005.plan.json")
+    assert P._variant_arm(cand, "cheap", {"L05_C005": "/m.pt"}, None).plan_file == cand.plan_file
+    assert P._variant_arm(cand, "generic", {}, "/g.pt").plan_file == cand.plan_file
+    assert P._variant_arm(cand, "fresh", {"L05_C005": "/f.pt"}, None).plan_file == cand.plan_file
+    assert P._variant_arm(cand, "teampreview", {}, None).plan_file is None
+    assert P._variant_arm(base, "production", {}, None, production_path="/p.pt").plan_file is None
     print("test_variant_arm_production OK")
 
 

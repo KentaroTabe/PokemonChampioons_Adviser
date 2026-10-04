@@ -58,8 +58,11 @@ class Lineup:
     origin: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
+        # parts は数値だけ丸める (同時探索は補助の種類の文字列 utility_kinds も入れる。2026-10-04: 文字列を round して
+        # s05_candidates.json の書き出しで TypeError になった)
         d = {"members": list(self.members), "concept": self.concept, "score": round(self.score, 4),
-             "parts": {k: round(v, 4) for k, v in self.parts.items()}, "tag": self.tag}
+             "parts": {k: (round(v, 4) if isinstance(v, (int, float)) and not isinstance(v, bool) else v)
+                       for k, v in self.parts.items()}, "tag": self.tag}
         if self.origin:
             d["origin"] = dict(self.origin)
         return d

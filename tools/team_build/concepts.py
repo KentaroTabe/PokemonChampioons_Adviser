@@ -293,11 +293,17 @@ def generate_concepts(spec, feats: dict, threats: list, legal: set, mega_capable
             "rules": rules or [],
             # 指定エース (hard constraint): 全 concept の core_ids に含め、メガ石を持てるなら mega_id もエース (S4 検証 / S6 で機械的に保証)
             "ace": ace,
+            # 技の指定 (--moves、hard constraint): その種の型に必ず入る技。構想はこの技を前提に役割と相方を決める
+            # (2026-10-04: バシャーモ つるぎのまい + バトンタッチ の指定が LLM に伝わっていなかった)
+            "required_moves": {s: list(m) for s, m in (getattr(spec, "required_moves", None) or {}).items() if m},
             "constraints": " ".join(x for x in (
                 ("各 concept の core_ids には、rules ごとに setters から 1 体と aces から 1 体 (別個体) を必ず含める" if rules else ""),
                 ((f"エース {ace} をこの構築の勝ち筋の中心とし、各 concept の core_ids に必ず含める"
                   + ("。mega_id は必ずエース (この構築ではエースだけがメガ石を持ち、他のメンバーは持たない)" if ace_mega else ""))
                  if ace else ""),
+                ("required_moves の種はその技を必ず持つ (型の残りの枠は機械が決める)。その技を活かす役割と相方 "
+                 "(例: 積み技 + バトンタッチなら、能力変化を受け取って抜く受け取り役) を核と complement_requirements に反映する"
+                 if (getattr(spec, "required_moves", None) or {}) else ""),
             ) if x),
             # 役割の設計図 (§4.1): 核は種 + 役割、補完枠は種を書かず要件 (役割 + 見る相手) で書く。S5 統合段が役割の雛形から型を作る
             "role_vocabulary": ROLE_VOCABULARY_JA,

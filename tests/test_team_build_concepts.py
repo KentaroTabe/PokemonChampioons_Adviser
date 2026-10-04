@@ -82,6 +82,14 @@ def test_generate_with_mock_provider():
         assert len(list(Path(d).glob("s04_concepts_opus_*.json"))) == 2   # 全入出力を保存
         rec = json.loads(next(Path(d).glob("s04_concepts_opus_*.json")).read_text())
         assert rec["prompt_hash"] and rec["model"] == prov.model_for("s04_concepts", "opus") and rec["provider"] == "mock"
+        assert json.loads(rec["prompt"])["required_moves"] == {}                      # 技の指定が無ければ空
+    # 技の指定 (--moves) は LLM への入力に渡し、制約文にも書く (構想がその技を前提に役割と相方を決める)
+    spec_req = BuildSpec(owned=["a", "b", "c", "d"], favorites=["a"], required_moves={"a": ["swordsdance", "batonpass"]})
+    with tempfile.TemporaryDirectory() as d:
+        prov = MockProvider([good], log_dir=Path(d))
+        K.generate_concepts(spec_req, feats, th, legal, mega, provider=prov, rounds=1, per_round=1)
+        payload = json.loads(json.loads(next(Path(d).glob("s04_concepts_opus_*.json")).read_text())["prompt"])
+        assert payload["required_moves"] == {"a": ["swordsdance", "batonpass"]} and "required_moves" in payload["constraints"]
     # 不正出力 → 差し戻し → 再試行で通る
     bad = json.dumps({"authoritative": {"concepts": [{"name": "z", "core_ids": ["zzz", "a"], "win_condition": "nope"}]}})
     prov = MockProvider([bad, good])
