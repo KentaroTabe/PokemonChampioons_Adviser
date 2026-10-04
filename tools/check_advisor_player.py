@@ -61,7 +61,7 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
               opp_split: str | None = None, battle_log: str | None = None,
               pick_noise: float = 0.0, action_noise: float = 0.0,
               user_policy: str = "full", candidate_id: str | None = None,
-              opp_offset: int = 0) -> None:
+              opp_offset: int = 0, selection_plan: str | None = None) -> None:
     from poke_env import AccountConfiguration
     from poke_env.player import RandomPlayer
     import advisor.engine as eng
@@ -128,11 +128,16 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
             advisor_policy_id=(f"rl:{os.environ.get('CHAMPIONS_MODELS_DIR', 'default')}"
                                f"|sel:{selection_model or 'default'}"),
             user_policy=user_policy, battle_seed=opp_seed, family_of=family_of)
+    plan = None
+    if selection_plan:
+        from tools.team_build.plan_prior import load_plan
+        plan = load_plan(selection_plan) or None
     player = make_advisor_player(
         team_source=own_tb, stats=stats, latencies=latencies,
         pick_policy=pick_policy, selection_model_path=selection_model,
         pick_noise=pick_noise, action_noise=action_noise, user_policy=user_policy,
         rng=random.Random((opp_seed or 0) + 7), recorder=recorder, opp_source=opp_team,
+        selection_plan=plan, family_of=family_of,
         account_configuration=AccountConfiguration(f"ADv{uid}", None),
         battle_format=TRAINING_BATTLE_FORMAT,
         server_configuration=TrainingServerConfiguration,
@@ -166,7 +171,7 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
             "belief_k": eng.BELIEF_K, "sensor_q": eng.SENSOR_Q_DEFAULT,
             "workers": eng.SEARCH_WORKERS, "search_blend": eng.SEARCH_BLEND,
             "team_file": team_file, "candidate_id": candidate_id,
-            "pick_policy": pick_policy, "selection_model": selection_model,
+            "pick_policy": pick_policy, "selection_model": selection_model, "selection_plan": selection_plan,
             "opp_split": split_info, "battle_log": battle_log,
             "pick_noise": pick_noise, "action_noise": action_noise, "user_policy": user_policy,
             "models_dir": os.environ.get("CHAMPIONS_MODELS_DIR"),
@@ -207,6 +212,8 @@ def main() -> None:
     ap.add_argument("--pick-policy", choices=["advisor", "teampreview"], default="advisor",
                     help="選出方策: advisor = 実助言と同じ選出モデル (既定) / teampreview = 相性順")
     ap.add_argument("--selection-model", default=None, help="候補専用の選出モデル (.pt)")
+    ap.add_argument("--selection-plan", default=None,
+                    help="構築の選出計画 (s06_sets/<cid>.plan.json)。advisor の選出でモデルの予測に計画の事前を足す (--opp-split が要る)")
     ap.add_argument("--opp-split", default=None,
                     help="相手列: opponent_families.json のパス:階層[:fold] (例 runs/x/opponent_families.json:selection)")
     ap.add_argument("--battle-log", default=None, help="対戦記録 (JSONL) の出力先")
@@ -232,7 +239,7 @@ def main() -> None:
                     opp_split=args.opp_split, battle_log=args.battle_log,
                     pick_noise=args.pick_noise, action_noise=args.action_noise,
                     user_policy=args.user_policy, candidate_id=args.candidate_id,
-                    opp_offset=args.opp_offset))
+                    opp_offset=args.opp_offset, selection_plan=args.selection_plan))
 
 
 if __name__ == "__main__":

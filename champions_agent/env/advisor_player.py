@@ -203,21 +203,27 @@ def pick_order_from_perm(perm, n: int) -> str:
     return "/team " + "".join(str(i + 1) for i in chosen + rest)
 
 
-def advisor_pick_order(battle, selection_model_path=None) -> Optional[str]:
-    """実助言と同じ選出: 選出モデル (候補専用モデルか、既定モデルで分布内のとき)。使えなければ None"""
+def advisor_pick_order(battle, selection_model_path=None, planned: Optional[list] = None) -> Optional[str]:
+    """実助言と同じ選出: 選出モデル (候補専用モデルか、既定モデルで分布内のとき)。使えなければ None。
+    planned = 構築の選出計画 (この相手の系統に出す 3 体)。あればモデルの予測勝率に計画の事前 (BUILD_PLAN_PRIOR_MIX) を足し、
+    モデルが使えないときは計画そのものを使う (tools.team_build.plan_prior)"""
     from champions_agent.agent import selection_dispatch as SD
     from champions_agent.agent import selection_model as sm
+    from tools.team_build.plan_prior import apply_plan_prior, plan_indices
     my = [p.species for p in battle.team.values()]
     opp_src = getattr(battle, "teampreview_opponent_team", None) or battle.opponent_team.values()
     opp = [p.species for p in opp_src]
     if len(my) < 3 or not opp:
         return None
-    if selection_model_path is None and not sm.is_in_distribution(my):
-        return None
-    path = Path(selection_model_path) if selection_model_path else SD.deployed_model_path()
-    scored = SD.score_all(my, opp, path)
+    plan_idx = plan_indices(planned, my) if planned else None
+    usable = selection_model_path is not None or sm.is_in_distribution(my)
+    scored = []
+    if usable:
+        path = Path(selection_model_path) if selection_model_path else SD.deployed_model_path()
+        scored = SD.score_all(my, opp, path)
     if not scored:
-        return None
+        return pick_order_from_perm(plan_idx, len(my)) if plan_idx else None
+    scored = apply_plan_prior(scored, plan_idx)
     return pick_order_from_perm(scored[0][0], len(my))
 
 
@@ -264,7 +270,8 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
                         pick_policy: str = "advisor", selection_model_path=None,
                         pick_noise: float = 0.0, action_noise: float = 0.0,
                         user_policy: str = "full", rng=None, recorder=None,
-                        opp_source=None, **player_kwargs):
+                        opp_source=None, selection_plan: Optional[dict] = None, family_of: Optional[dict] = None,
+                        **player_kwargs):
     """助言エンジンで戦う poke-env Player を作る。
 
     pick_policy: "advisor" = 実助言と同じ選出 (選出モデル、使えなければ相性順) /
@@ -273,6 +280,8 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
     pick_noise / action_noise: STRESS 用のノイズ (確率で乱択 / 2 位の手)
     user_policy: full / high / mixed / expert (遵守モデル、tools.team_build.user_model)
     recorder: tools.team_build.battle_log.BattleRecorder (対戦記録)。opp_source.last_id を相手 id に使う
+    selection_plan / family_of: 構築の選出計画 (plan.json の dict) と 相手 team_id → 系統 id。pick_policy advisor のとき
+        計画を選出モデルの初期値にする (plan_prior)。相手の系統は opp_source.last_id から引く
 
     team_source: last_text 属性を持つ Teambuilder (自分側の型登録に使う)。
     stats / latencies: 診断用の集計先 (省略可)。
@@ -341,8 +350,15 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
                 stats["pick_noise"] = stats.get("pick_noise", 0) + 1
                 return self.random_teampreview(battle)
             if pick_policy == "advisor":
+                planned = None
+                if selection_plan:
+                    from tools.team_build.plan_prior import plan_for_family
+                    fam = (family_of or {}).get(getattr(opp_source, "last_id", None))
+                    planned = plan_for_family(selection_plan, fam) or None
+                    if planned:
+                        stats["pick_plan_avail"] = stats.get("pick_plan_avail", 0) + 1
                 try:
-                    order = advisor_pick_order(battle, selection_model_path)
+                    order = advisor_pick_order(battle, selection_model_path, planned)
                 except Exception as e:
                     stats["pick_error"] = stats.get("pick_error", 0) + 1
                     stats["last_pick_error"] = repr(e)

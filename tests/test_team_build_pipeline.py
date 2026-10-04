@@ -239,6 +239,59 @@ def test_import_lineups():
     print("test_import_lineups OK")
 
 
+def test_identical_reference_and_repair_parents():
+    """参照と同一の候補は腕にしない、修理の親 (同一 → 参照の記録 / 生存の上位 / 探索の並びの Δ 上位)、本番モデルの弱さ (純粋)"""
+    import tempfile
+    from pathlib import Path
+    from tools.team_build import pipeline as PL
+    from tools.team_build import racing as R
+    a = "Dragonite @ Choice Scarf\nAbility: Multiscale\nLevel: 50\nAdamant Nature\nEVs: 4 HP / 252 Atk / 252 Spe\n- Outrage\n- Earthquake\n\n" \
+        "Tinkaton @ Leftovers\nAbility: Mold Breaker\nLevel: 50\nCareful Nature\nEVs: 252 HP / 4 Atk / 252 SpD\n- Gigaton Hammer\n- Stealth Rock\n"
+    b = "Tinkaton @ Leftovers\nAbility: Mold Breaker\nLevel: 50\nCareful Nature\nEVs: 252 HP / 4 Atk / 252 SpD\n- Stealth Rock\n- Gigaton Hammer\n\n" \
+        "Dragonite @ Choice Scarf\nAbility: Multiscale\nLevel: 50\nAdamant Nature\nEVs: 4 HP / 252 Atk / 252 Spe\n- Earthquake\n- Outrage\n"
+    c = a.replace("Choice Scarf", "Lum Berry")
+    assert PL.same_team(a, a) and not PL.same_team(a, c) and not PL.same_team("", "") and not PL.same_team(a, "")
+    with tempfile.TemporaryDirectory() as td:
+        pa, pc = Path(td) / "a.txt", Path(td) / "c.txt"
+        pa.write_text(a, encoding="utf-8")
+        pc.write_text(c, encoding="utf-8")
+        arms = [R.Arm("L00_INC", pa), R.Arm("L01_C001", pc), R.Arm("L02_X", Path(td) / "missing.txt")]
+        keep, same = PL.split_identical(arms, a)
+        assert [x.arm_id for x in same] == ["L00_INC"] and [x.arm_id for x in keep] == ["L01_C001", "L02_X"]
+    # 修理の親
+    res = {"arms": [
+        {"arm_id": "L00_INC@teampreview", "result": {"mean": 0.10}}, {"arm_id": "L00_INC@cheap", "result": {"mean": 0.14}},
+        {"arm_id": "L01_INC@cheap", "result": {"mean": 0.01}},
+        {"arm_id": "L05_C005@teampreview", "result": {"mean": -0.20}, "eliminated_at": 300},
+        {"arm_id": "L05_C005@cheap", "result": {"mean": -0.08}, "eliminated_at": 300},
+        {"arm_id": "L76_C066@cheap", "result": {"mean": -0.15}, "eliminated_at": 300},
+        {"arm_id": "L03_C001-R1A1@cheap", "result": {"mean": -0.05}, "eliminated_at": 300},
+        {"arm_id": "L09_old@cheap", "result": {"mean": 0.3}}]}
+    rows_by = {"L00_INC": {"roles": {"x": "breaker"}, "tag": "incumbent"}, "L01_INC": {"roles": {"x": "breaker"}, "tag": "incumbent_mut"},
+               "L05_C005": {"roles": {"x": "breaker"}, "tag": "concept"}, "L76_C066": {"roles": {"x": "breaker"}, "tag": "best"},
+               "L03_C001-R1A1": {"roles": {"x": "breaker"}, "tag": "repair"}, "L09_old": {"tag": "concept"}}
+    chosen = {"L01_INC": {"arm_id": "L01_INC@cheap"}}
+    parents = PL.repair_parents(res, ["L01_INC"], rows_by, identical=["L00_INC"], n_main=2, n_explore=1, chosen=chosen)
+    assert parents == [("L00_INC", ["reference"]), ("L01_INC", ["L01_INC@cheap"]), ("L05_C005", ["L05_C005@teampreview", "L05_C005@cheap"])], parents
+    # 探索の並びは脱落していても Δ 上位 (L05 −0.08 > L76 −0.15)、修理の変種と役割の無い行は親にしない、variant を束ねない設定なら選んだ腕だけ
+    parents2 = PL.repair_parents(res, ["L01_INC"], rows_by, identical=[], n_main=1, n_explore=2, pool_variants=False, chosen=chosen)
+    assert parents2 == [("L01_INC", ["L01_INC@cheap"]), ("L05_C005", ["L05_C005@teampreview"]), ("L76_C066", ["L76_C066@cheap"])], parents2
+    assert PL.best_delta_by_team(res)["L05_C005"] == -0.08 and PL.arms_of_team(res, "L00_INC") == ["L00_INC@teampreview", "L00_INC@cheap"]
+    # 本番の選出モデルが現行チームで弱い
+    gap = PL.reference_production_gap({"teampreview": 0.6, "production": 0.417, "fresh": 0.73}, threshold=0.1)
+    assert gap and abs(gap["gap"] - 0.313) < 1e-6
+    assert PL.reference_production_gap({"production": 0.7, "fresh": 0.73}, threshold=0.1) is None
+    assert PL.reference_production_gap({"fresh": 0.73}, threshold=0.1) is None
+    # 系統ごとの較正
+    from tools.team_build.review_run import family_calibration
+    recs = [{"opponent_family_id": "F1", "won": i < 8} for i in range(10)] + [{"opponent_family_id": "F2", "won": i < 2} for i in range(10)] \
+        + [{"opponent_family_id": "F3", "won": i < 5} for i in range(10)] + [{"opponent_family_id": "F4", "won": True} for _ in range(2)]
+    cal = family_calibration({"F1": 0.9, "F2": 0.3, "F3": 0.6, "F4": 0.1}, recs, min_n=5)
+    assert cal["n_families"] == 3 and cal["spearman"] == 1.0 and cal["rows"][0]["family"] in ("F1", "F2", "F3")
+    assert family_calibration({}, recs)["spearman"] is None
+    print("test_identical_reference_and_repair_parents OK")
+
+
 def test_variant_arm_production():
     """参照の variant「production」(配布版の選出モデルを強制) は path があるときだけ作られ、advisor 方策になる"""
     from pathlib import Path
@@ -267,3 +320,4 @@ if __name__ == "__main__":
     test_screen_margin_analysis()
     test_collect_run_timeout_returns_code()
     test_surrogate_quality_metrics()
+    test_identical_reference_and_repair_parents()

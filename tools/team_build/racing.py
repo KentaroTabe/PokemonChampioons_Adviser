@@ -36,6 +36,7 @@ class Arm:
     models_dir: Optional[str] = None
     extra_args: list = field(default_factory=list)
     pick_policy: Optional[str] = None      # arm 固有の選出方策 (None なら round の指定に従う)
+    plan_file: Optional[str] = None        # 構築の選出計画 (s06_sets/<cid>.plan.json)。advisor の選出で計画の事前を足す
     outcomes: list = field(default_factory=list)
     n_done: int = 0
     state: str = UNCERTAIN
@@ -46,7 +47,7 @@ class Arm:
     def to_dict(self) -> dict:
         return {"arm_id": self.arm_id, "team_file": str(self.team_file), "selection_model": self.selection_model,
                 "models_dir": self.models_dir, "extra_args": self.extra_args, "pick_policy": self.pick_policy,
-                "n_done": self.n_done,
+                "plan_file": self.plan_file, "n_done": self.n_done,
                 "wins": int(sum(self.outcomes)), "win_rate": (sum(self.outcomes) / len(self.outcomes)) if self.outcomes else None,
                 "state": self.state, "result": self.result, "history": self.history,
                 "eliminated_at": self.eliminated_at}
@@ -63,6 +64,8 @@ def measure_cmd(arm: Arm, n: int, offset: int, seed: int, split_file: Path, tier
         cmd += ["--selection-model", arm.selection_model]
     if arm.models_dir:
         cmd += ["--models-dir", arm.models_dir]
+    if arm.plan_file and (arm.pick_policy or pick_policy) == "advisor":
+        cmd += ["--selection-plan", str(arm.plan_file)]
     cmd += list(arm.extra_args)
     return cmd
 

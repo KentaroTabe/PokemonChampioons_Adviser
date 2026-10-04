@@ -116,12 +116,15 @@ def _run(cmd: list, log_path: Path, timeout: int = 4 * 3600) -> int:
 
 def collect_chunk(team_file: Path, split_file: Path, out_npz: Path, n: int, seed: int, log_path: Path,
                   explore: float = 0.5, fold: Optional[int] = 0, tier: str = "search",
-                  timeout: Optional[int] = None) -> int:
-    """1 chunk 分の収集。timeout は戦数に比例 (BUILD_COLLECT_TIMEOUT_PER_1K)。無応答は RC_TIMEOUT"""
+                  timeout: Optional[int] = None, plan_file: Optional[str] = None) -> int:
+    """1 chunk 分の収集。timeout は戦数に比例 (BUILD_COLLECT_TIMEOUT_PER_1K)。無応答は RC_TIMEOUT。
+    plan_file = 構築の選出計画 (探索枠の一部で計画の 3 体を踏ませる)"""
     spec = f"{split_file}:{tier}" + (f":{fold}" if fold is not None else "")
     cmd = [sys.executable, "-m", "tools.collect_selection_data", "--battles", str(n), "--explore", str(explore),
            "--team-file", str(team_file), "--opp-split", spec, "--opp-seed", str(seed),
            "--out", str(out_npz)]
+    if plan_file and Path(plan_file).exists():
+        cmd += ["--selection-plan", str(plan_file)]
     if timeout is None:
         timeout = int(BUILD_COLLECT_TIMEOUT_PER_1K * max(1, n) / 1000)
     return _run(cmd, log_path, timeout=timeout)
@@ -141,11 +144,13 @@ def adapt_selection(candidate_id: str, team_file: Path, split_file: Path, out_di
                     min_battles: int = BUILD_ADAPT_MIN_BATTLES, chunk: int = CHUNK,
                     patience: int = BUILD_ADAPT_PATIENCE, eps_train: float = BUILD_ADAPT_EPS_TRAIN,
                     max_battles: int = MAX_BATTLES, log=print, registry=None,
-                    tiers: tuple = (("search", BUILD_FOLD_ADAPT),), keep_checkpoints: bool = False) -> dict:
+                    tiers: tuple = (("search", BUILD_FOLD_ADAPT),), keep_checkpoints: bool = False,
+                    plan_file: Optional[str] = None) -> dict:
     """候補 1 つの選出モデル適応。戻り値: {"model": path, "n_battles", "history", "stop_reason", "artifact_id"}
 
     tiers: 収集に使う (階層, fold) の列。chunk ごとに巡回する (S11 は SEARCH 全体 + SELECTION)。
     keep_checkpoints: 学習のたびに selection_model_n{N}.pt を残す (learning curve の測定用)
+    plan_file: 構築の選出計画 (s06_sets/<cid>.plan.json)。収集の探索枠で計画の選出を踏ませる
     """
     import shutil
     out_dir = Path(out_dir) / candidate_id
@@ -162,12 +167,12 @@ def adapt_selection(candidate_id: str, team_file: Path, split_file: Path, out_di
     while n_total < max_battles:
         tier, fold = tiers[(n_total // chunk) % len(tiers)]
         chunk_seed = seed + n_total // chunk
-        rc = collect_chunk(team_file, split_file, data, chunk, chunk_seed, log_path, fold=fold, tier=tier)
+        rc = collect_chunk(team_file, split_file, data, chunk, chunk_seed, log_path, fold=fold, tier=tier, plan_file=plan_file)
         if rc != 0:
             # 無応答や一時的な失敗 (validator の空理由 rejected 等) は seed を変えて 1 回だけやり直す
             log(f"[adapt:{candidate_id}] collect rc={rc} at n={n_total} → seed を変えて再試行")
             rc = collect_chunk(team_file, split_file, data, chunk, chunk_seed + BUILD_COLLECT_RETRY_SEED_OFFSET,
-                               log_path, fold=fold, tier=tier)
+                               log_path, fold=fold, tier=tier, plan_file=plan_file)
         if rc != 0:
             stop_reason = f"collect_failed(rc={rc})"
             break
@@ -195,7 +200,7 @@ def adapt_selection(candidate_id: str, team_file: Path, split_file: Path, out_di
             break
     result = {"candidate_id": candidate_id, "model": str(model) if model.exists() else None,
               "data": str(data), "n_battles": n_total, "history": history, "stop_reason": stop_reason,
-              "elapsed_s": round(time.time() - t0, 1), "artifact_id": None}
+              "elapsed_s": round(time.time() - t0, 1), "artifact_id": None, "plan_file": plan_file}
     if registry is not None and model.exists():
         try:
             row = registry.register("selection_model", model,

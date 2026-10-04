@@ -20,10 +20,11 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from champions_agent.config import (BUILD_BULK_POINTS_MIN, BUILD_DEMERIT_NEED_MIN, BUILD_FAST_POINTS_MIN, BUILD_GEN_EV_TUNE,
-                                    BUILD_ITEM_CLASSES,
+                                    BUILD_ITEM_CLASSES, BUILD_ITEM_FALLBACK, BUILD_LOCK_IMMUNE_DISCOUNT,
                                     BUILD_OHKO_BONUS, BUILD_OHKO_THREAT_MIN_W, BUILD_ROLE_ALIASES, BUILD_ROLE_FAST_SHARE,
                                     BUILD_ROLE_FIELD_MOVES, BUILD_ROLE_SPREADS, BUILD_ROLE_TEMPLATES, BUILD_ROLE_UTILITY_MOVES,
-                                    BUILD_SET_CANDIDATES_PER_ROLE, BUILD_TYPE_ITEMS, BUILD_WALL_SPEED_MAX, BUILD_WEATHER_ROCKS)
+                                    BUILD_SET_CANDIDATES_PER_ROLE, BUILD_TYPE_ITEMS, BUILD_WALL_FAST_BULK_MIN, BUILD_WALL_SPEED_MAX,
+                                    BUILD_WEATHER_ROCKS)
 from tools.team_build.sets import SetCandidate
 
 WEATHERS = ("sun", "rain", "sand", "snow")
@@ -92,16 +93,81 @@ def classify_bulk(evs: str, item: Optional[str] = None, template_spread: str = "
     return "bulky"
 
 
-def spread_keeps_class(evs: str, bulk: str, bulk_min: int = BUILD_BULK_POINTS_MIN, fast_min: int = BUILD_FAST_POINTS_MIN) -> bool:
+def spread_keeps_class(evs: str, bulk: str, bulk_min: int = BUILD_BULK_POINTS_MIN, fast_min: int = BUILD_FAST_POINTS_MIN,
+                       offensive: bool = False, main_stat: Optional[str] = None) -> bool:
     """微調整した配分が雛形の性格を保つか (純粋): 速攻は素早さと主攻撃 (攻撃か特攻の大きい方) が fast_min 以上、
-    耐久は HP か防御側のどれかが bulk_min 以上"""
+    耐久は HP か防御側のどれかが bulk_min 以上。攻撃役 (offensive) は耐久側でも主攻撃 (main_stat。無ければ大きい方) が
+    fast_min 以上 (2026-10-04: 保護が耐久側しか見ておらず、攻撃役で主攻撃 24 未満の型が 22、グソクムシャは攻撃 0 だった)"""
     try:
         hp, at, de, sa, sd, sp = [int(x) for x in (evs or "").split("/")]
     except ValueError:
         return False
+    main = {"atk": at, "spa": sa}.get(main_stat or "", max(at, sa))
+    if offensive and main < fast_min:
+        return False
     if bulk == "fast":
         return sp >= fast_min and max(at, sa) >= fast_min
     return hp >= bulk_min or de >= bulk_min or sd >= bulk_min
+
+
+def bulk_product(base: dict) -> int:
+    """種族値の耐久 (HP × 防御 と HP × 特防 の大きい方)。役割の適性と壁の例外に使う (純粋)"""
+    hp = int(base.get("hp") or 0)
+    return max(hp * int(base.get("def") or 0), hp * int(base.get("spd") or 0))
+
+
+def wall_speed_ok(base: dict, speed_max: int = BUILD_WALL_SPEED_MAX, bulk_min: int = BUILD_WALL_FAST_BULK_MIN) -> bool:
+    """壁型の候補にできる速さか: 素早さ種族値が上限以下 (上限ちょうどは可: グライオン 95)、または耐久が十分 (純粋)"""
+    return int(base.get("spe") or 0) <= speed_max or bulk_product(base) >= bulk_min
+
+
+NATURE_MINUS = {"adamant": "spa", "jolly": "spa", "impish": "spa", "careful": "spa", "brave": "spe", "relaxed": "spe",
+                "quiet": "spe", "sassy": "spe", "modest": "atk", "timid": "atk", "bold": "atk", "calm": "atk",
+                "lonely": "def", "naughty": "spd", "mild": "def", "rash": "spd", "hasty": "def", "naive": "spd",
+                "lax": "spd", "gentle": "def"}
+
+
+def nature_fits_moves(nature: Optional[str], categories: list) -> bool:
+    """性格が下げる能力を攻撃技が使っていないか (純粋。ひかえめ + 物理技、おくびょう + でんこうせっか を作らない)"""
+    minus = NATURE_MINUS.get((nature or "").lower())
+    cats = {str(c).lower() for c in categories}
+    if minus == "atk" and "physical" in cats:
+        return False
+    if minus == "spa" and "special" in cats:
+        return False
+    return True
+
+
+def dominant_category(chosen: list, cat_of: dict, scored: dict, weights: dict) -> str:
+    """選んだ攻撃技の主分類 (純粋): 分類ごとに「その技が最良になる相手の重み」を足し、大きい方。同点は先頭の技の分類"""
+    tot = {"physical": 0.0, "special": 0.0}
+    for t, w in weights.items():
+        best = max(chosen, key=lambda m: scored.get(m, {}).get(t, 0.0), default=None)
+        if best is not None and scored.get(best, {}).get(t, 0.0) > 0:
+            tot[cat_of.get(best, "physical")] += float(w)
+    if tot["physical"] == tot["special"] and chosen:
+        return cat_of.get(chosen[0], "physical")
+    return "physical" if tot["physical"] >= tot["special"] else "special"
+
+
+def type_item_matches(item: Optional[str], move_types: list, type_items: dict = BUILD_TYPE_ITEMS) -> bool:
+    """タイプ強化の持ち物は、そのタイプの攻撃技が型にあるときだけ (純粋。ぎんのこなで虫技なし を作らない)"""
+    if not item:
+        return True
+    by_item = {v: k for k, v in type_items.items()}
+    if item not in by_item:
+        return True
+    return by_item[item] in set(move_types)
+
+
+def immune_share(move_type: Optional[str], targets: list, target_types: dict, weights: dict, effectiveness) -> float:
+    """担当のうち、その技のタイプを無効にする相手の重みの割合 (純粋)。effectiveness(type, [types]) → 倍率"""
+    if not move_type:
+        return 0.0
+    tot = sum(float(weights.get(t, 1.0)) for t in targets) or 1.0
+    imm = sum(float(weights.get(t, 1.0)) for t in targets
+              if effectiveness(move_type, list(target_types.get(t) or [])) == 0.0)
+    return imm / tot
 
 
 def effective_accuracy(entry: dict, has_field: Optional[dict] = None):
@@ -272,6 +338,9 @@ def pick_utility(kind: str, learnset: set, taken: list, ctx_prefs: dict, role_fi
                  pools: dict = BUILD_ROLE_UTILITY_MOVES) -> Optional[str]:
     """補助枠 1 つを埋める。kind は "a|b" で代替可。候補は役割の表の順 (状態異常は ctx_prefs["status_order"]、
     場は役割の場の技)。既に入っている技は除く"""
+    excl = set(ctx_prefs.get("exclude") or ())
+    cat_filter = ctx_prefs.get("category_of")          # priority: 型の分類と同じ技だけ (おくびょうにでんこうせっか を作らない)
+    want_cat = ctx_prefs.get("category")
     for k in kind.split("|"):
         if k == "field":
             cands = list(BUILD_ROLE_FIELD_MOVES.get(role_field or "", ()))
@@ -284,7 +353,9 @@ def pick_utility(kind: str, learnset: set, taken: list, ctx_prefs: dict, role_fi
         else:
             cands = list(pools.get(k, ()))
         for m in cands:
-            if m in learnset and m not in taken:
+            if m in learnset and m not in taken and m not in excl:
+                if k == "priority" and cat_filter is not None and want_cat and cat_filter(m) not in (want_cat, "", None):
+                    continue
                 return m
     return None
 
@@ -315,6 +386,9 @@ def pick_item(classes, category: str, stab_types: list, used: set, item_pct: dic
         out.extend(cands)
     if selfdrop_in_set and ability == "unburden" and legal("whiteherb") and "whiteherb" not in used and "whiteherb" not in out:
         out.insert(0, "whiteherb")
+    if not out:
+        # 雛形のクラスが並びで全部使用済み → 予備 (持ち物なしの型は作らない。2026-10-04: 持ち物なしが 8 型)
+        out = [c for c in BUILD_ITEM_FALLBACK if c not in used and legal(c)]
     if setup_in_set:
         out = [c for c in out if not c.startswith("choice")]        # こだわり + 積み技は作らない
     return out
@@ -425,8 +499,8 @@ def generate_role_sets(species_id: str, role: str, ctx: RoleContext) -> list:
         return []
     base = dict(sp["baseStats"])
     types = list(sp["types"])
-    if tname == "wall" and int(base.get("spe", 0)) >= BUILD_WALL_SPEED_MAX:
-        return []                                   # 速い種は壁型にしない (D-17)
+    if tname == "wall" and not wall_speed_ok(base):
+        return []                                   # 速い種は壁型にしない (D-17。耐久の高い種は例外)
     profile = _threat_profile(ctx)
     targets = profile["ids"]
     if not targets:
@@ -434,6 +508,7 @@ def generate_role_sets(species_id: str, role: str, ctx: RoleContext) -> list:
     weights = {t: float(ctx.weights.get(t, 1.0)) for t in targets}
     wmax = max(weights.values()) or 1.0
     norm_w = {t: w / wmax for t, w in weights.items()}
+    target_types = {t: list(getattr(ctx.threat_views[t][0], "types", None) or []) for t in targets}
     field_have = {"terrain": ctx.team_field.get("terrain"), "weather": ctx.team_field.get("weather")}
     if role_field in WEATHERS:
         field_have["weather"] = field_have["weather"] or WEATHER_FIELD_NAME[role_field]
@@ -572,7 +647,15 @@ def generate_role_sets(species_id: str, role: str, ctx: RoleContext) -> list:
         speed_order = ["trickroom"] + [m for m in speed_order if m != "trickroom"]
     elif ctx.speed_plan == "outspeed":
         speed_order = ["tailwind", "stickyweb", "thunderwave", "icywind", "electroweb"]
-    prefs = {"setup_order": setup_order, "status_order": status_order, "speed_control_order": speed_order}
+    offensive = bool(template.get("offensive", True))
+    exclude: set = set()
+    if offensive:
+        exclude.add("rest")             # 攻撃役の回復枠に ねむる を入れない (2026-10-04: 攻撃種のねむる + カゴのみが 37 型)
+    cat_of_move = lambda m: str((dex.move(m) or {}).get("category") or "").lower()   # noqa: E731
+    prefs = {"setup_order": setup_order, "status_order": status_order, "speed_control_order": speed_order,
+             "exclude": exclude, "category_of": cat_of_move, "category": (None if both else category)}
+    # 始動特性と同じ場の技を重ねない (コータスのひでり + にほんばれ): 自分の特性が張る場なら field 枠は満たしたとみなす
+    field_by_ability = bool(own.get("weather") or own.get("terrain"))
 
     # ---- 候補の組み立て: 補助枠 → 攻撃技 (積み技があれば上げた能力を下げる技を除く) → 持ち物 → 配分の微調整
     out: list = []
@@ -587,6 +670,14 @@ def generate_role_sets(species_id: str, role: str, ctx: RoleContext) -> list:
             if kind.split("|")[0] == "setup" and setup_choice:
                 taken.append(setup_choice)
                 notes.append(f"setup:{setup_choice}")
+                continue
+            if kind.split("|")[0] == "field" and field_by_ability:
+                notes.append(f"utility:field:ability:{ability}")      # 特性で張る (技は重ねない)。代替があればそれを埋める
+                alt = "|".join(kind.split("|")[1:])
+                m = pick_utility(alt, learnset, taken, prefs, role_field) if alt else None
+                if m is not None:
+                    taken.append(m)
+                    notes.append(f"utility:{alt}:{m}")
                 continue
             m = pick_utility(kind, learnset, taken, prefs, role_field)
             if m is None:
@@ -610,19 +701,60 @@ def generate_role_sets(species_id: str, role: str, ctx: RoleContext) -> list:
         if item and stone and item == stone:
             tbl_m = damage_table(attacker_view(item, nature0, evs), pool)
             use_scored = {m: {t: min(1.0, tbl_m[m].get(t, 0.0)) + bonus.get(m, {}).get(t, 0.0) for t in targets} for m in pool}
+        if item and item.startswith("choice"):
+            # こだわり + 数ターン固定の技 (げきりん等): 技に固定されている間に無効タイプの相手に交代されると何もできない。
+            # 担当のうちその技を無効にする相手の重みの割合だけ、その技の値を割り引く (BUILD_LOCK_IMMUNE_DISCOUNT)
+            adj: dict = {}
+            for m in pool:
+                if "locked" in attack_pool[m]["kinds"]:
+                    sh = immune_share(attack_pool[m]["type"], targets, target_types, norm_w, dex.effectiveness)
+                    if sh > 0:
+                        f = max(0.0, 1.0 - BUILD_LOCK_IMMUNE_DISCOUNT * sh)
+                        adj[m] = {t: v * f for t, v in use_scored[m].items()}
+                        notes.append(f"lock:{m}:immune_share={sh:.2f}")
+            if adj:
+                use_scored = dict(use_scored, **adj)
         chosen = G.greedy_attacks({m: use_scored[m] for m in pool}, n_attacks, norm_w)
         if len(chosen) < min(n_attacks, 1):
             return None
+        cur_category, cur_spread, cur_evs, cur_natures = category, spread_name, evs, natures
+        if both and chosen:
+            # 両分類の技を候補にした種: 選んだ技の主分類で性格・配分を決め、他方の分類の技は使わない (ひかえめにヘビーボンバー を作らない)
+            dom = dominant_category(chosen, {m: attack_pool[m]["cat"] for m in pool}, use_scored, norm_w)
+            if any(attack_pool[m]["cat"] != dom for m in chosen):
+                pool_d = [m for m in pool if attack_pool[m]["cat"] == dom]
+                chosen = G.greedy_attacks({m: use_scored[m] for m in pool_d}, n_attacks, norm_w)
+                if len(chosen) < min(n_attacks, 1):
+                    return None
+            if dom != category:
+                cur_category = dom
+                cat_s = "physical" if dom == "physical" else "special"
+                base_kind = spread_name.rsplit("_", 1)[0] if spread_name.endswith(("_physical", "_special")) else None
+                if base_kind in ("fast", "bulky", "tr", "tr_bulky"):
+                    cur_spread = f"{base_kind}_{cat_s}"
+                    cur_evs, cur_natures = BUILD_ROLE_SPREADS[cur_spread]
+                notes.append(f"category:{dom}")
         moves = chosen + taken
         if len(moves) > 4:
             moves = moves[:4]
-        nature = natures[0]
-        if len(natures) > 1 and bulk == "fast":
-            nature = natures[0] if fast_share() >= BUILD_ROLE_FAST_SHARE else natures[1]
+        nature = cur_natures[0]
+        if len(cur_natures) > 1 and bulk == "fast":
+            nature = cur_natures[0] if fast_share() >= BUILD_ROLE_FAST_SHARE else cur_natures[1]
         cats = [attack_pool[m]["cat"] for m in chosen]
-        if spread_name.startswith("wall"):
-            nature = G.wall_nature_for_moves(natures, cats, category == "physical")
-        c = SetCandidate(species_id, ability, item, nature, evs, moves, f"role:{role}", 0.0, notes)
+        if cur_spread.startswith("wall"):
+            nature = G.wall_nature_for_moves(cur_natures, cats, cur_category == "physical")
+        all_cats = cats + [cat_of_move(m) for m in taken if cat_of_move(m) in ("physical", "special")]
+        if not nature_fits_moves(nature, all_cats):
+            # 性格が下げる側の技が残る (補助枠の先制技など) → 下げない性格があればそれ、無ければこの候補は作らない
+            fit = [n for n in cur_natures if nature_fits_moves(n, all_cats)]
+            if not fit:
+                return None
+            nature = fit[0]
+        move_types = [attack_pool[m]["type"] for m in chosen]
+        if not type_item_matches(item, move_types):
+            return None                               # タイプ強化の持ち物はそのタイプの技があるときだけ (次の持ち物を試す)
+        evs_c, spread_c = cur_evs, cur_spread
+        c = SetCandidate(species_id, ability, item, nature, evs_c, moves, f"role:{role}", 0.0, notes)
         for m in chosen:
             notes.append(f"attack:{m}:{attack_pool[m]['tier']}" + (":" + "+".join(attack_pool[m]["kinds"]) if attack_pool[m]["kinds"] else ""))
         # 被覆 (担当の重みつき)
@@ -631,15 +763,17 @@ def generate_role_sets(species_id: str, role: str, ctx: RoleContext) -> list:
             best = max((use_scored[m].get(t, 0.0) for m in chosen), default=0.0)
             cov += norm_w[t] * min(1.0, best)
         c.score = round(cov / (sum(norm_w.values()) or 1.0), 4)
-        if BUILD_GEN_EV_TUNE and targets and ctx.speed_plan != "trick_room" and not spread_name.startswith("tr"):
+        notes[3] = f"spread:{spread_c}:{bulk}"
+        if BUILD_GEN_EV_TUNE and targets and ctx.speed_plan != "trick_room" and not spread_c.startswith("tr"):
             # 配分の微調整 (§11): 想定する相手 = 担当。定型より良い配分 (上を取る / 耐える / 倒す) があれば置き換える (注記 ev:tuned)。
             # 雛形の性格 (速攻 = 素早さと主攻撃に投資、耐久 = HP か防御側に投資) を壊す配分は採らない。トリックルーム計画は素早さ 0 のまま
             try:
                 tbl_for = (use_scored if use_scored is not scored else table)
                 tuned = G.tune_set_spread(c, base, types, ability, {t: ctx.threat_views[t] for t in targets}, norm_w, profile["speeds"],
-                                          attacker_view(item, nature, evs), {m: attack_pool[m]["cat"] for m in attack_pool},
+                                          attacker_view(item, nature, evs_c), {m: attack_pool[m]["cat"] for m in attack_pool},
                                           lambda fld: tbl_for, dex, team_field=field_have)
-                if tuned.evs != c.evs and spread_keeps_class(tuned.evs, bulk):
+                if tuned.evs != c.evs and spread_keeps_class(tuned.evs, bulk, offensive=offensive,
+                                                             main_stat=("atk" if cur_category == "physical" else "spa")):
                     c = tuned
             except Exception:
                 pass
@@ -659,8 +793,9 @@ def generate_role_sets(species_id: str, role: str, ctx: RoleContext) -> list:
             if c is None or c.key() in seen:
                 continue
             if "rest" in c.moves and "sleeptalk" not in c.moves and c.item != "chestoberry":
-                # ねむる単体は作らない: カゴのみに差し替える (§13。カゴが使用済み / 不合法なら候補にしない)
-                if "chestoberry" in ctx.used_items or not legal_item("chestoberry"):
+                # ねむる単体は作らない: 受け役ならカゴのみに差し替える (§13。カゴが使用済み / 不合法なら候補にしない)。
+                # 攻撃役は ねむる + カゴ の型を作らない (2026-10-04)
+                if offensive or "chestoberry" in ctx.used_items or not legal_item("chestoberry"):
                     continue
                 c = SetCandidate(c.species_id, c.ability, "chestoberry", c.nature, c.evs, list(c.moves), c.source, c.score,
                                  list(c.notes) + ["item:chestoberry:rest"])
