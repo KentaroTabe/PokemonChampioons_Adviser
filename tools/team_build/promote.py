@@ -44,11 +44,32 @@ def gate_check(reg: Registry, artifact_id: str) -> dict:
         ev = json.loads((final / "evaluation.json").read_text(encoding="utf-8")) if (final / "evaluation.json").exists() else {}
         if "ablation" not in ev:
             problems.append("ablation 表が無い")
-        runs = {r.get("run_id") for r in reg.list(kind="package") if (r.get("meta") or {}).get("candidate_id") == meta.get("candidate_id")
-                and ((r.get("meta") or {}).get("holdout") or {}).get("verdict") in ("PASS", "PASS_EQUIVALENT")}
+        runs = pass_runs_for_team(reg.list(kind="package"), meta)
         if len(runs) < BUILD_PROMOTE_MIN_FULL_RUNS:
-            problems.append(f"独立 full run の PASS が {len(runs)} 回 (必要 {BUILD_PROMOTE_MIN_FULL_RUNS})")
+            problems.append(f"独立 full run の PASS が {len(runs)} 回 (必要 {BUILD_PROMOTE_MIN_FULL_RUNS}。同じ 6 体の Package で数える)")
     return {"ok": not problems, "problems": problems, "status": row["status"], "kind": row["kind"]}
+
+
+def team_key(meta: dict) -> tuple:
+    """Package の同一性の鍵 = 6 体の種の集合 (candidate_id は run ごとに振り直されるので同じ並びの保証が無い。2026-10-05 判断 #24)"""
+    return tuple(sorted(str(s) for s in ((meta or {}).get("species") or [])))
+
+
+def pass_runs_for_team(packages: list, meta: dict) -> set:
+    """同じ 6 体の Package のうち holdout PASS の run_id の集合 (純粋)。species が無い古い Package は candidate_id で数える"""
+    key = team_key(meta)
+    out = set()
+    for r in packages or []:
+        m = r.get("meta") or {}
+        if (m.get("holdout") or {}).get("verdict") not in ("PASS", "PASS_EQUIVALENT"):
+            continue
+        if key:
+            same = bool(m.get("species")) and team_key(m) == key       # 6 体が確認できない Package は数えない
+        else:
+            same = m.get("candidate_id") == meta.get("candidate_id")
+        if same:
+            out.add(r.get("run_id"))
+    return out
 
 
 def banned_in_team_text(text: str, banned) -> list:

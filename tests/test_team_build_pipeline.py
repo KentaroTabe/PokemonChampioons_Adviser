@@ -292,6 +292,42 @@ def test_identical_reference_and_repair_parents():
     print("test_identical_reference_and_repair_parents OK")
 
 
+def test_plan_prior_variants_and_promotion_key():
+    """plan prior は既定 off: fresh の腕に計画を付けない。ab では fresh_plan の腕だけが計画を持ち、対応差を plan_ab_pairs で出す。
+    昇格の PASS 回数は candidate_id でなく 6 体の種で数える (判断 #24)"""
+    from pathlib import Path
+    from tools.team_build import pipeline as PL
+    from tools.team_build import racing as R
+    from tools.team_build.promote import pass_runs_for_team, team_key
+    base = R.Arm("L01_C001", Path("/tmp/x.txt"), None, "models", plan_file="/tmp/x.plan.json")
+    models = {"L01_C001": "/tmp/m.pt"}
+    off = PL._variant_arm(base, "fresh", models, None, plan_prior="off")
+    assert off is not None and off.plan_file is None and off.selection_model == "/tmp/m.pt"
+    on = PL._variant_arm(base, "fresh", models, None, plan_prior="on")
+    assert on.plan_file == "/tmp/x.plan.json"
+    assert PL._variant_arm(base, "fresh_plan", models, None, plan_prior="off") is None
+    ab = PL._variant_arm(base, "fresh_plan", models, None, plan_prior="ab")
+    assert ab is not None and ab.arm_id == "L01_C001@fresh_plan" and ab.plan_file == "/tmp/x.plan.json"
+    assert PL._variant_arm(base, "fresh", models, None, plan_prior="ab").plan_file is None
+    assert PL._variant_arm(base, "teampreview", models, None, plan_prior="on").plan_file is None
+    res = {"arms": [{"arm_id": "L01_C001@fresh", "result": {"mean": 0.10}}, {"arm_id": "L01_C001@fresh_plan", "result": {"mean": 0.14}},
+                    {"arm_id": "L02_C002@fresh", "result": {"mean": 0.0}}, {"arm_id": "L01_C001@teampreview", "result": {"mean": -0.1}}]}
+    pairs = PL.plan_ab_pairs(res)
+    assert pairs == {"L01_C001": {"delta_fresh": 0.10, "delta_fresh_plan": 0.14, "diff": 0.04}}
+    chosen = PL.choose_variants(res)
+    assert chosen["L01_C001"]["variant"] == "fresh_plan" and "plan_file" in chosen["L01_C001"]
+    # 昇格: 同じ 6 体 (candidate_id が違っても) の PASS を数える
+    pk = [{"run_id": "r1", "meta": {"candidate_id": "L00_INC", "species": ["a", "b", "c", "d", "e", "f"], "holdout": {"verdict": "PASS"}}},
+          {"run_id": "r2", "meta": {"candidate_id": "L03_C009", "species": ["f", "e", "d", "c", "b", "a"], "holdout": {"verdict": "PASS_EQUIVALENT"}}},
+          {"run_id": "r3", "meta": {"candidate_id": "L00_INC", "species": ["a", "b", "c", "d", "e", "g"], "holdout": {"verdict": "PASS"}}},
+          {"run_id": "r4", "meta": {"candidate_id": "L00_INC", "species": ["a", "b", "c", "d", "e", "f"], "holdout": {"verdict": "INCONCLUSIVE"}}},
+          {"run_id": "r5", "meta": {"candidate_id": "L00_INC", "holdout": {"verdict": "PASS"}}}]
+    assert pass_runs_for_team(pk, pk[0]["meta"]) == {"r1", "r2"}
+    assert pass_runs_for_team(pk, {"candidate_id": "L00_INC"}) == {"r1", "r3", "r5"}      # species の無い古い Package は id で
+    assert team_key({"species": ["b", "a"]}) == ("a", "b")
+    print("test_plan_prior_variants_and_promotion_key OK")
+
+
 def test_variant_arm_production():
     """参照の variant「production」(配布版の選出モデルを強制) は path があるときだけ作られ、advisor 方策になる"""
     from pathlib import Path
@@ -304,13 +340,15 @@ def test_variant_arm_production():
     assert P._variant_arm(base, "teampreview", {}, None).pick_policy == "teampreview"  # 既存 variant は不変
     assert P.best_by_win_rate({"teampreview": 0.757, "cheap": 0.72, "production": 0.848, "fresh": 0.83},
                               ("teampreview", "generic", "cheap", "production", "fresh")) == "production"
-    # 選出計画は advisor 方策の variant に引き継ぐ (teampreview は相性順だけなので渡さない)。計画の無い腕 (参照) は None のまま
+    # 選出計画は plan_prior=on のときだけ advisor 方策の variant に引き継ぐ (既定 off: 2026-10-05 判断 #25。teampreview は相性順だけ
+    # なので渡さない)。計画の無い腕 (参照) は None のまま
     cand = R.Arm("L05_C005", Path("/c.txt"), None, "/pins", plan_file="/runs/x/s06_sets/L05_C005.plan.json")
-    assert P._variant_arm(cand, "cheap", {"L05_C005": "/m.pt"}, None).plan_file == cand.plan_file
-    assert P._variant_arm(cand, "generic", {}, "/g.pt").plan_file == cand.plan_file
-    assert P._variant_arm(cand, "fresh", {"L05_C005": "/f.pt"}, None).plan_file == cand.plan_file
-    assert P._variant_arm(cand, "teampreview", {}, None).plan_file is None
-    assert P._variant_arm(base, "production", {}, None, production_path="/p.pt").plan_file is None
+    assert P._variant_arm(cand, "cheap", {"L05_C005": "/m.pt"}, None, plan_prior="on").plan_file == cand.plan_file
+    assert P._variant_arm(cand, "generic", {}, "/g.pt", plan_prior="on").plan_file == cand.plan_file
+    assert P._variant_arm(cand, "fresh", {"L05_C005": "/f.pt"}, None, plan_prior="on").plan_file == cand.plan_file
+    assert P._variant_arm(cand, "cheap", {"L05_C005": "/m.pt"}, None).plan_file is None          # 既定 off
+    assert P._variant_arm(cand, "teampreview", {}, None, plan_prior="on").plan_file is None
+    assert P._variant_arm(base, "production", {}, None, production_path="/p.pt", plan_prior="on").plan_file is None
     print("test_variant_arm_production OK")
 
 
@@ -328,3 +366,4 @@ if __name__ == "__main__":
     test_collect_run_timeout_returns_code()
     test_surrogate_quality_metrics()
     test_identical_reference_and_repair_parents()
+    test_plan_prior_variants_and_promotion_key()

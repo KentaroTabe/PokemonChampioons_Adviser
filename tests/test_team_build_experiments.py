@@ -130,8 +130,24 @@ def test_llm_audit():
     print("test_llm_audit OK")
 
 
+def test_learned_surrogate():
+    from tools.team_build.experiments import learned_surrogate as LS
+    def score(team, opp):
+        if opp == ["x"]:
+            return []
+        return [((0, 1, 2), 0.1 * len(set(team) & set(opp)))]
+    assert LS.learned_value(["a", "b", "c"], [["a", "b"], ["c"], ["x"]], score) == 0.15
+    assert LS.learned_value(["a"], [["x"]], score) is None
+    rows = [{"delta": 0.1, "learned": 0.6, "surrogate": 0.2}, {"delta": 0.0, "learned": 0.5, "surrogate": 0.9},
+            {"delta": -0.1, "learned": 0.4, "surrogate": 0.5}, {"delta": 0.2, "learned": None, "surrogate": 0.1}]
+    c = LS.compare_surrogates(rows)
+    assert c["n"] == 3 and c["spearman_learned"] == 1.0 and c["spearman_surrogate"] == -0.5
+    print("test_learned_surrogate OK")
+
+
 def main() -> None:
     test_calibration()
+    test_learned_surrogate()
     test_concept_origin()
     test_env_validity()
     test_llm_audit()

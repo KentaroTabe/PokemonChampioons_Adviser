@@ -940,6 +940,8 @@ def main() -> None:
                     help="途中で落ちた run の続き: S8a の結果と完了済みの適応 (adapt_result.json) を再利用する")
     ap.add_argument("--validate-n", type=int, default=None, help="S7 の checkpoint 検証の戦数 (既定 config)")
     ap.add_argument("--validate-max", type=int, default=None, help="S7 で検証する checkpoint 数 (既定 config)")
+    ap.add_argument("--plan-prior", choices=["off", "on", "ab"], default=None,
+                    help="選出計画を選出モデルの初期値にするか (既定 config BUILD_PLAN_PRIOR=off)。ab は S8b に fresh_plan の腕を足して対応比較")
     ap.add_argument("--repairs", type=int, default=None,
                     help="測定からの戻りの周回数 (S8a 後 / S8b 後の修理モード、docs/TEAM_BUILD_REDESIGN_1002.md §14)。"
                          "既定 config BUILD_REPAIR_ROUNDS。0 で無効")
@@ -1207,8 +1209,8 @@ def _measure(run_dir: Path, args) -> None:
     if subset is not None:
         log(run_dir, f"measure subset: {len(subset)} チーム {subset}")
     from champions_agent.config import (BUILD_ADAPT_VALIDATE_MAX_CKPTS, BUILD_ADAPT_VALIDATE_N, BUILD_FINALISTS,
-                                        BUILD_REFERENCE_FULL_ADAPT, BUILD_SCREEN_ADAPT_BATTLES, BUILD_SCREEN_MARGIN,
-                                        BUILD_SCREEN_MAX, BUILD_SCREEN_STEPS)
+                                        BUILD_PLAN_PRIOR, BUILD_REFERENCE_FULL_ADAPT, BUILD_SCREEN_ADAPT_BATTLES,
+                                        BUILD_SCREEN_MARGIN, BUILD_SCREEN_MAX, BUILD_SCREEN_STEPS)
     pm = PROFILE_MEASURE.get(getattr(args, "profile", "full"), PROFILE_MEASURE["full"])
     for key in ("race_max", "stress_n", "ablation_n", "max_candidates", "screen_adapt"):
         if getattr(args, key, None) is None and pm.get(key) is not None:
@@ -1238,7 +1240,8 @@ def _measure(run_dir: Path, args) -> None:
                     s11=(args.s11 == "on"), validate_n=args.validate_n or BUILD_ADAPT_VALIDATE_N,
                     validate_max=args.validate_max or BUILD_ADAPT_VALIDATE_MAX_CKPTS, resume=args.resume,
                     reference_full_adapt=(BUILD_REFERENCE_FULL_ADAPT if args.reference_adapt is None
-                                          else args.reference_adapt == "on"))
+                                          else args.reference_adapt == "on"),
+                    plan_prior=(args.plan_prior or BUILD_PLAN_PRIOR))
 
 
 if __name__ == "__main__":

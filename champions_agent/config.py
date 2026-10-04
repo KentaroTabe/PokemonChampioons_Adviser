@@ -654,9 +654,11 @@ BUILD_TRIO_MIX_BONUS = 0.03            # 3 体選出に攻撃役と補助・受�
 BUILD_SPECIES_SHARE_MAX = 0.5          # 保持する並びのうち同じ種が入る割合の上限 (固定枠・エースは除く。1003: カイリューが 79 並び全部に入った)
 BUILD_LOCK_IMMUNE_DISCOUNT = 0.5       # こだわり系 + 数ターン固定の技 (げきりん等) の型: その技を無効にする種が居る系統の相手への被覆を
                                        # この割合だけ割り引く (スカーフげきりんの技固定とフェアリー無効を計算が見ていなかった)
-BUILD_PLAN_PRIOR_MIX = 0.3             # 選出計画 (S5 の selection_plan) を選出モデルの初期値にする: 計画の 3 体と一致する選出の予測勝率に
-                                       # 足す重み (モデルが無い / 分布外のときは計画そのものを使う)
-BUILD_PLAN_EXPLORE_SHARE = 0.5         # cheap adaptation の収集で、探索枠 (--explore) のうち計画の選出を使う割合 (残りは乱択)
+BUILD_PLAN_PRIOR = "off"               # 選出計画 (S5 の selection_plan) を選出モデルの初期値にするか: off (既定、2026-10-05 ユーザー判断 #25:
+                                       # 未測定のまま既定 on にしない) / on (測定と適応の収集で使う) / ab (S8b に fresh_plan の腕を足し、
+                                       # 同じ並び・同じモデルで 計画あり vs なし を同一相手列で対応比較する。勝ってから on)
+BUILD_PLAN_PRIOR_MIX = 0.3             # 計画の 3 体と一致する選出の予測勝率に足す重み (モデルが無い / 分布外のときは計画そのものを使う)
+BUILD_PLAN_EXPLORE_SHARE = 0.5         # (on のとき) cheap adaptation の収集で、探索枠 (--explore) のうち計画の選出を使う割合 (残りは乱択)
 BUILD_ROLE_SUPPORT_BULK_MIN = 7000     # 受け・設置除去・吹き飛ばし・技だけの始動役の適性: 種族値の HP × 防御 か HP × 特防 がこれ以上
                                        # (リザードン 78×85=6630 は外れ、エンブオー 110×65=7150 は攻撃種族値の上限で外れる)
 BUILD_WALL_FAST_BULK_MIN = 9000        # 素早さ種族値が BUILD_WALL_SPEED_MAX を超えても、耐久 (HP × 防御 か HP × 特防) がこれ以上なら壁の候補にする
