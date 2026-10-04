@@ -107,6 +107,21 @@ def test_scores_and_beam():
     print("test_scores_and_beam OK")
 
 
+def test_sample_stratified():
+    import random
+    ls = [C.Lineup(tuple(f"m{i}"), f"c{i}", 1.0 - i * 0.05, {}) for i in range(12)]
+    rng = random.Random(1)
+    out = C.sample_stratified(ls, 4, 4, rng)
+    assert len(out) == 4 and len({l.concept for l in out}) == 4
+    # 4 層 (3 並びずつ) から 1 つずつ: 各層の点の範囲に 1 つずつ入る
+    bands = sorted(int(round((1.0 - l.score) / 0.05)) // 3 for l in out)
+    assert bands == [0, 1, 2, 3]
+    assert C.sample_stratified(ls[:3], 4, 4, rng) == ls[:3] and C.sample_stratified([], 4, 4, rng) == [] and C.sample_stratified(ls, 0, 4, rng) == []
+    out2 = C.sample_stratified(ls, 6, 2, random.Random(2))
+    assert len(out2) == 6 and sum(1 for l in out2 if l.score > 0.7) == 3
+    print("test_sample_stratified OK")
+
+
 def test_worst_hole_penalty():
     """穴の罰則: 1 脅威だけ誰も見ていない並びは、平均では僅差でも点で下がる。重みは最大を 1 に正規化"""
     feats, threats = _feats()

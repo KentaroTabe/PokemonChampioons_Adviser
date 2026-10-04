@@ -128,6 +128,90 @@ def package_species_of(package_id: str) -> Optional[list]:
         return None
 
 
+def selection_compliance(records: list) -> dict:
+    """1 対戦の記録 (jsonl の行) から、選出助言 (kind=selection の最後の推奨) と実際の選出の一致と、助言が選出の完了前に出ていたか
+    (時間内) を出す (純粋)。遵守モデルは廃止したが、実戦との差の源として記録は残す (2026-10-05)。
+    戻り値 {"has_advice", "primary" (model / rule / None), "members_match" (True / False / None), "basis", "timely" (True / False / None),
+            "latency_s" (助言 → 選出完了の秒。負なら助言が遅れた)}"""
+    final, t_adv = None, None
+    for d in records:
+        if d.get("type") == "advice" and d.get("kind") == "selection":
+            adv = d.get("advice") or {}
+            if adv.get("recommend"):
+                final, t_adv = adv, d.get("t")
+    out = {"has_advice": final is not None, "primary": (final or {}).get("primary"), "members_match": None, "basis": "none",
+           "timely": None, "latency_s": None}
+    if final is None:
+        return out
+    rec_idx = [r.get("index") for r in final["recommend"]]
+    rec_names = [r.get("name") for r in final["recommend"]]
+    picked_idx, t_done = None, None
+    observed: list = []
+    for d in records:
+        if d.get("type") != "scene":
+            continue
+        st = d.get("state") or {}
+        pl = st.get("player") or {}
+        party = pl.get("party") or []
+        picked = [i for i, p in enumerate(party) if p.get("picked")]
+        if picked and (picked_idx is None or len(picked) >= len(picked_idx)):
+            picked_idx = picked
+        if t_done is None and (st.get("selection_picked") == 3 or len(picked) >= 3):
+            t_done = d.get("t")
+        idx = pl.get("active")
+        if st.get("scene") != "selection" and idx is not None and 0 <= idx < len(party):
+            ja = party[idx].get("ja")
+            if ja and ja not in observed:
+                observed.append(ja)
+    if picked_idx is not None and len(picked_idx) == len(rec_idx):
+        out["members_match"] = sorted(picked_idx) == sorted(rec_idx)
+        out["basis"] = "picked"
+    elif observed:
+        if any(ja not in rec_names for ja in observed):
+            out["members_match"] = False
+        elif len(observed) >= len(rec_names):
+            out["members_match"] = True
+        out["basis"] = f"observed:{len(observed)}"
+    if t_adv is not None and t_done is not None:
+        out["latency_s"] = round(float(t_done) - float(t_adv), 1)
+        out["timely"] = out["latency_s"] >= 0
+    return out
+
+
+def selection_compliance_rows(paths: list) -> dict:
+    """対戦ログの集合 → 選出の遵守率 (一致 / 判定できた数)、時間内率、第一候補 (model / rule) 別の内訳"""
+    agg = {"n_battles": 0, "n_with_advice": 0, "n_match": 0, "n_mismatch": 0, "n_unknown": 0, "n_timely": 0, "n_late": 0,
+           "by_primary": {}}
+    for p in paths:
+        try:
+            recs = [json.loads(l) for l in Path(p).read_text(encoding="utf-8").splitlines() if l.strip()]
+        except Exception:
+            continue
+        agg["n_battles"] += 1
+        c = selection_compliance(recs)
+        if not c["has_advice"]:
+            continue
+        agg["n_with_advice"] += 1
+        key = c["primary"] or "unknown"
+        b = agg["by_primary"].setdefault(key, {"n": 0, "match": 0, "mismatch": 0})
+        b["n"] += 1
+        if c["members_match"] is True:
+            agg["n_match"] += 1
+            b["match"] += 1
+        elif c["members_match"] is False:
+            agg["n_mismatch"] += 1
+            b["mismatch"] += 1
+        else:
+            agg["n_unknown"] += 1
+        if c["timely"] is True:
+            agg["n_timely"] += 1
+        elif c["timely"] is False:
+            agg["n_late"] += 1
+    agg["selection_compliance"] = _ratio(agg["n_match"], agg["n_match"] + agg["n_mismatch"])
+    agg["selection_timely_rate"] = _ratio(agg["n_timely"], agg["n_timely"] + agg["n_late"])
+    return agg
+
+
 def compliance_from_audit(audit_rows: list) -> Optional[float]:
     """decision_audit --json の行 (各決定の followed: bool) から遵守率"""
     vals = [bool(r.get("followed")) for r in audit_rows if "followed" in r]
@@ -227,6 +311,8 @@ def main() -> None:
         rows = [r for r in labeled_rows(bdir, package_id=package_id, since_ts=since, package_species=species)
                 if r.get("team_match") is not False]
         out["audit"] = audit_aggregate([r["path"] for r in rows])
+        # 選出の遵守率と時間内率 (記録だけ。補正には使わない: 2026-10-05)
+        out["selection"] = selection_compliance_rows([r["path"] for r in rows])
     if args.json:
         print(json.dumps(out, ensure_ascii=False, indent=1))
         return
@@ -243,6 +329,10 @@ def main() -> None:
             print(format_summary(out["session"], "今回の接続テスト (マーカー以降)"))
     if "audit" in out:
         print(format_audit(out["audit"]))
+    if out.get("selection"):
+        sc = out["selection"]
+        print(f"[選出] 助言あり {sc['n_with_advice']}/{sc['n_battles']} / 一致 {sc['n_match']} 不一致 {sc['n_mismatch']} 不明 {sc['n_unknown']} "
+              f"→ 遵守率 {sc['selection_compliance']} / 時間内率 {sc['selection_timely_rate']} / 第一候補別 {sc['by_primary']}")
 
 
 if __name__ == "__main__":

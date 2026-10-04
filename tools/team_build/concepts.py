@@ -95,7 +95,7 @@ def blueprint_problems(c: dict, i: int) -> list:
     reqs = c.get("complement_requirements")
     if reqs is not None:
         if not isinstance(reqs, list):
-            problems.append(f"concepts[{i}]: complement_requirements は [{{role, targets, note}}] の配列")
+            problems.append(f"concepts[{i}]: complement_requirements は [{{role, note}}] の配列")
         else:
             if len(reqs) > COMPLEMENT_REQUIREMENTS_MAX:
                 problems.append(f"concepts[{i}]: complement_requirements は最大 {COMPLEMENT_REQUIREMENTS_MAX} 件")
@@ -309,14 +309,14 @@ def generate_concepts(spec, feats: dict, threats: list, legal: set, mega_capable
             "role_vocabulary": ROLE_VOCABULARY_JA,
             "blueprint": "core には核 2〜3 体を {species_id, role} で書く (role は role_vocabulary の id。天候/フィールドは "
                          "sun_setter / rain_abuser / psychic_setter のように場つきの id)。残りの枠は complement_requirements に "
-                         "役割と見る相手 (threats の id) で書き、種は書かない。plan には前提の場と速度の計画を書く",
+                         "役割で書き、種は書かない。相手との強弱 (beats / concedes / targets) は書かない (計算で出す)。"
+                         "plan には前提の場と速度の計画を書く",
             "output_schema": {"authoritative": {"concepts": [{"name": "str", "core_ids": ["id"],
                                                              "core": [{"species_id": "id", "role": "role_vocabulary の id"}],
                                                              "mega_id": "id|null",
                                                              "win_condition": "enum", "support_roles": ["enum"],
                                                              "weak_to": ["id"],
-                                                             "complement_requirements": [{"role": "role_vocabulary の id",
-                                                                                          "targets": ["threat id"], "note": "str"}],
+                                                             "complement_requirements": [{"role": "role_vocabulary の id", "note": "str"}],
                                                              "plan": {"field": {"weather": "sun|rain|sand|snow|null",
                                                                                 "terrain": "electric|grassy|psychic|misty|null"},
                                                                       "speed_plan": "outspeed|trick_room|neutral"},

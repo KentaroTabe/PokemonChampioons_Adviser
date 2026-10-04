@@ -286,8 +286,15 @@ BUILD_SCREEN_MAX = 300
 # S8a は teampreview / generic (汎用基底) / cheap (screening 用の短い適応)、S8b は teampreview / generic /
 # fresh (収束まで適応し、独立 fold の実測で選んだ checkpoint)。参照 (現行チーム) も同じ variant の最善で測る。
 # ablation: #0 は generic が fresh より +0.07、#3 は fresh が generic より +0.26 と候補で逆なので測定で選ぶ
-BUILD_SCREEN_VARIANTS = ("teampreview", "generic", "cheap")
-BUILD_PICK_VARIANTS = ("teampreview", "generic", "fresh")
+# 2026-10-05 (操縦はアドバイザーが行う): モデル無しの基準の選出は、実戦の助言と同じ相性の規則 "rule" (advisor.selection、ダメージ計算の
+# 対面行列)。従来の "teampreview" (タイプ相性の簡易規則) は実戦の経路に無いので variant から外す (指定すれば使える)
+BUILD_SCREEN_VARIANTS = ("rule", "generic", "cheap")
+BUILD_PICK_VARIANTS = ("rule", "generic", "fresh")
+# 環境チーム (相手) の操縦: heuristic = poke-env SimpleHeuristicsPlayer (従来) / rl = 学習済み行動方策 (ピンの ema)。選出は
+# heuristic (Player 自身) / matchup / rule (実戦の助言と同じ規則) / model (汎用の選出モデル) / prior (実戦の選出率に比例)。
+# 既定は実戦に近い方へ寄せる仮置き (rl + rule)。実験 12 (選出の一致率) と 13 (勝率の実戦との差) で決め直す
+BUILD_OPP_PILOT = "rl"
+BUILD_OPP_PICK_POLICY = "rule"
 # 現行チーム (config/my_team.json の登録 6 体) を exploitation pool として候補に必ず入れる: 代理スコアの較正点 +
 # 近傍 (1 枠入替、入替枠を散らして上位) を BUILD_INCUMBENT_NEIGHBORS 並び。探索 (exploration) の quota とは別枠。
 # 現行と近傍の登録済み個体は登録の型 (持ち物・配分・技) をそのまま使う
@@ -340,12 +347,19 @@ BUILD_REFERENCE_PRODUCTION_GAP = 0.10  # 参照の fresh (run 内で適応) − 
                                        # 記録し、fresh のモデルを registry に候補として登録する (1003: 本番 0.417 / 適応 0.73)
 BUILD_STRESS_ACTION_NOISE = (0.05, 0.10)
 BUILD_SMOKE_CANARY_BATTLES = 20        # 性能判定には使わない (crash / illegal action / 読込 / ログ / latency)
-BUILD_PROMOTE_MIN_FULL_RUNS = 3        # 昇格条件: 独立 full run 3 回 + 全 gate PASS + 重大 regression 0 + 人手 approve
+BUILD_PROMOTE_MIN_FULL_RUNS = 3        # 昇格条件: 同じ 6 体で holdout PASS の full run (下) 3 回 (= full run 2 本 + 確認 1 回。2026-10-05 Phase 5)
+                                       # + 全 gate PASS + 重大 regression 0 + 人手 approve
+BUILD_PROMOTE_MIN_HOLDOUT_N = 300      # "full run" の定義 1: 封印 holdout の対戦数がこれ以上 (途中で止めた run の PASS は数えない)
+BUILD_PROMOTE_DISTINCT_SPLITS = True   # "full run" の定義 2: 別の封印の分割 (sealed_id) で数える (同じ分割の PASS は 1 回)
 # 実戦評価の重み w_N: 有効標本と CI 半幅で決める (200 戦は early signal に留める)
 BUILD_REAL_MIN_EFFECTIVE_N = 1000
 BUILD_REAL_MAX_CI_HALFWIDTH = 0.03
+# 再構築の引き金 (tools/team_build/triggers): 閾値は基準線 (前回 run で記録した値) との差で測る (2026-10-05: 絶対値では季節で意味が変わる)
+BUILD_TRIGGER_REAL_GAP = 0.15          # 登録チームの実戦勝率 (移動平均) − シムの参照の勝率 が、基準線の差より これ以上 悪化したら
+BUILD_TRIGGER_POOL_MATCH_DROP = 0.5    # 相手プールの構築単位の一致率が基準線の この倍率 を割ったら
+BUILD_TRIGGER_MIN_REAL_BATTLES = 30    # 実戦の勝率を引き金に使う最小の試合数
 # 遵守モデルの基準遵守率 (P(follow) は助言の 1 位と 2 位の差で変調する)
-BUILD_USER_MODELS = {"full": 1.0, "high": 0.9, "mixed": 0.7, "expert": 0.5}
+# BUILD_USER_MODELS (遵守モデル) は 2026-10-05 に廃止: 操縦はアドバイザーが行う。実戦の遵守率・時間内率は real_eval が記録だけ残す
 BUILD_SCHEMA_VERSION = "1"
 
 # --- 実戦の相手バンク (tools/real_opponents、2026-09-09): 対戦ログの相手の「実際の選出・先発・判明した型」 ---
@@ -422,6 +436,10 @@ BUILD_LLM_STAGE_MODELS = {}
 BUILD_LLM_EFFORT = {"s04_concepts": None, "s13_report": None, "interventions": None, "articles": None}
 # - 1 呼び出しの費用上限 (USD、CLI --max-budget-usd)。再試行の暴走に対する保険。通常の S4 呼び出しは $1 前後 (Opus 5 実測)
 BUILD_LLM_MAX_BUDGET_USD = 5.0
+# 記事バンクの前段 (tools/team_build/articles_ingest): シーズン → その季節の規制 (合法性の検証に使う)。確かな対応だけ載せる
+# (M-5 = M-B 続行 (docs/REGULATION_CHANGE_RUNBOOK.md)、M-6 = 2026-09-11 の M-C 切替)。載っていない季節は unknown
+BUILD_ARTICLE_SEASON_REGULATION = {"M-5": "gen9championsbssregmb", "M-6": "gen9championsbssregmc"}
+BUILD_ARTICLE_DOUBLE_WORDS = ("ダブル", "double", "vgc")   # 記事の題名にあればダブルの記事 (記事バンクから除く)
 # - CLI に載せるツール。空 = ツール定義を system prompt に載せない (9/24 実測: 12.8k トークン。不許可リスト方式は 24.7k)
 BUILD_LLM_CLI_TOOLS = ""
 # 視覚監査 (tools/audit_subtask, audit_session) のモデル。8/18 に haiku / sonnet / opus を同一フレーム 30 枚で比較して opus に固定、
@@ -431,7 +449,11 @@ AUDIT_MODEL = "claude-opus-5-5"
 # 測定の相手プール (S2、tools/team_build/opponents.py)。ranked = POOL_PIN の上位ランカー構築 (従来)、
 # latest = 最新の使用率スナップショットの全種から「使用率% ∪ ゲーム内順位」の重みと共起 (teammate_usage) で合成
 # (2026-09-18 ユーザー決定: ブラックリストなしの最新ポケモン全体。上位構築に載らない今期の主役も相手に出る)
-BUILD_POOL_SOURCE = "latest"
+BUILD_POOL_SOURCE = "latest"               # latest = 使用率からの合成 / ranked = POOL_PIN の上位構築 / mixed = 実戦で当たった構築 (選出画面で 6 体
+                                           # 読めて整合した対戦) を先に入れ、足りない分だけ合成 (2026-10-05 判断 #1。型は合成のまま)
+BUILD_POOL_REAL_DAYS = 90                  # mixed: 実戦ログをこの日数以内に限る
+BUILD_POOL_REAL_MIN_N = 1                  # mixed: 構築 (6 体の組) をプールに入れる遭遇回数の下限
+BUILD_POOL_MATCH_THRESHOLD = 0.5           # 構築単位の一致率 (env_match): 実戦の相手がプールの構築と「同じ」とみなす重なり (Jaccard) の下限
 BUILD_POOL_TEAMMATE_MIX = 0.5              # 合成の 2 体目以降: (1 − mix) × 種の重み + mix × 選んだ種との共起
 BUILD_ARCHETYPE_TR_SPEED_SHARE = 0.3       # トリックルームのエース: 上位脅威への先手率がこれ以下
 BUILD_ARCHETYPE_FAST_SPEED_SHARE = 0.6     # 速攻役: 先手率がこれ以上 (タスキ / スカーフでも可)
@@ -504,6 +526,8 @@ BUILD_GEN_SETUP_BOOSTS = {"rockpolish": {"spe": 2}, "autotomize": {"spe": 2}, "s
                           "aquastep": {"spe": 1}}
 # 型の常識フィルタ (sets.set_sanity): きのみを食べた後しか出せない技は、きのみ以外の持ち物と組ませない
 BUILD_SET_BERRY_MOVES = ("belch",)
+BUILD_SET_LINT_GATE = True             # 型の常識規則 (tools/team_build/set_lint、2026-10-05 判断 #14): 誤り (性格と技 / 持ち物 / 場の重複 /
+                                       # 技 4 つ未満) の型は生成の最終検査で落とす。警告 (タイプ一致技の欠落) は記録だけ。False なら数えるだけ
 # こだわり系の持ち物と組ませない変化技のうち積み技以外 (設置 / 回復 / まもる / みがわり)。積み技は sets.setup_move_ids
 # (advisor/data/boost_moves.json + advisor.search.SETUP_MOVES) から作る (2026-10-02: 手書きの一覧の漏れをなくした)
 BUILD_SET_CHOICE_LOCK_MOVES = ("stealthrock", "spikes", "toxicspikes", "stickyweb",
@@ -651,12 +675,17 @@ BUILD_MAX_ATTACKERS = 4                # 攻撃役 (breaker / sweeper_setup / cl
 BUILD_ATTACKER_EXCESS_PENALTY = 0.03   # 超過 1 体あたりの減点 (1003: 79 並びのうち 65 が攻撃役 4 体以上)
 BUILD_DUP_ROLE_PENALTY = 0.02          # 同じ仕事の個体 (同じ雛形 × 同じ速度帯 (配分の fast / bulky / tr)) が 2 体以上あるとき 1 組あたりの減点
 BUILD_TRIO_MIX_BONUS = 0.03            # 3 体選出に攻撃役と補助・受け役の両方が入る系統の値への加点 (役割の充足: 先発・勝ち筋・受けが揃うか)
+BUILD_CALIBRATION_SLOTS = 4            # 較正の標本 (2026-10-05 判断 #10): S5 が生成して保持しなかった並びから層化抽出でこの数を S8a だけ測る
+                                       # (昇格・修理には使わない。上位だけを測る選択バイアスを避ける)。0 で無効
+BUILD_CALIBRATION_STRATA = 4           # 層化の層数 (代理の点の分位)
 BUILD_SPECIES_SHARE_MAX = 0.5          # 保持する並びのうち同じ種が入る割合の上限 (固定枠・エースは除く。1003: カイリューが 79 並び全部に入った)
 BUILD_LOCK_IMMUNE_DISCOUNT = 0.5       # こだわり系 + 数ターン固定の技 (げきりん等) の型: その技を無効にする種が居る系統の相手への被覆を
                                        # この割合だけ割り引く (スカーフげきりんの技固定とフェアリー無効を計算が見ていなかった)
-BUILD_PLAN_PRIOR_MIX = 0.3             # 選出計画 (S5 の selection_plan) を選出モデルの初期値にする: 計画の 3 体と一致する選出の予測勝率に
-                                       # 足す重み (モデルが無い / 分布外のときは計画そのものを使う)
-BUILD_PLAN_EXPLORE_SHARE = 0.5         # cheap adaptation の収集で、探索枠 (--explore) のうち計画の選出を使う割合 (残りは乱択)
+BUILD_PLAN_PRIOR = "off"               # 選出計画 (S5 の selection_plan) を選出モデルの初期値にするか: off (既定、2026-10-05 ユーザー判断 #25:
+                                       # 未測定のまま既定 on にしない) / on (測定と適応の収集で使う) / ab (S8b に fresh_plan の腕を足し、
+                                       # 同じ並び・同じモデルで 計画あり vs なし を同一相手列で対応比較する。勝ってから on)
+BUILD_PLAN_PRIOR_MIX = 0.3             # 計画の 3 体と一致する選出の予測勝率に足す重み (モデルが無い / 分布外のときは計画そのものを使う)
+BUILD_PLAN_EXPLORE_SHARE = 0.5         # (on のとき) cheap adaptation の収集で、探索枠 (--explore) のうち計画の選出を使う割合 (残りは乱択)
 BUILD_ROLE_SUPPORT_BULK_MIN = 7000     # 受け・設置除去・吹き飛ばし・技だけの始動役の適性: 種族値の HP × 防御 か HP × 特防 がこれ以上
                                        # (リザードン 78×85=6630 は外れ、エンブオー 110×65=7150 は攻撃種族値の上限で外れる)
 BUILD_WALL_FAST_BULK_MIN = 9000        # 素早さ種族値が BUILD_WALL_SPEED_MAX を超えても、耐久 (HP × 防御 か HP × 特防) がこれ以上なら壁の候補にする
@@ -736,6 +765,9 @@ BUILD_MEGA_FREE_STONES = 2
 # メガ石以外の最良代替)。「エース = 固定枠 + その構築の唯一のメガ」という読み (2026-10-02 ユーザー依頼「メガミミロップをエースと
 # する構築」)。2 個目の石を許すならここを増やす。現行チーム枝と参照 (登録の型) には適用しない
 BUILD_ACE_MAX_MEGA_STONES = 1
+BUILD_THEME_ACE_PICK_MIN = 0.5         # テーマの検査 (tools/team_build/theme_check): 指定エースの測定での選出率がこれ未満の並びは「テーマを満たさない」
+BUILD_THEME_GATE = False               # True なら S10 の勝者からテーマを満たさない並びを外す (全部外れるなら順位のまま印だけ)。
+                                       # 2026-10-05: まず 1 run 記録してから on にする (判断 #4)
 # 1 試合 1 回の資源 (メガシンカ) の推定 (advisor/gimmick.py。2026-09-11 ユーザー指摘「相手がメガ先を読まないのは致命的」):
 # 相手の種族ごとの「メガ石を持つ確率」は使用率 DB の石の使用率。石を持てるが使用率が無い種の既定値と、無視する下限
 GIMMICK_DEFAULT_STONE_PRIOR = 0.5
@@ -746,6 +778,10 @@ SEARCH_OPP_MEGA_MIN_PROB = 0.2
 # 構築の相手の選出 (apply_model_teampreview)、測定の助言の選出 (advisor_pick_order)、候補専用モデルの適応が従う。
 # v3 への切替は tools/compare_selection_features の門 (未知チームの MSE 改善・対応比較の順位精度が v1 に劣らない) を通してから
 SELECTION_FEATURES = "v1"
+# 実戦の選出助言の第一候補 (◎): True なら、登録チーム用の検証済みモデル (試用 Package) か分布内の配布版の推しを第一候補にし、
+# 相性の規則の推奨は参考に併記する (advisor.selection.choose_primary)。False なら従来 (規則が ◎、モデルは併記)。
+# 2026-10-05: 実戦の 9 戦で推奨とモデルの推しが一致した対戦は 0、測定はモデルの選出で測っているのに実戦は規則で選んでいた
+SELECTION_PRIMARY_MODEL = True
 # 自己加速 (S3 の役割 speed_boost = 加速後に上を取れる脅威の割合): 特性の倍率 (かるわざは消費アイテム持ちのときだけ) と
 # 加速技の倍率 (1 回積んだ後)。効果は最大のもの 1 つを採る
 BUILD_SPEED_BOOST_ABILITIES = {"speedboost": 1.5, "unburden": 2.0}

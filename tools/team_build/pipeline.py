@@ -34,7 +34,7 @@ from typing import Optional
 from champions_agent.config import (BUILD_ADAPT_MIN_BATTLES, BUILD_ADAPT_VALIDATE_MAX_CKPTS, BUILD_ADAPT_VALIDATE_N,
                                     BUILD_EQUIV_EPS, BUILD_FINALIST_HOLDOUT_ALL, BUILD_FINALIST_MAX_SHARED,
                                     BUILD_FINALISTS, BUILD_FOLD_EVAL, BUILD_FOLD_VALIDATE, BUILD_IDENTICAL_REFERENCE_SKIP,
-                                    BUILD_PICK_VARIANTS, BUILD_RACE_DEFAULT_MAX, BUILD_RACE_STEPS, BUILD_REFERENCE_FULL_ADAPT,
+                                    BUILD_PICK_VARIANTS, BUILD_PLAN_PRIOR, BUILD_RACE_DEFAULT_MAX, BUILD_RACE_STEPS, BUILD_REFERENCE_FULL_ADAPT,
                                     BUILD_REFERENCE_PRODUCTION_GAP, BUILD_REFERENCE_PRODUCTION_VARIANT,
                                     BUILD_REPAIR_EXPLORE_PARENTS, BUILD_REPAIR_FULL_ADAPT_ROUND2, BUILD_REPAIR_PARENTS,
                                     BUILD_REPAIR_POOL_VARIANTS, BUILD_REPAIR_ROUNDS, BUILD_REPRO_GATE,
@@ -53,6 +53,8 @@ from tools.team_build.verdict import DEGRADED
 REPO = Path(__file__).resolve().parent.parent.parent
 VARIANT_SEP = "@"
 SCREEN_ADAPT_PARALLEL = 4     # cheap adaptation の同時実行数 (収集は 1 プロセス 1 戦ずつ)
+from tools.team_build import theme_check as TC  # noqa: E402
+
 STOP_POINTS = ("s08a", "s08b")
 
 
@@ -147,15 +149,43 @@ def choose_variants(res: dict) -> dict:
         cid, v = split_variant(a["arm_id"])
         if cid not in chosen or d > chosen[cid]["delta"]:
             chosen[cid] = {"variant": v, "arm_id": a["arm_id"], "selection_model": a.get("selection_model"),
-                           "pick_policy": a.get("pick_policy") or ("teampreview" if v == "teampreview" else "advisor"),
+                           "pick_policy": a.get("pick_policy") or (v if v in ("teampreview", "rule") else "advisor"),
+                           "plan_file": a.get("plan_file"),
                            "delta": d, "se": r.get("se"), "state": a.get("state"), "n": a.get("n_done")}
     return chosen
+
+
+def plan_ab_pairs(res: dict) -> dict:
+    """plan prior の A/B (BUILD_PLAN_PRIOR = ab): 同じ並び・同じモデルの fresh と fresh_plan の対応差 {team_id: {"delta_fresh",
+    "delta_fresh_plan", "diff"}} (純粋)。両方の腕があるチームだけ"""
+    by: dict = {}
+    for a in (res or {}).get("arms", []):
+        cid, v = split_variant(a["arm_id"])
+        d = (a.get("result") or {}).get("mean")
+        if v in ("fresh", "fresh_plan") and d is not None:
+            by.setdefault(cid, {})[v] = float(d)
+    out = {}
+    for cid, dd in by.items():
+        if "fresh" in dd and "fresh_plan" in dd:
+            out[cid] = {"delta_fresh": dd["fresh"], "delta_fresh_plan": dd["fresh_plan"], "diff": round(dd["fresh_plan"] - dd["fresh"], 4)}
+    return out
 
 
 def team_survivors(chosen: dict, max_candidates: Optional[int]) -> list:
     """choose_variants の結果を Δ の降順に並べ、max_candidates まで返す"""
     ids = sorted(chosen, key=lambda c: -chosen[c]["delta"])
     return ids[:max_candidates] if max_candidates else ids
+
+
+def exclude_tagged(ids: list, rows_by: dict, tags=("calibration",)) -> tuple:
+    """並びの列から tag が tags の並び (較正の標本: S8a だけ測り、昇格・修理には使わない) を外す (純粋)。戻り値 (残り, 外した並び)"""
+    out, dropped = [], []
+    for cid in ids:
+        if ((rows_by.get(cid) or {}).get("tag") or "") in tags:
+            dropped.append(cid)
+        else:
+            out.append(cid)
+    return out, dropped
 
 
 def repro_gate_ok(s08b_delta: Optional[float], s10_delta: Optional[float]) -> bool:
@@ -254,7 +284,7 @@ def repair_parents(res: dict, survivors: list, rows_by: dict, identical: list = 
     if n_explore > 0:
         deltas = best_delta_by_team(res)
         explore = [cid for cid in sorted(deltas, key=lambda c: -deltas[c])
-                   if (rows_by.get(cid) or {}).get("tag") not in ("incumbent", "incumbent_mut", "repair")
+                   if (rows_by.get(cid) or {}).get("tag") not in ("incumbent", "incumbent_mut", "repair", "calibration")
                    and cid not in seen and has_roles(cid)]
         for cid in explore[:n_explore]:
             out.append((cid, arms(cid)))
@@ -279,7 +309,7 @@ def reference_production_gap(win_rates: dict, threshold: float = BUILD_REFERENCE
 def _repair_round(run_dir: Path, eval_dir: Path, round_no: int, parents: list, battles_prefix: str, split: Path, seed: int,
                   models_dir: str, generic: Optional[str], ref_arm, screen_adapt: int, adapt_chunk: int, parallel: int,
                   screen_variants: tuple, steps: tuple, max_battles: int, eps: float, log, resume: bool,
-                  n_threats: int) -> tuple:
+                  n_threats: int, plan_prior: str = BUILD_PLAN_PRIOR) -> tuple:
     """修理モードの 1 周: 診断 → 変種 (s06_sets に追加) → cheap adaptation → 参照との racing。
     戻り値 (変種の腕 [R.Arm], choose_variants の結果 {candidate_id: ...})。resume では s09_repair<n>.json の変種を再利用する"""
     from tools.team_build.repair import run_repair_round
@@ -315,9 +345,9 @@ def _repair_round(run_dir: Path, eval_dir: Path, round_no: int, parents: list, b
             models = None
     if models is None:
         models = _screen_adapt_all(arms, split, run_dir / "advisors_screen", seed + 100 * round_no, screen_adapt, adapt_chunk,
-                                   parallel, log)
+                                   parallel, log, plan_prior=plan_prior)
         _write_stage(run_dir, f"s09_repair{round_no}_models", models)
-    race_arms = [a for c in arms for a in (_variant_arm(c, v, models, generic) for v in screen_variants) if a]
+    race_arms = [a for c in arms for a in (_variant_arm(c, v, models, generic, plan_prior=plan_prior) for v in screen_variants) if a]
     race_json = eval_dir / f"s09_repair{round_no}_race.json"
     res = None
     if resume and race_json.exists():
@@ -349,13 +379,15 @@ def repair_race_reusable(res: dict, arm_ids: list) -> bool:
 
 
 def _screen_adapt_all(arms: list, split: Path, out_dir: Path, seed: int, n_battles: int, chunk: int,
-                      parallel: int, log) -> dict:
-    """全 arm を同じ予算で cheap adaptation する (収集 n_battles 戦 → 1 回学習)。戻り値 {arm_id: model or None}"""
+                      parallel: int, log, plan_prior: str = BUILD_PLAN_PRIOR) -> dict:
+    """全 arm を同じ予算で cheap adaptation する (収集 n_battles 戦 → 1 回学習)。戻り値 {arm_id: model or None}。
+    計画の事前は plan_prior が on のときだけ収集に使う"""
     def one(arm):
         # 選出計画があれば収集の探索枠で計画の選出を踏ませる (S7 の適応と同じ。2026-10-04: cheap adaptation に計画が渡っていなかった)
         r = AD.adapt_selection(f"{arm.arm_id}_screen", arm.team_file, split, out_dir, seed,
                                min_battles=n_battles, chunk=min(chunk, n_battles), max_battles=n_battles,
-                               patience=10 ** 9, log=log, registry=None, plan_file=getattr(arm, "plan_file", None))
+                               patience=10 ** 9, log=log, registry=None,
+                               plan_file=(arm.plan_file if plan_prior == "on" else None))
         return arm.arm_id, r.get("model"), r.get("stop_reason"), r.get("elapsed_s")
 
     out = {}
@@ -367,29 +399,34 @@ def _screen_adapt_all(arms: list, split: Path, out_dir: Path, seed: int, n_battl
 
 
 def _variant_arm(base: R.Arm, variant: str, models: dict, generic_path: Optional[str],
-                 production_path: Optional[str] = None) -> Optional[R.Arm]:
+                 production_path: Optional[str] = None, plan_prior: str = BUILD_PLAN_PRIOR) -> Optional[R.Arm]:
     """base (チーム) の選出方策 variant の腕。使えない variant は None。
     production = 配布版 (登録チームで微調整済み) の選出モデルを強制 (参照だけに使う。候補には無い)。
-    選出計画 (base.plan_file) は advisor 方策の variant に引き継ぐ (2026-10-04: variant の腕に計画が渡らず、screening と
-    S8b の選出に計画の事前が効いていなかった)。teampreview は相性順だけなので渡さない"""
-    plan = getattr(base, "plan_file", None)
-    if variant == "teampreview":
-        return R.Arm(variant_arm_id(base.arm_id, variant), base.team_file, None, base.models_dir, pick_policy="teampreview")
+    plan_prior: off = 計画を使わない / on = モデルの腕 (cheap / fresh) に計画の事前を足す / ab = fresh_plan の腕だけが計画を使う
+    (fresh と同じモデル + 計画。同一相手列での対応比較)"""
+    if variant in ("teampreview", "rule"):
+        # rule = 実戦の助言と同じ相性の規則 (モデル無し)。teampreview = 従来の簡易相性順 (指定時だけ)
+        return R.Arm(variant_arm_id(base.arm_id, variant), base.team_file, None, base.models_dir, pick_policy=variant)
     if variant == "generic":
         if not generic_path:
             return None
         return R.Arm(variant_arm_id(base.arm_id, variant), base.team_file, generic_path, base.models_dir, pick_policy="advisor",
-                     plan_file=plan)
+                     plan_file=(base.plan_file if plan_prior == "on" else None))
     if variant == "production":
         if not production_path:
             return None
         return R.Arm(variant_arm_id(base.arm_id, variant), base.team_file, production_path, base.models_dir,
-                     pick_policy="advisor", plan_file=plan)
+                     pick_policy="advisor")
     model = models.get(base.arm_id)
     if not model:
         return None
+    if variant == "fresh_plan":
+        if plan_prior != "ab" or not base.plan_file:
+            return None
+        return R.Arm(variant_arm_id(base.arm_id, variant), base.team_file, model, base.models_dir, pick_policy="advisor",
+                     plan_file=base.plan_file)
     return R.Arm(variant_arm_id(base.arm_id, variant), base.team_file, model, base.models_dir, pick_policy="advisor",
-                 plan_file=plan)
+                 plan_file=(base.plan_file if plan_prior == "on" else None))
 
 
 def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, max_battles: int = BUILD_RACE_DEFAULT_MAX,
@@ -406,13 +443,15 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
                     resume: bool = False, reference_full_adapt: bool = BUILD_REFERENCE_FULL_ADAPT,
                     reference_production_variant: bool = BUILD_REFERENCE_PRODUCTION_VARIANT,
                     finalists_k: int = BUILD_FINALISTS, finalist_max_shared: int = BUILD_FINALIST_MAX_SHARED,
-                    finalist_holdout_all: bool = BUILD_FINALIST_HOLDOUT_ALL, n_threats: int = 30) -> dict:
+                    finalist_holdout_all: bool = BUILD_FINALIST_HOLDOUT_ALL, n_threats: int = 30,
+                    plan_prior: str = BUILD_PLAN_PRIOR) -> dict:
     """resume: 途中で落ちた run の続き。evaluation/ の S8a 結果 (cheap モデル・参照 variant・racing) と
     advisors/<cid>/adapt_result.json (完了した適応) をそのまま使い、無いものだけ実行する
     reference_full_adapt: 参照にも S7 と同じ適応を与え、fresh を参照の variant に加える (S7b)
     reference_production_variant: 参照の variant に配布版 (本番) の選出モデルを加える
     finalists_k / finalist_max_shared / finalist_holdout_all: 方向性の違う最終候補を K 並び残し (共通メンバー ≤ max_shared)、
-    それぞれに S11/S11b/封印 holdout を行う (2026-09-17)。STRESS と ablation は 1 位だけ"""
+    それぞれに S11/S11b/封印 holdout を行う (2026-09-17)。STRESS と ablation は 1 位だけ
+    plan_prior: off / on / ab (選出計画を選出モデルの初期値にするか。ab は S8b に fresh_plan の腕を足して対応比較する)"""
     from champions_agent.agent.selection_model import GENERAL_MODEL_PATH
     log = lambda m: _log(run_dir, m)
 
@@ -464,7 +503,9 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
                             "reference_full_adapt": reference_full_adapt,
                             "reference_production_variant": reference_production_variant,
                             "finalists_k": finalists_k, "finalist_max_shared": finalist_max_shared,
-                            "finalist_holdout_all": finalist_holdout_all}}
+                            "finalist_holdout_all": finalist_holdout_all, "plan_prior": plan_prior}}
+    if plan_prior == "ab" and "fresh_plan" not in variants:
+        variants = tuple(variants) + ("fresh_plan",)
     eval_dir = run_dir / "evaluation"
 
     # S8a-1: 全候補 + 参照を同じ予算で cheap adaptation
@@ -474,7 +515,7 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
     else:
         log(f"S8a cheap adaptation: {len(cands)} 候補 + 参照 × {screen_adapt} 戦")
         screen_models = _screen_adapt_all([ref] + cands, split, run_dir / "advisors_screen", seed, screen_adapt,
-                                          adapt_chunk, parallel, log)
+                                          adapt_chunk, parallel, log, plan_prior=plan_prior)
         _write_stage(run_dir, "s08a_screen_models", screen_models)
 
     # S8a-2: 参照の variant の最善 (同一相手列、screen_max 戦)
@@ -499,7 +540,7 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
                         parallel=parallel)
         ref_wr = {split_variant(a.arm_id)[1]: (sum(a.outcomes) / len(a.outcomes) if a.outcomes else None)
                   for a in ref_variants}
-    ref_variant = best_by_win_rate(ref_wr, ref_order) or "teampreview"
+    ref_variant = best_by_win_rate(ref_wr, ref_order) or ("rule" if "rule" in ref_order else "teampreview")
     ref_best = next(a for a in ref_variants if split_variant(a.arm_id)[1] == ref_variant)
     summary["reference_variant"] = {"variant": ref_variant, "win_rates": ref_wr, "selection_model": ref_best.selection_model,
                                     "pick_policy": ref_best.pick_policy, "production_model": production}
@@ -513,12 +554,12 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
     if res8a and {split_variant(a["arm_id"])[0] for a in res8a.get("arms", [])} >= {c.arm_id for c in cands}:
         log("S8a screening: resume (s08a_screen.json を再利用)")
     else:
-        arms8a = [a for c in cands for a in (_variant_arm(c, v, screen_models, generic) for v in screen_variants) if a]
+        arms8a = [a for c in cands for a in (_variant_arm(c, v, screen_models, generic, plan_prior=plan_prior) for v in screen_variants) if a]
         res8a = R.race(arms8a, ref_arm(), split, "search", seed, eval_dir, stage="s08a_screen", fold=BUILD_FOLD_EVAL,
                        steps=screen_steps, max_battles=screen_max, eps=BUILD_EQUIV_EPS + screen_margin,
                        parallel=parallel, log=log)
     chosen8a = choose_variants(res8a)
-    all_survivors = team_survivors(chosen8a, None)
+    all_survivors, _calib_measured = exclude_tagged(team_survivors(chosen8a, None), rows_by_all)
     survivors = all_survivors[:max_candidates] if max_candidates else all_survivors
     log(f"S8a survivors: {len(all_survivors)}/{len(cands)} (脱落 {len(cands) - len(all_survivors)})、"
         f"S7 で適応する Δ 上位 {len(survivors)}: " +
@@ -527,6 +568,12 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
     summary["s08a_survivors"] = survivors
     summary["s08a_eliminated"] = [a.arm_id for a in cands if a.arm_id not in chosen8a]
     summary["s08a_capped"] = [c for c in all_survivors if c not in survivors]
+    calib_ids = [c for c, r in rows_by_all.items() if (r.get("tag") or "") == "calibration" and c in {a.arm_id for a in cands}]
+    if calib_ids:
+        # 較正の標本 (判断 #10): S8a の Δ を記録するだけ (生存・修理・昇格には使わない)。代理評価の較正 (s08a_calibration) には入る
+        summary["calibration_sample"] = {c: (chosen8a.get(c) or {}).get("delta") for c in calib_ids}
+        log(f"S8a calibration sample: 較正の標本 {len(calib_ids)} 並び (昇格・修理には使わない) Δ "
+            + ", ".join(f"{c}={(chosen8a.get(c) or {}).get('delta')}" for c in calib_ids))
     # 代理評価 (S5 の点・系統ごとの予測) と実測 (S8a の Δ・系統ごとの勝率・選出計画の一致) の較正を記録する
     # (2026-10-04: 評価の点と実戦が逆、系統ごとの予測に識別力がない、計画が実戦で使われない — まず run ごとに見える形にする)
     try:
@@ -561,7 +608,7 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
         log(f"S9 repair 1: 親 {[(c, len(a)) for c, a in parents]}")
         new_arms, chosen_r = _repair_round(run_dir, eval_dir, 1, parents, "s08a_screen", split, seed, models_dir, generic,
                                            ref_arm, screen_adapt, adapt_chunk, parallel, screen_variants, screen_steps,
-                                           screen_max, BUILD_EQUIV_EPS + screen_margin, log, resume, n_threats)
+                                           screen_max, BUILD_EQUIV_EPS + screen_margin, log, resume, n_threats, plan_prior)
         if new_arms:
             cands = cands + new_arms
             chosen8a.update(chosen_r)
@@ -595,7 +642,8 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
         try:
             return a.arm_id, AD.adapt_selection(a.arm_id, a.team_file, split, run_dir / "advisors", seed,
                                                 min_battles=adapt_min, chunk=adapt_chunk, max_battles=adapt_max,
-                                                log=log, registry=registry, keep_checkpoints=True, plan_file=a.plan_file)
+                                                log=log, registry=registry, keep_checkpoints=True,
+                                                plan_file=(a.plan_file if plan_prior == "on" else None))
         except Exception as e:      # 1 チームの失敗で run 全体を落とさない (fresh variant 無しで S8b へ)
             log(f"[adapt:{a.arm_id}] failed: {e!r}")
             return a.arm_id, {"candidate_id": a.arm_id, "model": None, "history": [], "stop_reason": f"error:{e!r}"}
@@ -682,7 +730,7 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
         if a.arm_id not in adapted:
             continue
         for v in variants:
-            arm = _variant_arm(a, v, fresh_models, generic)
+            arm = _variant_arm(a, v, fresh_models, generic, plan_prior=plan_prior)
             if arm:
                 arms8b.append(arm)
     res8b = _load_json(eval_dir / "s08b_adapted.json") if resume else None
@@ -695,7 +743,25 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
     contenders = team_survivors(chosen, None)
     summary["s08b_variants"] = chosen
     summary["s08b_contenders"] = contenders
+    if plan_prior == "ab":
+        summary["plan_ab"] = plan_ab_pairs(res8b)
+        log("S8b plan prior A/B (fresh_plan − fresh): " + ", ".join(f"{c}={v['diff']:+.3f}" for c, v in summary["plan_ab"].items()))
     log("S8b contenders: " + ", ".join(f"{c}={chosen[c]['variant']}({chosen[c]['delta']:+.3f})" for c in contenders))
+    # テーマの検査 (判断 #3・#4): エース / 固定枠 / 技の指定が選出の単位で効いているかを記録する (報告。門は BUILD_THEME_GATE)
+    theme = TC.theme_of_spec(_load_json(run_dir / "request.json") or {})
+
+    def _theme_check(cids: list, sources: list) -> dict:
+        rows_now = {r.get("candidate_id"): r for r in json.loads((run_dir / "s06_sets.json").read_text(encoding="utf-8"))}
+        recs_by = {cid: [rec for prefix, res in sources for rec in _records_of(eval_dir, prefix, arms_of_team(res, cid))] for cid in cids}
+        return TC.check_run(theme, rows_now, recs_by)
+    if TC.active(theme):
+        try:
+            tc8b = _theme_check(contenders, [("s08b_adapted", res8b)])
+            summary["theme_check_s08b"] = tc8b
+            _write_stage(run_dir, "theme_check_s08b", tc8b)
+            log("S8b " + TC.format_line(tc8b))
+        except Exception as e:
+            log(f"S8b theme check: error {e!r}")
     if stop_after == "s08b":
         summary["result"] = "stopped_after_s08b"
         _write_stage(run_dir, "summary", summary)
@@ -709,7 +775,7 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
         log(f"S9 repair 2: 親 {[(c, len(a)) for c, a in parents]}")
         new_arms, chosen_r = _repair_round(run_dir, eval_dir, 2, parents, "s08b_adapted", split, seed + s08b_seed_offset,
                                            models_dir, generic, ref_arm, screen_adapt, adapt_chunk, parallel, screen_variants,
-                                           steps, max_battles, BUILD_EQUIV_EPS, log, resume, n_threats)
+                                           steps, max_battles, BUILD_EQUIV_EPS, log, resume, n_threats, plan_prior)
         if new_arms:
             cands = cands + new_arms
             chosen.update(chosen_r)
@@ -732,7 +798,8 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
                     r2 = ad2.get(a.arm_id) or {}
                     if r2.get("model") and Path(r2["model"]).exists():
                         chosen[a.arm_id].update({"selection_model": r2["model"], "variant": "fresh", "pick_policy": "advisor",
-                                                 "adapted_n": r2.get("n_battles")})
+                                                 "adapted_n": r2.get("n_battles"),
+                                                 "plan_file": (a.plan_file if plan_prior == "on" else None)})
                         log(f"S9 repair 2: {a.arm_id} の選出モデルを S7 の適応 (n={r2.get('n_battles')}) に置き換えて S10 へ")
                     else:
                         log(f"S9 repair 2: {a.arm_id} の適応に失敗 ({r2.get('stop_reason')}) → screening の variant のまま")
@@ -740,9 +807,8 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
 
     # S10: SELECTION で比較 (チームごとに選んだ variant で)
     team_of = {a.arm_id: a.team_file for a in cands}
-    plan_of = {a.arm_id: a.plan_file for a in cands}
     arms10 = [R.Arm(cid, team_of[cid], chosen[cid]["selection_model"], models_dir, pick_policy=chosen[cid]["pick_policy"],
-                    plan_file=plan_of.get(cid))
+                    plan_file=chosen[cid].get("plan_file"))
               for cid in contenders]
     res10 = R.race(arms10, ref_arm(), split, "selection", seed + 2, eval_dir, stage="s10",
                    steps=steps, max_battles=max_battles, parallel=parallel, log=log)
@@ -754,6 +820,21 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
         return summary
     deltas10 = {a["arm_id"]: (a.get("result") or {}).get("mean") for a in res10["arms"]}
     ranked = sorted(finalists, key=lambda cid: -(deltas10[cid] if deltas10.get(cid) is not None else -1.0))
+    if TC.active(theme):
+        from champions_agent.config import BUILD_THEME_GATE
+        try:
+            tc = _theme_check(finalists, [("s08b_adapted", res8b), ("s10", res10)])
+            summary["theme_check"] = tc
+            _write_stage(run_dir, "theme_check", tc)
+            log("S10 " + TC.format_line(tc))
+            ranked, excluded = TC.apply_gate(ranked, tc["teams"], BUILD_THEME_GATE)
+            summary["theme_gate"] = {"enabled": BUILD_THEME_GATE, "excluded": excluded, "none_pass": tc["none_pass"]}
+            if excluded:
+                log(f"S10 theme gate: テーマを満たさない並びを勝者の候補から外す {excluded}")
+            if tc["none_pass"]:
+                log("S10 theme gate: どの並びもテーマを満たさない (none_pass) → 順位はそのまま、印だけ残す")
+        except Exception as e:
+            log(f"S10 theme check: error {e!r}")
     winner = ranked[0]
     summary["winner"] = winner
     summary["winner_variant"] = chosen[winner]["variant"]
@@ -830,7 +911,8 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
                 summary["action_adapter"] = p["action_adapter"]
             _write_stage(run_dir, f"s11b_action_adapt{tag}", ra)
             log(f"S11b action adapter [{cid}]: use_adapted={ra.get('use_adapted')} ({ra.get('reason')})")
-        final_arm = R.Arm(cid, arm_c.team_file, final_model, final_models_dir, pick_policy=final_pick, plan_file=arm_c.plan_file)
+        final_arm = R.Arm(cid, arm_c.team_file, final_model, final_models_dir, pick_policy=final_pick,
+                          plan_file=chosen[cid].get("plan_file"))
         h = None
         if is_top or finalist_holdout_all:
             h = HO.final_holdout(final_arm, ref_arm(), split, doc["sealed_id"], run_dir, seed + 4,

@@ -2,7 +2,7 @@
 
 variants:
   action_noise 5% / 10%  (2 位の手を選ぶ確率)     pick_noise 5% / 10% (選出を乱択)
-  user_policy high / mixed / expert (遵守モデル)   policy_population: prev / best のチェックポイント
+  policy_population: prev / best のチェックポイント (遵守モデルの 3 条件は 2026-10-05 に廃止: 操縦はアドバイザーが行う)
   ood: 外部取り込み構築 (STRESS 用に別生成)
 感度 = WR(current 条件) − WR(variant)。候補と参照を同じ variant で測って対応差も出す。
 """
@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from champions_agent.config import BUILD_STRESS_ACTION_NOISE, BUILD_USER_MODELS
+from champions_agent.config import BUILD_STRESS_ACTION_NOISE
 from tools.team_build import racing as R
 from tools.team_build.verdict import verdict4
 
@@ -47,9 +47,6 @@ def variants(models_dir_current: Optional[str], population: dict) -> list:
         v.append({"name": f"action_noise_{int(p * 100)}", "extra": ["--action-noise", str(p)], "models_dir": models_dir_current})
     for p in BUILD_STRESS_ACTION_NOISE:
         v.append({"name": f"pick_noise_{int(p * 100)}", "extra": ["--pick-noise", str(p)], "models_dir": models_dir_current})
-    for u in ("high", "mixed", "expert"):
-        if u in BUILD_USER_MODELS:
-            v.append({"name": f"user_{u}", "extra": ["--user-policy", u], "models_dir": models_dir_current})
     for tag, d in population.items():
         v.append({"name": f"policy_{tag}", "extra": [], "models_dir": d})
     return v

@@ -9,37 +9,23 @@ import tempfile
 from pathlib import Path
 
 from tools.team_build import interventions as IV
-from tools.team_build.candidates import SpeciesFeature
 from tools.team_build.package import selection_patterns_from_records
 
 
-def test_hypotheses_and_variants():
-    owned = {"a", "b", "c", "d", "e", "f", "g", "h"}
+def test_lineage_helpers():
+    """残っているのは変更の分類と系譜の記録だけ (LLM の仮説の経路は 2026-10-05 に削除)"""
     members = ["a", "b", "c", "d", "e", "f"]
-    ok = {"hypotheses": [{"id": "h1", "kind": "member", "target_id": "a", "replacement_id": "g", "reason": "no_switch_in"},
-                         {"id": "h2", "kind": "set", "target_id": "b", "reason": "outsped"},
-                         {"id": "h3", "kind": "pick", "reason": "selection_mismatch"}]}
-    assert IV.validate_hypotheses(ok, owned, set(members)) == []
-    bad = {"hypotheses": [{"id": "x", "kind": "member", "target_id": "zz", "replacement_id": "a", "reason": "nope"}]}
-    assert len(IV.validate_hypotheses(bad, owned, set(members))) >= 3
-    feats = {s: SpeciesFeature(s, {"t1": 0.2, "t2": 0.2}) for s in owned}
-    feats["g"].coverage = {"t1": 0.9, "t2": 0.1}
-    feats["a"].coverage = {"t1": 0.0, "t2": 0.5}
-    stats = {"loss_by_opponent_species": [{"key": "t1", "losses": 5}, {"key": "zz", "losses": 3}]}
-    muts = IV.rule_mutations(stats, members, feats, ["t1", "t2"])
-    assert muts and muts[0]["target_id"] == "a" and muts[0]["replacement_id"] == "g", muts
-    variants = IV.make_variants("L00", members, ok["hypotheses"] + muts)
-    kinds = [v["kind"] for v in variants]
-    assert "A_member" in kinds and "B_set" in kinds and "C_pick" in kinds
-    va = next(v for v in variants if v["kind"] == "A_member" and v["changes"][0]["out"] == "a")
-    assert "g" in va["members"] and "a" not in va["members"] and va["parent_team_id"] == "L00"
-    assert IV.classify_change(members, va["members"]) == "repair"
+    assert IV.classify_change(members, ["g", "b", "c", "d", "e", "f"]) == "repair"
     assert IV.classify_change(members, ["g", "h", "c", "d", "e", "zz"]) == "new_branch"
+    variants = [{"variant_id": "L00-R1A1", "kind": "A_member", "members": ["g", "b", "c", "d", "e", "f"], "changes": [{"out": "a", "in": "g"}]}]
     with tempfile.TemporaryDirectory() as d:
         p = IV.record_lineage(Path(d), "L00", variants)
         data = json.loads(p.read_text(encoding="utf-8"))
-        assert len(data["nodes"]) == len(variants) and data["nodes"][0]["parent"] == "L00"
-    print("test_hypotheses_and_variants OK")
+        assert len(data["nodes"]) == 1 and data["nodes"][0]["parent"] == "L00" and data["nodes"][0]["kind"] == "A_member"
+        IV.record_lineage(Path(d), "L00", variants)
+        assert len(json.loads(p.read_text(encoding="utf-8"))["nodes"]) == 2
+    assert not hasattr(IV, "llm_hypotheses") and not hasattr(IV, "rule_mutations")
+    print("test_lineage_helpers OK")
 
 
 def test_selection_patterns():
@@ -54,5 +40,5 @@ def test_selection_patterns():
 
 
 if __name__ == "__main__":
-    test_hypotheses_and_variants()
+    test_lineage_helpers()
     test_selection_patterns()

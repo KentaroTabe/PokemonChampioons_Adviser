@@ -76,6 +76,7 @@ def read_real_battle(path: Path) -> dict:
     lab = read_battle_labels(path)
     opp_sel: Optional[list] = None
     opp_seen: set = set()
+    in_battle: list = []          # 対戦中 (選出画面以外) に場に出た相手の種 (順)
     try:
         for line in path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
@@ -83,15 +84,24 @@ def read_real_battle(path: Path) -> dict:
             d = json.loads(line)
             if d.get("type") != "scene":
                 continue
-            party = ((d.get("state") or {}).get("opponent") or {}).get("party") or []
-            ids = [p.get("species") for p in party if p.get("species")]
+            st = d.get("state") or {}
+            opp = st.get("opponent") or {}
+            party = opp.get("party") or []
+            ids = [p.get("species") for p in party if p.get("species") and not p.get("guess")]
             if d.get("scene") == "selection" and opp_sel is None and len(ids) >= 6:
                 opp_sel = ids[:6]
             opp_seen |= set(ids)
+            idx = opp.get("active")
+            if d.get("scene") != "selection" and idx is not None and 0 <= idx < len(party):
+                sid = party[idx].get("species")
+                if sid and not party[idx].get("guess") and sid not in in_battle:
+                    in_battle.append(sid)
     except Exception:
         pass
     return {"file": path.name, "won": {"win": True, "loss": False}.get(lab.get("outcome")), "our_species": lab.get("species") or [],
-            "opp_species": sorted(set(opp_sel or opp_seen)), "opp_full": opp_sel is not None, "ts": path.stat().st_mtime}
+            "opp_species": sorted(set(opp_sel or opp_seen)), "opp_full": opp_sel is not None, "opp_seen": sorted(opp_seen),
+            "opp_seen_in_battle": in_battle, "consistent": (opp_sel is not None and opp_seen <= set(opp_sel) and len(lab.get("species") or []) == 6),
+            "ts": path.stat().st_mtime}
 
 
 def sim_reference_records(run_dir: Path) -> list:

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import random
 
-from champions_agent.env.advisor_player import apply_user_policy, pick_order_from_perm
+from champions_agent.env.advisor_player import apply_action_noise, pick_order_from_perm
 
 
 def test_pick_order_from_perm():
@@ -15,28 +15,23 @@ def test_pick_order_from_perm():
     print("test_pick_order_from_perm OK")
 
 
-def test_apply_user_policy():
+def test_apply_action_noise():
+    """遵守モデルは廃止 (2026-10-05)。残るのは STRESS 用の行動ノイズ (確率 p で 2 位の手) だけ"""
     adv = {"ok": True, "best": {"kind": "move", "id": "a", "score": 20.0},
            "actions": [{"kind": "move", "id": "a", "score": 20.0},
                        {"kind": "switch", "id": "b", "score": 19.5},
                        {"kind": "move", "id": "c", "score": 3.0}]}
     rng = random.Random(0)
-    out, followed = apply_user_policy(adv, "full", 0.0, rng)
+    out, followed = apply_action_noise(adv, 0.0, rng)
     assert followed and out is adv
-    # 行動ノイズ 100%: 常に 2 位
-    out, followed = apply_user_policy(adv, "full", 1.0, rng)
-    assert not followed and out["best"]["id"] == "b" and out["actions"][0]["id"] == "b"
-    assert [a["id"] for a in out["actions"]] == ["b", "a", "c"]
-    # 遵守モデル mixed: 迷い局面 (差 2.5%) なので一定割合で離反
-    dev = sum(1 for _ in range(500) if not apply_user_policy(adv, "mixed", 0.0, rng)[1])
-    assert 20 < dev < 200, dev
-    # ok でない / 候補 1 つは素通し
-    assert apply_user_policy({"ok": False}, "expert", 1.0, rng) == ({"ok": False}, True)
+    out, followed = apply_action_noise(adv, 1.0, rng)
+    assert not followed and out["best"]["id"] == "b" and [a["id"] for a in out["actions"]] == ["b", "a", "c"]
+    assert apply_action_noise({"ok": False}, 1.0, rng) == ({"ok": False}, True)
     one = {"ok": True, "actions": [{"kind": "move", "id": "a", "score": 1.0}]}
-    assert apply_user_policy(one, "expert", 1.0, rng)[1] is True
-    print("test_apply_user_policy OK")
+    assert apply_action_noise(one, 1.0, rng)[1] is True
+    print("test_apply_action_noise OK")
 
 
 if __name__ == "__main__":
     test_pick_order_from_perm()
-    test_apply_user_policy()
+    test_apply_action_noise()

@@ -143,10 +143,7 @@ def wall_speed_ok(base: dict, speed_max: int = BUILD_WALL_SPEED_MAX, bulk_min: i
     return int(base.get("spe") or 0) <= speed_max or bulk_product(base) >= bulk_min
 
 
-NATURE_MINUS = {"adamant": "spa", "jolly": "spa", "impish": "spa", "careful": "spa", "brave": "spe", "relaxed": "spe",
-                "quiet": "spe", "sassy": "spe", "modest": "atk", "timid": "atk", "bold": "atk", "calm": "atk",
-                "lonely": "def", "naughty": "spd", "mild": "def", "rash": "spd", "hasty": "def", "naive": "spd",
-                "lax": "spd", "gentle": "def"}
+from tools.team_build.set_lint import NATURE_MINUS  # noqa: E402  (性格 → 下げる能力。常識規則と同じ表)
 
 
 def nature_fits_moves(nature: Optional[str], categories: list) -> bool:
@@ -510,6 +507,7 @@ def generate_role_sets(species_id: str, role: str, ctx: RoleContext) -> list:
     from tools.team_build.interaction import _points_to_ev, view_from_set
     from tools.team_build.learnsets import learnset_of
     from tools.team_build.sets import legal_item, set_sanity
+    from tools.team_build.set_lint import fill_to_four, gate_rejects, lint_candidate
 
     dex = get_dex()
     sp = dex.species(species_id)
@@ -778,6 +776,22 @@ def generate_role_sets(species_id: str, role: str, ctx: RoleContext) -> list:
         moves = chosen + taken
         if len(moves) > 4:
             moves = moves[:4]
+        if len(moves) < 4:
+            # 技 4 つ未満の型を作らない (常識規則 few_moves): 主分類の攻撃技 (点の順) → 補助技 → learnset の残りで補充する
+            att_order = sorted((m for m in pool if m not in moves and attack_pool[m]["cat"] == cur_category),
+                               key=lambda m: -sum(norm_w[t] * use_scored[m].get(t, 0.0) for t in targets))
+            util_order = (list(BUILD_ROLE_UTILITY_MOVES["protect"]) + ["substitute"] + status_order + speed_order
+                          + [m for m in BUILD_ROLE_UTILITY_MOVES["heal"] if m not in exclude]
+                          + list(BUILD_ROLE_UTILITY_MOVES["pivot"]) + list(BUILD_ROLE_UTILITY_MOVES["screens"]))
+            moves = fill_to_four(moves, att_order, util_order, learnset, item=item, ability=ability,
+                                 exclude=set(exclude) | ({} if allow_selfko else set(BUILD_ROLE_UTILITY_MOVES["selfko"])),
+                                 move_of=lambda m: {"category": cat_of_move(m)})
+            if len(moves) < 4:
+                return None
+            chosen = [m for m in moves if m in attack_pool and m not in taken]
+            if boosted and ability != "contrary" and any(drops_boosted_stat(attack_pool[m]["entry"], boosted) for m in chosen):
+                return None
+            notes.append("fill:4moves")
         nature = cur_natures[0]
         if len(cur_natures) > 1 and bulk == "fast":
             nature = cur_natures[0] if fast_share() >= BUILD_ROLE_FAST_SHARE else cur_natures[1]
@@ -851,6 +865,12 @@ def generate_role_sets(species_id: str, role: str, ctx: RoleContext) -> list:
             if set_sanity(c):
                 c.notes.append("sanity:" + ";".join(set_sanity(c)))
                 continue
+            # 常識規則 (set_lint、2026-10-05): 誤りの型は作らない (数は LINT_REJECTS → S5 のログ / s06_lint.json)。警告は注記に残す
+            lint = lint_candidate(c)
+            if lint["errors"] and gate_rejects(c, source="role_sets"):
+                continue
+            if lint["warnings"]:
+                c.notes.append("lint:" + ";".join(lint["warnings"]))
             seen.add(c.key())
             out.append(c)
             if len(out) >= ctx.max_sets:

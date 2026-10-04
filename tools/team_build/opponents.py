@@ -92,10 +92,8 @@ def compose_team(rng: random.Random, weights: dict, teammates: dict, base_key, s
     return chosen
 
 
-def synthetic_pool(n: int = BUILD_POOL_TOP_N, seed: int = 0, snapshot_id: Optional[int] = None) -> tuple:
-    """最新の使用率スナップショットの全種から合成した相手プール (Team 一覧, team_id → 本文, snapshot_id)。
-    種の重みは meta_snapshot.merge_ranked (使用率% ∪ ゲーム内順位)、型は meta_sets (技は champions mod の learnset で検査)、
-    共起は teammate_usage。同じ seed なら同じプール。ブラックリスト (所持の方針) は適用しない (2026-09-18 ユーザー決定)"""
+def _meta_tables(snapshot_id: Optional[int] = None) -> dict:
+    """合成に要る表 (使用率の重み / 共起 / 種ごとの代表型 / 持ち物の予備 / メガ石) を最新 (または指定) のスナップショットから読む"""
     from champions_agent.data import database as db
     from champions_agent.env import team_builder as TB
     from champions_agent.env.legality import fill_moves
@@ -130,37 +128,115 @@ def synthetic_pool(n: int = BUILD_POOL_TOP_N, seed: int = 0, snapshot_id: Option
     stones = _mega_stone_ids()
     stone_of = {s: (r.get("item_name") if (r.get("item_name") or "") in stones else None) for s, r in rows_by.items()}
     weights = {s: w for s, w in weights.items() if s in rows_by}
+    return {"snap": snap, "weights": weights, "teammates": teammates, "rows_by": rows_by, "fallback_items": fallback_items,
+            "stones": stones, "stone_of": stone_of}
+
+
+def _team_from_ids(ids: list, tables: dict, by_id: dict, rank: int) -> Optional[tuple]:
+    """種 id の列 (6 体) → (Team, 本文)。種の型は合成 (代表型)。既にある構築 (同じ本文) や型の無い種があれば None"""
+    from champions_agent.env import team_builder as TB
+    rows_by = tables["rows_by"]
+    if len(ids) != 6 or any(s not in rows_by for s in ids):
+        return None
+    sets = [TB.PokemonSet(species=TB.to_showdown_name(TB._sanitize_species(s)), ability=rows_by[s]["ability_name"],
+                          item=TB._sanitize_item(rows_by[s]["item_name"]), tera_type=rows_by[s]["tera_type"],
+                          nature=rows_by[s]["nature"], evs=rows_by[s]["evs"],
+                          moves=[m for m in (rows_by[s][f"move{k}"] for k in (1, 2, 3, 4)) if m]) for s in ids]
+    TB._enforce_item_clause(sets, tables["fallback_items"])
+    text = "\n\n".join(p.to_showdown_text() for p in sets)
+    tid = team_id_of(text)
+    if tid in by_id:
+        return None
+    species, mega = parse_team_text(text, tables["stones"])
+    return F.Team(team_id=tid, species=species, mega=mega, rank=rank), text
+
+
+def synthetic_pool(n: int = BUILD_POOL_TOP_N, seed: int = 0, snapshot_id: Optional[int] = None, tables: Optional[dict] = None,
+                   teams: Optional[list] = None, by_id: Optional[dict] = None) -> tuple:
+    """最新の使用率スナップショットの全種から合成した相手プール (Team 一覧, team_id → 本文, snapshot_id)。
+    種の重みは meta_snapshot.merge_ranked (使用率% ∪ ゲーム内順位)、型は meta_sets (技は champions mod の learnset で検査)、
+    共起は teammate_usage。同じ seed なら同じプール。ブラックリスト (所持の方針) は適用しない (2026-09-18 ユーザー決定)。
+    teams / by_id を渡すとその続きに n まで足す (mixed: 実在の構築の後を合成で埋める)"""
+    from champions_agent.env import team_builder as TB
+    tables = tables or _meta_tables(snapshot_id)
     rng = random.Random(seed)
-    teams, by_id = [], {}
+    teams = list(teams or [])
+    by_id = dict(by_id or {})
     attempts = 0
     while len(teams) < n and attempts < n * 4:
         attempts += 1
-        ids = compose_team(rng, weights, teammates, TB._base_species_key, stone_of)
+        ids = compose_team(rng, tables["weights"], tables["teammates"], TB._base_species_key, tables["stone_of"])
         if len(ids) < 6:
             continue
-        sets = [TB.PokemonSet(species=TB.to_showdown_name(TB._sanitize_species(s)), ability=rows_by[s]["ability_name"],
-                              item=TB._sanitize_item(rows_by[s]["item_name"]), tera_type=rows_by[s]["tera_type"],
-                              nature=rows_by[s]["nature"], evs=rows_by[s]["evs"],
-                              moves=[m for m in (rows_by[s][f"move{k}"] for k in (1, 2, 3, 4)) if m]) for s in ids]
-        TB._enforce_item_clause(sets, fallback_items)
-        text = "\n\n".join(p.to_showdown_text() for p in sets)
-        tid = team_id_of(text)
-        if tid in by_id:
+        made = _team_from_ids(ids, tables, by_id, len(teams) + 1)
+        if made is None:
             continue
-        species, mega = parse_team_text(text, stones)
-        teams.append(F.Team(team_id=tid, species=species, mega=mega, rank=len(teams) + 1))
-        by_id[tid] = text
-    return teams, by_id, snap
+        teams.append(made[0])
+        by_id[made[0].team_id] = made[1]
+    return teams, by_id, tables["snap"]
+
+
+def _base_species(sid: str) -> str:
+    for suf in ("megax", "megay", "mega"):
+        if sid.endswith(suf) and len(sid) > len(suf):
+            return sid[: -len(suf)]
+    return sid
+
+
+def real_rosters(days: Optional[float] = None, min_n: int = 1, battles_dir: Optional[Path] = None) -> list:
+    """実戦で当たった構築 (6 体の組) とその遭遇回数 [(ids (昇順), n)] (遭遇の多い順)。
+    対象は整合した対戦だけ: 選出画面で相手 6 体が読めて、対戦中に見えた相手がその 6 体に含まれ、自分の 6 体も記録されている
+    (experiments/env_validity.read_real_battle の consistent)。メガ形態は基本種に丸める"""
+    from champions_agent.config import BUILD_POOL_REAL_DAYS, BUILD_POOL_REAL_MIN_N
+    from tools.team_build.env_match import load_real_battles
+    days = BUILD_POOL_REAL_DAYS if days is None else days
+    min_n = BUILD_POOL_REAL_MIN_N if min_n is None else min_n
+    counts: dict = {}
+    for b in load_real_battles(days, battles_dir):
+        if not (b.get("opp_full") and b.get("consistent")):
+            continue
+        ids = tuple(sorted({_base_species(s) for s in b.get("opp_species") or []}))
+        if len(ids) != 6:
+            continue
+        counts[ids] = counts.get(ids, 0) + 1
+    return sorted(((list(k), n) for k, n in counts.items() if n >= min_n), key=lambda kv: (-kv[1], kv[0]))
+
+
+def mixed_pool(n: int = BUILD_POOL_TOP_N, seed: int = 0, snapshot_id: Optional[int] = None, days: Optional[float] = None,
+               min_n: Optional[int] = None, battles_dir: Optional[Path] = None, log=None) -> tuple:
+    """実戦で当たった構築 (6 体の組は実在、型は合成) を先に入れ、足りない分だけ合成で埋めた相手プール
+    (Team 一覧, team_id → 本文, snapshot_id, 実在の構築数)。2026-10-05 判断 #1 (構築単位の一致率 17.8% → 季節内に 40% が目標)"""
+    tables = _meta_tables(snapshot_id)
+    teams: list = []
+    by_id: dict = {}
+    skipped = 0
+    for ids, _cnt in real_rosters(days, min_n, battles_dir):
+        if len(teams) >= n:
+            break
+        made = _team_from_ids(ids, tables, by_id, len(teams) + 1)
+        if made is None:
+            skipped += 1
+            continue
+        teams.append(made[0])
+        by_id[made[0].team_id] = made[1]
+    n_real = len(teams)
+    if log:
+        log(f"S2 mixed pool: 実在の構築 {n_real} (型の無い種などで除外 {skipped}) + 合成 {max(0, n - n_real)}")
+    teams, by_id, snap = synthetic_pool(n=n, seed=seed, tables=tables, teams=teams, by_id=by_id)
+    return teams, by_id, snap, n_real
 
 
 def pool_teams(top_n: int = BUILD_POOL_TOP_N, meta_snapshot_id: Optional[int] = None,
                source: Optional[str] = None, seed: int = 0) -> tuple:
     """(Team 一覧, team_id → チーム本文)。順位はプールの並び順 (上位が先)。
-    source: ranked = POOL_PIN の上位ランカー構築 (型は meta_snapshot_id の meta_sets) / latest = 最新スナップショットからの合成
-    (既定 config BUILD_POOL_SOURCE)"""
+    source: ranked = POOL_PIN の上位ランカー構築 (型は meta_snapshot_id の meta_sets) / latest = 最新スナップショットからの合成 /
+    mixed = 実戦で当たった構築を先に、残りを合成 (既定 config BUILD_POOL_SOURCE)"""
     source = source or BUILD_POOL_SOURCE
     if source == "latest":
         teams, by_id, _snap = synthetic_pool(n=top_n or BUILD_POOL_TOP_N, seed=seed)
+        return teams, by_id
+    if source == "mixed":
+        teams, by_id, _snap, _n_real = mixed_pool(n=top_n or BUILD_POOL_TOP_N, seed=seed)
         return teams, by_id
     from champions_agent.env.ranked_teams import build_ranked_teams
     texts = build_ranked_teams(top_n=top_n, include_external=False,
@@ -186,9 +262,12 @@ def build_split(run_id: str, out_dir: Path, seed: int, top_n: int = BUILD_POOL_T
     pool_source: ranked (POOL_PIN の上位構築) / latest (最新スナップショットからの合成)。既定 config BUILD_POOL_SOURCE"""
     pool_source = pool_source or BUILD_POOL_SOURCE
     pool_snapshot = meta_snapshot_id
+    n_real = 0
     if teams is None or by_id is None:
         if pool_source == "latest":
             teams, by_id, pool_snapshot = synthetic_pool(n=top_n, seed=seed)
+        elif pool_source == "mixed":
+            teams, by_id, pool_snapshot, n_real = mixed_pool(n=top_n, seed=seed)
         else:
             teams, by_id = pool_teams(top_n=top_n, meta_snapshot_id=meta_snapshot_id, source=pool_source)
     fams = F.cluster_families(teams, min_jaccard=min_jaccard)
@@ -202,7 +281,7 @@ def build_split(run_id: str, out_dir: Path, seed: int, top_n: int = BUILD_POOL_T
                  "teams": [t.team_id for t in f.teams]} for f in fams]
     doc = {
         "schema_version": "1", "run_id": run_id, "seed": seed, "top_n": top_n,
-        "meta_snapshot_id": meta_snapshot_id, "pool_source": pool_source, "pool_snapshot": pool_snapshot,
+        "meta_snapshot_id": meta_snapshot_id, "pool_source": pool_source, "pool_snapshot": pool_snapshot, "n_real_teams": n_real,
         "min_jaccard": min_jaccard, "ratios": ratios,
         "n_teams": len(teams), "n_families": len(fams),
         "tiers": {"search": split["search"], "selection": split["selection"],

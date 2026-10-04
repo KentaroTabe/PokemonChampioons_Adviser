@@ -315,9 +315,10 @@ def _species_matchup_score(my_view: MonView, my_moves: list,
     return offense / 100.0 - 0.8 * (threat / 100.0)
 
 
-def advise_selection(state: dict, resolver=None) -> dict:
-    """状態辞書から選出提案を作る。
+def advise_selection(state: dict, resolver=None, use_registered: bool = True) -> dict:
+    """状態辞書から選出提案を作る (相性の規則: ダメージ計算の対面行列)。
 
+    use_registered: 自分側の技に登録 (my_team) の技を使う (実戦と自分側の測定)。相手側の操縦に使うときは False。
     戻り値: {"ok": bool, "picked": N, "done": bool,
              "recommend": [{"name","index","lead"}], "reason": str,
              "matrix": [[score]]}
@@ -414,7 +415,7 @@ def advise_selection(state: dict, resolver=None) -> dict:
     def score_row(eval_sid, m):
         my_view, my_moves = get_view(eval_sid)
         # 自分側は登録技を優先する (使用率予測技は実際の型と乖離し得る)
-        reg = _own_registered_moves(m.get("name"))
+        reg = _own_registered_moves(m.get("name")) if use_registered else []
         if reg:
             my_moves = reg
         row = {}
@@ -592,11 +593,18 @@ def attach_model_pick(advice: dict, my_party: list, opp_party: list) -> None:
         names = [my_party[idx[i]].get("species_ja")
                  or my_party[idx[i]].get("species_id") or "?" for i in perm]
         from champions_agent.agent.selection_model import is_in_distribution
+        indices = [idx[i] for i in perm]
+        holders = [k for k in indices if _is_mega_holder(my_party[k])]
+        # メガ枠: 規則の推奨が同じ個体を割り当てていればそれ、無ければ先頭の石持ち (モデルはメガ枠を決めない)
+        rule_assign = next((r.get("index") for r in (advice.get("recommend") or []) if r.get("mega_assign")), None)
+        assignee = rule_assign if rule_assign in holders else (holders[0] if holders else None)
         advice["model_pick"] = {
-            "names": names, "win_prob": round(prob, 3),
+            "names": names, "win_prob": round(prob, 3), "indices": indices,
             # Package のモデルはそのパーティで適応済み。配布版は学習分布に入っているかで参考値かどうかを示す
             "trained": True if package_id else is_in_distribution(mine),
             "model": f"experiment:{package_id}" if package_id else "deployed",
+            "recommend": [{"index": k, "name": names[j], "lead": j == 0, "mega_holder": k in holders, "mega_assign": k == assignee}
+                          for j, k in enumerate(indices)],
         }
         # 実戦の選出傾向に条件づけた推し (条件付きモデル + バンクの選出率)。前提を満たさなければ出さない
         try:
@@ -623,9 +631,46 @@ def attach_model_pick(advice: dict, my_party: list, opp_party: list) -> None:
         pass
 
 
+def choose_primary(advice: dict, prefer_model: Optional[bool] = None) -> dict:
+    """第一候補 (◎) を決める (純粋。2026-10-05: 操縦はアドバイザーが行う)。
+    登録チーム用の検証済みモデル (試用 Package) か分布内の配布版の推し (model_pick.trained) があればそれを第一候補にし、
+    相性の規則の推奨は rule_recommend / rule_reason に残して参考に併記する。無ければ規則が第一候補 (従来)。
+    advice["primary"] = "model" | "rule"。選出助言の記録 (battle_log) と決定監査はこの recommend を見る"""
+    if prefer_model is None:
+        try:
+            from champions_agent.config import SELECTION_PRIMARY_MODEL
+            prefer_model = bool(SELECTION_PRIMARY_MODEL)
+        except Exception:
+            prefer_model = True
+    advice["primary"] = "rule"
+    mp = advice.get("model_pick") or {}
+    if not prefer_model or not advice.get("ok") or not mp.get("trained") or not mp.get("recommend"):
+        return advice
+    advice["rule_recommend"] = list(advice.get("recommend") or [])
+    advice["rule_reason"] = advice.get("reason")
+    advice["recommend"] = [dict(r) for r in mp["recommend"]]
+    advice["reason"] = f"学習モデルの推し (予測勝率 {float(mp.get('win_prob') or 0.0):.0%}、{mp.get('model')})"
+    holders = [r["name"] for r in advice["recommend"] if r.get("mega_holder")]
+    assign = next((r["name"] for r in advice["recommend"] if r.get("mega_assign")), None)
+    if assign in holders:
+        holders.remove(assign)
+        holders.insert(0, assign)
+    advice["mega_picks"] = holders
+    advice["primary"] = "model"
+    return advice
+
+
 def format_selection_advice(advice: dict) -> str:
     if not advice.get("ok"):
         base = f"[選出評価不可] {advice.get('reason')}"
+    elif advice.get("primary") == "model":
+        rec = advice["recommend"]
+        names = " → ".join(("★" if r["lead"] else "") + r["name"] for r in rec)
+        base = f"◎ 推奨選出 (学習モデル): {names} (★=先発)\n  {advice['reason']}"
+        rr = advice.get("rule_recommend") or []
+        if rr:
+            base += ("\n  参考 (相性の規則): " + " → ".join(("★" if r["lead"] else "") + r["name"] for r in rr)
+                     + (f"\n  {advice['rule_reason']}" if advice.get("rule_reason") else ""))
     else:
         rec = advice["recommend"]
         names = " → ".join(("★" if r["lead"] else "") + r["name"] for r in rec)
@@ -641,7 +686,7 @@ def format_selection_advice(advice: dict) -> str:
                      f"(ストーン持ち{len(mega)}体: {'/'.join(mega)}。"
                      "メガシンカは1試合1回、他の持ち物は死にます)")
         mp = advice.get("model_pick")
-        if mp:
+        if mp and advice.get("primary") != "model":
             note = ("" if mp.get("trained")
                     else " ※このチームは未学習のため参考値")
             base += (f"\n  🤖 学習モデルの推し: {' → '.join(mp['names'])} "

@@ -66,6 +66,10 @@ TESTS=(
   test_lineup_search
   test_team_build_repair
   test_plan_prior
+  test_pilot
+  test_set_lint
+  test_theme_check
+  test_articles_ingest
   test_team_build_experiments
   test_team_build_archetypes
   test_team_build_banned

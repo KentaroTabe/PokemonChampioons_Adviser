@@ -230,6 +230,30 @@ def beam_complete(core: tuple, pool: list, feats: dict, threats: list, style: st
     return sorted(out, key=lambda l: -l.score)
 
 
+def sample_stratified(lineups: list, k: int, strata: int, rng, key=None) -> list:
+    """較正の標本 (2026-10-05 判断 #10、純粋): 点の降順に strata 個の層へ等分し、層を順に回りながら各層から rng で 1 つずつ引く
+    (上位の層から)。k 個か尽きるまで。lineups が k 以下なら全部"""
+    rows = sorted(lineups, key=(key or (lambda l: -float(getattr(l, "score", 0.0)))))
+    if k <= 0 or not rows:
+        return []
+    if len(rows) <= k:
+        return list(rows)
+    n_bins = max(1, min(int(strata), len(rows)))
+    size = -(-len(rows) // n_bins)
+    bins = [rows[i * size:(i + 1) * size] for i in range(n_bins)]
+    bins = [list(b) for b in bins if b]
+    out: list = []
+    while len(out) < k and any(bins):
+        for b in bins:
+            if len(out) >= k:
+                break
+            if not b:
+                continue
+            pick = b.pop(rng.randrange(len(b)))
+            out.append(pick)
+    return out
+
+
 def select_with_quotas(lineups: list, quotas: dict, min_distance: float = MIN_DISTANCE) -> list:
     """まずコンセプト系統ごとの最良を 1 つずつ採り、次に quota (best overall / coverage / roles / synergy /
     novelty)。既採用との距離が min_distance 未満なら次点へ (「性質の違う有望候補」を残す)"""
