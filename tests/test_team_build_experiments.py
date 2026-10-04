@@ -145,8 +145,39 @@ def test_learned_surrogate():
     print("test_learned_surrogate OK")
 
 
+def test_selection_compliance():
+    from tools.team_build.real_eval import selection_compliance
+    recs = [{"type": "scene", "t": 1.0, "state": {"scene": "selection", "selection_picked": 0, "player": {"party": [{"ja": "A"}, {"ja": "B"}, {"ja": "C"}]}}},
+            {"type": "advice", "kind": "selection", "t": 2.0, "advice": {"primary": "model", "recommend": [{"index": 0, "name": "A", "lead": True}, {"index": 2, "name": "C"}, {"index": 1, "name": "B"}]}},
+            {"type": "scene", "t": 5.0, "state": {"scene": "selection", "selection_picked": 3, "player": {"party": [{"ja": "A", "picked": True}, {"ja": "B", "picked": True}, {"ja": "C", "picked": True}]}}}]
+    c = selection_compliance(recs)
+    assert c["has_advice"] and c["primary"] == "model" and c["members_match"] is True and c["basis"] == "picked"
+    assert c["timely"] is True and c["latency_s"] == 3.0
+    late = [dict(recs[2], t=1.5)] + recs[:2]
+    c2 = selection_compliance(late)
+    assert c2["timely"] is False
+    # picked が揃わないときは場に出た種で判定 (推奨外が出れば不一致)
+    recs3 = recs[:2] + [{"type": "scene", "t": 9.0, "state": {"scene": "command", "player": {"active": 1, "party": [{"ja": "A"}, {"ja": "D"}, {"ja": "C"}]}}}]
+    assert selection_compliance(recs3)["members_match"] is False and selection_compliance(recs3)["basis"] == "observed:1"
+    assert selection_compliance([recs[0]])["has_advice"] is False
+    print("test_selection_compliance OK")
+
+
+def test_opponent_pick_validity_helpers():
+    from tools.team_build.experiments import opponent_pick_validity as OV
+    assert OV.consistent({"opp_full": True, "opp_seen": ["a", "b"], "opp_species": ["a", "b", "c", "d", "e", "f"], "our_species": list("uvwxyz")})
+    assert not OV.consistent({"opp_full": True, "opp_seen": ["a", "q"], "opp_species": ["a", "b", "c", "d", "e", "f"], "our_species": list("uvwxyz")})
+    assert not OV.consistent({"opp_full": False, "opp_seen": [], "opp_species": [], "our_species": list("uvwxyz")})
+    rows = [{"precision": {"rule": 1.0, "matchup": 0.5}}, {"precision": {"rule": 0.5, "matchup": None}}]
+    sm = OV.summarize(rows, ["rule", "matchup"])
+    assert sm["rule"] == {"n": 2, "mean": 0.75, "median": 0.75} and sm["matchup"]["n"] == 1
+    print("test_opponent_pick_validity_helpers OK")
+
+
 def main() -> None:
     test_calibration()
+    test_selection_compliance()
+    test_opponent_pick_validity_helpers()
     test_learned_surrogate()
     test_concept_origin()
     test_env_validity()

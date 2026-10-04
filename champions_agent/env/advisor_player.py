@@ -28,28 +28,42 @@ _EV_KEYS = {"HP": "hp", "Atk": "atk", "Def": "def",
 
 # 自分側の型 (シム用): species_ja -> {"ev","nature","item_ja","ability_ja"}
 _SIM_BUILDS: dict = {}
+_SIM_MOVES: dict = {}
 _orig_get_my_build = None
+_orig_get_my_moves = None
 
 
 def _install_build_hook() -> None:
-    """advisor.my_team.get_my_build を、シム登録 → 従来の順で引くようにする"""
-    global _orig_get_my_build
+    """advisor.my_team.get_my_build / get_my_moves を、シム登録 → 従来の順で引くようにする。
+    技も差し替える (2026-10-05): 選出の規則は登録技で自分側を評価するので、シムの候補チームが登録チームと同じ種を持つとき
+    登録チームの技で評価されていた"""
+    global _orig_get_my_build, _orig_get_my_moves
     import advisor.my_team as mt
     if _orig_get_my_build is not None:
         return
     _orig_get_my_build = mt.get_my_build
+    _orig_get_my_moves = mt.get_my_moves
 
     def hooked(species_ja):
         b = _SIM_BUILDS.get(species_ja or "")
         return b if b else _orig_get_my_build(species_ja)
 
+    def hooked_moves(species_ja):
+        if _SIM_BUILDS:                       # シムで登録している間は登録チームの技を引かない (無ければ空 = 使用率の予測技)
+            return list(_SIM_MOVES.get(species_ja or "", []))
+        return _orig_get_my_moves(species_ja)
+
     mt.get_my_build = hooked
+    mt.get_my_moves = hooked_moves
 
 
-def register_team_text(text: str) -> dict:
-    """Showdownチームテキストから自分側の型を登録する。戻り値: 登録した辞書"""
+def register_team_text(text: str, resolver=None) -> dict:
+    """Showdownチームテキストから自分側の型 (能力ポイント・性格・技) を登録する。戻り値: 登録した辞書。
+    技は resolver (vision.normalize.NameResolver) があれば日本語名で登録する (登録技の解決は日本語名から)"""
     _install_build_hook()
     out = {}
+    _SIM_BUILDS.clear()
+    _SIM_MOVES.clear()
     for block in (text or "").strip().split("\n\n"):
         lines = [l.strip() for l in block.strip().splitlines() if l.strip()]
         if not lines:
@@ -58,7 +72,14 @@ def register_team_text(text: str) -> dict:
         sid = re.sub(r"[^a-z0-9]", "", head.lower())
         ja = species_ja_name(sid) or sid
         ev, nature = {}, {}
+        moves: list = []
         for l in lines[1:]:
+            if l.startswith("- "):
+                mid = re.sub(r"[^a-z0-9]", "", l[2:].strip().lower())
+                mj = resolver.ja_of("moves", mid) if resolver is not None else None
+                if mj:
+                    moves.append(mj)
+                continue
             if l.startswith("EVs:"):
                 for part in l.split(":", 1)[1].split("/"):
                     m = re.match(r"\s*(\d+)\s+(\w+)", part)
@@ -72,6 +93,7 @@ def register_team_text(text: str) -> dict:
         build = {"ev": {s: ev.get(s, 0) for s in _STATS} if ev else {},
                  "nature": nature, "item_ja": None, "ability_ja": None}
         _SIM_BUILDS[ja] = build
+        _SIM_MOVES[ja] = moves
         out[ja] = build
     return out
 
@@ -177,6 +199,31 @@ def battle_to_state(battle, resolver=None) -> Optional[dict]:
     }
 
 
+def preview_to_state(battle, resolver=None) -> Optional[dict]:
+    """poke-env Battle (選出画面、active が居ない時点) -> 選出助言の状態辞書 (advisor.selection.advise_selection の入力)"""
+    own_vals = list(battle.team.values())
+    opp_src = getattr(battle, "teampreview_opponent_team", None) or battle.opponent_team.values()
+    opp_vals = list(opp_src)
+    if len(own_vals) < 3 or not opp_vals:
+        return None
+    own = [_mon_entry(p, True, resolver, False) for p in own_vals]
+    for e in own:
+        e["is_picked"] = False
+    opp = [_mon_entry(p, False, resolver, False) for p in opp_vals]
+    return {"scene": "selection", "selection_picked": 0, "field": {},
+            "player": {"party": own}, "opponent": {"party": opp}}
+
+
+def rule_pick_order(battle, resolver=None, use_registered: bool = True) -> Optional[str]:
+    """実戦の助言と同じ相性の規則 (advise_selection) の選出。評価できなければ None"""
+    from tools.team_build.pilot import perm_to_team_order, rule_perm
+    state = preview_to_state(battle, resolver)
+    if state is None:
+        return None
+    perm = rule_perm(state, use_registered=use_registered, resolver=resolver)
+    return perm_to_team_order(perm, len(battle.team)) if perm else None
+
+
 def choose_from_advice(battle, advice: dict) -> Optional[dict]:
     """助言の best を poke-env の行動に写す。選べなければ None"""
     if not advice or not advice.get("ok"):
@@ -227,29 +274,18 @@ def advisor_pick_order(battle, selection_model_path=None, planned: Optional[list
     return pick_order_from_perm(scored[0][0], len(my))
 
 
-def apply_user_policy(advice: dict, user_policy: str, action_noise: float,
-                      rng) -> tuple:
-    """助言に遵守モデルと行動ノイズを適用し、(best を差し替えた助言, followed) を返す (純粋)。
-
-    - user_policy != full: tools.team_build.user_model.decide で従うか/離反するかを決める
-    - action_noise: 確率 p で 2 位の手 (STRESS 用)
-    """
+def apply_action_noise(advice: dict, action_noise: float, rng) -> tuple:
+    """助言に行動ノイズ (STRESS 用: 確率 p で 2 位の手) を適用し、(best を差し替えた助言, followed) を返す (純粋)。
+    遵守モデル (user_policy) は 2026-10-05 に廃止: 操縦はアドバイザーが行う前提で測り、実戦の遵守率は記録だけ残す"""
     actions = list((advice or {}).get("actions") or [])
     if not advice or not advice.get("ok") or len(actions) < 2:
         return advice, True
-    chosen, followed = actions[0], True
-    if user_policy and user_policy != "full":
-        from tools.team_build.user_model import decide
-        chosen, followed = decide(user_policy, advice, rng)
-        chosen = chosen or actions[0]
     if action_noise > 0 and rng.random() < action_noise:
-        chosen, followed = actions[1], False
-    if chosen is actions[0]:
-        return advice, followed
-    adv = dict(advice)
-    adv["best"] = chosen
-    adv["actions"] = [chosen] + [a for a in actions if a is not chosen]
-    return adv, followed
+        adv = dict(advice)
+        adv["best"] = actions[1]
+        adv["actions"] = [actions[1]] + [a for a in actions if a is not actions[1]]
+        return adv, False
+    return advice, True
 
 
 def _state_summary(battle) -> dict:
@@ -269,16 +305,16 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
                         latencies: Optional[list] = None,
                         pick_policy: str = "advisor", selection_model_path=None,
                         pick_noise: float = 0.0, action_noise: float = 0.0,
-                        user_policy: str = "full", rng=None, recorder=None,
+                        rng=None, recorder=None,
                         opp_source=None, selection_plan: Optional[dict] = None, family_of: Optional[dict] = None,
                         **player_kwargs):
-    """助言エンジンで戦う poke-env Player を作る。
+    """助言エンジンで戦う poke-env Player を作る (操縦はアドバイザー: 選出も行動も実戦の助言と同じ経路)。
 
-    pick_policy: "advisor" = 実助言と同じ選出 (選出モデル、使えなければ相性順) /
-                 "teampreview" = 従来の相性順 (search_expert.teampreview_order)
+    pick_policy: "advisor" = 実助言と同じ選出 (選出モデル → 使えなければ相性の規則 advise_selection → 最後に簡易相性順) /
+                 "rule" = 相性の規則 (advise_selection) だけ /
+                 "teampreview" = 従来の簡易相性順 (search_expert.teampreview_order。実戦の経路には無い)
     selection_model_path: 候補専用の選出モデル (None なら既定モデルを分布内のときだけ使う)
     pick_noise / action_noise: STRESS 用のノイズ (確率で乱択 / 2 位の手)
-    user_policy: full / high / mixed / expert (遵守モデル、tools.team_build.user_model)
     recorder: tools.team_build.battle_log.BattleRecorder (対戦記録)。opp_source.last_id を相手 id に使う
     selection_plan / family_of: 構築の選出計画 (plan.json の dict) と 相手 team_id → 系統 id。pick_policy advisor のとき
         計画を選出モデルの初期値にする (plan_prior)。相手の系統は opp_source.last_id から引く
@@ -300,14 +336,11 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
             t0 = time.perf_counter()
             advice, followed, d = None, True, None
             try:
-                text = getattr(team_source, "last_text", None)
-                if text and stats.get("_registered") != text:
-                    register_team_text(text)
-                    stats["_registered"] = text
+                self._register_team()
                 state = battle_to_state(battle, resolver)
                 if state:
                     advice = evaluate(state, resolver)
-                    adv2, followed = apply_user_policy(advice, user_policy, action_noise, rng)
+                    adv2, followed = apply_action_noise(advice, action_noise, rng)
                     d = choose_from_advice(battle, adv2)
                     if not followed:
                         stats["deviated"] = stats.get("deviated", 0) + 1
@@ -334,7 +367,14 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
                 return self.create_order(d["move"], mega=d["mega"])
             return self.create_order(d["pokemon"])
 
+        def _register_team(self):
+            text = getattr(team_source, "last_text", None)
+            if text and stats.get("_registered") != text:
+                register_team_text(text, resolver)
+                stats["_registered"] = text
+
         def teampreview(self, battle):
+            self._register_team()
             order = self._pick(battle)
             if recorder is not None:
                 try:
@@ -367,7 +407,19 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
                     stats["pick_model"] = stats.get("pick_model", 0) + 1
                     return order
                 stats["pick_fallback"] = stats.get("pick_fallback", 0) + 1
+            if pick_policy in ("advisor", "rule"):
+                # モデルが無い / 分布外: 実戦の助言と同じ相性の規則 (advise_selection) で選ぶ (従来の簡易相性順ではない)
+                try:
+                    order = rule_pick_order(battle, resolver, use_registered=True)
+                except Exception as e:
+                    stats["pick_rule_error"] = stats.get("pick_rule_error", 0) + 1
+                    stats["last_pick_rule_error"] = repr(e)
+                    order = None
+                if order:
+                    stats["pick_rule"] = stats.get("pick_rule", 0) + 1
+                    return order
             try:
+                stats["pick_matchup"] = stats.get("pick_matchup", 0) + 1
                 return teampreview_order(battle)
             except Exception:
                 return self.random_teampreview(battle)

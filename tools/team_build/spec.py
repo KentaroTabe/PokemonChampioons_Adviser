@@ -4,7 +4,7 @@
 LLM で自由文を解析した場合も、そのまま実行せず validate_spec で schema と制約の整合を通す
 (docs/TEAM_BUILDING_IMPLEMENTATION.md §9-1, §10)。
 
-objective: max_wr (既定) / stable (E[WR] − λ·Risk) / easy (遵守モデル込み WR) / favorites (固定枠制約下の max_wr)
+objective: max_wr (既定) / stable (E[WR] − λ·Risk) / favorites (固定枠制約下の max_wr)。easy (遵守モデル込み) は 2026-10-05 に廃止
 """
 from __future__ import annotations
 
@@ -15,9 +15,9 @@ from pathlib import Path
 from typing import Optional
 
 from champions_agent.config import (
-    BUILD_SCHEMA_VERSION, BUILD_USER_MODELS, TRAINING_BATTLE_FORMAT)
+    BUILD_SCHEMA_VERSION, TRAINING_BATTLE_FORMAT)
 
-OBJECTIVES = ("max_wr", "stable", "easy", "favorites")
+OBJECTIVES = ("max_wr", "stable", "favorites")
 STYLES = ("any", "offense", "balance", "bulky_offense", "cycle", "setup", "speed_control",
           "anti_meta", "stall")
 PROFILES = ("fast", "medium", "full")
@@ -89,7 +89,6 @@ class BuildSpec:
     owned: list = field(default_factory=list)         # 使える候補を限定するとき (空なら 参戦種 − banned)
     banned_source: dict = field(default_factory=dict)  # 使わないリストの出どころ (file / sha256 / file_count / extra / unknown)
     style: str = "any"
-    user_policy: str = "full"                         # easy のときの遵守モデル既定
     profile: str = "full"
     regulation: str = TRAINING_BATTLE_FORMAT
     notes: str = ""
@@ -316,7 +315,7 @@ def parse_form(form: dict, owned: Optional[list] = None, banned_path: Path = BAN
     owned (使える候補) は省略時 参戦種 − banned"""
     spec = BuildSpec()
     prov = {}
-    for key in ("objective", "style", "user_policy", "profile", "regulation", "notes"):
+    for key in ("objective", "style", "profile", "regulation", "notes"):
         if form.get(key) not in (None, ""):
             setattr(spec, key, str(form[key]))
             prov[key] = "resolved"
@@ -356,7 +355,7 @@ def parse_form(form: dict, owned: Optional[list] = None, banned_path: Path = BAN
     spec.locked = list(spec.favorites)
     if spec.favorites and spec.objective == "max_wr" and "objective" not in prov:
         spec.objective, prov["objective"] = "favorites", "inferred"
-    for key in ("objective", "style", "user_policy", "profile"):
+    for key in ("objective", "style", "profile"):
         prov.setdefault(key, "inferred")
     spec.provenance = prov
     return spec
@@ -369,8 +368,6 @@ def validate_spec(spec: BuildSpec, legal: Optional[set] = None) -> list:
         problems.append(f"objective が不正: {spec.objective}")
     if spec.style not in STYLES:
         problems.append(f"style が不正: {spec.style}")
-    if spec.user_policy not in BUILD_USER_MODELS:
-        problems.append(f"user_policy が不正: {spec.user_policy}")
     if spec.profile not in PROFILES:
         problems.append(f"profile が不正: {spec.profile}")
     owned = set(spec.owned)

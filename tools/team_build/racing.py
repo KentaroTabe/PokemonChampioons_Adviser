@@ -19,13 +19,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from champions_agent.config import (BUILD_EQUIV_EPS, BUILD_RACE_DEFAULT_MAX, BUILD_RACE_MIN_TERMINAL_N,
-                                    BUILD_RACE_STEPS)
+from champions_agent.config import (BUILD_EQUIV_EPS, BUILD_OPP_PICK_POLICY, BUILD_OPP_PILOT, BUILD_RACE_DEFAULT_MAX,
+                                    BUILD_RACE_MIN_TERMINAL_N, BUILD_RACE_STEPS)
 from tools.team_build.verdict import (DEGRADED, EQUIVALENT, IMPROVED, UNCERTAIN, look_z, n_looks, next_step,
                                       verdict4)
 
 REPO = Path(__file__).resolve().parent.parent.parent
 PARALLEL = 5                # 同時に回す測定プロセス数 (config 化候補)
+OPP_PILOT = BUILD_OPP_PILOT               # 環境チームの操縦 (全腕で同じ。run の記録に残す)
+OPP_PICK_POLICY = BUILD_OPP_PICK_POLICY
 
 
 @dataclass
@@ -59,6 +61,7 @@ def measure_cmd(arm: Arm, n: int, offset: int, seed: int, split_file: Path, tier
            "--skip-random", "--belief-k", "0", "--team-file", str(arm.team_file),
            "--opp-split", f"{split_file}:{tier}" + (f":{fold}" if fold is not None else ""),
            "--opp-offset", str(offset), "--pick-policy", arm.pick_policy or pick_policy,
+           "--opp-pilot", OPP_PILOT, "--opp-pick-policy", OPP_PICK_POLICY,
            "--battle-log", str(battle_log), "--json", str(out_json), "--candidate-id", arm.arm_id]
     if arm.selection_model:
         cmd += ["--selection-model", arm.selection_model]
@@ -193,7 +196,8 @@ def race(candidates: list, reference: Arm, split_file: Path, tier: str, seed: in
             ", ".join(f"{a.arm_id}={a.state}({(a.result or {}).get('mean') or 0:+.3f})" for a in arms))
     result = {
         "stage": stage, "tier": tier, "fold": fold, "seed": seed, "eps": eps, "steps": list(steps),
-        "pick_policy": pick_policy, "n_looks": k_looks, "z": z, "min_terminal_n": min_terminal_n, "run_to_max": run_to_max,
+        "pick_policy": pick_policy, "opp_pilot": OPP_PILOT, "opp_pick_policy": OPP_PICK_POLICY,
+        "n_looks": k_looks, "z": z, "min_terminal_n": min_terminal_n, "run_to_max": run_to_max,
         "max_battles": max_battles, "n_candidates_seen": len(arms), "elapsed_s": round(time.time() - t0, 1),
         "reference": reference.to_dict(), "arms": [a.to_dict() for a in arms], "rounds": rounds,
         "note": "探索時の最高値は期待勝率ではない (Winner's curse)。採否は holdout の結果だけで決める",

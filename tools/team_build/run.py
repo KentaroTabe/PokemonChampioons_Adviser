@@ -946,7 +946,7 @@ def main() -> None:
                     help="測定からの戻りの周回数 (S8a 後 / S8b 後の修理モード、docs/TEAM_BUILD_REDESIGN_1002.md §14)。"
                          "既定 config BUILD_REPAIR_ROUNDS。0 で無効")
     ap.add_argument("--registry", default=None, help="registry のディレクトリ (既定 logs/registry)")
-    ap.add_argument("--adapt-action", choices=["auto", "on", "off"], default="auto",
+    ap.add_argument("--adapt-action", choices=["auto", "on", "off"], default="off",
                     help="行動方策 adapter (S11b)。auto = full プロファイルのみ")
     ap.add_argument("--action-steps", type=int, default=None, help="adapter の 1 chunk 学習ステップ (既定 100k)")
     ap.add_argument("--action-eval", type=int, default=None, help="adapter の chunk ごとの対応比較戦数 (既定 100)")

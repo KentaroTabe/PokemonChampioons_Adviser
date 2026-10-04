@@ -60,16 +60,20 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
               pick_policy: str = "advisor", selection_model: str | None = None,
               opp_split: str | None = None, battle_log: str | None = None,
               pick_noise: float = 0.0, action_noise: float = 0.0,
-              user_policy: str = "full", candidate_id: str | None = None,
-              opp_offset: int = 0, selection_plan: str | None = None) -> None:
+              candidate_id: str | None = None,
+              opp_offset: int = 0, selection_plan: str | None = None,
+              opp_pilot: str | None = None, opp_pick_policy: str | None = None) -> None:
     from poke_env import AccountConfiguration
     from poke_env.player import RandomPlayer
     import advisor.engine as eng
     from champions_agent.env.advisor_player import make_advisor_player
     from champions_agent.env.ranked_teams import (
         RankedTeambuilder, pinned_meta_snapshot_id)
-    from champions_agent.env.showdown_env import (
-        TrainingServerConfiguration, make_benchmark_player)
+    from champions_agent.config import BUILD_OPP_PICK_POLICY, BUILD_OPP_PILOT
+    from champions_agent.env.showdown_env import TrainingServerConfiguration
+    from tools.team_build.pilot import make_opponent_player
+    opp_pilot = opp_pilot or BUILD_OPP_PILOT
+    opp_pick_policy = opp_pick_policy or BUILD_OPP_PICK_POLICY
 
     if belief_k is not None:
         eng.BELIEF_K = belief_k
@@ -126,8 +130,8 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
         recorder = BattleRecorder(
             Path(battle_log), candidate_team_id=candidate_id or (team_file or "ranked"),
             advisor_policy_id=(f"rl:{os.environ.get('CHAMPIONS_MODELS_DIR', 'default')}"
-                               f"|sel:{selection_model or 'default'}"),
-            user_policy=user_policy, battle_seed=opp_seed, family_of=family_of)
+                               f"|sel:{selection_model or 'default'}|pick:{pick_policy}|opp:{opp_pilot}/{opp_pick_policy}"),
+            user_policy="advisor", battle_seed=opp_seed, family_of=family_of)
     plan = None
     if selection_plan:
         from tools.team_build.plan_prior import load_plan
@@ -135,16 +139,16 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
     player = make_advisor_player(
         team_source=own_tb, stats=stats, latencies=latencies,
         pick_policy=pick_policy, selection_model_path=selection_model,
-        pick_noise=pick_noise, action_noise=action_noise, user_policy=user_policy,
+        pick_noise=pick_noise, action_noise=action_noise,
         rng=random.Random((opp_seed or 0) + 7), recorder=recorder, opp_source=opp_team,
         selection_plan=plan, family_of=family_of,
         account_configuration=AccountConfiguration(f"ADv{uid}", None),
         battle_format=TRAINING_BATTLE_FORMAT,
         server_configuration=TrainingServerConfiguration,
         team=own_tb)
-    bench = make_benchmark_player(
-        battle_format=TRAINING_BATTLE_FORMAT, team=opp_team,
-        account_configuration=AccountConfiguration(f"ADo{uid}", None))
+    # 環境チームの操縦 (2026-10-05): 行動は opp_pilot (heuristic / rl)、選出は opp_pick_policy。全腕で同じ設定 (racing が渡す)
+    bench = make_opponent_player(opp_pilot, opp_team, TRAINING_BATTLE_FORMAT, AccountConfiguration(f"ADo{uid}", None),
+                                 pick_policy=opp_pick_policy, rng=random.Random((opp_seed or 0) + 11))
     t0 = time.time()
     await player.battle_against(bench, n_battles=n_battles)
     dt = time.time() - t0
@@ -173,7 +177,8 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
             "team_file": team_file, "candidate_id": candidate_id,
             "pick_policy": pick_policy, "selection_model": selection_model, "selection_plan": selection_plan,
             "opp_split": split_info, "battle_log": battle_log,
-            "pick_noise": pick_noise, "action_noise": action_noise, "user_policy": user_policy,
+            "pick_noise": pick_noise, "action_noise": action_noise,
+            "opp_pilot": opp_pilot, "opp_pick_policy": opp_pick_policy,
             "models_dir": os.environ.get("CHAMPIONS_MODELS_DIR"),
             "rl_blend": os.environ.get("RL_BLEND_WEIGHT", "25"),
             "opp_seed": opp_seed, "meta_snapshot": meta_pin,
@@ -209,8 +214,12 @@ def main() -> None:
     ap.add_argument("--no-rl-blend", action="store_true")
     ap.add_argument("--search-blend", type=float, default=None,
                     help="探索の推奨値をスコアへ統合する重み (P9)。0=無効")
-    ap.add_argument("--pick-policy", choices=["advisor", "teampreview"], default="advisor",
-                    help="選出方策: advisor = 実助言と同じ選出モデル (既定) / teampreview = 相性順")
+    ap.add_argument("--pick-policy", choices=["advisor", "rule", "teampreview"], default="advisor",
+                    help="選出方策: advisor = 実助言と同じ (選出モデル → 相性の規則) / rule = 相性の規則だけ / teampreview = 従来の簡易相性順")
+    ap.add_argument("--opp-pilot", choices=["heuristic", "rl"], default=None,
+                    help="環境チーム (相手) の操縦: heuristic = poke-env SimpleHeuristicsPlayer / rl = 学習済み行動方策 (既定 config BUILD_OPP_PILOT)")
+    ap.add_argument("--opp-pick-policy", choices=["heuristic", "matchup", "rule", "model", "prior"], default=None,
+                    help="環境チームの選出 (既定 config BUILD_OPP_PICK_POLICY)")
     ap.add_argument("--selection-model", default=None, help="候補専用の選出モデル (.pt)")
     ap.add_argument("--selection-plan", default=None,
                     help="構築の選出計画 (s06_sets/<cid>.plan.json)。advisor の選出でモデルの予測に計画の事前を足す (--opp-split が要る)")
@@ -219,8 +228,6 @@ def main() -> None:
     ap.add_argument("--battle-log", default=None, help="対戦記録 (JSONL) の出力先")
     ap.add_argument("--pick-noise", type=float, default=0.0, help="STRESS: 選出を乱択する確率")
     ap.add_argument("--action-noise", type=float, default=0.0, help="STRESS: 2位の手を選ぶ確率")
-    ap.add_argument("--user-policy", choices=["full", "high", "mixed", "expert"], default="full",
-                    help="遵守モデル (tools.team_build.user_model)")
     ap.add_argument("--models-dir", default=None,
                     help="行動方策 (RL) のピン dir。CHAMPIONS_MODELS_DIR に設定してから読み込む")
     ap.add_argument("--candidate-id", default=None, help="対戦記録に付ける候補 id")
@@ -238,8 +245,9 @@ def main() -> None:
                     pick_policy=args.pick_policy, selection_model=args.selection_model,
                     opp_split=args.opp_split, battle_log=args.battle_log,
                     pick_noise=args.pick_noise, action_noise=args.action_noise,
-                    user_policy=args.user_policy, candidate_id=args.candidate_id,
-                    opp_offset=args.opp_offset, selection_plan=args.selection_plan))
+                    candidate_id=args.candidate_id,
+                    opp_offset=args.opp_offset, selection_plan=args.selection_plan,
+                    opp_pilot=args.opp_pilot, opp_pick_policy=args.opp_pick_policy))
 
 
 if __name__ == "__main__":

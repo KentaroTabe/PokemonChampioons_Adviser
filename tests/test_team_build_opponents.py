@@ -11,7 +11,6 @@ from pathlib import Path
 
 from tools.team_build import opponents as O
 from tools.team_build import families as F
-from tools.team_build import user_model as U
 from tools.team_build.battle_log import summarize_events, _slim_advice, read_records
 
 
@@ -125,24 +124,6 @@ def test_event_summary_and_records():
     print("test_event_summary_and_records OK")
 
 
-def test_user_model():
-    adv = {"actions": [{"kind": "move", "id": "a", "score": 20.0}, {"kind": "move", "id": "b", "score": 19.0}]}
-    adv_clear = {"actions": [{"kind": "move", "id": "a", "score": 20.0}, {"kind": "move", "id": "b", "score": 5.0}]}
-    assert U.confidence_gap(adv) < U.confidence_gap(adv_clear)
-    assert U.follow_probability("full", 0.0) == 1.0
-    p_close = U.follow_probability("expert", U.confidence_gap(adv))
-    p_clear = U.follow_probability("expert", U.confidence_gap(adv_clear))
-    assert 0.5 <= p_close < p_clear <= 1.0, (p_close, p_clear)
-    assert U.deviation_choice("mixed", adv)["id"] == "b"
-    assert U.deviation_choice("expert", adv, rl_choice={"kind": "move", "id": "rl"})["id"] == "rl"
-    assert U.deviation_choice("full", adv) is None
-    rng = random.Random(0)
-    follows = sum(U.decide("mixed", adv, rng)[1] for _ in range(2000))
-    assert 0.6 * 2000 < follows < 0.95 * 2000, follows        # 迷い局面では基準 0.7 より少し上
-    assert all(U.decide("full", adv, rng)[1] for _ in range(50))
-    print("test_user_model OK")
-
-
 def test_pool_ignores_banned():
     """相手のパーティには使わないリスト (config/banned_species.txt) を適用しない (2026-09-25 ユーザー決定):
     合成に banned の入口が無く、重みのある種はすべて相手の候補になる"""
@@ -161,4 +142,3 @@ if __name__ == "__main__":
     test_pool_ignores_banned()
     test_build_split_and_sequence()
     test_event_summary_and_records()
-    test_user_model()

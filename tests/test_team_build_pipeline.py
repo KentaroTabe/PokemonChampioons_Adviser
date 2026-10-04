@@ -310,6 +310,10 @@ def test_plan_prior_variants_and_promotion_key():
     assert ab is not None and ab.arm_id == "L01_C001@fresh_plan" and ab.plan_file == "/tmp/x.plan.json"
     assert PL._variant_arm(base, "fresh", models, None, plan_prior="ab").plan_file is None
     assert PL._variant_arm(base, "teampreview", models, None, plan_prior="on").plan_file is None
+    rule = PL._variant_arm(base, "rule", models, None)
+    assert rule is not None and rule.pick_policy == "rule" and rule.selection_model is None and rule.plan_file is None
+    ch = PL.choose_variants({"arms": [{"arm_id": "L01_C001@rule", "result": {"mean": 0.05}}]})
+    assert ch["L01_C001"]["pick_policy"] == "rule" and ch["L01_C001"]["variant"] == "rule"
     res = {"arms": [{"arm_id": "L01_C001@fresh", "result": {"mean": 0.10}}, {"arm_id": "L01_C001@fresh_plan", "result": {"mean": 0.14}},
                     {"arm_id": "L02_C002@fresh", "result": {"mean": 0.0}}, {"arm_id": "L01_C001@teampreview", "result": {"mean": -0.1}}]}
     pairs = PL.plan_ab_pairs(res)

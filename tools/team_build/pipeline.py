@@ -147,7 +147,7 @@ def choose_variants(res: dict) -> dict:
         cid, v = split_variant(a["arm_id"])
         if cid not in chosen or d > chosen[cid]["delta"]:
             chosen[cid] = {"variant": v, "arm_id": a["arm_id"], "selection_model": a.get("selection_model"),
-                           "pick_policy": a.get("pick_policy") or ("teampreview" if v == "teampreview" else "advisor"),
+                           "pick_policy": a.get("pick_policy") or (v if v in ("teampreview", "rule") else "advisor"),
                            "plan_file": a.get("plan_file"),
                            "delta": d, "se": r.get("se"), "state": a.get("state"), "n": a.get("n_done")}
     return chosen
@@ -391,8 +391,9 @@ def _variant_arm(base: R.Arm, variant: str, models: dict, generic_path: Optional
     production = 配布版 (登録チームで微調整済み) の選出モデルを強制 (参照だけに使う。候補には無い)。
     plan_prior: off = 計画を使わない / on = モデルの腕 (cheap / fresh) に計画の事前を足す / ab = fresh_plan の腕だけが計画を使う
     (fresh と同じモデル + 計画。同一相手列での対応比較)"""
-    if variant == "teampreview":
-        return R.Arm(variant_arm_id(base.arm_id, variant), base.team_file, None, base.models_dir, pick_policy="teampreview")
+    if variant in ("teampreview", "rule"):
+        # rule = 実戦の助言と同じ相性の規則 (モデル無し)。teampreview = 従来の簡易相性順 (指定時だけ)
+        return R.Arm(variant_arm_id(base.arm_id, variant), base.team_file, None, base.models_dir, pick_policy=variant)
     if variant == "generic":
         if not generic_path:
             return None
@@ -526,7 +527,7 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
                         parallel=parallel)
         ref_wr = {split_variant(a.arm_id)[1]: (sum(a.outcomes) / len(a.outcomes) if a.outcomes else None)
                   for a in ref_variants}
-    ref_variant = best_by_win_rate(ref_wr, ref_order) or "teampreview"
+    ref_variant = best_by_win_rate(ref_wr, ref_order) or ("rule" if "rule" in ref_order else "teampreview")
     ref_best = next(a for a in ref_variants if split_variant(a.arm_id)[1] == ref_variant)
     summary["reference_variant"] = {"variant": ref_variant, "win_rates": ref_wr, "selection_model": ref_best.selection_model,
                                     "pick_policy": ref_best.pick_policy, "production_model": production}

@@ -286,8 +286,15 @@ BUILD_SCREEN_MAX = 300
 # S8a は teampreview / generic (汎用基底) / cheap (screening 用の短い適応)、S8b は teampreview / generic /
 # fresh (収束まで適応し、独立 fold の実測で選んだ checkpoint)。参照 (現行チーム) も同じ variant の最善で測る。
 # ablation: #0 は generic が fresh より +0.07、#3 は fresh が generic より +0.26 と候補で逆なので測定で選ぶ
-BUILD_SCREEN_VARIANTS = ("teampreview", "generic", "cheap")
-BUILD_PICK_VARIANTS = ("teampreview", "generic", "fresh")
+# 2026-10-05 (操縦はアドバイザーが行う): モデル無しの基準の選出は、実戦の助言と同じ相性の規則 "rule" (advisor.selection、ダメージ計算の
+# 対面行列)。従来の "teampreview" (タイプ相性の簡易規則) は実戦の経路に無いので variant から外す (指定すれば使える)
+BUILD_SCREEN_VARIANTS = ("rule", "generic", "cheap")
+BUILD_PICK_VARIANTS = ("rule", "generic", "fresh")
+# 環境チーム (相手) の操縦: heuristic = poke-env SimpleHeuristicsPlayer (従来) / rl = 学習済み行動方策 (ピンの ema)。選出は
+# heuristic (Player 自身) / matchup / rule (実戦の助言と同じ規則) / model (汎用の選出モデル) / prior (実戦の選出率に比例)。
+# 既定は実戦に近い方へ寄せる仮置き (rl + rule)。実験 12 (選出の一致率) と 13 (勝率の実戦との差) で決め直す
+BUILD_OPP_PILOT = "rl"
+BUILD_OPP_PICK_POLICY = "rule"
 # 現行チーム (config/my_team.json の登録 6 体) を exploitation pool として候補に必ず入れる: 代理スコアの較正点 +
 # 近傍 (1 枠入替、入替枠を散らして上位) を BUILD_INCUMBENT_NEIGHBORS 並び。探索 (exploration) の quota とは別枠。
 # 現行と近傍の登録済み個体は登録の型 (持ち物・配分・技) をそのまま使う
@@ -345,7 +352,7 @@ BUILD_PROMOTE_MIN_FULL_RUNS = 3        # 昇格条件: 独立 full run 3 回 + �
 BUILD_REAL_MIN_EFFECTIVE_N = 1000
 BUILD_REAL_MAX_CI_HALFWIDTH = 0.03
 # 遵守モデルの基準遵守率 (P(follow) は助言の 1 位と 2 位の差で変調する)
-BUILD_USER_MODELS = {"full": 1.0, "high": 0.9, "mixed": 0.7, "expert": 0.5}
+# BUILD_USER_MODELS (遵守モデル) は 2026-10-05 に廃止: 操縦はアドバイザーが行う。実戦の遵守率・時間内率は real_eval が記録だけ残す
 BUILD_SCHEMA_VERSION = "1"
 
 # --- 実戦の相手バンク (tools/real_opponents、2026-09-09): 対戦ログの相手の「実際の選出・先発・判明した型」 ---
@@ -748,6 +755,10 @@ SEARCH_OPP_MEGA_MIN_PROB = 0.2
 # 構築の相手の選出 (apply_model_teampreview)、測定の助言の選出 (advisor_pick_order)、候補専用モデルの適応が従う。
 # v3 への切替は tools/compare_selection_features の門 (未知チームの MSE 改善・対応比較の順位精度が v1 に劣らない) を通してから
 SELECTION_FEATURES = "v1"
+# 実戦の選出助言の第一候補 (◎): True なら、登録チーム用の検証済みモデル (試用 Package) か分布内の配布版の推しを第一候補にし、
+# 相性の規則の推奨は参考に併記する (advisor.selection.choose_primary)。False なら従来 (規則が ◎、モデルは併記)。
+# 2026-10-05: 実戦の 9 戦で推奨とモデルの推しが一致した対戦は 0、測定はモデルの選出で測っているのに実戦は規則で選んでいた
+SELECTION_PRIMARY_MODEL = True
 # 自己加速 (S3 の役割 speed_boost = 加速後に上を取れる脅威の割合): 特性の倍率 (かるわざは消費アイテム持ちのときだけ) と
 # 加速技の倍率 (1 回積んだ後)。効果は最大のもの 1 つを採る
 BUILD_SPEED_BOOST_ABILITIES = {"speedboost": 1.5, "unburden": 2.0}
