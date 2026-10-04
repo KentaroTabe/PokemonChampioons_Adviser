@@ -137,7 +137,7 @@ sonnetは疑い箇所の検証+少数サンプルの網羅に専念する (タ�
 | `python -m tools.team_build.run --run-id <id> [--profile fast\|medium\|full] [--llm none\|headless] [--stages search\|measure\|all] [--search-mode joint\|legacy] [--repairs N] [--ace <種>] [--sets-file F]` | 構築システム (S0〜S13。既定 joint = 並びと型の同時探索、repairs = 測定からの戻りの周回。測定では参照と同一の候補は腕にせず、戻りの親に探索の並びを含め、2 周目の変種にも S7 の適応、選出計画 (s06_sets/<cid>.plan.json) を選出の初期値にする。docs/TEAM_BUILD_REDESIGN_1002.md §17.2 / TEAM_BUILDING_IMPLEMENTATION.md) |
 | `python -m tools.check_advisor_player --team-file F --opp-split SPLIT:tier[:fold] --selection-plan s06_sets/<cid>.plan.json [--selection-model M]` | 構築の選出計画を選出モデルの初期値にして測る (計画の 3 体と一致する選出の予測勝率に BUILD_PLAN_PRIOR_MIX を足す。モデルが無ければ計画そのもの) |
 | `python -m tools.collect_selection_data --team-file F --opp-split SPLIT:search:0 --selection-plan PLAN` | 選出モデルの適応データの収集で、探索枠の一部 (BUILD_PLAN_EXPLORE_SHARE) に計画の選出を踏ませる |
-| `python -m tools.team_build.experiments.calibration` / `.concept_origin` / `.env_validity --run-id R` / `.llm_audit --run-id R` | 切り分けの見直しの検証実験 (1 代理評価の較正の予備試験 / 2 構想の出所ごとの到達率 / 3 相手プールの妥当性と実戦 vs シム / 4 LLM 審査の一致率 κ)。結果は logs/build_search/experiments/*.json |
+| `python -m tools.team_build.experiments.calibration` / `.concept_origin` / `.env_validity --run-id R` / `.llm_audit --run-id R [--resume <記録のディレクトリ>]` | 切り分けの見直しの検証実験 (1 代理評価の較正の予備試験 / 2 構想の出所ごとの到達率 / 3 相手プールの妥当性と実戦 vs シム / 4 LLM 審査の一致率 κ)。結果は logs/build_search/experiments/*.json。4 は claude CLI を 60 回呼ぶ (Sonnet 1 回 約 3.5 分、全体で約 3 時間・$9)。呼び出しが失敗した束は「判定なし」として集計から外れ、`--resume` で成功分を記録から再利用して失敗した束だけやり直せる。10/4 の結果と評価は docs/TEAM_BUILD_EXPERIMENTS_1004.md |
 
 進化探索は相手分布に `--forecast-mix` (使用率トレンドの1期外挿。履歴が
 2ヶ月分たまるまで自動無効) と `--archive-mix` (過去の優勝チーム=PSRO反復)

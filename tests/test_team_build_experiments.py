@@ -100,6 +100,33 @@ def test_llm_audit():
     prov = MockProvider([json.dumps({"authoritative": {"verdicts": [{"id": 0, "flags": ["ev_misallocation"]}, {"id": 1, "flags": []}, {"id": 2, "flags": []}]}})])
     labels = LA.audit_once(prov, "sonnet", sets, 10, "audit_test")
     assert labels == {0: {"ev_misallocation"}, 1: set(), 2: set()}
+    # 呼び出しの失敗は「判定なし」(None)。「指摘なし」(空集合) と区別し、指摘率と κ の分母から外す
+    # (2026-10-04: Haiku の 2・3 周目が全部 429 で失敗し、指摘なしと数えて κ 0.33・tier 間 κ 0.0 が出た)
+    bad = MockProvider([""])                                   # JSON が返らない → 再試行しても ok にならない
+    failed = LA.audit_once(bad, "haiku", sets, 10, "audit_fail")
+    assert failed == {0: None, 1: None, 2: None}
+    mixed = {"h#1": labels, "h#2": failed, "h#3": {0: {"ev_misallocation"}, 1: None, 2: set()}}
+    ag2 = LA.agreement(mixed, [0, 1, 2])
+    by = {(p["a"], p["b"]): p for p in ag2["pairs"]}
+    assert by[("h#1", "h#2")]["n"] == 0 and by[("h#1", "h#2")]["kappa_any"] is None     # 失敗した周との対は数えない
+    assert by[("h#1", "h#3")]["n"] == 2 and by[("h#1", "h#3")]["kappa_any"] == 1.0 and ag2["mean_kappa_any"] == 1.0
+    fr2 = LA.flag_rates(mixed["h#3"], [0, 1, 2])
+    assert fr2["n"] == 2 and fr2["any"] == 0.5 and LA.flag_rates(failed, [0, 1, 2])["n"] == 0
+    assert LA.majority([{"a"}, None, {"a", "b"}]) == {"a"} and LA.majority([None, None]) is None
+    assert LA.judged(mixed["h#3"], [0, 1, 2]) == [0, 2]
+    # 再開: 成功した記録 (同じ段・同じ入力・同じ system) は再利用して呼び出さない。失敗の記録は使わない
+    prompt = json.dumps({"sets": [dict(s, id=i) for i, s in enumerate(sets)], "categories": list(LA.CATEGORIES)}, ensure_ascii=False, indent=1)
+    ok_text = json.dumps({"authoritative": {"verdicts": [{"id": 1, "flags": ["role_mismatch"]}]}})
+    recs = [{"stage": "audit_x", "system": LA.SYSTEM, "prompt": prompt, "error": None, "problems": [], "raw_text": ok_text},
+            {"stage": "audit_y", "system": LA.SYSTEM, "prompt": prompt, "error": "RuntimeError('429')", "problems": ["出力に JSON オブジェクトが見つからない"], "raw_text": ""},
+            {"stage": "audit_z", "system": "別の system", "prompt": prompt, "error": None, "problems": [], "raw_text": ok_text}]
+    cache = LA.cached_verdicts(recs, LA.SYSTEM)
+    assert list(cache) == [("audit_x", prompt)]
+    idle = MockProvider([""])
+    assert LA.audit_once(idle, "haiku", sets, 10, "audit_x", cache) == {0: set(), 1: {"role_mismatch"}, 2: set()} and idle.i == 0
+    assert LA.audit_once(idle, "haiku", sets, 10, "audit_y", cache) == {0: None, 1: None, 2: None} and idle.i > 0
+    retried = dict(recs[0], stage="audit_r", prompt=prompt + LA.RETRY_MARK + " (直して再出力):\n- x")     # 再試行で成功した記録
+    assert ("audit_r", prompt) in LA.cached_verdicts([retried], LA.SYSTEM)
     print("test_llm_audit OK")
 
 
