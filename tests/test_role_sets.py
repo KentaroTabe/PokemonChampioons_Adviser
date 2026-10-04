@@ -27,6 +27,28 @@ def test_template_resolution_and_bulk():
     assert R.spread_keeps_class("10/32/0/0/0/24", "fast") and not R.spread_keeps_class("8/24/0/0/19/15", "fast")
     assert R.spread_keeps_class("32/0/10/8/0/16", "bulky") and not R.spread_keeps_class("0/32/0/0/16/18", "bulky")
     assert not R.spread_keeps_class("bad", "fast")
+    # 攻撃役は耐久側の配分でも主攻撃 ≥ 24 を保つ (2026-10-04: グソクムシャの攻撃 0 など 22 型)
+    assert R.spread_keeps_class("32/0/32/0/2/0", "bulky") and not R.spread_keeps_class("32/0/32/0/2/0", "bulky", offensive=True, main_stat="atk")
+    assert R.spread_keeps_class("32/24/8/0/2/0", "bulky", offensive=True, main_stat="atk")
+    assert not R.spread_keeps_class("32/24/8/0/2/0", "bulky", offensive=True, main_stat="spa")
+    # 壁の速さ: 上限ちょうど (95) は可、超えても耐久が十分なら可
+    assert R.wall_speed_ok({"hp": 75, "def": 125, "spd": 75, "spe": 95}) and not R.wall_speed_ok({"hp": 65, "def": 60, "spd": 65, "spe": 115})
+    assert R.wall_speed_ok({"hp": 100, "def": 100, "spd": 100, "spe": 110}) and R.bulk_product({"hp": 100, "def": 80, "spd": 120}) == 12000
+    # 性格と技の分類: 性格が下げる側の技は使わない
+    assert R.nature_fits_moves("modest", ["special", "special"]) and not R.nature_fits_moves("modest", ["special", "physical"])
+    assert not R.nature_fits_moves("timid", ["physical"]) and R.nature_fits_moves("jolly", ["physical"]) and not R.nature_fits_moves("adamant", ["special"])
+    assert R.nature_fits_moves("naive", ["physical", "special"]) and R.nature_fits_moves(None, ["physical"])
+    cat = {"heavyslam": "physical", "flashcannon": "special", "earthpower": "special"}
+    scored = {"heavyslam": {"t1": 1.0, "t2": 0.2}, "flashcannon": {"t1": 0.5, "t2": 0.9}, "earthpower": {"t1": 0.4, "t2": 0.8}}
+    assert R.dominant_category(["heavyslam", "flashcannon"], cat, scored, {"t1": 1.0, "t2": 1.0}) == "physical"      # 同点は先頭の技
+    assert R.dominant_category(["heavyslam", "flashcannon"], cat, scored, {"t1": 0.5, "t2": 1.0}) == "special"
+    # タイプ強化の持ち物はそのタイプの技があるときだけ
+    assert R.type_item_matches("silverpowder", ["Bug", "Grass"]) and not R.type_item_matches("silverpowder", ["Grass", "Ground"])
+    assert R.type_item_matches("leftovers", ["Grass"]) and R.type_item_matches(None, [])
+    # 固定技を無効にする担当の重みの割合
+    eff = lambda t, types: 0.0 if (t == "Dragon" and "Fairy" in types) else 1.0      # noqa: E731
+    sh = R.immune_share("Dragon", ["a", "b", "c"], {"a": ["Fairy"], "b": ["Steel"], "c": ["Water", "Fairy"]}, {"a": 1.0, "b": 1.0, "c": 0.5}, eff)
+    assert abs(sh - 1.5 / 2.5) < 1e-9 and R.immune_share(None, ["a"], {}, {}, eff) == 0.0 and R.immune_share("Fire", ["a"], {"a": ["Fairy"]}, {}, eff) == 0.0
     print("test_template_resolution_and_bulk OK")
 
 
@@ -140,6 +162,16 @@ def test_ability_fit_and_utility_and_items():
     assert items == ["heatrock", "charcoal", "sharpbeak"]
     items = R.pick_item(("sash", "setup_berry"), "physical", [], set(), {}, legal, None, "unburden", None, False, False, True)
     assert items[0] == "whiteherb" and "sitrusberry" in items                        # かるわざ + 自己低下技 → しろいハーブ
+    # クラスの持ち物が全部使用済み → 予備 (BUILD_ITEM_FALLBACK) から。持ち物なしにはしない
+    items = R.pick_item(("orb", "sash"), "physical", [], {"lifeorb", "focussash"}, {}, legal, None, None, None, False, False, False)
+    assert items and items[0] == "leftovers" and "lifeorb" not in items and "focussash" not in items
+    # 補助枠: 分類の違う先制技は選ばない (おくびょうにでんこうせっか)、除外 (攻撃役のねむる) は飛ばす
+    ls2 = {"quickattack", "vacuumwave", "rest", "recover"}
+    cat_of = {"quickattack": "physical", "vacuumwave": "special"}.get
+    assert R.pick_utility("priority", ls2, [], dict(prefs, category_of=cat_of, category="special")) == "vacuumwave"
+    assert R.pick_utility("priority", ls2, [], dict(prefs, category_of=cat_of, category="physical")) == "quickattack"
+    assert R.pick_utility("priority", ls2, [], dict(prefs, category_of=cat_of, category=None)) == "quickattack"
+    assert R.pick_utility("heal", {"rest"}, [], dict(prefs, exclude={"rest"})) is None and R.pick_utility("heal", {"rest"}, [], prefs) == "rest"
     print("test_ability_fit_and_utility_and_items OK")
 
 

@@ -324,6 +324,20 @@ BUILD_REPAIR_KO_MIN_N = 3              # 「誰に何で倒されたか」の集
 BUILD_REPAIR_ITEM_UNUSED_RATE = 0.1    # 消費アイテムが発動した割合 (選出あたり) がこれ未満なら型の変更対象
 BUILD_REPAIR_FAMILY_BOOST = 2.0        # 修理モードで「負けに効いた」系統の重みに掛ける倍率 (1 + この値)
 BUILD_REPAIR_MIN_GAIN = 0.005          # 変種として採る点の増分の下限 (親より上がらない変種は作らない)
+# 2026-10-04 run 1003 の点検 (測定と戻りの手続き) への対処
+BUILD_IDENTICAL_REFERENCE_SKIP = True  # 参照 (登録チーム) と同じ 6 体・同じ型の候補は腕にしない (同じチームどうしの差は選出モデルの学習の
+                                       # ばらつきだけ。1002d の PASS +0.107 は構築の差ではなかった)。修理の親としては参照の記録で診断する
+BUILD_REPAIR_EXPLORE_PARENTS = 1       # 1 周あたり、探索の並び (現行枝でないもの) から Δ 上位を親に加える数 (S8a で脱落していても診断する。
+                                       # 1003 では探索の 7 並びが全部脱落し、修理の対象が現行チームと近傍だけになった)
+BUILD_REPAIR_POOL_VARIANTS = True      # 診断の対戦記録は同じ並びの全 variant (teampreview / generic / cheap …) の腕を束ねる
+                                       # (1003: 選んだ腕だけの 300 戦では負けに効いた系統が 18 戦しか束ねられず下限 20 を割った)
+BUILD_REPAIR_MIN_N_SHARE = 0.06        # 診断の下限の相対値: min(BUILD_REPAIR_MIN_N, 対戦数 × この値) を下限にする。届かなくても部分の証拠として使う
+BUILD_REPAIR_ANSWER_MIN = 0.5          # 「誰に何で倒されたか」の集中への受け: 入替先はその相手の型への被覆 (行の値) がこれ以上の種に限る
+BUILD_REPAIR_DISTINCT_IN = True        # 入替 (A) の変種は入れる種を散らす (同じ入替先ばかりにしない。1003: ヒスイヌメルゴン / バクフーン / カイリューだけ)
+BUILD_REPAIR_FULL_ADAPT_ROUND2 = True  # 2 周目の変種にも S7 と同じ適応 (収束まで + 検証 fold の checkpoint 選択) を与えてから S10 に出す
+                                       # (1003: 他の並びは 8000 戦以上の適応モデル、2 周目の変種は 1000 戦の簡易モデルかモデルなしだった)
+BUILD_REFERENCE_PRODUCTION_GAP = 0.10  # 参照の fresh (run 内で適応) − 本番 (配布版) の勝率差がこれ以上なら「本番の選出モデルが現行チームで弱い」と
+                                       # 記録し、fresh のモデルを registry に候補として登録する (1003: 本番 0.417 / 適応 0.73)
 BUILD_STRESS_ACTION_NOISE = (0.05, 0.10)
 BUILD_SMOKE_CANARY_BATTLES = 20        # 性能判定には使わない (crash / illegal action / 読込 / ログ / latency)
 BUILD_PROMOTE_MIN_FULL_RUNS = 3        # 昇格条件: 独立 full run 3 回 + 全 gate PASS + 重大 regression 0 + 人手 approve
@@ -608,7 +622,8 @@ BUILD_ROLE_SPREADS = {
     "tr_bulky_physical": ("32/0/32/0/2/0", ("relaxed",)), "tr_bulky_special": ("32/0/2/0/32/0", ("sassy",)),
 }
 BUILD_SET_CANDIDATES_PER_ROLE = 3    # 種 × 役割ごとの候補型の上限 (雛形の生成型 + 使用率の型)
-BUILD_WALL_SPEED_MAX = 95            # 素早さ種族値がこれ以上の種は壁型の候補にしない (D-17。使用率の壁型は一体の候補として入る)
+BUILD_WALL_SPEED_MAX = 95            # 素早さ種族値がこれを超える種は壁型の候補にしない (D-17。95 のグライオンは入る。耐久が BUILD_WALL_FAST_BULK_MIN
+                                     # 以上なら超えても入る。使用率の壁型は一体の候補として入る)
 BUILD_BULK_POINTS_MIN = 24           # HP または防御側への投資がこれ以上なら「耐久」(安定技を優先。D-03)
 BUILD_FAST_POINTS_MIN = 24           # 素早さへの投資がこれ以上で耐久投資が無ければ「速攻」(1 発化のデメリット技を許す)
 BUILD_OHKO_BONUS = 0.5               # 担当する相手を 2 発 → 1 発にできる技への加点 (被覆 1 体分の半分。D-04)
@@ -629,6 +644,24 @@ BUILD_ROLE_WALL_OFFENSE_MAX = 110    # 役割の指定が無い種に壁役を�
 BUILD_ARCHETYPE_SPEED_PLAN = {"trick_room": "trick_room", "speed": "outspeed"}   # 軸 → 速度の計画 (他は neutral)
 BUILD_JOINT_REFINE_TARGETS = True    # 仕上げ: 並びが決まった後、各個体の型を担当 (選出計画の相手) に合わせて作り直す (点が上がるときだけ。D-04)
 BUILD_SELFKO_COST = 1.0              # 自爆・捨て技 (だいばくはつ / おきみやげ / みちづれ / いのちがけ) の費用 (§12): 被覆の行では 1 回だけ数え (最も効く相手 1 体にだけ技の利得を足す)、利得をその個体の他の相手への被覆の平均 × この値だけ割り引く
+# 2026-10-04 run 1003 の点検 (並びの評価と選出 / 型と役割) への対処。設計文書 §5.3 の「役割の充足」「重複の減点」の実装
+BUILD_UTILITY_BONUS = {"hazard": 0.03, "removal": 0.02, "priority": 0.02, "speed_control": 0.02}   # 並びに設置 / 除去 / 先制 / 速度操作が
+                                       # あることの価値 (被覆相当。種類ごとに 1 回。1003 の 79 並びのうち 25 は 4 つとも無かった)
+BUILD_MAX_ATTACKERS = 4                # 攻撃役 (breaker / sweeper_setup / cleaner / tr_ace / weather_ace / terrain_ace) の数がこれを超えると減点
+BUILD_ATTACKER_EXCESS_PENALTY = 0.03   # 超過 1 体あたりの減点 (1003: 79 並びのうち 65 が攻撃役 4 体以上)
+BUILD_DUP_ROLE_PENALTY = 0.02          # 同じ仕事の個体 (同じ雛形 × 同じ速度帯 (配分の fast / bulky / tr)) が 2 体以上あるとき 1 組あたりの減点
+BUILD_TRIO_MIX_BONUS = 0.03            # 3 体選出に攻撃役と補助・受け役の両方が入る系統の値への加点 (役割の充足: 先発・勝ち筋・受けが揃うか)
+BUILD_SPECIES_SHARE_MAX = 0.5          # 保持する並びのうち同じ種が入る割合の上限 (固定枠・エースは除く。1003: カイリューが 79 並び全部に入った)
+BUILD_LOCK_IMMUNE_DISCOUNT = 0.5       # こだわり系 + 数ターン固定の技 (げきりん等) の型: その技を無効にする種が居る系統の相手への被覆を
+                                       # この割合だけ割り引く (スカーフげきりんの技固定とフェアリー無効を計算が見ていなかった)
+BUILD_PLAN_PRIOR_MIX = 0.3             # 選出計画 (S5 の selection_plan) を選出モデルの初期値にする: 計画の 3 体と一致する選出の予測勝率に
+                                       # 足す重み (モデルが無い / 分布外のときは計画そのものを使う)
+BUILD_PLAN_EXPLORE_SHARE = 0.5         # cheap adaptation の収集で、探索枠 (--explore) のうち計画の選出を使う割合 (残りは乱択)
+BUILD_ROLE_SUPPORT_BULK_MIN = 7000     # 受け・設置除去・吹き飛ばし・技だけの始動役の適性: 種族値の HP × 防御 か HP × 特防 がこれ以上
+                                       # (リザードン 78×85=6630 は外れ、エンブオー 110×65=7150 は攻撃種族値の上限で外れる)
+BUILD_WALL_FAST_BULK_MIN = 9000        # 素早さ種族値が BUILD_WALL_SPEED_MAX を超えても、耐久 (HP × 防御 か HP × 特防) がこれ以上なら壁の候補にする
+BUILD_ITEM_FALLBACK = ("leftovers", "lifeorb", "sitrusberry", "lumberry", "focussash", "expertbelt", "rockyhelmet", "chestoberry")
+                                       # 雛形のクラスの持ち物が並びで全部使用済みのときの予備 (持ち物なしの型を作らない。それも尽きれば候補なし)
 # テンプレート: attacks = 攻撃技の本数、utility = 補助技の役割 (順に埋める。埋まらなければそのテンプレートは捨てる)
 BUILD_GEN_TEMPLATES = (
     {"name": "attack3_setup", "attacks": 3, "utility": ("setup",)},

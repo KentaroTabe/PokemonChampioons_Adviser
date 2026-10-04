@@ -23,9 +23,10 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from champions_agent.config import (BUILD_CONSUMABLE_ITEMS, BUILD_MAX_CHANGES, BUILD_REPAIR_ARMS, BUILD_REPAIR_FAMILY_BOOST,
-                                    BUILD_REPAIR_ITEM_UNUSED_RATE, BUILD_REPAIR_KO_MIN_N, BUILD_REPAIR_LOSS_RATE_MIN,
-                                    BUILD_REPAIR_MIN_GAIN, BUILD_REPAIR_MIN_N, BUILD_REPAIR_UNUSED_RATE)
+from champions_agent.config import (BUILD_CONSUMABLE_ITEMS, BUILD_MAX_CHANGES, BUILD_REPAIR_ANSWER_MIN, BUILD_REPAIR_ARMS,
+                                    BUILD_REPAIR_DISTINCT_IN, BUILD_REPAIR_FAMILY_BOOST, BUILD_REPAIR_ITEM_UNUSED_RATE,
+                                    BUILD_REPAIR_KO_MIN_N, BUILD_REPAIR_LOSS_RATE_MIN, BUILD_REPAIR_MIN_GAIN, BUILD_REPAIR_MIN_N,
+                                    BUILD_REPAIR_MIN_N_SHARE, BUILD_REPAIR_UNUSED_RATE)
 from tools.team_build.lineup_search import LineupResult, LineupSearch, SearchConfig, constraints_ok, team_field_from
 from tools.team_build.loss_stats import _norm_name
 
@@ -49,19 +50,25 @@ def resource_counts(records: list, role: str = "p1") -> dict:
 def diagnose(stats: dict, members: list, items_of: Optional[dict] = None, consumed: Optional[dict] = None,
              min_n: int = BUILD_REPAIR_MIN_N, loss_rate_min: float = BUILD_REPAIR_LOSS_RATE_MIN,
              unused_rate: float = BUILD_REPAIR_UNUSED_RATE, ko_min_n: int = BUILD_REPAIR_KO_MIN_N,
-             item_unused_rate: float = BUILD_REPAIR_ITEM_UNUSED_RATE, consumable=BUILD_CONSUMABLE_ITEMS) -> dict:
-    """敗因統計 → 制約 (§14.2)。items_of = 親の型の持ち物 {種: 持ち物}、consumed = resource_counts"""
+             item_unused_rate: float = BUILD_REPAIR_ITEM_UNUSED_RATE, consumable=BUILD_CONSUMABLE_ITEMS,
+             min_n_share: float = BUILD_REPAIR_MIN_N_SHARE) -> dict:
+    """敗因統計 → 制約 (§14.2)。items_of = 親の型の持ち物 {種: 持ち物}、consumed = resource_counts。
+    must_cover は下限 (min(min_n, n × min_n_share)) に届かなくても残す (must_cover_enough=False、evidence = 届いた比率)"""
     n = int(stats.get("n") or 0)
     members = list(members)
+    # 下限は対戦数に相対 (min_n_share): 300 戦の screening では系統あたり数戦なので絶対値 20 に届かないことがある (1003: 18 戦)。
+    # 届かなくても束ねた系統は「部分の証拠」として使い、重みの引き上げを証拠の比率で弱める (must_cover_enough / evidence)
+    min_n_eff = min(int(min_n), max(5, int(round(min_n_share * n)))) if n > 0 else int(min_n)
     must_cover, acc = [], 0
     for row in stats.get("loss_by_opponent_family") or []:
         if row.get("losses", 0) < 2 or row.get("loss_rate", 0.0) < loss_rate_min or row.get("key") in (None, "?"):
             continue
         must_cover.append(row["key"])
         acc += int(row.get("n") or 0)
-        if acc >= min_n:
+        if acc >= min_n_eff:
             break
-    enough = acc >= min_n
+    enough = acc >= min_n_eff
+    evidence = round(min(1.0, acc / max(1, min_n_eff)), 3)
     threat_species = [row["key"] for row in (stats.get("loss_by_opponent_species") or [])
                       if row.get("losses", 0) >= 2 and row.get("loss_rate", 0.0) >= loss_rate_min][:3]
     ko = [{"ours": k.get("ours"), "by": k.get("by"), "move": k.get("move"), "n": int(k.get("n") or 0)}
@@ -89,7 +96,7 @@ def diagnose(stats: dict, members: list, items_of: Optional[dict] = None, consum
                        and used.get("losses", 0) / max(1, n_used) > unused.get("losses", 0) / max(1, n_unused) + 0.1)
     notes = []
     if must_cover:
-        notes.append(f"負けに効いた系統 {must_cover} (束ねて {acc} 戦{'' if enough else '、下限未満'})")
+        notes.append(f"負けに効いた系統 {must_cover} (束ねて {acc} 戦 / 下限 {min_n_eff}{'' if enough else '、下限未満: 部分の証拠'})")
     if threat_species:
         notes.append(f"負けに効いた相手 {threat_species}")
     for k in ko:
@@ -100,7 +107,8 @@ def diagnose(stats: dict, members: list, items_of: Optional[dict] = None, consum
         notes.append(f"{u['species']} の {u['item']} は {u['selected']} 選出で {u['consumed']} 回しか発動しなかった")
     if mega_review:
         notes.append("メガを使った試合の敗率が使わなかった試合より高い (メガ枠の見直し)")
-    return {"n": n, "must_cover": must_cover if enough else [], "must_cover_n": acc, "threat_species": threat_species,
+    return {"n": n, "must_cover": must_cover, "must_cover_n": acc, "must_cover_enough": enough, "min_n": min_n_eff,
+            "evidence": evidence, "threat_species": threat_species,
             "ko": ko, "vulnerable": [s for s, _c in vuln.most_common()], "replace_candidates": replace,
             "unused_items": unused_items, "mega_review": mega_review, "notes": notes}
 
@@ -131,8 +139,18 @@ def repair_variants(search: LineupSearch, parent: LineupResult, diag: dict, cfg:
     変種の origin = {"kind": "repair", "parent", "round", "variant": "B"|"A", "changes": [...], "diagnosis": 要約}"""
     combo = [search.lib.by_key[e.key] for e in parent.entries]
     species = list(diag.get("threat_species") or []) + [k["by"] for k in (diag.get("ko") or []) if k.get("by")]
-    w, boosted_idx = boosted_weights(search.fam_w, search.pool.families, search.pool.sets, diag.get("must_cover"), species, boost)
+    eff_boost = float(boost) * float(diag.get("evidence", 1.0) if diag.get("evidence") is not None else 1.0)
+    w, boosted_idx = boosted_weights(search.fam_w, search.pool.families, search.pool.sets, diag.get("must_cover"), species, eff_boost)
     targets = search.pool.species_of_families(boosted_idx) or None
+    # 「誰に何で倒されたか」の集中への受け: 入替先はその相手 (ko の by) の型への被覆が BUILD_REPAIR_ANSWER_MIN 以上の種に限る
+    # (2026-10-04: 診断で出た「アシレーヌのムーンフォースで倒される」への受けが入替先に入らなかった)
+    answer_rows = [i for i, o in enumerate(search.pool.sets) if o.species_id in {k["by"] for k in (diag.get("ko") or []) if k.get("by")}]
+
+    def answers(idx: int) -> bool:
+        if not answer_rows:
+            return True
+        row = search.rows_for([idx])[0]
+        return float(max(row[r] for r in answer_rows)) >= BUILD_REPAIR_ANSWER_MIN
     # 親が既にエース・石の制約に合わない並び (現行チーム: 登録の石が 2 個など) なら、その親の修理ではエースの規則を当てず、
     # 石の数は親のまま (S5 の現行チーム枝と同じ扱い。2026-10-03: 石 2 個の現行チームから変種が 1 つも出なかった)
     ace, max_stones = cfg.ace, cfg.max_stones
@@ -190,10 +208,15 @@ def repair_variants(search: LineupSearch, parent: LineupResult, diag: dict, cfg:
             mega_id = ace or (stone_holder if stone_holder != out_sid else None)
             # 外した種は候補に戻さない (2026-10-03: 外したヒスイヌメルゴンが同じ型で戻り、親と同じ並びの変種ができた)
             cfg_x = replace(cfg_r, banned=frozenset(set(cfg_r.banned) | {out_sid}))
-            ext = search._extend([(sc0, rest, {})], cfg_x, species_pool, roles_of, required, cfg.speed_plan, mega_id, 2, ace)
+            ext = search._extend([(sc0, rest, {})], cfg_x, species_pool, roles_of, required, cfg.speed_plan, mega_id,
+                                 max(2, max_arms), ace)
+            with_answer = [x for x in ext if answers(x[1][-1])]
+            if answer_rows and with_answer:
+                ext = with_answer
             for sc, new, _fills in ext:
                 in_e = search.lib.entries[new[-1]]
-                item = (sc, new, "A", [{"out": out_sid, "in": in_e.species_id, "to": _set_summary(in_e.cand)}])
+                item = (sc, new, "A", [{"out": out_sid, "in": in_e.species_id, "to": _set_summary(in_e.cand),
+                                        "answers_ko": bool(answer_rows) and answers(new[-1])}])
                 tried.append(item)
                 if sc >= base_sc + min_gain:
                     found.append(item)
@@ -221,6 +244,17 @@ def repair_variants(search: LineupSearch, parent: LineupResult, diag: dict, cfg:
         found = [max(tried, key=lambda x: x[0])]
         forced = True
     found.sort(key=lambda x: -x[0])
+    if BUILD_REPAIR_DISTINCT_IN:
+        # 入替 (A) の入れる種を散らす: 入れる種が初出の変種を先に、同じ種の 2 つ目以降は後ろに (点の順は各群の中で保つ)
+        first, later, seen_in = [], [], set()
+        for item in found:
+            ins = tuple(sorted(c.get("in") for c in item[3] if c.get("in")))
+            if item[2] == "A" and ins and ins in seen_in:
+                later.append(item)
+            else:
+                seen_in.add(ins)
+                first.append(item)
+        found = first + later
     out: list = []
     seen: set = {tuple(sorted(e.key for e in parent.entries))}        # 親と同じ型の組は変種にしない
     summary = {"must_cover": diag.get("must_cover"), "threat_species": diag.get("threat_species"), "ko": diag.get("ko"),
@@ -252,8 +286,9 @@ def variant_id(parent_id: str, round_no: int, kind: str, n: int) -> str:
 # ------------------------------------------------------------------ 配線
 def run_repair_round(run_dir: Path, parents: list, round_no: int, battles_prefix: str, log: Optional[Callable] = None,
                      n_threats: int = 30, max_arms: int = BUILD_REPAIR_ARMS, max_changes: int = BUILD_MAX_CHANGES) -> dict:
-    """1 周の修理: parents = [(candidate_id, 診断に使う腕の arm_id)]。探索 fold の対戦記録 (evaluation/battles/
-    <battles_prefix>_<arm_id>.jsonl) を診断し、変種を s06_sets.json / s06_sets/<id>.txt に足す (validate-team 済み)。
+    """1 周の修理: parents = [(candidate_id, 診断に使う腕の arm_id か [arm_id ...])]。探索 fold の対戦記録 (evaluation/battles/
+    <battles_prefix>_<arm_id>.jsonl、複数なら束ねる) を診断し、変種を s06_sets.json / s06_sets/<id>.txt (+ .plan.json) に足す
+    (validate-team 済み)。
     戻り値 {"ids": 合法な変種の candidate_id, "report": 診断と変種の一覧}。従来の S5 (roles の無い行) の親は飛ばす"""
     from tools.team_build import interventions as IV
     from tools.team_build import joint_stage as J
@@ -275,8 +310,12 @@ def run_repair_round(run_dir: Path, parents: list, round_no: int, battles_prefix
         if not row or not row.get("roles"):
             log(f"S9 repair {round_no}: {cid} は役割つきの並びでない (従来の S5) → 飛ばす")
             continue
-        bl = run_dir / "evaluation" / "battles" / f"{battles_prefix}_{arm_id}.jsonl"
-        recs = [json.loads(l) for l in bl.read_text(encoding="utf-8").splitlines() if l.strip()] if bl.exists() else []
+        arm_ids = list(arm_id) if isinstance(arm_id, (list, tuple)) else [arm_id]
+        recs: list = []
+        for aid in arm_ids:          # 同じ並びの全 variant の記録を束ねる (診断の対戦数を増やす)
+            bl = run_dir / "evaluation" / "battles" / f"{battles_prefix}_{aid}.jsonl"
+            if bl.exists():
+                recs.extend(json.loads(l) for l in bl.read_text(encoding="utf-8").splitlines() if l.strip())
         stats = loss_stats(recs, our_species=list(row["members"]))
         items_of = {s.get("species"): s.get("item") for s in (row.get("sets") or [])}
         diag = diagnose(stats, row["members"], items_of, resource_counts(recs))
@@ -303,6 +342,7 @@ def run_repair_round(run_dir: Path, parents: list, round_no: int, battles_prefix
             text = S.to_showdown_text(team)
             ok, errs = S.validate_team_text(text, spec.regulation)
             (run_dir / "s06_sets" / f"{vid}.txt").write_text(text, encoding="utf-8")
+            J.write_plan_file(run_dir / "s06_sets", vid, v)
             r = J.make_row(len(rows), vid, v, "repair", ok, errs, spec.ace or None, is_inc=False)
             rows.append(r)
             made.append({"candidate_id": vid, "ok": ok, "score": v.score, "repair_score": v.origin.get("repair_score"),
@@ -313,7 +353,7 @@ def run_repair_round(run_dir: Path, parents: list, round_no: int, battles_prefix
                 new_ids.append(vid)
         if lineage:
             IV.record_lineage(run_dir, cid, lineage)
-        report["parents"].append({"candidate_id": cid, "arm_id": arm_id, "n_records": len(recs), "diagnosis": diag,
+        report["parents"].append({"candidate_id": cid, "arm_id": arm_ids, "n_records": len(recs), "diagnosis": diag,
                                   "fixed": sorted(fixed), "variants": made})
         report["variants"].extend(made)
         log(f"S9 repair {round_no}: {cid} ({len(recs)} 戦) 診断 {diag['notes'] or ['特記なし']} → 変種 {len(made)} "

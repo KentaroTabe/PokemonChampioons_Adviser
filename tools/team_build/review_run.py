@@ -125,6 +125,36 @@ def surrogate_quality(sets_rows: list, res8a: dict, k: int = 4) -> dict:
             "regret_at_k": round(regret, 4), "order_surrogate": by_score, "order_measured": by_delta}
 
 
+def family_calibration(family_values: dict, records: list, min_n: int = 5, plan_file=None) -> dict:
+    """系統ごとの予測 (S5 の family_values: 系統 → 最良 3 体の値) と実測 (対戦記録の系統ごとの勝率) の較正 (純粋)。
+    戻り値 {"n_families", "spearman", "rows": [{family, predicted, win_rate, n}], "plan": 計画と選出の一致 (plan_file があれば)}。
+    2026-10-04: 系統ごとの予測の順位相関は 0.02〜0.45 だった。run ごとに記録して閾値・項の見直しの材料にする"""
+    from collections import defaultdict
+    wl: dict = defaultdict(lambda: [0, 0])
+    for r in records or []:
+        fam = r.get("opponent_family_id")
+        if not fam:
+            continue
+        wl[fam][0 if r.get("won") else 1] += 1
+    rows = []
+    for fam, (w, l) in wl.items():
+        n = w + l
+        if n >= min_n and fam in (family_values or {}):
+            rows.append({"family": fam, "predicted": float(family_values[fam]), "win_rate": round(w / n, 3), "n": n})
+    rows.sort(key=lambda r: -r["n"])
+    out = {"n_families": len(rows), "n_records": len(records or []),
+           "spearman": spearman([r["predicted"] for r in rows], [r["win_rate"] for r in rows]) if len(rows) >= 3 else None,
+           "rows": rows}
+    if plan_file:
+        try:
+            from tools.team_build.plan_prior import load_plan, plan_agreement
+            plan = load_plan(plan_file)
+            out["plan"] = plan_agreement(records or [], plan) if plan else None
+        except Exception:
+            out["plan"] = None
+    return out
+
+
 def recommendations(review: dict) -> list:
     rec = []
     sq = review.get("surrogate") or {}

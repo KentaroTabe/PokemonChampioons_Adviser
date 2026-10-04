@@ -548,6 +548,47 @@ lineups = select_with_quotas(lineups)
   S4 の新スキーマ (役割・要件) を使うなら S4 からやり直す) で本 run → 1002d と比べる。初回は S5 の所要時間 (96 構想) と S9 のログ (変種数・生存数) を見る。
 - **初回 run ace_lopunny_1003 の実測 (10/3〜10/4)**: S4 47 分 (50/99 系統が新スキーマ)、S5 統合段 21 分 (型 5137、行 72 万)、S6 81/84 合法、型の多様性は改善 (1 型だけの種 25 中 5、1002d は 35 中 21)。測定は探索の 7 並びが S8a で全部脱落、戻り 2 周で変種 6 (S10 まで残るが参照に届かず)、勝者は現行チーム (holdout INCONCLUSIVE +0.027、1002d は PASS +0.107)。見つけた不具合: Species Clause / シムに無い種 id / 石 2 個の親の修理 / 外した種が戻る (全部修正、fix/joint-legality は run 中にマージし 2 周目から有効、fix/repair-noop は 10/4 マージ)。残る課題: 代理評価 (被覆) と実戦のずれ。実装文書 §12 (10/4) を参照。
 
+### 17.2 run 1003 の点検 (2026-10-04) への対処
+
+run ace_lopunny_1003 の点検で出た問題 (測定と戻りの手続き 6 件、並びの評価と選出 5 件、型と役割 7 件) への対処。設定の初期値は
+champions_agent/config.py の 2026-10-04 の節にあり、実測で見直す (D-27)。
+
+**測定と戻りの手続き** (tools/team_build/pipeline.py、repair.py)
+
+| 問題 | 対処 |
+|---|---|
+| 同じチームどうしで差が出る (L00_INC と参照は同じ 6 体・同じ型。1002d の PASS は選出モデルの学習のばらつき) | 参照と同じ 6 体・同じ型の候補は腕にしない (`split_identical`、`BUILD_IDENTICAL_REFERENCE_SKIP`)。summary に `identical_to_reference`。現行チームの修理は参照の腕の記録で診断する |
+| 2 周目の変種だけ選出モデルが軽い (S10 で他は 8000 戦以上、変種は 1000 戦かモデルなし) | 2 周目の変種のうち racing で生存したものに S7 と同じ適応 (fold A で収束まで + fold V の checkpoint 選択) を与えてから S10 に出す (`BUILD_REPAIR_FULL_ADAPT_ROUND2`、`_full_adapt`) |
+| 戻りの親が現行系だけになる (探索の並びが S8a で全滅) | 親 = 参照と同一の候補 + 生存の Δ 上位 `BUILD_REPAIR_PARENTS` + 探索の並び (現行枝・変種を除く) の Δ 上位 `BUILD_REPAIR_EXPLORE_PARENTS` (脱落していても診断する) (`repair_parents`) |
+| 修理の入替先が偏る (ヒスイヌメルゴン / バクフーン / カイリューだけ)、診断の「ムーンフォースで倒される」への受けが入らない | 入替先は「誰に何で倒されたか」の相手の型への被覆が `BUILD_REPAIR_ANSWER_MIN` 以上の種に限る (`answers`)。入替 (A) の候補を `max_arms` 幅まで広げ、入れる種が初出の変種を先に並べる (`BUILD_REPAIR_DISTINCT_IN`)。変更の記録に `answers_ko` |
+| 診断の下限に届かない (300 戦で 18 戦、下限 20) | 診断の記録は同じ並びの全 variant の腕を束ねる (`BUILD_REPAIR_POOL_VARIANTS`、3 variant × 300 戦)。下限は min(20, 対戦数 × `BUILD_REPAIR_MIN_N_SHARE`)。届かなくても束ねた系統を部分の証拠として使い、重みの引き上げを証拠の比率 (`evidence`) で弱める |
+| 本番の選出モデルが現行チームで弱い (本番 0.417 / 適応 0.73) | S7b で fresh − production ≥ `BUILD_REFERENCE_PRODUCTION_GAP` なら `evaluation/reference_model_gap.json` と summary に記録し、fresh のモデルを registry に候補 (`for: registered_team`, `recommend_production`) として登録する。昇格は人手 (promote) |
+
+**並びの評価と選出** (tools/team_build/lineup_search.py、joint_stage.py、plan_prior.py、review_run.py)
+
+| 問題 | 対処 |
+|---|---|
+| 評価の点と実戦が逆、系統ごとの予測に識別力がない | まず run ごとに見える形にする: S8a の後に代理の点と Δ の順位相関 (`surrogate_quality`)、系統ごとの予測 (行の `family_values`) と系統ごとの勝率の順位相関 (`family_calibration`)、計画と選出の一致を `evaluation/s08a_calibration.json` と summary の `calibration` に書く。戻りでは実測の負けに効いた系統の重みを上げる (従来どおり) |
+| 選出計画が実戦で使われない (3 体一致 3〜18%、コータスとリザードンが一度も選出されない)、計画を選出モデルの初期値にする設計が未実装 | S5 / 修理が並びごとに `s06_sets/<cid>.plan.json` を書く。測定 (`check_advisor_player --selection-plan`) では選出モデルの予測勝率に計画の 3 体と一致する選出への加点 `BUILD_PLAN_PRIOR_MIX` を足し、モデルが無い / 分布外なら計画そのものを使う。適応の収集 (`collect_selection_data --selection-plan`) では探索枠の `BUILD_PLAN_EXPLORE_SHARE` で計画の選出を踏ませる。racing の腕 (`Arm.plan_file`) と S7 / cheap adaptation に配線 |
+| 補助の価値が点に入らない (設置 / 除去 / 先制 / 速度操作。25 並びは 4 つとも無く、65 並びは攻撃役 4 体以上)、「役割の充足」「重複の減点」が未実装 | `composition_terms`: 補助の種類ごとの加点 `BUILD_UTILITY_BONUS`、攻撃役が `BUILD_MAX_ATTACKERS` を超えた分の減点 `BUILD_ATTACKER_EXCESS_PENALTY`、同じ仕事 (同じ雛形 × 同じ速度帯) の重複の減点 `BUILD_DUP_ROLE_PENALTY`。3 体選出の評価で攻撃役と補助・受け役の両方が入る 3 体に `BUILD_TRIO_MIX_BONUS` (`team_eval(classes=…)`)。parts に utility / attackers / dup |
+| 特定の種に集中する (カイリューが 79 並び全部)、スカーフげきりんの技固定とフェアリー無効を計算が見ていない | 保持する並びで同じ種が入る割合に上限 `BUILD_SPECIES_SHARE_MAX` (固定枠・エースは除く。`cap_species_share`)。こだわり + 固定技の型は、その技を無効にする相手が居る系統の相手への被覆を `BUILD_LOCK_IMMUNE_DISCOUNT` だけ割り引く (行: `lock_immune_adjust`、型の生成: `immune_share`) |
+
+**型と役割** (tools/team_build/role_sets.py、joint_stage.py)
+
+| 問題 | 対処 |
+|---|---|
+| 役割の適性を見ていない (リザードンの吹き飛ばし役、エンブオーの受け、ガブリアスの雨始動、カイリューの雪始動) | `role_aptitude`: 受け・設置除去・吹き飛ばし・交代役・状態異常役・壁役と、技だけの始動役は耐久 (種族値の HP × 防御 か HP × 特防) ≥ `BUILD_ROLE_SUPPORT_BULK_MIN`、受けと技だけの始動役は攻撃種族値 ≤ `BUILD_ROLE_WALL_OFFENSE_MAX`。特性の始動役は速くても可。補完の候補は未充足の役割について適性の順に並べる |
+| 配分の微調整が攻撃役の火力を削る (主攻撃 24 未満が 22 型、グソクムシャ 攻撃 0) | `spread_keeps_class(offensive=, main_stat=)`: 攻撃役は耐久側の配分でも主攻撃 ≥ `BUILD_FAST_POINTS_MIN` を保つ |
+| 性格と技の食い違い 39 型 (ひかえめにヘビーボンバー、おくびょうにでんこうせっか) | 両分類の技を候補にした種は選んだ技の主分類 (`dominant_category`) で性格・配分を決め、他方の分類の技は使わない。先制技の補助枠は型の分類と同じ技だけ (`pick_utility(category_of=)`)。性格が下げる側の技が残る型は作らない (`nature_fits_moves`) |
+| 持ち物の不整合 (ぎんのこなで虫技なし 3、持ち物なし 8、攻撃種のねむる + カゴ 37) | タイプ強化はそのタイプの技があるときだけ (`type_item_matches`)。クラスの持ち物が全部使用済みなら予備 `BUILD_ITEM_FALLBACK` (持ち物なしの型は作らない)。攻撃役の回復枠に ねむる を入れず、ねむる + カゴ の差し替えは受け役だけ |
+| 始動特性と同じ場の技の重複 8 型 (コータスのひでり + にほんばれ) | 自分の特性が場を張るなら field 枠は満たしたとみなし、代替 (pivot / status / heal) を埋める |
+| 壁の速さの上限が厳しい (グライオン 95 で構想ごと捨てた)、核の型が作れずに捨てた構想 5 | 上限は「超える」(95 ちょうどは可)、耐久 ≥ `BUILD_WALL_FAST_BULK_MIN` なら超えても可 (`wall_speed_ok`)。核の指定の役割の型が作れないときは種の既定の役割で代える (構想を捨てない。`_core_combos`) |
+| 役割の逆引きの誤り (現行のアシレーヌが のんき だけで「トリックルーム要員」) | `infer_role`: −Spe の性格は、回復・状態技があれば wall、攻撃技 3 本以上で素早さ 0 のときだけ tr_ace。並びに tr_setter が居なければ tr_ace は breaker (`demote_tr_ace`: 登録の型と行の型に適用) |
+
+テスト: tests/test_lineup_search (適性・逆引き・構成の項・種の上限・固定技の行)、test_role_sets (配分の保護・性格と技・タイプ強化・予備の持ち物・補助枠)、
+test_team_build_repair (下限の相対化と部分の証拠・受け・入替先の多様化)、test_team_build_pipeline (同一の候補・修理の親・本番モデルの差・系統の較正)、
+test_plan_prior (計画の事前)。学習・測定の実対戦は次の run で確認する。
+
 ## 18. 未決事項 (2026-10-02 夕方に全部解決)
 
 1. 核が 2 体の構想の 3 体目 → 順に選ぶ (D-24、§5.2)。

@@ -21,9 +21,11 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from champions_agent.config import (BUILD_ACE_MAX_MEGA_STONES, BUILD_COMPLEMENT_BEAM, BUILD_COMPLEMENT_SPECIES_K,
-                                    BUILD_CORE_BEAM, BUILD_LINEUP_HOLE_THRESHOLD, BUILD_LINEUP_HOLE_WEIGHT,
-                                    BUILD_LINEUP_MAX_MEGA_STONES, BUILD_ROLE_FULFIL_BONUS, BUILD_SET_CANDIDATES_PER_ROLE,
+from champions_agent.config import (BUILD_ACE_MAX_MEGA_STONES, BUILD_ATTACKER_EXCESS_PENALTY, BUILD_COMPLEMENT_BEAM,
+                                    BUILD_COMPLEMENT_SPECIES_K, BUILD_CORE_BEAM, BUILD_DUP_ROLE_PENALTY,
+                                    BUILD_LINEUP_HOLE_THRESHOLD, BUILD_LINEUP_HOLE_WEIGHT, BUILD_LINEUP_MAX_MEGA_STONES,
+                                    BUILD_MAX_ATTACKERS, BUILD_ROLE_FULFIL_BONUS, BUILD_ROLE_UTILITY_MOVES,
+                                    BUILD_SET_CANDIDATES_PER_ROLE, BUILD_TRIO_MIX_BONUS, BUILD_UTILITY_BONUS,
                                     BUILD_WEATHER_CONFLICT_PENALTY)
 from tools.team_build.role_sets import TERRAINS, WEATHER_FIELD_NAME, WEATHERS, template_of
 
@@ -141,11 +143,12 @@ class LineupResult:
     assignments: dict            # 種 → 選出計画でその種を出す系統 id の一覧 (担当)
     fills: dict                  # 種 → 補完で埋めた穴の系統 id (選ばれた理由)
     selection_plan: dict         # 系統 id → 出す 3 体 (種 id)
-    score: float                 # 並びの点 (被覆 − 穴 − 衝突 + 役割の充足)
+    score: float                 # 並びの点 (被覆 − 穴 − 衝突 + 役割の充足 + 補助の価値 − 攻撃役の過多 − 重複)
     parts: dict
     concept: str = ""
     tag: str = ""
     origin: dict = field(default_factory=dict)
+    family_values: dict = field(default_factory=dict)    # 系統 id → 最良 3 体の値 (予測。実測との較正に使う)
 
 
 # ------------------------------------------------------------------ 評価 (純粋)
@@ -158,8 +161,11 @@ def trio_values(rows: np.ndarray) -> np.ndarray:
 
 
 def team_eval(rows: np.ndarray, fam_matrix: np.ndarray, fam_w: np.ndarray,
-              hole_threshold: float = BUILD_LINEUP_HOLE_THRESHOLD, hole_weight: float = BUILD_LINEUP_HOLE_WEIGHT) -> dict:
+              hole_threshold: float = BUILD_LINEUP_HOLE_THRESHOLD, hole_weight: float = BUILD_LINEUP_HOLE_WEIGHT,
+              classes: Optional[list] = None, trio_bonus: float = 0.0) -> dict:
     """6 体から 3 体を出す前提の並びの評価。rows = 並びの各個体の被覆行 (k × n_opp)。
+    classes = 個体ごとの役割の種類 ("offense" / "support")。渡せば、攻撃役と補助・受け役の両方が入る 3 体の値に trio_bonus を足す
+    (役割の充足: 先発・勝ち筋・受けが揃うか。設計文書 §5.3)。
     戻り値 {"value": 被覆 − 穴の罰則, "coverage", "hole", "plans": 系統ごとの最良 3 体の index 配列, "best": 系統ごとの最良の値}"""
     n_fam = fam_matrix.shape[0]
     k = rows.shape[0]
@@ -168,6 +174,9 @@ def team_eval(rows: np.ndarray, fam_matrix: np.ndarray, fam_w: np.ndarray,
                 "best": np.zeros(n_fam, dtype=np.float32)}
     combos = list(itertools.combinations(range(k), min(TRIO, k)))
     vals = np.stack([fam_matrix @ trio_values(rows[list(c)]) for c in combos])      # (n_trios × n_fam)
+    if classes is not None and trio_bonus > 0 and k >= 2:
+        mix = np.array([1.0 if len({classes[i] for i in c}) >= 2 else 0.0 for c in combos], dtype=np.float32)
+        vals = vals + trio_bonus * mix[:, None]
     best_idx = np.argmax(vals, axis=0)
     best = vals[best_idx, np.arange(n_fam)]
     total = float(fam_w.sum()) or 1.0
@@ -228,6 +237,68 @@ def role_fulfillment(entries: list, required: list) -> float:
     if tot <= 0:
         return 1.0
     return 1.0 - len(unmet_roles(entries, required)) / tot
+
+
+OFFENSE_TEMPLATES = ("breaker", "sweeper_setup", "cleaner", "tr_ace", "weather_ace", "terrain_ace")
+UTILITY_KINDS = ("hazard", "removal", "priority", "speed_control")
+
+
+def role_class(role: str) -> str:
+    """役割 → "offense" (攻撃役) / "support" (補助・受け役)。未知の役割は offense"""
+    try:
+        tname = template_of(role)[0]
+    except KeyError:
+        return "offense"
+    return "offense" if tname in OFFENSE_TEMPLATES else "support"
+
+
+def speed_tier(cand) -> str:
+    """型の速度帯 (配分と性格から): fast (素早さ投資 ≥ 24) / tr (−Spe の性格で素早さ 0) / bulky"""
+    try:
+        pts = [int(x) for x in str(getattr(cand, "evs", "") or "").split("/")]
+    except ValueError:
+        pts = []
+    spe = pts[5] if len(pts) == 6 else 0
+    if spe >= 24:
+        return "fast"
+    if (getattr(cand, "nature", "") or "").lower() in ("brave", "quiet", "relaxed", "sassy") and spe == 0:
+        return "tr"
+    return "bulky"
+
+
+def utility_kinds(entries: list, pools: dict = BUILD_ROLE_UTILITY_MOVES) -> set:
+    """並びにある補助の種類 (設置 / 除去 / 先制 / 速度操作)。技から機械的に"""
+    out: set = set()
+    for e in entries:
+        ms = set(e.moves or [])
+        for k in UTILITY_KINDS:
+            if ms & set(pools.get(k, ())):
+                out.add(k)
+    return out
+
+
+def composition_terms(entries: list, utility_bonus: dict = BUILD_UTILITY_BONUS, max_attackers: int = BUILD_MAX_ATTACKERS,
+                      attacker_penalty: float = BUILD_ATTACKER_EXCESS_PENALTY, dup_penalty: float = BUILD_DUP_ROLE_PENALTY) -> dict:
+    """並びの構成の項 (純粋。設計文書 §5.3 の「役割の充足」と「重複の減点」):
+    utility = 設置 / 除去 / 先制 / 速度操作があることの価値 (種類ごとに 1 回)、
+    attackers = 攻撃役の数、excess = 上限を超えた攻撃役 1 体あたりの減点、
+    dup = 同じ仕事 (同じ雛形 × 同じ速度帯) の個体が 2 体以上あるときの減点。
+    戻り値 {"utility", "attackers", "excess", "dup", "kinds", "value" (= utility − excess − dup)}"""
+    kinds = utility_kinds(entries)
+    util = sum(float(utility_bonus.get(k, 0.0)) for k in kinds)
+    n_att = sum(1 for e in entries if role_class(e.role) == "offense")
+    excess = attacker_penalty * max(0, n_att - int(max_attackers))
+    groups: dict = {}
+    for e in entries:
+        try:
+            tname = template_of(e.role)[0]
+        except KeyError:
+            tname = e.role
+        key = (tname, speed_tier(e.cand))
+        groups[key] = groups.get(key, 0) + 1
+    dup = dup_penalty * sum(max(0, n - 1) for n in groups.values())
+    return {"utility": round(util, 4), "attackers": n_att, "excess": round(excess, 4), "dup": round(dup, 4),
+            "kinds": sorted(kinds), "value": round(util - excess - dup, 4)}
 
 
 def constraints_ok(entries: list, ace: Optional[str], max_stones: int, base_of: Optional[Callable] = None) -> tuple:
@@ -347,6 +418,8 @@ class SearchConfig:
     field_penalty: float = BUILD_WEATHER_CONFLICT_PENALTY
     role_bonus: float = BUILD_ROLE_FULFIL_BONUS
     base_of: Optional[Callable] = None       # 種 id → Species Clause の同一視キー (図鑑番号)。None なら種 id そのもの
+    trio_bonus: float = BUILD_TRIO_MIX_BONUS         # 3 体選出に攻撃役と補助・受け役の両方が入る系統の値への加点
+    composition: bool = True                         # 補助の価値 / 攻撃役の過多 / 重複の減点を点に入れる (composition_terms)
 
 
 class LineupSearch:
@@ -386,10 +459,12 @@ class LineupSearch:
 
     def evaluate(self, idxs: list, cfg: SearchConfig) -> dict:
         self.n_evals += 1
-        return team_eval(self.rows_for(idxs), self.fam_matrix, self.fam_w, cfg.hole_threshold, cfg.hole_weight)
+        classes = [role_class(self.lib.entries[i].role) for i in idxs] if cfg.trio_bonus > 0 else None
+        return team_eval(self.rows_for(idxs), self.fam_matrix, self.fam_w, cfg.hole_threshold, cfg.hole_weight,
+                         classes=classes, trio_bonus=cfg.trio_bonus)
 
     def score_of(self, idxs: list, required: list, cfg: SearchConfig) -> tuple:
-        """並びの点 = 被覆 − 穴 − 始動源の衝突 + 役割の充足。戻り値 (点, 評価の dict)"""
+        """並びの点 = 被覆 − 穴 − 始動源の衝突 + 役割の充足 + 補助の価値 − 攻撃役の過多 − 同じ仕事の重複。戻り値 (点, 評価の dict)"""
         info = self.evaluate(idxs, cfg)
         entries = [self.lib.entries[i] for i in idxs]
         conflicts = field_conflicts(entries)
@@ -397,6 +472,10 @@ class LineupSearch:
         info["conflicts"] = conflicts
         info["roles"] = fulfil
         score = info["value"] - cfg.field_penalty * conflicts + (cfg.role_bonus * fulfil if required else 0.0)
+        if cfg.composition:
+            comp = composition_terms(entries)
+            info["composition"] = comp
+            score += comp["value"]
         return score, info
 
     # ---- 候補
@@ -479,6 +558,13 @@ class LineupSearch:
                 roles = list(dict.fromkeys(want + list(roles_of(sid))))
             allowed = mega_allowed_for(sid, cfg.ace, mega_id, has_stone)
             idxs = self.entries_for(sid, roles, used, allowed, tfield, speed_plan)
+            if not idxs and role:
+                # 指定の役割の型が作れない核 (例: 壁の速さの上限に当たる) は、種の既定の役割で代える。構想ごと捨てない
+                # (2026-10-04: 1003 では核の型が作れずに捨てた構想が 99 のうち 5)
+                alt = [r for r in roles_of(sid) if r != role]
+                idxs = self.entries_for(sid, alt, used, allowed, tfield, speed_plan)
+                if idxs:
+                    self.log(f"S5 核 {sid}: 役割 {role} の型が作れない → {[self.lib.entries[i].role for i in idxs][:3]} で代える")
             if not idxs:
                 return []
             per_species.append(round_robin(idxs, lambda i: self.lib.entries[i].role, BUILD_SET_CANDIDATES_PER_ROLE))
@@ -552,14 +638,18 @@ class LineupSearch:
                 assign[entries[j].species_id].append(fams[f][0])
         conflicts = field_conflicts(entries)
         fulfil = role_fulfillment(entries, required)
+        comp = composition_terms(entries) if cfg.composition else {"utility": 0.0, "attackers": 0, "excess": 0.0, "dup": 0.0, "kinds": []}
         return LineupResult(
             members=tuple(sorted(e.species_id for e in entries)), entries=entries,
             roles={e.species_id: e.role for e in entries}, assignments=assign, fills=dict(fills), selection_plan=plan,
             score=round(float(score), 4),
             parts={"coverage": round(float(info["coverage"]), 4), "hole": round(float(info["hole"]), 4),
                    "roles": round(fulfil, 3), "field_conflicts": conflicts,
-                   "n_holes": int(sum(1 for b in info["best"] if b < cfg.hole_threshold))},
-            concept=concept_id, tag=tag, origin=dict(origin or {}))
+                   "n_holes": int(sum(1 for b in info["best"] if b < cfg.hole_threshold)),
+                   "utility": comp["utility"], "attackers": comp["attackers"], "attacker_excess": comp["excess"],
+                   "dup": comp["dup"], "utility_kinds": ",".join(comp["kinds"])},
+            concept=concept_id, tag=tag, origin=dict(origin or {}),
+            family_values={fams[f][0]: round(float(info["best"][f]), 4) for f in range(len(fams))})
 
     # ---- 仕上げ: 担当に合わせて型を作り直す
     def refine(self, result: LineupResult, cfg: SearchConfig, required: list, targets_of: Callable) -> tuple:

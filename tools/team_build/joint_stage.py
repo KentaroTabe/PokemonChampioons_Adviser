@@ -17,14 +17,16 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from champions_agent.config import (BUILD_ARCHETYPE_SPEED_PLAN, BUILD_COMPLEMENT_ROLE_SPECIES_K, BUILD_INCUMBENT_NEIGHBORS,
-                                    BUILD_JOINT_REFINE_TARGETS, BUILD_ROLE_FIELD_MOVES, BUILD_ROLE_OFFENSE_MIN,
-                                    BUILD_ROLE_UTILITY_MOVES, BUILD_ROLE_WALL_OFFENSE_MAX, BUILD_SELFKO_COST,
-                                    BUILD_SESSION_THREAT_BOOST, BUILD_WALL_SPEED_MAX)
+                                    BUILD_JOINT_REFINE_TARGETS, BUILD_LOCK_IMMUNE_DISCOUNT, BUILD_ROLE_FIELD_MOVES,
+                                    BUILD_ROLE_OFFENSE_MIN, BUILD_ROLE_SUPPORT_BULK_MIN, BUILD_ROLE_UTILITY_MOVES,
+                                    BUILD_ROLE_WALL_OFFENSE_MAX, BUILD_SELFKO_COST, BUILD_SESSION_THREAT_BOOST,
+                                    BUILD_SPECIES_SHARE_MAX)
 from tools.team_build import candidates as C
 from tools.team_build import sets as S
 from tools.team_build.lineup_search import (TEAM_SIZE, LineupResult, LineupSearch, OppPool, OppSet, SearchConfig, SetEntry,
                                             concept_requirements, role_matches, team_field_from)  # noqa: F401 (repair が使う)
-from tools.team_build.role_sets import TERRAINS, WEATHER_FIELD_NAME, WEATHERS, pick_utility, template_of
+from tools.team_build.role_sets import (TERRAINS, WEATHER_FIELD_NAME, WEATHERS, bulk_product, pick_utility, template_of,
+                                        wall_speed_ok)
 
 FIELD_WEATHER_ROLE = {v: k for k, v in WEATHER_FIELD_NAME.items()}      # 場の名前 → 役割 id の接頭辞 (sandstorm → sand)
 TR_NATURES = ("brave", "quiet", "relaxed", "sassy")
@@ -69,20 +71,100 @@ def infer_role(cand, category_of: Optional[Callable] = None, setup_of: Optional[
     if cand.item == "choicescarf" or (ms & set(util["priority"]) and n_attacks >= 3):
         return "cleaner"
     if (cand.nature or "") in TR_NATURES:
-        return "tr_ace"
+        # −Spe の性格だけでは決めない (2026-10-04: 現行のアシレーヌが のんき だけで TR 要員になっていた)。
+        # 回復・状態技があれば受け、攻撃技 3 本以上で素早さ 0 なら tr_ace、それ以外は breaker
+        if ms & set(util["heal"]) or ms & set(util["status"]):
+            return "wall"
+        if n_attacks >= 3 and _speed_points(cand.evs) == 0:
+            return "tr_ace"
     return "breaker"
 
 
+def _speed_points(evs) -> int:
+    try:
+        return int(str(evs or "").split("/")[5])
+    except (IndexError, ValueError):
+        return 0
+
+
+def demote_tr_ace(entries: list) -> list:
+    """並びの文脈で役割を直す: トリックルームの始動役 (tr_setter) が居ない並びに tr_ace は居ない → breaker に (純粋)。
+    登録の型・行の型の逆引き (infer_role は 1 体ずつ見る) の後に呼ぶ"""
+    if any(role_matches(e.role, "tr_setter") for e in entries):
+        return entries
+    out = []
+    for e in entries:
+        if e.role == "tr_ace":
+            e = replace(e, role="breaker")
+        out.append(e)
+    return out
+
+
+SUPPORT_BULK_TEMPLATES = ("wall", "hazard_removal", "phazer", "pivot", "status_spreader", "support_screens", "support_veil")
+LEAD_TEMPLATES = ("hazard_lead", "suicide_lead", "speed_control")
+
+
+def role_aptitude(role: str, learnset: set, abilities: list, base: dict, field_of: Callable) -> float:
+    """種がその役割にどれだけ向くか (0 = 作れない / 向かない、1 に近いほど適任)。純粋。
+    2026-10-04: 被覆の高い種が名目だけ役割を満たしていた (リザードンの吹き飛ばし役、エンブオーの受け、ガブリアスの雨始動、
+    カイリューの雪始動) ので、受け・設置除去・吹き飛ばし・技だけの始動役には耐久 (BUILD_ROLE_SUPPORT_BULK_MIN) と
+    攻撃種族値の上限 (BUILD_ROLE_WALL_OFFENSE_MAX) を要求し、攻撃役には火力を要求する"""
+    try:
+        tname, template, rfield = template_of(role)
+    except KeyError:
+        return 0.0
+    atk, spa = int(base.get("atk") or 0), int(base.get("spa") or 0)
+    off = max(atk, spa)
+    bulk = bulk_product(base)
+    if template.get("offensive", True):
+        if off < BUILD_ROLE_OFFENSE_MIN:
+            return 0.0
+        apt = min(1.0, off / 150.0)
+    else:
+        apt = min(1.0, bulk / float(2 * BUILD_ROLE_SUPPORT_BULK_MIN))
+    if tname == "wall":
+        if not wall_speed_ok(base) or off > BUILD_ROLE_WALL_OFFENSE_MAX or bulk < BUILD_ROLE_SUPPORT_BULK_MIN:
+            return 0.0
+    elif tname in SUPPORT_BULK_TEMPLATES:
+        if bulk < BUILD_ROLE_SUPPORT_BULK_MIN:
+            return 0.0
+    if tname in ("weather_setter", "terrain_setter", "support_veil"):
+        want = WEATHER_FIELD_NAME.get(rfield, rfield) if rfield in WEATHERS else rfield
+        kind = "weather" if rfield in WEATHERS else "terrain"
+        by_ability = any((field_of(a, ()) or {}).get(kind) == want for a in abilities)
+        by_move = bool(set(BUILD_ROLE_FIELD_MOVES.get(rfield or "", ())) & learnset)
+        if tname != "support_veil" and not (by_ability or by_move):
+            return 0.0
+        if tname != "support_veil" and not by_ability:
+            # 技だけの始動役: 耐久があり攻撃役でない種に限る (ガブリアスの あまごい / カイリューの ゆきげしき を始動役にしない)
+            if bulk < BUILD_ROLE_SUPPORT_BULK_MIN or off > BUILD_ROLE_WALL_OFFENSE_MAX:
+                return 0.0
+        elif by_ability:
+            apt = min(1.0, apt + 0.3)
+    prefs = {"status_order": list(BUILD_ROLE_UTILITY_MOVES["status"]),
+             "speed_control_order": list(BUILD_ROLE_UTILITY_MOVES["speed_control"])}
+    for kind in template.get("utility", ()):
+        if "|" in kind or kind in ("setup", "field"):
+            continue
+        if pick_utility(kind, learnset, [], prefs, rfield) is None:
+            return 0.0
+    return round(max(apt, 0.05), 3)
+
+
 def role_capable(role: str, learnset: set, abilities: list, base: dict, field_of: Callable) -> bool:
-    """種がその役割の型を作れそうか (雛形の必須の補助枠・始動源・火力・速さ)。事前の絞り込み用の軽い判定"""
+    """種がその役割の型を作れそうか (雛形の必須の補助枠・始動源・火力・速さ・耐久)。事前の絞り込み用の軽い判定"""
+    return role_aptitude(role, learnset, abilities, base, field_of) > 0.0
+
+
+def _role_capable_legacy(role: str, learnset: set, abilities: list, base: dict, field_of: Callable) -> bool:
     try:
         tname, template, rfield = template_of(role)
     except KeyError:
         return False
-    atk, spa, spe = int(base.get("atk") or 0), int(base.get("spa") or 0), int(base.get("spe") or 0)
+    atk, spa = int(base.get("atk") or 0), int(base.get("spa") or 0)
     if template.get("offensive", True) and max(atk, spa) < BUILD_ROLE_OFFENSE_MIN:
         return False
-    if tname == "wall" and spe >= BUILD_WALL_SPEED_MAX:
+    if tname == "wall" and not wall_speed_ok(base):
         return False
     if tname in ("weather_setter", "terrain_setter", "support_veil"):
         want = WEATHER_FIELD_NAME.get(rfield, rfield) if rfield in WEATHERS else rfield
@@ -113,7 +195,8 @@ def default_roles(base: dict, learnset: set, max_roles: int = 3) -> list:
         if any(move_entry(m).get("setup_boosts") for m in learnset):
             roles.append("sweeper_setup")
         roles.append("breaker")
-    if off <= BUILD_ROLE_WALL_OFFENSE_MAX and spe < BUILD_WALL_SPEED_MAX and (set(util["heal"]) & learnset):
+    if off <= BUILD_ROLE_WALL_OFFENSE_MAX and wall_speed_ok(base) and bulk_product(base) >= BUILD_ROLE_SUPPORT_BULK_MIN \
+            and (set(util["heal"]) & learnset):
         roles.append("wall")
     if set(util["pivot"]) & learnset:
         roles.append("pivot")
@@ -213,18 +296,56 @@ def selfko_moves(moves: list) -> list:
     return [m for m in moves if move_entry(m).get("selfdestruct") or move_entry(m).get("condition") == "selfko"]
 
 
+def locked_move_types(moves: list) -> list:
+    """数ターン固定の攻撃技 (げきりん等) のタイプ (効果表 locked)"""
+    from advisor.dex import get_dex
+    from advisor.effects import move_entry
+    dex = get_dex()
+    out = []
+    for m in moves:
+        if move_entry(m).get("locked"):
+            t = (dex.move(m) or {}).get("type")
+            if t:
+                out.append(t)
+    return out
+
+
+def lock_immune_adjust(vec, pool: OppPool, immune_rows: set, discount: float = BUILD_LOCK_IMMUNE_DISCOUNT):
+    """こだわり + 固定技の型の行 (純粋): 固定技を無効にする相手 (immune_rows = 相手の型の index) が居る系統の相手への被覆を
+    (1 − discount) 倍にする (技に固定されている間にその相手へ交代されると何もできない)。他の系統はそのまま"""
+    import numpy as np
+    out = np.asarray(vec, dtype=np.float32).copy()
+    if not immune_rows or discount <= 0:
+        return out
+    hit: set = set()
+    for _fid, _w, rows in pool.families:
+        if immune_rows & set(rows):
+            hit |= set(rows)
+    for r in hit:
+        out[r] *= max(0.0, 1.0 - float(discount))
+    return out
+
+
 def make_row_post(row_fn: Callable) -> Callable:
-    """自爆技を持つ型の行の後処理 (selfko_adjust)。技なしの行を別に計算する (自爆技を持つ型だけ、行の計算が 2 倍)"""
+    """行の後処理: 自爆技を持つ型 (selfko_adjust、技なしの行を別に計算する) と、こだわり + 固定技の型 (lock_immune_adjust)"""
     from dataclasses import replace as _replace
+    from advisor.dex import get_dex
+    dex = get_dex()
 
     def post(entry: SetEntry, vec, pool: OppPool):
         ko = selfko_moves(entry.moves)
         rest = [m for m in entry.moves if m not in ko]
-        if not ko or not rest:
-            return vec
-        alt = _replace(entry, moves=rest)
-        without = [float(row_fn(alt, opp)) for opp in pool.sets]
-        return selfko_adjust(vec, without)
+        if ko and rest:
+            alt = _replace(entry, moves=rest)
+            without = [float(row_fn(alt, opp)) for opp in pool.sets]
+            vec = selfko_adjust(vec, without)
+        if entry.item and str(entry.item).startswith("choice"):
+            types = locked_move_types(entry.moves)
+            if types:
+                immune = {i for i, opp in enumerate(pool.sets)
+                          if any(dex.effectiveness(t, list(getattr(opp.view, "types", None) or [])) == 0.0 for t in types)}
+                vec = lock_immune_adjust(vec, pool, immune)
+        return vec
     return post
 
 
@@ -292,21 +413,27 @@ def make_roles_of(info: Callable) -> Callable:
 
 
 def make_capable(info: Callable, field_of: Callable) -> Callable:
+    """capable(sid, role) → bool。capable.aptitude(sid, role) → 0..1 (役割の適性)"""
     cache: dict = {}
 
-    def capable(sid: str, role: str) -> bool:
+    def aptitude(sid: str, role: str) -> float:
         key = (sid, role)
         if key not in cache:
             i = info(sid)
-            cache[key] = bool(i["base"]) and role_capable(role, i["learnset"], i["abilities"], i["base"], field_of)
+            cache[key] = role_aptitude(role, i["learnset"], i["abilities"], i["base"], field_of) if i["base"] else 0.0
         return cache[key]
+
+    def capable(sid: str, role: str) -> bool:
+        return aptitude(sid, role) > 0.0
+    capable.aptitude = aptitude          # type: ignore[attr-defined]
     return capable
 
 
 def make_prefilter(feats: dict, threat_weights: dict, capable: Callable, role_k: int = BUILD_COMPLEMENT_ROLE_SPECIES_K) -> Callable:
     """S3 の特徴 (代表型の脅威への被覆) で、穴の相手 (脅威リストに居るもの) に強い順。未充足の役割 1 つにつき、
-    役割を満たせる種を role_k 体まで先頭に足す"""
+    役割を満たせる種を適性 (capable.aptitude があればそれ、次に被覆) の順に role_k 体まで先頭に足す"""
     wmax = max(threat_weights.values(), default=1.0) or 1.0
+    aptitude = getattr(capable, "aptitude", None)
 
     def score(sid: str, targets: list) -> float:
         f = feats.get(sid)
@@ -321,13 +448,15 @@ def make_prefilter(feats: dict, threat_weights: dict, capable: Callable, role_k:
         ranked = sorted(species_ids, key=lambda s: -score(s, targets))
         out: list = []
         for role in dict.fromkeys(unmet):
+            able = [s for s in ranked if capable(s, role)]
+            if aptitude is not None:
+                able.sort(key=lambda s: (-float(aptitude(s, role)), -score(s, targets)))
             n = 0
-            for s in ranked:
+            for s in able:
                 if s in out:
                     continue
-                if capable(s, role):
-                    out.append(s)
-                    n += 1
+                out.append(s)
+                n += 1
                 if n >= role_k:
                     break
         for s in ranked:
@@ -460,7 +589,7 @@ def registered_entries(reg_text: str, log: Optional[Callable] = None) -> list:
         except Exception as e:
             log(f"S5 registered {sid}: {e!r}")
             return []
-    return out if len(out) == TEAM_SIZE else []
+    return demote_tr_ace(out) if len(out) == TEAM_SIZE else []
 
 
 def make_base_of() -> Callable:
@@ -529,7 +658,7 @@ def result_from_row(search: LineupSearch, row: dict, cfg: SearchConfig, custom_s
     roles = row.get("roles") or {}
     cands = [S.SetCandidate(s["species"], s.get("ability"), s.get("item"), s.get("nature"), s.get("evs"), list(s.get("moves") or []),
                             s.get("source") or "row", float(s.get("coverage") or 0.0), list(s.get("notes") or [])) for s in sets]
-    first = [entry_from_candidate(c, roles.get(c.species_id) or "breaker", None) for c in cands]
+    first = demote_tr_ace([entry_from_candidate(c, roles.get(c.species_id) or "breaker", None) for c in cands])
     tfield = team_field_from(first)
     entries = [entry_from_candidate(c, e.role, tfield, locked=(c.source == "custom" or c.species_id in (custom_sets or {})))
                for c, e in zip(cands, first)]
@@ -558,7 +687,8 @@ def make_row(index: int, cid: str, r: LineupResult, tag: str, ok: bool, errs: li
             "ace": (ace_sid if (ace_sid and ace_sid in r.members and not is_inc) else None), "ace_notes": [],
             "locked_restored": [],
             "roles": dict(r.roles), "assignments": dict(r.assignments), "fills": dict(r.fills),
-            "selection_plan": dict(r.selection_plan),
+            "selection_plan": dict(r.selection_plan), "family_values": dict(getattr(r, "family_values", {}) or {}),
+            "parts": {k: (round(float(v), 4) if isinstance(v, (int, float)) else v) for k, v in (r.parts or {}).items()},
             "sets": [{"species": c.species_id, "ability": c.ability, "item": c.item, "nature": c.nature, "evs": c.evs,
                       "moves": list(c.moves), "source": c.source, "coverage": round(float(c.score), 3),
                       "role": r.roles.get(c.species_id), "notes": list(c.notes)} for c in team]}
@@ -611,6 +741,14 @@ def stage_s5_joint(run_dir: Path, spec, fams: list, feats: dict, tv: dict, threa
         if all(C.distance(l.members, c.members) >= C.MIN_DISTANCE for c in chosen):
             l.tag = "fill"
             chosen.append(l)
+    if chosen:
+        before = {m: sum(1 for l in chosen if m in l.members) for l in chosen for m in l.members}
+        chosen = cap_species_share(chosen, [l for l in rest if l not in chosen], BUILD_SPECIES_SHARE_MAX,
+                                   protected=set(spec.favorites) | ({spec.ace} if spec.ace else set()), min_distance=C.MIN_DISTANCE)
+        after = {m: sum(1 for l in chosen if m in l.members) for l in chosen for m in l.members}
+        top_b = sorted(before.items(), key=lambda kv: -kv[1])[:3]
+        top_a = sorted(after.items(), key=lambda kv: -kv[1])[:3]
+        log(f"S5 species cap (≤ {BUILD_SPECIES_SHARE_MAX:.0%}): 上位の種 {top_b} → {top_a} ({len(chosen)} 並び)")
     if refine and chosen:
         # 仕上げ: 担当 (選出計画でその個体を出す系統の相手) に合わせて型を作り直す (点が上がるときだけ)
         fam_species = {fid: pool.species_of_families([i]) for i, (fid, _w, _rows) in enumerate(pool.families)}
@@ -664,6 +802,61 @@ def stage_s5_joint(run_dir: Path, spec, fams: list, feats: dict, tv: dict, threa
     return chosen, rows
 
 
+def write_plan_file(out_dir: Path, cid: str, r: LineupResult) -> Path:
+    """選出計画 (系統 → 出す 3 体) を s06_sets/<cid>.plan.json に書く。測定 (check_advisor_player --selection-plan) と
+    cheap adaptation の収集 (collect_selection_data --selection-plan) が選出モデルの初期値に使う (設計文書 §5.3)"""
+    p = Path(out_dir) / f"{cid}.plan.json"
+    p.write_text(json.dumps({"candidate_id": cid, "members": list(r.members), "selection_plan": dict(r.selection_plan),
+                             "assignments": dict(r.assignments)}, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    return p
+
+
+def cap_species_share(chosen: list, rest: list, max_share: float = BUILD_SPECIES_SHARE_MAX, protected=(),
+                      min_distance: Optional[float] = None) -> list:
+    """保持する並びで同じ種が入る割合に上限を掛ける (純粋)。chosen の順に見て、固定枠・エース (protected) 以外の種が
+    上限 (ceil(max_share × 目標数)、最小 2) を超える並びは外し、rest (点の順) から上限と距離を満たすものを足して目標数に戻す。
+    2026-10-04: カイリューが 79 並びすべてに入っていた"""
+    import math
+    target = len(chosen)
+    if target == 0 or max_share >= 1.0:
+        return list(chosen)
+    cap = max(2, int(math.ceil(max_share * target)))
+    prot = set(protected or ())
+    counts: dict = {}
+    out: list = []
+
+    def fits(l) -> bool:
+        return all(counts.get(m, 0) < cap for m in l.members if m not in prot)
+
+    def far(l) -> bool:
+        if min_distance is None:
+            return True
+        return all(C.distance(l.members, c.members) >= min_distance for c in out)
+
+    def take(l) -> None:
+        out.append(l)
+        for m in l.members:
+            counts[m] = counts.get(m, 0) + 1
+    dropped: list = []
+    for l in chosen:
+        if fits(l):
+            take(l)
+        else:
+            dropped.append(l)
+    for l in rest:
+        if len(out) >= target:
+            break
+        if l in out or not fits(l) or not far(l):
+            continue
+        l.tag = l.tag or "fill"
+        take(l)
+    for l in dropped:                       # 足りなければ外した並びを戻す (上限は目標数を割ってまで守らない)
+        if len(out) >= target:
+            break
+        take(l)
+    return out
+
+
 def write_sets(run_dir: Path, spec, chosen: list, by_members: dict, reg_text: str, log: Callable) -> list:
     """s06_sets.json / s06_sets/<並び>.txt (従来の行の形 + roles / assignments / fills / selection_plan)"""
     out_dir = run_dir / "s06_sets"
@@ -681,6 +874,7 @@ def write_sets(run_dir: Path, spec, chosen: list, by_members: dict, reg_text: st
         ok, errs = S.validate_team_text(text, spec.regulation)
         cid = f"L{idx:02d}_{l.concept}"
         (out_dir / f"{cid}.txt").write_text(text, encoding="utf-8")
+        write_plan_file(out_dir, cid, r)
         r.score = float(l.score)
         r.origin = dict(l.origin or {})
         rows.append(make_row(idx, cid, r, l.tag, ok, errs, ace_sid, is_inc, registered))

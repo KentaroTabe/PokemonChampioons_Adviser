@@ -35,17 +35,23 @@ def test_diagnose():
     items_of = {"core1": "lifeorb", "core2": "sitrusberry", "fillD": "focussash", "fillC": "choicescarf"}
     consumed = RP.resource_counts(recs)
     assert consumed == {"core2": 12}
-    d = RP.diagnose(st, members, items_of, consumed, min_n=20, loss_rate_min=0.5, unused_rate=0.05, ko_min_n=3)
-    assert d["must_cover"] == ["F_A", "F_B"] and d["must_cover_n"] == 22
+    d = RP.diagnose(st, members, items_of, consumed, min_n=20, loss_rate_min=0.5, unused_rate=0.05, ko_min_n=3, min_n_share=1.0)
+    assert d["must_cover"] == ["F_A", "F_B"] and d["must_cover_n"] == 22 and d["must_cover_enough"] and d["evidence"] == 1.0
     assert d["threat_species"][:2] == ["a1", "a2"] and "c1" not in d["threat_species"]
     assert d["ko"] and d["ko"][0]["ours"] == "core1" and d["ko"][0]["by"] == "a1" and d["ko"][0]["n"] == 5
     assert d["vulnerable"] == ["core1"]
     assert d["replace_candidates"] == ["weak"]
     assert [u["species"] for u in d["unused_items"]] == ["fillD"] and d["unused_items"][0]["consumed"] == 0
     assert d["mega_review"] is False and len(d["notes"]) >= 4
-    # 束ねた対戦数が下限に届かなければ must_cover は空 (証拠不足)
-    d2 = RP.diagnose(st, members, items_of, consumed, min_n=40)
-    assert d2["must_cover"] == [] and d2["must_cover_n"] == 22
+    # 束ねた対戦数が下限に届かなくても must_cover は部分の証拠として残す (must_cover_enough=False、evidence = 届いた比率)
+    d2 = RP.diagnose(st, members, items_of, consumed, min_n=40, min_n_share=1.0)
+    assert d2["must_cover"] == ["F_A", "F_B"] and d2["must_cover_n"] == 22 and not d2["must_cover_enough"]
+    assert d2["min_n"] == 32 and d2["evidence"] == round(22 / 32, 3) and "部分の証拠" in d2["notes"][0]
+    # 下限は対戦数に相対 (min(min_n, n × share)): 32 戦 × 0.5 = 16 → F_A (12) + F_B (10) で届く。× 0.06 なら最小 5 → F_A だけ
+    d3 = RP.diagnose(st, members, items_of, consumed, min_n=40, min_n_share=0.5)
+    assert d3["min_n"] == 16 and d3["must_cover"] == ["F_A", "F_B"] and d3["must_cover_enough"]
+    d4 = RP.diagnose(st, members, items_of, consumed, min_n=20)
+    assert d4["min_n"] == 5 and d4["must_cover"] == ["F_A"] and d4["must_cover_enough"]
     # 系統の重みの引き上げ: must_cover と負けに効いた相手の居る系統
     pool = W._pool()
     fam_w = pool.family_matrix()[1]
@@ -90,6 +96,20 @@ def test_repair_variants():
     a = next(v for v in vs if v.origin["variant"] == "A")
     assert a.origin["changes"][0]["out"] == "weak" and "weak" not in a.members
     assert a.origin["changes"][0]["in"] in ("fillC", "fillD")
+    # 「c1 に倒される」への受け: 入替先は c1 の型への被覆が BUILD_REPAIR_ANSWER_MIN 以上の種 (fillC は c 0.9、fillD は d だけ → fillC)
+    a_in = [v.origin["changes"][0]["in"] for v in vs if v.origin["variant"] == "A" and len(v.origin["changes"]) == 1]
+    assert a_in and all(x == "fillC" for x in a_in), a_in
+    assert all(c.get("answers_ko") for v in vs if v.origin["variant"] == "A" for c in v.origin["changes"] if "in" in c)
+    # 入替先を散らす: ko の無い診断では、入れる種が初出の変種が同じ種の 2 つ目より先に並ぶ
+    vs_d = RP.repair_variants(s, parent, dict(diag, ko=[], vulnerable=[]), cfg, pool_species, W._roles_of, [],
+                              fixed={"core1", "core2"}, parent_id="L01_C001", round_no=1, max_changes=2, max_arms=6, boost=2.0,
+                              min_gain=0.001)
+    ins_d = [tuple(sorted(c["in"] for c in v.origin["changes"] if "in" in c)) for v in vs_d if v.origin["variant"] == "A"]
+    first_seen = []
+    for x in ins_d:
+        if x not in first_seen:
+            first_seen.append(x)
+    assert len(first_seen) >= 2, ins_d
     # 上限と順序: 点の降順、最大 max_arms
     assert [v.origin["repair_score"] for v in vs] == sorted((v.origin["repair_score"] for v in vs), reverse=True)
     vs2 = RP.repair_variants(s, parent, diag, cfg, pool_species, W._roles_of, [], fixed={"core1", "core2"}, parent_id="L01_C001",

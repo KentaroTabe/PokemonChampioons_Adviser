@@ -33,11 +33,13 @@ from typing import Optional
 
 from champions_agent.config import (BUILD_ADAPT_MIN_BATTLES, BUILD_ADAPT_VALIDATE_MAX_CKPTS, BUILD_ADAPT_VALIDATE_N,
                                     BUILD_EQUIV_EPS, BUILD_FINALIST_HOLDOUT_ALL, BUILD_FINALIST_MAX_SHARED,
-                                    BUILD_FINALISTS, BUILD_FOLD_EVAL, BUILD_FOLD_VALIDATE, BUILD_PICK_VARIANTS,
-                                    BUILD_RACE_DEFAULT_MAX, BUILD_RACE_STEPS, BUILD_REFERENCE_FULL_ADAPT,
-                                    BUILD_REFERENCE_PRODUCTION_VARIANT, BUILD_REPAIR_PARENTS, BUILD_REPAIR_ROUNDS,
-                                    BUILD_REPRO_GATE, BUILD_SCREEN_ADAPT_BATTLES, BUILD_SCREEN_MARGIN, BUILD_SCREEN_MAX,
-                                    BUILD_SCREEN_STEPS, BUILD_SCREEN_VARIANTS)
+                                    BUILD_FINALISTS, BUILD_FOLD_EVAL, BUILD_FOLD_VALIDATE, BUILD_IDENTICAL_REFERENCE_SKIP,
+                                    BUILD_PICK_VARIANTS, BUILD_RACE_DEFAULT_MAX, BUILD_RACE_STEPS, BUILD_REFERENCE_FULL_ADAPT,
+                                    BUILD_REFERENCE_PRODUCTION_GAP, BUILD_REFERENCE_PRODUCTION_VARIANT,
+                                    BUILD_REPAIR_EXPLORE_PARENTS, BUILD_REPAIR_FULL_ADAPT_ROUND2, BUILD_REPAIR_PARENTS,
+                                    BUILD_REPAIR_POOL_VARIANTS, BUILD_REPAIR_ROUNDS, BUILD_REPRO_GATE,
+                                    BUILD_SCREEN_ADAPT_BATTLES, BUILD_SCREEN_MARGIN, BUILD_SCREEN_MAX, BUILD_SCREEN_STEPS,
+                                    BUILD_SCREEN_VARIANTS)
 from tools.team_build import ablation as AB
 from tools.team_build import adapt as AD
 from tools.team_build import finalists as FN
@@ -85,7 +87,9 @@ def candidate_arms(run_dir: Path, models_dir: str, limit: Optional[int] = None, 
             continue
         if ids is not None and r["candidate_id"] not in ids:
             continue
-        arms.append(R.Arm(r["candidate_id"], run_dir / "s06_sets" / f"{r['candidate_id']}.txt", None, models_dir))
+        plan = run_dir / "s06_sets" / f"{r['candidate_id']}.plan.json"
+        arms.append(R.Arm(r["candidate_id"], run_dir / "s06_sets" / f"{r['candidate_id']}.txt", None, models_dir,
+                          plan_file=(str(plan) if plan.exists() else None)))
     return arms[:limit] if limit else arms
 
 
@@ -93,6 +97,16 @@ def _write_stage(run_dir: Path, name: str, obj) -> None:
     (run_dir / "evaluation").mkdir(parents=True, exist_ok=True)
     (run_dir / "evaluation" / f"{name}.json").write_text(json.dumps(obj, ensure_ascii=False, indent=1) + "\n",
                                                          encoding="utf-8")
+
+
+def _records_of(eval_dir: Path, prefix: str, arm_ids: list) -> list:
+    """対戦記録 (evaluation/battles/<prefix>_<arm_id>.jsonl) を腕の分だけ束ねて読む"""
+    recs: list = []
+    for aid in arm_ids:
+        p = eval_dir / "battles" / f"{prefix}_{aid}.jsonl"
+        if p.exists():
+            recs.extend(json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip())
+    return recs
 
 
 # ------------------------------------------------------------------ 純粋関数 (テスト対象)
@@ -159,6 +173,106 @@ def best_by_win_rate(rows: dict, order: tuple) -> Optional[str]:
         if best_wr is None or wr > best_wr:
             best, best_wr = v, wr
     return best
+
+
+def same_team(text_a: str, text_b: str) -> bool:
+    """2 つのチーム本文が同じ 6 体・同じ型か (純粋: 種 id → 型のキーの集合で比べる。並び順・ニックネームは無視)"""
+    from tools.team_build.sets import parse_set_text
+    try:
+        a = {sid: c.key() for sid, c in parse_set_text(text_a or "").items()}
+        b = {sid: c.key() for sid, c in parse_set_text(text_b or "").items()}
+    except Exception:
+        return False
+    return bool(a) and a == b
+
+
+def split_identical(cands: list, reference_text: str, read_text=None) -> tuple:
+    """候補のうち参照 (登録チーム) と同じ 6 体・同じ型のものを分ける (純粋)。戻り値 (残す候補, 同一の候補)。
+    同じチームどうしの差は選出モデルの学習のばらつきだけなので腕にしない (BUILD_IDENTICAL_REFERENCE_SKIP)"""
+    read_text = read_text or (lambda p: Path(p).read_text(encoding="utf-8"))
+    keep, same = [], []
+    for a in cands:
+        try:
+            txt = read_text(a.team_file)
+        except Exception:
+            txt = ""
+        (same if same_team(txt, reference_text) else keep).append(a)
+    return keep, same
+
+
+def arms_of_team(res: dict, cid: str) -> list:
+    """racing の結果からそのチームの全 variant の arm_id (対戦記録を束ねる用。純粋)"""
+    return [a["arm_id"] for a in (res or {}).get("arms", []) if split_variant(a["arm_id"])[0] == cid]
+
+
+def best_delta_by_team(res: dict) -> dict:
+    """racing の結果 → {team_id: variant の最大 Δ} (脱落した腕も含む。純粋)"""
+    out: dict = {}
+    for a in (res or {}).get("arms", []):
+        d = (a.get("result") or {}).get("mean")
+        if d is None:
+            continue
+        cid = split_variant(a["arm_id"])[0]
+        if cid not in out or d > out[cid]:
+            out[cid] = d
+    return out
+
+
+def repair_parents(res: dict, survivors: list, rows_by: dict, identical: list = (), n_main: int = BUILD_REPAIR_PARENTS,
+                   n_explore: int = BUILD_REPAIR_EXPLORE_PARENTS, pool_variants: bool = BUILD_REPAIR_POOL_VARIANTS,
+                   chosen: Optional[dict] = None) -> list:
+    """修理の親 [(candidate_id, [診断に使う腕の arm_id ...])] (純粋)。
+    1. 参照と同一の候補 (identical): 参照の腕 ("reference") の記録で診断する (現行チームの修理)
+    2. 生存した並びの Δ 上位 n_main
+    3. 探索の並び (現行枝 incumbent / incumbent_mut と修理の変種を除く) の Δ 上位 n_explore。S8a で脱落していても診断する
+       (2026-10-04: 探索の並びが全滅すると修理の対象が現行チームと近傍だけになっていた)
+    pool_variants なら同じ並びの全 variant の腕を束ねる (診断の対戦数を増やす)。役割の無い行 (従来の S5) は親にしない"""
+    def arms(cid: str) -> list:
+        if pool_variants:
+            a = arms_of_team(res, cid)
+            if a:
+                return a
+        c = (chosen or {}).get(cid) or {}
+        return [c["arm_id"]] if c.get("arm_id") else arms_of_team(res, cid)[:1]
+
+    def has_roles(cid: str) -> bool:
+        return bool((rows_by.get(cid) or {}).get("roles"))
+
+    out: list = []
+    seen: set = set()
+    for cid in identical:
+        if has_roles(cid) and cid not in seen:
+            out.append((cid, ["reference"]))
+            seen.add(cid)
+    for cid in survivors:
+        if len([c for c, _a in out if c not in identical]) >= n_main:
+            break
+        if cid in seen or not has_roles(cid):
+            continue
+        out.append((cid, arms(cid)))
+        seen.add(cid)
+    if n_explore > 0:
+        deltas = best_delta_by_team(res)
+        explore = [cid for cid in sorted(deltas, key=lambda c: -deltas[c])
+                   if (rows_by.get(cid) or {}).get("tag") not in ("incumbent", "incumbent_mut", "repair")
+                   and cid not in seen and has_roles(cid)]
+        for cid in explore[:n_explore]:
+            out.append((cid, arms(cid)))
+            seen.add(cid)
+    return out
+
+
+def reference_production_gap(win_rates: dict, threshold: float = BUILD_REFERENCE_PRODUCTION_GAP) -> Optional[dict]:
+    """参照の variant の勝率 {variant: wr} から、本番 (production) の選出モデルが run 内で適応した fresh より
+    threshold 以上弱ければその事実 (純粋)。弱くなければ None"""
+    fresh, prod = win_rates.get("fresh"), win_rates.get("production")
+    if fresh is None or prod is None:
+        return None
+    gap = float(fresh) - float(prod)
+    if gap < threshold:
+        return None
+    return {"fresh": fresh, "production": prod, "gap": round(gap, 4), "threshold": threshold,
+            "note": "本番の選出モデルが現行チームで弱い: 実際の助言の選出に影響する。fresh のモデルを registry に候補として登録した"}
 
 
 # ------------------------------------------------------------------ 実行
@@ -322,10 +436,19 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
     ref = reference_arm(run_dir, models_dir, resume=resume)
     # 代理スコアでは絞らない (max_candidates は S7 で収束まで適応するチーム数)
     cands = candidate_arms(run_dir, models_dir, None, ids=candidate_ids)
+    identical: list = []
+    if BUILD_IDENTICAL_REFERENCE_SKIP:
+        cands, same = split_identical(cands, ref.team_file.read_text(encoding="utf-8"))
+        identical = [a.arm_id for a in same]
+        if identical:
+            log(f"S7-13: 参照と同じ 6 体・同じ型の候補 {identical} は腕にしない (差は選出モデルの学習のばらつきだけ)。"
+                f"修理の親としては参照の記録で診断する")
     if not cands:
-        raise SystemExit("合法な候補がありません (s06_sets.json)")
+        raise SystemExit("合法な候補がありません (s06_sets.json。参照と同一の候補は除く)")
+    sets_rows_all = json.loads((run_dir / "s06_sets.json").read_text(encoding="utf-8"))
+    rows_by_all = {r.get("candidate_id"): r for r in sets_rows_all}
     summary = {"models_dir": models_dir, "reference": ref.to_dict(), "n_candidates": len(cands),
-               "candidate_ids": [a.arm_id for a in cands],
+               "candidate_ids": [a.arm_id for a in cands], "identical_to_reference": identical,
                "protocol": {"screen_adapt": screen_adapt, "screen_margin": screen_margin, "screen_steps": list(screen_steps),
                             "screen_max": screen_max, "screen_variants": list(screen_variants),
                             "variants": list(variants), "max_candidates": max_candidates,
@@ -398,16 +521,38 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
     summary["s08a_survivors"] = survivors
     summary["s08a_eliminated"] = [a.arm_id for a in cands if a.arm_id not in chosen8a]
     summary["s08a_capped"] = [c for c in all_survivors if c not in survivors]
+    # 代理評価 (S5 の点・系統ごとの予測) と実測 (S8a の Δ・系統ごとの勝率・選出計画の一致) の較正を記録する
+    # (2026-10-04: 評価の点と実戦が逆、系統ごとの予測に識別力がない、計画が実戦で使われない — まず run ごとに見える形にする)
+    try:
+        from tools.team_build.review_run import family_calibration, surrogate_quality
+        cal = {"surrogate": surrogate_quality(sets_rows_all, res8a), "teams": {}}
+        for a in cands:
+            recs = _records_of(eval_dir, "s08a_screen", arms_of_team(res8a, a.arm_id))
+            cal["teams"][a.arm_id] = family_calibration((rows_by_all.get(a.arm_id) or {}).get("family_values") or {}, recs,
+                                                        plan_file=a.plan_file)
+        rhos = [t["spearman"] for t in cal["teams"].values() if t.get("spearman") is not None]
+        cal["median_family_spearman"] = sorted(rhos)[len(rhos) // 2] if rhos else None
+        _write_stage(run_dir, "s08a_calibration", cal)
+        summary["calibration"] = {"surrogate_spearman": (cal["surrogate"] or {}).get("spearman"),
+                                  "median_family_spearman": cal["median_family_spearman"],
+                                  "plan_match3": {c: (t.get("plan") or {}).get("match3_rate") for c, t in cal["teams"].items()}}
+        log(f"S8a calibration: 代理の点と Δ の順位相関 {summary['calibration']['surrogate_spearman']}、"
+            f"系統ごとの予測と勝率の順位相関 (中央値) {cal['median_family_spearman']}、"
+            f"計画と選出の 3 体一致 {summary['calibration']['plan_match3']}")
+    except Exception as e:
+        log(f"S8a calibration: error {e!r}")
     if stop_after == "s08a":
         summary["result"] = "stopped_after_s08a"
         _write_stage(run_dir, "summary", summary)
         return summary
 
     # S9 (1 周目): S8a の上位の並びを探索 fold の記録で診断し、修理モードの変種を cheap adaptation + screening で測って
-    # 生存した変種を S7 以降の候補に加える (docs/TEAM_BUILD_REDESIGN_1002.md §14)
+    # 生存した変種を S7 以降の候補に加える (docs/TEAM_BUILD_REDESIGN_1002.md §14)。親は 参照と同一の候補 (参照の記録で診断) +
+    # 生存の上位 + 探索の並びの Δ 上位 (脱落していても)。診断の記録は同じ並びの全 variant を束ねる
     repair_rounds = min(int(repairs or 0), BUILD_REPAIR_ROUNDS)
-    if repair_rounds >= 1 and survivors:
-        parents = [(c, chosen8a[c]["arm_id"]) for c in survivors[:BUILD_REPAIR_PARENTS]]
+    if repair_rounds >= 1 and (survivors or identical):
+        parents = repair_parents(res8a, survivors, rows_by_all, identical=identical, chosen=chosen8a)
+        log(f"S9 repair 1: 親 {[(c, len(a)) for c, a in parents]}")
         new_arms, chosen_r = _repair_round(run_dir, eval_dir, 1, parents, "s08a_screen", split, seed, models_dir, generic,
                                            ref_arm, screen_adapt, adapt_chunk, parallel, screen_variants, screen_steps,
                                            screen_max, BUILD_EQUIV_EPS + screen_margin, log, resume, n_threats)
@@ -444,39 +589,45 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
         try:
             return a.arm_id, AD.adapt_selection(a.arm_id, a.team_file, split, run_dir / "advisors", seed,
                                                 min_battles=adapt_min, chunk=adapt_chunk, max_battles=adapt_max,
-                                                log=log, registry=registry, keep_checkpoints=True)
+                                                log=log, registry=registry, keep_checkpoints=True, plan_file=a.plan_file)
         except Exception as e:      # 1 チームの失敗で run 全体を落とさない (fresh variant 無しで S8b へ)
             log(f"[adapt:{a.arm_id}] failed: {e!r}")
             return a.arm_id, {"candidate_id": a.arm_id, "model": None, "history": [], "stop_reason": f"error:{e!r}"}
 
-    adapted = {}
-    with ThreadPoolExecutor(max_workers=max(1, min(parallel, SCREEN_ADAPT_PARALLEL))) as ex:
-        for cid, r in ex.map(_adapt_one, to_adapt):
-            adapted[cid] = r
-    for a in to_adapt:
-        r = adapted[a.arm_id]
-        ckpts = AD.checkpoints_from_history(r.get("history"))
-        if (r.get("validated") or {}).get("chosen") and Path(r["validated"]["chosen"]).exists():
-            log(f"[validate:{a.arm_id}] resume (検証済み n{r['validated'].get('chosen_n')})")
-            r["model"] = r["validated"]["chosen"]
-        elif ckpts:
-            sel = AD.select_checkpoint(a.arm_id, a.team_file, ckpts, split, seed + 8, models_dir,
-                                       run_dir / "advisors" / a.arm_id / "validate", parallel=parallel, log=log,
-                                       fold=BUILD_FOLD_VALIDATE, n=validate_n, max_ckpts=validate_max)
-            r["validated"] = sel
-            if sel.get("chosen"):
-                r["model_last"] = r.get("model")
-                r["model"] = sel["chosen"]
-                if registry is not None and sel["chosen"] != r.get("model_last"):
-                    try:
-                        row = registry.register("selection_model", Path(sel["chosen"]),
-                                                meta={"candidate_id": a.arm_id, "n_battles": sel.get("chosen_n"),
-                                                      "validated": True, "fold": BUILD_FOLD_VALIDATE},
-                                                run_id=run_dir.name, status="candidate")
-                        r["artifact_id_validated"] = row["id"]
-                    except Exception as e:
-                        r["registry_error_validated"] = repr(e)
-        adapted[a.arm_id] = r
+    def _full_adapt(arm_list: list) -> dict:
+        """S7 の手順 (fold A で収束まで適応 → fold V の実測で checkpoint を選ぶ) を腕の列に適用する。
+        2 周目の修理の変種にも同じ手順を与える (BUILD_REPAIR_FULL_ADAPT_ROUND2) ので関数にした"""
+        out: dict = {}
+        with ThreadPoolExecutor(max_workers=max(1, min(parallel, SCREEN_ADAPT_PARALLEL))) as ex:
+            for cid, r in ex.map(_adapt_one, arm_list):
+                out[cid] = r
+        for a in arm_list:
+            r = out[a.arm_id]
+            ckpts = AD.checkpoints_from_history(r.get("history"))
+            if (r.get("validated") or {}).get("chosen") and Path(r["validated"]["chosen"]).exists():
+                log(f"[validate:{a.arm_id}] resume (検証済み n{r['validated'].get('chosen_n')})")
+                r["model"] = r["validated"]["chosen"]
+            elif ckpts:
+                sel = AD.select_checkpoint(a.arm_id, a.team_file, ckpts, split, seed + 8, models_dir,
+                                           run_dir / "advisors" / a.arm_id / "validate", parallel=parallel, log=log,
+                                           fold=BUILD_FOLD_VALIDATE, n=validate_n, max_ckpts=validate_max)
+                r["validated"] = sel
+                if sel.get("chosen"):
+                    r["model_last"] = r.get("model")
+                    r["model"] = sel["chosen"]
+                    if registry is not None and sel["chosen"] != r.get("model_last"):
+                        try:
+                            row = registry.register("selection_model", Path(sel["chosen"]),
+                                                    meta={"candidate_id": a.arm_id, "n_battles": sel.get("chosen_n"),
+                                                          "validated": True, "fold": BUILD_FOLD_VALIDATE},
+                                                    run_id=run_dir.name, status="candidate")
+                            r["artifact_id_validated"] = row["id"]
+                        except Exception as e:
+                            r["registry_error_validated"] = repr(e)
+            out[a.arm_id] = r
+        return out
+
+    adapted = _full_adapt(to_adapt)
     _write_stage(run_dir, "s07_adapt", adapted)
 
     # S7b: 参照の fresh 変種を S8a-2 と同じ相手列 (s08a_reference、screen_max 戦) で測り、参照の variant を選び直す。
@@ -496,6 +647,25 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
                                                   "chosen_n": (ref_fresh.get("validated") or {}).get("chosen_n")}}
         log(f"S7b reference variant (fresh を加えて選び直し): {ref_variant} "
             + " ".join(f"{k}={v}" for k, v in ref_wr.items()))
+        gap = reference_production_gap(ref_wr)
+        if gap:
+            # 本番の選出モデルが現行チームで弱い (1003: 本番 0.417 / 適応 0.73)。実際の助言の選出に影響するので記録し、
+            # 適応したモデルを registry に候補として登録する (昇格は人手: tools.team_build.promote)
+            gap.update({"fresh_model": ref_fresh.get("model"), "production_model": production,
+                        "n_battles": ref_fresh.get("n_battles"), "chosen_n": (ref_fresh.get("validated") or {}).get("chosen_n")})
+            if registry is not None and ref_fresh.get("model"):
+                try:
+                    row = registry.register("selection_model", Path(ref_fresh["model"]),
+                                            meta={"candidate_id": "reference", "for": "registered_team", "recommend_production": True,
+                                                  "gap": gap["gap"], "win_rates": ref_wr},
+                                            run_id=run_dir.name, status="candidate")
+                    gap["artifact_id"] = row["id"]
+                except Exception as e:
+                    gap["registry_error"] = repr(e)
+            summary["reference_production_gap"] = gap
+            _write_stage(run_dir, "reference_model_gap", gap)
+            log(f"S7b 注意: 本番の選出モデルが現行チームで弱い (本番 {gap['production']} / 適応 {gap['fresh']}、差 {gap['gap']:+.3f})。"
+                f"evaluation/reference_model_gap.json に記録" + (f"、registry {gap.get('artifact_id')}" if gap.get("artifact_id") else ""))
     elif reference_full_adapt:
         log(f"S7b reference fresh: 適応に失敗 ({ref_fresh.get('stop_reason')}) → 参照は S8a の variant ({ref_variant}) のまま")
 
@@ -527,8 +697,10 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
 
     # S9 (2 周目): S8b の上位の並びを診断 → 修理モードの変種 → cheap adaptation + racing (S8b と同じ段階) → 生存した変種を
     # S10 の contenders に加える (変種の選出モデルは cheap。LLM の仮説は使わない: D-28)
-    if repair_rounds >= 2 and contenders:
-        parents = [(c, chosen[c]["arm_id"]) for c in contenders[:BUILD_REPAIR_PARENTS]]
+    if repair_rounds >= 2 and (contenders or identical):
+        rows_by_all = {r.get("candidate_id"): r for r in json.loads((run_dir / "s06_sets.json").read_text(encoding="utf-8"))}
+        parents = repair_parents(res8b, contenders, rows_by_all, identical=identical, chosen=chosen)
+        log(f"S9 repair 2: 親 {[(c, len(a)) for c, a in parents]}")
         new_arms, chosen_r = _repair_round(run_dir, eval_dir, 2, parents, "s08b_adapted", split, seed + s08b_seed_offset,
                                            models_dir, generic, ref_arm, screen_adapt, adapt_chunk, parallel, screen_variants,
                                            steps, max_battles, BUILD_EQUIV_EPS, log, resume, n_threats)
@@ -543,10 +715,28 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
                                       "survivors": added}
             log(f"S9 repair 2: 変種 {len(new_arms)} のうち生存 {len(added)} を S10 の contenders に加える: "
                 + ", ".join(f"{c}={chosen_r[c]['variant']}({chosen_r[c]['delta']:+.3f})" for c in added))
+            if BUILD_REPAIR_FULL_ADAPT_ROUND2 and added:
+                # 2 周目の変種にも S7 と同じ適応を与えてから S10 に出す (他の並びは収束まで適応したモデル、変種だけ cheap 1000 戦の
+                # モデルかモデルなし、という不公平を無くす。2026-10-04)
+                arms_r2 = [a for a in new_arms if a.arm_id in added]
+                ad2 = _full_adapt(arms_r2)
+                adapted.update(ad2)
+                _write_stage(run_dir, "s07_adapt", adapted)
+                for a in arms_r2:
+                    r2 = ad2.get(a.arm_id) or {}
+                    if r2.get("model") and Path(r2["model"]).exists():
+                        chosen[a.arm_id].update({"selection_model": r2["model"], "variant": "fresh", "pick_policy": "advisor",
+                                                 "adapted_n": r2.get("n_battles")})
+                        log(f"S9 repair 2: {a.arm_id} の選出モデルを S7 の適応 (n={r2.get('n_battles')}) に置き換えて S10 へ")
+                    else:
+                        log(f"S9 repair 2: {a.arm_id} の適応に失敗 ({r2.get('stop_reason')}) → screening の variant のまま")
+                summary["s08b_variants"] = chosen
 
     # S10: SELECTION で比較 (チームごとに選んだ variant で)
     team_of = {a.arm_id: a.team_file for a in cands}
-    arms10 = [R.Arm(cid, team_of[cid], chosen[cid]["selection_model"], models_dir, pick_policy=chosen[cid]["pick_policy"])
+    plan_of = {a.arm_id: a.plan_file for a in cands}
+    arms10 = [R.Arm(cid, team_of[cid], chosen[cid]["selection_model"], models_dir, pick_policy=chosen[cid]["pick_policy"],
+                    plan_file=plan_of.get(cid))
               for cid in contenders]
     res10 = R.race(arms10, ref_arm(), split, "selection", seed + 2, eval_dir, stage="s10",
                    steps=steps, max_battles=max_battles, parallel=parallel, log=log)
@@ -634,7 +824,7 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
                 summary["action_adapter"] = p["action_adapter"]
             _write_stage(run_dir, f"s11b_action_adapt{tag}", ra)
             log(f"S11b action adapter [{cid}]: use_adapted={ra.get('use_adapted')} ({ra.get('reason')})")
-        final_arm = R.Arm(cid, arm_c.team_file, final_model, final_models_dir, pick_policy=final_pick)
+        final_arm = R.Arm(cid, arm_c.team_file, final_model, final_models_dir, pick_policy=final_pick, plan_file=arm_c.plan_file)
         h = None
         if is_top or finalist_holdout_all:
             h = HO.final_holdout(final_arm, ref_arm(), split, doc["sealed_id"], run_dir, seed + 4,

@@ -290,14 +290,62 @@ def test_joint_stage_pure():
     assert J.infer_role(c(["a", "b", "c", "d"], nature="brave"), cat_of, setup_of, field_of) == "tr_ace"
     assert J.infer_role(c(["a", "b", "c", "d"]), cat_of, setup_of, field_of) == "breaker"
     # 役割を満たせるか (雛形の必須の補助枠 / 始動源 / 火力 / 速さ)
-    base_fast = {"atk": 120, "spa": 60, "spe": 110}
-    base_wall = {"atk": 60, "spa": 60, "spe": 40}
+    base_fast = {"hp": 80, "atk": 120, "def": 70, "spa": 60, "spd": 70, "spe": 110}
+    base_wall = {"hp": 100, "atk": 60, "def": 110, "spa": 60, "spd": 90, "spe": 40}
     assert J.role_capable("hazard_lead", {"stealthrock", "a"}, [], base_wall, field_of)
     assert not J.role_capable("hazard_lead", {"a"}, [], base_wall, field_of)
     assert J.role_capable("sand_setter", {"a"}, ["sandstream"], base_wall, field_of)
     assert J.role_capable("sand_setter", {"sandstorm"}, ["ab"], base_wall, field_of)
     assert not J.role_capable("rain_setter", {"sandstorm"}, ["sandstream"], base_wall, field_of)
     assert J.role_capable("breaker", set(), [], base_fast, field_of) and not J.role_capable("breaker", set(), [], base_wall, field_of)
+    # 役割の適性 (2026-10-04): 技だけの始動役・受け・設置除去・吹き飛ばしは耐久と攻撃種族値の上限を要求する。速い攻撃種は名目だけ満たさない
+    assert not J.role_capable("rain_setter", {"raindance"}, ["ab"], base_fast, field_of), "ガブリアスの雨始動は作らない"
+    assert J.role_capable("rain_setter", {"raindance"}, ["ab"], base_wall, field_of)
+    assert J.role_capable("sand_setter", set(), ["sandstream"], base_fast, field_of), "特性の始動役は速くても可"
+    thin = {"hp": 78, "atk": 84, "def": 78, "spa": 109, "spd": 85, "spe": 100}          # リザードン相当
+    assert not J.role_capable("phazer", {"roar", "recover"}, [], thin, field_of) and not J.role_capable("hazard_removal", {"defog"}, [], thin, field_of)
+    strong = {"hp": 110, "atk": 123, "def": 65, "spa": 100, "spd": 65, "spe": 65}        # エンブオー相当
+    assert not J.role_capable("wall", {"recover"}, [], strong, field_of), "攻撃種族値が高い種は受けにしない"
+    assert J.role_capable("wall", {"recover"}, [], base_wall, field_of)
+    gliscor = {"hp": 75, "atk": 95, "def": 125, "spa": 45, "spd": 75, "spe": 95}
+    assert J.role_capable("wall", {"roost"}, [], gliscor, field_of), "素早さ 95 ちょうどは壁の候補に入る"
+    persian = {"hp": 65, "atk": 60, "def": 60, "spa": 75, "spd": 65, "spe": 115}
+    assert not J.role_capable("wall", {"roost"}, [], persian, field_of)
+    assert J.role_aptitude("sand_setter", set(), ["sandstream"], base_wall, field_of) > J.role_aptitude("sand_setter", {"sandstorm"}, ["ab"], base_wall, field_of)
+    assert J.role_capable("hazard_lead", {"stealthrock"}, [], thin, field_of), "先発の設置役は耐久を要求しない"
+    # 役割の逆引き: −Spe の性格だけでは tr_ace にしない (攻撃技 3 本以上で素早さ 0 のときだけ)。回復・状態技があれば wall
+    assert J.infer_role(c(["recover", "a", "b", "c"], nature="relaxed"), cat_of, setup_of, field_of) == "wall"
+    cr = SetCandidate("x", "ab", None, "relaxed", "32/0/32/0/2/0", ["a", "b", "c", "d"])
+    assert J.infer_role(cr, cat_of, setup_of, field_of) == "tr_ace"
+    cr2 = SetCandidate("x", "ab", None, "relaxed", "32/0/32/0/0/2", ["a", "b", "c", "d"])
+    assert J.infer_role(cr2, cat_of, setup_of, field_of) == "breaker"
+    # 並びの文脈: tr_setter が居なければ tr_ace は breaker
+    ents_tr = [_entry("x", "tr_ace", "x1", None, False, {}), _entry("y", "breaker", "y1", "lifeorb", False, {})]
+    assert [e.role for e in J.demote_tr_ace(ents_tr)] == ["breaker", "breaker"]
+    ents_tr2 = ents_tr + [_entry("z", "tr_setter", "z1", "mentalherb", False, {})]
+    assert [e.role for e in J.demote_tr_ace(ents_tr2)] == ["tr_ace", "breaker", "tr_setter"]
+    # こだわり + 固定技の行: 無効にする相手が居る系統の相手だけ割り引く
+    pool = _pool()
+    vec = np.ones(len(pool.sets), dtype=np.float32)
+    adj = J.lock_immune_adjust(vec, pool, {OPP_IDS.index("b1")}, discount=0.5)
+    assert float(adj[OPP_IDS.index("b1")]) == 0.5 and float(adj[OPP_IDS.index("b2")]) == 0.5 and float(adj[OPP_IDS.index("a1")]) == 1.0
+    assert np.allclose(J.lock_immune_adjust(vec, pool, set(), 0.5), vec)
+    # 種の集中の上限
+    from tools.team_build import candidates as C
+    mk = lambda *m: C.Lineup(tuple(sorted(m)), "X", 1.0, {})      # noqa: E731
+    chosen = [mk("k", "a", "b", "c", "d", "e"), mk("k", "a", "b", "c", "d", "f"), mk("k", "g", "h", "i", "j", "l"),
+              mk("k", "m", "n", "o", "p", "q")]
+    rest = [mk("r", "s", "t", "u", "v", "w"), mk("k", "x", "y", "z", "aa", "bb")]
+    out = J.cap_species_share(chosen, rest, max_share=0.5, protected=())
+    # 上限 2 (= 4 × 0.5): k 入りは 2 つまで、代わりに rest の r 入りが入る。足りない分は外した並びを戻す (目標数は守る) ので k は 3
+    assert len(out) == 4 and any("r" in l.members for l in out)
+    assert [l.members for l in out[:3]] == [chosen[0].members, chosen[1].members, rest[0].members]
+    assert sum(1 for l in out if "k" in l.members) == 3
+    rest2 = rest + [mk("r2", "s2", "t2", "u2", "v2", "w2")]
+    out2 = J.cap_species_share(chosen, rest2, max_share=0.5, protected=())
+    assert sum(1 for l in out2 if "k" in l.members) == 2 and len(out2) == 4
+    out_p = J.cap_species_share(chosen, rest, max_share=0.5, protected={"k"})
+    assert [l.members for l in out_p] == [l.members for l in chosen]
     assert J.role_capable("wall", {"recover"}, [], base_wall, field_of) and not J.role_capable("wall", {"recover"}, [], base_fast, field_of)
     assert J.role_capable("pivot", {"uturn"}, [], base_wall, field_of) and not J.role_capable("nosuch", set(), [], base_wall, field_of)
     # 役割の指定が無い種に試す役割
@@ -330,6 +378,48 @@ def test_joint_stage_pure():
     print("test_joint_stage_pure OK")
 
 
+def test_composition_terms():
+    """補助の価値・攻撃役の過多・同じ仕事の重複 (設計文書 §5.3)、3 体の役割構成の加点"""
+    def ent(sid, role, moves, evs="2/32/0/0/0/32", nature="jolly", item=None):
+        cand = SetCandidate(sid, "ab", item, nature, evs, list(moves), f"role:{role}", 0.5, [])
+        return L.SetEntry((sid,), sid, role, cand, SimpleNamespace(ability="ab"), list(moves), item, False,
+                          {"terrain": None, "weather": None}, {"terrain": None, "weather": None})
+    atk = [ent(f"a{i}", "breaker", ["tackle"]) for i in range(6)]
+    comp = L.composition_terms(atk, utility_bonus={"hazard": 0.03, "removal": 0.02, "priority": 0.02, "speed_control": 0.02},
+                               max_attackers=4, attacker_penalty=0.03, dup_penalty=0.02)
+    assert comp["attackers"] == 6 and abs(comp["excess"] - 0.06) < 1e-9 and comp["utility"] == 0.0 and comp["kinds"] == []
+    assert abs(comp["dup"] - 0.02 * 5) < 1e-9 and abs(comp["value"] - (-0.06 - 0.10)) < 1e-9
+    mixed = [ent("a", "breaker", ["tackle", "suckerpunch"]), ent("b", "sweeper_setup", ["swordsdance"], evs="2/32/0/0/0/32"),
+             ent("c", "hazard_lead", ["stealthrock"], evs="32/0/32/0/2/0", nature="impish"),
+             ent("d", "hazard_removal", ["defog"], evs="32/0/32/0/2/0", nature="impish"),
+             ent("e", "speed_control", ["trickroom"], evs="32/0/32/0/2/0", nature="relaxed"),
+             ent("f", "wall", ["recover"], evs="32/0/0/0/32/2", nature="calm")]
+    comp2 = L.composition_terms(mixed, utility_bonus={"hazard": 0.03, "removal": 0.02, "priority": 0.02, "speed_control": 0.02},
+                                max_attackers=4, attacker_penalty=0.03, dup_penalty=0.02)
+    assert comp2["kinds"] == ["hazard", "priority", "removal", "speed_control"] and abs(comp2["utility"] - 0.09) < 1e-9
+    assert comp2["attackers"] == 2 and comp2["excess"] == 0.0 and comp2["dup"] == 0.0 and abs(comp2["value"] - 0.09) < 1e-9
+    assert L.role_class("breaker") == "offense" and L.role_class("setup_ace") == "offense" and L.role_class("wall") == "support"
+    assert L.role_class("sun_setter") == "support" and L.role_class("sun_abuser") == "offense"
+    assert L.speed_tier(mixed[0].cand) == "fast" and L.speed_tier(mixed[4].cand) == "tr" and L.speed_tier(mixed[2].cand) == "bulky"
+    # 3 体の役割構成: 攻撃役と補助・受け役の両方が入る 3 体に加点 (系統の値へ)
+    pool = _pool()
+    fm, w = pool.family_matrix()
+    rows = np.array([[0.5] * 8, [0.5] * 8, [0.5] * 8], dtype=np.float32)
+    base = L.team_eval(rows, fm, w)
+    same = L.team_eval(rows, fm, w, classes=["offense"] * 3, trio_bonus=0.03)
+    mix = L.team_eval(rows, fm, w, classes=["offense", "offense", "support"], trio_bonus=0.03)
+    assert abs(base["coverage"] - same["coverage"]) < 1e-6 and abs(mix["coverage"] - base["coverage"] - 0.03) < 1e-6
+    # 探索の結果に構成の項と系統ごとの予測値が載る
+    s = _search()
+    cfg = L.SearchConfig(core_beam=2, complement_beam=2, species_k=10)
+    res = s.search({"family_id": "C009", "core_ids": ["core1", "core2"], "mega_id": "core2"}, cfg, ["core1", "core2", "fillC", "fillD", "weak", "sun"], _roles_of)
+    assert res and set(res[0].family_values) == set(OPP) and "utility" in res[0].parts and "attackers" in res[0].parts
+    cfg_off = L.SearchConfig(core_beam=2, complement_beam=2, species_k=10, composition=False, trio_bonus=0.0)
+    res_off = s.search({"family_id": "C009", "core_ids": ["core1", "core2"], "mega_id": "core2"}, cfg_off, ["core1", "core2", "fillC", "fillD", "weak", "sun"], _roles_of)
+    assert res_off and res_off[0].parts["utility"] == 0.0
+    print("test_composition_terms OK")
+
+
 def main() -> None:
     test_team_eval()
     test_constraints_and_roles()
@@ -338,6 +428,7 @@ def main() -> None:
     test_incumbent_branch()
     test_refine_targets()
     test_joint_stage_pure()
+    test_composition_terms()
     print("ALL OK")
 
 
