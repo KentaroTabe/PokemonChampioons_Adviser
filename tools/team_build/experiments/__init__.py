@@ -4,6 +4,9 @@
   2. concept_origin  構想の出所 (LLM / 規則 / 軸) ごとの到達率            python -m tools.team_build.experiments.concept_origin
   3. env_validity    相手プールの妥当性と系統ごとの実戦 vs シム           python -m tools.team_build.experiments.env_validity --run-id R
   4. llm_audit       LLM の常識審査の一致率 (Cohen の κ)                 python -m tools.team_build.experiments.llm_audit --run-id R
+  8. learned_surrogate 学習の代理 (選出モデルの予測勝率) と測定の順位相関  python -m tools.team_build.experiments.learned_surrogate
+ 12. opponent_pick_validity 環境チームの選出の方策と実戦の選出の一致     python -m tools.team_build.experiments.opponent_pick_validity
+ 13. opponent_pilot_validity 環境チームの操縦 × 選出の方策と実戦の勝率    python -m tools.team_build.experiments.opponent_pilot_validity --run-id R
 結果は logs/build_search/experiments/ に JSON で残す。純粋関数は tests/test_team_build_experiments.py で閉じる。
 """
 from __future__ import annotations

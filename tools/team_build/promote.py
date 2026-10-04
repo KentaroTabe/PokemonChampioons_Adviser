@@ -7,7 +7,10 @@
     python -m tools.team_build.promote --rollback --kind package
     python -m tools.team_build.promote --experiment <package_id> | --experiment-off   # 接続テストで候補を試用 (experiment ラベル)
 
-昇格条件 (docs/TEAM_BUILDING_IMPLEMENTATION.md §9-7): 独立 full run 3 回 + 全 gate PASS + 重大 regression 0 + 人手 approve。
+昇格条件 (docs/TEAM_BUILDING_IMPLEMENTATION.md §9-7、2026-10-05 Phase 5): 同じ 6 体で holdout PASS の **full run** が
+BUILD_PROMOTE_MIN_FULL_RUNS 回 (= full run 2 本 + 確認 1 回) + 全 gate PASS + 重大 regression 0 + 人手 approve。
+full run の定義: 封印 holdout の対戦数 ≥ BUILD_PROMOTE_MIN_HOLDOUT_N、別の封印の分割 (sealed_id) ごとに 1 回だけ数える。
+登録チームと同じ 6 体の Package は数えない (1002d の PASS は参照との差が選出モデルのばらつきだった)。
 自動昇格はしない。緊急ロールバックの invariant 監視は invariants.py (後続)。
 """
 from __future__ import annotations
@@ -15,8 +18,9 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from typing import Optional
 
-from champions_agent.config import BUILD_PROMOTE_MIN_FULL_RUNS
+from champions_agent.config import BUILD_PROMOTE_DISTINCT_SPLITS, BUILD_PROMOTE_MIN_FULL_RUNS, BUILD_PROMOTE_MIN_HOLDOUT_N
 from tools.team_build.registry import Registry
 
 REPO = Path(__file__).resolve().parent.parent.parent
@@ -44,10 +48,16 @@ def gate_check(reg: Registry, artifact_id: str) -> dict:
         ev = json.loads((final / "evaluation.json").read_text(encoding="utf-8")) if (final / "evaluation.json").exists() else {}
         if "ablation" not in ev:
             problems.append("ablation 表が無い")
-        runs = pass_runs_for_team(reg.list(kind="package"), meta)
+        reg_key = registered_team_key()
+        if reg_key and team_key(meta) == reg_key:
+            problems.append("登録チームと同じ 6 体 (昇格しても変わらない。参照との差は選出モデルのばらつきで、PASS は数えない)")
+        runs = pass_runs_for_team(reg.list(kind="package"), meta, exclude_key=reg_key)
         if len(runs) < BUILD_PROMOTE_MIN_FULL_RUNS:
-            problems.append(f"独立 full run の PASS が {len(runs)} 回 (必要 {BUILD_PROMOTE_MIN_FULL_RUNS}。同じ 6 体の Package で数える)")
-    return {"ok": not problems, "problems": problems, "status": row["status"], "kind": row["kind"]}
+            problems.append(f"full run の PASS が {len(runs)} 回 (必要 {BUILD_PROMOTE_MIN_FULL_RUNS}。同じ 6 体、holdout n ≥ "
+                            f"{BUILD_PROMOTE_MIN_HOLDOUT_N}、別の封印の分割ごとに 1 回)")
+    return {"ok": not problems, "problems": problems, "status": row["status"], "kind": row["kind"],
+            "full_run": {"min_runs": BUILD_PROMOTE_MIN_FULL_RUNS, "min_holdout_n": BUILD_PROMOTE_MIN_HOLDOUT_N,
+                         "distinct_splits": BUILD_PROMOTE_DISTINCT_SPLITS}}
 
 
 def team_key(meta: dict) -> tuple:
@@ -55,21 +65,43 @@ def team_key(meta: dict) -> tuple:
     return tuple(sorted(str(s) for s in ((meta or {}).get("species") or [])))
 
 
-def pass_runs_for_team(packages: list, meta: dict) -> set:
-    """同じ 6 体の Package のうち holdout PASS の run_id の集合 (純粋)。species が無い古い Package は candidate_id で数える"""
+def pass_runs_for_team(packages: list, meta: dict, min_n: int = BUILD_PROMOTE_MIN_HOLDOUT_N,
+                       distinct_splits: bool = BUILD_PROMOTE_DISTINCT_SPLITS, exclude_key: Optional[tuple] = None) -> set:
+    """同じ 6 体の Package のうち holdout PASS の **full run** の run_id の集合 (純粋)。
+    full run = holdout の対戦数 n ≥ min_n (n が無い古い記録は数えない。min_n=0 なら数える)。distinct_splits なら同じ封印の分割
+    (sealed_id) の PASS は 1 回に数える (最初の run)。exclude_key (登録チームの 6 体) と同じ鍵の Package は空 (昇格しても変わらない)。
+    species が無い古い Package は candidate_id で数える"""
     key = team_key(meta)
-    out = set()
+    if exclude_key and key and key == tuple(exclude_key):
+        return set()
+    by_split: dict = {}
     for r in packages or []:
         m = r.get("meta") or {}
-        if (m.get("holdout") or {}).get("verdict") not in ("PASS", "PASS_EQUIVALENT"):
+        hold = m.get("holdout") or {}
+        if hold.get("verdict") not in ("PASS", "PASS_EQUIVALENT"):
             continue
         if key:
             same = bool(m.get("species")) and team_key(m) == key       # 6 体が確認できない Package は数えない
         else:
             same = m.get("candidate_id") == meta.get("candidate_id")
-        if same:
-            out.add(r.get("run_id"))
-    return out
+        if not same:
+            continue
+        n = hold.get("n")
+        if min_n and (n is None or int(n) < int(min_n)):
+            continue
+        k = (hold.get("sealed_id") or r.get("run_id")) if distinct_splits else r.get("run_id")
+        by_split.setdefault(k, r.get("run_id"))
+    return set(by_split.values())
+
+
+def registered_team_key() -> tuple:
+    """登録チーム (config/my_team.json) の 6 体の鍵。読めなければ空"""
+    try:
+        from tools.team_build.run import registered_team
+        _text, ids, _mega = registered_team()
+        return tuple(sorted(str(s) for s in ids)) if ids else ()
+    except Exception:
+        return ()
 
 
 def banned_in_team_text(text: str, banned) -> list:

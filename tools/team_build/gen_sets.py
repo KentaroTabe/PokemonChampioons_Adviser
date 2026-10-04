@@ -401,9 +401,9 @@ def choose_ability(abilities, priority=BUILD_GEN_ABILITY_PRIORITY) -> Optional[s
 def assemble_sets(species_id: str, pool: dict, pick_attacks: Callable, archetype: str, nature: str,
                   ability: Optional[str], templates=BUILD_GEN_TEMPLATES, archetypes=BUILD_GEN_ARCHETYPES,
                   setup_items=BUILD_GEN_SETUP_ITEMS, fixed_item: Optional[str] = None, extra_notes=(),
-                  max_sets: int = BUILD_GEN_MAX_SETS) -> list:
+                  max_sets: int = BUILD_GEN_MAX_SETS, lint: bool = True) -> list:
     """テンプレートごとに 1 型。pick_attacks(n, exclude) → [move]。役割が埋まらないテンプレートは捨てる。
-    fixed_item (メガ石) があれば全型その持ち物。戻り値 [SetCandidate (source learnset)]"""
+    fixed_item (メガ石) があれば全型その持ち物。戻り値 [SetCandidate (source learnset)]。lint: 常識規則の最終検査 (set_lint) で誤りの型を落とす"""
     arch = archetypes[archetype]
     out: list = []
     seen: set = set()
@@ -429,8 +429,16 @@ def assemble_sets(species_id: str, pool: dict, pick_attacks: Callable, archetype
             continue
         seen.add(key)
         items = setup_items if "setup" in tpl["utility"] else arch["items"]
-        out.append(SetCandidate(species_id, ability, fixed_item or items[0], nature, arch["evs"], moves, "learnset",
-                                notes=[f"gen:{tpl['name']}:{archetype}"] + list(extra_notes)))
+        c = SetCandidate(species_id, ability, fixed_item or items[0], nature, arch["evs"], moves, "learnset",
+                         notes=[f"gen:{tpl['name']}:{archetype}"] + list(extra_notes))
+        if lint:
+            try:
+                from tools.team_build.set_lint import gate_rejects
+                if gate_rejects(c, source="gen_sets"):
+                    continue                              # 常識規則の誤り (性格と技 / 持ち物 / 場の重複) の型は作らない
+            except Exception:
+                pass
+        out.append(c)
         if len(out) >= max_sets:
             break
     return out

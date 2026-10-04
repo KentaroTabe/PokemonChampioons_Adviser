@@ -53,6 +53,8 @@ from tools.team_build.verdict import DEGRADED
 REPO = Path(__file__).resolve().parent.parent.parent
 VARIANT_SEP = "@"
 SCREEN_ADAPT_PARALLEL = 4     # cheap adaptation の同時実行数 (収集は 1 プロセス 1 戦ずつ)
+from tools.team_build import theme_check as TC  # noqa: E402
+
 STOP_POINTS = ("s08a", "s08b")
 
 
@@ -175,6 +177,17 @@ def team_survivors(chosen: dict, max_candidates: Optional[int]) -> list:
     return ids[:max_candidates] if max_candidates else ids
 
 
+def exclude_tagged(ids: list, rows_by: dict, tags=("calibration",)) -> tuple:
+    """並びの列から tag が tags の並び (較正の標本: S8a だけ測り、昇格・修理には使わない) を外す (純粋)。戻り値 (残り, 外した並び)"""
+    out, dropped = [], []
+    for cid in ids:
+        if ((rows_by.get(cid) or {}).get("tag") or "") in tags:
+            dropped.append(cid)
+        else:
+            out.append(cid)
+    return out, dropped
+
+
 def repro_gate_ok(s08b_delta: Optional[float], s10_delta: Optional[float]) -> bool:
     """再現性の門: 勝者は S8b (SEARCH) と S10 (SELECTION) の両分割で Δ ≥ 0 でなければ holdout に進めない。純粋"""
     return s08b_delta is not None and s10_delta is not None and s08b_delta >= 0.0 and s10_delta >= 0.0
@@ -271,7 +284,7 @@ def repair_parents(res: dict, survivors: list, rows_by: dict, identical: list = 
     if n_explore > 0:
         deltas = best_delta_by_team(res)
         explore = [cid for cid in sorted(deltas, key=lambda c: -deltas[c])
-                   if (rows_by.get(cid) or {}).get("tag") not in ("incumbent", "incumbent_mut", "repair")
+                   if (rows_by.get(cid) or {}).get("tag") not in ("incumbent", "incumbent_mut", "repair", "calibration")
                    and cid not in seen and has_roles(cid)]
         for cid in explore[:n_explore]:
             out.append((cid, arms(cid)))
@@ -546,7 +559,7 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
                        steps=screen_steps, max_battles=screen_max, eps=BUILD_EQUIV_EPS + screen_margin,
                        parallel=parallel, log=log)
     chosen8a = choose_variants(res8a)
-    all_survivors = team_survivors(chosen8a, None)
+    all_survivors, _calib_measured = exclude_tagged(team_survivors(chosen8a, None), rows_by_all)
     survivors = all_survivors[:max_candidates] if max_candidates else all_survivors
     log(f"S8a survivors: {len(all_survivors)}/{len(cands)} (脱落 {len(cands) - len(all_survivors)})、"
         f"S7 で適応する Δ 上位 {len(survivors)}: " +
@@ -555,6 +568,12 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
     summary["s08a_survivors"] = survivors
     summary["s08a_eliminated"] = [a.arm_id for a in cands if a.arm_id not in chosen8a]
     summary["s08a_capped"] = [c for c in all_survivors if c not in survivors]
+    calib_ids = [c for c, r in rows_by_all.items() if (r.get("tag") or "") == "calibration" and c in {a.arm_id for a in cands}]
+    if calib_ids:
+        # 較正の標本 (判断 #10): S8a の Δ を記録するだけ (生存・修理・昇格には使わない)。代理評価の較正 (s08a_calibration) には入る
+        summary["calibration_sample"] = {c: (chosen8a.get(c) or {}).get("delta") for c in calib_ids}
+        log(f"S8a calibration sample: 較正の標本 {len(calib_ids)} 並び (昇格・修理には使わない) Δ "
+            + ", ".join(f"{c}={(chosen8a.get(c) or {}).get('delta')}" for c in calib_ids))
     # 代理評価 (S5 の点・系統ごとの予測) と実測 (S8a の Δ・系統ごとの勝率・選出計画の一致) の較正を記録する
     # (2026-10-04: 評価の点と実戦が逆、系統ごとの予測に識別力がない、計画が実戦で使われない — まず run ごとに見える形にする)
     try:
@@ -728,6 +747,21 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
         summary["plan_ab"] = plan_ab_pairs(res8b)
         log("S8b plan prior A/B (fresh_plan − fresh): " + ", ".join(f"{c}={v['diff']:+.3f}" for c, v in summary["plan_ab"].items()))
     log("S8b contenders: " + ", ".join(f"{c}={chosen[c]['variant']}({chosen[c]['delta']:+.3f})" for c in contenders))
+    # テーマの検査 (判断 #3・#4): エース / 固定枠 / 技の指定が選出の単位で効いているかを記録する (報告。門は BUILD_THEME_GATE)
+    theme = TC.theme_of_spec(_load_json(run_dir / "request.json") or {})
+
+    def _theme_check(cids: list, sources: list) -> dict:
+        rows_now = {r.get("candidate_id"): r for r in json.loads((run_dir / "s06_sets.json").read_text(encoding="utf-8"))}
+        recs_by = {cid: [rec for prefix, res in sources for rec in _records_of(eval_dir, prefix, arms_of_team(res, cid))] for cid in cids}
+        return TC.check_run(theme, rows_now, recs_by)
+    if TC.active(theme):
+        try:
+            tc8b = _theme_check(contenders, [("s08b_adapted", res8b)])
+            summary["theme_check_s08b"] = tc8b
+            _write_stage(run_dir, "theme_check_s08b", tc8b)
+            log("S8b " + TC.format_line(tc8b))
+        except Exception as e:
+            log(f"S8b theme check: error {e!r}")
     if stop_after == "s08b":
         summary["result"] = "stopped_after_s08b"
         _write_stage(run_dir, "summary", summary)
@@ -786,6 +820,21 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
         return summary
     deltas10 = {a["arm_id"]: (a.get("result") or {}).get("mean") for a in res10["arms"]}
     ranked = sorted(finalists, key=lambda cid: -(deltas10[cid] if deltas10.get(cid) is not None else -1.0))
+    if TC.active(theme):
+        from champions_agent.config import BUILD_THEME_GATE
+        try:
+            tc = _theme_check(finalists, [("s08b_adapted", res8b), ("s10", res10)])
+            summary["theme_check"] = tc
+            _write_stage(run_dir, "theme_check", tc)
+            log("S10 " + TC.format_line(tc))
+            ranked, excluded = TC.apply_gate(ranked, tc["teams"], BUILD_THEME_GATE)
+            summary["theme_gate"] = {"enabled": BUILD_THEME_GATE, "excluded": excluded, "none_pass": tc["none_pass"]}
+            if excluded:
+                log(f"S10 theme gate: テーマを満たさない並びを勝者の候補から外す {excluded}")
+            if tc["none_pass"]:
+                log("S10 theme gate: どの並びもテーマを満たさない (none_pass) → 順位はそのまま、印だけ残す")
+        except Exception as e:
+            log(f"S10 theme check: error {e!r}")
     winner = ranked[0]
     summary["winner"] = winner
     summary["winner_variant"] = chosen[winner]["variant"]

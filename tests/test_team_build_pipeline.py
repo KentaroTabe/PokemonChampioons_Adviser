@@ -320,15 +320,27 @@ def test_plan_prior_variants_and_promotion_key():
     assert pairs == {"L01_C001": {"delta_fresh": 0.10, "delta_fresh_plan": 0.14, "diff": 0.04}}
     chosen = PL.choose_variants(res)
     assert chosen["L01_C001"]["variant"] == "fresh_plan" and "plan_file" in chosen["L01_C001"]
-    # 昇格: 同じ 6 体 (candidate_id が違っても) の PASS を数える
-    pk = [{"run_id": "r1", "meta": {"candidate_id": "L00_INC", "species": ["a", "b", "c", "d", "e", "f"], "holdout": {"verdict": "PASS"}}},
-          {"run_id": "r2", "meta": {"candidate_id": "L03_C009", "species": ["f", "e", "d", "c", "b", "a"], "holdout": {"verdict": "PASS_EQUIVALENT"}}},
-          {"run_id": "r3", "meta": {"candidate_id": "L00_INC", "species": ["a", "b", "c", "d", "e", "g"], "holdout": {"verdict": "PASS"}}},
-          {"run_id": "r4", "meta": {"candidate_id": "L00_INC", "species": ["a", "b", "c", "d", "e", "f"], "holdout": {"verdict": "INCONCLUSIVE"}}},
-          {"run_id": "r5", "meta": {"candidate_id": "L00_INC", "holdout": {"verdict": "PASS"}}}]
-    assert pass_runs_for_team(pk, pk[0]["meta"]) == {"r1", "r2"}
-    assert pass_runs_for_team(pk, {"candidate_id": "L00_INC"}) == {"r1", "r3", "r5"}      # species の無い古い Package は id で
+    # 昇格: 同じ 6 体 (candidate_id が違っても) の PASS を数える。full run = holdout n ≥ 下限、別の封印の分割ごとに 1 回
+    team = ["a", "b", "c", "d", "e", "f"]
+    pk = [{"run_id": "r1", "meta": {"candidate_id": "L00_INC", "species": team, "holdout": {"verdict": "PASS", "n": 600, "sealed_id": "s1"}}},
+          {"run_id": "r2", "meta": {"candidate_id": "L03_C009", "species": list(reversed(team)), "holdout": {"verdict": "PASS_EQUIVALENT", "n": 2400, "sealed_id": "s2"}}},
+          {"run_id": "r3", "meta": {"candidate_id": "L00_INC", "species": ["a", "b", "c", "d", "e", "g"], "holdout": {"verdict": "PASS", "n": 600, "sealed_id": "s3"}}},
+          {"run_id": "r4", "meta": {"candidate_id": "L00_INC", "species": team, "holdout": {"verdict": "INCONCLUSIVE", "n": 600, "sealed_id": "s4"}}},
+          {"run_id": "r5", "meta": {"candidate_id": "L00_INC", "holdout": {"verdict": "PASS"}}},
+          {"run_id": "r6", "meta": {"candidate_id": "L00_INC", "species": team, "holdout": {"verdict": "PASS", "n": 100, "sealed_id": "s6"}}},
+          {"run_id": "r7", "meta": {"candidate_id": "L00_INC", "species": team, "holdout": {"verdict": "PASS", "n": 600, "sealed_id": "s1"}}}]
+    assert pass_runs_for_team(pk, pk[0]["meta"], min_n=300) == {"r1", "r2"}               # r6 は短い、r7 は r1 と同じ分割
+    assert pass_runs_for_team(pk, pk[0]["meta"], min_n=0) == {"r1", "r2", "r6"}
+    assert pass_runs_for_team(pk, pk[0]["meta"], min_n=0, distinct_splits=False) == {"r1", "r2", "r6", "r7"}
+    assert pass_runs_for_team(pk, pk[0]["meta"], exclude_key=tuple(team)) == set()         # 登録チームと同じ 6 体は数えない
+    assert pass_runs_for_team(pk, pk[0]["meta"], exclude_key=("x",), min_n=300) == {"r1", "r2"}
+    assert pass_runs_for_team(pk, {"candidate_id": "L00_INC"}, min_n=0) == {"r1", "r3", "r5", "r6"}   # species の無い古い Package は id で (r7 は r1 と同じ分割)
     assert team_key({"species": ["b", "a"]}) == ("a", "b")
+    # 較正の標本 (tag calibration) は生存・修理の親に入れない
+    rows_by = {"L01": {"tag": "concept", "roles": {"a": "x"}}, "L02": {"tag": "calibration", "roles": {"a": "x"}}, "L03": {"tag": "fill", "roles": {"a": "x"}}}
+    assert PL.exclude_tagged(["L02", "L01", "L03"], rows_by) == (["L01", "L03"], ["L02"])
+    res = {"arms": [{"arm_id": "L02@cheap", "result": {"mean": 0.3}}, {"arm_id": "L03@cheap", "result": {"mean": 0.1}}]}
+    assert PL.repair_parents(res, [], rows_by, n_main=0, n_explore=2) == [("L03", ["L03@cheap"])]
     print("test_plan_prior_variants_and_promotion_key OK")
 
 

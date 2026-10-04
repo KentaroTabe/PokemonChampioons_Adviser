@@ -129,6 +129,15 @@ def stage_s1_s3(run_dir: Path, spec: BuildSpec, prof: dict, seed: int, top_n: in
                         pool_source=pool_source)
     log(run_dir, f"S2 opponents: source={pool_source} snapshot={split.get('pool_snapshot')} teams={split['n_teams']} "
                  f"families={split['n_families']} split={split['summary']} sealed={split['sealed_id']}")
+    # 環境モデルの整合 (判断 #1): 実戦の相手 (整合した対戦) がプールの構築とどれだけ一致するかを run ごとに記録する (目標 0.4)
+    try:
+        from tools.team_build.env_match import record_env_match
+        em = record_env_match(run_dir, split)
+        if em:
+            log(run_dir, f"S2 env match: 実戦 {em['n_real']} 戦 (整合 {em['n_consistent']}) のうちプールの構築と一致 {em['covered_share']} "
+                         f"(閾値 {em['threshold']}、目標 {em['target']}、実在の構築 {split.get('n_real_teams')})")
+    except Exception as e:
+        log(run_dir, f"S2 env match: error {e!r}")
     tv = threat_sets(doc, prof["threats"])
     # セッションの相手など、脅威リストに無い種を代表型で足す (改善案の測定: 動きづらかった相手を脅威に含める)
     added = []
@@ -860,6 +869,11 @@ def stage_s6(run_dir: Path, spec: BuildSpec, lineups: list, snapshot_id: int, tv
                                       "coverage": round(c.score, 3), "notes": c.notes} for c in team]})
     _assert_no_banned(run_dir, "S6", [(r["candidate_id"], r["members"]) for r in results], set(spec.banned))
     _assert_ace_mega(run_dir, results)
+    try:
+        from tools.team_build.set_lint import write_lint_report
+        write_lint_report(run_dir, results, lambda m: log(run_dir, m))
+    except Exception as e:
+        log(run_dir, f"S6 lint: error {e!r}")
     (run_dir / "s06_sets.json").write_text(json.dumps(results, ensure_ascii=False, indent=1) + "\n",
                                            encoding="utf-8")
     n_ok = sum(1 for r in results if r["ok"])
@@ -952,8 +966,9 @@ def main() -> None:
     ap.add_argument("--action-eval", type=int, default=None, help="adapter の chunk ごとの対応比較戦数 (既定 100)")
     ap.add_argument("--article-file", default=None,
                     help="構築記事の本文 (ユーザーが貼ったもの)。LLM で structured claims にして軸の候補に加える (要 --llm headless)")
-    ap.add_argument("--pool-source", choices=["ranked", "latest"], default=BUILD_POOL_SOURCE,
-                    help="測定の相手プール: ranked = POOL_PIN の上位ランカー構築 / latest = 最新スナップショットの全種から合成 "
+    ap.add_argument("--pool-source", choices=["ranked", "latest", "mixed"], default=BUILD_POOL_SOURCE,
+                    help="測定の相手プール: ranked = POOL_PIN の上位ランカー構築 / latest = 最新スナップショットの全種から合成 / "
+                         "mixed = 実戦で当たった構築 (選出画面で 6 体読めて整合した対戦) を先に入れ、足りない分だけ合成 "
                          "(既定 config BUILD_POOL_SOURCE)")
     ap.add_argument("--archetypes", choices=["on", "off"], default=("on" if BUILD_ARCHETYPES else "off"),
                     help="構築の軸 (docs/TEAM_BUILD_ARCHETYPES.md): S3 で役割判定、S4 で軸 × 分岐の core と LLM の軸ごとの提案、"
@@ -1064,7 +1079,7 @@ def main() -> None:
         lineups, results = stage_s5_joint(run_dir, spec, fams, feats, tv, threat_weights, split, prof, doc["snapshot"]["id"],
                                           session_weights=session_w, n_neighbors=args.incumbent_neighbors_s5,
                                           only_incumbent=args.only_incumbent, rule_ctx=rule_ctx,
-                                          registered=registered_team(), log=lambda m: log(run_dir, m))
+                                          registered=registered_team(), log=lambda m: log(run_dir, m), seed=args.seed)
         _assert_no_banned(run_dir, "S5", [(r["candidate_id"], r["members"]) for r in results], set(spec.banned))
         _assert_ace_mega(run_dir, results)
     else:
@@ -1075,6 +1090,14 @@ def main() -> None:
         results = stage_s6(run_dir, spec, lineups, doc["snapshot"]["id"], tv, concept_mega, rule_ctx=rule_ctx, gen=gen,
                            arch_ctx=arch_ctx, fams=fams)
     manifest["search_mode"] = args.search_mode
+    for name, key in (("s02_env_match.json", "env_match"), ("s06_lint.json", "lint")):
+        try:
+            d = json.loads((run_dir / name).read_text(encoding="utf-8"))
+            manifest[key] = ({"covered_share": d.get("covered_share"), "n_consistent": d.get("n_consistent")} if key == "env_match"
+                             else {"error_rate": d.get("error_rate"), "generated_error_rate": (d.get("generated") or {}).get("error_rate"),
+                                   "warning_rate": d.get("warning_rate")})
+        except Exception:
+            pass
     from champions_agent.env.ranked_teams import pinned_meta_snapshot_id
     manifest.update({"meta_snapshot": doc["snapshot"]["id"], "meta_pin": pinned_meta_snapshot_id(),
                      "pool_source": split.get("pool_source"), "pool_snapshot": split.get("pool_snapshot"),
@@ -1103,7 +1126,7 @@ def resolve_candidate_subset(rows: list, candidates: Optional[str], strata: Opti
     if candidates:
         ids += [c.strip() for c in candidates.split(",") if c.strip()]
     if strata:
-        explore = sorted((r for r in ok_rows if (r.get("tag") or "") not in ("incumbent", "incumbent_mut")),
+        explore = sorted((r for r in ok_rows if (r.get("tag") or "") not in ("incumbent", "incumbent_mut", "calibration")),
                          key=lambda r: -(r.get("score") or 0.0))
         for tok in strata.split(","):
             tok = tok.strip()
@@ -1115,6 +1138,8 @@ def resolve_candidate_subset(rows: list, candidates: Optional[str], strata: Opti
     if include_incumbent:
         ids += [r["candidate_id"] for r in ok_rows if r.get("tag") == "incumbent"]
         ids += [r["candidate_id"] for r in ok_rows if r.get("tag") == "incumbent_mut"][:max(0, incumbent_neighbors)]
+    # 較正の標本 (tag calibration) は部分集合の指定があっても常に測る (S8a だけなので費用は小さい。判断 #10)
+    ids += [r["candidate_id"] for r in ok_rows if r.get("tag") == "calibration"]
     seen, out = set(), []
     for c in ids:
         if c not in seen:

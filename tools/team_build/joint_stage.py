@@ -11,6 +11,7 @@ lineup_search を動かし、従来の s05_candidates.json / s06_sets.json / s06
 from __future__ import annotations
 
 import json
+import random
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -490,6 +491,7 @@ def make_candidates_fn(tv: dict, threat_weights: dict, snapshot_id: Optional[int
     from champions_agent.data import database as db
     from tools.team_build import gen_sets as G
     from tools.team_build.role_sets import RoleContext, generate_role_sets
+    from tools.team_build.set_lint import gate_rejects
     log = log or (lambda m: None)
     req_of = {sid: list(mv) for sid, mv in (required_moves or {}).items() if mv}
     cache: dict = {}
@@ -517,6 +519,8 @@ def make_candidates_fn(tv: dict, threat_weights: dict, snapshot_id: Optional[int
         rep = usage_of(sid)[3]
         if rep is None or S.set_sanity(rep) or not S.legal_item(rep.item):
             return None
+        if gate_rejects(rep, source="representative"):
+            return None                                  # 常識規則の誤り (持ち物なし等) の代表型は候補にしない
         if S.has_mega_stone(rep.item) and not mega_allowed:
             return None
         if req_of.get(sid) and not set(req_of[sid]) <= set(rep.moves or []):
@@ -719,8 +723,8 @@ def make_row(index: int, cid: str, r: LineupResult, tag: str, ok: bool, errs: li
 def stage_s5_joint(run_dir: Path, spec, fams: list, feats: dict, tv: dict, threat_weights: dict, split: dict, prof: dict,
                    snapshot_id: Optional[int], session_weights: Optional[dict] = None, n_neighbors: Optional[int] = None,
                    only_incumbent: bool = False, rule_ctx: Optional[dict] = None, registered: Optional[tuple] = None,
-                   log: Optional[Callable] = None, refine: bool = BUILD_JOINT_REFINE_TARGETS) -> tuple:
-    """S5 統合段。戻り値 (選んだ並び [candidates.Lineup], s06_sets.json の行)。
+                   log: Optional[Callable] = None, refine: bool = BUILD_JOINT_REFINE_TARGETS, seed: int = 0) -> tuple:
+    """S5 統合段。戻り値 (選んだ並び [candidates.Lineup], s06_sets.json の行)。seed: 較正の標本の層化抽出に使う。
     s05_candidates.json (従来 + mode=joint) と s06_sets.json / s06_sets/<並び>.txt (従来 + roles / assignments / fills /
     selection_plan) を保存する。validate-team は run.py 側の不変条件 (除外・エースの石) の前に通す"""
     log = log or print
@@ -812,6 +816,27 @@ def stage_s5_joint(run_dir: Path, spec, fams: list, feats: dict, tv: dict, threa
             existing.add(r.members)
         chosen = branch + chosen
         log(f"S5 incumbent branch: 現行={'あり' if inc else 'なし (除外/プール外/未登録)'} 近傍={len(neigh)} (登録 {len(reg_ids)} 体)")
+    # 較正の標本 (2026-10-05 判断 #10): 保持しなかった並びから層化抽出で K 並びを足し、S8a だけ測る (tag calibration。
+    # 生存・修理・昇格には使わない: 上位だけを測る選択バイアスを避ける)。生成した並び全部は s05_generated.json に残す
+    from champions_agent.config import BUILD_CALIBRATION_SLOTS, BUILD_CALIBRATION_STRATA
+    from tools.team_build.set_lint import rejects_snapshot
+    kept = {tuple(l.members) for l in chosen}
+    unretained = [l for l in lineups if tuple(l.members) not in kept]
+    calib: list = []
+    if BUILD_CALIBRATION_SLOTS > 0 and unretained and not only_incumbent:
+        calib = C.sample_stratified(unretained, BUILD_CALIBRATION_SLOTS, BUILD_CALIBRATION_STRATA, random.Random(int(seed) + 10005))
+        for l in calib:
+            l.tag = "calibration"
+        chosen = chosen + calib
+        log(f"S5 calibration sample: 保持しなかった {len(unretained)} 並びから層化抽出 {len(calib)} 並び (点 "
+            + ", ".join(f"{l.score:.3f}" for l in calib) + ")")
+    status = {tuple(l.members): ("calibration" if l.tag == "calibration" else "kept") for l in chosen}
+    (run_dir / "s05_generated.json").write_text(json.dumps(
+        {"n_generated": len(results), "n_unique": len(lineups), "n_kept": len(kept), "n_calibration": len(calib),
+         "lineups": [{"members": list(l.members), "concept": l.concept, "score": round(float(l.score), 4),
+                      "status": status.get(tuple(l.members), "unretained")} for l in sorted(lineups, key=lambda l: -l.score)]},
+        ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    log(f"S5 lint: 生成の最終検査で落とした型 {rejects_snapshot()}")
     (run_dir / "s05_candidates.json").write_text(
         json.dumps({"n_generated": len(results), "lineups": [l.to_dict() for l in chosen], "mode": "joint",
                     "only_incumbent": bool(only_incumbent),
@@ -899,6 +924,11 @@ def write_sets(run_dir: Path, spec, chosen: list, by_members: dict, reg_text: st
         r.score = float(l.score)
         r.origin = dict(l.origin or {})
         rows.append(make_row(idx, cid, r, l.tag, ok, errs, ace_sid, is_inc, registered))
+    try:
+        from tools.team_build.set_lint import write_lint_report
+        write_lint_report(run_dir, rows, log)            # 行に lint が付く (誤り = 登録 / 指定の型だけのはず。生成型は落としている)
+    except Exception as e:
+        log(f"S6 lint: error {e!r}")
     (run_dir / "s06_sets.json").write_text(json.dumps(rows, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     n_ok = sum(1 for x in rows if x["ok"])
     log(f"S6 sets: {n_ok}/{len(rows)} 並びが合法 (validate-team)")
