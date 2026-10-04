@@ -196,7 +196,28 @@ def test_generate_smoke():
     tr = R.RoleContext(threat_views=tv, weights=weights, speed_plan="trick_room")
     for s in R.generate_role_sets("kingambit", "setup_ace", tr):
         assert "swordsdance" in s.moves and s.evs.split("/")[5] == "0"                 # トリル計画: 剣舞、素早さ 0
+    # 技の指定 (--moves): バシャーモ つるぎのまい + バトンタッチ は必ず入り、残りの 2 枠は攻撃技。変化技の指定があるのでこだわり系は持たない
+    bp = R.RoleContext(threat_views=tv, weights=weights, required_moves=["swordsdance", "batonpass"])
+    for role in ("setup_ace", "breaker"):
+        sets_b = R.generate_role_sets("blaziken", role, bp)
+        assert sets_b, role
+        for s in sets_b:
+            assert {"swordsdance", "batonpass"} <= set(s.moves) and len(s.moves) == 4 and len(set(s.moves)) == 4, s.moves
+            assert not (s.item or "").startswith("choice"), s.item
+            assert "req:swordsdance" in s.notes and "req:batonpass" in s.notes
+    assert R.generate_role_sets("blaziken", "setup_ace", R.RoleContext(threat_views=tv, weights=weights, required_moves=["spore"])) == []
     print("test_generate_smoke OK")
+
+
+def test_required_moves_helpers():
+    """技の指定が雛形の補助枠を兼ねるかの判定 (純粋)"""
+    assert R.utility_satisfied_by("pivot|status", ["swordsdance", "batonpass"]) == "batonpass"
+    assert R.utility_satisfied_by("setup", ["swordsdance", "batonpass"], is_setup=lambda m: m == "swordsdance") == "swordsdance"
+    assert R.utility_satisfied_by("setup", ["batonpass"], is_setup=lambda m: m == "swordsdance") is None
+    assert R.utility_satisfied_by("hazard", ["batonpass"]) is None
+    assert R.utility_satisfied_by("field|status", ["sunnyday"], role_field="sun") == "sunnyday"
+    assert R.utility_satisfied_by("field", ["sunnyday"], role_field="rain") is None
+    print("test_required_moves_helpers OK")
 
 
 if __name__ == "__main__":
@@ -204,4 +225,5 @@ if __name__ == "__main__":
     test_attack_rules()
     test_setup_axes_and_drops()
     test_ability_fit_and_utility_and_items()
+    test_required_moves_helpers()
     test_generate_smoke()

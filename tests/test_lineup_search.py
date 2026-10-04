@@ -362,6 +362,14 @@ def test_joint_stage_pure():
         [("screens_dual", 1), ("setup_ace", 2), ("ohko_user", 1)]
     assert J.branch_roles_of({"name": "llm"}, arch) == []
     assert J.family_weight(2, {"a", "b"}, {"b": 1.0}, boost=2.0) == 6.0 and J.family_weight(1, {"a"}, None) == 1.0
+    # 技の指定に積み技がある種は積み役として作る: 補助・受けの役割を求められても積みエースの雛形に (攻撃役の役割はそのまま)
+    is_setup = lambda m: m == "swordsdance"     # noqa: E731
+    assert J.role_for_required("pivot", ["swordsdance", "batonpass"], is_setup) == "sweeper_setup"
+    assert J.role_for_required("wall", ["swordsdance"], is_setup) == "sweeper_setup"
+    assert J.role_for_required("breaker", ["swordsdance", "batonpass"], is_setup) == "breaker"
+    assert J.role_for_required("setup_ace", ["swordsdance"], is_setup) == "setup_ace"
+    assert J.role_for_required("pivot", ["batonpass"], is_setup) == "pivot" and J.role_for_required("pivot", [], is_setup) == "pivot"
+    assert J.role_for_required("nosuchrole", ["swordsdance"], is_setup) == "nosuchrole"
     # 自爆技の 1 回だけの費用 (§12): 利得が最大の相手 1 体にだけ足し、個体の他の相手への被覆の平均 × cost で割り引く
     adj = J.selfko_adjust([0.9, 0.8, 0.5], [0.2, 0.6, 0.5], cost=1.0)
     close = lambda a, b: abs(float(a) - float(b)) < 1e-5     # noqa: E731 (float32)

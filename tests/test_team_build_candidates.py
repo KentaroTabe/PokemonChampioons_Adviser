@@ -24,6 +24,13 @@ def _feats():
     return feats, threats
 
 
+def test_lineup_to_dict_keeps_text_parts():
+    """parts に文字列 (同時探索の utility_kinds) が入っていても to_dict が落ちない (数値だけ丸める)"""
+    d = C.Lineup(("a", "b"), "C001", 0.123456, {"coverage": 0.987654, "attackers": 4, "utility_kinds": "hazard,priority"}).to_dict()
+    assert d["parts"] == {"coverage": 0.9877, "attackers": 4, "utility_kinds": "hazard,priority"} and d["score"] == 0.1235
+    print("test_lineup_to_dict_keeps_text_parts OK")
+
+
 def test_incumbent_branch():
     """現行チーム (較正点) と近傍: 固定枠は入替えず、除外種を入れず、入替枠を散らして上位"""
     from tools.team_build.run import incumbent_branch
@@ -122,5 +129,6 @@ def test_worst_hole_penalty():
 
 if __name__ == "__main__":
     test_scores_and_beam()
+    test_lineup_to_dict_keeps_text_parts()
     test_incumbent_branch()
     test_worst_hole_penalty()

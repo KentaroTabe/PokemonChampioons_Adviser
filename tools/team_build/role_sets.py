@@ -40,7 +40,8 @@ class RoleContext:
     (None なら全部)、team_field = 並びの始動源 {"terrain", "weather"} (自分の特性・技は含めない)、speed_plan = outspeed /
     trick_room / neutral、used_items = 並びで使用済みの持ち物、mega_allowed = この枠がメガ石を持てるか、
     item_pct / move_pct / ability_pct = 使用率 (同点のときの参考)、abilities = 候補の特性 (None なら図鑑)、
-    learnset = 覚える技 (None なら champions mod の learnset)"""
+    learnset = 覚える技 (None なら champions mod の learnset)、required_moves = 技の指定 (--moves。この種の型に必ず入れる技。
+    覚えなければ候補なし。残りの枠を役割の補助技と攻撃技で埋める)"""
     threat_views: dict
     weights: dict = field(default_factory=dict)
     targets: Optional[list] = None
@@ -54,6 +55,27 @@ class RoleContext:
     abilities: Optional[list] = None
     learnset: Optional[set] = None
     max_sets: int = BUILD_SET_CANDIDATES_PER_ROLE
+    required_moves: list = field(default_factory=list)
+
+
+def utility_satisfied_by(kind: str, moves: list, role_field: Optional[str] = None, is_setup: Optional[Callable] = None,
+                         pools: dict = BUILD_ROLE_UTILITY_MOVES) -> Optional[str]:
+    """補助枠 (kind、"a|b" で代替可) を既にある技 (moves) のどれかが満たすなら、その技 (無ければ None)。純粋。
+    技の指定 (required_moves) が雛形の補助枠を兼ねるときに、同じ仕事の技を重ねて入れないために使う"""
+    for k in kind.split("|"):
+        if k == "field":
+            cands = set(BUILD_ROLE_FIELD_MOVES.get(role_field or "", ()))
+        elif k == "setup":
+            hit = next((m for m in moves if is_setup is not None and is_setup(m)), None)
+            if hit:
+                return hit
+            continue
+        else:
+            cands = set(pools.get(k, ()))
+        hit = next((m for m in moves if m in cands), None)
+        if hit:
+            return hit
+    return None
 
 
 # ------------------------------------------------------------------ 役割の解決 (純粋)
@@ -497,6 +519,10 @@ def generate_role_sets(species_id: str, role: str, ctx: RoleContext) -> list:
     learnset = set(ctx.learnset if ctx.learnset is not None else learnset_of(species_id))
     if not learnset:
         return []
+    # 技の指定 (--moves): 必ず入れる技。覚えない技が混ざっていれば候補なし
+    req = [m for m in dict.fromkeys(ctx.required_moves or []) if m]
+    if len(req) > 4 or any(m not in learnset for m in req):
+        return []
     base = dict(sp["baseStats"])
     types = list(sp["types"])
     if tname == "wall" and not wall_speed_ok(base):
@@ -663,12 +689,25 @@ def generate_role_sets(species_id: str, role: str, ctx: RoleContext) -> list:
     stab_types = [t for t in types]
 
     def build(item: Optional[str], setup_choice: Optional[str]) -> Optional[SetCandidate]:
-        taken: list = []
+        taken: list = list(req)                      # 技の指定は先に入れる (雛形の補助枠を兼ねるものはその枠に数える)
+        req_unused = list(req)
         notes = [f"role:{role}", f"template:{tname}", f"targets:{len(targets)}", f"spread:{spread_name}:{bulk}",
-                 f"ability:{ability}:{ab_why or 'default'}"]
+                 f"ability:{ability}:{ab_why or 'default'}"] + [f"req:{m}" for m in req]
+        room = 4 if len(req) >= 4 else 3             # 指定の技があっても攻撃技を最低 1 本残す (4 本とも指定なら残さない)
         for kind in template.get("utility", ()):
+            if req:
+                hit = utility_satisfied_by(kind, req_unused, role_field, lambda m: bool(move_entry(m).get("setup_boosts")))
+                if hit:
+                    req_unused.remove(hit)           # 指定の技がこの枠を満たす (同じ仕事の技を重ねない)
+                    notes.append(f"utility:{kind}:{hit}:req")
+                    continue
+                if len(taken) >= room:
+                    if "|" in kind or kind.split("|")[0] == "setup":
+                        continue                     # 任意の枠は入れない
+                    return None                      # 必須の補助枠が入らない → この役割では指定の技と両立しない
             if kind.split("|")[0] == "setup" and setup_choice:
-                taken.append(setup_choice)
+                if setup_choice not in taken:
+                    taken.append(setup_choice)
                 notes.append(f"setup:{setup_choice}")
                 continue
             if kind.split("|")[0] == "field" and field_by_ability:
@@ -696,6 +735,8 @@ def generate_role_sets(species_id: str, role: str, ctx: RoleContext) -> list:
             pool.sort(key=lambda m: 0 if "selfdrop" in attack_pool[m]["kinds"] else 1)
         n_attacks = int(template.get("attacks", 3))
         n_attacks = min(n_attacks, 4 - len(taken))
+        if req:
+            n_attacks = 4 - len(taken)               # 指定の技で減った補助枠の分は攻撃技で埋める
         # メガ石を持つ候補はメガ後の種族値・タイプ・特性で担当への期待ダメージを引き直す (view_from_set が石でフォルムを切り替える)
         use_scored = scored
         if item and stone and item == stone:
@@ -782,9 +823,15 @@ def generate_role_sets(species_id: str, role: str, ctx: RoleContext) -> list:
     setup_choices = [setup_order[0]] if setup_order else [None]
     if "setup" in "|".join(template.get("utility", ())) and not setup_order:
         setup_choices = [None]
+    # 技の指定に積み技があればそれを積み技にする (雛形に積みの枠が無くても、上げた能力を下げる攻撃技は採らない)
+    req_setup = next((m for m in req if move_entry(m).get("setup_boosts")), None)
+    if req_setup:
+        setup_choices = [req_setup]
+    # 指定に変化技 (バトンタッチ等) があれば、積み技ありと同じくこだわり系は持たせない
+    req_status = any(str((dex.move(m) or {}).get("category") or "").lower() == "status" for m in req)
     selfdrop_any = any("selfdrop" in attack_pool[m]["kinds"] for m in cand_moves)
     items = pick_item(template.get("items", ()), category, stab_types, set(ctx.used_items), ctx.item_pct, legal_item, role_field,
-                      ability, stone, ctx.mega_allowed, bool(setup_choices[0]), selfdrop_any)
+                      ability, stone, ctx.mega_allowed, bool(setup_choices[0]) or req_status, selfdrop_any)
     if not items:
         items = [None]
     for item in items:

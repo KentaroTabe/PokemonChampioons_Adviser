@@ -352,9 +352,10 @@ def _screen_adapt_all(arms: list, split: Path, out_dir: Path, seed: int, n_battl
                       parallel: int, log) -> dict:
     """全 arm を同じ予算で cheap adaptation する (収集 n_battles 戦 → 1 回学習)。戻り値 {arm_id: model or None}"""
     def one(arm):
+        # 選出計画があれば収集の探索枠で計画の選出を踏ませる (S7 の適応と同じ。2026-10-04: cheap adaptation に計画が渡っていなかった)
         r = AD.adapt_selection(f"{arm.arm_id}_screen", arm.team_file, split, out_dir, seed,
                                min_battles=n_battles, chunk=min(chunk, n_battles), max_battles=n_battles,
-                               patience=10 ** 9, log=log, registry=None)
+                               patience=10 ** 9, log=log, registry=None, plan_file=getattr(arm, "plan_file", None))
         return arm.arm_id, r.get("model"), r.get("stop_reason"), r.get("elapsed_s")
 
     out = {}
@@ -368,22 +369,27 @@ def _screen_adapt_all(arms: list, split: Path, out_dir: Path, seed: int, n_battl
 def _variant_arm(base: R.Arm, variant: str, models: dict, generic_path: Optional[str],
                  production_path: Optional[str] = None) -> Optional[R.Arm]:
     """base (チーム) の選出方策 variant の腕。使えない variant は None。
-    production = 配布版 (登録チームで微調整済み) の選出モデルを強制 (参照だけに使う。候補には無い)"""
+    production = 配布版 (登録チームで微調整済み) の選出モデルを強制 (参照だけに使う。候補には無い)。
+    選出計画 (base.plan_file) は advisor 方策の variant に引き継ぐ (2026-10-04: variant の腕に計画が渡らず、screening と
+    S8b の選出に計画の事前が効いていなかった)。teampreview は相性順だけなので渡さない"""
+    plan = getattr(base, "plan_file", None)
     if variant == "teampreview":
         return R.Arm(variant_arm_id(base.arm_id, variant), base.team_file, None, base.models_dir, pick_policy="teampreview")
     if variant == "generic":
         if not generic_path:
             return None
-        return R.Arm(variant_arm_id(base.arm_id, variant), base.team_file, generic_path, base.models_dir, pick_policy="advisor")
+        return R.Arm(variant_arm_id(base.arm_id, variant), base.team_file, generic_path, base.models_dir, pick_policy="advisor",
+                     plan_file=plan)
     if variant == "production":
         if not production_path:
             return None
         return R.Arm(variant_arm_id(base.arm_id, variant), base.team_file, production_path, base.models_dir,
-                     pick_policy="advisor")
+                     pick_policy="advisor", plan_file=plan)
     model = models.get(base.arm_id)
     if not model:
         return None
-    return R.Arm(variant_arm_id(base.arm_id, variant), base.team_file, model, base.models_dir, pick_policy="advisor")
+    return R.Arm(variant_arm_id(base.arm_id, variant), base.team_file, model, base.models_dir, pick_policy="advisor",
+                 plan_file=plan)
 
 
 def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, max_battles: int = BUILD_RACE_DEFAULT_MAX,
