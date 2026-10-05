@@ -10,11 +10,24 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Optional
 
 from tools.team_build import racing as R
 from tools.team_build.experiments import RUNS, load_json, write_result
 
 DEFAULT_COMBOS = "heuristic:heuristic,heuristic:rule,rl:matchup,rl:rule,rl:model,rl:prior"
+
+
+def gap_rows(outcomes_by_arm: dict, real: Optional[float]) -> list:
+    """{arm_id: [勝敗 (1 / 0)]} と実戦の勝率 → 腕ごとの行 [{"arm", "n", "win_rate", "gap_to_real"}] (純粋)。
+    実戦との差の絶対値が小さい順 (差が出せない行は末尾、同じなら入力の順)"""
+    rows = []
+    for arm_id, outcomes in outcomes_by_arm.items():
+        wr = (sum(outcomes) / len(outcomes)) if outcomes else None
+        rows.append({"arm": arm_id, "n": len(outcomes), "win_rate": round(wr, 4) if wr is not None else None,
+                     "gap_to_real": (round(wr - real, 4) if (wr is not None and real is not None) else None)})
+    rows.sort(key=lambda r: (r["gap_to_real"] is None, abs(r["gap_to_real"] or 0.0)))
+    return rows
 
 
 def main() -> None:
@@ -52,6 +65,7 @@ def main() -> None:
     if real is None:
         ev = load_json(Path(__file__).resolve().parent.parent.parent.parent / "logs" / "build_search" / "experiments" / "env_validity.json") or {}
         real = ev.get("real_win_rate")
+    rows = gap_rows({a.arm_id: a.outcomes for a in arms}, real)
     result = {"run_id": args.run_id, "n": args.n, "tier": args.tier, "real_win_rate": real, "real_n": real_n, "rows": rows,
               "closest": rows[0]["arm"] if rows and rows[0]["gap_to_real"] is not None else None}
     p = write_result("opponent_pilot_validity", result)

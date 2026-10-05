@@ -214,10 +214,45 @@ def test_opponent_pick_validity_helpers():
     print("test_opponent_pick_validity_helpers OK")
 
 
+def test_opponent_pilot_validity():
+    import sys
+    import types
+    from pathlib import Path
+    from tools.team_build import racing as R
+    from tools.team_build.experiments import opponent_pilot_validity as OP
+    rows = OP.gap_rows({"ref_heuristic_rule": [1, 1, 1, 0], "ref_rl_rule": [1, 0, 1, 0], "ref_rl_prior": []}, 0.4)
+    assert [r["arm"] for r in rows] == ["ref_rl_rule", "ref_heuristic_rule", "ref_rl_prior"]
+    assert rows[0] == {"arm": "ref_rl_rule", "n": 4, "win_rate": 0.5, "gap_to_real": 0.1}
+    assert rows[2] == {"arm": "ref_rl_prior", "n": 0, "win_rate": None, "gap_to_real": None}
+    rows = OP.gap_rows({"a": [1, 0], "b": [1, 1]}, None)       # 実戦の勝率が無ければ差は出さない (入力の順のまま)
+    assert [r["arm"] for r in rows] == ["a", "b"] and all(r["gap_to_real"] is None for r in rows)
+
+    # main の通し (対戦だけ差し替え): 測定のあとの集計と保存まで進む
+    # (2026-10-05: 集計の行を消して rows が未定義になり、約 1 時間の測定が終わってから落ちる形になっていた)
+    def fake_round(arms, n, *_args, **_kwargs):
+        for i, a in enumerate(arms):
+            a.outcomes.extend([1] * (n - i) + [0] * i)
+    saved: dict = {}
+    old = (OP.R, OP.write_result, sys.argv)
+    OP.R = types.SimpleNamespace(Arm=R.Arm, measure_round=fake_round)
+    OP.write_result = lambda name, doc: saved.update({name: doc}) or Path(name)
+    sys.argv = ["opponent_pilot_validity", "--run-id", "nosuch_run", "--n", "4", "--combos", "heuristic:rule,rl:rule",
+                "--real-win-rate", "0.75"]
+    try:
+        OP.main()
+    finally:
+        OP.R, OP.write_result, sys.argv = old
+    res = saved["opponent_pilot_validity"]
+    assert res["closest"] == "ref_rl_rule" and res["real_win_rate"] == 0.75 and res["real_n"] is None
+    assert [(r["arm"], r["win_rate"], r["gap_to_real"]) for r in res["rows"]] == [("ref_rl_rule", 0.75, 0.0), ("ref_heuristic_rule", 1.0, 0.25)]
+    print("test_opponent_pilot_validity OK")
+
+
 def main() -> None:
     test_calibration()
     test_selection_compliance()
     test_opponent_pick_validity_helpers()
+    test_opponent_pilot_validity()
     test_learned_surrogate()
     test_concept_origin()
     test_env_validity()
