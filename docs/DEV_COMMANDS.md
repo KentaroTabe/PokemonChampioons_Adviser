@@ -142,6 +142,8 @@ sonnetは疑い箇所の検証+少数サンプルの網羅に専念する (タ�
 | `python -m tools.team_build.promote --gate <package_id>` | 昇格条件の確認。PASS は同じ 6 体の **full run** (封印 holdout n ≥ BUILD_PROMOTE_MIN_HOLDOUT_N = 600、別の封印の分割ごとに 1 回) で数え、登録チームと同じ 6 体の Package は数えない (2026-10-05) |
 | `python -m tools.team_build.triggers [--run-id R] [--set-baseline] [--real-days 30]` | 再構築の引き金 (季節の切替 / 実戦 − シムの差が基準線より 0.2 以上悪化 / 相手プールの一致率は記録だけ)。実戦の勝率は登録チームと同じ 6 体の対戦記録を直接数える。閾値は基準線 (`--set-baseline` で保存した採用時の値) との差。基準線が無い項目は記録だけ |
 | `python -m tools.team_build.articles_ingest --csv logs/articles/blogs.csv [--include-unconfirmed] [--check-robots] [--out F]` | 記事バンクの前段: 上位プレイヤーのブログ一覧 (CSV) → 取得対象の一覧 logs/articles/manifest.json (URL の正規化と重複排除、ダブル / シングルの分類、シーズン → 規制、順位、robots.txt の可否)。本文の取得と LLM の抽出はしない (次の段) |
+| `python -m tools.advice_trace [--last N \| --battle F] [--json]` | 助言の追跡 (2026-10-05 ②): 対戦ログの version 行 (指定 Package / 実際に読んだ選出モデルの sha / 退避理由) と Package の manifest の一致、助言 ID ごとの生成時刻と表示時刻 (ブラウザが返す)、古い状態への表示、推奨がシステムの状態で選べたか、を 1 本で出す。docs/ADVICE_TRACE_1005.md |
+| `python -m tools.scene_eval extract --out logs/scenes/set1.jsonl [--consistent 20] [--failure 10]` / `evaluate --set F [--json]` | 正解つき局面 (③): 対戦中の助言から整合 20 + 既知の失敗 10 の雛形を切り出し (truth は人が埋める: 正しい状態・選べる行動・表示期限)、当時の推奨 / 復元した状態での推奨 / 正しい状態での推奨と、feasible_system / feasible_truth、期限内の表示を比べる。この局面集の誤り率は実戦全体の発生率ではない |
 
 進化探索は相手分布に `--forecast-mix` (使用率トレンドの1期外挿。履歴が
 2ヶ月分たまるまで自動無効) と `--archive-mix` (過去の優勝チーム=PSRO反復)

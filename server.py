@@ -171,6 +171,16 @@ async def connect(sid, environ):
                         "running": True}, room=sid)
 
 
+@sio.on('advice_shown')
+async def advice_shown(sid, data):
+    """ブラウザが助言を描画した時刻 (2026-10-05 ②: 生成時刻と表示時刻を分けて記録する)。data = {advice_id, kind, t_shown (秒)}"""
+    try:
+        d = data or {}
+        battle_log.on_display(d.get("advice_id"), d.get("t_shown"), d.get("kind"))
+    except Exception as e:
+        print(f"[server] 表示の記録に失敗: {e}")
+
+
 @sio.on('send_frame')
 async def handle_frame(sid, data):
     """受信フレームの受け口。処理中なら最新1枚だけ保持し、続けて処理する。
@@ -340,7 +350,7 @@ async def _handle_one_frame(sid, data):
                 _last_advice_key = sel_key
                 _last_advice_time = now
                 advice = await loop.run_in_executor(None, advisor.advise_selection, state)
-                battle_log.on_advice(advice, "selection")
+                battle_log.on_advice(advice, "selection", state)
                 await sio.emit('advice_update', advice, room=sid)
                 print("--- 選出アドバイス ---")
                 print(advice["text"])
@@ -360,7 +370,7 @@ async def _handle_one_frame(sid, data):
                 _last_advice_species = _active_mon(state).get("species_id")
                 _stale_notified = False
                 advice["text"] = advisor.format_advice(advice)
-                battle_log.on_advice(advice, "battle")
+                battle_log.on_advice(advice, "battle", state)
                 await sio.emit('advice_update', advice, room=sid)
                 if advice.get("provisional"):
                     # 確定前: 次フレームで即再計算して安定を確認する
