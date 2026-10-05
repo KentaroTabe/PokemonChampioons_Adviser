@@ -105,6 +105,52 @@ def test_resolve_candidate_subset():
     print("test_resolve_candidate_subset OK")
 
 
+def test_search_mode_both_merge():
+    """--search-mode both (実験 11): 従来方式の並びを G.. の id で同時探索の行に足し、strata は方式ごとに数える"""
+    import json
+    import tempfile
+    from pathlib import Path
+    from tools.team_build.run import (LEGACY_SUBDIR, legacy_candidate_id, merge_search_modes, resolve_candidate_subset,
+                                      write_merged_sets)
+    assert legacy_candidate_id("L05_C020") == "G05_C020" and legacy_candidate_id("X1") == "G_X1"
+    joint = [{"candidate_id": "L00_INC", "index": 0, "ok": True, "tag": "incumbent", "score": 0.80, "roles": {"a": "wall"}},
+             {"candidate_id": "L01_C001", "index": 1, "ok": True, "tag": "concept", "score": 0.90, "roles": {"a": "wall"}},
+             {"candidate_id": "L02_C002", "index": 2, "ok": True, "tag": "best", "score": 0.95, "roles": {"a": "wall"}},
+             {"candidate_id": "L03_C003", "index": 3, "ok": True, "tag": "calibration", "score": 0.70, "roles": {"a": "wall"}}]
+    legacy = [{"candidate_id": "L00_INC", "index": 0, "ok": True, "tag": "incumbent", "score": 1.00},
+              {"candidate_id": "L01_INC", "index": 1, "ok": True, "tag": "incumbent_mut", "score": 1.05},
+              {"candidate_id": "L02_C001", "index": 2, "ok": True, "tag": "best", "score": 1.30},
+              {"candidate_id": "L03_C004", "index": 3, "ok": False, "tag": "coverage", "score": 1.25},
+              {"candidate_id": "L04_C002", "index": 4, "ok": True, "tag": "roles", "score": 1.10}]
+    rows, id_map = merge_search_modes(joint, legacy)
+    assert id_map == {"L02_C001": "G02_C001", "L03_C004": "G03_C004", "L04_C002": "G04_C002"}        # 現行枝は足さない
+    assert [r["candidate_id"] for r in rows] == ["L00_INC", "L01_C001", "L02_C002", "L03_C003", "G02_C001", "G03_C004", "G04_C002"]
+    assert [r["search_mode"] for r in rows] == ["joint"] * 4 + ["legacy"] * 3 and [r["index"] for r in rows] == list(range(7))
+    assert rows[4]["legacy_candidate_id"] == "L02_C001" and "search_mode" not in joint[0] and legacy[2]["candidate_id"] == "L02_C001"
+    # strata は方式ごと (点の尺度が違う): 同時探索の 1 位 L02 (0.95)、従来方式の 1 位 G02 (1.30)。不合法 (G03) は数えない
+    assert resolve_candidate_subset(rows, None, "1", False, 0) == ["L02_C002", "G02_C001", "L03_C003"]
+    assert resolve_candidate_subset(rows, None, "1,2,3", True, 0) == ["L02_C002", "L01_C001", "G02_C001", "G04_C002", "L00_INC", "L03_C003"]
+    # 役割の無い行 (従来方式) は修理の親にならない (既存の規則がそのまま効く)
+    res = {"arms": [{"arm_id": "G02_C001@cheap", "result": {"mean": 0.2}, "n_done": 300},
+                    {"arm_id": "L02_C002@cheap", "result": {"mean": 0.1}, "n_done": 300}]}
+    parents = P.repair_parents(res, ["G02_C001", "L02_C002"], {r["candidate_id"]: r for r in rows}, n_main=2, n_explore=1)
+    assert [c for c, _a in parents] == ["L02_C002"]
+    # 構築本文の写しと s06_sets.json の書き直し
+    with tempfile.TemporaryDirectory() as td:
+        run_dir = Path(td)
+        leg = run_dir / LEGACY_SUBDIR
+        (leg / "s06_sets").mkdir(parents=True)
+        (leg / "s06_sets" / "L02_C001.txt").write_text("TEAM A", encoding="utf-8")
+        (leg / "s06_sets" / "L04_C002.txt").write_text("TEAM B", encoding="utf-8")
+        write_merged_sets(run_dir, leg, rows, id_map)
+        assert (run_dir / "s06_sets" / "G02_C001.txt").read_text(encoding="utf-8") == "TEAM A"
+        assert (run_dir / "s06_sets" / "G04_C002.txt").read_text(encoding="utf-8") == "TEAM B"
+        assert not (run_dir / "s06_sets" / "G03_C004.txt").exists()                                # 本文の無い行は写さない
+        saved = json.loads((run_dir / "s06_sets.json").read_text(encoding="utf-8"))
+        assert [r["candidate_id"] for r in saved] == [r["candidate_id"] for r in rows]
+    print("test_search_mode_both_merge OK")
+
+
 def test_screen_margin_analysis():
     from tools.team_build.screen_margin import analyze_margin, to_markdown
     def arm(aid, mean, se, state="uncertain", n=300):
@@ -378,6 +424,7 @@ if __name__ == "__main__":
     test_choose_variants_team_x_pickvariant_and_survivors()
     test_checkpoint_selection_helpers()
     test_resolve_candidate_subset()
+    test_search_mode_both_merge()
     test_screen_margin_analysis()
     test_collect_run_timeout_returns_code()
     test_surrogate_quality_metrics()

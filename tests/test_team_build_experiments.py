@@ -142,6 +142,46 @@ def test_learned_surrogate():
             {"delta": -0.1, "learned": 0.4, "surrogate": 0.5}, {"delta": 0.2, "learned": None, "surrogate": 0.1}]
     c = LS.compare_surrogates(rows)
     assert c["n"] == 3 and c["spearman_learned"] == 1.0 and c["spearman_surrogate"] == -0.5
+    # 層化と帰無分布 (2026-10-05): 現行チームの系統が高く測定され、学習の代理もその系統を高く見るだけの世界。
+    # 全部の並びでは相関が出るが、探索の並びだけでは出ない → 採否は探索の層で行い、不採用になる
+    import random
+    rng = random.Random(7)
+
+    def run(n_inc: int, n_exp: int) -> list:
+        out = []
+        for i in range(n_inc):
+            out.append({"candidate_id": f"L0{i}_INC", "tag": "incumbent_mut", "delta": 0.05 + 0.01 * rng.random(),
+                        "learned": 0.70 + 0.01 * rng.random(), "surrogate": 0.80 + 0.01 * rng.random()})
+        for i in range(n_exp):
+            out.append({"candidate_id": f"L1{i}_C00{i}", "tag": "concept", "delta": -0.10 + 0.05 * rng.random(),
+                        "learned": 0.60 + 0.02 * rng.random(), "surrogate": 0.90 + 0.02 * rng.random()})
+        return out
+    runs = [run(3, 6) for _ in range(5)]
+    assert LS.is_incumbent_family({"candidate_id": "L01_INC-R1A1", "tag": "repair"}) and LS.is_incumbent_family({"candidate_id": "L00_INC"})
+    assert not LS.is_incumbent_family({"candidate_id": "L05_C020", "tag": "concept"})
+    assert [len(x) for x in LS.stratum_rows(runs, "exploration")] == [6] * 5 and [len(x) for x in LS.stratum_rows(runs, "all")] == [9] * 5
+    s = LS.stratified_summary(runs, n_perm=300, seed=1)
+    assert s["all"]["learned"]["mean"] > 0.5 and s["all"]["learned"]["p"] < 0.05           # 系統の対比だけで有意に見える
+    assert s["all"]["surrogate"]["mean"] < 0 and s["exploration"]["n_rows_per_run"] == [6] * 5
+    assert abs(s["exploration"]["learned"]["mean"]) < 0.5 and s["exploration"]["learned"]["p"] > 0.05
+    d = LS.decide(s)
+    assert d["adopt"] is False and d["stratum"] == "exploration" and "p =" in d["reason"]
+    # 探索の並びの中でも学習の代理が Δ の順位を当てる世界 → 採用
+    good = []
+    for _ in range(5):
+        rows2 = []
+        for i in range(8):
+            dlt = -0.2 + 0.05 * i
+            rows2.append({"candidate_id": f"L2{i}_C01{i}", "tag": "concept", "delta": dlt, "learned": 0.5 + dlt, "surrogate": rng.random()})
+        good.append(rows2)
+    s2 = LS.stratified_summary(good, n_perm=300, seed=1)
+    d2 = LS.decide(s2)
+    assert s2["exploration"]["learned"]["median"] == 1.0 and s2["exploration"]["learned"]["p"] < 0.05 and d2["adopt"] is True
+    # 並びが足りない run は数えない。使える run が無ければ p は None、採否は不採用
+    few = [[{"candidate_id": "L00_INC", "tag": "incumbent", "delta": 0.0, "learned": 0.6, "surrogate": 0.5}]]
+    s3 = LS.stratified_summary(few, n_perm=10, seed=1)
+    assert s3["exploration"]["learned"]["p"] is None and LS.decide(s3)["adopt"] is False
+    assert LS.pooled_rho([[{"delta": 0.1, "learned": 0.1}, {"delta": 0.2, "learned": 0.3}]], "learned")["n_runs"] == 0
     print("test_learned_surrogate OK")
 
 

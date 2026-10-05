@@ -88,6 +88,21 @@ def test_measure_cmd_flags():
     print("test_measure_cmd_flags OK")
 
 
+def test_child_env_threads():
+    """測定の子プロセスのスレッド数: 既定は config の値を全部の変数に入れ、呼び出し側の指定は上書きしない。None なら足さない"""
+    env = R.child_env({"PATH": "/bin"}, threads=1)
+    assert all(env[k] == "1" for k in R.THREAD_ENV_VARS) and env["PATH"] == "/bin"
+    env2 = R.child_env({"OMP_NUM_THREADS": "4"}, threads=1)
+    assert env2["OMP_NUM_THREADS"] == "4" and env2["MKL_NUM_THREADS"] == "1"          # 指定済みは優先
+    base = {"PATH": "/bin"}
+    assert R.child_env(base, threads=None) == base and R.child_env(base, threads=0) == base
+    assert "OMP_NUM_THREADS" not in base                                             # 渡した辞書は書き換えない
+    from champions_agent.config import BUILD_MEASURE_THREADS
+    if BUILD_MEASURE_THREADS:
+        assert R.child_env({})["OMP_NUM_THREADS"] == str(BUILD_MEASURE_THREADS)
+    print("test_child_env_threads OK")
+
+
 def test_measure_round_reuses_measured_json():
     """同じ (stage, arm, offset, n) の測定済み JSON があれば測り直さない (止めた run の腕単位の再開)"""
     import importlib
@@ -144,6 +159,7 @@ if __name__ == "__main__":
     test_race_eliminates_and_terminates()
     test_min_terminal_n_and_run_to_max()
     test_measure_cmd_flags()
+    test_child_env_threads()
     test_measure_round_reuses_measured_json()
     test_look_z_widens_with_looks()
     test_race_uses_look_adjusted_z()
