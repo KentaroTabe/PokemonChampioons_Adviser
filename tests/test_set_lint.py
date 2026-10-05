@@ -175,6 +175,13 @@ def test_repair_set():
     r = L.repair_set("hawlucha", "unburden", "hawluchanite", "adamant", ["acrobatics", "closecombat", "swordsdance", "protect"], info=INFO)
     assert r is None and L.LINT_REPAIR_BLOCKED == {"unfixed:few_moves": 1}
     assert L.repairs_snapshot()["blocked"] == {"unfixed:few_moves": 1}
+    # 実データの形: 使用率の一覧には代表型の技 (外したアクロバットを含む) がそのまま入っている。外した技は補充で入れ直さない
+    # (2026-10-05: 入れ直して unfixed:item になり、ルチャブルの基本の型が石を持たない代替に替わっていた)
+    L.LINT_REPAIR_BLOCKED.clear()
+    r = L.repair_set("hawlucha", "unburden", "hawluchanite", "adamant", ["swordsdance", "acrobatics", "closecombat", "protect"], info=INFO,
+                     usage_moves=["swordsdance", "acrobatics", "closecombat", "protect", "earthquake", "roost"])
+    assert r and r["item"] == "hawluchanite" and r["moves"] == ["swordsdance", "closecombat", "protect", "earthquake"], r
+    assert r["repairs"] == ["item:acrobatics->move", "few_moves"] and L.LINT_REPAIR_BLOCKED == {}
     # 石 + 4 つ未満 → 補充だけ (石はそのまま)
     r = L.repair_set("charizard", "blaze", "charizarditex", "timid", ["flamethrower", "shadowball", "roost"], info=INFO, usage_moves=["protect"])
     assert r and r["item"] == "charizarditex" and r["moves"] == ["flamethrower", "shadowball", "roost", "protect"] and r["repairs"] == ["few_moves"]
@@ -205,6 +212,40 @@ def test_repair_set():
     assert f3 and f3.item == "torkoalite" and "sunnyday" not in f3.moves and len(f3.moves) == 4
     assert c.item == "chestoberry"                                                   # 元は変えない
     print("test_repair_set OK")
+
+
+def test_base_set_keeps_mega_stone():
+    """従来方式の基本の型 (sets.base_set): メガ石 + アクロバットの代表型を、石を持たない代替に替えない (判断 §9.6)。
+    2026-10-05: 門に使用率の技を渡していなかったので技の側の修理ができず、持ち物を替えた代替 (非メガ) が基本の型になっていた。
+    使用率の表は実データと同じ形 (代表型の技が上位にそのまま入る) で作る"""
+    import sqlite3
+    from tools.team_build import sets as S
+    from tools.team_build.sets import SetCandidate
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE meta_sets (snapshot_id, pokemon_name, ability_name, item_name, nature, evs, move1, move2, move3, move4)")
+    conn.execute("CREATE TABLE move_usage (snapshot_id, pokemon_name, move_name, usage_percent)")
+    conn.execute("CREATE TABLE item_usage (snapshot_id, pokemon_name, item_name, usage_percent)")
+    conn.execute("INSERT INTO meta_sets VALUES (1, 'hawlucha', 'unburden', 'hawluchanite', 'adamant', '0/32/0/0/2/32', "
+                 "'swordsdance', 'acrobatics', 'closecombat', 'protect')")
+    for m, p in (("swordsdance", 54.7), ("acrobatics", 51.2), ("closecombat", 35.2), ("protect", 30.0), ("earthquake", 29.9), ("roost", 27.9)):
+        conn.execute("INSERT INTO move_usage VALUES (1, 'hawlucha', ?, ?)", (m, p))
+    alt = SetCandidate("hawlucha", "unburden", "sitrusberry", "adamant", "0/32/0/0/2/32", ["swordsdance", "acrobatics", "closecombat", "protect"],
+                       "alt:item")
+    old = (L.default_info, S.enumerate_sets, S.legal_item)
+    L.default_info = lambda: INFO
+    S.enumerate_sets = lambda *a, **k: [alt]            # 門で代表型が落ちたときの代替 (石を持たない型)
+    S.legal_item = lambda it: True
+    L.rejects_snapshot(reset=True)
+    try:
+        base = S.base_set(conn, 1, "hawlucha")
+        repaired = L.repairs_snapshot()["repaired"]
+        blocked = L.repairs_snapshot()["blocked"]
+    finally:
+        L.default_info, S.enumerate_sets, S.legal_item = old
+        L.rejects_snapshot(reset=True)
+    assert base is not None and base.item == "hawluchanite", (base.item if base else None, blocked)
+    assert repaired == {"legacy": 1} and blocked == {}, (repaired, blocked)
+    print("test_base_set_keeps_mega_stone OK")
 
 
 def test_stab_warning():
@@ -281,6 +322,7 @@ def main() -> None:
     test_field_dup_and_few_moves()
     test_few_moves_exemptions()
     test_repair_set()
+    test_base_set_keeps_mega_stone()
     test_stab_warning()
     test_fill_to_four()
     test_rows_report_and_gate()
