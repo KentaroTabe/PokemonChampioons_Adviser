@@ -45,8 +45,8 @@ def racing_summary(doc: dict) -> dict:
             "elapsed_s": doc.get("elapsed_s")}
 
 
-STAGE_TOKEN = re.compile(r"^(S\d+[a-z]?(?:-\d+)?|\[racing:([A-Za-z0-9_]+)\]|\[holdout\]|\[stress\]|\[ablation\]|\[adapt_action|\[adapt|"
-                         r"\[validate|\[screen-adapt\]|最終候補|再現性の門|registry)")
+STAGE_TOKEN = re.compile(r"^(S\d+[a-z]?(?:-\d+)?|\[racing:([A-Za-z0-9_]+)\]|\[holdout\]|\[stress\]|\[ablation\]|\[adapt_action|"
+                         r"\[adapt(?::([A-Za-z0-9_]+))?|\[validate|\[screen-adapt\]|\[concepts\]|最終候補|再現性の門|registry)")
 RACING_STAGE = (("s08a", "S8a"), ("s09_repair", "S9 repair"), ("s08b", "S8b"), ("s10", "S10"), ("s12_holdout", "S12 holdout"),
                 ("opp_pilot", "experiment"))
 
@@ -67,8 +67,12 @@ def stage_of(msg: str) -> Optional[str]:
         return f"racing:{name}"
     if tok.startswith("S9"):
         return "S9 repair"
-    return {"[holdout]": "S12 holdout", "[stress]": "STRESS", "[ablation]": "ablation", "[adapt_action": "S11b", "[adapt": "S7",
-            "[validate": "S7", "[screen-adapt]": "S8a", "最終候補": "S10", "再現性の門": "S10", "registry": "S13"}.get(tok, tok)
+    if tok.startswith("[adapt") and not tok.startswith("[adapt_action"):
+        name = m.group(3) or ""
+        return "S8a" if "screen" in name else "S7"          # ふるいの準備の軽い適応 ([adapt:…_screen]) は S8a (§9.1)
+    return {"[holdout]": "S12 holdout", "[stress]": "STRESS", "[ablation]": "ablation", "[adapt_action": "S11b",
+            "[validate": "S7", "[screen-adapt]": "S8a", "[concepts]": "S4", "最終候補": "S10", "再現性の門": "S10",
+            "registry": "S13"}.get(tok, tok)
 
 
 def stage_durations(run_log: Path) -> dict:

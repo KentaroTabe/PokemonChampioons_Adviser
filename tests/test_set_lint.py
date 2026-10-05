@@ -144,9 +144,16 @@ def test_few_moves_exemptions():
 def test_repair_set():
     legal = lambda it: it != "lifeorb"      # noqa: E731  (ライフオーブが使えない規制の例)
     usage = ["flamethrower", "roost", "toxic", "willowisp", "earthquake"]
-    # 性格: + を保って下げる側を変える (ひかえめ + 物理技 → おっとり)
+    # 性格: + を保って下げる側を変える。両方の攻撃を使うなら防御側 (ひかえめ + 物理と特殊 → おっとり)、
+    # 片方しか使わないなら使わない側の攻撃 (ずぶとい + 物理だけ → わんぱく、ひかえめ + 物理だけ → いじっぱり)
     r = L.repair_set("charizard", "blaze", "lifeorb", "modest", ["flamethrower", "earthquake", "shadowball", "protect"], info=INFO, usage_moves=usage)
     assert r and r["nature"] == "mild" and r["repairs"] == ["nature_move"] and r["item"] == "lifeorb"
+    r = L.repair_set("corviknight", "pressure", "leftovers", "bold", ["ironhead", "bodypress", "roost", "protect"], info=INFO)
+    assert r and r["nature"] == "impish"
+    r = L.repair_set("charizard", "blaze", "lifeorb", "modest", ["earthquake", "closecombat", "return", "protect"], info=INFO)
+    assert r and r["nature"] == "adamant"
+    assert L.nature_repair("jolly", ["flamethrower", "earthquake"], INFO.move) == "naive" and L.nature_repair("jolly", ["flamethrower"], INFO.move) == "timid"
+    assert L.nature_repair("serious", ["flamethrower"], INFO.move) is None
     # 持ち物: なし → 予備 (合法なもの)。カゴのみ + ねむる無し / こだわり + 変化技 も予備に
     r = L.repair_set("charizard", "blaze", None, "timid", ["flamethrower", "shadowball", "roost", "protect"], info=INFO, legal_item=legal)
     assert r and r["item"] == "leftovers" and r["repairs"] == ["item:none"]
@@ -156,6 +163,25 @@ def test_repair_set():
     assert r and r["item"] == "leftovers" and r["repairs"] == ["item:choice_status"]
     r = L.repair_set("hawlucha", "unburden", "leftovers", "adamant", ["acrobatics", "closecombat", "swordsdance", "protect"], info=INFO)
     assert r and r["item"] == "focussash" and r["repairs"] == ["item:acrobatics"]
+    # メガ石は外さない (判断 §9.6): アクロバットなら技の側を外して補充、他の持ち物の誤りは直さず止める (理由を数える)
+    L.LINT_REPAIR_BLOCKED.clear()
+    assert L.is_mega_stone("hawluchanite") and L.is_mega_stone("charizarditex") and not L.is_mega_stone("eviolite") and not L.is_mega_stone(None)
+    r = L.repair_set("hawlucha", "unburden", "hawluchanite", "adamant", ["acrobatics", "closecombat", "swordsdance", "protect"], info=INFO,
+                     usage_moves=["earthquake", "roost"])
+    assert r and r["item"] == "hawluchanite" and "acrobatics" not in r["moves"] and r["moves"][3] == "earthquake"
+    assert r["repairs"] == ["item:acrobatics->move", "few_moves"]
+    # 技の側を外しても補充できなければ (必須技などの制約) 止めて理由を残す。石は外さない
+    L.LINT_REPAIR_BLOCKED.clear()
+    r = L.repair_set("hawlucha", "unburden", "hawluchanite", "adamant", ["acrobatics", "closecombat", "swordsdance", "protect"], info=INFO)
+    assert r is None and L.LINT_REPAIR_BLOCKED == {"unfixed:few_moves": 1}
+    assert L.repairs_snapshot()["blocked"] == {"unfixed:few_moves": 1}
+    # 石 + 4 つ未満 → 補充だけ (石はそのまま)
+    r = L.repair_set("charizard", "blaze", "charizarditex", "timid", ["flamethrower", "shadowball", "roost"], info=INFO, usage_moves=["protect"])
+    assert r and r["item"] == "charizarditex" and r["moves"] == ["flamethrower", "shadowball", "roost", "protect"] and r["repairs"] == ["few_moves"]
+    L.LINT_REPAIR_BLOCKED.clear()
+    r = L.repair_set("charizard", "blaze", "charizarditex", "timid", ["protect", "roost", "toxic", "substitute"], info=INFO)
+    assert r is None and L.LINT_REPAIR_BLOCKED == {}                       # 誤りが無い (警告だけ) なら None
+    assert L.repairs_snapshot()["blocked"] == {}
     # 場の重複: 技を外し、使用率の技で補充。4 つ未満も補充
     r = L.repair_set("torkoal", "drought", "heatrock", "quiet", ["flamethrower", "sunnyday", "earthquake", "protect"], info=INFO, usage_moves=usage)
     assert r and "sunnyday" not in r["moves"] and len(r["moves"]) == 4 and r["repairs"] == ["field_dup", "few_moves"] and r["moves"][3] == "roost"
@@ -169,6 +195,14 @@ def test_repair_set():
     c = SetCandidate("charizard", "blaze", "chestoberry", "modest", "0/0/0/32/0/32", ["flamethrower", "earthquake", "shadowball", "protect"], "representative")
     f = L.repair_candidate(c, info=INFO)
     assert f.item == "leftovers" and f.nature == "mild" and f.source == "representative" and f.notes[-1] == "lint_repair:nature_move;item:chesto_no_rest"
+    # 石を持つ型のこだわりの誤りは直さず止める (理由を数える)
+    L.LINT_REPAIR_BLOCKED.clear()
+    c2 = SetCandidate("charizard", "blaze", "charizarditex", "timid", "0/0/0/32/0/32", ["flamethrower", "shadowball", "protect", "roost"], "representative")
+    c2.item = "charizarditex"
+    assert L.repair_candidate(c2, info=INFO) is None                           # 誤り無し
+    c3 = SetCandidate("torkoal", "drought", "torkoalite", "quiet", "0/0/0/32/0/32", ["flamethrower", "sunnyday", "earthquake"], "representative")
+    f3 = L.repair_candidate(c3, info=INFO, usage_moves=["protect", "toxic"])
+    assert f3 and f3.item == "torkoalite" and "sunnyday" not in f3.moves and len(f3.moves) == 4
     assert c.item == "chestoberry"                                                   # 元は変えない
     print("test_repair_set OK")
 

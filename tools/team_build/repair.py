@@ -205,10 +205,10 @@ def repair_variants(search: LineupSearch, parent: LineupResult, diag: dict, cfg:
             repl = sorted(cand_out, key=lambda s: len(parent.assignments.get(s, [])))[:max_changes]
         repl = repl[:max(1, max_changes)]
         if min_changes >= 2 and len(repl) < 2 and max_changes >= 2:
-            # 2 枠以上の入替しか作らないのに差し替え対象が 1 体 → 固定でない個体のうち担当の少ない順で 2 体目を足す
-            # (2026-10-05: 1003 の記録では現行チームに入替の変種が 1 本も出なかった)
-            extra = [e.species_id for e in parent.entries
-                     if e.species_id not in fixed and not e.locked and e.species_id not in repl]
+            # 2 枠以上の入替しか作らないのに差し替え対象が 1 体 → 固定 (エース・固定枠・核) でない個体のうち担当の少ない順で 2 体目を足す。
+            # 登録の型の個体 (locked) も候補にする: 「登録した型を変更しない」と「その個体を構築から外さない」は別の制約
+            # (2026-10-05 判断 §9.6。現行チームは 6 体とも登録の型なので、除くと入替の変種が 1 本も出なかった)
+            extra = [e.species_id for e in parent.entries if e.species_id not in fixed and e.species_id not in repl]
             extra.sort(key=lambda sp: len(parent.assignments.get(sp, [])))
             repl = (repl + extra)[:2]
         stone_holder = next((e.species_id for e in parent.entries if e.stone), None)
@@ -291,15 +291,17 @@ def repair_variants(search: LineupSearch, parent: LineupResult, diag: dict, cfg:
 
 def select_variants(per_parent: list, max_arms: int) -> list:
     """親ごとの変種の候補 [(parent_id, [LineupResult ...])] から測る変種を選ぶ (純粋)。
-    親を順に回り、まず各親の最良の型だけの変種 (B) と最良の入替 (A) を 1 本ずつ、残りは修理の点 (origin.repair_score) の降順で
-    max_arms まで。2026-10-05: 親ごとの上限 (max_arms // 親の数) だと 3 本 2 親で 1 本ずつになり、2 枠の入替が測られなかった"""
+    親を順に回り、まず各親の最良の入替 (A、2 枠以上) を 1 本ずつ、次に各親の最良の型だけの変種 (B) を 1 本ずつ、残りは修理の点
+    (origin.repair_score) の降順で max_arms まで。A を先にするのは次の run で 2 枠の入替を検証する機会を確保するため
+    (2026-10-05 判断 §9.6。2 枠の方が強いと結論したわけではない)。親ごとの上限 (max_arms // 親の数) だと 3 本 2 親で 1 本ずつになり、
+    2 枠の入替が測られなかった"""
     chosen: list = []
     taken: set = set()
 
     def best_of(vs: list, kind: str):
         cands = [v for v in vs if v.origin.get("variant") == kind and id(v) not in taken]
         return max(cands, key=lambda v: float(v.origin.get("repair_score") or 0.0), default=None)
-    for kind in ("B", "A"):
+    for kind in ("A", "B"):
         for pid, vs in per_parent:
             if len(chosen) >= max_arms:
                 return chosen

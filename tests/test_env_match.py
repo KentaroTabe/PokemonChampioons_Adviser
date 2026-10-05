@@ -45,6 +45,8 @@ def test_stage_durations_and_change_counts():
     assert RV.stage_of("[racing:s10] round offset=0") == "S10" and RV.stage_of("[racing:s09_repair1_race] looks=3") == "S9 repair"
     assert RV.stage_of("[racing:s08a_reference] x") == "S8a" and RV.stage_of("[racing:s12_holdout_L01] x") == "S12 holdout"
     assert RV.stage_of("[adapt L01] chunk 1") == "S7" and RV.stage_of("[screen-adapt] start") == "S8a" and RV.stage_of("[racing:zzz] q") == "racing:zzz"
+    assert RV.stage_of("[adapt:L01_C001] chunk 1") == "S7" and RV.stage_of("[adapt:L01_C001_screen] chunk 1") == "S8a"
+    assert RV.stage_of("[validate:L01] ckpt 2") == "S7" and RV.stage_of("[adapt_action:L01] step") == "S11b" and RV.stage_of("[concepts] axis 3") == "S4"
     d2 = RV.durations_from_marks([(0, "S8b: start"), (100, "[racing:s08b_adapted] after 100"), (700, "[racing:s10] looks=3"), (1000, "S10 winner")])
     assert d2["S8b"] == 100 and d2["S10"] == 900
     rows = [{"candidate_id": "L01-R1A1", "origin": {"kind": "repair", "variant": "A", "changes": [{"out": "a"}, {"out": "b"}]}},

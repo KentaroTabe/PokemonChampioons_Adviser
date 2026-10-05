@@ -130,9 +130,13 @@ def test_repair_variants():
     p1 = [V("B", 0.9), V("A", 0.8), V("A", 0.7)]
     p2 = [V("B", 0.95), V("B", 0.6)]
     chosen = RP.select_variants([("P1", p1), ("P2", p2)], 3)
-    assert [(pid, v.origin["variant"], v.origin["repair_score"]) for pid, v in chosen] == [("P1", "B", 0.9), ("P2", "B", 0.95), ("P1", "A", 0.8)]
+    # 2 枠の入替 (A) を各親から先に、次に型だけ (B) (判断 §9.6: 次の run で 2 枠の入替を検証できるように)
+    assert [(pid, v.origin["variant"], v.origin["repair_score"]) for pid, v in chosen] == [("P1", "A", 0.8), ("P1", "B", 0.9), ("P2", "B", 0.95)]
+    p3 = [V("B", 0.99), V("A", 0.5)]
+    chosen3 = RP.select_variants([("P1", p1), ("P2", p2), ("P3", p3)], 3)
+    assert [(pid, v.origin["variant"]) for pid, v in chosen3] == [("P1", "A"), ("P3", "A"), ("P1", "B")]
     chosen5 = RP.select_variants([("P1", p1), ("P2", p2)], 5)
-    assert [v.origin["repair_score"] for _p, v in chosen5] == [0.9, 0.95, 0.8, 0.7, 0.6] and len(RP.select_variants([("P1", p1)], 0)) == 0
+    assert [v.origin["repair_score"] for _p, v in chosen5] == [0.8, 0.9, 0.95, 0.7, 0.6] and len(RP.select_variants([("P1", p1)], 0)) == 0
     # 上限と順序: 点の降順、最大 max_arms
     assert [v.origin["repair_score"] for v in vs] == sorted((v.origin["repair_score"] for v in vs), reverse=True)
     vs2 = RP.repair_variants(s, parent, diag, cfg, pool_species, W._roles_of, [], fixed={"core1", "core2"}, parent_id="L01_C001",
@@ -160,6 +164,12 @@ def test_repair_variants():
     vs5 = RP.repair_variants(s, parent2, dict(diag, replace_candidates=["weak"]), cfg_ace, pool_species, W._roles_of, [],
                              fixed={"core2"}, parent_id="L00_INC", round_no=1, max_changes=1, max_arms=6, boost=2.0, min_gain=0.001, min_changes=1)
     assert vs5, "石 2 個の現行チームからも変種が出る"
+    # 登録の型の個体 (locked) でも固定 (エース・固定枠・核) でなければ 2 体目の差し替え候補になる (判断 §9.6)
+    vs6 = RP.repair_variants(s, parent2, dict(diag, replace_candidates=["weak"], ko=[]), cfg_ace, pool_species, W._roles_of, [],
+                             fixed={"core2"}, parent_id="L00_INC", round_no=1, max_changes=2, max_arms=6, boost=2.0, min_gain=0.001)
+    a6 = [v for v in vs6 if v.origin["variant"] == "A"]
+    assert a6 and all(len(v.origin["changes"]) == 2 for v in a6), [(v.origin["variant"], v.origin["changes"]) for v in vs6]
+    assert all({c["out"] for c in v.origin["changes"]} >= {"weak"} and "core2" not in {c["out"] for c in v.origin["changes"]} for v in a6)
     for v in vs5:
         assert sum(1 for e in v.entries if e.stone) == 2 and "weak" not in v.members
     # 外した種は候補に戻さない: 親で C を見ている fillC を外すと、最良の候補は fillC 自身だが戻さず別の種を入れる。
