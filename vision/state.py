@@ -165,6 +165,48 @@ def adopt_selection_guess(party: list, idx: int, species_id: str, species_ja: st
     return "adopt"
 
 
+def apply_manual_species(party: list, idx: int, species_ja: str, species_id: Optional[str]) -> dict:
+    """手動確定 (候補のプルダウン / 手入力) を相手の枠に入れる (純粋)。
+    戻り値 {"index": 入れた枠 (入れなければ None), "moved": 別の枠へ付け替えたか, "cleared": 取り消した別枠の推定の index,
+    "reason": 入れなかった理由 (入れたら None)}
+
+    - 対象枠が未確定、または選出画面の推定 (species_guess) → その枠に入れる。推定は確定ではないので手入力で上書きできる
+      (2026-10-06 第18回接続テスト: 推定の枠が「確定済み」と扱われ、6 枠とも推定で埋まっていて付け替え先も無く、推定の
+      カイリュー / スターミー を直そうとした手入力が 9 回続けて無視された)
+    - 対象枠が同じ種で確定済み → そのまま (入れ直しても同じ)
+    - 対象枠が別の種で確定済み → 未確定の枠へ付け替える (プルダウンの描画から選択までの間に、対象枠が別フレームで自動確定
+      されることがある。2026-08-20)。未確定の枠が無ければ入れない
+    - 入れる種が別の枠にもあるとき (同種 2 体はルール上あり得ない): 別の枠が確定済みなら入れない、推定ならそちらを取り消す
+    """
+    out = {"index": None, "moved": False, "cleared": [], "reason": None}
+    if not (0 <= idx < len(party)):
+        out["reason"] = "枠の番号が範囲外"
+        return out
+    slot = party[idx]
+    target = idx
+    if slot.species_ja and not slot.species_guess and slot.species_ja != species_ja:
+        target = next((j for j, p in enumerate(party) if not p.species_ja), None)
+        if target is None:
+            out["reason"] = f"slot{idx} は {slot.species_ja} で確定済み (未確定の枠なし)"
+            return out
+        out["moved"] = True
+
+    def _same(q) -> bool:
+        return q.species_ja == species_ja or bool(species_id and q.species_id == species_id)
+
+    others = [(j, q) for j, q in enumerate(party) if j != target and q.species_ja and _same(q)]
+    fixed = next((j for j, q in others if not q.species_guess), None)
+    if fixed is not None:
+        out["reason"] = f"{species_ja} は slot{fixed} で確定済み"
+        return out
+    for j, q in others:
+        q.clear_species_guess()
+        out["cleared"].append(j)
+    party[target].merge_species(species_ja, species_id)
+    out["index"] = target
+    return out
+
+
 @dataclass
 class SideState:
     trainer_name: Optional[str] = None

@@ -14,6 +14,8 @@ from typing import Optional
 import cv2
 import numpy as np
 
+from champions_agent.config import SELECTION_PRIOR_AUTO_ACCEPT
+
 TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "images" / "templetes"
 # 実キャプチャ由来のテンプレート (手動確定時に自動収穫。OBS色シフトに強い)
 REAL_DIR = Path(__file__).resolve().parent.parent / "images" / "species_icons"
@@ -236,7 +238,7 @@ def harvest_from_frame(frame_path, opp_index: int, species_id: str) -> bool:
     return harvest_species_icon(species_id, zcrop(img, z["icon"]))
 
 
-PRIOR_AUTO_ACCEPT = 0.85   # 使用率がこの確率以上なら視覚照合なしで確定
+PRIOR_AUTO_ACCEPT = SELECTION_PRIOR_AUTO_ACCEPT   # 事前確率がこれ以上なら視覚照合なしで採る (値は champions_agent/config)
 
 
 def identify_species(icon_crop, candidates: list,
@@ -244,7 +246,7 @@ def identify_species(icon_crop, candidates: list,
     """アイコン画像を候補種族のスプライトと照合して特定する。
 
     candidates: [(species_id, prior確率, 日本語名)] (advisor.infer の出力)
-    - 候補が実質1体 (prior >= 0.85) なら使用率だけで確定
+    - 候補が実質1体 (prior >= SELECTION_PRIOR_AUTO_ACCEPT) なら使用率だけで確定
     - 複数候補はシルエット形状 (IoU + マスクdHash) で判別
     戻り値: (species_id, 日本語名, スコア) or None (確信が持てない場合)
     """

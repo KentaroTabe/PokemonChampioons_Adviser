@@ -100,6 +100,7 @@ TESTS=(
   test_undefined_names
   test_rate_outcome_attribution
   test_stale_notice
+  test_type_inference_prior
 )
 
 fail=0

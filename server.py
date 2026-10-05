@@ -29,6 +29,8 @@ from vision.pipeline import VisionPipeline
 from vision.scenes import SCENE_SELECTION, SCENE_STANDBY
 from vision.end_notice import battle_end_notice, outcome_revision_notice
 from vision.stale_notice import advice_target, stale_advice_notice
+from vision.state import apply_manual_species
+from champions_agent.config import MANUAL_SPECIES_RESOLVE_CUTOFF
 
 
 def should_advise_selection(state: dict) -> bool:
@@ -247,13 +249,13 @@ async def _handle_one_frame(sid, data):
         state, fired = await loop.run_in_executor(None, pipeline.process, img)
         _proc_ms.append((time.time() - _t_proc) * 1000.0)
         processed_counter += 1
+        battle_log.on_frame(state, fired)
+        spread_tracker.on_frame(state, fired)   # 相手の型推定 (先後/ダメージ観測)
         # 勝敗を推定・不明で記録した後にレートが読めて推定が変わったら、助言欄に出す (2026-10-06 第18回)
         _rev = outcome_revision_notice(battle_log.pop_revision())
         if _rev:
             await sio.emit('advice_update', _rev, room=sid)
             print(f"[server] {_rev['reason']}")
-        battle_log.on_frame(state, fired)
-        spread_tracker.on_frame(state, fired)   # 相手の型推定 (先後/ダメージ観測)
 
         # 場の状況/選出画面は貴重な検証データなので、2秒間隔で保存する
         # (選出は自選出ハイライトの検証用: 選出操作の短い時間を捉える)
@@ -410,12 +412,18 @@ def _attach_candidates(state: dict) -> None:
     相手ポケモンへ添付する (フロント表示 + RLの素早さ比較用)
     """
     try:
-        from advisor.infer import get_inference
+        from advisor.infer import get_inference, guess_view
         for i, p in enumerate(state["opponent"]["party"]):
             # 未確定枠と、選出画面の推定 (species_guess) の枠に候補を付ける (推定は手動で直せるように)
             if (p.get("species_ja") and not p.get("species_guess")) or not p.get("types"):
                 continue
             cands = get_inference().candidates(p["types"], top_k=8)
+            if p.get("species_guess"):
+                # ほぼ確定の推定 (タイプからの候補が実質 1 体) には候補を出さず、これまで通りその種として扱う。
+                # それ以外の推定には候補を出す (画面は「違う場合は選択」と出す。2026-10-06 第18回)
+                view = guess_view(cands, p.get("species_id"))
+                p["guess_sure"] = view["sure"]
+                cands = view["candidates"]
             if cands:
                 p["candidates"] = [
                     {"id": sid_, "ja": ja, "pct": round(prob * 100, 1)}
@@ -1067,33 +1075,37 @@ async def set_state(sid, data):
 
 @sio.on('set_species')
 async def set_species(sid, data):
-    """フロントエンドのプルダウンから相手ポケモンの種族を確定する"""
+    """フロントエンドから相手ポケモンの種族を確定する (候補のプルダウン、または ✏️ の手入力 = species_id なしの日本語名)。
+    どの枠に入れるか・入れないかは vision.state.apply_manual_species が決める (選出画面の推定の枠は上書きできる)"""
     try:
         idx = int(data["index"])
-        species_id = data["species_id"]
+        species_id = data.get("species_id")
         species_ja = data.get("species_ja") or species_id
         party = pipeline.state.opponent.party
-        # プルダウン描画から選択までの間に、対象枠が別フレームで自動確定
-        # されることがある (2026-08-20: 選んだのに反映されない一因)。
-        # 対象枠が既に別種族で確定済みなら、未確定枠へ付け替える。
-        # 同種族で確定済みなら何もしない (二重適用の防止)
-        if 0 <= idx < len(party) and party[idx].species_ja \
-                and party[idx].species_ja != species_ja:
-            alt = next((j for j, p in enumerate(party)
-                        if not p.species_ja), None)
-            print(f"[server] 手動確定: slot{idx}は{party[idx].species_ja}で"
-                  f"確定済みのため slot{alt} へ付け替え")
-            if alt is None:
-                pipeline.state.log_event(
-                    "manual",
-                    f"手動確定を無視: {species_ja} (空き枠なし・全枠確定済み)",
-                    event_id="species_manual_skip")
-                await sio.emit('state_update', pipeline.state.to_dict(),
-                               room=sid)
+
+        async def _skip(reason: str) -> None:
+            # 入れなかった理由をイベント欄とサーバーのログに出す
+            pipeline.state.log_event("manual", f"手動確定を無視: {species_ja} ({reason})",
+                                     event_id="species_manual_skip")
+            print(f"[server] 手動確定を無視: {species_ja} ({reason})")
+            st = pipeline.state.to_dict()
+            _attach_candidates(st)
+            await sio.emit('state_update', st, room=sid)
+
+        if not species_id:
+            r = pipeline.resolver.resolve_species(str(species_ja or ""), cutoff=MANUAL_SPECIES_RESOLVE_CUTOFF)
+            if not r:
+                await _skip("種族名を解決できない")
                 return
-            idx = alt
+            species_ja, species_id = r[0], r[1]
+        res = apply_manual_species(party, idx, species_ja, species_id)
+        if res["index"] is None:
+            await _skip(res["reason"])
+            return
+        if res["moved"]:
+            print(f"[server] 手動確定: slot{idx} は確定済みのため slot{res['index']} へ付け替え")
+        idx = res["index"]
         if 0 <= idx < len(party):
-            party[idx].merge_species(species_ja, species_id)
             # 直近の「HUD名不一致」で観測された別名をこの個体に紐づける
             # (試合中の個体名キャッシュ: 以後その名前のイベントが正しく帰属する)
             import re as _re

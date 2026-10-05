@@ -17,6 +17,7 @@ from typing import Optional
 
 from advisor.dex import get_dex
 from advisor.sets import DB_PATH
+from champions_agent.config import INFER_PAST_USAGE_DECAY, INFER_USAGE_FLOOR, SELECTION_GUESS_SURE_PROB
 
 _TYPE_JA2EN = None
 _ID2JA = None
@@ -116,6 +117,38 @@ def _base_species_id(species_id: str) -> str:
     return species_id
 
 
+def prior_weights(latest_rows: list, past_rows: list) -> dict:
+    """基本種 id → 事前の重み (純粋)。
+    latest_rows: 最新スナップショットの [(種の名前, 使用率%, ゲーム内順位 or None)]、past_rows: 過去の [(種の名前, 使用率%)]。
+
+    - メガ形態は基本種へ合算する (使用率% は和、順位は良い方)。
+    - 最新にある種: max(使用率%, 順位 r を使用率曲線の r 番目に読み替えた値)。構築システムの環境スナップショット
+      (tools.team_build.meta_snapshot.merge_ranked) と同じ定義。使用率% は pokedb の上位ランカー構築の採用率で、新しい
+      シーズンのオープンデータが出るまで前のシーズンのまま (2026-10-06 第18回接続テスト: 規制 M-C に入って 4 週間たっても
+      シーズン 5 = M-B の採用率で、今期のゲーム内順位 2 位のボーマンダが ドラゴン/ひこう の候補で 0.9% だった)。
+      ゲーム内順位 (championsbattledata の今期の列位置) は今期を映すので、こちらで底上げする。
+    - 最新に無い種: 過去の最大使用率を INFER_PAST_USAGE_DECAY 倍して残す (現メタ優先は保ちつつ低使用率の種もゼロにしない)
+    """
+    from tools.team_build.meta_snapshot import usage_at_rank
+    latest: dict = {}
+    rank: dict = {}
+    for name, pct, r in latest_rows:
+        base = _base_species_id(_slug(name))
+        latest[base] = latest.get(base, 0.0) + max(float(pct), INFER_USAGE_FLOOR)
+        if r is not None:
+            rank[base] = min(rank.get(base, int(r)), int(r))
+    curve = sorted(latest.values(), reverse=True)
+    weights = {base: max(u, usage_at_rank(rank.get(base), curve)) for base, u in latest.items()}
+    past: dict = {}
+    for name, pct in past_rows:
+        base = _base_species_id(_slug(name))
+        past[base] = max(past.get(base, 0.0), max(float(pct), INFER_USAGE_FLOOR))
+    for base, v in past.items():
+        if base not in weights:
+            weights[base] = v * INFER_PAST_USAGE_DECAY
+    return weights
+
+
 class TypeInference:
     """タイプ構成 -> 種族候補 (確率付き) の推測器"""
 
@@ -137,31 +170,19 @@ class TypeInference:
             # 全スナップショットを読む: 最新だけだと約半数の種族が候補から
             # 消える (実測: 最新235種/全期間491種。むし/ひこう構成の
             # ストライク等が推測不能だった)
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(pokemon_usage)")}
+            rank_col = "rank" if "rank" in cols else "NULL"     # 順位の列が無い古い DB でも読めるように
             rows = conn.execute(
-                "SELECT pokemon_name, usage_percent, snapshot_id "
+                f"SELECT pokemon_name, usage_percent, snapshot_id, {rank_col} AS rank "
                 "FROM pokemon_usage").fetchall()
             conn.close()
         except Exception:
             return
 
-        # ベース種へ使用率を合算 (メガ形態ページ等)。
-        # 最新スナップショットの使用率を優先し、最新に載っていない種族は
-        # 過去の最大使用率を減衰 (x0.25) して採用する (現メタ優先は保ちつつ
-        # 低使用率種もゼロにしない)
         latest_id = snap["id"]
-        latest: dict[str, float] = {}
-        past: dict[str, float] = {}
-        for r in rows:
-            base = _base_species_id(_slug(r["pokemon_name"]))
-            v = max(float(r["usage_percent"]), 0.05)
-            if r["snapshot_id"] == latest_id:
-                latest[base] = latest.get(base, 0.0) + v
-            else:
-                past[base] = max(past.get(base, 0.0), v)
-        usage: dict[str, float] = dict(latest)
-        for base, v in past.items():
-            if base not in usage:
-                usage[base] = v * 0.25
+        usage = prior_weights(
+            [(r["pokemon_name"], r["usage_percent"], r["rank"]) for r in rows if r["snapshot_id"] == latest_id],
+            [(r["pokemon_name"], r["usage_percent"]) for r in rows if r["snapshot_id"] != latest_id])
 
         # チャンピオンズフィルタ: 全期間へ広げた際にSV由来スナップショットの
         # 種族 (チャンピオンズに存在しない) が混入しないようにする
@@ -207,3 +228,16 @@ def get_inference() -> TypeInference:
     if _inference is None:
         _inference = TypeInference()
     return _inference
+
+
+def guess_view(cands: list, species_id: Optional[str], sure_prob: float = SELECTION_GUESS_SURE_PROB) -> dict:
+    """選出画面の推定の枠 (species_id と推定済み) を画面にどう出すか (純粋)。cands = candidates() の出力。
+    戻り値 {"sure": ほぼ確定か, "candidates": 画面に出す候補 (ほぼ確定なら空)}。
+
+    ほぼ確定 = 推定した種が、タイプからの候補の中で sure_prob 以上 (SELECTION_GUESS_SURE_PROB。実測で外れが無かった帯)。
+    ほぼ確定の枠には候補を出さず、これまで通りその種として扱う。それ以外の推定の枠には候補を出して手で直せるようにする
+    (2026-10-06 第18回接続テスト: 全部の推定の枠にプルダウンが出て、選ぶことを求められているように見えた)"""
+    base = _base_species_id(species_id) if species_id else None
+    p = next((prob for sid, prob, _ja in cands if sid == base), 0.0)
+    sure = bool(base) and p >= sure_prob
+    return {"sure": sure, "candidates": [] if sure else list(cands)}
