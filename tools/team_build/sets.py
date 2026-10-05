@@ -238,7 +238,7 @@ def lint_gate(cands: list, source: str = "legacy", usage_moves=()) -> list:
     """常識規則の最終検査 (set_lint、2026-10-05): 誤りの型は、直せるなら直して残し (set_lint.repair_candidate: 性格の下げる側、
     持ち物の予備、場の重複の技、4 つ未満の補充)、直せなければ落とす。指定の型 (source custom) は触らない。
     従来方式 (S5 → S6) の型は代表型と単独入替の代替から作るので、同時探索と同じ門を通す (実験 11 で方式を比べるときの条件を揃える)"""
-    from tools.team_build.set_lint import LINT_REJECTS, gate_rejects, lint_candidate, repair_candidate
+    from tools.team_build.set_lint import LINT_REPAIRS, gate_rejects, lint_candidate, repair_candidate
     out = []
     for c in cands:
         src = str(getattr(c, "source", "") or "")
@@ -247,7 +247,7 @@ def lint_gate(cands: list, source: str = "legacy", usage_moves=()) -> list:
             continue
         fixed = repair_candidate(c, usage_moves=usage_moves, legal_item=legal_item)
         if fixed is not None:
-            LINT_REJECTS[f"{source}:repaired"] += 1
+            LINT_REPAIRS[source] += 1
             out.append(fixed)
         elif not gate_rejects(c, source=f"{source}:{src.split(':')[0] or 'unknown'}"):
             out.append(c)

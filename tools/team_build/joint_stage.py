@@ -491,7 +491,7 @@ def make_candidates_fn(tv: dict, threat_weights: dict, snapshot_id: Optional[int
     from champions_agent.data import database as db
     from tools.team_build import gen_sets as G
     from tools.team_build.role_sets import RoleContext, generate_role_sets
-    from tools.team_build.set_lint import LINT_REJECTS, gate_rejects, lint_candidate, repair_candidate
+    from tools.team_build.set_lint import LINT_REPAIRS, gate_rejects, lint_candidate, repair_candidate
     log = log or (lambda m: None)
     req_of = {sid: list(mv) for sid, mv in (required_moves or {}).items() if mv}
     cache: dict = {}
@@ -528,7 +528,7 @@ def make_candidates_fn(tv: dict, threat_weights: dict, snapshot_id: Optional[int
                 if gate_rejects(rep, source="representative"):
                     return None
             else:
-                LINT_REJECTS["representative:repaired"] += 1
+                LINT_REPAIRS["representative"] += 1
                 rep = fixed
         if S.has_mega_stone(rep.item) and not mega_allowed:
             return None
@@ -856,7 +856,9 @@ def stage_s5_joint(run_dir: Path, spec, fams: list, feats: dict, tv: dict, threa
          "lineups": [{"members": list(l.members), "concept": l.concept, "score": round(float(l.score), 4),
                       "status": status.get(tuple(l.members), "unretained")} for l in sorted(lineups, key=lambda l: -l.score)]},
         ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
-    log(f"S5 lint: 生成の最終検査で落とした型 {rejects_snapshot()}")
+    from tools.team_build.set_lint import repairs_snapshot
+    log(f"S5 lint: 生成の最終検査で落とした型 {rejects_snapshot()}、直した型 {repairs_snapshot()['repaired']}、"
+        f"直せず止めた {repairs_snapshot()['blocked']}")
     (run_dir / "s05_candidates.json").write_text(
         json.dumps({"n_generated": len(results), "lineups": [l.to_dict() for l in chosen], "mode": "joint",
                     "only_incumbent": bool(only_incumbent),

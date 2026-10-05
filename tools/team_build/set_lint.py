@@ -25,7 +25,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Callable, Optional
 
-from champions_agent.config import BUILD_CONSUMABLE_ITEMS, BUILD_SET_LINT_GATE, BUILD_TYPE_ITEMS
+from champions_agent.config import BUILD_CONSUMABLE_ITEMS, BUILD_ITEM_FALLBACK, BUILD_SET_LINT_GATE, BUILD_TYPE_ITEMS
 
 # 性格 → 下げる能力 (無補正の性格は載せない)
 NATURE_MINUS = {"adamant": "spa", "jolly": "spa", "impish": "spa", "careful": "spa", "brave": "spe", "relaxed": "spe",
@@ -40,9 +40,12 @@ CHOICE_ITEMS = frozenset({"choiceband", "choicespecs", "choicescarf"})
 CHOICE_STATUS_EXEMPT = frozenset({"transform", "trick", "switcheroo"})
 # 技が 4 つ未満でも誤りにしない種 (覚える技が 4 つ無い): メタモン / アンノーン。learnset が読めるときは 4 未満の種も同じ扱い
 FEW_MOVES_EXEMPT_SPECIES = frozenset({"ditto", "unown"})
-# 性格の修理: 下げる側を使う技があるとき、+ の能力を保って下げる側を変える (純粋な表)
-NATURE_REPAIR = {"modest": "mild", "timid": "hasty", "bold": "lax", "calm": "gentle",
-                 "adamant": "naughty", "jolly": "naive", "impish": "lax", "careful": "gentle"}
+# 性格の修理: + の能力を保って下げる側を変える (純粋な表)。使わない側の攻撃を下げられればそれ (other)、
+# 両方の攻撃技を使うなら防御か特防へ (defense)。2026-10-05 §9.3: 常に耐久を下げる表では ずぶとい + 物理技 が のうてんき になっていた
+NATURE_REPAIR = {"modest": {"other": "adamant", "defense": "mild"}, "timid": {"other": "jolly", "defense": "hasty"},
+                 "bold": {"other": "impish", "defense": "lax"}, "calm": {"other": "careful", "defense": "gentle"},
+                 "adamant": {"other": "modest", "defense": "naughty"}, "jolly": {"other": "timid", "defense": "naive"},
+                 "impish": {"other": "bold", "defense": "lax"}, "careful": {"other": "calm", "defense": "gentle"}}
 # タイプ強化の持ち物 → タイプ (config の 18 種 + プレート / おこう)
 _PLATES = {"flameplate": "Fire", "splashplate": "Water", "zapplate": "Electric", "meadowplate": "Grass", "icicleplate": "Ice",
            "fistplate": "Fighting", "toxicplate": "Poison", "earthplate": "Ground", "skyplate": "Flying", "mindplate": "Psychic",
@@ -67,9 +70,12 @@ OWN_TYPE_MOVES = frozenset({"revelationdance", "ivycudgel", "ragingbull", "multi
 ERROR_CODES = ("nature_move", "item", "field_dup", "few_moves")
 WARNING_CODES = ("no_stab",)
 
-# 生成の最終検査で落とした型の数 (source:code → n) と、code ごとの種の内訳 (何を落としているかの確認用。s06_lint.json に写す)
+# 生成の最終検査で落とした型の数 (source:code → n) と、code ごとの種の内訳 (何を落としているかの確認用。s06_lint.json に写す)。
+# 直した型 (LINT_REPAIRS: source → n) と、直せず止めた理由 (LINT_REPAIR_BLOCKED: 理由 → n) は落とした数と分けて数える (§9.1)
 LINT_REJECTS: Counter = Counter()
 LINT_REJECT_SPECIES: dict = {}
+LINT_REPAIRS: Counter = Counter()
+LINT_REPAIR_BLOCKED: Counter = Counter()
 
 
 # ------------------------------------------------------------------ 技の情報
@@ -281,7 +287,40 @@ def rejects_snapshot(reset: bool = False) -> dict:
     if reset:
         LINT_REJECTS.clear()
         LINT_REJECT_SPECIES.clear()
+        LINT_REPAIRS.clear()
+        LINT_REPAIR_BLOCKED.clear()
     return out
+
+
+def repairs_snapshot() -> dict:
+    """直した型の数 (source → n) と、直せず止めた理由 (reason → n)"""
+    return {"repaired": dict(sorted(LINT_REPAIRS.items())), "blocked": dict(sorted(LINT_REPAIR_BLOCKED.items()))}
+
+
+def is_mega_stone(item: Optional[str]) -> bool:
+    """メガ石か (sets.has_mega_stone が読めない環境では綴りで判定: …ite / …itex / …itey / …itez。しんかのきせき は除く)"""
+    it = (item or "").lower()
+    if not it:
+        return False
+    try:
+        from tools.team_build.sets import has_mega_stone
+        if has_mega_stone(it):
+            return True
+    except Exception:
+        pass
+    return it != "eviolite" and (it.endswith(("ite", "itex", "itey", "itez")))
+
+
+def nature_repair(nature: Optional[str], moves: list, move_of: Callable) -> Optional[str]:
+    """性格の修理 (純粋): 下げる側の攻撃技があるとき、もう片方の攻撃を使う技が無ければそちらを下げる性格 (other)、
+    両方使うなら防御側を下げる性格 (defense)。表に無い性格は None"""
+    table = NATURE_REPAIR.get((nature or "").lower())
+    if not table:
+        return None
+    minus = NATURE_MINUS.get((nature or "").lower())
+    other_cat = "special" if minus == "atk" else "physical"       # 下げても困らない側の分類
+    uses_other = any(uses_own_offense(mv, move_of(mv)) and (move_of(mv) or {}).get("category") == other_cat for mv in moves)
+    return table["defense"] if uses_other else table["other"]
 
 
 def rejects_species_top(k: int = 15) -> dict:
@@ -290,17 +329,17 @@ def rejects_species_top(k: int = 15) -> dict:
 
 
 # ------------------------------------------------------------------ 候補の修理 (誤りを直せるなら直して残す)
-FALLBACK_ITEMS = ("leftovers", "lifeorb", "sitrusberry", "lumberry", "focussash", "expertbelt", "rockyhelmet")
 CONSUMABLE_FOR_ACROBATICS = ("focussash", "sitrusberry", "lumberry")
 
 
 def repair_set(species_id: str, ability: Optional[str], item: Optional[str], nature: Optional[str], moves: list, *,
                info=None, usage_moves=(), legal_item: Optional[Callable] = None, learnset=None) -> Optional[dict]:
-    """誤りのある型を、規則に沿う最小の変更で直す (純粋: info / legal_item は引数)。直せなければ None。
+    """誤りのある型を、規則に沿う最小の変更で直す (純粋: info / legal_item は引数)。直せなければ None (理由は LINT_REPAIR_BLOCKED)。
     直し方 (2026-10-05: 従来方式の代表型 4 種が門で落ちた → 捨てる前に直す):
-      nature_move  性格の + を保って下げる側を変える (NATURE_REPAIR)
-      item         なし / カゴのみで ねむる なし / こだわりと変化技 / タイプ強化で該当技なし → 予備の持ち物 (こだわり以外)、
-                   アクロバット → 消費する持ち物
+      nature_move  + を保って下げる側を変える (nature_repair: 使わない側の攻撃を下げる、両方使うなら防御側)
+      item         なし / カゴのみで ねむる なし / こだわりと変化技 / タイプ強化で該当技なし → 予備の持ち物 (config BUILD_ITEM_FALLBACK、
+                   こだわり以外)、アクロバット → 消費する持ち物。**メガ石は外さない** (§9.6: 想定フォルム・特性・役割まで変わる):
+                   石を持つ型はアクロバットの側を外して補充し、他の持ち物の誤りは直さず止める (理由 mega_stone)
       field_dup    特性と同じ場の技を外す (後で補充)
       few_moves    usage_moves (使用率の順) → learnset の順で 4 つまで補充 (こだわりなら変化技は足さない)
     戻り値 {"item", "nature", "moves", "repairs": [code ...]} (誤りが残れば None)"""
@@ -312,7 +351,7 @@ def repair_set(species_id: str, ability: Optional[str], item: Optional[str], nat
     it, nat, mv = item, nature, [m for m in moves if m]
     repairs: list = []
     if "nature_move" in res["errors"]:
-        new = NATURE_REPAIR.get((nat or "").lower())
+        new = nature_repair(nat, mv, info.move)
         if new:
             nat = new
             repairs.append("nature_move")
@@ -322,16 +361,26 @@ def repair_set(species_id: str, ability: Optional[str], item: Optional[str], nat
         repairs.append("field_dup")
     if "item" in res["errors"]:
         problems = res["detail"]["item"]["problems"]
-        pool = CONSUMABLE_FOR_ACROBATICS if "acrobatics" in problems else FALLBACK_ITEMS
-        cand = next((x for x in pool if legal_item(x) and x != it), None)
-        if cand:
-            it, repairs = cand, repairs + ["item:" + "+".join(problems)]
+        if is_mega_stone(it):
+            if problems == ["acrobatics"]:
+                mv = [m for m in mv if m != "acrobatics"]           # 石は保持して技の側を直す (後で補充)
+                repairs.append("item:acrobatics->move")
+            else:
+                LINT_REPAIR_BLOCKED["mega_stone:" + "+".join(problems)] += 1
+                return None
+        else:
+            pool = CONSUMABLE_FOR_ACROBATICS if "acrobatics" in problems else tuple(BUILD_ITEM_FALLBACK)
+            cand = next((x for x in pool if legal_item(x) and x != it and x not in CHOICE_ITEMS), None)
+            if cand:
+                it, repairs = cand, repairs + ["item:" + "+".join(problems)]
     if len(set(mv)) < 4 and not few_moves_exempt(species_id, info):
         util = [m for m in usage_moves if m not in mv]
         mv = fill_to_four(mv, [], util, set(learnset or ()) | set(usage_moves) | set(mv), item=it, ability=ability,
                           move_of=info.move)
         repairs.append("few_moves")
-    if lint_set(species_id, ability, it, nat, mv, info=info)["errors"]:
+    left = lint_set(species_id, ability, it, nat, mv, info=info)["errors"]
+    if left:
+        LINT_REPAIR_BLOCKED["unfixed:" + "+".join(left)] += 1
         return None
     return {"item": it, "nature": nat, "moves": mv, "repairs": repairs}
 
@@ -430,7 +479,8 @@ def lint_rows(rows: list, info=None) -> dict:
             "error_rate": round(n_err / n_sets, 4) if n_sets else None, "warning_rate": round(n_warn / n_sets, 4) if n_sets else None,
             "generated": {"n_sets": gen_n, "n_error_sets": gen_err, "error_rate": round(gen_err / gen_n, 4) if gen_n else None},
             "by_code": dict(sorted(by_code.items())), "by_source": by_source, "examples": examples,
-            "rejected_in_generation": rejects_snapshot(), "rejected_species_top": rejects_species_top()}
+            "rejected_in_generation": rejects_snapshot(), "rejected_species_top": rejects_species_top(),
+            "repaired_in_generation": repairs_snapshot()["repaired"], "repair_blocked": repairs_snapshot()["blocked"]}
 
 
 def write_lint_report(run_dir, rows: list, log: Optional[Callable] = None, info=None) -> dict:
@@ -444,5 +494,5 @@ def write_lint_report(run_dir, rows: list, log: Optional[Callable] = None, info=
         g = rep["generated"]
         log(f"S6 lint: 誤り {rep['n_error_sets']}/{rep['n_sets']} 型 ({rep['error_rate']})、生成型 {g['n_error_sets']}/{g['n_sets']} "
             f"({g['error_rate']}、目標 0)、警告 {rep['n_warning_sets']} ({rep['warning_rate']})、code {rep['by_code']}、"
-            f"生成で落とした型 {rep['rejected_in_generation']}")
+            f"生成で落とした型 {rep['rejected_in_generation']}、直した型 {rep['repaired_in_generation']}、直せず止めた {rep['repair_blocked']}")
     return rep
