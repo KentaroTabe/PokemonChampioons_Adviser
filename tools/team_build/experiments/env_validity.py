@@ -62,6 +62,16 @@ def family_win_rates(records: list, key: str = "family_id", min_n: int = 3) -> d
     return {f: {"n": w + l, "win_rate": round(w / (w + l), 3)} for f, (w, l) in wl.items() if w + l >= min_n}
 
 
+def same_team_battles(battles: list, ref_species) -> list:
+    """参照と同じ 6 体で戦い、勝敗が残っている対戦 (純粋)。自分の種が 6 体そろって一致するものだけ数える
+    (2026-10-05: 部分集合で数えていたので、自分の種が 1 体しか読めていない別の構築の対戦が「同じ並び」に入っていた。
+    docs/incidents/reports/2026-10-04-same-team-battles-subset-count.md)"""
+    want = set(ref_species or ())
+    if len(want) != 6:
+        return []
+    return [b for b in battles or [] if b.get("won") is not None and set(b.get("our_species") or []) == want]
+
+
 def compare_families(real: dict, sim: dict) -> dict:
     common = sorted(set(real) & set(sim))
     rows = [{"family_id": f, "real": real[f], "sim": sim[f]} for f in common]
@@ -129,8 +139,9 @@ def main() -> None:
     family_of = {tid: f["family_id"] for f in split.get("families", []) for tid in f.get("teams", [])}
     ref_species = set(parse_set_text((run_dir / "reference_team.txt").read_text(encoding="utf-8"))) if (run_dir / "reference_team.txt").exists() else set()
     since = time.time() - args.days * 86400 if args.days else None
-    battles = [read_real_battle(p) for p in sorted(Path(args.battles_dir).glob("battle_*.jsonl"))]
-    battles = [b for b in battles if (since is None or b["ts"] >= since) and len(b["opp_species"]) >= 3]
+    in_window = [b for b in (read_real_battle(p) for p in sorted(Path(args.battles_dir).glob("battle_*.jsonl")))
+                 if since is None or b["ts"] >= since]
+    battles = [b for b in in_window if len(b["opp_species"]) >= 3]       # 相手の種が 3 体以上読めた対戦 (プールとの照合の対象)
     matches = []
     for b in battles:
         m = match_family(set(b["opp_species"]), teams, family_of)
@@ -141,17 +152,20 @@ def main() -> None:
         if b["overlap"] < args.threshold:
             for s in b["opp_species"]:
                 uncovered[s] = uncovered.get(s, 0) + 1
-    same_team = [b for b in battles if ref_species and set(b["our_species"]) <= ref_species and b["won"] is not None
-                 and b["overlap"] >= args.threshold]
+    # 実戦の勝率は同じ 6 体の対戦の全部で数える。系統ごとの比較だけ、相手がプールに入る対戦に限る
+    # (2026-10-05: 勝率にもプールの条件を掛けていて 1 戦分の値になっていた)
+    same_all = same_team_battles(in_window, ref_species)
+    same_team = [b for b in same_all if b.get("overlap", 0.0) >= args.threshold]
     real_fam = family_win_rates(same_team)
     sim_fam = family_win_rates(sim_reference_records(run_dir), min_n=5)
     cmp = compare_families(real_fam, sim_fam)
-    wins = [b["won"] for b in same_team]
+    wins = [b["won"] for b in same_all]
     result = {"run_id": args.run_id, "n_pool_teams": len(teams), "n_real_battles": len(battles),
               "n_full_preview": sum(1 for b in battles if b["opp_full"]),
               "coverage": coverage_summary(matches, args.threshold),
               "uncovered_species_top": sorted(uncovered.items(), key=lambda kv: -kv[1])[:20],
-              "same_team_battles": len(same_team), "real_win_rate": round(sum(wins) / len(wins), 3) if wins else None,
+              "same_team_battles": len(same_all), "same_team_wins": sum(1 for w in wins if w), "same_team_in_pool": len(same_team),
+              "real_win_rate": round(sum(wins) / len(wins), 3) if wins else None,
               "sim_reference_win_rate": (round(sum(1 for r in sim_reference_records(run_dir) if r["won"]) / max(1, len(sim_reference_records(run_dir))), 3)
                                          if sim_reference_records(run_dir) else None),
               "family_compare": cmp,
@@ -160,7 +174,8 @@ def main() -> None:
     print(f"実戦 {len(battles)} 戦 (相手 6 体が読めた {result['n_full_preview']})、プールに入る割合 {result['coverage']['covered_share']} "
           f"(閾値 {args.threshold})、重なりの分布 {result['coverage']['overlap_hist']}")
     print(f"入らない相手に多い種: {result['uncovered_species_top'][:10]}")
-    print(f"参照と同じ並びの実戦 {len(same_team)} 戦: 勝率 {result['real_win_rate']} / シムの参照 {result['sim_reference_win_rate']}、"
+    print(f"参照と同じ 6 体の実戦 {len(same_all)} 戦 {result['same_team_wins']} 勝: 勝率 {result['real_win_rate']} / "
+          f"シムの参照 {result['sim_reference_win_rate']}、うち相手がプールに入る {len(same_team)} 戦で "
           f"系統ごとの順位相関 {cmp['spearman']} (共通 {cmp['n_common']} 系統)")
     print(f"保存: {p}")
 

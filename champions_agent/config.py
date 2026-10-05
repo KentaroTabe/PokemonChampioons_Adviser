@@ -298,7 +298,7 @@ BUILD_PICK_VARIANTS = ("rule", "generic", "fresh")
 # 環境チーム (相手) の操縦: heuristic = poke-env SimpleHeuristicsPlayer (従来) / rl = 学習済み行動方策 (ピンの ema)。選出は
 # heuristic (Player 自身) / matchup / rule (実戦の助言と同じ規則) / model (汎用の選出モデル) / prior (実戦の選出率に比例)。
 # 既定は実戦に近い方へ寄せる仮置き (rl + rule)。実験 12 (選出の一致率) と 13 (勝率の実戦との差) で決め直す
-BUILD_OPP_PILOT = "rl"                     # 確定 (2026-10-05 実験 13: 参照の勝率は heuristic 0.78 / 0.73、rl 0.54〜0.61。実戦 0.41 と矛盾しないのは rl)
+BUILD_OPP_PILOT = "rl"                     # 確定 (2026-10-05 実験 13: 参照の勝率は heuristic 0.78 / 0.73、rl 0.54〜0.61。実戦 0.44 (16 戦 7 勝) と矛盾しないのは rl)
 BUILD_OPP_PICK_POLICY = "rule"            # 確定 (実験 12: どの方策も実戦の選出と区別できず、実験 13 でも差が出ない → 既に入っている rule)
 # 現行チーム (config/my_team.json の登録 6 体) を exploitation pool として候補に必ず入れる: 代理スコアの較正点 +
 # 近傍 (1 枠入替、入替枠を散らして上位) を BUILD_INCUMBENT_NEIGHBORS 並び。探索 (exploration) の quota とは別枠。
