@@ -79,7 +79,7 @@ def test_repair_variants():
     diag = {"must_cover": ["C", "D"], "threat_species": ["c1"], "ko": [{"ours": "tune", "by": "c1", "move": "x", "n": 4}],
             "vulnerable": ["tune"], "replace_candidates": ["weak"], "unused_items": [], "mega_review": False, "notes": ["t"]}
     vs = RP.repair_variants(s, parent, diag, cfg, pool_species, W._roles_of, [], fixed={"core1", "core2"}, parent_id="L01_C001",
-                            round_no=1, max_changes=2, max_arms=6, boost=2.0, min_gain=0.001)
+                            round_no=1, max_changes=2, max_arms=6, boost=2.0, min_gain=0.001, min_changes=1)
     assert vs, "変種が出る"
     kinds = [v.origin["variant"] for v in vs]
     assert "B" in kinds and "A" in kinds, kinds
@@ -103,22 +103,29 @@ def test_repair_variants():
     # 入替先を散らす: ko の無い診断では、入れる種が初出の変種が同じ種の 2 つ目より先に並ぶ
     vs_d = RP.repair_variants(s, parent, dict(diag, ko=[], vulnerable=[]), cfg, pool_species, W._roles_of, [],
                               fixed={"core1", "core2"}, parent_id="L01_C001", round_no=1, max_changes=2, max_arms=6, boost=2.0,
-                              min_gain=0.001)
+                              min_gain=0.001, min_changes=1)
     ins_d = [tuple(sorted(c["in"] for c in v.origin["changes"] if "in" in c)) for v in vs_d if v.origin["variant"] == "A"]
     first_seen = []
     for x in ins_d:
         if x not in first_seen:
             first_seen.append(x)
     assert len(first_seen) >= 2, ins_d
+    # 既定 (BUILD_REPAIR_MIN_CHANGES = 2、判断 #6): 入替 (A) は 2 枠以上だけ。型だけの変種 (B) は残る
+    vs_min = RP.repair_variants(s, parent, dict(diag, replace_candidates=["weak", "tune"]), cfg, pool_species, W._roles_of, [],
+                                fixed={"core1", "core2"}, parent_id="L01_C001", round_no=1, max_changes=2, max_arms=6, boost=2.0,
+                                min_gain=0.001)
+    assert vs_min and all(len(v.origin["changes"]) >= 2 for v in vs_min if v.origin["variant"] == "A"), \
+        [(v.origin["variant"], len(v.origin["changes"])) for v in vs_min]
+    assert any(v.origin["variant"] == "B" for v in vs_min)
     # 上限と順序: 点の降順、最大 max_arms
     assert [v.origin["repair_score"] for v in vs] == sorted((v.origin["repair_score"] for v in vs), reverse=True)
     vs2 = RP.repair_variants(s, parent, diag, cfg, pool_species, W._roles_of, [], fixed={"core1", "core2"}, parent_id="L01_C001",
-                             round_no=1, max_changes=2, max_arms=1, boost=2.0, min_gain=0.001)
+                             round_no=1, max_changes=2, max_arms=1, boost=2.0, min_gain=0.001, min_changes=1)
     assert len(vs2) == 1
     # 差し替え対象が無ければ担当の少ない個体 (固定でない) を入替える。重みは元に戻っている
     diag2 = dict(diag, replace_candidates=[])
     vs3 = RP.repair_variants(s, parent, diag2, cfg, pool_species, W._roles_of, [], fixed={"core1", "core2"}, parent_id="L01_C001",
-                             round_no=2, max_changes=1, max_arms=6, boost=2.0, min_gain=0.001)
+                             round_no=2, max_changes=1, max_arms=6, boost=2.0, min_gain=0.001, min_changes=1)
     assert any(v.origin["variant"] == "A" for v in vs3)
     assert np.allclose(s.fam_w, [1, 1, 1, 1])
     # 親が石 2 個 (現行チーム) でエース指定があっても、その親の修理ではエースの規則を当てず石の数は親のまま (変種が出る。新しい石は足さない)
@@ -135,7 +142,7 @@ def test_repair_variants():
     parent2 = s._finalize(sc2, combo2, {}, "INC", [], cfg, tag="incumbent")
     cfg_ace = L.SearchConfig(species_k=10, ace="core2", favorites=("core2",))
     vs5 = RP.repair_variants(s, parent2, dict(diag, replace_candidates=["weak"]), cfg_ace, pool_species, W._roles_of, [],
-                             fixed={"core2"}, parent_id="L00_INC", round_no=1, max_changes=1, max_arms=6, boost=2.0, min_gain=0.001)
+                             fixed={"core2"}, parent_id="L00_INC", round_no=1, max_changes=1, max_arms=6, boost=2.0, min_gain=0.001, min_changes=1)
     assert vs5, "石 2 個の現行チームからも変種が出る"
     for v in vs5:
         assert sum(1 for e in v.entries if e.stone) == 2 and "weak" not in v.members
@@ -152,7 +159,7 @@ def test_repair_variants():
     parent3 = s._finalize(sc3, combo3, {}, "C001", [], cfg)
     diag3 = dict(diag, replace_candidates=["fillC"], vulnerable=[], must_cover=["C"], threat_species=["c1"], ko=[])
     vs6 = RP.repair_variants(s, parent3, diag3, cfg, pool_species, W._roles_of, [], fixed={"core1", "core2"}, parent_id="L02_C001",
-                             round_no=2, max_changes=1, max_arms=6, boost=2.0, min_gain=0.001)
+                             round_no=2, max_changes=1, max_arms=6, boost=2.0, min_gain=0.001, min_changes=1)
     pkey = tuple(sorted(e.key for e in parent3.entries))
     for v in vs6:
         assert tuple(sorted(e.key for e in v.entries)) != pkey, "親と同じ変種は作らない"

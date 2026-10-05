@@ -6,7 +6,8 @@
   誤り
     nature_move   性格が下げる側 (攻撃 / 特攻) を使う攻撃技を持つ。自分の能力を使わない技は除く: イカサマ (相手の攻撃)、ボディプレス
                   (自分の防御)、ちきゅうなげ / ナイトヘッド (固定ダメージ)、一撃技、カウンター系、いかりのまえば等の威力 0 の割合技。
-                  とんぼがえり / クイックターン / ボルトチェンジ / こうそくスピン / キラースピン / ねこだまし も除く (NATURE_RULE_EXCLUDED)
+                  とんぼがえり / クイックターン / ボルトチェンジ / こうそくスピン / キラースピン / ねこだまし と、効果が目的の技
+                  ドラゴンテール / ともえなげ / ほっぺすりすり も除く (NATURE_RULE_EXCLUDED。後の 3 つは 10/5 の定義の漏れの補正)
     item          持ち物なし / タイプ強化の持ち物でそのタイプの攻撃技なし / カゴのみで ねむる なし / こだわり系と変化技 /
                   アクロバットと消費しない持ち物
     field_dup     特性で張る場 (ひでり等) と同じ場を技 (にほんばれ等) でも張る
@@ -31,8 +32,9 @@ NATURE_MINUS = {"adamant": "spa", "jolly": "spa", "impish": "spa", "careful": "s
                 "quiet": "spe", "sassy": "spe", "modest": "atk", "timid": "atk", "bold": "atk", "calm": "atk",
                 "lonely": "def", "naughty": "spd", "mild": "def", "rash": "spd", "hasty": "def", "naive": "spd",
                 "lax": "spd", "gentle": "def"}
-# 性格の規則から除く技 (ユーザー定義): 交代技・除去・ねこだまし (威力より役割で入れる技)
-NATURE_RULE_EXCLUDED = frozenset({"uturn", "flipturn", "voltswitch", "rapidspin", "mortalspin", "fakeout"})
+# 性格の規則から除く技 (ユーザー定義): 交代技・除去・ねこだまし・吹き飛ばし・まひ (威力より効果で入れる技)
+NATURE_RULE_EXCLUDED = frozenset({"uturn", "flipturn", "voltswitch", "rapidspin", "mortalspin", "fakeout",
+                                  "dragontail", "circlethrow", "nuzzle"})
 CHOICE_ITEMS = frozenset({"choiceband", "choicespecs", "choicescarf"})
 # タイプ強化の持ち物 → タイプ (config の 18 種 + プレート / おこう)
 _PLATES = {"flameplate": "Fire", "splashplate": "Water", "zapplate": "Electric", "meadowplate": "Grass", "icicleplate": "Ice",
@@ -58,8 +60,9 @@ OWN_TYPE_MOVES = frozenset({"revelationdance", "ivycudgel", "ragingbull", "multi
 ERROR_CODES = ("nature_move", "item", "field_dup", "few_moves")
 WARNING_CODES = ("no_stab",)
 
-# 生成の最終検査で落とした型の数 (code → n)。stage_s5_joint が run の記録に写す
+# 生成の最終検査で落とした型の数 (source:code → n) と、code ごとの種の内訳 (何を落としているかの確認用。s06_lint.json に写す)
 LINT_REJECTS: Counter = Counter()
+LINT_REJECT_SPECIES: dict = {}
 
 
 # ------------------------------------------------------------------ 技の情報
@@ -245,6 +248,9 @@ def gate_rejects(c, info=None, source: str = "generated", gate: bool = BUILD_SET
         return None
     for code in res["errors"]:
         LINT_REJECTS[f"{source}:{code}"] += 1
+        d = res["detail"].get(code) or {}
+        why = code if code != "item" else "item:" + "+".join(d.get("problems") or [])
+        LINT_REJECT_SPECIES.setdefault(why, Counter())[str(getattr(c, "species_id", "?"))] += 1
     return res if gate else None
 
 
@@ -252,7 +258,13 @@ def rejects_snapshot(reset: bool = False) -> dict:
     out = dict(sorted(LINT_REJECTS.items()))
     if reset:
         LINT_REJECTS.clear()
+        LINT_REJECT_SPECIES.clear()
     return out
+
+
+def rejects_species_top(k: int = 15) -> dict:
+    """落とした型の内訳: 理由 (code、持ち物は問題の種類つき) → {種: n} の上位 k (2026-10-05: 煙試験で 644 型を落とした内訳の確認用)"""
+    return {why: dict(cnt.most_common(k)) for why, cnt in sorted(LINT_REJECT_SPECIES.items())}
 
 
 # ------------------------------------------------------------------ 技の補充 (4 つ未満を作らない)
@@ -336,7 +348,7 @@ def lint_rows(rows: list, info=None) -> dict:
             "error_rate": round(n_err / n_sets, 4) if n_sets else None, "warning_rate": round(n_warn / n_sets, 4) if n_sets else None,
             "generated": {"n_sets": gen_n, "n_error_sets": gen_err, "error_rate": round(gen_err / gen_n, 4) if gen_n else None},
             "by_code": dict(sorted(by_code.items())), "by_source": by_source, "examples": examples,
-            "rejected_in_generation": rejects_snapshot()}
+            "rejected_in_generation": rejects_snapshot(), "rejected_species_top": rejects_species_top()}
 
 
 def write_lint_report(run_dir, rows: list, log: Optional[Callable] = None, info=None) -> dict:

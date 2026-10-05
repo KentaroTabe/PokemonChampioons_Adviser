@@ -274,3 +274,22 @@ CI 83 モジュール緑を確かめて統合ブランチにマージした (f9d
 - MCS 2026.09 の記事が M-C かどうか。
 - set_lint が落とした代表型 167 の中身 (実在の型を誤りとしていないか)。
 - 実戦の勝敗の記録の誤り (9/29 夕方の 7 戦は 3 勝 4 敗が正しい可能性があり、記録上は 2 勝 5 敗)。
+
+## 6. 対応 (実装側、2026-10-05 夜)
+
+§1 の結論は config と手続きに反映した (BUILD_REPAIR_ROUNDS 1 / BUILD_REPAIR_ARMS 3 / BUILD_REPAIR_MIN_CHANGES 2、BUILD_PROMOTE_MIN_HOLDOUT_N 600、
+BUILD_TRIGGER_REAL_GAP 0.2 / BUILD_TRIGGER_POOL_MATCH_FIRE False、BUILD_CALIBRATION_VARIANTS ("cheap",)、BUILD_STRESS_ONLY_ON_PASS、
+BUILD_ARTICLE_SEASON_REGULATION の 6 季節、テーマの門は「同等のときだけ入替」)。§4 の依頼は次のとおり。
+
+| # | 依頼 | 対応 |
+|---|---|---|
+| 1 | 引き金の入力 | `env_match.real_record` / `registered_real_record` が登録チームと同じ 6 体の対戦記録を直接数える (直近 BUILD_TRIGGER_REAL_DAYS = 30 日)。`triggers.gather` と実験 13 の既定の実戦勝率はこれを読む。シムの参照の勝率は run の summary (reference_variant) を優先 |
+| 2 | 一致率の測り方 | mixed はプールに入れた実在の構築の元の対戦ファイルを `opponent_families.json` の real_rosters に残し、`s02_env_match.json` はその対戦を除いて測る (covered_share)。入れた対戦込みの値は covered_share_including_used に別に残す |
+| 3 | 較正の標本 | 軽い適応の腕 (cheap) だけ測る |
+| 4 | set_lint の例外 | ドラゴンテール / ともえなげ / ほっぺすりすり を NATURE_RULE_EXCLUDED に追加 |
+| 5 | set_lint の副作用 | 落とした型の内訳を `s06_lint.json` の rejected_species_top (理由 × 種、持ち物は問題の種類つき) に出す。生成側で避けられる誤りは避ける: こだわり型は補助枠を変化技で埋めない (攻撃 4 本)、カゴのみを持ち物の予備から外す (ねむる の型だけ)、アクロバットは消費する持ち物のときだけ。代表型 167 の中身はこの内訳で確認できる |
+| 6 | 種の集中 | 据え置き (判断 #22)。`s05_generated.json` と manifest に species_share_top を記録し、S5 のログに出す。原因は「足りなければ外した並びを戻す」規則と、保持しなかった並びも同じ種を含むこと。直すなら探索の補完に種の頻度の減点を入れる設計変更 (判断待ち) |
+| 7 | 記事の形式 | 1 行に複数の記事がある行は、題名を " / " と <br> で分け、URL と数が合えば記事ごとに判定する |
+| 8 | 段ごとの所要 | `review_run.stage_durations` を段の行 (S8a / S9 / [holdout] …) で切り替える方式にし、段ごとの合計 (時刻順、日付またぎ対応) を出す |
+| — | 従来方式の型 | 従来方式 (S5 → S6) の型にも同じ門 (`sets.lint_gate`: enumerate_sets と base_set)。実験 11 で方式を比べる条件を揃える |
+

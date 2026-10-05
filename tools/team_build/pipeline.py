@@ -177,6 +177,18 @@ def team_survivors(chosen: dict, max_candidates: Optional[int]) -> list:
     return ids[:max_candidates] if max_candidates else ids
 
 
+def change_counts(rows: list, ids: list) -> dict:
+    """修理の変種ごとの親との違い (純粋): {candidate_id: {"kind": "A"|"B", "n_changes": 変更の数}} (s06_sets.json の行の origin から。
+    2026-10-05 判断 #6: 変種ごとの変更枠数を summary に残し、2 枠以上の変種が良いかを次の 2 run で見る)"""
+    by = {r.get("candidate_id"): r for r in rows or []}
+    out = {}
+    for cid in ids or []:
+        o = (by.get(cid) or {}).get("origin") or {}
+        if o.get("kind") == "repair":
+            out[cid] = {"kind": o.get("variant"), "n_changes": len(o.get("changes") or [])}
+    return out
+
+
 def exclude_tagged(ids: list, rows_by: dict, tags=("calibration",)) -> tuple:
     """並びの列から tag が tags の並び (較正の標本: S8a だけ測り、昇格・修理には使わない) を外す (純粋)。戻り値 (残り, 外した並び)"""
     out, dropped = [], []
@@ -554,7 +566,12 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
     if res8a and {split_variant(a["arm_id"])[0] for a in res8a.get("arms", [])} >= {c.arm_id for c in cands}:
         log("S8a screening: resume (s08a_screen.json を再利用)")
     else:
-        arms8a = [a for c in cands for a in (_variant_arm(c, v, screen_models, generic, plan_prior=plan_prior) for v in screen_variants) if a]
+        from champions_agent.config import BUILD_CALIBRATION_VARIANTS
+
+        def _variants_for(cid: str) -> tuple:
+            # 較正の標本は軽い適応の腕だけ (較正に使うのはその Δ だけ。判断 #4)
+            return tuple(BUILD_CALIBRATION_VARIANTS) if (rows_by_all.get(cid) or {}).get("tag") == "calibration" else tuple(screen_variants)
+        arms8a = [a for c in cands for a in (_variant_arm(c, v, screen_models, generic, plan_prior=plan_prior) for v in _variants_for(c.arm_id)) if a]
         res8a = R.race(arms8a, ref_arm(), split, "search", seed, eval_dir, stage="s08a_screen", fold=BUILD_FOLD_EVAL,
                        steps=screen_steps, max_battles=screen_max, eps=BUILD_EQUIV_EPS + screen_margin,
                        parallel=parallel, log=log)
@@ -616,7 +633,9 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
             survivors = survivors + [c for c in added if c not in survivors]
             summary["s08a_variants"] = chosen8a
             summary["s09_repair1"] = {"parents": [p[0] for p in parents], "variants": [a.arm_id for a in new_arms],
-                                      "survivors": added}
+                                      "survivors": added,
+                                      "changes": change_counts(json.loads((run_dir / "s06_sets.json").read_text(encoding="utf-8")),
+                                                               [a.arm_id for a in new_arms])}
             log(f"S9 repair 1: 変種 {len(new_arms)} のうち生存 {len(added)} を S7 以降の候補に加える: "
                 + ", ".join(f"{c}={chosen_r[c]['variant']}({chosen_r[c]['delta']:+.3f})" for c in added))
 
@@ -784,7 +803,9 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
             summary["s08b_variants"] = chosen
             summary["s08b_contenders"] = contenders
             summary["s09_repair2"] = {"parents": [p[0] for p in parents], "variants": [a.arm_id for a in new_arms],
-                                      "survivors": added}
+                                      "survivors": added,
+                                      "changes": change_counts(json.loads((run_dir / "s06_sets.json").read_text(encoding="utf-8")),
+                                                               [a.arm_id for a in new_arms])}
             log(f"S9 repair 2: 変種 {len(new_arms)} のうち生存 {len(added)} を S10 の contenders に加える: "
                 + ", ".join(f"{c}={chosen_r[c]['variant']}({chosen_r[c]['delta']:+.3f})" for c in added))
             if BUILD_REPAIR_FULL_ADAPT_ROUND2 and added:
@@ -827,10 +848,10 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
             summary["theme_check"] = tc
             _write_stage(run_dir, "theme_check", tc)
             log("S10 " + TC.format_line(tc))
-            ranked, excluded = TC.apply_gate(ranked, tc["teams"], BUILD_THEME_GATE)
-            summary["theme_gate"] = {"enabled": BUILD_THEME_GATE, "excluded": excluded, "none_pass": tc["none_pass"]}
-            if excluded:
-                log(f"S10 theme gate: テーマを満たさない並びを勝者の候補から外す {excluded}")
+            ranked, demoted = TC.apply_gate(ranked, tc["teams"], BUILD_THEME_GATE, deltas=deltas10, eps=BUILD_EQUIV_EPS)
+            summary["theme_gate"] = {"enabled": BUILD_THEME_GATE, "demoted": demoted, "none_pass": tc["none_pass"], "eps": BUILD_EQUIV_EPS}
+            if demoted:
+                log(f"S10 theme gate: テーマを満たす並び {ranked[0]} が 1 位 {demoted[0]} と同等 (Δ の差 ≤ {BUILD_EQUIV_EPS}) なので入れ替える")
             if tc["none_pass"]:
                 log("S10 theme gate: どの並びもテーマを満たさない (none_pass) → 順位はそのまま、印だけ残す")
         except Exception as e:
@@ -925,14 +946,21 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
         if is_top:
             hold = h
             summary["holdout"] = hold
-            rob = ST.run_stress(final_arm, ref_arm(), split, run_dir, seed + 5, n=stress_n, log=log, parallel=parallel)
-            summary["robustness_worst"] = rob.get("worst_sensitivity_candidate")
-            # ablation の A1: adapter を採用したらそれ (action 効果 = adapter − 基底)、無ければ前世代のチェックポイント
-            alt_dir = final_models_dir if final_models_dir != models_dir else pop.get("prev")
-            abl = AB.ablation_grid(arm_c.team_file, ref.team_file, final_model, ref_best.selection_model, models_dir,
-                                   alt_dir, split, run_dir, seed + 6, n=ablation_n, log=log, parallel=parallel,
-                                   ref_pick_policy=ref_best.pick_policy)
-            summary["ablation"] = abl.get("effects")
+            from champions_agent.config import BUILD_STRESS_ONLY_ON_PASS
+            passed = (hold or {}).get("verdict") in ("PASS", "PASS_EQUIVALENT")
+            if passed or not BUILD_STRESS_ONLY_ON_PASS:
+                rob = ST.run_stress(final_arm, ref_arm(), split, run_dir, seed + 5, n=stress_n, log=log, parallel=parallel)
+                summary["robustness_worst"] = rob.get("worst_sensitivity_candidate")
+                # ablation の A1: adapter を採用したらそれ (action 効果 = adapter − 基底)、無ければ前世代のチェックポイント
+                alt_dir = final_models_dir if final_models_dir != models_dir else pop.get("prev")
+                abl = AB.ablation_grid(arm_c.team_file, ref.team_file, final_model, ref_best.selection_model, models_dir,
+                                       alt_dir, split, run_dir, seed + 6, n=ablation_n, log=log, parallel=parallel,
+                                       ref_pick_policy=ref_best.pick_policy)
+                summary["ablation"] = abl.get("effects")
+            else:
+                # 判断 #1 (2026-10-05): STRESS と ablation は PASS のときだけ (INCONCLUSIVE / FAIL の run では約 2.5 時間を省く)
+                summary["stress_skipped"] = {"reason": f"holdout {(hold or {}).get('verdict')} (PASS でない)", "saved_stages": ["STRESS", "ablation"]}
+                log(f"STRESS / ablation: 省略 (holdout {(hold or {}).get('verdict')}、BUILD_STRESS_ONLY_ON_PASS)")
         # S13: Package (1 位は final/、他の最終候補は final/alternatives/<cid>/)
         species = members_by.get(cid, [])
         out_dir = (run_dir / "final") if is_top else (run_dir / "final" / "alternatives" / cid)

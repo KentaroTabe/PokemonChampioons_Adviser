@@ -1105,12 +1105,17 @@ def main() -> None:
             log(run_dir, f"S6 both: 同時探索 {sum(1 for r in results if r.get('search_mode') == 'joint')} 並びに従来方式 {len(id_map)} 並びを足した "
                          f"(id は {LEGACY_ID_PREFIX}..、従来方式の現行枝は足さない。従来方式の成果物は {LEGACY_SUBDIR}/)")
     manifest["search_mode"] = args.search_mode
-    for name, key in (("s02_env_match.json", "env_match"), ("s06_lint.json", "lint")):
+    for name, key in (("s02_env_match.json", "env_match"), ("s06_lint.json", "lint"), ("s05_generated.json", "species_share_top")):
         try:
             d = json.loads((run_dir / name).read_text(encoding="utf-8"))
-            manifest[key] = ({"covered_share": d.get("covered_share"), "n_consistent": d.get("n_consistent")} if key == "env_match"
-                             else {"error_rate": d.get("error_rate"), "generated_error_rate": (d.get("generated") or {}).get("error_rate"),
-                                   "warning_rate": d.get("warning_rate")})
+            if key == "env_match":
+                manifest[key] = {"covered_share": d.get("covered_share"), "n_consistent": d.get("n_consistent"),
+                                 "n_excluded_used_in_pool": d.get("n_excluded_used_in_pool")}
+            elif key == "lint":
+                manifest[key] = {"error_rate": d.get("error_rate"), "generated_error_rate": (d.get("generated") or {}).get("error_rate"),
+                                 "warning_rate": d.get("warning_rate"), "rejected_in_generation": d.get("rejected_in_generation")}
+            else:
+                manifest[key] = d.get("species_share_top")
         except Exception:
             pass
     from champions_agent.env.ranked_teams import pinned_meta_snapshot_id

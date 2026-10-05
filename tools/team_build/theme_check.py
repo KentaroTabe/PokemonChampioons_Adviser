@@ -103,12 +103,26 @@ def check_run(theme: dict, rows_by: dict, records_by: dict, ace_min: float = BUI
             "none_pass": bool(teams) and n_pass == 0 and n_fail > 0}
 
 
-def apply_gate(ranked: list, teams: dict, gate: bool) -> tuple:
-    """S10 の順位にテーマの門を掛ける (純粋)。gate が偽なら何もしない。満たさない (pass is False) 並びを外す。
-    全部外れるなら順位のまま (呼び出し側が none_pass の印を残す)。戻り値 (順位, 外した並び)"""
-    if not gate:
+def apply_gate(ranked: list, teams: dict, gate: bool, deltas: Optional[dict] = None, eps: float = 0.02) -> tuple:
+    """S10 の順位にテーマの門を掛ける (純粋)。gate が偽なら何もしない。
+    deltas (candidate_id → S10 の Δ) があれば「同等のときだけ入れ替える」: 1 位がテーマを満たさないとき、満たす並びのうち最上位の Δ が
+    1 位の Δ − eps 以上ならその並びを 1 位にする (それ以外は順位のまま)。2026-10-05 判断 #3: 単純に外すと現行より弱い並びが勝者になる。
+    deltas が無ければ旧来どおり満たさない並びを外す (全部外れるなら順位のまま)。戻り値 (順位, 動かした並び)"""
+    if not gate or not ranked:
         return list(ranked), []
-    failing = [c for c in ranked if (teams.get(c) or {}).get("pass") is False]
+    passes = {c: (teams.get(c) or {}).get("pass") for c in ranked}
+    if deltas is not None:
+        top = ranked[0]
+        if passes[top] is not False:
+            return list(ranked), []
+        best_pass = next((c for c in ranked if passes[c] is True), None)
+        if best_pass is None:
+            return list(ranked), []
+        d_top, d_best = deltas.get(top), deltas.get(best_pass)
+        if d_top is None or d_best is None or d_best < d_top - eps:
+            return list(ranked), []
+        return [best_pass] + [c for c in ranked if c != best_pass], [top]
+    failing = [c for c in ranked if passes[c] is False]
     passing = [c for c in ranked if c not in failing]
     if not passing:
         return list(ranked), []

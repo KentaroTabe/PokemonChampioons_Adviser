@@ -298,8 +298,8 @@ BUILD_PICK_VARIANTS = ("rule", "generic", "fresh")
 # 環境チーム (相手) の操縦: heuristic = poke-env SimpleHeuristicsPlayer (従来) / rl = 学習済み行動方策 (ピンの ema)。選出は
 # heuristic (Player 自身) / matchup / rule (実戦の助言と同じ規則) / model (汎用の選出モデル) / prior (実戦の選出率に比例)。
 # 既定は実戦に近い方へ寄せる仮置き (rl + rule)。実験 12 (選出の一致率) と 13 (勝率の実戦との差) で決め直す
-BUILD_OPP_PILOT = "rl"
-BUILD_OPP_PICK_POLICY = "rule"
+BUILD_OPP_PILOT = "rl"                     # 確定 (2026-10-05 実験 13: 参照の勝率は heuristic 0.78 / 0.73、rl 0.54〜0.61。実戦 0.41 と矛盾しないのは rl)
+BUILD_OPP_PICK_POLICY = "rule"            # 確定 (実験 12: どの方策も実戦の選出と区別できず、実験 13 でも差が出ない → 既に入っている rule)
 # 現行チーム (config/my_team.json の登録 6 体) を exploitation pool として候補に必ず入れる: 代理スコアの較正点 +
 # 近傍 (1 枠入替、入替枠を散らして上位) を BUILD_INCUMBENT_NEIGHBORS 並び。探索 (exploration) の quota とは別枠。
 # 現行と近傍の登録済み個体は登録の型 (持ち物・配分・技) をそのまま使う
@@ -326,8 +326,9 @@ BUILD_FINALIST_HOLDOUT_ALL = True   # 全最終候補に封印 holdout を行う
 BUILD_MAX_REPAIRS = 2                  # 同じ系統の改修反復。3 回目以降は新しい concept branch
 BUILD_MAX_CHANGES = 2                  # 1 反復あたりの入替枠数。3 枠以上は新系統
 # 測定からの戻り (S8a / S8b → S5 修理モード。docs/TEAM_BUILD_REDESIGN_1002.md §14 / §16.2。LLM の仮説は使わない: D-28)
-BUILD_REPAIR_ROUNDS = BUILD_MAX_REPAIRS   # 周回数 (S8a 後と S8b 後の 1 周ずつ)。run.py --repairs の既定
-BUILD_REPAIR_ARMS = 6                  # 1 周あたりに racing へ加える変種の上限 (親が複数なら分け合う)
+BUILD_REPAIR_ROUNDS = 1                # 周回数 (2026-10-05 判断 #6: 1 周 (S8a 後) だけ。1003 の変種 6 本は最終比較で全部 −0.04〜−0.01)。run.py --repairs の既定
+BUILD_REPAIR_ARMS = 3                  # 1 周あたりに racing へ加える変種の上限 (親が複数なら分け合う。判断 #6: 3 本)
+BUILD_REPAIR_MIN_CHANGES = 2           # 入替 (A) の変種は親との違いがこの枠数以上 (±0.04 の 1 枠の変種は測っても分からない。判断 #6)。型だけの変種 (B) は可
 BUILD_REPAIR_PARENTS = 2               # 1 周あたりに診断して修理する親の並びの数 (Δ の上位から)
 BUILD_REPAIR_MIN_N = 20                # 診断に使う対戦数の下限 (系統は負けの多い順に束ねてこの数に達するまで)
 BUILD_REPAIR_LOSS_RATE_MIN = 0.5       # 「負けに効いた」系統 / 相手種の敗率の下限
@@ -352,17 +353,22 @@ BUILD_REFERENCE_PRODUCTION_GAP = 0.10  # 参照の fresh (run 内で適応) − 
                                        # 記録し、fresh のモデルを registry に候補として登録する (1003: 本番 0.417 / 適応 0.73)
 BUILD_STRESS_ACTION_NOISE = (0.05, 0.10)
 BUILD_SMOKE_CANARY_BATTLES = 20        # 性能判定には使わない (crash / illegal action / 読込 / ログ / latency)
+BUILD_STRESS_ONLY_ON_PASS = True       # STRESS と ablation は封印 holdout が PASS のときだけ (INCONCLUSIVE / FAIL なら約 2.5 時間を省く。判断 #1)
 BUILD_PROMOTE_MIN_FULL_RUNS = 3        # 昇格条件: 同じ 6 体で holdout PASS の full run (下) 3 回 (= full run 2 本 + 確認 1 回。2026-10-05 Phase 5)
                                        # + 全 gate PASS + 重大 regression 0 + 人手 approve
-BUILD_PROMOTE_MIN_HOLDOUT_N = 300      # "full run" の定義 1: 封印 holdout の対戦数がこれ以上 (途中で止めた run の PASS は数えない)
+BUILD_PROMOTE_MIN_HOLDOUT_N = 600      # "full run" の定義 1: 封印 holdout の対戦数がこれ以上 (fast の上限 300 の暫定の PASS は数えない。判断 #7)
 BUILD_PROMOTE_DISTINCT_SPLITS = True   # "full run" の定義 2: 別の封印の分割 (sealed_id) で数える (同じ分割の PASS は 1 回)
 # 実戦評価の重み w_N: 有効標本と CI 半幅で決める (200 戦は early signal に留める)
 BUILD_REAL_MIN_EFFECTIVE_N = 1000
 BUILD_REAL_MAX_CI_HALFWIDTH = 0.03
 # 再構築の引き金 (tools/team_build/triggers): 閾値は基準線 (前回 run で記録した値) との差で測る (2026-10-05: 絶対値では季節で意味が変わる)
-BUILD_TRIGGER_REAL_GAP = 0.15          # 登録チームの実戦勝率 (移動平均) − シムの参照の勝率 が、基準線の差より これ以上 悪化したら
-BUILD_TRIGGER_POOL_MATCH_DROP = 0.5    # 相手プールの構築単位の一致率が基準線の この倍率 を割ったら
-BUILD_TRIGGER_MIN_REAL_BATTLES = 30    # 実戦の勝率を引き金に使う最小の試合数
+BUILD_TRIGGER_REAL_GAP = 0.2           # 登録チームの実戦勝率 (同じ 6 体、直近 BUILD_TRIGGER_REAL_DAYS 日) − シムの参照の勝率 が、基準線の差より これ以上 悪化したら
+                                       # (判断 #8: 30 戦どうしの差の標準誤差は約 0.13。0.15 だと変化が無くても約 12% で発火、0.2 なら約 6%)
+BUILD_TRIGGER_REAL_DAYS = 30           # 実戦の勝率の移動平均の窓 (日)
+BUILD_TRIGGER_POOL_MATCH_DROP = 0.5    # 相手プールの構築単位の一致率が基準線の この倍率 を割ったら (記録に残す値)
+BUILD_TRIGGER_POOL_MATCH_FIRE = False  # 一致率で引き金を引くか。判断 #8: プールの seed だけで 0.08〜0.18 に動くので、後から来た対戦だけで測れて
+                                       # 整合した実戦が 100 戦を超えるまでは記録だけ
+BUILD_TRIGGER_MIN_REAL_BATTLES = 30    # 実戦の勝率を引き金に使う最小の試合数 (基準線・現在の両方に要る)
 # 遵守モデルの基準遵守率 (P(follow) は助言の 1 位と 2 位の差で変調する)
 # BUILD_USER_MODELS (遵守モデル) は 2026-10-05 に廃止: 操縦はアドバイザーが行う。実戦の遵守率・時間内率は real_eval が記録だけ残す
 BUILD_SCHEMA_VERSION = "1"
@@ -442,8 +448,9 @@ BUILD_LLM_EFFORT = {"s04_concepts": None, "s13_report": None, "interventions": N
 # - 1 呼び出しの費用上限 (USD、CLI --max-budget-usd)。再試行の暴走に対する保険。通常の S4 呼び出しは $1 前後 (Opus 5 実測)
 BUILD_LLM_MAX_BUDGET_USD = 5.0
 # 記事バンクの前段 (tools/team_build/articles_ingest): シーズン → その季節の規制 (合法性の検証に使う)。確かな対応だけ載せる
-# (M-5 = M-B 続行 (docs/REGULATION_CHANGE_RUNBOOK.md)、M-6 = 2026-09-11 の M-C 切替)。載っていない季節は unknown
-BUILD_ARTICLE_SEASON_REGULATION = {"M-5": "gen9championsbssregmb", "M-6": "gen9championsbssregmc"}
+BUILD_ARTICLE_SEASON_REGULATION = {"M-1": "gen9championsbssregma", "M-2": "gen9championsbssregmb", "M-3": "gen9championsbssregmb",
+                                   "M-4": "gen9championsbssregmb", "M-5": "gen9championsbssregmb", "M-6": "gen9championsbssregmc"}
+                                   # 2026-10-05 判断 #9: M-1 = M-A (題名の表記 4 件)、M-2〜M-5 = M-B (M-5 は手順書)、M-6 = M-C (9/9 から)。MCS だけの行は unknown
 BUILD_ARTICLE_DOUBLE_WORDS = ("ダブル", "double", "vgc")   # 記事の題名にあればダブルの記事 (記事バンクから除く)
 # - CLI に載せるツール。空 = ツール定義を system prompt に載せない (9/24 実測: 12.8k トークン。不許可リスト方式は 24.7k)
 BUILD_LLM_CLI_TOOLS = ""
@@ -683,6 +690,7 @@ BUILD_TRIO_MIX_BONUS = 0.03            # 3 体選出に攻撃役と補助・受�
 BUILD_CALIBRATION_SLOTS = 4            # 較正の標本 (2026-10-05 判断 #10): S5 が生成して保持しなかった並びから層化抽出でこの数を S8a だけ測る
                                        # (昇格・修理には使わない。上位だけを測る選択バイアスを避ける)。0 で無効
 BUILD_CALIBRATION_STRATA = 4           # 層化の層数 (代理の点の分位)
+BUILD_CALIBRATION_VARIANTS = ("cheap",)  # 較正の標本は軽い適応の腕だけ測る (較正に使うのはその Δ だけ。3 変種なら +1.5 時間、1 変種なら +0.7 時間。判断 #4)
 # 代理評価の採否の検定 (計画書 §3.1 / §3.2。experiments/learned_surrogate の層化と帰無分布、2026-10-05):
 BUILD_SURROGATE_MIN_GAIN = 0.2         # 学習の代理を探索の主項にする条件: 探索の並びでの run 内順位相関の中央値が被覆より これ以上 高い
 BUILD_NULL_ALPHA = 0.05                # 並べ替え検定の有意水準 (「帰無分布の 95 点を超える」= 片側 p < 0.05)
@@ -698,7 +706,7 @@ BUILD_PLAN_EXPLORE_SHARE = 0.5         # (on のとき) cheap adaptation の収�
 BUILD_ROLE_SUPPORT_BULK_MIN = 7000     # 受け・設置除去・吹き飛ばし・技だけの始動役の適性: 種族値の HP × 防御 か HP × 特防 がこれ以上
                                        # (リザードン 78×85=6630 は外れ、エンブオー 110×65=7150 は攻撃種族値の上限で外れる)
 BUILD_WALL_FAST_BULK_MIN = 9000        # 素早さ種族値が BUILD_WALL_SPEED_MAX を超えても、耐久 (HP × 防御 か HP × 特防) がこれ以上なら壁の候補にする
-BUILD_ITEM_FALLBACK = ("leftovers", "lifeorb", "sitrusberry", "lumberry", "focussash", "expertbelt", "rockyhelmet", "chestoberry")
+BUILD_ITEM_FALLBACK = ("leftovers", "lifeorb", "sitrusberry", "lumberry", "focussash", "expertbelt", "rockyhelmet")   # カゴのみは ねむる の型だけ (常識規則)
                                        # 雛形のクラスの持ち物が並びで全部使用済みのときの予備 (持ち物なしの型を作らない。それも尽きれば候補なし)
 # テンプレート: attacks = 攻撃技の本数、utility = 補助技の役割 (順に埋める。埋まらなければそのテンプレートは捨てる)
 BUILD_GEN_TEMPLATES = (
@@ -775,7 +783,8 @@ BUILD_MEGA_FREE_STONES = 2
 # する構築」)。2 個目の石を許すならここを増やす。現行チーム枝と参照 (登録の型) には適用しない
 BUILD_ACE_MAX_MEGA_STONES = 1
 BUILD_THEME_ACE_PICK_MIN = 0.5         # テーマの検査 (tools/team_build/theme_check): 指定エースの測定での選出率がこれ未満の並びは「テーマを満たさない」
-BUILD_THEME_GATE = False               # True なら S10 の勝者からテーマを満たさない並びを外す (全部外れるなら順位のまま印だけ)。
+BUILD_THEME_GATE = False               # True なら S10 で、テーマを満たす並びが最良の並びと同等 (Δ の差 ≤ BUILD_EQUIV_EPS) のときだけ勝者を入れ替える
+                                       # (判断 #3: 単純に外すと 1002d・1003 とも現行より勝率の低い並びが勝者になる。閾値 0.5 は据え置き、門は off)。
                                        # 2026-10-05: まず 1 run 記録してから on にする (判断 #4)
 # 1 試合 1 回の資源 (メガシンカ) の推定 (advisor/gimmick.py。2026-09-11 ユーザー指摘「相手がメガ先を読まないのは致命的」):
 # 相手の種族ごとの「メガ石を持つ確率」は使用率 DB の石の使用率。石を持てるが使用率が無い種の既定値と、無視する下限

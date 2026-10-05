@@ -45,8 +45,25 @@ def racing_summary(doc: dict) -> dict:
             "elapsed_s": doc.get("elapsed_s")}
 
 
+STAGE_TOKEN = re.compile(r"^(S\d+[a-z]?(?:-\d+)?|\[holdout\]|\[stress\]|\[ablation\]|最終候補|再現性の門|registry)")
+
+
+def stage_of(msg: str) -> Optional[str]:
+    """ログ行の先頭から段の名前 (S8a / S9 / [holdout] …)。段の行でなければ None (racing や適応の進捗行は直前の段に属する)"""
+    m = STAGE_TOKEN.match(msg or "")
+    if not m:
+        return None
+    tok = m.group(1)
+    if tok.startswith("S9"):
+        return "S9 repair"
+    return {"[holdout]": "S12 holdout", "[stress]": "STRESS", "[ablation]": "ablation", "最終候補": "S10", "再現性の門": "S10",
+            "registry": "S13"}.get(tok, tok)
+
+
 def stage_durations(run_log: Path) -> dict:
-    """run.log のタイムスタンプから段ごとの所要 (秒)"""
+    """run.log のタイムスタンプから段ごとの所要 (秒、時刻順)。段の行 (S8a … / [holdout] …) で段が切り替わり、途中の進捗行
+    (racing / adapt の行) は直前の段に数える。日付をまたぐ run は 24 時間を足す。
+    2026-10-05: 以前は行間の長い順の 12 件で、段ごとの所要になっていなかった (TEAM_BUILD_PENDING_1005 §4-8)"""
     if not run_log.exists():
         return {}
     marks = []
@@ -56,14 +73,26 @@ def stage_durations(run_log: Path) -> dict:
             continue
         t = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
         marks.append((t, m.group(4)))
-    out = {}
-    for i in range(1, len(marks)):
-        dt = marks[i][0] - marks[i - 1][0]
-        if dt < 0:
-            dt += 86400
-        key = marks[i][1][:28]
-        out[key] = out.get(key, 0) + dt
-    return dict(sorted(out.items(), key=lambda kv: -kv[1])[:12])
+    return durations_from_marks(marks)
+
+
+def durations_from_marks(marks: list) -> dict:
+    """[(秒, メッセージ)] → {段: 秒} (純粋)。段が決まる前の行は "S0-6" に数える"""
+    out: dict = {}
+    cur = "S0-6"
+    prev_t: Optional[int] = None
+    for t, msg in marks:
+        if prev_t is not None:
+            dt = t - prev_t
+            if dt < 0:
+                dt += 86400
+            out[cur] = out.get(cur, 0) + dt
+        st = stage_of(msg)
+        if st:
+            cur = st
+        prev_t = t
+    out["total"] = sum(v for k, v in out.items() if k != "total")
+    return out
 
 
 def _ranks(values: list) -> list:

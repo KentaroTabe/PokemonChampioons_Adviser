@@ -507,7 +507,7 @@ def generate_role_sets(species_id: str, role: str, ctx: RoleContext) -> list:
     from tools.team_build.interaction import _points_to_ev, view_from_set
     from tools.team_build.learnsets import learnset_of
     from tools.team_build.sets import legal_item, set_sanity
-    from tools.team_build.set_lint import fill_to_four, gate_rejects, lint_candidate
+    from tools.team_build.set_lint import CONSUMABLE_ITEMS, fill_to_four, gate_rejects, lint_candidate
 
     dex = get_dex()
     sp = dex.species(species_id)
@@ -687,6 +687,7 @@ def generate_role_sets(species_id: str, role: str, ctx: RoleContext) -> list:
     stab_types = [t for t in types]
 
     def build(item: Optional[str], setup_choice: Optional[str]) -> Optional[SetCandidate]:
+        choice_item = bool(item and item.startswith("choice"))      # こだわり型は変化技を持たない (常識規則。補助枠は攻撃技で埋める)
         taken: list = list(req)                      # 技の指定は先に入れる (雛形の補助枠を兼ねるものはその枠に数える)
         req_unused = list(req)
         notes = [f"role:{role}", f"template:{tname}", f"targets:{len(targets)}", f"spread:{spread_name}:{bulk}",
@@ -717,6 +718,10 @@ def generate_role_sets(species_id: str, role: str, ctx: RoleContext) -> list:
                     notes.append(f"utility:{alt}:{m}")
                 continue
             m = pick_utility(kind, learnset, taken, prefs, role_field)
+            if m is not None and choice_item and cat_of_move(m) == "status":
+                if "|" in kind or kind in ("setup",):
+                    continue                         # 任意の補助枠: こだわり型では入れない (攻撃技で埋まる)
+                return None                          # 必須の補助枠 (変化技) とこだわりは両立しない → 次の持ち物
             if m is None:
                 if "|" in kind or kind in ("setup",):
                     continue
@@ -727,6 +732,8 @@ def generate_role_sets(species_id: str, role: str, ctx: RoleContext) -> list:
         pool = [m for m in cand_moves if m not in taken]
         if item and item.startswith("choice"):
             pool += [m for m in choice_extra if m not in taken]
+        if item and item not in CONSUMABLE_ITEMS and not item.endswith(("berry", "gem")):
+            pool = [m for m in pool if m != "acrobatics"]            # アクロバットは消費する持ち物 (か持ち物なし) のときだけ (常識規則)
         if boosted and ability != "contrary":
             pool = [m for m in pool if not drops_boosted_stat(attack_pool[m]["entry"], boosted)]
         if ability == "contrary":

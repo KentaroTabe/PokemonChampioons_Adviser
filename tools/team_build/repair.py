@@ -24,6 +24,7 @@ from typing import Callable, Optional
 import numpy as np
 
 from champions_agent.config import (BUILD_CONSUMABLE_ITEMS, BUILD_MAX_CHANGES, BUILD_REPAIR_ANSWER_MIN, BUILD_REPAIR_ARMS,
+                                    BUILD_REPAIR_MIN_CHANGES,
                                     BUILD_REPAIR_DISTINCT_IN, BUILD_REPAIR_FAMILY_BOOST, BUILD_REPAIR_ITEM_UNUSED_RATE,
                                     BUILD_REPAIR_KO_MIN_N, BUILD_REPAIR_LOSS_RATE_MIN, BUILD_REPAIR_MIN_GAIN, BUILD_REPAIR_MIN_N,
                                     BUILD_REPAIR_MIN_N_SHARE, BUILD_REPAIR_UNUSED_RATE)
@@ -133,9 +134,12 @@ def boosted_weights(fam_w: np.ndarray, families: list, sets: list, must_cover: l
 def repair_variants(search: LineupSearch, parent: LineupResult, diag: dict, cfg: SearchConfig, species_pool: list,
                     roles_of: Callable, required: list, fixed: set, parent_id: str, round_no: int,
                     max_changes: int = BUILD_MAX_CHANGES, max_arms: int = BUILD_REPAIR_ARMS,
-                    boost: float = BUILD_REPAIR_FAMILY_BOOST, min_gain: float = BUILD_REPAIR_MIN_GAIN) -> list:
+                    boost: float = BUILD_REPAIR_FAMILY_BOOST, min_gain: float = BUILD_REPAIR_MIN_GAIN,
+                    min_changes: int = BUILD_REPAIR_MIN_CHANGES) -> list:
     """親の並び → 変種 [LineupResult] (型だけの変種 B を先に、個体の入替 A を次に。親より点が上がるものだけ、点の降順で
     max_arms まで)。fixed = 入替えない個体 (エース・核・固定枠)。評価は負けに効いた系統の重みを上げたもの (boosted_weights)。
+    min_changes: 入替 (A) は親との違いがこの枠数以上のものだけ作る (2026-10-05 判断 #6: 1 枠の変種 ±0.04 は測っても分からない。
+    型だけの変種 B は役割・型の変更として可)。
     変種の origin = {"kind": "repair", "parent", "round", "variant": "B"|"A", "changes": [...], "diagnosis": 要約}"""
     combo = [search.lib.by_key[e.key] for e in parent.entries]
     species = list(diag.get("threat_species") or []) + [k["by"] for k in (diag.get("ko") or []) if k.get("by")]
@@ -201,7 +205,7 @@ def repair_variants(search: LineupSearch, parent: LineupResult, diag: dict, cfg:
             repl = sorted(cand_out, key=lambda s: len(parent.assignments.get(s, [])))[:max_changes]
         repl = repl[:max(1, max_changes)]
         stone_holder = next((e.species_id for e in parent.entries if e.stone), None)
-        for out_sid in repl:
+        for out_sid in (repl if min_changes <= 1 else []):        # 1 枠の入替は min_changes ≥ 2 なら作らない
             k = next(i for i, e in enumerate(parent.entries) if e.species_id == out_sid)
             rest = combo[:k] + combo[k + 1:]
             sc0, _ = search.score_of(rest, required, cfg)
@@ -239,6 +243,9 @@ def repair_variants(search: LineupSearch, parent: LineupResult, diag: dict, cfg:
                     found.append(item)
     finally:
         search.fam_w = old_w
+    eligible = lambda it: it[2] != "A" or len(it[3]) >= max(1, int(min_changes))      # noqa: E731
+    found = [it for it in found if eligible(it)]
+    tried = [it for it in tried if eligible(it)]
     forced = False
     if not found and tried:
         found = [max(tried, key=lambda x: x[0])]
