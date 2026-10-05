@@ -79,6 +79,15 @@ def test_env_validity():
     cmp = EV.compare_families({"F1": {"n": 5, "win_rate": 0.8}, "F2": {"n": 3, "win_rate": 0.0}, "F3": {"n": 3, "win_rate": 0.5}},
                               {"F1": {"n": 50, "win_rate": 0.7}, "F2": {"n": 50, "win_rate": 0.3}, "F3": {"n": 50, "win_rate": 0.5}, "F4": {"n": 9, "win_rate": 0.9}})
     assert cmp["n_common"] == 3 and cmp["spearman"] == 1.0
+    # 同じ並びの実戦: 自分の 6 体がそろって一致し、勝敗が残っている対戦だけ (10/5: 自分の種が 1 体しか読めていない対戦を
+    # 部分集合として数えていて、16 戦を 17 戦と数えていた)
+    ref = ["l", "m", "n", "o", "p", "q"]
+    bs = [{"our_species": ref, "won": True}, {"our_species": list(reversed(ref)), "won": False},
+          {"our_species": ["l"], "won": False}, {"our_species": ["l", "m", "n", "o", "p", "zz"], "won": True},
+          {"our_species": ref, "won": None}, {"our_species": [], "won": True}]
+    same = EV.same_team_battles(bs, set(ref))
+    assert [b["won"] for b in same] == [True, False]
+    assert EV.same_team_battles(bs, {"l"}) == [] and EV.same_team_battles(bs, set()) == [] and EV.same_team_battles([], set(ref)) == []
     print("test_env_validity OK")
 
 
