@@ -39,6 +39,13 @@ def test_theme_check():
     assert T.apply_gate(["B", "A", "C"], run["teams"], gate=True) == (["A", "C"], ["B"])
     run2 = T.check_run(theme, {"B": row2}, {"B": recs}, 0.5)
     assert run2["none_pass"] and T.apply_gate(["B"], run2["teams"], True) == (["B"], [])
+    # Δ を渡すと「同等のときだけ入れ替える」(判断 #3): 1 位が満たさず、満たす最上位の Δ が 1 位 − eps 以上なら入替、そうでなければそのまま
+    teams = {"X": {"pass": False}, "Y": {"pass": True}, "Z": {"pass": True}}
+    assert T.apply_gate(["X", "Y", "Z"], teams, True, deltas={"X": 0.10, "Y": 0.085, "Z": 0.0}, eps=0.02) == (["Y", "X", "Z"], ["X"])
+    assert T.apply_gate(["X", "Y", "Z"], teams, True, deltas={"X": 0.10, "Y": 0.07, "Z": 0.0}, eps=0.02) == (["X", "Y", "Z"], [])
+    assert T.apply_gate(["Y", "X"], teams, True, deltas={"X": 0.10, "Y": 0.2}, eps=0.02) == (["Y", "X"], [])      # 1 位が満たすなら何もしない
+    assert T.apply_gate(["X"], {"X": {"pass": False}}, True, deltas={"X": 0.1}) == (["X"], [])                        # 満たす並びが無い
+    assert T.apply_gate(["X", "Y"], teams, False, deltas={"X": 0.1, "Y": 0.1}) == (["X", "Y"], [])
     assert "満たす 1" in T.format_line(run)
     print("test_theme_check OK")
 
@@ -48,14 +55,20 @@ def test_triggers():
     cur = dict(base)
     r = G.evaluate(cur, base)
     assert not r["fire"] and r["checks"]["real_gap"]["gap"] == -0.2 and not r["checks"]["pool_match"]["fire"]
-    # 実戦の差が基準線より 0.15 以上悪化 → 引き金。試合数が足りなければ引き金にしない
-    r = G.evaluate(dict(base, real_win_rate=0.28), base)
+    # 実戦の差が基準線より 0.2 (判断 #8) 以上悪化 → 引き金。試合数が足りなければ (現在・基準線のどちらでも) 引き金にしない
+    r = G.evaluate(dict(base, real_win_rate=0.24), base)
     assert r["fire"] and r["checks"]["real_gap"]["fire"] and "悪化" in r["reasons"][0]
-    r = G.evaluate(dict(base, real_win_rate=0.28, real_n=10), base)
+    assert not G.evaluate(dict(base, real_win_rate=0.28), base)["fire"]                       # 0.17 の悪化では引かない
+    r = G.evaluate(dict(base, real_win_rate=0.24, real_n=10), base)
     assert not r["fire"] and r["checks"]["real_gap"]["note"] == "few_battles"
-    # 一致率が基準線の半分を割る → 引き金。基準線が無ければ記録だけ
+    r = G.evaluate(dict(base, real_win_rate=0.24), dict(base, real_n=10))
+    assert not r["fire"] and r["checks"]["real_gap"]["note"] == "baseline_few_battles"
+    # 一致率は記録だけ (BUILD_TRIGGER_POOL_MATCH_FIRE = False): 床を割っても引かない。pool_fire=True なら引く
     r = G.evaluate(dict(base, pool_match_share=0.14), base)
-    assert r["fire"] and r["checks"]["pool_match"]["floor"] == 0.15
+    assert not r["fire"] and r["checks"]["pool_match"]["below_floor"] and r["checks"]["pool_match"]["note"] == "record_only"
+    assert r["checks"]["pool_match"]["floor"] == 0.15
+    r = G.evaluate(dict(base, pool_match_share=0.14), base, pool_fire=True)
+    assert r["fire"] and r["checks"]["pool_match"]["fire"]
     r = G.evaluate(dict(base, pool_match_share=0.05), None)
     assert not r["fire"] and r["checks"]["pool_match"]["note"] == "no_baseline" and r["checks"]["real_gap"]["note"] == "no_baseline"
     # 季節 (規制) の切替

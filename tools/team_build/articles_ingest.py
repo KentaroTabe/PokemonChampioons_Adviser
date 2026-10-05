@@ -67,6 +67,12 @@ def split_urls(s: str) -> list:
     return out
 
 
+def split_titles(title: str) -> list:
+    """1 行に複数の記事がある題名 ("A / B"、"A<br>B") を記事ごとに分ける (順序保持)。URL の数と合えば URL ごとの形式の判定に使う"""
+    parts = [t.strip() for t in re.split(r"<br\s*/?>|\s/\s", title or "") if t.strip()]
+    return parts
+
+
 def classify_format(title: str, words=BUILD_ARTICLE_DOUBLE_WORDS) -> str:
     """題名から形式: ダブルの語があれば double、題名が無ければ unknown、それ以外 single"""
     t = (title or "").lower()
@@ -121,14 +127,18 @@ def build_manifest(rows: list, include_unconfirmed: bool = False) -> dict:
         if urls:
             n_rows_with_url += 1
         seasons = seasons_of(r["season"])
-        for u in urls:
+        titles = split_titles(r["title"])
+        per_url = len(titles) == len(urls) and len(urls) > 1      # 1 行に複数の記事: 題名が URL と同じ数なら記事ごとに形式を判定
+        for i, u in enumerate(urls):
             if u in seen:
                 continue
             seen.add(u)
+            title = titles[i] if per_url else r["title"]
+            fmt = classify_format(title)
             entries.append({"url": u, "host": urlparse(u).netloc, "author": r["author"], "platform": r["platform"],
-                            "confidence": r["confidence"], "title": r["title"], "format": classify_format(r["title"]),
+                            "confidence": r["confidence"], "title": title, "format": fmt,
                             "seasons": seasons, "regulation": regulation_of(seasons), "rank": rank_of(r["evidence"]),
-                            "note": r["note"], "robots": "unchecked", "selected": classify_format(r["title"]) != "double"})
+                            "note": r["note"], "robots": "unchecked", "selected": fmt != "double"})
     fmt = Counter(e["format"] for e in entries)
     by_season: Counter = Counter()
     for e in entries:

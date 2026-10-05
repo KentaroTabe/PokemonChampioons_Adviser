@@ -831,8 +831,19 @@ def stage_s5_joint(run_dir: Path, spec, fams: list, feats: dict, tv: dict, threa
         log(f"S5 calibration sample: 保持しなかった {len(unretained)} 並びから層化抽出 {len(calib)} 並び (点 "
             + ", ".join(f"{l.score:.3f}" for l in calib) + ")")
     status = {tuple(l.members): ("calibration" if l.tag == "calibration" else "kept") for l in chosen}
+    # 種の集中の記録 (2026-10-05: 上限 50% を掛けても煙試験でカイリュー 92%。足りなければ外した並びを戻す規則と、保持しなかった並びも
+    # 同じ種を含むことが原因。判断 #22 で据え置き・記録だけ)
+    retained = [l for l in chosen if l.tag != "calibration"]
+    cnt: dict = {}
+    for l in retained:
+        for m in l.members:
+            cnt[m] = cnt.get(m, 0) + 1
+    share_top = {m: round(n / len(retained), 3) for m, n in sorted(cnt.items(), key=lambda kv: -kv[1])[:6]} if retained else {}
+    log(f"S5 species share (上限 {BUILD_SPECIES_SHARE_MAX:.0%} の記録、保持 {len(retained)} 並び): "
+        + ", ".join(f"{m}={v:.0%}" for m, v in share_top.items()))
     (run_dir / "s05_generated.json").write_text(json.dumps(
         {"n_generated": len(results), "n_unique": len(lineups), "n_kept": len(kept), "n_calibration": len(calib),
+         "species_share_top": share_top, "species_share_max": BUILD_SPECIES_SHARE_MAX,
          "lineups": [{"members": list(l.members), "concept": l.concept, "score": round(float(l.score), 4),
                       "status": status.get(tuple(l.members), "unretained")} for l in sorted(lineups, key=lambda l: -l.score)]},
         ensure_ascii=False, indent=1) + "\n", encoding="utf-8")

@@ -26,6 +26,10 @@ MOVES = {
     "voltswitch": {"type": "Electric", "category": "special", "power": 70},
     "fakeout": {"type": "Normal", "category": "physical", "power": 40},
     "rapidspin": {"type": "Normal", "category": "physical", "power": 50},
+    "dragontail": {"type": "Dragon", "category": "physical", "power": 60},
+    "circlethrow": {"type": "Fighting", "category": "physical", "power": 60},
+    "nuzzle": {"type": "Electric", "category": "physical", "power": 20},
+    "ironhead": {"type": "Steel", "category": "physical", "power": 80},
     "acrobatics": {"type": "Flying", "category": "physical", "power": 55},
     "weatherball": {"type": "Normal", "category": "special", "power": 50},
     "terrainpulse": {"type": "Normal", "category": "special", "power": 50},
@@ -76,6 +80,10 @@ def test_nature_move_rule():
     assert "nature_move" in lint("charizard", "blaze", "lifeorb", "adamant", ["earthquake", "closecombat", "flamethrower", "protect"])["errors"]
     assert lint("charizard", "blaze", "lifeorb", "adamant", ["earthquake", "closecombat", "voltswitch", "fakeout"])["errors"] == []
     assert lint("charizard", "blaze", "lifeorb", "jolly", ["earthquake", "closecombat", "rapidspin", "protect"])["errors"] == []
+    # 効果が目的の技 (ドラゴンテール / ともえなげ / ほっぺすりすり) は除く (10/5 の定義の漏れ: 登録チームのずぶとい + ドラゴンテール)
+    assert lint("corviknight", "pressure", "leftovers", "bold", ["dragontail", "bodypress", "roost", "protect"])["errors"] == []
+    assert lint("corviknight", "pressure", "leftovers", "bold", ["circlethrow", "nuzzle", "roost", "protect"])["errors"] == []
+    assert "nature_move" in lint("corviknight", "pressure", "leftovers", "bold", ["ironhead", "bodypress", "roost", "protect"])["errors"]
     # 無補正や防御側を下げる性格は対象外
     assert lint("charizard", "blaze", "lifeorb", "naive", ["earthquake", "flamethrower", "protect", "toxic"])["errors"] == []
     assert lint("charizard", "blaze", "lifeorb", None, ["earthquake", "flamethrower", "protect", "toxic"])["errors"] == []
@@ -166,9 +174,16 @@ def test_rows_report_and_gate():
     class C:
         species_id, ability, item, nature, moves = "torkoal", "drought", "heatrock", "quiet", ["flamethrower", "sunnyday", "earthquake", "protect"]
     L.LINT_REJECTS.clear()
+    L.LINT_REJECT_SPECIES.clear()
     assert L.gate_rejects(C(), info=INFO, source="t") is not None and L.rejects_snapshot() == {"t:field_dup": 1}
+    assert L.rejects_species_top() == {"field_dup": {"torkoal": 1}}
     assert L.gate_rejects(C(), info=INFO, source="t", gate=False) is None and L.rejects_snapshot(reset=True) == {"t:field_dup": 2}
-    assert L.rejects_snapshot() == {}
+    assert L.rejects_snapshot() == {} and L.rejects_species_top() == {}
+    C.item = "chestoberry"
+    C.moves = ["flamethrower", "earthquake", "protect", "toxic"]
+    assert L.gate_rejects(C(), info=INFO, source="t") is not None and L.rejects_species_top() == {"item:chesto_no_rest": {"torkoal": 1}}
+    L.rejects_snapshot(reset=True)
+    C.item = "heatrock"
     C.moves = ["flamethrower", "earthquake", "protect", "toxic"]
     assert L.gate_rejects(C(), info=INFO) is None
     print("test_rows_report_and_gate OK")

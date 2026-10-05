@@ -219,11 +219,31 @@ def base_set(conn, snapshot_id: int, species_id: str, custom: Optional["SetCandi
     """その種の基本の型: 指定の型 (custom) → 代表型 → 生成型 (generated: learnset から作った型、代表型が無い種の補完) の順。
     必須技 (required) があれば差し込む"""
     rep = custom if custom is not None else representative_set(conn, snapshot_id, species_id)
+    if rep is not None and custom is None and not lint_gate([rep]):
+        # 代表型が常識規則の誤り (合成の代表型は持ち物と技を独立に選ぶのでカゴのみ + ねむる無し等が出る) → 門を通る代替か生成型
+        alts = enumerate_sets(conn, snapshot_id, species_id, required=required, category_of=category_of, setup_moves=setup_moves,
+                              generated=generated)
+        rep = alts[0] if alts else None
+        if rep is not None:
+            return rep
     if rep is None and generated:
-        rep = generated[0]
+        gen_ok = lint_gate(list(generated))
+        rep = gen_ok[0] if gen_ok else None
     if rep is None:
         return None
     return apply_required_moves(rep, required, category_of, setup_moves) if required else rep
+
+
+def lint_gate(cands: list, source: str = "legacy") -> list:
+    """常識規則の最終検査 (set_lint、2026-10-05): 誤りの型を落とす。指定の型 (source custom) は落とさない。
+    従来方式 (S5 → S6) の型は代表型と単独入替の代替から作るので、同時探索と同じ門を通す (実験 11 で方式を比べるときの条件を揃える)"""
+    from tools.team_build.set_lint import gate_rejects
+    out = []
+    for c in cands:
+        src = str(getattr(c, "source", "") or "")
+        if src == "custom" or not gate_rejects(c, source=f"{source}:{src.split(':')[0] or 'unknown'}"):
+            out.append(c)
+    return out
 
 
 def finalize_candidates(cands: list, required=None, category_of=None, setup_moves=()) -> list:
@@ -251,7 +271,7 @@ def enumerate_sets(conn, snapshot_id: int, species_id: str, min_pct: float = ALT
         return finalize_candidates([custom], required, category_of, setup_moves)
     rep = representative_set(conn, snapshot_id, species_id)
     if rep is None:
-        return finalize_candidates(list(generated or []), required, category_of, setup_moves)
+        return lint_gate(finalize_candidates(list(generated or []), required, category_of, setup_moves))
     if required:
         category_of = category_of or default_category_of()
         setup_moves = setup_moves or default_setup_moves()
@@ -321,7 +341,7 @@ def enumerate_sets(conn, snapshot_id: int, species_id: str, min_pct: float = ALT
             if c.key() not in seen:
                 seen.add(c.key())
                 out.append(c)
-    return finalize_candidates(out, required, category_of, setup_moves)
+    return lint_gate(finalize_candidates(out, required, category_of, setup_moves))
 
 
 def _mega_stones() -> set:
