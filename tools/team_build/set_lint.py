@@ -350,6 +350,7 @@ def repair_set(species_id: str, ability: Optional[str], item: Optional[str], nat
         return None
     it, nat, mv = item, nature, [m for m in moves if m]
     repairs: list = []
+    removed: list = []          # 誤りの原因として外した技。補充で入れ直さない (下の few_moves)
     if "nature_move" in res["errors"]:
         new = nature_repair(nat, mv, info.move)
         if new:
@@ -358,12 +359,14 @@ def repair_set(species_id: str, ability: Optional[str], item: Optional[str], nat
     if "field_dup" in res["errors"]:
         dup = set(res["detail"]["field_dup"]["moves"])
         mv = [m for m in mv if m not in dup]
+        removed += sorted(dup)
         repairs.append("field_dup")
     if "item" in res["errors"]:
         problems = res["detail"]["item"]["problems"]
         if is_mega_stone(it):
             if problems == ["acrobatics"]:
                 mv = [m for m in mv if m != "acrobatics"]           # 石は保持して技の側を直す (後で補充)
+                removed.append("acrobatics")
                 repairs.append("item:acrobatics->move")
             else:
                 LINT_REPAIR_BLOCKED["mega_stone:" + "+".join(problems)] += 1
@@ -374,9 +377,11 @@ def repair_set(species_id: str, ability: Optional[str], item: Optional[str], nat
             if cand:
                 it, repairs = cand, repairs + ["item:" + "+".join(problems)]
     if len(set(mv)) < 4 and not few_moves_exempt(species_id, info):
-        util = [m for m in usage_moves if m not in mv]
+        # 外した技は補充の候補にしない。使用率の一覧には代表型の技がそのまま入っているので、除かないと外した技が先頭で戻る
+        # (2026-10-05: ルチャブルナイト + アクロバット の代表型で、外したアクロバットを入れ直して「直せない」になっていた)
+        util = [m for m in usage_moves if m not in mv and m not in removed]
         mv = fill_to_four(mv, [], util, set(learnset or ()) | set(usage_moves) | set(mv), item=it, ability=ability,
-                          move_of=info.move)
+                          exclude=removed, move_of=info.move)
         repairs.append("few_moves")
     left = lint_set(species_id, ability, it, nat, mv, info=info)["errors"]
     if left:

@@ -219,7 +219,10 @@ def base_set(conn, snapshot_id: int, species_id: str, custom: Optional["SetCandi
     """その種の基本の型: 指定の型 (custom) → 代表型 → 生成型 (generated: learnset から作った型、代表型が無い種の補完) の順。
     必須技 (required) があれば差し込む"""
     rep = custom if custom is not None else representative_set(conn, snapshot_id, species_id)
-    if rep is not None and custom is None and not lint_gate([rep]):
+    # 門には使用率の技を渡す (技の側の修理の補充に要る。渡さないとメガ石 + アクロバットの代表型が直せず、石を持たない代替に替わっていた:
+    # 2026-10-05 ルチャブル)。直せた場合もここで返すのは元の代表型のまま (直した型を基本の型にするかは未決: TEAM_BUILD_PENDING_1005 §11)
+    if rep is not None and custom is None and not lint_gate(
+            [rep], usage_moves=[m for m, _ in _rows(conn, "move_usage", "move_name", snapshot_id, species_id, 0.0)]):
         # 代表型が常識規則の誤り (合成の代表型は持ち物と技を独立に選ぶのでカゴのみ + ねむる無し等が出る) → 門を通る代替か生成型
         alts = enumerate_sets(conn, snapshot_id, species_id, required=required, category_of=category_of, setup_moves=setup_moves,
                               generated=generated)
