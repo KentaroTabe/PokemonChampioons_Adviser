@@ -466,6 +466,7 @@ BUILD_POOL_SOURCE = "latest"               # latest = 使用率からの合成 /
 BUILD_POOL_REAL_DAYS = 90                  # mixed: 実戦ログをこの日数以内に限る
 BUILD_POOL_REAL_MIN_N = 1                  # mixed: 構築 (6 体の組) をプールに入れる遭遇回数の下限
 BUILD_POOL_MATCH_THRESHOLD = 0.5           # 構築単位の一致率 (env_match): 実戦の相手がプールの構築と「同じ」とみなす重なり (Jaccard) の下限
+BUILD_POOL_MATCH_MIN_N = 20                # 一致率を目安として読む整合した実戦の最小数 (mixed で入れた対戦を除くと 4 戦しか残らない等。judgement は sufficient を見る)
 BUILD_POOL_TEAMMATE_MIX = 0.5              # 合成の 2 体目以降: (1 − mix) × 種の重み + mix × 選んだ種との共起
 BUILD_ARCHETYPE_TR_SPEED_SHARE = 0.3       # トリックルームのエース: 上位脅威への先手率がこれ以下
 BUILD_ARCHETYPE_FAST_SPEED_SHARE = 0.6     # 速攻役: 先手率がこれ以上 (タスキ / スカーフでも可)

@@ -52,6 +52,12 @@ def main() -> None:
     if real is None:
         ev = load_json(Path(__file__).resolve().parent.parent.parent.parent / "logs" / "build_search" / "experiments" / "env_validity.json") or {}
         real = ev.get("real_win_rate")
+    rows = []
+    for a in arms:
+        wr = (sum(a.outcomes) / len(a.outcomes)) if a.outcomes else None
+        rows.append({"arm": a.arm_id, "n": len(a.outcomes), "win_rate": round(wr, 4) if wr is not None else None,
+                     "gap_to_real": (round(wr - real, 4) if (wr is not None and real is not None) else None)})
+    rows.sort(key=lambda r: (abs(r["gap_to_real"]) if r["gap_to_real"] is not None else 9.0))
     result = {"run_id": args.run_id, "n": args.n, "tier": args.tier, "real_win_rate": real, "real_n": real_n, "rows": rows,
               "closest": rows[0]["arm"] if rows and rows[0]["gap_to_real"] is not None else None}
     p = write_result("opponent_pilot_validity", result)

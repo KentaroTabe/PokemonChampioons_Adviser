@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from champions_agent.config import BUILD_POOL_MATCH_THRESHOLD, BUILD_POOL_REAL_DAYS
+from champions_agent.config import BUILD_POOL_MATCH_MIN_N, BUILD_POOL_MATCH_THRESHOLD, BUILD_POOL_REAL_DAYS
 
 
 def match_rate(teams: dict, battles: list, threshold: float = BUILD_POOL_MATCH_THRESHOLD, exclude_files=()) -> dict:
@@ -34,7 +34,9 @@ def match_rate(teams: dict, battles: list, threshold: float = BUILD_POOL_MATCH_T
         best_hist[key] = best_hist.get(key, 0) + 1
     return {"n_real": len(battles or []), "n_consistent": len(cons), "n_matched": matched,
             "covered_share": (round(matched / len(cons), 3) if cons else None), "threshold": threshold,
-            "n_excluded_used_in_pool": len(cons_all) - len(cons), "overlap_hist": dict(sorted(best_hist.items()))}
+            "n_excluded_used_in_pool": len(cons_all) - len(cons), "overlap_hist": dict(sorted(best_hist.items())),
+            # 分母が小さいと値は目安にならない (2026-10-05: mixed で入れた対戦を除くと 4 戦 → 0.25)。sufficient が偽なら記録だけ
+            "sufficient": len(cons) >= BUILD_POOL_MATCH_MIN_N, "min_n": BUILD_POOL_MATCH_MIN_N}
 
 
 def real_record(battles: list, species: list) -> dict:

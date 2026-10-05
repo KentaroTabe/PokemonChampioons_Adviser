@@ -491,7 +491,7 @@ def make_candidates_fn(tv: dict, threat_weights: dict, snapshot_id: Optional[int
     from champions_agent.data import database as db
     from tools.team_build import gen_sets as G
     from tools.team_build.role_sets import RoleContext, generate_role_sets
-    from tools.team_build.set_lint import gate_rejects
+    from tools.team_build.set_lint import LINT_REJECTS, gate_rejects, lint_candidate, repair_candidate
     log = log or (lambda m: None)
     req_of = {sid: list(mv) for sid, mv in (required_moves or {}).items() if mv}
     cache: dict = {}
@@ -519,8 +519,17 @@ def make_candidates_fn(tv: dict, threat_weights: dict, snapshot_id: Optional[int
         rep = usage_of(sid)[3]
         if rep is None or S.set_sanity(rep) or not S.legal_item(rep.item):
             return None
-        if gate_rejects(rep, source="representative"):
-            return None                                  # 常識規則の誤り (持ち物なし等) の代表型は候補にしない
+        if lint_candidate(rep)["errors"]:
+            # 常識規則の誤り (持ち物なし等) の代表型は、直せるなら直して候補にし (使用率の技で補充)、直せなければ門の設定どおり落とす
+            move_pct = usage_of(sid)[1] or {}
+            fixed = repair_candidate(rep, usage_moves=sorted(move_pct, key=lambda m: -float(move_pct.get(m) or 0.0)),
+                                     legal_item=S.legal_item)
+            if fixed is None:
+                if gate_rejects(rep, source="representative"):
+                    return None
+            else:
+                LINT_REJECTS["representative:repaired"] += 1
+                rep = fixed
         if S.has_mega_stone(rep.item) and not mega_allowed:
             return None
         if req_of.get(sid) and not set(req_of[sid]) <= set(rep.moves or []):
