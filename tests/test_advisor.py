@@ -196,11 +196,10 @@ def test_evaluate_end_to_end():
     print(Advisor().format_advice(advice))
 
 
-def test_pivot_over_plain_switch():
-    """素の交代が最善のとき、無効化されない交代技が交代より上に来る"""
-    import copy
-    from advisor.engine import evaluate as _eval
-    state = {
+def _pivot_state():
+    """ハッサム (とんぼがえり / バレットパンチ) + ガブリアス vs リザードン (フレアドライブ判明): 相性最悪で素の交代が最善になる局面。
+    ハッサムは素早さ負けで、エンジンは「行動前に倒される見込み」と判定する"""
+    return {
         "field": {"weather": None, "terrain": None, "trick_room": False},
         "mega_used": {"player": False, "opponent": False},
         "player": {
@@ -210,7 +209,6 @@ def test_pivot_over_plain_switch():
             "screens": {"reflect": False, "light_screen": False,
                         "aurora_veil": False},
             "party": [
-                # ハッサム vs リザードン: 相性最悪で交代が最善になる状況
                 {"species_id": "scizor", "species_ja": "ハッサム",
                  "types": ["むし", "はがね"], "hp_percent": 100.0,
                  "hp_current": 145, "hp_max": 145, "status": None,
@@ -243,19 +241,95 @@ def test_pivot_over_plain_switch():
             ],
         },
     }
+
+
+def _dump(actions):
+    return [f"{a['kind']}:{a.get('id') or a['name']}={a['score']}" for a in actions]
+
+
+def test_pivot_over_plain_switch():
+    """交代技の複合価値: 素の交代が最善で、自分が先に動ける (倒される前に技が出る) なら、無効化されない交代技が交代より上に来る。
+    ここではハッサムに素早さ +2 を与えて先手にする"""
+    import copy
+    from advisor.engine import evaluate as _eval
+    state = _pivot_state()
+    state["player"]["party"][0]["boosts"] = {"spe": 2}
     advice = _eval(state)
     assert advice["ok"], advice
     actions = advice["actions"]
     idx = {a["id"]: i for i, a in enumerate(actions) if a.get("id")}
-    switch_idx = next(i for i, a in enumerate(actions)
-                      if a["kind"] == "switch")
-    # 交代が交代技より上に来ているなら、交代技の複合価値が働いていない
-    dump = [f"{a['kind']}:{a.get('id') or a['name']}={a['score']}"
-            for a in actions]
+    switch_idx = next(i for i, a in enumerate(actions) if a["kind"] == "switch")
+    dump = _dump(actions)
     assert idx["uturn"] < switch_idx, dump
     top = actions[idx["uturn"]]
     assert "交代するならまずこの技" in top["reason"], dump
+    assert "行動前に倒される見込み" not in top["reason"], dump
     print("test_pivot_over_plain_switch OK")
+
+
+def test_plain_switch_over_pivot_when_ko_first():
+    """行動前に倒される見込みなら、交代技の複合価値は働かず素の交代が上 (2026-10-05: 補正が割引を上書きし、先に倒される
+    とんぼがえり 53 点 > 交代 51 点 になっていた矛盾の修正)。交代技は自分の行動順にしか発動せず、素の交代は相手の攻撃より先に成立する"""
+    from advisor.engine import evaluate as _eval
+    advice = _eval(_pivot_state())
+    assert advice["ok"], advice
+    actions = advice["actions"]
+    idx = {a["id"]: i for i, a in enumerate(actions) if a.get("id")}
+    switch = next(a for a in actions if a["kind"] == "switch")
+    switch_idx = actions.index(switch)
+    dump = _dump(actions)
+    uturn = actions[idx["uturn"]]
+    assert "行動前に倒される見込み" in uturn["reason"], dump
+    assert switch_idx < idx["uturn"], dump
+    assert uturn["score"] < switch["score"], dump
+    assert "交代するならまずこの技" not in uturn["reason"], dump
+    assert "交代技は発動しない" in uturn["reason"], dump
+    # 先制技 (バレットパンチ) は先に動けるので割引されず、割引された交代技より上に残る
+    assert idx["bulletpunch"] < idx["uturn"], dump
+    print("test_plain_switch_over_pivot_when_ko_first OK")
+
+
+def test_pivot_bonus_consistent_with_priority_and_immunity():
+    """交代技の複合価値は既存の判定と整合する:
+    (a) 相手が KO 圏の先制技持ちなら、自分が素早さで勝っていても交代技 (優先度 0) は先に動けない → 上乗せしない、素の交代が上。
+        先制技 (バレットパンチ、同じ優先度で自分が速い) は先に動けるので割引されない
+    (b) 無効相性の交代技 (ボルトチェンジ → じめん) は交代自体が起きない → 上乗せしない"""
+    import copy
+    from advisor.engine import evaluate as _eval
+    from vision.normalize import NameResolver
+    res = NameResolver()
+    # (a) ハッサム HP 15%・素早さ +2 (先手) vs ドドゲザン (ふいうち判明)
+    s = _pivot_state()
+    s["player"]["party"][0].update({"hp_percent": 15.0, "hp_current": 22, "boosts": {"spe": 2}})
+    s["opponent"]["party"][0].update({"species_id": "kingambit", "species_ja": "ドドゲザン", "types": ["あく", "はがね"],
+                                      "revealed_moves": ["ふいうち"]})
+    adv = _eval(s, res)
+    assert adv["ok"] and "先制技持ち" in adv["speed_note"], adv["speed_note"]
+    actions = adv["actions"]
+    idx = {a["id"]: i for i, a in enumerate(actions) if a.get("id")}
+    switch_idx = next(i for i, a in enumerate(actions) if a["kind"] == "switch")
+    dump = _dump(actions)
+    assert switch_idx < idx["bulletpunch"] < idx["uturn"], dump
+    assert "交代技は発動しない" in actions[idx["uturn"]]["reason"], dump
+    assert "行動前に倒される見込み" not in actions[idx["bulletpunch"]]["reason"], dump
+    # (b) ウォッシュロトム (ボルトチェンジだけ) + アーマーガア vs ガブリアス
+    s2 = _pivot_state()
+    s2["player"]["party"][0] = {"species_id": "rotomwash", "species_ja": "ウォッシュロトム", "types": ["でんき", "みず"],
+                                "hp_percent": 100.0, "hp_current": 125, "hp_max": 125, "status": None, "boosts": {"spe": 2},
+                                "ability_id": None, "item_id": None,
+                                "moves": [{"name_ja": "ボルトチェンジ", "move_id": "voltswitch", "pp": 20, "max_pp": 20,
+                                           "effectiveness": "immune"}], "revealed_moves": []}
+    s2["player"]["party"][1] = {"species_id": "corviknight", "species_ja": "アーマーガア", "types": ["ひこう", "はがね"],
+                                "hp_percent": 100.0, "hp_current": 205, "hp_max": 205, "status": None, "boosts": {},
+                                "ability_id": None, "item_id": None, "moves": [], "revealed_moves": []}
+    s2["opponent"]["party"][0].update({"species_id": "garchomp", "species_ja": "ガブリアス", "types": ["ドラゴン", "じめん"],
+                                       "revealed_moves": ["じしん"]})
+    actions2 = _eval(s2, res)["actions"]
+    dump2 = _dump(actions2)
+    assert actions2[0]["kind"] == "switch", dump2
+    vs = next(a for a in actions2 if a.get("id") == "voltswitch")
+    assert vs["score"] <= 0 and "交代するならまずこの技" not in vs["reason"], dump2
+    print("test_pivot_bonus_consistent_with_priority_and_immunity OK")
 
 
 def _mini_state(my_mon, opp_mon):
@@ -801,6 +875,8 @@ if __name__ == "__main__":
     test_weather_and_screens()
     test_evaluate_end_to_end()
     test_pivot_over_plain_switch()
+    test_plain_switch_over_pivot_when_ko_first()
+    test_pivot_bonus_consistent_with_priority_and_immunity()
     test_priority_evaluation()
     test_psychic_terrain_priority()
     test_fainted_active_switch_only()
