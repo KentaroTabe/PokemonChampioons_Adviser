@@ -99,6 +99,7 @@ TESTS=(
   test_team_build_ace
   test_undefined_names
   test_rate_outcome_attribution
+  test_stale_notice
 )
 
 fail=0

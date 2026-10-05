@@ -28,6 +28,7 @@ from vision import ocr
 from vision.pipeline import VisionPipeline
 from vision.scenes import SCENE_SELECTION, SCENE_STANDBY
 from vision.end_notice import battle_end_notice, outcome_revision_notice
+from vision.stale_notice import advice_target, stale_advice_notice
 
 
 def should_advise_selection(state: dict) -> bool:
@@ -103,8 +104,8 @@ _last_scene = "unknown"
 # フレーム処理 (pipeline.process) と助言計算 (advisor.advise) の所要 ms を残す)
 _proc_ms: deque = deque(maxlen=200)
 _advise_ms: deque = deque(maxlen=50)
-# 直近の対戦助言が対象にした自分の場のポケモン (種族 id) と、交代後の無効化通知を出したか
-_last_advice_species = None
+# 直近の対戦助言の対象 (自分の場の枠と第一推奨。vision.stale_notice.advice_target) と、交代後の通知を出したか
+_last_advice_target = None
 _stale_notified = False
 BATTLE_SCENES_FOR_STALE = ("field", "battle_hud", "command", "move_select", "watch", "field_check")
 
@@ -117,11 +118,6 @@ def _pct(values, q: float) -> float:
     return xs[min(len(xs) - 1, int(round((len(xs) - 1) * q / 100.0)))]
 
 
-def _active_mon(state: dict) -> dict:
-    pl = state.get("player") or {}
-    idx = pl.get("active_index")
-    party = pl.get("party") or []
-    return party[idx] if isinstance(idx, int) and 0 <= idx < len(party) else {}
 _last_frame_ts = 0.0
 
 # デバッグフレームの保存は1枚あたり約46ms (1920x1080 PNG) かかり、
@@ -233,7 +229,7 @@ async def _handle_one_frame(sid, data):
     global processed_counter
     global _last_state_json, _last_advice_time, _last_advice_key
     global _last_dump_time, _last_scene_log
-    global _last_advice_species, _stale_notified, _end_notice_seq
+    global _last_advice_target, _stale_notified, _end_notice_seq
     try:
         encoded_data = data.split(',')[1]
         nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
@@ -373,7 +369,7 @@ async def _handle_one_frame(sid, data):
                 _t_adv = time.time()
                 advice = await loop.run_in_executor(None, advisor.advise, state)
                 _advise_ms.append((time.time() - _t_adv) * 1000.0)
-                _last_advice_species = _active_mon(state).get("species_id")
+                _last_advice_target = advice_target(state, advice)
                 _stale_notified = False
                 advice["text"] = advisor.format_advice(advice)
                 battle_log.on_advice(advice, "battle", state)
@@ -390,17 +386,15 @@ async def _handle_one_frame(sid, data):
 
         # 場のポケモンが助言の対象と変わったのに新しい決定画面を取れていない間 (処理落ちで command を取りこぼす等)、
         # 前の個体向けの助言が表示に残る (2026-09-29 第16回: こだわりスカーフのサザンドラに交代したあと、アシレーヌ向けの
-        # 技の推奨が出たままだった)。一度だけ無効化の通知を出す (次の決定画面で通常の助言に戻る。対戦ログには残さない)
-        if state["scene"] in BATTLE_SCENES_FOR_STALE and state.get("battle_active") and not state.get("outcome"):
-            cur = _active_mon(state)
-            if cur.get("species_id") and _last_advice_species and cur["species_id"] != _last_advice_species \
-                    and not _stale_notified:
+        # 技の推奨が出たままだった)。一度だけ通知を出す (次の決定画面で通常の助言に戻る。対戦ログには残さない)。
+        # 第一推奨どおりの交代は「助言どおり」と伝え、メガシンカは交代に数えない (vision.stale_notice。2026-10-06 第18回)
+        if state["scene"] in BATTLE_SCENES_FOR_STALE and state.get("battle_active") and not state.get("outcome") \
+                and not _stale_notified:
+            notice = stale_advice_notice(_last_advice_target, state)
+            if notice:
                 _stale_notified = True
-                name = cur.get("species_ja") or cur["species_id"]
-                notice = {"ok": False, "stale": True, "kind": "battle",
-                          "reason": f"場のポケモンが {name} に代わりました。前の助言は無効です (次の決定画面で更新します)"}
                 await sio.emit('advice_update', notice, room=sid)
-                print(f"[server] 助言を無効化: {notice['reason']}")
+                print(f"[server] 助言の対象が交代: {notice['reason']}")
 
     except Exception as e:
         print(f"[server] 画像処理エラー: {e}")
