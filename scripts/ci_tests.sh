@@ -96,6 +96,7 @@ TESTS=(
   test_end_notice
   test_outcome_correction
   test_team_build_ace
+  test_undefined_names
 )
 
 fail=0
