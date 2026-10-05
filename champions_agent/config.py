@@ -241,6 +241,11 @@ BUILD_EQUIV_EPS = 0.02
 BUILD_CI_Z = 1.96                      # 95% 信頼区間 (1 回だけ判定するとき: holdout、ablation)
 # 追加測定の戦数の目安 (絶対上限ではない。必要な精度に達したら終了、達しなければ Uncertain 終了)
 BUILD_RACE_STEPS = (100, 300, 600, 1200, 2400, 4800, 9600)
+# 測定の子プロセス (tools.check_advisor_player、racing が腕ごとに 1 プロセスを同時に回す) の数値計算のスレッド数。
+# 既定のまま (コア数ぶん) だと 5〜6 プロセスでスレッドを取り合う。2026-10-05 の実測 (8 コア、参照チーム、相手 heuristic、30 戦ずつ):
+# 6 腕同時 既定 25.4 戦/分 → 1 スレッド 36.5 戦/分 (+44%)、8 腕同時 1 スレッド 35.7 戦/分。勝率は同じ (0.667 / 0.672)。
+# 呼び出し側の環境変数 (OMP_NUM_THREADS など) が指定されていればそちらを優先する。None で従来どおり
+BUILD_MEASURE_THREADS = 1
 # racing は同じ候補を段階ごとに繰り返し判定する (optional stopping)。段数 K に応じて判定の z を
 # 広げ、途中打ち切り込みで全体の α を保つ。pocock: Pocock 境界 (両側 α=0.05、Jennison & Turnbull
 # Table 2.1)、表に無い段数は bonferroni (α/K) で代用。none: 各段で BUILD_CI_Z (2026-09-06 以前の挙動)

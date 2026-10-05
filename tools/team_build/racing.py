@@ -19,8 +19,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from champions_agent.config import (BUILD_EQUIV_EPS, BUILD_OPP_PICK_POLICY, BUILD_OPP_PILOT, BUILD_RACE_DEFAULT_MAX,
-                                    BUILD_RACE_MIN_TERMINAL_N, BUILD_RACE_STEPS)
+from champions_agent.config import (BUILD_EQUIV_EPS, BUILD_MEASURE_THREADS, BUILD_OPP_PICK_POLICY, BUILD_OPP_PILOT,
+                                    BUILD_RACE_DEFAULT_MAX, BUILD_RACE_MIN_TERMINAL_N, BUILD_RACE_STEPS)
 from tools.team_build.verdict import (DEGRADED, EQUIVALENT, IMPROVED, UNCERTAIN, look_z, n_looks, next_step,
                                       verdict4)
 
@@ -73,11 +73,26 @@ def measure_cmd(arm: Arm, n: int, offset: int, seed: int, split_file: Path, tier
     return cmd
 
 
+# 数値計算ライブラリのスレッド数を決める環境変数 (torch / numpy は起動時に読む)
+THREAD_ENV_VARS = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS")
+
+
+def child_env(base: Optional[dict] = None, threads: Optional[int] = BUILD_MEASURE_THREADS) -> dict:
+    """測定の子プロセスの環境 (純粋): スレッド数の環境変数を threads にする。呼び出し側の環境で既に指定されていればそれを優先し、
+    threads が None / 0 なら何も足さない。測定は腕ごとに 1 プロセスを同時に回すので、各プロセスが既定 (コア数) のスレッドを
+    立てると取り合いになる (2026-10-05 実測: 6 腕同時で 25.4 戦/分 → 1 スレッドにすると 36.5 戦/分、勝率は同じ)"""
+    env = dict(os.environ if base is None else base)
+    if threads:
+        for k in THREAD_ENV_VARS:
+            env.setdefault(k, str(int(threads)))
+    return env
+
+
 def _run_one(cmd: list, log_path: Path, timeout: int) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as lf:
         try:
-            res = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, cwd=str(REPO), timeout=timeout)
+            res = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, cwd=str(REPO), timeout=timeout, env=child_env())
         except subprocess.TimeoutExpired:
             lf.write(f"\n[racing] timeout {timeout}s\n")
             return 124
