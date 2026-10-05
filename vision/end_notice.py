@@ -13,6 +13,7 @@ from champions_agent.config import BATTLE_END_FAINT_CONFIRM_SEC
 # 終了の確定イベント → 根拠の表示 (fired に複数あれば先頭のものを使う)
 END_BASIS = (
     (("battle_win", "battle_lose"), "勝負の文言"),
+    (("battle_win_screen", "battle_lose_screen"), "WIN / LOSE の画面"),
     (("battle_end_faint_confirmed",), "3 体目のひんしから確定"),
     (("battle_end_result",), "リザルト画面"),
     (("battle_end_rank",), "ランク画面"),

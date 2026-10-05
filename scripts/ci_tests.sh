@@ -101,6 +101,7 @@ TESTS=(
   test_rate_outcome_attribution
   test_stale_notice
   test_type_inference_prior
+  test_win_lose_screen
 )
 
 fail=0

@@ -13,16 +13,25 @@ from __future__ import annotations
 
 from typing import Optional
 
-TEXT_OUTCOME = {"battle_win": "win", "battle_lose": "loss"}
+# 勝敗を確定する強い根拠: 勝負の文言 (battle_win / battle_lose) と、WIN / LOSE の画面 (battle_*_screen。2026-10-06、vision/win_lose)
+TEXT_OUTCOME = {"battle_win": "win", "battle_lose": "loss", "battle_win_screen": "win", "battle_lose_screen": "loss"}
 # これを過ぎたら以後の文言は次の対戦のもの (連結ログ)
 END_MARK = ("battle_end_rank", "battle_end_result")
 
 
 def text_outcome_of(fired) -> Optional[str]:
-    """発火イベントに勝負の文言があればその勝敗"""
+    """発火イベントに勝負の文言 (または WIN / LOSE の画面) があればその勝敗"""
     for f in fired or []:
         if f in TEXT_OUTCOME:
             return TEXT_OUTCOME[f]
+    return None
+
+
+def text_outcome_basis(fired) -> Optional[str]:
+    """text_outcome_of が採った根拠の名前: "battle_text" (勝負の文言) / "win_lose_screen" (WIN / LOSE の画面) / None"""
+    for f in fired or []:
+        if f in TEXT_OUTCOME:
+            return "win_lose_screen" if f.endswith("_screen") else "battle_text"
     return None
 
 

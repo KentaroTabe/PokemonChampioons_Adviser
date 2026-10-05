@@ -464,6 +464,8 @@ class BattleStateV2:
         self.battle_ended: bool = False
         # 3体目のひんし等の終了の兆候 {"side", "ts", "fainted"}。猶予内に交代が無ければ確定 (events.confirm_end_hint)
         self.end_hint: Optional[dict] = None
+        # WIN / LOSE の画面から読んだ勝敗 (vision/win_lose。1 対戦 1 回だけ発火させるための印。reset_battle で消える)
+        self.win_lose_screen: Optional[str] = None
         # とんぼがえり系を自分が使用し、交代先の選択が保留中 (2026-08-21
         # 第8回: この場面で技トップの助言が出ていた)。events が技使用で
         # 立て、switch_player / 次ターン到達で下ろす。engineは交代限定で助言

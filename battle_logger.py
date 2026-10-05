@@ -30,7 +30,7 @@ from typing import Optional
 
 from champions_agent.config import (BSS_PICK_COUNT, OUTCOME_LAST_ZERO_MAX_SEC, OUTCOME_ZERO_HP_PCT,
                                     RATE_INFER_MAX_DELTA, RATE_INFER_MIN_DELTA)
-from tools.battle_outcome import rate_inference, text_outcome_of
+from tools.battle_outcome import rate_inference, text_outcome_basis, text_outcome_of
 
 LOG_DIR = Path(__file__).resolve().parent / "logs" / "battles"
 # 対戦終了を確定させるイベント (どれか 1 つで勝敗レコードを書く): ランク画面の文言 / リザルト画面のシーン分類 /
@@ -360,10 +360,11 @@ class BattleLogger:
             # 「勝負に勝った」を読んだが、記録は負けのままだった)
             text_out = text_outcome_of(fired)
             if self._outcome_logged and text_out and text_out != self._outcome_value:
+                basis = text_outcome_basis(fired)
                 self._write({"type": "outcome", "outcome": text_out,
-                             "corrected_from": self._outcome_value, "basis": "battle_text"})
+                             "corrected_from": self._outcome_value, "basis": basis})
                 self._outcome_value = text_out
-                self._outcome_info = {"outcome": text_out, "inferred": False, "basis": "battle_text", "basis_text": None}
+                self._outcome_info = {"outcome": text_out, "inferred": False, "basis": basis, "basis_text": None}
             if self._outcome_logged and text_out and text_out == self._outcome_value:
                 self._outcome_strong = True   # 文言で裏づけられた (推定で記録した値でも、以後レートで動かさない)
 

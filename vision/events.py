@@ -624,6 +624,24 @@ class EventParser:
                      event_id="battle_end_faint_confirmed")
         return "battle_end_faint_confirmed"
 
+    def end_by_win_lose_screen(self, outcome: Optional[str]) -> Optional[str]:
+        """WIN / LOSE の画面 (vision/win_lose) で勝敗を確定する (pipeline が毎フレーム呼ぶ)。1 対戦 1 回。
+        勝負の文言と同じ扱い (state.outcome を立てる。文言と食い違えば画面を採り、ログに残す)。
+        戻り値: "battle_win_screen" / "battle_lose_screen" / None"""
+        st = self.state
+        if outcome not in ("win", "loss") or st.win_lose_screen:
+            return None
+        st.win_lose_screen = outcome
+        event_id = "battle_win_screen" if outcome == "win" else "battle_lose_screen"
+        if st.outcome and st.outcome != outcome:
+            st.log_event("system", f"勝負の文言の勝敗 ({st.outcome}) と WIN / LOSE の画面 ({outcome}) が食い違う。画面を採る",
+                         event_id=None)
+        st.outcome = outcome
+        st.battle_ended = True
+        st.end_hint = None
+        st.log_event("system", f"WIN / LOSE の画面: 自分が {'WIN' if outcome == 'win' else 'LOSE'}", event_id=event_id)
+        return event_id
+
     def end_by_result_scene(self) -> Optional[str]:
         """リザルト画面を見た = 対戦終了 (pipeline がシーン分類から呼ぶ)。勝敗は文言/レート/ひんし数から logger が決める"""
         st = self.state
