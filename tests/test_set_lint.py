@@ -214,9 +214,12 @@ def test_repair_set():
     print("test_repair_set OK")
 
 
-def test_base_set_keeps_mega_stone():
-    """従来方式の基本の型 (sets.base_set): メガ石 + アクロバットの代表型を、石を持たない代替に替えない (判断 §9.6)。
-    2026-10-05: 門に使用率の技を渡していなかったので技の側の修理ができず、持ち物を替えた代替 (非メガ) が基本の型になっていた。
+def test_base_set_uses_repaired_set():
+    """従来方式の基本の型 (sets.base_set): 代表型に誤りがあれば、直した型を基本の型にする (2026-10-05 ユーザー判断)。
+    - メガ石 + アクロバット: 石を保持して技の側を直す。石を持たない代替には替えない (判断 §9.6)。門に使用率の技を渡していなかった
+      ころは技の側の修理ができず、持ち物を替えた代替 (非メガ) が基本の型になっていた
+    - 性格と技: 直した性格の型を返す (以前は直した数だけ数えて、元の誤りのある型を返していた)
+    - 誤りが無い代表型はそのまま。直せない代表型は代替に替える
     使用率の表は実データと同じ形 (代表型の技が上位にそのまま入る) で作る"""
     import sqlite3
     from tools.team_build import sets as S
@@ -225,9 +228,15 @@ def test_base_set_keeps_mega_stone():
     conn.execute("CREATE TABLE meta_sets (snapshot_id, pokemon_name, ability_name, item_name, nature, evs, move1, move2, move3, move4)")
     conn.execute("CREATE TABLE move_usage (snapshot_id, pokemon_name, move_name, usage_percent)")
     conn.execute("CREATE TABLE item_usage (snapshot_id, pokemon_name, item_name, usage_percent)")
-    conn.execute("INSERT INTO meta_sets VALUES (1, 'hawlucha', 'unburden', 'hawluchanite', 'adamant', '0/32/0/0/2/32', "
-                 "'swordsdance', 'acrobatics', 'closecombat', 'protect')")
-    for m, p in (("swordsdance", 54.7), ("acrobatics", 51.2), ("closecombat", 35.2), ("protect", 30.0), ("earthquake", 29.9), ("roost", 27.9)):
+    sets = [(1, "hawlucha", "unburden", "hawluchanite", "adamant", ("swordsdance", "acrobatics", "closecombat", "protect")),
+            (1, "corviknight", "pressure", "leftovers", "bold", ("ironhead", "bodypress", "roost", "protect")),
+            (1, "charizard", "blaze", "leftovers", "timid", ("flamethrower", "shadowball", "roost", "protect")),
+            (2, "hawlucha", "unburden", "hawluchanite", "adamant", ("swordsdance", "acrobatics", "closecombat", "protect"))]
+    for snap, sid, ab, it, nat, mv in sets:
+        conn.execute("INSERT INTO meta_sets VALUES (?, ?, ?, ?, ?, '0/32/0/0/2/32', ?, ?, ?, ?)", (snap, sid, ab, it, nat, *mv))
+        for i, m in enumerate(mv):
+            conn.execute("INSERT INTO move_usage VALUES (?, ?, ?, ?)", (snap, sid, m, 60.0 - i))
+    for m, p in (("earthquake", 29.9), ("roost", 27.9)):       # snapshot 1 のルチャブルだけ、補充に使える技がある
         conn.execute("INSERT INTO move_usage VALUES (1, 'hawlucha', ?, ?)", (m, p))
     alt = SetCandidate("hawlucha", "unburden", "sitrusberry", "adamant", "0/32/0/0/2/32", ["swordsdance", "acrobatics", "closecombat", "protect"],
                        "alt:item")
@@ -238,14 +247,28 @@ def test_base_set_keeps_mega_stone():
     L.rejects_snapshot(reset=True)
     try:
         base = S.base_set(conn, 1, "hawlucha")
+        nat_fixed = S.base_set(conn, 1, "corviknight")
+        clean = S.base_set(conn, 1, "charizard")
         repaired = L.repairs_snapshot()["repaired"]
         blocked = L.repairs_snapshot()["blocked"]
+        unfixable = S.base_set(conn, 2, "hawlucha")
+        blocked2 = L.repairs_snapshot()["blocked"]
     finally:
         L.default_info, S.enumerate_sets, S.legal_item = old
         L.rejects_snapshot(reset=True)
+    # メガ石は残り、アクロバットは使用率の次の技に替わる
     assert base is not None and base.item == "hawluchanite", (base.item if base else None, blocked)
-    assert repaired == {"legacy": 1} and blocked == {}, (repaired, blocked)
-    print("test_base_set_keeps_mega_stone OK")
+    assert list(base.moves) == ["swordsdance", "closecombat", "protect", "earthquake"] and base.source == "representative", base.moves
+    assert base.notes[-1] == "lint_repair:item:acrobatics->move;few_moves", base.notes
+    # 性格を直した型が基本の型になる (ずぶとい + 物理技だけ → わんぱく)
+    assert nat_fixed.nature == "impish" and list(nat_fixed.moves) == ["ironhead", "bodypress", "roost", "protect"]
+    assert nat_fixed.notes[-1] == "lint_repair:nature_move"
+    # 誤りが無ければ代表型のまま
+    assert clean.nature == "timid" and clean.item == "leftovers" and not [n for n in clean.notes if str(n).startswith("lint_repair")]
+    assert repaired == {"legacy": 2} and blocked == {}, (repaired, blocked)
+    # 直せない (補充に使える技が無い) ときだけ代替に替える
+    assert unfixable is alt and blocked2 == {"unfixed:few_moves": 1}, (unfixable, blocked2)
+    print("test_base_set_uses_repaired_set OK")
 
 
 def test_stab_warning():
@@ -322,7 +345,7 @@ def main() -> None:
     test_field_dup_and_few_moves()
     test_few_moves_exemptions()
     test_repair_set()
-    test_base_set_keeps_mega_stone()
+    test_base_set_uses_repaired_set()
     test_stab_warning()
     test_fill_to_four()
     test_rows_report_and_gate()
