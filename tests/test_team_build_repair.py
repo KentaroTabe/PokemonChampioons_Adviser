@@ -117,6 +117,22 @@ def test_repair_variants():
     assert vs_min and all(len(v.origin["changes"]) >= 2 for v in vs_min if v.origin["variant"] == "A"), \
         [(v.origin["variant"], len(v.origin["changes"])) for v in vs_min]
     assert any(v.origin["variant"] == "B" for v in vs_min)
+    # 差し替え対象が 1 体でも、2 枠以上の規則なら 2 体目を足して入替の変種を作る (1003: 現行チームに入替が出なかった)
+    vs_one = RP.repair_variants(s, parent, dict(diag, replace_candidates=["weak"]), cfg, pool_species, W._roles_of, [],
+                                fixed={"core1", "core2"}, parent_id="L01_C001", round_no=1, max_changes=2, max_arms=6, boost=2.0,
+                                min_gain=0.001)
+    a_one = [v for v in vs_one if v.origin["variant"] == "A"]
+    assert a_one and all(len(v.origin["changes"]) == 2 for v in a_one) and all("weak" in {c["out"] for c in v.origin["changes"]} for v in a_one)
+    # 親をまたいだ選び方: 各親の最良の B と A を 1 本ずつ先に、残りは点の順 (純粋)
+    class V:
+        def __init__(self, kind, score):
+            self.origin = {"variant": kind, "repair_score": score}
+    p1 = [V("B", 0.9), V("A", 0.8), V("A", 0.7)]
+    p2 = [V("B", 0.95), V("B", 0.6)]
+    chosen = RP.select_variants([("P1", p1), ("P2", p2)], 3)
+    assert [(pid, v.origin["variant"], v.origin["repair_score"]) for pid, v in chosen] == [("P1", "B", 0.9), ("P2", "B", 0.95), ("P1", "A", 0.8)]
+    chosen5 = RP.select_variants([("P1", p1), ("P2", p2)], 5)
+    assert [v.origin["repair_score"] for _p, v in chosen5] == [0.9, 0.95, 0.8, 0.7, 0.6] and len(RP.select_variants([("P1", p1)], 0)) == 0
     # 上限と順序: 点の降順、最大 max_arms
     assert [v.origin["repair_score"] for v in vs] == sorted((v.origin["repair_score"] for v in vs), reverse=True)
     vs2 = RP.repair_variants(s, parent, diag, cfg, pool_species, W._roles_of, [], fixed={"core1", "core2"}, parent_id="L01_C001",

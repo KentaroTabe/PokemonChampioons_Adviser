@@ -70,8 +70,7 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
     from champions_agent.env.ranked_teams import (
         RankedTeambuilder, pinned_meta_snapshot_id)
     from champions_agent.config import BUILD_OPP_PICK_POLICY, BUILD_OPP_PILOT
-    from champions_agent.env.showdown_env import (
-        TrainingServerConfiguration, make_benchmark_player)
+    from champions_agent.env.showdown_env import TrainingServerConfiguration, make_benchmark_player
     from tools.team_build.pilot import make_opponent_player
     opp_pilot = opp_pilot or BUILD_OPP_PILOT
     opp_pick_policy = opp_pick_policy or BUILD_OPP_PICK_POLICY

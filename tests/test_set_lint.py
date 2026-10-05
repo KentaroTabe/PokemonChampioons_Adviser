@@ -30,6 +30,9 @@ MOVES = {
     "circlethrow": {"type": "Fighting", "category": "physical", "power": 60},
     "nuzzle": {"type": "Electric", "category": "physical", "power": 20},
     "ironhead": {"type": "Steel", "category": "physical", "power": 80},
+    "transform": {"type": "Normal", "category": "status", "power": 0},
+    "trick": {"type": "Psychic", "category": "status", "power": 0},
+    "stealthrock": {"type": "Rock", "category": "status", "power": 0},
     "acrobatics": {"type": "Flying", "category": "physical", "power": 55},
     "weatherball": {"type": "Normal", "category": "special", "power": 50},
     "terrainpulse": {"type": "Normal", "category": "special", "power": 50},
@@ -107,6 +110,10 @@ def test_item_rule():
     assert item_errs("flyinggem", ["acrobatics", "flamethrower", "roost", "protect"]) == []
     # 持ち物なしは他の規則と重ならない (アクロバットは消費する持ち物の規則だけ)
     assert item_errs(None, ["acrobatics", "flamethrower", "roost", "protect"]) == ["none"]
+    # こだわり + へんしん / トリック は誤りにしない (メタモンのスカーフ、こだわりトリック。10/5 の誤検出の補正)
+    assert item_errs("choicescarf", ["transform"]) == []
+    assert item_errs("choicescarf", ["trick", "flamethrower", "shadowball", "hypervoice"]) == []
+    assert item_errs("choicescarf", ["protect", "flamethrower", "shadowball", "hypervoice"]) == ["choice_status"]
     print("test_item_rule OK")
 
 
@@ -119,6 +126,51 @@ def test_field_dup_and_few_moves():
     assert "few_moves" in lint("torkoal", "whitesmoke", "heatrock", "quiet", ["flamethrower", "flamethrower", "earthquake", "protect"])["errors"]
     assert L.has_errors(r) and not L.has_errors({"errors": [], "warnings": ["no_stab"]})
     print("test_field_dup_and_few_moves OK")
+
+
+def test_few_moves_exemptions():
+    # 覚える技が 4 つ無い種は「4 つ未満」を誤りにしない (メタモン)。learnset_size を持つ info でも同じ
+    r = lint("ditto", "imposter", "choicescarf", "timid", ["transform"])
+    assert r["errors"] == [] and r["warnings"] == ["no_stab"] if TYPES.get("ditto") else r["errors"] == []
+
+    class Info2(FakeInfo):
+        def learnset_size(self, sid):
+            return 3 if sid == "tinymon" else 20
+    assert L.lint_set("tinymon", None, "leftovers", "bold", ["protect", "toxic"], info=Info2())["errors"] == []
+    assert "few_moves" in L.lint_set("charizard", None, "leftovers", "bold", ["protect", "toxic"], info=Info2())["errors"]
+    print("test_few_moves_exemptions OK")
+
+
+def test_repair_set():
+    legal = lambda it: it != "lifeorb"      # noqa: E731  (ライフオーブが使えない規制の例)
+    usage = ["flamethrower", "roost", "toxic", "willowisp", "earthquake"]
+    # 性格: + を保って下げる側を変える (ひかえめ + 物理技 → おっとり)
+    r = L.repair_set("charizard", "blaze", "lifeorb", "modest", ["flamethrower", "earthquake", "shadowball", "protect"], info=INFO, usage_moves=usage)
+    assert r and r["nature"] == "mild" and r["repairs"] == ["nature_move"] and r["item"] == "lifeorb"
+    # 持ち物: なし → 予備 (合法なもの)。カゴのみ + ねむる無し / こだわり + 変化技 も予備に
+    r = L.repair_set("charizard", "blaze", None, "timid", ["flamethrower", "shadowball", "roost", "protect"], info=INFO, legal_item=legal)
+    assert r and r["item"] == "leftovers" and r["repairs"] == ["item:none"]
+    r = L.repair_set("charizard", "blaze", "chestoberry", "timid", ["flamethrower", "shadowball", "roost", "protect"], info=INFO)
+    assert r and r["item"] == "leftovers" and r["repairs"] == ["item:chesto_no_rest"]
+    r = L.repair_set("charizard", "blaze", "choicespecs", "timid", ["flamethrower", "shadowball", "roost", "protect"], info=INFO)
+    assert r and r["item"] == "leftovers" and r["repairs"] == ["item:choice_status"]
+    r = L.repair_set("hawlucha", "unburden", "leftovers", "adamant", ["acrobatics", "closecombat", "swordsdance", "protect"], info=INFO)
+    assert r and r["item"] == "focussash" and r["repairs"] == ["item:acrobatics"]
+    # 場の重複: 技を外し、使用率の技で補充。4 つ未満も補充
+    r = L.repair_set("torkoal", "drought", "heatrock", "quiet", ["flamethrower", "sunnyday", "earthquake", "protect"], info=INFO, usage_moves=usage)
+    assert r and "sunnyday" not in r["moves"] and len(r["moves"]) == 4 and r["repairs"] == ["field_dup", "few_moves"] and r["moves"][3] == "roost"
+    r = L.repair_set("charizard", "blaze", "leftovers", "timid", ["flamethrower", "shadowball"], info=INFO, usage_moves=["roost", "toxic"])
+    assert r and r["moves"] == ["flamethrower", "shadowball", "roost", "toxic"] and r["repairs"] == ["few_moves"]
+    # 直せない: 補充する技が無い / 誤りが無いなら None
+    assert L.repair_set("charizard", "blaze", "leftovers", "timid", ["flamethrower", "shadowball"], info=INFO) is None
+    assert L.repair_set("charizard", "blaze", "leftovers", "timid", ["flamethrower", "shadowball", "roost", "protect"], info=INFO) is None
+    # SetCandidate 相当の候補: source を保ち notes に lint_repair を残す
+    from tools.team_build.sets import SetCandidate
+    c = SetCandidate("charizard", "blaze", "chestoberry", "modest", "0/0/0/32/0/32", ["flamethrower", "earthquake", "shadowball", "protect"], "representative")
+    f = L.repair_candidate(c, info=INFO)
+    assert f.item == "leftovers" and f.nature == "mild" and f.source == "representative" and f.notes[-1] == "lint_repair:nature_move;item:chesto_no_rest"
+    assert c.item == "chestoberry"                                                   # 元は変えない
+    print("test_repair_set OK")
 
 
 def test_stab_warning():
@@ -193,6 +245,8 @@ def main() -> None:
     test_nature_move_rule()
     test_item_rule()
     test_field_dup_and_few_moves()
+    test_few_moves_exemptions()
+    test_repair_set()
     test_stab_warning()
     test_fill_to_four()
     test_rows_report_and_gate()

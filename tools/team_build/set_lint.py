@@ -36,6 +36,13 @@ NATURE_MINUS = {"adamant": "spa", "jolly": "spa", "impish": "spa", "careful": "s
 NATURE_RULE_EXCLUDED = frozenset({"uturn", "flipturn", "voltswitch", "rapidspin", "mortalspin", "fakeout",
                                   "dragontail", "circlethrow", "nuzzle"})
 CHOICE_ITEMS = frozenset({"choiceband", "choicespecs", "choicescarf"})
+# こだわり系と組ませてよい変化技: へんしん (メタモンのこだわりスカーフ)、トリック / すりかえ (こだわりトリック)。2026-10-05 誤検出の補正
+CHOICE_STATUS_EXEMPT = frozenset({"transform", "trick", "switcheroo"})
+# 技が 4 つ未満でも誤りにしない種 (覚える技が 4 つ無い): メタモン / アンノーン。learnset が読めるときは 4 未満の種も同じ扱い
+FEW_MOVES_EXEMPT_SPECIES = frozenset({"ditto", "unown"})
+# 性格の修理: 下げる側を使う技があるとき、+ の能力を保って下げる側を変える (純粋な表)
+NATURE_REPAIR = {"modest": "mild", "timid": "hasty", "bold": "lax", "calm": "gentle",
+                 "adamant": "naughty", "jolly": "naive", "impish": "lax", "careful": "gentle"}
 # タイプ強化の持ち物 → タイプ (config の 18 種 + プレート / おこう)
 _PLATES = {"flameplate": "Fire", "splashplate": "Water", "zapplate": "Electric", "meadowplate": "Grass", "icicleplate": "Ice",
            "fistplate": "Fighting", "toxicplate": "Poison", "earthplate": "Ground", "skyplate": "Flying", "mindplate": "Psychic",
@@ -149,7 +156,7 @@ def item_problems(item: Optional[str], moves: list, move_of: Callable) -> list:
             out.append("type_no_move")
     if it == "chestoberry" and "rest" not in ms:
         out.append("chesto_no_rest")
-    if it in CHOICE_ITEMS and any((move_of(mv) or {}).get("category") == "status" for mv in ms):
+    if it in CHOICE_ITEMS and any((move_of(mv) or {}).get("category") == "status" and mv not in CHOICE_STATUS_EXEMPT for mv in ms):
         out.append("choice_status")
     if "acrobatics" in ms and it and it not in CONSUMABLE_ITEMS and not it.endswith("berry") and not it.endswith("gem"):
         out.append("acrobatics")
@@ -202,6 +209,21 @@ def stab_missing(own_types: list, ability: Optional[str], moves: list, move_of: 
     return True
 
 
+def few_moves_exempt(species_id: str, info=None) -> bool:
+    """覚える技が 4 つ無い種は「技 4 つ未満」を誤りにしない (メタモン等)。info.learnset_size(species) があればそれも見る"""
+    sid = str(species_id or "").lower()
+    if sid in FEW_MOVES_EXEMPT_SPECIES:
+        return True
+    fn = getattr(info, "learnset_size", None)
+    if fn is not None:
+        try:
+            n = fn(sid)
+            return n is not None and int(n) < 4
+        except Exception:
+            return False
+    return False
+
+
 def lint_set(species_id: str, ability: Optional[str], item: Optional[str], nature: Optional[str], moves: list,
              info=None, own_types: Optional[list] = None) -> dict:
     """型 1 つの検査 → {"errors": [code], "warnings": [code], "detail": {code: 根拠}}。info 省略時は図鑑"""
@@ -221,7 +243,7 @@ def lint_set(species_id: str, ability: Optional[str], item: Optional[str], natur
     if fd:
         errors.append("field_dup")
         detail["field_dup"] = {"ability": ability, "moves": fd}
-    if len(set(moves)) < 4:
+    if len(set(moves)) < 4 and not few_moves_exempt(species_id, info):
         errors.append("few_moves")
         detail["few_moves"] = {"n": len(set(moves))}
     types = list(own_types) if own_types is not None else list(info.types_of(species_id) or [])
@@ -265,6 +287,66 @@ def rejects_snapshot(reset: bool = False) -> dict:
 def rejects_species_top(k: int = 15) -> dict:
     """落とした型の内訳: 理由 (code、持ち物は問題の種類つき) → {種: n} の上位 k (2026-10-05: 煙試験で 644 型を落とした内訳の確認用)"""
     return {why: dict(cnt.most_common(k)) for why, cnt in sorted(LINT_REJECT_SPECIES.items())}
+
+
+# ------------------------------------------------------------------ 候補の修理 (誤りを直せるなら直して残す)
+FALLBACK_ITEMS = ("leftovers", "lifeorb", "sitrusberry", "lumberry", "focussash", "expertbelt", "rockyhelmet")
+CONSUMABLE_FOR_ACROBATICS = ("focussash", "sitrusberry", "lumberry")
+
+
+def repair_set(species_id: str, ability: Optional[str], item: Optional[str], nature: Optional[str], moves: list, *,
+               info=None, usage_moves=(), legal_item: Optional[Callable] = None, learnset=None) -> Optional[dict]:
+    """誤りのある型を、規則に沿う最小の変更で直す (純粋: info / legal_item は引数)。直せなければ None。
+    直し方 (2026-10-05: 従来方式の代表型 4 種が門で落ちた → 捨てる前に直す):
+      nature_move  性格の + を保って下げる側を変える (NATURE_REPAIR)
+      item         なし / カゴのみで ねむる なし / こだわりと変化技 / タイプ強化で該当技なし → 予備の持ち物 (こだわり以外)、
+                   アクロバット → 消費する持ち物
+      field_dup    特性と同じ場の技を外す (後で補充)
+      few_moves    usage_moves (使用率の順) → learnset の順で 4 つまで補充 (こだわりなら変化技は足さない)
+    戻り値 {"item", "nature", "moves", "repairs": [code ...]} (誤りが残れば None)"""
+    info = info or default_info()
+    legal_item = legal_item or (lambda it: True)
+    res = lint_set(species_id, ability, item, nature, moves, info=info)
+    if not res["errors"]:
+        return None
+    it, nat, mv = item, nature, [m for m in moves if m]
+    repairs: list = []
+    if "nature_move" in res["errors"]:
+        new = NATURE_REPAIR.get((nat or "").lower())
+        if new:
+            nat = new
+            repairs.append("nature_move")
+    if "field_dup" in res["errors"]:
+        dup = set(res["detail"]["field_dup"]["moves"])
+        mv = [m for m in mv if m not in dup]
+        repairs.append("field_dup")
+    if "item" in res["errors"]:
+        problems = res["detail"]["item"]["problems"]
+        pool = CONSUMABLE_FOR_ACROBATICS if "acrobatics" in problems else FALLBACK_ITEMS
+        cand = next((x for x in pool if legal_item(x) and x != it), None)
+        if cand:
+            it, repairs = cand, repairs + ["item:" + "+".join(problems)]
+    if len(set(mv)) < 4 and not few_moves_exempt(species_id, info):
+        util = [m for m in usage_moves if m not in mv]
+        mv = fill_to_four(mv, [], util, set(learnset or ()) | set(usage_moves) | set(mv), item=it, ability=ability,
+                          move_of=info.move)
+        repairs.append("few_moves")
+    if lint_set(species_id, ability, it, nat, mv, info=info)["errors"]:
+        return None
+    return {"item": it, "nature": nat, "moves": mv, "repairs": repairs}
+
+
+def repair_candidate(c, *, info=None, usage_moves=(), legal_item=None, learnset=None):
+    """SetCandidate を修理した新しい SetCandidate (source は保ち、notes に lint_repair:<codes> を足す)。直せなければ None"""
+    fixed = repair_set(c.species_id, c.ability, c.item, c.nature, list(c.moves or []), info=info, usage_moves=usage_moves,
+                       legal_item=legal_item, learnset=learnset)
+    if fixed is None:
+        return None
+    import copy
+    out = copy.copy(c)
+    out.item, out.nature, out.moves = fixed["item"], fixed["nature"], list(fixed["moves"])
+    out.notes = list(getattr(c, "notes", []) or []) + ["lint_repair:" + ";".join(fixed["repairs"])]
+    return out
 
 
 # ------------------------------------------------------------------ 技の補充 (4 つ未満を作らない)

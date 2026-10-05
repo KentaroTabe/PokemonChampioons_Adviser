@@ -204,6 +204,13 @@ def repair_variants(search: LineupSearch, parent: LineupResult, diag: dict, cfg:
             cand_out = [e.species_id for e in parent.entries if e.species_id not in fixed and not e.locked]
             repl = sorted(cand_out, key=lambda s: len(parent.assignments.get(s, [])))[:max_changes]
         repl = repl[:max(1, max_changes)]
+        if min_changes >= 2 and len(repl) < 2 and max_changes >= 2:
+            # 2 枠以上の入替しか作らないのに差し替え対象が 1 体 → 固定でない個体のうち担当の少ない順で 2 体目を足す
+            # (2026-10-05: 1003 の記録では現行チームに入替の変種が 1 本も出なかった)
+            extra = [e.species_id for e in parent.entries
+                     if e.species_id not in fixed and not e.locked and e.species_id not in repl]
+            extra.sort(key=lambda sp: len(parent.assignments.get(sp, [])))
+            repl = (repl + extra)[:2]
         stone_holder = next((e.species_id for e in parent.entries if e.stone), None)
         for out_sid in (repl if min_changes <= 1 else []):        # 1 枠の入替は min_changes ≥ 2 なら作らない
             k = next(i for i, e in enumerate(parent.entries) if e.species_id == out_sid)
@@ -282,6 +289,34 @@ def repair_variants(search: LineupSearch, parent: LineupResult, diag: dict, cfg:
     return out
 
 
+def select_variants(per_parent: list, max_arms: int) -> list:
+    """親ごとの変種の候補 [(parent_id, [LineupResult ...])] から測る変種を選ぶ (純粋)。
+    親を順に回り、まず各親の最良の型だけの変種 (B) と最良の入替 (A) を 1 本ずつ、残りは修理の点 (origin.repair_score) の降順で
+    max_arms まで。2026-10-05: 親ごとの上限 (max_arms // 親の数) だと 3 本 2 親で 1 本ずつになり、2 枠の入替が測られなかった"""
+    chosen: list = []
+    taken: set = set()
+
+    def best_of(vs: list, kind: str):
+        cands = [v for v in vs if v.origin.get("variant") == kind and id(v) not in taken]
+        return max(cands, key=lambda v: float(v.origin.get("repair_score") or 0.0), default=None)
+    for kind in ("B", "A"):
+        for pid, vs in per_parent:
+            if len(chosen) >= max_arms:
+                return chosen
+            v = best_of(vs, kind)
+            if v is not None:
+                chosen.append((pid, v))
+                taken.add(id(v))
+    rest = [(pid, v) for pid, vs in per_parent for v in vs if id(v) not in taken]
+    rest.sort(key=lambda pv: -float(pv[1].origin.get("repair_score") or 0.0))
+    for pid, v in rest:
+        if len(chosen) >= max_arms:
+            break
+        chosen.append((pid, v))
+        taken.add(id(v))
+    return chosen
+
+
 def _set_summary(cand) -> dict:
     return {"ability": cand.ability, "item": cand.item, "nature": cand.nature, "evs": cand.evs, "moves": list(cand.moves)}
 
@@ -309,9 +344,9 @@ def run_repair_round(run_dir: Path, parents: list, round_no: int, battles_prefix
     ctx = None
     report = {"round": round_no, "parents": [], "variants": []}
     new_ids: list = []
-    per_parent = max(1, max_arms // max(1, len(parents)))
     fams = (J.load_json(run_dir / "s04_concepts.json") or {}).get("families") or []
     fam_by = {f.get("family_id"): f for f in fams}
+    generated: list = []          # (cid, arm_ids, recs, diag, fixed, variants)
     for cid, arm_id in parents:
         row = by_id.get(cid)
         if not row or not row.get("roles"):
@@ -333,16 +368,25 @@ def run_repair_round(run_dir: Path, parents: list, round_no: int, battles_prefix
         fixed = set(spec.favorites) | ({spec.ace} if spec.ace else set()) | {c for c in (fam.get("core_ids") or []) if c in parent.members}
         required = list(ctx.cfg.required_roles) + J.concept_requirements(fam, J.branch_roles_of(fam))
         try:
+            # 親ごとに max_arms まで作り、測る変種は親をまたいで選ぶ (select_variants: 各親の B と A を 1 本ずつ先に)
             variants = repair_variants(ctx.search, parent, diag, ctx.cfg, ctx.species_pool, ctx.roles_of, required, fixed, cid,
-                                       round_no, max_changes=max_changes, max_arms=per_parent)
+                                       round_no, max_changes=max_changes, max_arms=max_arms)
         except Exception as e:
             log(f"S9 repair {round_no}: {cid} error {e!r}")
             variants = []
+        generated.append((cid, arm_ids, recs, diag, fixed, variants))
+    chosen = select_variants([(cid, vs) for cid, _a, _r, _d, _f, vs in generated], max_arms)
+    chosen_ids = {id(v) for _c, v in chosen}
+    for cid, arm_ids, recs, diag, fixed, variants in generated:
         made: list = []
         counts: dict = {}
         lineage: list = []
         for v in variants:
             kind = v.origin.get("variant", "X")
+            if id(v) not in chosen_ids:
+                made.append({"candidate_id": None, "ok": None, "score": v.score, "repair_score": v.origin.get("repair_score"),
+                             "changes": v.origin.get("changes"), "kind": kind, "measured": False})
+                continue
             counts[kind] = counts.get(kind, 0) + 1
             vid = variant_id(cid, round_no, kind, counts[kind])
             team = [e.cand for e in v.entries]
@@ -353,7 +397,7 @@ def run_repair_round(run_dir: Path, parents: list, round_no: int, battles_prefix
             r = J.make_row(len(rows), vid, v, "repair", ok, errs, spec.ace or None, is_inc=False)
             rows.append(r)
             made.append({"candidate_id": vid, "ok": ok, "score": v.score, "repair_score": v.origin.get("repair_score"),
-                         "changes": v.origin.get("changes")})
+                         "changes": v.origin.get("changes"), "kind": kind, "measured": True})
             lineage.append({"variant_id": vid, "kind": f"{kind}_{'set' if kind == 'B' else 'member'}", "members": list(v.members),
                             "changes": v.origin.get("changes")})
             if ok:
@@ -362,9 +406,10 @@ def run_repair_round(run_dir: Path, parents: list, round_no: int, battles_prefix
             IV.record_lineage(run_dir, cid, lineage)
         report["parents"].append({"candidate_id": cid, "arm_id": arm_ids, "n_records": len(recs), "diagnosis": diag,
                                   "fixed": sorted(fixed), "variants": made})
-        report["variants"].extend(made)
-        log(f"S9 repair {round_no}: {cid} ({len(recs)} 戦) 診断 {diag['notes'] or ['特記なし']} → 変種 {len(made)} "
-            f"(合法 {sum(1 for m in made if m['ok'])})")
+        report["variants"].extend(m for m in made if m["measured"])
+        log(f"S9 repair {round_no}: {cid} ({len(recs)} 戦) 診断 {diag['notes'] or ['特記なし']} → 変種 {len(variants)} のうち測る "
+            f"{sum(1 for m in made if m['measured'])} (合法 {sum(1 for m in made if m['ok'])}、"
+            f"種類 {[m['kind'] + ':' + str(len(m['changes'] or [])) for m in made if m['measured']]})")
     (run_dir / "s06_sets.json").write_text(json.dumps(rows, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     report["ids"] = list(new_ids)
     (run_dir / "evaluation").mkdir(parents=True, exist_ok=True)

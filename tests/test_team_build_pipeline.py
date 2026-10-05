@@ -382,6 +382,12 @@ def test_plan_prior_variants_and_promotion_key():
     assert pass_runs_for_team(pk, pk[0]["meta"], exclude_key=("x",), min_n=300) == {"r1", "r2"}
     assert pass_runs_for_team(pk, {"candidate_id": "L00_INC"}, min_n=0) == {"r1", "r3", "r5", "r6"}   # species の無い古い Package は id で (r7 は r1 と同じ分割)
     assert team_key({"species": ["b", "a"]}) == ("a", "b")
+    # 較正の標本は軽い適応の腕だけ測る / STRESS と ablation は PASS のときだけ (純粋な補助)
+    rb = {"L01": {"tag": "concept"}, "L02": {"tag": "calibration"}}
+    assert PL.variants_for("L01", rb, ("rule", "generic", "cheap"), ("cheap",)) == ("rule", "generic", "cheap")
+    assert PL.variants_for("L02", rb, ("rule", "generic", "cheap"), ("cheap",)) == ("cheap",) and PL.variants_for("zz", rb, ("a",), ("b",)) == ("a",)
+    assert PL.should_run_stress("PASS", True) and PL.should_run_stress("PASS_EQUIVALENT", True) and not PL.should_run_stress("INCONCLUSIVE", True)
+    assert PL.should_run_stress("FAIL", False) and not PL.should_run_stress(None, True)
     # 較正の標本 (tag calibration) は生存・修理の親に入れない
     rows_by = {"L01": {"tag": "concept", "roles": {"a": "x"}}, "L02": {"tag": "calibration", "roles": {"a": "x"}}, "L03": {"tag": "fill", "roles": {"a": "x"}}}
     assert PL.exclude_tagged(["L02", "L01", "L03"], rows_by) == (["L01", "L03"], ["L02"])

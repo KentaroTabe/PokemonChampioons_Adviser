@@ -313,6 +313,12 @@ def main() -> None:
         out["audit"] = audit_aggregate([r["path"] for r in rows])
         # 選出の遵守率と時間内率 (記録だけ。補正には使わない: 2026-10-05)
         out["selection"] = selection_compliance_rows([r["path"] for r in rows])
+        # 追跡 (②): 版の一致 (version 行 vs Package の selection_model_sha256) / 表示率と遅延 / 推奨がシステムの状態で選べたか
+        try:
+            from tools.advice_trace import package_selection_sha, summarize_paths
+            out["trace"] = summarize_paths([r["path"] for r in rows], package_selection_sha(package_id))
+        except Exception as e:
+            out["trace"] = {"error": repr(e)}
     if args.json:
         print(json.dumps(out, ensure_ascii=False, indent=1))
         return
@@ -333,6 +339,12 @@ def main() -> None:
         sc = out["selection"]
         print(f"[選出] 助言あり {sc['n_with_advice']}/{sc['n_battles']} / 一致 {sc['n_match']} 不一致 {sc['n_mismatch']} 不明 {sc['n_unknown']} "
               f"→ 遵守率 {sc['selection_compliance']} / 時間内率 {sc['selection_timely_rate']} / 第一候補別 {sc['by_primary']}")
+    tr = out.get("trace") or {}
+    if tr and "error" not in tr:
+        v, d, f = tr["version"], tr["display"], tr["feasibility"]
+        print(f"[追跡] 版: Package と一致 {v['n_match']} / 不一致 {v['n_mismatch']} / 判定不能 {v['n_unknown']} (退避 {v['fallback_reasons']}) / "
+              f"表示: {d['n_displayed']}/{d['n_advice']} 遅延の中央値 {d['latency_p50']} 秒 (p90 {d['latency_p90']}) 遅い {d['n_late']} 古い状態 {d['n_stale']} / "
+              f"実行不能 (システムの状態) {f['n_infeasible_system']}/{f['n']} (判定不能 {f['n_unknown_system']})")
 
 
 if __name__ == "__main__":

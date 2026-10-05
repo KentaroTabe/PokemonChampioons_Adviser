@@ -36,9 +36,17 @@ def test_stage_durations_and_change_counts():
              (600, "S8a survivors"), (660, "S9 repair 1: 親"), (900, "S7 adapt"), (1500, "S8b: x"), (1800, "S10 winner"),
              (1900, "[holdout] PASS"), (2000, "[stress] start"), (2300, "S13 package"), (100, "S13 registry")]     # 日付をまたぐ
     d = RV.durations_from_marks(marks)
-    assert d["S8a"] == 540 and d["S9 repair"] == 240 and d["S7"] == 600 and d["S12 holdout"] == 100 and d["STRESS"] == 300
-    assert d["S13"] == 86400 - 2200 and d["total"] == sum(v for k, v in d.items() if k != "total")
-    assert RV.stage_of("S9 repair 2: 親") == "S9 repair" and RV.stage_of("[racing:x] y") is None and RV.stage_of("最終候補 (方向性)") == "S10"
+    # 行間は後ろの行の段に数える: S8a = 60 (準備の行まで) + 60 (racing の行まで) + 420 (survivors まで)、S10 = S8b の行から勝者の行まで
+    assert d["S7-13"] == 60 and d["S8a"] == 540 and d["S9 repair"] == 60 and d["S7"] == 240 and d["S8b"] == 600 and d["S10"] == 300
+    assert d["S12 holdout"] == 100 and d["STRESS"] == 100 and d["S13"] == 300 + (86400 - 2200)
+    assert d["total"] == sum(v for k, v in d.items() if k != "total")
+    assert RV.stage_of("S9 repair 2: 親") == "S9 repair" and RV.stage_of("最終候補 (方向性)") == "S10" and RV.stage_of("plain progress") is None
+    # racing の進捗行は stage 名から段に写す (S10 の racing が直前の段に数えられていた)
+    assert RV.stage_of("[racing:s10] round offset=0") == "S10" and RV.stage_of("[racing:s09_repair1_race] looks=3") == "S9 repair"
+    assert RV.stage_of("[racing:s08a_reference] x") == "S8a" and RV.stage_of("[racing:s12_holdout_L01] x") == "S12 holdout"
+    assert RV.stage_of("[adapt L01] chunk 1") == "S7" and RV.stage_of("[screen-adapt] start") == "S8a" and RV.stage_of("[racing:zzz] q") == "racing:zzz"
+    d2 = RV.durations_from_marks([(0, "S8b: start"), (100, "[racing:s08b_adapted] after 100"), (700, "[racing:s10] looks=3"), (1000, "S10 winner")])
+    assert d2["S8b"] == 100 and d2["S10"] == 900
     rows = [{"candidate_id": "L01-R1A1", "origin": {"kind": "repair", "variant": "A", "changes": [{"out": "a"}, {"out": "b"}]}},
             {"candidate_id": "L01-R1B1", "origin": {"kind": "repair", "variant": "B", "changes": [{"species": "a"}]}},
             {"candidate_id": "L02", "origin": {}}]

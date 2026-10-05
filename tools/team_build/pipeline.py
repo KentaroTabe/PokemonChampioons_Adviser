@@ -177,6 +177,17 @@ def team_survivors(chosen: dict, max_candidates: Optional[int]) -> list:
     return ids[:max_candidates] if max_candidates else ids
 
 
+def variants_for(cid: str, rows_by: dict, screen_variants, calibration_variants) -> tuple:
+    """S8a で測る variant (純粋): 較正の標本 (tag calibration) は軽い適応の腕だけ、それ以外は screen_variants (判断 #4)"""
+    tag = (rows_by.get(cid) or {}).get("tag") or ""
+    return tuple(calibration_variants) if tag == "calibration" else tuple(screen_variants)
+
+
+def should_run_stress(verdict: Optional[str], only_on_pass: bool) -> bool:
+    """STRESS と ablation を回すか (純粋): only_on_pass なら holdout が PASS / PASS_EQUIVALENT のときだけ (判断 #1)"""
+    return (not only_on_pass) or verdict in ("PASS", "PASS_EQUIVALENT")
+
+
 def change_counts(rows: list, ids: list) -> dict:
     """修理の変種ごとの親との違い (純粋): {candidate_id: {"kind": "A"|"B", "n_changes": 変更の数}} (s06_sets.json の行の origin から。
     2026-10-05 判断 #6: 変種ごとの変更枠数を summary に残し、2 枠以上の変種が良いかを次の 2 run で見る)"""
@@ -567,11 +578,9 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
         log("S8a screening: resume (s08a_screen.json を再利用)")
     else:
         from champions_agent.config import BUILD_CALIBRATION_VARIANTS
-
-        def _variants_for(cid: str) -> tuple:
-            # 較正の標本は軽い適応の腕だけ (較正に使うのはその Δ だけ。判断 #4)
-            return tuple(BUILD_CALIBRATION_VARIANTS) if (rows_by_all.get(cid) or {}).get("tag") == "calibration" else tuple(screen_variants)
-        arms8a = [a for c in cands for a in (_variant_arm(c, v, screen_models, generic, plan_prior=plan_prior) for v in _variants_for(c.arm_id)) if a]
+        arms8a = [a for c in cands
+                  for a in (_variant_arm(c, v, screen_models, generic, plan_prior=plan_prior)
+                            for v in variants_for(c.arm_id, rows_by_all, screen_variants, BUILD_CALIBRATION_VARIANTS)) if a]
         res8a = R.race(arms8a, ref_arm(), split, "search", seed, eval_dir, stage="s08a_screen", fold=BUILD_FOLD_EVAL,
                        steps=screen_steps, max_battles=screen_max, eps=BUILD_EQUIV_EPS + screen_margin,
                        parallel=parallel, log=log)
@@ -947,8 +956,7 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
             hold = h
             summary["holdout"] = hold
             from champions_agent.config import BUILD_STRESS_ONLY_ON_PASS
-            passed = (hold or {}).get("verdict") in ("PASS", "PASS_EQUIVALENT")
-            if passed or not BUILD_STRESS_ONLY_ON_PASS:
+            if should_run_stress((hold or {}).get("verdict"), BUILD_STRESS_ONLY_ON_PASS):
                 rob = ST.run_stress(final_arm, ref_arm(), split, run_dir, seed + 5, n=stress_n, log=log, parallel=parallel)
                 summary["robustness_worst"] = rob.get("worst_sensitivity_candidate")
                 # ablation の A1: adapter を採用したらそれ (action 効果 = adapter − 基底)、無ければ前世代のチェックポイント

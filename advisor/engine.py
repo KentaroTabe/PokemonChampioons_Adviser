@@ -825,15 +825,23 @@ def evaluate(state: dict, resolver=None) -> dict:
     # 行動前に倒される見込みの技の割引 (RL補正も含めて掛ける)。
     # RL方策は「先に動けない」文脈を学習しきれておらず、技スコアだけ
     # 割り引くとRL事前分布が実行されない技を上位へ復活させるため、
-    # ブレンド後の合計に対して適用する
+    # ブレンド後の合計に対して適用する。割引した技の id は後段の補正
+    # (交代技の複合価値) が「実行できない技」を持ち上げないように覚えておく
+    ko_before_act_ids = set()
     for a in actions:
         if a.pop("act_discount", False):
             a["score"] = round(a["score"] * ACT_BEFORE_KO_DISCOUNT, 1)
+            ko_before_act_ids.add(a.get("id"))
     actions.sort(key=lambda a: -a["score"])
 
     # 交代技の複合価値: 素の交代が最善のとき、無効化されない交代技があれば
     # 「同じ交代を実現しつつダメージも入る」分だけ交代より優先する。
-    # 無効相性 (ボルトチェンジ→地面等) は交代自体が発生しないため対象外
+    # 無効相性 (ボルトチェンジ→地面等) は交代自体が発生しないため対象外。
+    # 行動前に倒される見込みの技 (上の割引) も対象外: 交代技は自分の行動順に
+    # 発動するので、先に倒されれば交代もダメージも起きない。素の交代は
+    # 相手の攻撃より先に成立するため、その状況では素の交代の方が安全
+    # (2026-10-05: この補正が割引を上書きし、ハッサム vs リザードンで
+    # 先に倒される とんぼがえり 53 点 > 交代 51 点 になっていた)
     try:
         if actions and actions[0]["kind"] == "switch":
             best_switch = actions[0]
@@ -841,6 +849,10 @@ def evaluate(state: dict, resolver=None) -> dict:
                 if (a["kind"] == "move" and a["id"] in PIVOT_MOVE_IDS
                         and a["score"] > -90
                         and move_type_mult.get(a["id"], 0) > 0):
+                    if a["id"] in ko_before_act_ids:
+                        a["reason"] += (" / 先に倒される見込みなので交代技は"
+                                        f"発動しない: 素の交代 ({best_switch['name']}) を優先")
+                        continue
                     a["score"] = round(
                         best_switch["score"] + PIVOT_OVER_SWITCH_BONUS, 1)
                     a["reason"] += (f" / 交代するならまずこの技: ダメージを"

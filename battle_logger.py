@@ -6,9 +6,16 @@
 
   {"t": ..., "type": "scene",   "scene": ..., "state": {...簡約状態...}}
   {"t": ..., "type": "events",  "fired": [...], "scene": ...}
-  {"t": ..., "type": "advice",  "kind": "battle"|"selection", "advice": {...}}
+  {"t": ..., "type": "advice",  "kind": "battle"|"selection", "advice": {...}, "advice_id": ..., "version_id": ...,
+   "state_id": ..., "state": {...助言が見た簡約状態...}, "policy": {"selection": ..., "rl_loaded": ...}}
+  {"t": ..., "type": "display", "advice_id": ..., "t_shown": ブラウザの表示時刻 (秒)}
+  {"t": ..., "type": "version", ...advisor.versions.runtime_versions() (指定 Package / 実際に読んだモデルの sha / 退避理由)}
   {"t": ..., "type": "outcome", "outcome": "win"|"loss"|"unknown",
    ("inferred": true — 勝敗メッセージ取り逃し時のHP文脈からの推定)}
+
+2026-10-05 ②: 助言の行に advice_id と、助言が見た状態 (state) とその digest (state_id)、動いていた版 (version_id) を付け、
+ブラウザが表示した時刻を display の行で別に残す。「どの版が、どの状態を見て、何を推奨し、いつ表示されたか」を 1 本で追うため
+(tools/team_build/real_eval の trace と tools/advice_trace)。
 
 プレイヤーが実際に選んだ行動は events の move_player_* / switch_player として
 記録される (アドバイスとの突き合わせで採用率・成績を後段で分析できる)。
@@ -78,6 +85,12 @@ def _compact_state(state: dict) -> dict:
 EXPERIMENT_MARK = Path("logs") / ".experiment_package"   # 候補 Package の試用中はここに package_id
 
 
+def state_digest(compact: dict, n: int = 12) -> str:
+    """助言が見た簡約状態の digest (純粋)。同じ状態への助言は同じ id になる"""
+    import hashlib
+    return hashlib.sha1(json.dumps(compact, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")).hexdigest()[:n]
+
+
 def battle_source_labels() -> dict:
     """{"source": organic|recommended|experiment, "package_id", "dataset_kind": "real",
         "data_quality": "trusted"}。registry の production Package と現在の my_team を比べる"""
@@ -128,6 +141,8 @@ class BattleLogger:
         self._fainted_last = (0, 0)  # 直前フレームの (自分, 相手) ひんし数
         self._rate_open = None      # この対戦に入る前のレート {"value","ts"}
         self._rate_last = None      # 直近観測レート (ファイルを跨いで保持)
+        self._version = None        # この対戦の version 行 (advisor.versions.runtime_versions)
+        self._advice_seq = 0        # 助言 ID の連番 (ファイル内で一意)
 
     # ------------------------------------------------------------------
     def _open_new(self) -> None:
@@ -151,6 +166,14 @@ class BattleLogger:
             self._write({"type": "session", **battle_source_labels()})
         except Exception as e:      # ラベル付けの失敗で対戦ログを止めない
             print(f"[battle_log] 由来ラベル付け失敗: {e}")
+        # 動いている版 (指定 Package / 実際に読んだ選出モデルと行動方策の sha / 構築の版 / 退避理由)。2026-10-05 ②
+        try:
+            from advisor.versions import runtime_versions
+            self._version = runtime_versions(refresh=True)
+            self._write({"type": "version", **self._version})
+        except Exception as e:
+            print(f"[battle_log] 版の記録に失敗: {e}")
+            self._version = None
 
     def _write(self, record: dict) -> None:
         if self._file is None:
@@ -322,6 +345,43 @@ class BattleLogger:
             sum(1 for p in state.get("opponent", {}).get("party", [])
                 if p.get("status") == "fainted"))
 
-    def on_advice(self, advice: dict, kind: str) -> None:
+    def on_advice(self, advice: dict, kind: str, state: Optional[dict] = None) -> str:
+        """助言の記録。advice に advice_id / t_gen を書き込み (ブラウザが表示の確認に使う)、助言が見た簡約状態とその digest、
+        動いていた版の id、実際に使った選出モデルの経路 (model_pick.model: experiment:<id> / deployed) と RL の読み込み状態を残す。
+        戻り値 advice_id"""
+        if self._file is None:
+            self._open_new()
+        self._advice_seq += 1
+        aid = f"{self._file.stem[7:]}-{self._advice_seq:04d}"      # battle_YYYYmmdd_HHMMSS → YYYYmmdd_HHMMSS-0001
+        advice["advice_id"] = aid
+        advice["t_gen"] = round(time.time(), 2)
         slim = {k: v for k, v in advice.items() if k not in ("text",)}
-        self._write({"type": "advice", "kind": kind, "advice": slim})
+        rec = {"type": "advice", "kind": kind, "advice": slim, "advice_id": aid,
+               "version_id": (self._version or {}).get("version_id")}
+        if state is not None:
+            try:
+                compact = _compact_state(state)
+                rec["state"] = compact
+                rec["state_id"] = state_digest(compact)
+                rec["turn"] = state.get("turn")
+            except Exception:
+                pass
+        try:
+            from advisor.versions import rl_loaded_now
+            mp = (advice.get("model_pick") or {}) if kind == "selection" else {}
+            rec["policy"] = {"selection": (mp.get("model") if kind == "selection" else None),
+                             "primary": advice.get("primary") if kind == "selection" else None,
+                             "rl_loaded": rl_loaded_now() if kind == "battle" else None}
+        except Exception:
+            pass
+        self._write(rec)
+        return aid
+
+    def on_display(self, advice_id: str, t_shown: Optional[float], kind: Optional[str] = None) -> None:
+        """ブラウザが助言を表示した時刻 (ブラウザの時計、秒)。生成時刻 (advice の t_gen) と分けて残す (受入条件 2)"""
+        if not advice_id or self._file is None:
+            return
+        rec = {"type": "display", "advice_id": str(advice_id), "t_shown": (round(float(t_shown), 3) if t_shown is not None else None)}
+        if kind:
+            rec["kind"] = kind
+        self._write(rec)

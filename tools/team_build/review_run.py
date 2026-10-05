@@ -45,25 +45,35 @@ def racing_summary(doc: dict) -> dict:
             "elapsed_s": doc.get("elapsed_s")}
 
 
-STAGE_TOKEN = re.compile(r"^(S\d+[a-z]?(?:-\d+)?|\[holdout\]|\[stress\]|\[ablation\]|最終候補|再現性の門|registry)")
+STAGE_TOKEN = re.compile(r"^(S\d+[a-z]?(?:-\d+)?|\[racing:([A-Za-z0-9_]+)\]|\[holdout\]|\[stress\]|\[ablation\]|\[adapt_action|\[adapt|"
+                         r"\[validate|\[screen-adapt\]|最終候補|再現性の門|registry)")
+RACING_STAGE = (("s08a", "S8a"), ("s09_repair", "S9 repair"), ("s08b", "S8b"), ("s10", "S10"), ("s12_holdout", "S12 holdout"),
+                ("opp_pilot", "experiment"))
 
 
 def stage_of(msg: str) -> Optional[str]:
-    """ログ行の先頭から段の名前 (S8a / S9 / [holdout] …)。段の行でなければ None (racing や適応の進捗行は直前の段に属する)"""
+    """ログ行の先頭から段の名前 (S8a / S9 repair / [racing:s10] → S10 …)。段の行でなければ None。
+    racing の進捗行 ([racing:<stage>]) は stage 名から段に写す (2026-10-05: 以前は無視していたので S10 の racing が直前の段に数えられ、
+    戻りが 9.8 時間・S10 が 0 時間になった)"""
     m = STAGE_TOKEN.match(msg or "")
     if not m:
         return None
     tok = m.group(1)
+    if tok.startswith("[racing:"):
+        name = m.group(2) or ""
+        for prefix, stage in RACING_STAGE:
+            if name.startswith(prefix):
+                return stage
+        return f"racing:{name}"
     if tok.startswith("S9"):
         return "S9 repair"
-    return {"[holdout]": "S12 holdout", "[stress]": "STRESS", "[ablation]": "ablation", "最終候補": "S10", "再現性の門": "S10",
-            "registry": "S13"}.get(tok, tok)
+    return {"[holdout]": "S12 holdout", "[stress]": "STRESS", "[ablation]": "ablation", "[adapt_action": "S11b", "[adapt": "S7",
+            "[validate": "S7", "[screen-adapt]": "S8a", "最終候補": "S10", "再現性の門": "S10", "registry": "S13"}.get(tok, tok)
 
 
 def stage_durations(run_log: Path) -> dict:
-    """run.log のタイムスタンプから段ごとの所要 (秒、時刻順)。段の行 (S8a … / [holdout] …) で段が切り替わり、途中の進捗行
-    (racing / adapt の行) は直前の段に数える。日付をまたぐ run は 24 時間を足す。
-    2026-10-05: 以前は行間の長い順の 12 件で、段ごとの所要になっていなかった (TEAM_BUILD_PENDING_1005 §4-8)"""
+    """run.log のタイムスタンプから段ごとの所要 (秒、時刻順)。行間の時間は**後ろの行の段**に数える (終わりにしか行を出さない段
+    (S10 の勝者、[holdout] の判定) の時間がその段に入るように)。段の名前が無い行は直前の段に属する。日付をまたぐ run は 24 時間を足す"""
     if not run_log.exists():
         return {}
     marks = []
@@ -77,19 +87,19 @@ def stage_durations(run_log: Path) -> dict:
 
 
 def durations_from_marks(marks: list) -> dict:
-    """[(秒, メッセージ)] → {段: 秒} (純粋)。段が決まる前の行は "S0-6" に数える"""
+    """[(秒, メッセージ)] → {段: 秒} (純粋)。各行間の時間は後ろの行の段 (段の名前が無ければ直前の段) に数える。
+    先頭の行より前は数えない"""
     out: dict = {}
     cur = "S0-6"
     prev_t: Optional[int] = None
     for t, msg in marks:
+        st = stage_of(msg) or cur
         if prev_t is not None:
             dt = t - prev_t
             if dt < 0:
                 dt += 86400
-            out[cur] = out.get(cur, 0) + dt
-        st = stage_of(msg)
-        if st:
-            cur = st
+            out[st] = out.get(st, 0) + dt
+        cur = st
         prev_t = t
     out["total"] = sum(v for k, v in out.items() if k != "total")
     return out

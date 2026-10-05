@@ -731,6 +731,11 @@
             const head = headIdx >= 0 ? lines[headIdx] : (lines[0] || '');
             document.getElementById('advice-headline').textContent = head;
             document.getElementById('advice-text').textContent = full;
+            // 表示の確認 (2026-10-05): 描画が済んだフレームでブラウザの時計を返す。サーバーの生成時刻 (t_gen) と分けて記録される
+            if (a.advice_id) {
+                requestAnimationFrame(() => socket.emit('advice_shown',
+                    {advice_id: a.advice_id, kind: a.kind || null, t_shown: Date.now() / 1000}));
+            }
         });
 
         document.getElementById('reset-btn').addEventListener('click', () => socket.emit('reset_state'));
