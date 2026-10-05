@@ -38,7 +38,19 @@ MOVES = {
     "terrainpulse": {"type": "Normal", "category": "special", "power": 50},
     "rest": {"type": "Psychic", "category": "status", "power": 0},
     "protect": {"type": "Normal", "category": "status", "power": 0},
-    "swordsdance": {"type": "Normal", "category": "status", "power": 0},
+    "swordsdance": {"type": "Normal", "category": "status", "power": 0, "self_boosts": {"atk": 2}},
+    "dragondance": {"type": "Dragon", "category": "status", "power": 0, "self_boosts": {"atk": 1, "spe": 1}},
+    "shellsmash": {"type": "Normal", "category": "status", "power": 0,
+                   "self_boosts": {"atk": 2, "spa": 2, "spe": 2, "def": -1, "spd": -1}},
+    "aquajet": {"type": "Water", "category": "physical", "power": 40, "priority": 1},
+    "extremespeed": {"type": "Normal", "category": "physical", "power": 80, "priority": 2},
+    "suckerpunch": {"type": "Dark", "category": "physical", "power": 70, "priority": 1},
+    "vacuumwave": {"type": "Fighting", "category": "special", "power": 40, "priority": 1},
+    "moonblast": {"type": "Fairy", "category": "special", "power": 95},
+    "flareblitz": {"type": "Fire", "category": "physical", "power": 120},
+    "partingshot": {"type": "Dark", "category": "status", "power": 0},
+    "switcheroo": {"type": "Dark", "category": "status", "power": 0},
+    "thunderwave": {"type": "Electric", "category": "status", "power": 0},
     "sunnyday": {"type": "Fire", "category": "status", "power": 0},
     "raindance": {"type": "Water", "category": "status", "power": 0},
     "psychicterrain": {"type": "Psychic", "category": "status", "power": 0},
@@ -58,7 +70,7 @@ class FakeInfo:
         if d is None:
             return None
         return dict({"variable_power": None, "fixed_damage": None, "ohko": False, "target_stat": False, "other_stat": None,
-                     "condition": None, "flags": set()}, **d)
+                     "condition": None, "flags": set(), "priority": 0, "self_boosts": {}}, **d)
 
     def types_of(self, sid):
         return list(TYPES.get(sid, []))
@@ -93,6 +105,45 @@ def test_nature_move_rule():
     print("test_nature_move_rule OK")
 
 
+def test_priority_move_by_set():
+    """先制技は型によって判別する (2026-10-05 ユーザー判断): 「1 ダメージを与えられれば良い先制技」は誤りにせず、
+    「火力が必要な先制技」は誤りにする。一律に除くのでも一律に誤りにするのでもない"""
+    def ok(*a):
+        return "nature_move" not in lint(*a)["errors"]
+    # 1 ダメージでよい: 特殊で戦う型 (下げる側は攻撃) の物理の先制技。使用率の上位に実際にある型
+    assert ok("primarina", "torrent", "sitrusberry", "modest", ["moonblast", "hypervoice", "aquajet", "protect"])        # アシレーヌ
+    assert ok("dragonite", "multiscale", "leftovers", "modest", ["roost", "extremespeed", "flamethrower", "shadowball"])  # カイリュー
+    assert ok("houndoom", "flashfire", "focussash", "timid", ["shadowball", "flamethrower", "protect", "suckerpunch"])    # ヘルガー
+    # 逆向き: 物理で戦う型 (下げる側は特攻) の特殊の先制技
+    assert ok("lucario", "innerfocus", "lifeorb", "adamant", ["closecombat", "earthquake", "vacuumwave", "protect"])
+    # 下げる側を使わないダメージ源 (ボディプレス) で戦う型の先制技も同じ
+    assert ok("corviknight", "pressure", "leftovers", "bold", ["bodypress", "extremespeed", "roost", "protect"])
+    # からをやぶる は両方の攻撃を上げるので、それだけでは火力が要るとしない (どちらで戦う型かはほかの技で決まる)
+    assert ok("blastoise", "torrent", "whiteherb", "modest", ["shellsmash", "aquajet", "flamethrower", "shadowball"])
+    # 火力が要る (誤り): 先制技でない物理技もある (ウインディ: ずぶとい + しんそく・フレアドライブ)
+    r = lint("arcanine", "intimidate", "rockyhelmet", "bold", ["willowisp", "roost", "extremespeed", "flareblitz"])
+    assert r["errors"] == ["nature_move"] and r["detail"]["nature_move"]["moves"] == ["extremespeed", "flareblitz"]
+    # 火力が要る (誤り): 下げる側だけを上げる技を持つ / その攻撃を上げるこだわり系を持つ / 先制技が唯一の攻撃技
+    assert not ok("dragonite", "multiscale", "leftovers", "modest", ["dragondance", "extremespeed", "flamethrower", "roost"])
+    assert not ok("dragonite", "multiscale", "leftovers", "modest", ["swordsdance", "extremespeed", "flamethrower", "roost"])
+    assert not ok("dragonite", "multiscale", "choiceband", "modest", ["extremespeed", "flamethrower", "shadowball", "hypervoice"])
+    assert not ok("dragonite", "multiscale", "leftovers", "bold", ["extremespeed", "roost", "toxic", "protect"])
+    # 判別の関数 (純粋)
+    mv = INFO.move
+    assert L.priority_needs_power("atk", "leftovers", ["moonblast", "aquajet", "protect", "roost"], mv) is False
+    assert L.priority_needs_power("atk", "leftovers", ["swordsdance", "aquajet", "moonblast", "roost"], mv) is True
+    assert L.priority_needs_power("atk", "leftovers", ["shellsmash", "aquajet", "moonblast", "roost"], mv) is False
+    assert L.priority_needs_power("atk", "choiceband", ["moonblast", "aquajet", "shadowball", "hypervoice"], mv) is True
+    assert L.priority_needs_power("atk", "choicespecs", ["moonblast", "aquajet", "shadowball", "hypervoice"], mv) is False
+    assert L.priority_needs_power("atk", None, ["aquajet", "protect", "roost", "toxic"], mv) is True
+    assert L.priority_needs_power("spa", "leftovers", ["closecombat", "vacuumwave", "protect", "roost"], mv) is False
+    # 直す処理: 誤りでなくなった型は直さない (ひかえめ アシレーヌは ひかえめ のまま)。誤りのままの型は従来どおり直す
+    assert L.repair_set("primarina", "torrent", "sitrusberry", "modest", ["moonblast", "hypervoice", "aquajet", "protect"], info=INFO) is None
+    r = L.repair_set("arcanine", "intimidate", "rockyhelmet", "bold", ["willowisp", "roost", "extremespeed", "flareblitz"], info=INFO)
+    assert r and r["nature"] == "impish"
+    print("test_priority_move_by_set OK")
+
+
 def test_item_rule():
     def item_errs(item, moves):
         return (lint("charizard", "blaze", item, "timid", moves)["detail"].get("item") or {}).get("problems", [])
@@ -114,6 +165,14 @@ def test_item_rule():
     assert item_errs("choicescarf", ["transform"]) == []
     assert item_errs("choicescarf", ["trick", "flamethrower", "shadowball", "hypervoice"]) == []
     assert item_errs("choicescarf", ["protect", "flamethrower", "shadowball", "hypervoice"]) == ["choice_status"]
+    # トリック / すりかえ を持つ型は、持ち物を押し付けたあとで変化技を使うので誤りにしない。すてゼリフ は縛られても交代するので
+    # 誤りにしない (2026-10-05 ユーザー判断。パンプジン: トリック + おにび、アローラペルシアン: すりかえ + すてゼリフ・でんじは、
+    # イキリンコ: こだわりスカーフ + すてゼリフ)
+    assert item_errs("choicescarf", ["trick", "willowisp", "flamethrower", "shadowball"]) == []
+    assert item_errs("choicescarf", ["switcheroo", "partingshot", "thunderwave", "flamethrower"]) == []
+    assert item_errs("choicescarf", ["partingshot", "uturn", "flamethrower", "shadowball"]) == []
+    assert item_errs("choicescarf", ["willowisp", "voltswitch", "flamethrower", "shadowball"]) == ["choice_status"]   # トリックが無ければ誤りのまま
+    assert item_errs("choicescarf", ["partingshot", "willowisp", "flamethrower", "shadowball"]) == ["choice_status"]  # すてゼリフ 以外の変化技は数える
     print("test_item_rule OK")
 
 
@@ -341,6 +400,7 @@ def test_rows_report_and_gate():
 
 def main() -> None:
     test_nature_move_rule()
+    test_priority_move_by_set()
     test_item_rule()
     test_field_dup_and_few_moves()
     test_few_moves_exemptions()

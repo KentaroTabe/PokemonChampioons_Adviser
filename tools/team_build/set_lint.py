@@ -7,9 +7,12 @@
     nature_move   性格が下げる側 (攻撃 / 特攻) を使う攻撃技を持つ。自分の能力を使わない技は除く: イカサマ (相手の攻撃)、ボディプレス
                   (自分の防御)、ちきゅうなげ / ナイトヘッド (固定ダメージ)、一撃技、カウンター系、いかりのまえば等の威力 0 の割合技。
                   とんぼがえり / クイックターン / ボルトチェンジ / こうそくスピン / キラースピン / ねこだまし と、効果が目的の技
-                  ドラゴンテール / ともえなげ / ほっぺすりすり も除く (NATURE_RULE_EXCLUDED。後の 3 つは 10/5 の定義の漏れの補正)
+                  ドラゴンテール / ともえなげ / ほっぺすりすり も除く (NATURE_RULE_EXCLUDED。後の 3 つは 10/5 の定義の漏れの補正)。
+                  先制技は型によって判別する (2026-10-05 ユーザー判断): 下げる側を使う攻撃技が先制技だけで、その先制技が
+                  「1 ダメージ入ればよい」使い方 (削り・とどめ) なら誤りにしない。「火力が要る」使い方なら誤り (priority_needs_power)
     item          持ち物なし / タイプ強化の持ち物でそのタイプの攻撃技なし / カゴのみで ねむる なし / こだわり系と変化技 /
-                  アクロバットと消費しない持ち物
+                  アクロバットと消費しない持ち物。こだわり系と変化技の例外 (2026-10-05 ユーザー判断): トリック / すりかえ を持つ型
+                  (持ち物を押し付けたあとで変化技を使う) と、すてゼリフ (縛られても交代する)
     field_dup     特性で張る場 (ひでり等) と同じ場を技 (にほんばれ等) でも張る
     few_moves     技が 4 つ未満 (重複を除く)
   警告
@@ -36,8 +39,14 @@ NATURE_MINUS = {"adamant": "spa", "jolly": "spa", "impish": "spa", "careful": "s
 NATURE_RULE_EXCLUDED = frozenset({"uturn", "flipturn", "voltswitch", "rapidspin", "mortalspin", "fakeout",
                                   "dragontail", "circlethrow", "nuzzle"})
 CHOICE_ITEMS = frozenset({"choiceband", "choicespecs", "choicescarf"})
-# こだわり系と組ませてよい変化技: へんしん (メタモンのこだわりスカーフ)、トリック / すりかえ (こだわりトリック)。2026-10-05 誤検出の補正
-CHOICE_STATUS_EXEMPT = frozenset({"transform", "trick", "switcheroo"})
+# こだわり系と組ませてよい変化技: へんしん (メタモンのこだわりスカーフ)、トリック / すりかえ (こだわりトリック)、
+# すてゼリフ (縛られても交代するので成立する。イキリンコ: こだわりスカーフ 71.7%・すてゼリフ 63.0%)。2026-10-05 誤検出の補正
+CHOICE_STATUS_EXEMPT = frozenset({"transform", "trick", "switcheroo", "partingshot"})
+# これを持つ型は、こだわり系の持ち物を相手に押し付けたあとでほかの変化技を使う → 「こだわり系と変化技」を誤りにしない
+# (パンプジン: トリック + おにび、アローラペルシアン: すりかえ + すてゼリフ・でんじは。2026-10-05 ユーザー判断)
+CHOICE_PASS_MOVES = frozenset({"trick", "switcheroo"})
+# 分類ごとの「その攻撃を上げるこだわり系」: これを持つ型の先制技は火力が要る (priority_needs_power)
+CHOICE_POWER_ITEM = {"physical": "choiceband", "special": "choicespecs"}
 # 技が 4 つ未満でも誤りにしない種 (覚える技が 4 つ無い): メタモン / アンノーン。learnset が読めるときは 4 未満の種も同じ扱い
 FEW_MOVES_EXEMPT_SPECIES = frozenset({"ditto", "unown"})
 # 性格の修理: + の能力を保って下げる側を変える (純粋な表)。使わない側の攻撃を下げられればそれ (other)、
@@ -99,12 +108,19 @@ class DexInfo:
             e = move_entry(move_id) or {}
         except Exception:
             e = {}
+        try:
+            from advisor.dex import move_boost_effects
+            boosts = dict((move_boost_effects(move_id) or {}).get("self") or {})
+        except Exception:
+            boosts = {}
         out = {"type": mi.get("type"), "category": str(mi.get("category") or "").lower(),
                "power": int(e.get("power") if e.get("power") is not None else (mi.get("basePower") or 0)),
                "variable_power": e.get("variable_power"), "fixed_damage": e.get("fixed_damage"), "ohko": bool(e.get("ohko")),
                "target_stat": e.get("override_offensive_pokemon") == "target", "other_stat": e.get("override_offensive_stat"),
                "condition": e.get("condition"), "flags": set((mi.get("flags") or {}).keys()) if isinstance(mi.get("flags"), dict)
-               else set(e.get("flags") or [])}
+               else set(e.get("flags") or []),
+               # 先制技の判別に使う: 優先度と、自分の能力を確実に上げる効果 (つるぎのまい 等。advisor/data/boost_moves.json)
+               "priority": int(mi.get("priority") or e.get("priority") or 0), "self_boosts": boosts}
         self._cache[move_id] = out
         return out
 
@@ -140,13 +156,43 @@ def uses_own_offense(move_id: str, m: Optional[dict]) -> bool:
     return not m.get("target_stat") and not m.get("other_stat")
 
 
-def nature_move_mismatch(nature: Optional[str], moves: list, move_of: Callable) -> list:
-    """性格が下げる側を使う攻撃技 (純粋)。戻り値 = 該当する技"""
+def priority_needs_power(minus: str, item: Optional[str], moves: list, move_of: Callable) -> bool:
+    """性格が下げる側 (minus = "atk" / "spa") を使う先制技に「火力が要る」型か (純粋)。
+    2026-10-05 ユーザー判断: 先制技は一律に規則から除くのでも一律に誤りにするのでもなく、「火力が必要な先制技」か
+    「1 ダメージを与えられれば良い先制技」かを型によって判別する。次のどれかなら火力が要る:
+      - 下げる側だけを上げる技を持つ (つるぎのまい / りゅうのまい 等。上げてから撃つ型。からをやぶる のように両方の攻撃を
+        上げる技は数えない: どちらで戦う型かはほかの技で決まる)
+      - その攻撃を上げるこだわり系を持つ (下げる側が攻撃なら こだわりハチマキ、特攻なら こだわりメガネ)
+      - 下げる側を使わないダメージ源が 1 つも無い (その先制技が唯一の攻撃技)
+    どれでもなければ「1 ダメージ入ればよい」使い方 (ほかの技で戦い、先制技は削り・とどめ・タスキつぶし) とみなす。
+    例: ひかえめ アシレーヌの アクアジェット、ひかえめ カイリューの しんそく、おくびょう ヘルガーの ふいうち は誤りにしない"""
+    want = "physical" if minus == "atk" else "special"
+    other_stat = "spa" if minus == "atk" else "atk"
+    ms = [str(m) for m in moves]
+    for mv in ms:
+        boosts = (move_of(mv) or {}).get("self_boosts") or {}
+        if int(boosts.get(minus) or 0) > 0 and int(boosts.get(other_stat) or 0) <= 0:
+            return True
+    if (item or "").lower() == CHOICE_POWER_ITEM[want]:
+        return True
+
+    def uses_minus(mv: str) -> bool:
+        return uses_own_offense(mv, move_of(mv)) and (move_of(mv) or {}).get("category") == want
+    return not any(damaging(move_of(mv)) and mv not in NATURE_RULE_EXCLUDED and not uses_minus(mv) for mv in ms)
+
+
+def nature_move_mismatch(nature: Optional[str], moves: list, move_of: Callable, item: Optional[str] = None) -> list:
+    """性格が下げる側を使う攻撃技 (純粋)。戻り値 = 該当する技。
+    該当する技が先制技だけで、その型では 1 ダメージ入ればよい使い方 (priority_needs_power が偽) なら、該当なしとする"""
     minus = NATURE_MINUS.get((nature or "").lower())
     if minus not in ("atk", "spa"):
         return []
     want = "physical" if minus == "atk" else "special"
-    return [mv for mv in moves if uses_own_offense(mv, move_of(mv)) and (move_of(mv) or {}).get("category") == want]
+    bad = [mv for mv in moves if uses_own_offense(mv, move_of(mv)) and (move_of(mv) or {}).get("category") == want]
+    if bad and all(int((move_of(mv) or {}).get("priority") or 0) > 0 for mv in bad) \
+            and not priority_needs_power(minus, item, moves, move_of):
+        return []
+    return bad
 
 
 def item_problems(item: Optional[str], moves: list, move_of: Callable) -> list:
@@ -162,7 +208,9 @@ def item_problems(item: Optional[str], moves: list, move_of: Callable) -> list:
             out.append("type_no_move")
     if it == "chestoberry" and "rest" not in ms:
         out.append("chesto_no_rest")
-    if it in CHOICE_ITEMS and any((move_of(mv) or {}).get("category") == "status" and mv not in CHOICE_STATUS_EXEMPT for mv in ms):
+    # こだわり系と変化技。トリック / すりかえ を持つ型は押し付けたあとで変化技を使うので誤りにしない (CHOICE_PASS_MOVES)
+    if it in CHOICE_ITEMS and not (CHOICE_PASS_MOVES & set(ms)) \
+            and any((move_of(mv) or {}).get("category") == "status" and mv not in CHOICE_STATUS_EXEMPT for mv in ms):
         out.append("choice_status")
     if "acrobatics" in ms and it and it not in CONSUMABLE_ITEMS and not it.endswith("berry") and not it.endswith("gem"):
         out.append("acrobatics")
@@ -237,7 +285,7 @@ def lint_set(species_id: str, ability: Optional[str], item: Optional[str], natur
     move_of = info.move
     moves = [str(m) for m in (moves or []) if m]
     errors, warnings, detail = [], [], {}
-    bad = nature_move_mismatch(nature, moves, move_of)
+    bad = nature_move_mismatch(nature, moves, move_of, item=item)
     if bad:
         errors.append("nature_move")
         detail["nature_move"] = {"nature": nature, "moves": bad}
