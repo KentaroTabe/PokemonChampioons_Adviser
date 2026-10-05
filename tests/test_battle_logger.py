@@ -115,20 +115,46 @@ def test_outcome_inference():
 def test_outcome_inference_by_rate():
     # 実戦 (5試合目): 最終ひんしも勝敗メッセージも取り逃し、HP0%由来の
     # 推定も効かなかった。結果画面のレート増減から勝敗を推定する
+    #
+    # 2026-10-06 期待値の変更 (第18回接続テスト。docs/incidents/reports/2026-10-06-rate-delta-misattributed-outcome.md):
+    # 以前は「前の対戦が勝ち (1602 を観測) → この対戦で 1618 を観測 → 勝ちと推定」を期待していた。ランク画面のレートは
+    # 対戦前の値で表示が始まるので、1602 が前の対戦の「前」の値、1618 がこの対戦の「前」の値 (= 前の対戦の後の値) の
+    # ことがあり、その場合 +16 は前の対戦の勝ちの増減でこの対戦の勝敗ではない (第18回の 2 戦目で実際に誤記録)。
+    # 差の向きが前の対戦の勝敗と同じなら推定しない (下の「あいまいな場合」)。向きが逆なら前の対戦の増減ではあり得ないので
+    # 推定する (こちらを従来の筋書きに使う)。帰属の規則の詳しいテストは tests/test_rate_outcome_attribution.py
     import json
     tmp = Path(tempfile.mkdtemp())
     try:
+        # あいまいな場合: 前の対戦は勝ち、この対戦で読めた値は +16 → 前の対戦の増減かもしれないので推定しない
+        amb = BattleLogger(log_dir=tmp)
+        st = _state("field")
+        st["last_rate"] = {"value": 1602, "ts": time.time()}
+        amb.on_frame(st, [])
+        amb._finalize("win")
+        time.sleep(1.1)
+        amb.on_frame(_state("command"), ["move_player_surf"])
+        fa = amb._file
+        st = _state("field")
+        st["last_rate"] = {"value": 1618, "ts": time.time()}
+        amb.on_frame(st, [])
+        amb._finalize(None)
+        records = [json.loads(l) for l in fa.read_text().splitlines()]
+        oc = [r for r in records if r["type"] == "outcome"][0]
+        assert oc["outcome"] == "unknown" and "inferred" not in oc, oc
+        assert [r["value"] for r in records if r["type"] == "rate"] == [1618]   # レートの行は残る
+        time.sleep(1.1)
+
         lg = BattleLogger(log_dir=tmp)
-        # 前の対戦の結果画面でレート1602を観測済み (ファイルを跨いで保持)
+        # 前の対戦 (負け) の結果画面でレート1602を観測済み (ファイルを跨いで保持)
         st = _state("field")
         st["last_rate"] = {"value": 1602, "ts": time.time()}
         lg.on_frame(st, [])
-        lg._finalize("win")
+        lg._finalize("loss")
         time.sleep(1.1)
         # 新しい対戦 (rate_open=1602)
         lg.on_frame(_state("command"), ["move_player_surf"])
         f = lg._file
-        # 対戦後の結果画面でレート1618を観測 (増=勝ち)。勝敗メッセージは欠落
+        # 対戦後の結果画面でレート1618を観測 (増=勝ち。前の対戦は負けなので、その増減ではない)。勝敗メッセージは欠落
         st = _state("field")
         st["last_rate"] = {"value": 1618, "ts": time.time()}
         lg.on_frame(st, [])
@@ -137,10 +163,11 @@ def test_outcome_inference_by_rate():
         oc = [r for r in records if r["type"] == "outcome"][0]
         assert oc["outcome"] == "win", oc
         assert oc.get("inferred") is True, oc
+        assert oc.get("basis") == "rate" and oc.get("basis_text") == "レート 1602.0 → 1618.0", oc
         rates = [r for r in records if r["type"] == "rate"]
         assert rates and rates[-1]["value"] == 1618, rates
 
-        # レート減=負け
+        # レート減=負け (1618 はこの前の対戦の「後」の値だと分かっている → 次の差はこの対戦の増減)
         time.sleep(1.1)
         lg.on_frame(_state("command"), ["move_player_surf"])
         f2 = lg._file

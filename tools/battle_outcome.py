@@ -54,7 +54,10 @@ class OutcomeTracker:
         typ = d.get("type")
         if typ == "outcome":
             self.recorded, self.inferred, self.corrected_row = outcome_record_fields(d)
-            self.text, self.closed = None, False
+            # 推定の更新の行 (revised_from: 後から読めたレートで推定し直した。ランク画面の後に書かれる) は、文言による訂正の
+            # 候補と「ランク画面を過ぎた」の印をそのまま引き継ぐ (ここで戻すと、次の対戦の文言を訂正に使ってしまう)
+            if "revised_from" not in d:
+                self.text, self.closed = None, False
         elif typ == "events":
             fired = d.get("fired") or []
             t = text_outcome_of(fired)
@@ -76,3 +79,37 @@ def outcome_from_records(records) -> tuple:
     for d in records:
         ot.feed(d)
     return ot.result()
+
+
+def rate_inference(reads: list, rate_open: Optional[float], open_fresh: bool, open_is_post: bool,
+                   prev_outcome: Optional[str], min_delta: float, max_delta: float) -> Optional[dict]:
+    """ランク画面のレートの読みから、この対戦の勝敗を推定する (純粋)。推定できなければ None。
+    戻り値 {"outcome": "win" | "loss", "from": 対戦前の値, "to": 対戦後の値}。推定できたとき、最後の読みは対戦後の値。
+
+    reads: この対戦の終了画面で読めたレート (値が変わるたびに 1 つ、時刻順)。rate_open: この対戦に入る前の最後の読み。
+    open_fresh: rate_open が直前の対戦の終了画面で読めた値か (間に読めなかった対戦が無い)。open_is_post: rate_open が直前の
+    対戦の「後」の値だと分かっているか。prev_outcome: 直前の対戦の勝敗 (文言などで確定したものだけ。推定・不明は None)。
+
+    ランク画面のレートは対戦前の値で表示が始まり、数秒で対戦後の値に変わる。1 回だけ読めた値はどちらか分からない
+    (2026-10-06 第18回接続テスト: 1 回だけ読めた 9 戦で、対戦前の値 5 / 対戦後の値 4)。対戦前の値どうしの差は直前の対戦の
+    増減なので、この対戦の勝敗にしてはいけない (第18回の 2 戦目: 1 戦目の負けの −19.0 を 2 戦目の負けと記録した。実際は勝ち)。
+    - 2 つ以上読めた: 最初 (対戦前) → 最後 (対戦後) の増減
+    - 1 つだけ読めて rate_open と違い、rate_open が直前の対戦で読めた値のとき:
+        rate_open が直前の対戦の後の値だと分かっている → その差
+        直前の対戦の勝敗が確定していて、差の向きがそれと逆 → その差の向き (直前の対戦の増減ではあり得ない)
+        それ以外 (差の向きが直前の対戦と同じ / 直前の勝敗が不明) → 推定しない (直前の対戦の増減かもしれない)
+    差の大きさが min_delta 未満 (小数の読み違い) / max_delta 超 (数字の誤読) なら推定しない"""
+    def _of(a: float, b: float) -> Optional[dict]:
+        d = b - a
+        if abs(d) < min_delta or abs(d) > max_delta:
+            return None
+        return {"outcome": "win" if d > 0 else "loss", "from": a, "to": b}
+
+    reads = [float(v) for v in (reads or [])]
+    if len(reads) >= 2:
+        return _of(reads[0], reads[-1])
+    if len(reads) == 1 and rate_open is not None and open_fresh:
+        got = _of(float(rate_open), reads[0])
+        if got and (open_is_post or (prev_outcome in ("win", "loss") and prev_outcome != got["outcome"])):
+            return got
+    return None

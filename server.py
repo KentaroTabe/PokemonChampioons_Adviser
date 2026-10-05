@@ -27,7 +27,7 @@ from fastapi import FastAPI
 from vision import ocr
 from vision.pipeline import VisionPipeline
 from vision.scenes import SCENE_SELECTION, SCENE_STANDBY
-from vision.end_notice import battle_end_notice
+from vision.end_notice import battle_end_notice, outcome_revision_notice
 
 
 def should_advise_selection(state: dict) -> bool:
@@ -251,6 +251,11 @@ async def _handle_one_frame(sid, data):
         state, fired = await loop.run_in_executor(None, pipeline.process, img)
         _proc_ms.append((time.time() - _t_proc) * 1000.0)
         processed_counter += 1
+        # 勝敗を推定・不明で記録した後にレートが読めて推定が変わったら、助言欄に出す (2026-10-06 第18回)
+        _rev = outcome_revision_notice(battle_log.pop_revision())
+        if _rev:
+            await sio.emit('advice_update', _rev, room=sid)
+            print(f"[server] {_rev['reason']}")
         battle_log.on_frame(state, fired)
         spread_tracker.on_frame(state, fired)   # 相手の型推定 (先後/ダメージ観測)
 
@@ -282,7 +287,8 @@ async def _handle_one_frame(sid, data):
             for f in fired:
                 print(f"[server] イベント検知: {f}")
             # 対戦終了 (とその見込み) を検知した瞬間に助言欄へ出す (終了の確定は 1 対戦 1 回)
-            notice = battle_end_notice(state, fired)
+            # 勝敗が確定していなければ、対戦ログに記録した推定の結果と根拠を出す (battle_log.on_frame が先に記録済み)
+            notice = battle_end_notice(state, fired, battle_log.outcome_info())
             if notice and notice.get("battle_end"):
                 if _end_notice_seq == state.get("battle_seq"):
                     notice = None

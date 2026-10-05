@@ -42,10 +42,41 @@ def test_no_notice_for_other_events():
     print("test_no_notice_for_other_events OK")
 
 
+def test_inferred_result_is_shown_with_basis():
+    """2026-10-06 第18回接続テスト: 勝負の文言を読めなかった対戦で「勝敗は未確定 (…から推定)」とだけ出て、どちらと推定したかが
+    分からなかった。対戦ログに記録した推定の結果と根拠を出す"""
+    from vision.end_notice import outcome_revision_notice, result_text
+    rec = {"outcome": "loss", "inferred": True, "basis": "rate", "basis_text": "レート 1705.9 → 1686.7"}
+    n = battle_end_notice({"outcome": None}, ["battle_end_rank"], rec)
+    assert n["battle_end"] is True and n["reason"] == "対戦終了: 負けと推定 [レート 1705.9 → 1686.7] (ランク画面)", n
+    rec = {"outcome": "win", "inferred": True, "basis": "fainted", "basis_text": "ひんしの数 自分 1 / 相手 3"}
+    assert battle_end_notice({}, ["battle_end_result"], rec)["reason"] == \
+        "対戦終了: 勝ちと推定 [ひんしの数 自分 1 / 相手 3] (リザルト画面)"
+    # 推定もできなかった (記録は unknown): 推定していないことが分かる文言
+    n = battle_end_notice({"outcome": None}, ["battle_end_rank"],
+                          {"outcome": "unknown", "inferred": False, "basis": None, "basis_text": None})
+    assert "未確定" in n["reason"] and "と推定" not in n["reason"] and "ランク画面" in n["reason"], n
+    # 対戦状態の勝敗 (勝負の文言など) が確定していれば、記録の内容によらずそれを出す
+    assert battle_end_notice({"outcome": "win"}, ["battle_win"], rec)["reason"] == "対戦終了: 勝ち (勝負の文言)"
+    assert result_text("loss", {"outcome": "win", "inferred": True, "basis_text": "x"}) == "負け"
+    # 記録が確定値 (推定でない) ならそのまま
+    assert result_text(None, {"outcome": "win", "inferred": False}) == "勝ち"
+    # 後から読めたレートで推定を更新したときの通知
+    rev = {"outcome": "loss", "inferred": True, "basis": "rate", "basis_text": "レート 1705.9 → 1686.7",
+           "revised_from": "unknown"}
+    n = outcome_revision_notice(rev)
+    assert n and n["battle_end"] is True and n["ok"] is False and n["kind"] == "battle"
+    assert n["reason"] == "勝敗の推定を更新: 未確定 → 負けと推定 [レート 1705.9 → 1686.7]", n
+    assert "勝ち → 負けと推定" in outcome_revision_notice(dict(rev, revised_from="win"))["reason"]
+    assert outcome_revision_notice(None) is None and outcome_revision_notice({"outcome": "unknown"}) is None
+    print("test_inferred_result_is_shown_with_basis OK")
+
+
 def main() -> None:
     test_hint_and_cancel()
     test_end_basis_and_result()
     test_no_notice_for_other_events()
+    test_inferred_result_is_shown_with_basis()
     print("ALL OK")
 
 
