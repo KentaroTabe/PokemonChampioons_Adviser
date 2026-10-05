@@ -941,9 +941,11 @@ def main() -> None:
                     help="この段で止める (ablation 拡張: S8a/S8b の結果だけ取る)")
     ap.add_argument("--s08b-seed-offset", type=int, default=1,
                     help="S8b の相手列 seed のオフセット (既定 1 = S8a と別の列。ablation 拡張では 0 で同一列)")
-    ap.add_argument("--search-mode", choices=["joint", "legacy"], default=BUILD_SEARCH_MODE,
+    ap.add_argument("--search-mode", choices=["joint", "legacy", "both"], default=BUILD_SEARCH_MODE,
                     help="joint = 並びと型の同時探索 (S5 統合段: 核の型を同時に決め補完を順に足す、docs/TEAM_BUILD_REDESIGN_1002.md §5) / "
-                         "legacy = 従来の S5 (種の並び) → S6 (型) (既定 config BUILD_SEARCH_MODE)")
+                         "legacy = 従来の S5 (種の並び) → S6 (型) / both = 同じ構想で両方を探索し、従来方式の並びを G.. の id で "
+                         "同時探索の並びに足す (実験 11: 同じ run・同じ相手列で両方式を測る。--strata は方式ごとに数える) "
+                         "(既定 config BUILD_SEARCH_MODE)")
     ap.add_argument("--s11", choices=["on", "off"], default="off",
                     help="S11 (勝者の SEARCH+SELECTION 再学習)。既定 off = S7 の検証済み checkpoint を最終モデルにする")
     ap.add_argument("--reference-adapt", choices=["on", "off"], default=None,
@@ -1072,7 +1074,8 @@ def main() -> None:
             log(run_dir, f"S4 article: claims={len(claims)} cores={len(cores)} → families={len(fams)}")
         except Exception as e:
             log(run_dir, f"S4 article error: {e!r}")
-    if args.search_mode == "joint":
+    lineups, results = [], []
+    if args.search_mode in ("joint", "both"):
         # S5 統合段 (2026-10-02 再設計): 並びと型を同時に探索し、s05_candidates / s06_sets を同じ形で保存する。
         # 不変条件 (除外・エースの石) は従来どおりここで検査する
         from tools.team_build.joint_stage import stage_s5_joint
@@ -1082,13 +1085,25 @@ def main() -> None:
                                           registered=registered_team(), log=lambda m: log(run_dir, m), seed=args.seed)
         _assert_no_banned(run_dir, "S5", [(r["candidate_id"], r["members"]) for r in results], set(spec.banned))
         _assert_ace_mega(run_dir, results)
-    else:
-        lineups = stage_s5(run_dir, spec, fams, feats, threats, prof, threat_weights,
-                           only_incumbent=args.only_incumbent, n_neighbors=args.incumbent_neighbors_s5,
-                           rule_ctx=rule_ctx, arch_ctx=arch_ctx)
+    if args.search_mode in ("legacy", "both"):
+        # both (実験 11): 従来方式は run の下の legacy/ に同じ形 (s05_candidates / s06_sets) で出し、合法性の検査まで済ませてから
+        # 同時探索の行に足す。同じ構想・同じ脅威の重み・同じ規則の文脈を使う (違うのは S5 / S6 の方式だけ)
+        leg_dir = run_dir if args.search_mode == "legacy" else run_dir / LEGACY_SUBDIR
+        leg_dir.mkdir(parents=True, exist_ok=True)
+        lineups_l = stage_s5(leg_dir, spec, fams, feats, threats, prof, threat_weights,
+                             only_incumbent=args.only_incumbent, n_neighbors=args.incumbent_neighbors_s5,
+                             rule_ctx=rule_ctx, arch_ctx=arch_ctx)
         concept_mega = {f["family_id"]: f.get("mega_id") for f in fams}
-        results = stage_s6(run_dir, spec, lineups, doc["snapshot"]["id"], tv, concept_mega, rule_ctx=rule_ctx, gen=gen,
-                           arch_ctx=arch_ctx, fams=fams)
+        results_l = stage_s6(leg_dir, spec, lineups_l, doc["snapshot"]["id"], tv, concept_mega, rule_ctx=rule_ctx, gen=gen,
+                             arch_ctx=arch_ctx, fams=fams)
+        if args.search_mode == "legacy":
+            lineups, results = lineups_l, results_l
+        else:
+            results, id_map = merge_search_modes(results, results_l)
+            write_merged_sets(run_dir, leg_dir, results, id_map)
+            manifest["n_lineups_legacy"] = len(id_map)
+            log(run_dir, f"S6 both: 同時探索 {sum(1 for r in results if r.get('search_mode') == 'joint')} 並びに従来方式 {len(id_map)} 並びを足した "
+                         f"(id は {LEGACY_ID_PREFIX}..、従来方式の現行枝は足さない。従来方式の成果物は {LEGACY_SUBDIR}/)")
     manifest["search_mode"] = args.search_mode
     for name, key in (("s02_env_match.json", "env_match"), ("s06_lint.json", "lint")):
         try:
@@ -1111,12 +1126,56 @@ def main() -> None:
         _measure(run_dir, args)
 
 
+LEGACY_SUBDIR = "legacy"          # --search-mode both のとき、従来方式 (S5 → S6) の成果物を置く run の下のディレクトリ
+LEGACY_ID_PREFIX = "G"            # both で従来方式の並びに振る candidate_id の先頭 (同時探索の L.. と番号が衝突するため)
+
+
+def legacy_candidate_id(cid: str) -> str:
+    """both の run で従来方式の並びに振る candidate_id: L05_C020 → G05_C020 (構想の id はそのまま残す。純粋)"""
+    cid = str(cid)
+    return LEGACY_ID_PREFIX + cid[1:] if cid.startswith("L") else f"{LEGACY_ID_PREFIX}_{cid}"
+
+
+def merge_search_modes(joint_rows: list, legacy_rows: list) -> tuple:
+    """--search-mode both: 同時探索の行に従来方式の行を足す (純粋)。戻り値 (行, {従来方式の元の id: 新しい id})。
+    - 同時探索の行に search_mode = "joint"、従来方式の行に search_mode = "legacy" と legacy_candidate_id (元の id) を付ける
+    - 従来方式の現行枝 (incumbent / incumbent_mut) は足さない (同じ登録チームの枝が同時探索の側にある)
+    - 従来方式の candidate_id は G.. に替え、index は足した順に振り直す。代理の点 (score) は方式ごとに尺度が違うので、
+      順位は方式ごとに数える (resolve_candidate_subset)"""
+    rows = [dict(r, search_mode="joint") for r in joint_rows]
+    have = {r.get("candidate_id") for r in rows}
+    id_map: dict = {}
+    for r in legacy_rows:
+        if (r.get("tag") or "") in ("incumbent", "incumbent_mut"):
+            continue
+        old = str(r.get("candidate_id"))
+        new = legacy_candidate_id(old)
+        if new in have:
+            continue
+        have.add(new)
+        id_map[old] = new
+        rows.append(dict(r, candidate_id=new, index=len(rows), search_mode="legacy", legacy_candidate_id=old))
+    return rows, id_map
+
+
+def write_merged_sets(run_dir: Path, leg_dir: Path, rows: list, id_map: dict) -> None:
+    """both: 従来方式の構築本文 (leg_dir/s06_sets/<元の id>.txt) を run の s06_sets/<新しい id>.txt に写し、足した行で s06_sets.json を書き直す"""
+    out_dir = run_dir / "s06_sets"
+    out_dir.mkdir(exist_ok=True)
+    for old, new in id_map.items():
+        src = leg_dir / "s06_sets" / f"{old}.txt"
+        if src.exists():
+            (out_dir / f"{new}.txt").write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    (run_dir / "s06_sets.json").write_text(json.dumps(rows, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+
+
 def resolve_candidate_subset(rows: list, candidates: Optional[str], strata: Optional[str],
                              include_incumbent: bool, incumbent_neighbors: int) -> Optional[list]:
     """測定するチームの部分集合を決める (純粋)。None なら全候補。
 
     candidates: candidate_id のカンマ区切り。strata: 探索候補 (現行枝を除く) を S5 スコア順に並べた 1 始まりの順位の
-    カンマ区切り (例 1,2,5,10,20)。include_incumbent なら現行 + 近傍 (incumbent_neighbors 並び) を加える
+    カンマ区切り (例 1,2,5,10,20)。include_incumbent なら現行 + 近傍 (incumbent_neighbors 並び) を加える。
+    探索の方式が混ざる run (--search-mode both の search_mode) では、順位は方式ごとに数える (点の尺度が方式で違う)
     """
     if not candidates and not strata:
         return None
@@ -1126,15 +1185,21 @@ def resolve_candidate_subset(rows: list, candidates: Optional[str], strata: Opti
     if candidates:
         ids += [c.strip() for c in candidates.split(",") if c.strip()]
     if strata:
-        explore = sorted((r for r in ok_rows if (r.get("tag") or "") not in ("incumbent", "incumbent_mut", "calibration")),
-                         key=lambda r: -(r.get("score") or 0.0))
-        for tok in strata.split(","):
-            tok = tok.strip()
-            if not tok:
-                continue
-            k = int(tok)
-            if 1 <= k <= len(explore):
-                ids.append(explore[k - 1]["candidate_id"])
+        explore_all = [r for r in ok_rows if (r.get("tag") or "") not in ("incumbent", "incumbent_mut", "calibration")]
+        modes: list = []
+        for r in explore_all:
+            m = r.get("search_mode") or ""
+            if m not in modes:
+                modes.append(m)
+        for m in modes:
+            explore = sorted((r for r in explore_all if (r.get("search_mode") or "") == m), key=lambda r: -(r.get("score") or 0.0))
+            for tok in strata.split(","):
+                tok = tok.strip()
+                if not tok:
+                    continue
+                k = int(tok)
+                if 1 <= k <= len(explore):
+                    ids.append(explore[k - 1]["candidate_id"])
     if include_incumbent:
         ids += [r["candidate_id"] for r in ok_rows if r.get("tag") == "incumbent"]
         ids += [r["candidate_id"] for r in ok_rows if r.get("tag") == "incumbent_mut"][:max(0, incumbent_neighbors)]
