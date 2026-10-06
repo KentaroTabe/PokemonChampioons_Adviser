@@ -70,6 +70,7 @@ TESTS=(
   test_set_lint
   test_theme_check
   test_articles_ingest
+  test_article_parse
   test_env_match
   test_advice_trace
   test_team_build_experiments
