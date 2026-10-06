@@ -520,6 +520,25 @@ def reject_alias(data: dict, category: str, alias: str, today: Optional[str] = N
     return new, "rejected"
 
 
+def add_alias(data: dict, category: str, alias: str, canonical: str, today: Optional[str] = None,
+              dic: Optional[ArticleDictionary] = None, source: Optional[dict] = None) -> tuple:
+    """人が別名を直接足す (basis = human、confirmed)。canonical は辞書の厳密一致で解決できる名前で、往復一致を通す。
+    同じ表記に有効な entry があれば足さない。→ (新しい辞書, 結果の符号: added / not_name_token / canonical_unresolved / exists / conflict)"""
+    new = copy.deepcopy(data)
+    if category not in CATEGORIES or not is_name_token(alias) or not is_name_token(canonical):
+        return new, "not_name_token"
+    d = dic or default_dictionary()
+    ident = value_id(d.lookup_exact(category, canonical))
+    if not ident or not roundtrip_ok(d, category, canonical, ident):
+        return new, "canonical_unresolved"
+    same = _matches(new, category, alias)
+    active = [e for e in same if e["status"] in ACTIVE_STATUSES]
+    if active:
+        return new, "exists" if active[0]["id"] == ident else "conflict"
+    new.setdefault("entries", []).append(make_entry(category, alias, canonical, ident, "confirmed", "human", today or _today(), source=source))
+    return new, "added"
+
+
 def _format_entry(e: dict) -> str:
     return f"{e['category']}\t{e['alias']}\t→ {e['canonical']} ({e['id']})\t{e['status']}\t{e['basis']}\t{e.get('added')}"
 
@@ -530,6 +549,7 @@ def main(argv: Optional[list] = None) -> int:
     g.add_argument("--list", action="store_true", help="一覧")
     g.add_argument("--confirm", nargs=2, metavar=("CATEGORY", "ALIAS"), help="確定する (往復一致を通るものだけ)")
     g.add_argument("--reject", nargs=2, metavar=("CATEGORY", "ALIAS"), help="却下する")
+    g.add_argument("--add", nargs=3, metavar=("CATEGORY", "ALIAS", "CANONICAL"), help="人が別名を直接足す (辞書の名前へ。往復一致を通るものだけ)")
     ap.add_argument("--status", choices=STATUSES, help="--list の絞り込み")
     ap.add_argument("--id", dest="ident", help="同じ表記に複数の対応があるときの id")
     ap.add_argument("--path", default=str(DEFAULT_PATH), help="別名辞書のファイル (既定 vision/data/article_aliases.json)")
@@ -544,9 +564,11 @@ def main(argv: Optional[list] = None) -> int:
         return 0
     if args.confirm:
         new, code = confirm_alias(data, args.confirm[0], args.confirm[1], ident=args.ident)
+    elif args.add:
+        new, code = add_alias(data, args.add[0], args.add[1], args.add[2])
     else:
         new, code = reject_alias(data, args.reject[0], args.reject[1], ident=args.ident)
-    if code in ("confirmed", "rejected"):
+    if code in ("confirmed", "rejected", "added"):
         save_aliases(new, path)
         print(f"{code}: {path}")
         return 0

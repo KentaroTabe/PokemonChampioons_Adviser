@@ -141,6 +141,66 @@ def test_units_parse_to_records():
     print("test_units_parse_to_records OK")
 
 
+def _li_raw(name, url, item, ability, moves, nature, stat, ev, init="form0", form1=None):
+    """生の HTML の li (data-* 属性。表示は JS が組み立てる)。form1 = (メガ後の名前, url, 特性)"""
+    attrs = [f"data-name='{name}'", f"data-url='{url}'", f"data-item-name='{item}'", f"data-ability='{ability}'", f"data-nature='{nature}'",
+             f"data-stat='{','.join(str(x) for x in stat)}'", f"data-ev='{','.join(str(x) for x in ev)}'", f"data-init-form='{init}'"]
+    attrs += [f"data-move{i + 1}-name='{m}'" for i, m in enumerate(moves)]
+    if form1:
+        attrs += [f"data-form1-name='{form1[0]}'", f"data-form1-url='{form1[1]}'", f"data-form1-ability='{form1[2]}'", "data-form0-label='通常'",
+                  "data-form1-label='メガ'"]
+    return f"<li {' '.join(attrs)}></li>"
+
+
+RAW_HTML = f"""<html><body><div id="article-body">
+<h2>最強パーティランキング</h2><p>レギュレーションM-Cの構築の評価 (合成)。</p>
+<h2>メガラグラージ構築</h2><h3>メガラグラージ構築の詳細</h3>
+<div class="gw_all_table"><table><tbody><tr><th>評価</th><th>チームID</th></tr><tr><td>S</td><td>RAW0001</td></tr></tbody></table></div>
+<ol class="wd-pkch-pkmlist" data-auto-generate="true">
+{_li_raw('ラグラージ', '100', 'ラグラージナイト', 'げきりゅう', ['ウェーブタックル', 'じしん', 'れいとうパンチ', 'どくづき'], 'ようき',
+         [177, 162, 120, 103, 110, 102], [2, 32, 0, 0, 0, 32], init='form1', form1=('メガラグラージ', '101', 'すいすい'))}
+{_li_raw('ペリッパー', '102', 'しめったいわ', 'あめふらし', ['ぼうふう', 'なみのり', 'とんぼがえり', 'おいかぜ'], 'ひかえめ',
+         [167, 63, 120, 158, 92, 88], [32, 0, 0, 29, 2, 3])}
+</ol>
+<p>生の形式の試験。</p>
+<h3>選出紹介</h3><h4>基本選出</h4>
+<div class="gw_all_table"><table><tbody><tr><th>基本選出</th></tr><tr>{_td('ペリッパー', '102', '(初手)')}{_td('メガラグラージ', '101')}</tr></tbody></table></div>
+</div></body></html>"""
+
+
+def test_raw_data_attributes():
+    """生の HTML (li の data-* 属性) も読める。メガが既定の個体はメガ後の形態・特性で、実数値 (通常の形態の値) は出さない"""
+    dic = P.default_dictionary()
+    units = G.gamewith_units(RAW_HTML, source={"url": f"{GW}/555537"}, dic=dic)
+    assert len(units) == 1 and units[0]["meta"]["team_code"] == "RAW0001" and units[0]["meta"]["regulation"] == "gen9championsbssregmc"
+    lines = units[0]["marked"].splitlines()
+    assert lines[1] == f"* [メガラグラージ]({GW}/101)@ラグラージナイト(ようき)すいすい"
+    assert lines[2] == "* HP:2 / 攻撃:32 / 素早:32" and lines[3] == "* ウェーブタックル / じしん / れいとうパンチ / どくづき"   # 実数値の行は無い
+    assert lines[4] == f"* [ペリッパー]({GW}/102)@しめったいわ(ひかえめ)あめふらし"
+    assert lines[5] == "* HP:32 / 特攻:29 / 特防:2 / 素早:3" and lines[6] == "* ぼうふう / なみのり / とんぼがえり / おいかぜ"   # data-stat は使わない
+    assert "基本選出はペリッパー(初手)、メガラグラージ。" in lines
+    parsed = P.parse_article(units[0]["marked"], dic, host="gamewith.jp")
+    assert [m["species_id"] for m in parsed["members"]] == ["swampertmega", "pelipper"]
+    assert parsed["members"][0]["actual"] is None and parsed["members"][1]["actual"] is None
+    rec = B.build_validated_record(parsed, dict(units[0]["source"], synthetic=True), units[0]["meta"])
+    assert rec["status"] == "incomplete" and all(not p.startswith("m") or ":moves:" in p or p.startswith("members") for p in rec["problems"])
+    rules = [r for r in rec["selection_rules"] if r["recommendation"] == "default"]
+    assert len(rules) == 1 and rules[0]["lead"] == "m2" and sorted(rules[0]["selected_members"]) == ["m1", "m2"]
+    # 注記つきの種名 (イエッサン(オス) → indeedeemale) は見出しで解決し、文中の短い名前「イエッサン」も同じ味方として読む (別の種にしない)
+    gendered = RAW_HTML.replace(_li_raw('ペリッパー', '102', 'しめったいわ', 'あめふらし', ['ぼうふう', 'なみのり', 'とんぼがえり', 'おいかぜ'], 'ひかえめ',
+                                        [167, 63, 120, 158, 92, 88], [32, 0, 0, 29, 2, 3]),
+                                _li_raw('イエッサン(オス)', '300', 'サイコシード', 'サイコメイカー', ['サイコキネシス', 'いやしのねがい', 'このゆびとまれ', 'トリックルーム'],
+                                        'ずぶとい', [1, 1, 1, 1, 1, 1], [32, 0, 32, 0, 2, 0]))
+    gendered = gendered.replace("基本選出はペリッパー(初手)、メガラグラージ。", "基本選出はイエッサン(初手)、メガラグラージ。").replace(
+        _td('ペリッパー', '102', '(初手)'), _td('イエッサン(オス)', '300', '(初手)'))
+    gu = G.gamewith_units(gendered, source={"url": f"{GW}/555537"}, dic=dic)
+    gp = P.parse_article(gu[0]["marked"], dic, host="gamewith.jp")
+    assert [m["species_id"] for m in gp["members"]] == ["swampertmega", "indeedeemale"]
+    grec = B.build_validated_record(gp, dict(gu[0]["source"], synthetic=True), gu[0]["meta"])
+    assert not any("species_outside_team" in p for p in grec["problems"]) and grec["selection_rules"][0]["lead"] == "m2"
+    print("test_raw_data_attributes OK")
+
+
 def test_registry_and_edge_cases():
     adapters = host_adapters()
     assert set(adapters) == {"gamewith.jp"}
@@ -163,6 +223,7 @@ def test_registry_and_edge_cases():
 def main() -> None:
     test_units_from_synthetic_page()
     test_units_parse_to_records()
+    test_raw_data_attributes()
     test_registry_and_edge_cases()
     print("ALL OK")
 

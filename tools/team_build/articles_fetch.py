@@ -158,7 +158,23 @@ def run(urls: list, policy: dict, fetcher: Optional[Fetcher] = None, state_path:
             "unresolved_names": res["unresolved_names"], "alias_entries": res["alias_entries"]}
 
 
-def _summary_lines(out: dict) -> list:
+def _rule_ja(rule: dict, members: dict) -> str:
+    """選出規則 1 つの日本語の短い表示 (名前は表からの逆引き)"""
+    from advisor.ja_names import species_ja
+    names = [species_ja(members.get(m, m)) for m in rule.get("selected_members") or []]
+    names += [species_ja(s.get("species_id")) for s in rule.get("selected_species") or []]
+    lead = rule.get("lead") or rule.get("lead_species")
+    lead_ja = species_ja(members.get(lead, lead)) if lead else None
+    cond = rule.get("condition")
+    cond_s = ""
+    if cond:
+        preds = [c.get("predicate") for c in (cond.get("any_of") or cond.get("all_of") or [cond])]
+        cond_s = f" 条件={'/'.join(str(p) for p in preds)}({cond.get('evaluation')})"
+    return (f"{rule.get('recommendation')}{cond_s}: {'・'.join(names)}" + (f" 初手={lead_ja}" if lead_ja else "")
+            + (" (例示)" if rule.get("example") else "") + (f" 自由枠{rule['free_slots']}" if rule.get("free_slots") else ""))
+
+
+def _summary_lines(out: dict, ja: bool = False) -> list:
     lines = []
     for p in out["plan"]:
         lines.append(f"{p['action']:<5} {p['reason'] or 'ok':<26} {p['url']}")
@@ -169,6 +185,15 @@ def _summary_lines(out: dict) -> list:
         members = ", ".join(m["species_id"] for m in rec["members"])
         lines.append(f"記録 {rec['case_id']} {rec['record_kind']} status={rec['status']} reg={meta.get('regulation')} "
                      f"team_code={meta.get('team_code')} members=[{members}] rules={len(rec['selection_rules'])} claims={len(rec['claims'])}")
+        if ja:
+            from advisor.ja_names import set_line_ja
+            id_map = {m["id"]: m["species_id"] for m in rec["members"]}
+            for m in rec["members"]:
+                lines.append("    " + set_line_ja(m))
+            for r in rec["selection_rules"]:
+                lines.append("    選出: " + _rule_ja(r, id_map))
+            if rec.get("problems"):
+                lines.append("    問題: " + ", ".join(rec["problems"]))
     lines.append(f"counts: {json.dumps(out['batch_counts'], ensure_ascii=False, sort_keys=True)}")
     lines.append(f"未解決の名前: {len(out['unresolved_names'])} 件、別名 confirmed {len(out['alias_entries']['confirmed'])} / candidate {len(out['alias_entries']['candidate'])}")
     lines.append(f"保存: {out['saved_to'] or '(なし)'}")
@@ -186,11 +211,12 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--site-ids", default=str(DEFAULT_SITE_IDS_PATH))
     ap.add_argument("--dry-run", action="store_true", help="取得と解析だけ行い、何も書かない")
     ap.add_argument("--refetch", action="store_true", help="以前に取得した URL も取り直す (必要な更新時だけ)")
+    ap.add_argument("--ja", action="store_true", help="記録の型と選出規則を日本語名で表示する (人の照合用。名前は表からの逆引き)")
     args = ap.parse_args(argv)
     policy = load_policy(Path(args.policy))
     out = run(args.url, policy, state_path=Path(args.state), bank_dir=Path(args.bank_dir), base_version=args.base_version,
               aliases_path=Path(args.aliases), site_ids_path=Path(args.site_ids), dry_run=args.dry_run, refetch=args.refetch)
-    for ln in _summary_lines(out):
+    for ln in _summary_lines(out, ja=args.ja):
         print(ln)
     return 0 if any(p["action"] == "fetch" for p in out["plan"]) else 1
 

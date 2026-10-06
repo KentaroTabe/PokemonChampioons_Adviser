@@ -6,11 +6,13 @@
     h2 "<軸>構築"                      … 次の h2 までが 1 構築 (10 構築。末尾の h2 「…の著者情報」「関連ページ」は対象外)
       h3 "<軸>構築の詳細"
       table (th 評価 / チームID、td にゲーム内のチーム ID)
-      ol.wd-pkch-pkmlist > li ×6        … 個体。li > div._wrapper > div._form (通常 / メガ の 2 つ、または 1 つ。_active が既定の表示 = メガ)
-        div._form > div._header > div._name > a (種名。href の末尾の数字がサイト固有 id) / div._item > card (持ち物)
-                    div._body > div._body_left > div._ability > card / div._moves > div > card ×4
-                                div._body_right > div._params > div._st > span ×6 (実数値 HABCDS) / div._ev > span ×6 (能力ポイント、"-" は 0)
-                                                  div._nature > div._nature_value > span (性格)
+      ol.wd-pkch-pkmlist[data-auto-generate] > li ×6 … 個体。**生の HTML では li の data-* 属性に全部入っている** (表示は JS が組み立てる。
+        2026-10-06 の取得で確認): data-name (通常の形態の種名) / data-url (サイト固有 id) / data-item-name / data-ability / data-moveN-name (N=1..4) /
+        data-nature / data-stat (通常の形態の実数値 HABCDS、カンマ区切り) / data-ev (能力ポイント、0 を含む) / data-init-form (form0 = 通常、
+        form1 = メガ。既定の表示) / data-form1-name / data-form1-url / data-form1-ability (メガ後の形態)。
+        描画後の DOM (ブラウザで見える形) では li > div._wrapper > div._form (通常 / メガ、_active が既定) > div._header (div._name > a、
+        div._item > card) / div._body (div._ability > card、div._moves > div > card ×4、div._st > span ×6、div._ev > span ×6、div._nature_value)。
+        変換層は data-* を先に読み、無ければ描画後の形を読む
       p (構築の説明)
       h3 "選出紹介" → h4 "基本選出" | "<X>選出" | 小話の見出し → table (td: img[alt=種名] 種名 <br> "(初手)" | "など") → div.gw-info → p (文)
 出力: unit = {"kind": "team", "marked": 正規形 (使用ポケモン の節に 6 体の見出し行・配分の行・実数値の行・技一覧の行、戦術と解説 の節に
@@ -205,6 +207,32 @@ def parse_form(form: Node) -> Optional[dict]:
             "moves": moves, "actual": actual, "points": points, "nature": nature}
 
 
+def parse_li_data(li: Node) -> Optional[dict]:
+    """生の HTML の li (data-* 属性に個体の情報。表示は JS が組み立てる。2026-10-06 の取得で確認) → parse_form と同じ形。
+    data-init-form = form1 ならメガ後の形態 (data-form1-name / -url / -ability) を使う。data-stat (実数値) は出さない: 表示用に
+    JS が組み立てる値で、メガ後の形態の個体 (data-name がメガの名前のものも含む) では通常の形態の値になっていて再計算と合わない
+    (10/6 の取得で 2 構築が矛盾になった)。能力ポイント (data-ev) と性格が正で、実数値はこちらで再計算できる。data-name が無ければ None"""
+    a = li.attrs
+    name = (a.get("data-name") or "").strip()
+    if not name:
+        return None
+    init = (a.get("data-init-form") or "form0").strip()
+    use_alt = init != "form0" and bool(a.get(f"data-{init}-name"))
+    if use_alt:
+        name = a.get(f"data-{init}-name", name).strip()
+        url_id = a.get(f"data-{init}-url") or ""
+        ability = (a.get(f"data-{init}-ability") or a.get("data-ability") or "").strip()
+    else:
+        url_id = a.get("data-url") or ""
+        ability = (a.get("data-ability") or "").strip()
+    moves = [(a.get(f"data-move{i}-name") or "").strip() for i in range(1, 5)]
+    moves = [m for m in moves if m]
+    points = [p.strip() for p in (a.get("data-ev") or "").split(",") if p.strip() != ""]
+    href = f"https://{HOST}/pokemon-champions/{url_id}" if url_id.isdigit() else None
+    return {"name": name, "href": href, "item": (a.get("data-item-name") or "").strip(), "ability": ability, "moves": moves,
+            "actual": [], "points": points, "nature": (a.get("data-nature") or "").strip()}
+
+
 def active_form(li: Node) -> Optional[Node]:
     """li の表示中の form (_active のトグルの順番と同じ位置の form。トグルが無ければ最初の form)"""
     forms = li.find_all("div", FORM_CLASS)
@@ -301,8 +329,10 @@ def team_unit_text(block: list) -> tuple:
             for li in node.find_all("li"):
                 if li.parent is not node:
                     continue
-                form = active_form(li)
-                m = parse_form(form) if form is not None else None
+                m = parse_li_data(li)                        # 生の HTML (data-* 属性)。無ければ描画後の DOM (div._form)
+                if m is None:
+                    form = active_form(li)
+                    m = parse_form(form) if form is not None else None
                 if m:
                     members.append(m)
             continue
@@ -336,8 +366,11 @@ def intro_text(intro: list) -> str:
 
 def gamewith_units(html_text: str, source: Optional[dict] = None, meta: Optional[dict] = None, dic=None) -> list:
     """ページの HTML → 構築ごとの unit の列 (kind = team)。規制は冒頭の記事固有の記述から (無ければ meta のまま / unknown)。
-    source は editorial_site / none を既定にして呼び出し側の値で上書き。dic (ArticleDictionary) を渡せば、辞書で解決できない
-    種名を unit["local"]["unresolved_names"] に残す (記録には入れない)"""
+    source は editorial_site / none を既定にして呼び出し側の値で上書き。辞書 (dic、無ければ default_dictionary) で解決できない
+    種名・持ち物・性格・特性を unit["local"]["unresolved_names"] に残す (記録には入れない。別名の候補に回る)"""
+    if dic is None:
+        from tools.team_build.article_parse import default_dictionary
+        dic = default_dictionary()
     root = build_dom(html_text)
     body = _article_body(root)
     intro, blocks = team_blocks(body)
@@ -368,6 +401,10 @@ def gamewith_units(html_text: str, source: Optional[dict] = None, meta: Optional
         if dic is not None:
             bad = [{"category": "species", "text": mem["name"], "host": HOST, "site_key": _site_id(mem.get("href"))}
                    for mem in members if not dic.species_id(mem["name"])]
+            for cat, key in (("items", "item"), ("natures", "nature"), ("abilities", "ability")):     # 見出し行の他の項目も (別名の候補へ)
+                for mem in members:
+                    if mem.get(key) and not isinstance(dic.lookup(cat, mem[key]), str):
+                        bad.append({"category": cat, "text": mem[key], "host": HOST, "site_key": None})
             unit["local"] = {"unresolved_names": bad, "n_members": len(members), "n_selection_lines": n_sel}
         else:
             unit["local"] = {"unresolved_names": [], "n_members": len(members), "n_selection_lines": n_sel}

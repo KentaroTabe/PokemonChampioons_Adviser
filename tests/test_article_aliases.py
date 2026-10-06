@@ -275,7 +275,13 @@ def test_dictionary_uses_confirmed_only():
     assert dic.alias_count == 2 and "aliases:2:" in dic.version
     base = P.ArticleDictionary(raw)
     assert base.alias_count == 0 and base.version.endswith("/aliases:0") and dic.with_aliases(None).version == base.version
-    assert P.default_dictionary().alias_count == 0                                         # 同梱の別名辞書は空から始める
+    # 同梱の別名辞書 (vision/data/article_aliases.json): 10/6 に GameWith の実ページで見つけたメガ石の略記 3 件を人が足した (basis human、confirmed)。
+    # 同梱の entry は全部 confirmed で、辞書の件数と一致し、往復一致を通る
+    bundled = A.load_aliases()
+    assert bundled["entries"] and all(e["status"] == "confirmed" and e["basis"] == "human" for e in bundled["entries"])
+    assert P.default_dictionary().alias_count == len(bundled["entries"])
+    assert all(A.roundtrip_ok(P.default_dictionary(), e["category"], e["canonical"], e["id"]) for e in bundled["entries"])
+    assert P.default_dictionary().lookup("items", "ピクシナイト") == "clefablite"
     # 解析: confirmed の別名で説明文の「地震」が技 id になり、未解決の名前から消える
     parsed = P.parse_article(SYNTHETIC, dic)
     assert parsed["unresolved_names"] == [] and parsed["dictionary_version"] == dic.version
@@ -287,6 +293,32 @@ def test_dictionary_uses_confirmed_only():
     print("test_dictionary_uses_confirmed_only OK")
 
 
+def test_add_alias_and_real_page_names():
+    """人が別名を直接足す (--add): 往復一致を通るものだけ、同じ表記の有効な entry があれば足さない。
+    10/6 の GameWith の実ページで見つかった表記: 性別の注記は既知の変換、組み立てたフォルム名 (ヒートロトム) は辞書の第 2 の表で解決"""
+    dic = P.default_dictionary()
+    data = A.empty_aliases()
+    data, code = A.add_alias(data, "items", "ピクシナイト", "ピクシーナイト", today=TODAY, dic=dic)
+    assert code == "added" and data["entries"][0]["id"] == "clefablite" and data["entries"][0]["basis"] == "human"
+    assert A.add_alias(data, "items", "ピクシナイト", "ピクシーナイト", today=TODAY, dic=dic)[1] == "exists"
+    assert A.add_alias(data, "items", "ピクシナイト", "マフォクシーナイト", today=TODAY, dic=dic)[1] == "conflict"
+    assert A.add_alias(data, "items", "謎の石", "存在しない石", today=TODAY, dic=dic)[1] == "canonical_unresolved"
+    assert A.add_alias(data, "items", "文です。", "ピクシーナイト", today=TODAY, dic=dic)[1] == "not_name_token"
+    assert P.ArticleDictionary(P.json.loads(P.JP_NAMES_PATH.read_text(encoding="utf-8")), data).lookup("items", "ピクシナイト") == "clefablite"
+    # 性別の注記 (オス = 基本形態) と メガフラエッテ(えいえんのはな) は既知の変換で確定
+    e = A.known_transform_entry(dic, {"category": "species", "text": "イエッサン(オス)", "host": None, "site_key": None}, TODAY)
+    assert e and e["id"] == "indeedee" and e["status"] == "confirmed" and e["basis"] == "known_transform"
+    e2 = A.known_transform_entry(dic, {"category": "species", "text": "メガフラエッテ(えいえんのはな)", "host": None, "site_key": None}, TODAY)
+    assert e2 and e2["id"] == "floettemega"
+    assert A.known_transform_entry(dic, {"category": "species", "text": "イエッサン(メス)", "host": None, "site_key": None}, TODAY) is None   # メスは図鑑に無い
+    # 組み立てたフォルム名 (名前表に無い) は厳密一致の第 2 の表で解決する (ロトムのフォルム、えいえんのはな)
+    assert dic.species_id("ヒートロトム") == "rotomheat" and dic.species_id("ウォッシュロトム") == "rotomwash"
+    assert dic.species_id("フラエッテ(えいえんのはな)") == "floetteeternal" and dic.species_id("フラエッテ") == "floette"
+    assert dic.lookup_exact("species", "ヒートロトム") == {"id": "rotomheat", "num": 479} and dic.name_of("species", "rotomheat") == "ヒートロトム"
+    assert dic.lookup("abilities", "はどうのぼうご") == "auraguard"                          # 10/6 に名前表へ追加 (メガルカリオ Z の特性。表記は未確認)
+    print("test_add_alias_and_real_page_names OK")
+
+
 def main() -> None:
     test_known_transform()
     test_site_id_verified()
@@ -296,6 +328,7 @@ def main() -> None:
     test_decide_conflict_and_upgrade()
     test_confirm_reject_history()
     test_dictionary_uses_confirmed_only()
+    test_add_alias_and_real_page_names()
     print("ALL OK")
 
 

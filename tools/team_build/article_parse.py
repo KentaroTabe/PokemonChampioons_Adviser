@@ -102,12 +102,19 @@ class ArticleDictionary:
                     names.setdefault(vid, ja)
             self._tables[cat] = table
             self._names[cat] = names
+        # 名前表に無いフォルム名 (ヒートロトム / フラエッテ(えいえんのはな) / ヒスイ…) は、図鑑の全種について組み立てた日本語名
+        # (advisor.infer.species_ja_name。tools/team_build/spec._form_name_index と同じ考え) を第 2 の厳密一致の表にする
+        forms = constructed_form_names(set(self._names["species"]))
+        for ja, sid, num in forms:
+            self._tables["species"].setdefault(normalize(ja), {"id": sid, "num": num})
+            self._names["species"].setdefault(sid, ja)
         self._species_ja = dict(self._names["species"])
         self._move_ja = dict(self._names["moves"])
         self._type_words = sorted((raw.get("types") or {}).items(), key=lambda kv: -len(kv[0]))
-        # 素の文字列から種名を探すための一覧 (長い順。短すぎる名前は誤検出するので省く)
-        self._species_words = sorted(((ja, v["id"]) for ja, v in (raw.get("species") or {}).items()
-                                      if isinstance(v, dict) and len(ja) >= BUILD_ARTICLE_PLAIN_NAME_MIN_CHARS), key=lambda kv: -len(kv[0]))
+        # 素の文字列から種名を探すための一覧 (長い順。短すぎる名前は誤検出するので省く)。組み立てたフォルム名も含める
+        species_entries = [(ja, v["id"]) for ja, v in (raw.get("species") or {}).items() if isinstance(v, dict)] + [(ja, sid) for ja, sid, _n in forms]
+        self._species_words = sorted({(ja, sid) for ja, sid in species_entries if len(ja) >= BUILD_ARTICLE_PLAIN_NAME_MIN_CHARS},
+                                     key=lambda kv: -len(kv[0]))
         if aliases:
             from tools.team_build.article_aliases import confirmed_map     # 循環 import を避けて呼び出し時に読む
             self._aliases = confirmed_map(aliases)
@@ -168,6 +175,28 @@ class ArticleDictionary:
 
 
 @lru_cache(maxsize=1)
+def _constructed_form_names_all() -> tuple:
+    """図鑑の全種の (組み立てた日本語名, id, 図鑑番号)。advisor.infer.species_ja_name が id をそのまま返す種は除く。図鑑が無ければ空"""
+    try:
+        from advisor.dex import get_dex
+        from advisor.infer import species_ja_name
+        dex = get_dex()
+        out = []
+        for sid in dex.species_ids():
+            ja = species_ja_name(sid)
+            if ja and ja != sid:
+                out.append((ja, sid, (dex.species(sid) or {}).get("num")))
+        return tuple(out)
+    except Exception:
+        return ()
+
+
+def constructed_form_names(known_ids: set) -> list:
+    """名前表に無い種 (known_ids に id が無い) の組み立てた日本語名だけ → [(日本語名, id, 図鑑番号)] (決定的な並び)"""
+    return [(ja, sid, num) for ja, sid, num in _constructed_form_names_all() if sid not in known_ids]
+
+
+@lru_cache(maxsize=1)
 def default_dictionary() -> ArticleDictionary:
     """jp_names.json + 記事専用の別名辞書 (ファイルがあれば。使うのは confirmed だけ)"""
     aliases = None
@@ -179,19 +208,21 @@ def default_dictionary() -> ArticleDictionary:
 
 @lru_cache(maxsize=1)
 def mega_table() -> dict:
-    """メガ形態 id → (基本種 id, メガ石 id)、メガ石 id → メガ形態 id (図鑑 champions_dex の requiredItem が正)"""
+    """メガ形態 id → (基本種 id, メガ石 id)、メガ石 id → メガ形態 id (図鑑 champions_dex の requiredItem が正)、
+    メガ形態 id → メガ後の特性 id の列 (abilities。記事の特性がメガ前のものか見分けるため)"""
     try:
         from tools.check_mega_items import DEX, mega_stones
         dex = json.loads(DEX.read_text(encoding="utf-8")).get("species", {})
     except Exception:
-        return {"forms": {}, "stones": {}}
-    forms, stones = {}, {}
+        return {"forms": {}, "stones": {}, "abilities": {}}
+    forms, stones, abilities = {}, {}, {}
     for sid, _name, _req, stone in mega_stones():
         base = re.sub(r"[^a-z0-9]", "", (dex.get(sid, {}).get("baseSpecies") or "").lower()) or None
         forms[sid] = (base, stone)
         if stone:
             stones[stone] = sid
-    return {"forms": forms, "stones": stones}
+        abilities[sid] = [re.sub(r"[^a-z0-9]", "", str(a).lower()) for a in (dex.get(sid, {}).get("abilities") or {}).values() if a]
+    return {"forms": forms, "stones": stones, "abilities": abilities}
 
 
 # ------------------------------------------------------------------------------------------------------------------
@@ -433,8 +464,16 @@ def parse_member_head(line: str, dic: ArticleDictionary) -> Optional[dict]:
             form_id = species_id
         else:
             notes.append("mega_form_from_stone")
+    # メガ形態の特性: 記事がメガ前の特性 (げきりゅう / もうか) を書くことがある (GameWith はトグルの無い個体でそう書く。10/6 の取得で確認)。
+    # 図鑑のメガ後の特性が 1 つに決まるなら、記事の特性はメガ前として pre_mega_ability に残し、ability はメガ後の特性にする
+    pre_mega_ability = None
+    mega_abilities = mega["abilities"].get(form_id) or []
+    if form_id in mega["forms"] and ability_id and ability_id not in mega_abilities and len(mega_abilities) == 1:
+        pre_mega_ability, ability_id = ability_id, mega_abilities[0]
+        notes.append("ability_pre_mega")
     return {"species_id": form_id, "base_species_id": base_id, "mega_stone": stone, "item": item_id, "nature": nature_id,
-            "ability": ability_id, "display": species_text, "warnings": warnings, "notes": notes, "unresolved": unresolved}
+            "ability": ability_id, "pre_mega_ability": pre_mega_ability, "display": species_text, "warnings": warnings, "notes": notes,
+            "unresolved": unresolved}
 
 
 # ------------------------------------------------------------------------------------------------------------------
@@ -527,11 +566,17 @@ def split_sentences(lines: list) -> list:
     return out
 
 
+_NAME_QUALIFIER_RE = re.compile(r"[（(][^）)]*[）)]$")
+
+
 def _member_names(members: list, dic: ArticleDictionary) -> list:
-    """[(名前, member_id)] を長い順に。見出しの表示名、使用形態と基本種の辞書名"""
+    """[(名前, member_id)] を長い順に。見出しの表示名、使用形態と基本種の辞書名。注記つきの名前 (イエッサン(オス) / フラエッテ(えいえんのはな))
+    は注記を外した短い名前でも味方として読む (筆者は自分の個体を短い名前で呼ぶ。10/6 の GameWith の実ページで「イエッサン」が別の種
+    (indeedee) に解決して矛盾になった)"""
     names = []
     for mem in members:
         cand = {mem["display"], dic.species_ja(mem["species_id"]) or "", dic.species_ja(mem["base_species_id"]) or ""}
+        cand |= {_NAME_QUALIFIER_RE.sub("", n) for n in list(cand)}
         for n in cand:
             if n:
                 names.append((n, mem["id"]))

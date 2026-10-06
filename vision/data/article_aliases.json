@@ -1,4 +1,56 @@
 {
  "schema": "article_aliases/1",
- "entries": []
+ "entries": [
+  {
+   "category": "items",
+   "alias": "ピクシナイト",
+   "canonical": "ピクシーナイト",
+   "id": "clefablite",
+   "status": "confirmed",
+   "basis": "human",
+   "added": "2026-10-06",
+   "history": [
+    {
+     "at": "2026-10-06",
+     "from": null,
+     "to": "confirmed",
+     "basis": "human"
+    }
+   ]
+  },
+  {
+   "category": "items",
+   "alias": "カイリュナイト",
+   "canonical": "カイリューナイト",
+   "id": "dragoninite",
+   "status": "confirmed",
+   "basis": "human",
+   "added": "2026-10-06",
+   "history": [
+    {
+     "at": "2026-10-06",
+     "from": null,
+     "to": "confirmed",
+     "basis": "human"
+    }
+   ]
+  },
+  {
+   "category": "items",
+   "alias": "マフォクシナイト",
+   "canonical": "マフォクシーナイト",
+   "id": "delphoxite",
+   "status": "confirmed",
+   "basis": "human",
+   "added": "2026-10-06",
+   "history": [
+    {
+     "at": "2026-10-06",
+     "from": null,
+     "to": "confirmed",
+     "basis": "human"
+    }
+   ]
+  }
+ ]
 }

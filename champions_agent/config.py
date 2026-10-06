@@ -564,7 +564,10 @@ BUILD_ARTICLE_CHARSET_ALIASES = {"shift_jis": "cp932", "shift-jis": "cp932", "sj
                                  "x-euc-jp": "euc_jp"}   # HTML の charset 名 → Python の codec (Shift_JIS は WHATWG と同じく cp932 で読む)
 # 記事専用の別名辞書 (tools/team_build/article_aliases、vision/data/article_aliases.json。OCR 用の jp_names.json とは別)。
 # 往復一致 (canonical → 同じ id) は必須の検査だが、元の表記との対応は裏付けないので自動確定の条件にはしない。自動確定は次の 2 つだけ
-BUILD_ARTICLE_KNOWN_TRANSFORMS = (("万", "まん"),)   # 表記の既知の変換 (順に置換して厳密一致すれば basis=known_transform で確定。「10万ボルト」→「10まんボルト」)
+BUILD_ARTICLE_KNOWN_TRANSFORMS = (("万", "まん"),                   # 表記の既知の変換 (順に置換して厳密一致すれば basis=known_transform で確定。「10万ボルト」→「10まんボルト」)
+                                  ("(オス)", ""), ("（オス）", ""),   # 性別の注記: オスは Showdown の基本形態 (イエッサン(オス) → indeedee)。メスは図鑑に無いので変換しない
+                                  ("メガフラエッテ(えいえんのはな)", "メガフラエッテ"), ("メガフラエッテ（えいえんのはな）", "メガフラエッテ"))
+                                             # メガフラエッテは えいえんのはな の形態のメガだけ (floettemega)。GameWith の表記 (10/6 の取得で確認)
 BUILD_ARTICLE_SITE_ID_PATTERNS = {"yakkun.com": {"species": r"/zukan/n(\w+)", "moves": r"[?&]move=(\d+)", "items": r"item_s=(\d+)",
                                                  "abilities": r"tokusei=(\d+)"},
                                   "gamewith.jp": {"species": r"/pokemon-champions/(\d+)$"}}   # リンクのサイト固有 id (ホスト → 種別 → 正規表現の第 1 群)。
