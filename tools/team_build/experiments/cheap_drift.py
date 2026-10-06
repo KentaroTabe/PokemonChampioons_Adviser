@@ -123,14 +123,15 @@ def main() -> None:
     ap.add_argument("--n", type=int, default=60, help="比べる相手の構築の数")
     ap.add_argument("--tier", default="selection", help="相手の層 (search / selection / holdout)")
     ap.add_argument("--base", default=None, help="起点のモデル (省略時は汎用 general_model_path)")
-    ap.add_argument("--adapted", default=None, help="比べるモデル (省略時は run の advisors/<arm>_screen/selection_model.pt)")
+    ap.add_argument("--adapted", default=None, help="比べるモデル (省略時は run の advisors_screen/<arm>_screen/selection_model.pt)")
     ap.add_argument("--team-file", default=None, help="自分のチーム (省略時は run の reference_team.txt か s06_sets/<arm>.txt)")
     ap.add_argument("--split", default=None, help="opponent_families.json (省略時は run のもの)")
     args = ap.parse_args()
     from champions_agent.agent import selection_dispatch as SD
     run_dir = (RUNS / args.run_id) if args.run_id else None
     base = Path(args.base) if args.base else SD.general_model_path()
-    adapted = Path(args.adapted) if args.adapted else (run_dir / "advisors" / f"{args.arm}_screen" / "selection_model.pt")
+    # cheap のモデルは pipeline._screen_adapt_all が run_dir/advisors_screen/<arm>_screen/ に書く (advisors/ は S7 の適応)
+    adapted = Path(args.adapted) if args.adapted else (run_dir / "advisors_screen" / f"{args.arm}_screen" / "selection_model.pt")
     team_file = Path(args.team_file) if args.team_file else (
         run_dir / "reference_team.txt" if args.arm == "reference" else run_dir / "s06_sets" / f"{args.arm}.txt")
     split_path = Path(args.split) if args.split else (run_dir / "opponent_families.json")

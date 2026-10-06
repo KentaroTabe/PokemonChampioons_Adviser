@@ -386,6 +386,11 @@ def test_plan_prior_variants_and_promotion_key():
     rb = {"L01": {"tag": "concept"}, "L02": {"tag": "calibration"}}
     assert PL.variants_for("L01", rb, ("rule", "generic", "cheap"), ("cheap",)) == ("rule", "generic", "cheap")
     assert PL.variants_for("L02", rb, ("rule", "generic", "cheap"), ("cheap",)) == ("cheap",) and PL.variants_for("zz", rb, ("a",), ("b",)) == ("a",)
+    # 軽い適応 (cheap) は、測る variant に cheap があるときだけ回す (2026-10-06 判断: 既定は規則と汎用の 2 腕、較正の標本は汎用)
+    assert PL.needs_cheap(("rule", "generic", "cheap"), ("generic",)) and PL.needs_cheap(("rule", "generic"), ("cheap",))
+    assert not PL.needs_cheap(("rule", "generic"), ("generic",)) and not PL.needs_cheap((), ()) and not PL.needs_cheap(None)
+    from champions_agent.config import BUILD_CALIBRATION_VARIANTS, BUILD_SCREEN_VARIANTS
+    assert not PL.needs_cheap(BUILD_SCREEN_VARIANTS, BUILD_CALIBRATION_VARIANTS), "既定では cheap の適応は回らない"
     assert PL.should_run_stress("PASS", True) and PL.should_run_stress("PASS_EQUIVALENT", True) and not PL.should_run_stress("INCONCLUSIVE", True)
     assert PL.should_run_stress("FAIL", False) and not PL.should_run_stress(None, True)
     # 較正の標本 (tag calibration) は生存・修理の親に入れない

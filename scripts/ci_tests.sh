@@ -98,7 +98,7 @@ TESTS=(
   test_outcome_correction
   test_team_build_ace
   test_undefined_names
-  test_split_seed
+  test_season_pin
   test_cheap_drift
   test_register_selection
 )

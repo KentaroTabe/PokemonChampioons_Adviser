@@ -173,10 +173,11 @@ async def connect(sid, environ):
 
 @sio.on('advice_shown')
 async def advice_shown(sid, data):
-    """ブラウザが助言を描画した時刻 (2026-10-05 ②: 生成時刻と表示時刻を分けて記録する)。data = {advice_id, kind, t_shown (秒)}"""
+    """ブラウザが助言を描画した時刻 (2026-10-05 ②: 生成時刻と表示時刻を分けて記録する)。
+    data = {advice_id, kind, t_shown (秒), hidden (タブが隠れていて描画されずに送った: 2026-10-06)}"""
     try:
         d = data or {}
-        battle_log.on_display(d.get("advice_id"), d.get("t_shown"), d.get("kind"))
+        battle_log.on_display(d.get("advice_id"), d.get("t_shown"), d.get("kind"), hidden=d.get("hidden"))
     except Exception as e:
         print(f"[server] 表示の記録に失敗: {e}")
 
