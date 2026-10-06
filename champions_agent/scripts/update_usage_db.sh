@@ -25,6 +25,9 @@ LOG_FILE="$LOG_DIR/update_$(date +%Y-%m-%d).log"
   python -m champions_agent.data.ingest --skip-static --source auto
   python -m champions_agent.data.build_meta
   python -m champions_agent.data.role_tagger
+  # 構築システムの季節の固定 (相手プールのスナップショット) の鮮度: 固定したスナップショットと最新の上位種の重なりが
+  # 下限を切ったら警告を出す (2026-10-06 判断。固定し直しは season_pin --repin)。失敗しても更新は止めない
+  python -m tools.team_build.season_pin --check || echo "[season_pin] 鮮度の確認に失敗 (更新は続行)"
   # 90日より古いアーカイブ/ログを削除
   find "$LOG_DIR" -name "*.json.gz" -mtime +90 -delete
   find "$LOG_DIR" -name "update_*.log" -mtime +90 -delete

@@ -813,3 +813,32 @@ feature/team-build (4228999) の上に実装した。対戦も run も回して�
 - S9 の変種の腕: cheap を外したので S8a と同じ 2 腕 (規則 / 汎用) で測る、としたが、変種だけ軽い適応を残す選択肢は採っていない (順位が崩れるのは同じ)。
 - 鮮度の警告の置き場: `triggers` の記録 (`python -m tools.team_build.triggers` を回したとき) と `season_pin --check`。日次の定点 (track_progress) や
   使用率 DB の更新スクリプトに組み込むかは運用側の判断。
+
+## 17. 判断と統合の確認 (運用側、2026-10-06 昼)
+
+§16.1 の 3 点への回答と、統合用ブランチでの確認。
+
+| 判断 | 回答 | 根拠 |
+|---|---|---|
+| PR の base | `feature/team-build`。取り込みは運用側が統合ブランチで `--no-ff` で行い (下の integ/1006)、push 後に PR はマージ済みになる。PR は見直しと記録のためのもので、無くてもよい | main は PR でしか更新しない運用 (ブランチ運用の規約)。統合ブランチへの取り込み単位と PR の単位を揃える |
+| S9 の変種の腕 | 規則 / 汎用の 2 腕でよい。変種だけ軽い適応を残さない | 順位の崩れは腕の種類によらない (cheap_drift の 4 腕すべてで入れ替わり) |
+| 鮮度の警告の置き場 | 使用率 DB の日次更新 (`champions_agent/scripts/update_usage_db.sh`) の最後に `season_pin --check` を足し、同じ更新ログに出す。日次の定点 (track_progress) には入れない | 鮮度が変わるのはスナップショットが増えるときで、その場で分かるのがよい。定点は今は停止中で、評価のハングの履歴もある |
+
+統合用ブランチ `integ/1006` (worktree): `feature/team-build` (4228999d) に `fix/connection-test-18` (10 コミット) と `claude/admiring-carson-k21swr`
+(2ea39b71 / 89e04c37 / 10ce9642) を順に `--no-ff` で取り込んだ。衝突は `scripts/ci_tests.sh` の CI の一覧 (両方が末尾に足した) だけで、両方を残した。
+自動で合わさった `battle_logger.py` / `server.py` / `index.html` / `champions_agent/config.py` / `tools/team_build/real_eval.py` は目で確かめた。
+CI の一覧 94 モジュール緑。本体への反映は改善 run の終了後に `feature/team-build` を integ/1006 へ ff する。
+
+実データでの確認 (統合後のコード、対戦は回していない):
+- 第18回の 15 戦の選出の局面を再生すると、◎ は 15 戦とも学習モデル (`primary: model`, `model_trained: False`) になり、推奨は当時の
+  「学習モデルの推し」と同じ (実際の選出と 3 体一致 2 戦 / 2 体一致 10 戦)。規則の推奨 (登録の型を見る版) は 15 戦ともイエッサンを含まず、
+  実際の選出との 3 体一致は 0。
+- `register_selection --status`: 現在の 6 体の鍵 `a7375849dc81e1d3` (カメックス / イエッサン / オオニューラ / グレンアルマ / ボーマンダ /
+  ブリジュラス)、登録はまだ無い。注意: 現在の 6 体は直近の対戦ログの選出画面から決めるので、`logs/battles` の無い worktree では別の 6 体
+  (登録 33 体からの推定) になる。登録は本体のツリーで行う。
+- `season_pin --show`: 記録は空。統合後の最初の run (煙試験) が M-C の固定 (seed・スナップショット・バンクの区切り) を作る。
+- `cheap_drift` は既定の置き場でそのまま動く。
+
+残り (運用側): run 終了後に ff、煙試験 (`s06_lint.json` の `form_changes` と gen_sets の直した数、manifest の `season_pin`)、
+`register_selection --run-id improve_20261006_0128`、P1 の測定 (`check_advisor_player --no-rl-blend` 対 既定、登録チームで 300 戦ずつ)、
+P4 の局面の正解の記入 (`logs/scenes/newteam_1006.jsonl`、整合 20 + 失敗 10。候補 342: 整合 286 / 助言停止 29 / 無効 24 / 遅延 2 / HP 固着 1)。
