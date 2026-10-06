@@ -505,7 +505,143 @@ BUILD_LLM_MAX_BUDGET_USD = 5.0
 BUILD_ARTICLE_SEASON_REGULATION = {"M-1": "gen9championsbssregma", "M-2": "gen9championsbssregmb", "M-3": "gen9championsbssregmb",
                                    "M-4": "gen9championsbssregmb", "M-5": "gen9championsbssregmb", "M-6": "gen9championsbssregmc"}
                                    # 2026-10-05 判断 #9: M-1 = M-A (題名の表記 4 件)、M-2〜M-5 = M-B (M-5 は手順書)、M-6 = M-C (9/9 から)。MCS だけの行は unknown
-BUILD_ARTICLE_DOUBLE_WORDS = ("ダブル", "double", "vgc")   # 記事の題名にあればダブルの記事 (記事バンクから除く)
+BUILD_ARTICLE_DOUBLE_WORDS = ("ダブル", "double", "vgc")   # 記事の題名にあればダブルの記事 (記事バンクから除く)。NFKC で見る (半角カナも当たる)
+BUILD_ARTICLE_DOUBLE_EXCLUDE_WORDS = ("ダブルエース",)      # ダブルバトルを意味しない複合語 (先に取り除く。10/6 の一覧更新: 「勝てるダブルエース構築」はシングル)
+# 記事バンク (tools/team_build/article_parse + article_bank、docs/ARTICLE_BANK_DESIGN_1006.md)。2026-10-06 の初期案 (検証前の値)。
+# 本文は LLM に渡さない: 定型部分 (使用ポケモン) を決定的に解析し、解説は限定した規則で構造化する。LLM には構造化した結果だけ渡す
+BUILD_ARTICLE_MEMBER_SECTION_WORDS = ("使用ポケモン", "個体紹介", "個別解説", "構築紹介", "パーティ紹介", "採用理由")  # 個体の節の見出し語
+BUILD_ARTICLE_TEAM_SECTION_WORDS = ("戦術", "解説", "選出", "立ち回り", "基本選出", "重いポケモン", "苦手", "総括", "おわりに", "あとがき")
+                                             # ここからはチーム全体の節 (個体の節を閉じる)
+BUILD_ARTICLE_MAX_MEMBERS = 6                # 1 記事の使用個体の上限 (超えた個体見出しは警告にして採らない)
+BUILD_ARTICLE_MOVES_PER_SET = 4              # 採用技の数 (技一覧の行から。説明文の技は足さない)
+BUILD_ARTICLE_STAT_WORDS = {"hp": ("HP", "H", "体力"), "atk": ("攻撃", "A"), "def": ("防御", "B"), "spa": ("特攻", "C", "特殊攻撃"),
+                            "spd": ("特防", "D", "特殊防御"), "spe": ("素早", "素早さ", "S", "すばやさ")}   # 配分の行の能力名
+BUILD_ARTICLE_EV252_LABEL = "252表示"        # 配分の行がこの語を含めば 252 表示 (能力ポイントと別の種類として保持)
+BUILD_ARTICLE_ACTUAL_LABEL = "実数値"        # 実数値の行の語 (6 つの数を - で繋いだもの)
+BUILD_ARTICLE_ACTUAL_BASE_LABEL = "通常形態の実数値"   # メガの個体で、記事がメガ前 (通常の形態) の実数値を載せているときの行の語。基本種の計算値と比べる
+                                             # (GameWith の data-stat は通常の形態の値。形態を明示して保持し、検算の有無を記録に残す。2026-10-06 ユーザー判断)
+BUILD_ARTICLE_EV252_MAX = 252                # 252 表示の 1 能力の上限。ラベルの無い配分の行は、全部が能力ポイントの上限 (BUILD_GEN_EV_POINT_CAP) 以下なら能力ポイント
+BUILD_ARTICLE_EV252_PER_POINT, BUILD_ARTICLE_EV252_OFFSET = 8, 4   # 能力ポイント p (> 0) の 252 表示 = 8p − 4 (32 → 252、2 → 12)。整合性の検査にだけ使う (換算して保存しない)
+BUILD_ARTICLE_HEADING_MAX_CHARS = 24         # リンクの無い短い行が節の見出し語を含めば見出しとみなす長さの上限
+BUILD_ARTICLE_CONDITION_WORDS = {"weather_control": ("天候を操", "天候操作", "天候変化", "天候パ"), "trick_room": ("トリックルーム", "トリル"),
+                                 "setup": ("積み", "積む"), "stall": ("受けループ", "受け構築"), "sand": ("砂パ",), "rain": ("雨パ",)}
+                                             # 選出の条件の語 → 述語 (記事の「相手に X がいるなら」の X)。表に無い条件は未確定にする
+BUILD_ARTICLE_TARGET_MOD_WORDS = {"max_speed": ("最速",), "neutral_max_speed": ("準速",), "no_investment": ("無振り",),
+                                  "choice_scarf": ("スカーフ",), "non_mega": ("通常の", "非メガ")}   # 対象の直前の修飾語 → 相手の型条件 (表に無い修飾は mods_unparsed)
+BUILD_ARTICLE_SELECTION_REQUIRED_WORDS = ("必ず", "固定", "確定")   # 選出規則がこれを含めば recommendation = required (無ければ preferred)
+BUILD_ARTICLE_SELECTION_COMBINABLE_WORDS = ("混ぜ", "ぐちゃぐちゃ", "組み替え", "組み合わせても")   # 2 組を混ぜてよい、の明記
+BUILD_ARTICLE_NEGATION_SUFFIXES = ("わけではない", "わけでもない", "とは思わない", "ことはない")   # 「に弱い」等の直後にあれば主張にしない
+BUILD_ARTICLE_NAME_TOKEN_MAX_CHARS = 20      # 辞書で解決できなかった名前を辞書の補修用に残す長さの上限 (記事の文は残さない)
+BUILD_ARTICLE_PLAIN_NAME_MIN_CHARS = 3       # リンクの無い素の文字列から種名を探すときの名前の最短長 (2 文字の種名は誤検出が多い)
+BUILD_ARTICLE_LLM_MAX_INPUT_TOKENS = 3000    # 1 記事の構造化データ (本文なし) の入力上限。超えたら LLM の段を飛ばす (規則の段だけで完了)
+BUILD_ARTICLE_LLM_MAX_OUTPUT_TOKENS = 2000   # 出力の上限
+BUILD_ARTICLE_LLM_MAX_CALLS = 2              # 記事 1 本の呼び出しの上限 (初回 + 修正 1 回。再試行を含む)。超えたら未完了にして増やさない
+BUILD_ARTICLE_LLM_TIMEOUT_S = 180            # 1 呼び出しの待ち時間の上限 (秒)
+BUILD_ARTICLE_BATCH_MAX_ARTICLES = 20        # 1 回の処理で扱う記事の数の上限
+BUILD_ARTICLE_BATCH_MAX_USD = 3.0            # 1 回の処理の費用の上限 (USD。呼び出しの usage の合計で止める)
+BUILD_ARTICLE_CHARS_PER_TOKEN = 1.0          # トークンの見積もり (日本語は 1 文字 ≈ 1 トークンの安全側)
+BUILD_ARTICLE_POOL_SHARE_MAX = 0.10          # 記事由来の構築が相手プールに占める上限 (件数・評価重みの両方。後続の段階で使う)
+BUILD_ARTICLE_MATCH_MIN_COMMON = 4           # 選出の照合: 相手の 6 体のうち確定した基本種が記事の 6 体と一致する数の下限
+BUILD_ARTICLE_MIX_ALPHAS = (0.0, 0.05, 0.10)  # 選出予測の混合の割合 (並行して記録。初期は判断に使わない)
+# 記録の種類と出典の 2 軸 (2026-10-06 ユーザー判断、docs/ARTICLE_BANK_DESIGN_1006.md §3.7)。「誰が掲載したか」と「使用実績の根拠」は別の軸
+BUILD_ARTICLE_RECORD_KIND_MEMBERS = {"team": BUILD_ARTICLE_MAX_MEMBERS, "single_set": 1}   # 記録の種類 → 個体の数 (team = 6 体、single_set = 単体の型)
+BUILD_ARTICLE_PUBLISHER_KINDS = ("personal_blog", "user_submission_site", "editorial_site", "unknown")   # source.publisher_kind (誰が掲載したか)
+BUILD_ARTICLE_USAGE_EVIDENCE = ("self_report", "battle_log_confirmed", "none", "unknown")              # source.usage_evidence (使用実績の根拠)
+BUILD_ARTICLE_POOL_EVIDENCE = ("self_report", "battle_log_confirmed")   # 相手プール本体に入れてよい使用実績の根拠。初版は編集部の推奨 (実績の根拠なし) を
+                                             # 入れないが、判定は publisher_kind ではなく usage_evidence で行う (編集部の記事でも実績のある構築を紹介することがある)
+BUILD_ARTICLE_PURPOSE_RECORD_KINDS = {"pool": ("team",), "weakness": ("team", "single_set"), "selection": ("team",),
+                                      "parser_eval": ("team", "single_set")}   # 用途 → 使える記録の種類 (article_bank.usable_for)
+BUILD_ARTICLE_PURPOSE_REQUIREMENTS = {"pool": ("members_known", "sets_known"), "selection": ("members_known", "selection_readable"),
+                                      "weakness": ("any_set_or_claim",), "parser_eval": ()}
+                                             # 用途 → 記録に揃っていなければならない情報 (record["facets"]。2026-10-06 ユーザー判断: incomplete を一律に
+                                             # 除外しない)。members_known = 種類の個体数の種が分かる / sets_known = 種類の個体数の型が各 4 技で揃う /
+                                             # selection_readable = 選出規則が 1 つ以上 / any_set_or_claim = 4 技の揃った型か筆者の主張が 1 つ以上
+BUILD_ARTICLE_REGULATION_NAMES = {"M-A": "gen9championsbssregma", "M-B": "gen9championsbssregmb", "M-C": "gen9championsbssregmc"}
+                                             # 記事固有の記載 (題名・タグ) の規制名 → 規制 id (article_units.regulation_from_text。全角は NFKC で吸収)
+BUILD_ARTICLE_REGULATION_DASHES = "-‐‒–—―−ー"   # 規制名の区切りとみなす文字: U+002D, U+2010, U+2012〜2015, U+2212, U+30FC
+                                             # (NFKC で - にならないダッシュ類・マイナス記号・長音。全角の － と半角の ｰ は NFKC で - / ー になる)
+BUILD_ARTICLE_REGULATION_BASES = ("article_text", "site_tag", "user_confirmed", "manifest_season")
+                                             # meta.regulation_basis の列挙値 (article_bank.set_regulation)。manifest_season = blogs.csv のシーズン列 → BUILD_ARTICLE_SEASON_REGULATION
+BUILD_ARTICLE_CHARSET_ALIASES = {"shift_jis": "cp932", "shift-jis": "cp932", "sjis": "cp932", "x-sjis": "cp932", "windows-31j": "cp932",
+                                 "x-euc-jp": "euc_jp"}   # HTML の charset 名 → Python の codec (Shift_JIS は WHATWG と同じく cp932 で読む)
+# 記事専用の別名辞書 (tools/team_build/article_aliases、vision/data/article_aliases.json。OCR 用の jp_names.json とは別)。
+# 往復一致 (canonical → 同じ id) は必須の検査だが、元の表記との対応は裏付けないので自動確定の条件にはしない。自動確定は次の 2 つだけ
+BUILD_ARTICLE_KNOWN_TRANSFORMS = (("万", "まん"),                   # 表記の既知の変換 (順に置換して厳密一致すれば basis=known_transform で確定。「10万ボルト」→「10まんボルト」)
+                                  ("(オス)", ""), ("（オス）", ""),   # 性別の注記: オスは Showdown の基本形態 (イエッサン(オス) → indeedee)。メスは図鑑に無いので変換しない
+                                  ("メガフラエッテ(えいえんのはな)", "メガフラエッテ"), ("メガフラエッテ（えいえんのはな）", "メガフラエッテ"))
+                                             # メガフラエッテは えいえんのはな の形態のメガだけ (floettemega)。GameWith の表記 (10/6 の取得で確認)
+BUILD_ARTICLE_SITE_ID_PATTERNS = {"yakkun.com": {"species": r"/zukan/n(\w+)", "moves": r"[?&]move=(\d+)", "items": r"item_s=(\d+)",
+                                                 "abilities": r"tokusei=(\d+)"},
+                                  "gamewith.jp": {"species": r"/pokemon-champions/(\d+)$"}}   # リンクのサイト固有 id (ホスト → 種別 → 正規表現の第 1 群)。
+                                             # yakkun は添付の記事の例のリンクの形 (実ページ未確認、取得は deny)。gamewith は 10/6 に確認したページの種のリンク
+BUILD_ARTICLE_FETCH_MIN_INTERVAL_S = 10      # 同じホストへの要求の間隔の下限 (秒)。方針 (host_policy の min_interval_s) があればそちら
+BUILD_ARTICLE_FETCH_TIMEOUT_S = 30           # 1 回の取得の待ち時間の上限 (秒)
+BUILD_ARTICLE_SITE_ID_MIN_CONFIRMATIONS = 2   # サイト固有 id が単一の id にこの数の記事で対応していれば basis=site_id_verified で確定 (別 id が出たら以後使わない)
+BUILD_ARTICLE_ALIAS_LLM_MAX_NAMES = 50       # LLM に名前を送る 1 回の上限 (種別と表記だけ。本文は送らない)
+BUILD_ARTICLE_ALIAS_LLM_MAX_CALLS = 1        # 1 回の処理で名前の対応を LLM に聞く呼び出しの上限 (再試行を含む)。LLM だけが根拠の対応は candidate (自動確定しない)
+BUILD_ARTICLE_ALIAS_LLM_TIER = "sonnet"      # 名前の対応を聞くモデルの tier (BUILD_LLM_MODELS。回帰の測定なしの初期値)
+BUILD_ARTICLE_BATCH_MAX_BODY_CHARS = 400_000  # 1 回の処理で保持する本文 (リンクつきの本文) の合計文字数の上限。超えた unit は deferred (本文をディスクへ退避しない)
+# 選出規則の schema 2 (article_parse.extract_selection_rules。2026-10-06 ユーザー判断、docs/ARTICLE_BANK_DESIGN_1006.md §3.4)。語の表は初期案 (測定なし)
+BUILD_ARTICLE_CONDITION_CONNECTORS = ("ならば", "なら", "の場合", "場合", "であれば", "なければ", "ければ", "のとき", "の時", "には")
+                                             # 条件の節を閉じる語 (長い語から照合)。「〜がいる場合は」「〜が多い場合は」の「場合」単独も含める
+BUILD_ARTICLE_CONDITION_SUBJECT_WORDS = ("相手",)   # 条件の主体の語 (記事の筆者から見た相手 = article_opponent)。この語の後の接続の語で条件の節を閉じる
+BUILD_ARTICLE_PRESENCE_WORDS = ("いる", "いれ", "いて", "居る", "居れ", "入っている", "入っていれ", "入って")
+BUILD_ARTICLE_ABSENCE_WORDS = ("いない", "いなけれ", "いなく", "居ない", "居なけれ", "無い", "無けれ", "なし", "入っていない", "入っていなけれ")
+                                             # 条件の語の後で最初に現れた方で在否を決める (どちらも無ければ在る)。不在を値で表せない述語
+                                             # (role / type_count / type_many / move_type_present) の不在は条件にしない
+BUILD_ARTICLE_PRESENCE_ATTACHED_WORDS = ("入り",)   # 種名の直後に付く在の語 (「ゴリランダー入り」)
+BUILD_ARTICLE_CONDITION_OR_WORDS = ("とか", "または", "もしくは", "や", "か", "、", "・")   # 1 文の複数の条件の間の「または」(先に取り除いてから「と」を見る)
+BUILD_ARTICLE_CONDITION_AND_WORDS = ("と", "かつ", "且つ", "て、", "で、")   # 条件の間にこれがあれば all_of、無ければ any_of
+BUILD_ARTICLE_ROLE_WORDS = {"physical_wall": ("物理受け",), "special_wall": ("特殊受け",), "wall": ("受けポケモン", "耐久ポケモン")}
+                                             # 役割の語 → role の値 (種だけで断定しない: evaluation unknown)。重なる語は表の順で先の鍵
+BUILD_ARTICLE_TYPE_KANJI_WORDS = {"氷": "Ice", "炎": "Fire", "水": "Water", "電気": "Electric", "草": "Grass", "格闘": "Fighting", "毒": "Poison",
+                                  "地面": "Ground", "飛行": "Flying", "虫": "Bug", "岩": "Rock", "悪": "Dark", "鋼": "Steel", "竜": "Dragon",
+                                  "霊": "Ghost", "妖精": "Fairy"}
+                                             # 選出の条件で読むタイプの漢字の略記 (辞書 jp_names.json のタイプはひらがな・カタカナだけ)。
+                                             # 「超」(エスパー) は比較の語 (BUILD_ARTICLE_COUNT_COMPARATORS) と重なるので入れない
+BUILD_ARTICLE_MOVE_TYPE_WORDS = ("技持ち", "技を持つ", "技を持っ", "技を覚え")   # 「<タイプ>技持ち」→ move_type_present (覚えられるだけでは成立しない)
+BUILD_ARTICLE_MANY_WORDS = ("多い", "多め", "多く")   # 「多い」→ type_many、他の条件には quantity = many (基準の数を付け足さない)
+BUILD_ARTICLE_COUNT_COMPARATORS = {"以上": ">=", "以下": "<=", "超": ">", "未満": "<"}   # type_count の比較の語 → op (比較の語の無い数は条件にしない)
+BUILD_ARTICLE_COUNTER_WORDS = ("体", "匹")       # type_count の数え方の語
+BUILD_ARTICLE_NUMERAL_WORDS = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6}   # 漢数字 (算用数字は NFKC で読む)
+BUILD_ARTICLE_CONDITION_EVALUATION = {"species_present": "species", "type_present": "species", "type_count": "species_count", "type_many": "unknown",
+                                      "role": "unknown", "move_type_present": "set_known_only", "weather_control": "set_known_only",
+                                      "trick_room": "set_known_only", "sand": "set_known_only", "rain": "set_known_only", "setup": "unknown",
+                                      "stall": "unknown"}
+                                             # 述語 → 判定の可否: species = 確定した種で判定 / species_count = 判明している種・フォルムの範囲で数える /
+                                             # set_known_only = 相手の型が確認できたときだけ / unknown = 初版は判定しない (規則は保存する)。表に無い述語は unknown
+                                             # type_present (2026-10-06 ユーザー判断): 判定の結果は true / false / unknown。確定した個体に対象タイプがあれば true、
+                                             # 全枠が確定して無ければ false、未確定枠やフォルムで結果が変わるなら unknown。タイプは選出時点で見える形態 (メガ前) で見る
+BUILD_ARTICLE_TYPE_PRESENT_FORM = "base"      # type_present の value.form: 条件はメガ前 (選出時点で確認できる形態) について。メガ後の形態を成立済みとして扱わない
+BUILD_ARTICLE_MEGA_BASE_FORM_OVERRIDES = {"floettemega": "floetteeternal"}
+                                             # メガ前の形態が図鑑の baseSpecies (種) と違うメガ: メガフラエッテは えいえんのはな の形態からだけ (champions_dex に
+                                             # その情報が無い)。10/6 の GameWith の実ページで通常形態の実数値が floetteeternal の計算値と一致した
+BUILD_ARTICLE_CONDITION_EVALUATION_ORDER = ("species", "species_count", "set_known_only", "unknown")   # 強い → 弱い (複数の条件の全体は最も弱いもの)
+BUILD_ARTICLE_CONDITION_MANY_EVALUATION = "unknown"   # quantity = many の条件の判定 (「多い」の基準を付け足さない。type_many と同じ理由)
+BUILD_ARTICLE_SELECTION_MARKERS = {"基本選出": "default", "基本選出例": "default", "選出例": "preferred"}
+                                             # 無条件の選出の印 → recommendation (default = 基本選出: 無条件の推奨で、必須・選出確率 100% ではない)。
+                                             # 印の前 (「<見出し>の選出例は」の見出し) は捨てて条件にしない (2026-10-06 変換層の文の形)
+BUILD_ARTICLE_LEAD_WORDS = ("初手", "先発")     # 先発の語 (「初手は X」「X(初手)」「X（初手）」。明記されたときだけ lead / lead_species)
+BUILD_ARTICLE_BACK_WORDS = ("後発",)            # 「初手 A、後発 B と C」の後発の語 (先発の語と両方あれば無条件の基本選出)
+BUILD_ARTICLE_SELECTION_PREDICATES = ("を選出", "を出す", "を出し")   # 「X や Y を選出 (します)」: 直前の列挙を選出の候補にする
+BUILD_ARTICLE_SELECTION_PREDICATE_EXCLUDES = ("しない", "しません", "せず", "できない", "できません", "され", "ません", "ない")
+                                             # 選出の述語の直後にあれば選出の述語にしない (否定・受け身 = 相手の選出)
+BUILD_ARTICLE_SELECTION_LIST_SEPARATORS = ("、", ",", "，", "・", "/", "／", "+", "＋", "や", "と")   # 選出の列挙の区切り
+BUILD_ARTICLE_EXAMPLE_WORDS = ("など", "等", "とか")   # 選出の列挙に付く例示の語 → example = True (exact_trio にしない)
+BUILD_ARTICLE_FREE_SLOT_WORDS = ("自由", "相手に合わせ", "相手次第", "相手を見て")   # 「残り 1 体は相手に合わせて」の未指定の枠の語 (この中の「相手」は条件の主体にしない)
+BUILD_ARTICLE_FREE_SLOT_NAMES = ("自由枠",)     # 「+ 自由枠」(数が書かれていなければ free_slots = 0、未確定 selection_free_slot_count_unspecified)
+BUILD_ARTICLE_FREE_SLOT_COUNTERS = ("体", "匹", "枠")   # 未指定の枠の数え方の語
+BUILD_ARTICLE_SELECTION_ELSE_WORDS = ("それ以外", "他は", "その他", "以外は", "残り")   # 味方名の無い「それ以外は」の分岐 (規則にせず未確定)
+# 記事バンクの記録の系列と重複 (tools/team_build/article_bank.lineage_key / merge_cases。2026-10-06 ユーザー判断、docs/ARTICLE_BANK_DESIGN_1006.md §5.1)。
+# 取得履歴 (access.jsonl) は追記してよいが、利用するバンクでは同じ記事・同じ構築の同一内容を重複計上せず、更新は旧版との関係を持たせる
+BUILD_ARTICLE_LINEAGE_UNIT_KEYS = ("team_code", "unit_index")
+                                             # 記事の中の構築を区別する meta の項目 (先にあるものを使う): ゲーム内のチーム ID → ページ内の番号。
+                                             # 番号はページの並びが変わると別の構築を指す (チーム ID の無い構築は系列を取り違え得る)
+BUILD_ARTICLE_LINEAGE_MANUAL_FIELDS = ("species_id", "item", "nature", "ability", "moves", "points")   # 性格・特性が違えば別の型 (運用側の判断 10/6)
+                                             # 手入力 (source.entry_method = manual、url_hash なし) の系列の鍵にする個体の項目 = 種・持ち物・技・配分
+                                             # (能力ポイント)。技は順を問わない。性格・特性・実数値は鍵に入れない (鍵が同じで違えば同じ型の更新として扱う)
+BUILD_ARTICLE_BANK_STATUSES = ("ok", "warnings", "incomplete")
+                                             # バンクに入れる処理状態。conflict (検査の矛盾) / failed (個体が無い) は入れない (merge_cases が除いて rejected に数える)
 # - CLI に載せるツール。空 = ツール定義を system prompt に載せない (9/24 実測: 12.8k トークン。不許可リスト方式は 24.7k)
 BUILD_LLM_CLI_TOOLS = ""
 # 視覚監査 (tools/audit_subtask, audit_session) のモデル。8/18 に haiku / sonnet / opus を同一フレーム 30 枚で比較して opus に固定、

@@ -5686,7 +5686,8 @@
   "かんつうドリル": "piercingdrill",
   "ドラゴンスキン": "dragonize",
   "メガソーラー": "megasol",
-  "とびだすハバネロ": "spicyspray"
+  "とびだすハバネロ": "spicyspray",
+  "はどうのぼうご": "auraguard"
  },
  "items": {
   "マスターボール": "masterball",
@@ -7791,9 +7792,9 @@
   "ピクシーナイト": "clefablite",
   "ケケンカニナイト": "crabominite",
   "ダークライナイト": "darkranite",
-  "マフォクシーナイト": "delphoxite",
+  "マフォクシナイト": "delphoxite",
   "ドラミドロナイト": "dragalgite",
-  "カイリューナイト": "dragoninite",
+  "カイリュナイト": "dragoninite",
   "ジジーロンナイト": "drampanite",
   "シビルドンナイト": "eelektrossite",
   "エンブオーナイト": "emboarite",
