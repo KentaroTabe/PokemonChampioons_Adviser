@@ -2,7 +2,8 @@
 
 process_batch(units, dic, aliases, site_store, llm_resolver=None, limits=None, policy=None) の手順:
   0. 入力の検査: unit の kind が表にあること、source / meta に本文が無いこと (assert_no_prose)、出典の 2 軸が表の値であること
-  1. ホストの門と上限: host_allowed(policy, source.host, "fetch") が偽の unit は解析しない (status = host_not_allowed)。
+  1. ホストの門と上限: host_allowed(policy, source.host, "fetch", url=source.url) が偽の unit は解析しない (status = host_not_allowed。
+     方針に allowed_urls があれば、その URL 以外も偽)。
      ページ (url_hash。無ければ本文のハッシュ) 単位で、BUILD_ARTICLE_BATCH_MAX_ARTICLES ページ・本文の合計
      BUILD_ARTICLE_BATCH_MAX_BODY_CHARS 文字までを受け入れ、超えたページの unit は処理しない (status = deferred。本文をディスクへ退避しない)
   2. 受け入れた unit を全部解析し、未解決の名前とサイト固有 id の観測を集める (観測は SiteIdStore へ。同じページの観測は 1 回と数える)
@@ -70,7 +71,7 @@ def _unit_info(units: list) -> list:
         body_hash = src.get("body_hash") or _hash16(marked)
         uh = src.get("url_hash") or (url_hash(src["url"]) if src.get("url") else None)
         page = uh or f"body:{body_hash}"
-        info.append({"kind": kind, "host": src.get("host"), "url_hash": uh, "body_hash": body_hash, "page": page,
+        info.append({"kind": kind, "host": src.get("host"), "url": src.get("url"), "url_hash": uh, "body_hash": body_hash, "page": page,
                      "unit": pos[page], "chars": len(marked)})
         pos[page] += 1
     return info
@@ -110,7 +111,7 @@ def process_batch(units: list, dic: Optional[ArticleDictionary] = None, aliases:
         idxs = [i for i, inf in enumerate(info) if inf["page"] == page]
         allowed = []
         for i in idxs:
-            if host_allowed(policy, info[i]["host"], "fetch"):
+            if host_allowed(policy, info[i]["host"], "fetch", url=info[i]["url"]):      # allowed_urls があれば URL も見る
                 allowed.append(i)
             else:
                 rows[i] = _state_row(info[i], "host_not_allowed")

@@ -182,7 +182,7 @@ def validate_record(record: dict, legal_ids: Optional[set] = None, dex=None) -> 
     return problems
 
 
-def usable_for(record: dict, purpose: str, regulation: Optional[str] = None) -> bool:
+def usable_for(record: dict, purpose: str, regulation: Optional[str] = None, policy: Optional[dict] = None) -> bool:
     """記録を用途に使えるか (2026-10-06 ユーザー判断)。purpose ∈ BUILD_ARTICLE_PURPOSE_RECORD_KINDS ("pool" / "weakness" /
     "selection" / "parser_eval")。
     - parser_eval (解析器の評価) は常に True (合成の記事も可)
@@ -190,7 +190,8 @@ def usable_for(record: dict, purpose: str, regulation: Optional[str] = None) -> 
       引数の regulation と違えば False (regulation を指定しなければ一致しないので False。規制を問わずに使う用途は作らない)
     - pool (相手プール本体): team だけ、かつ usage_evidence が BUILD_ARTICLE_POOL_EVIDENCE (自己申告 / 対戦記録で確認) に入ること。
       初版は編集部の推奨をプール本体に入れないが、判定は publisher_kind ではなく使用実績の根拠で行う
-    - selection (選出予測): team だけ。weakness (似た構築の弱点): team / single_set"""
+    - selection (選出予測): team だけ。weakness (似た構築の弱点): team / single_set
+    - policy (host_policy) を渡せば、出典ホストの purposes の制限 (host_allowed) も見る (ホスト全体の allow で全用途に通さない)"""
     kinds = BUILD_ARTICLE_PURPOSE_RECORD_KINDS.get(purpose)
     if kinds is None:
         raise ValueError(f"purpose が表に無い値 (許可: {', '.join(BUILD_ARTICLE_PURPOSE_RECORD_KINDS)})")
@@ -198,6 +199,8 @@ def usable_for(record: dict, purpose: str, regulation: Optional[str] = None) -> 
         return True
     src = record.get("source") or {}
     if src.get("synthetic"):
+        return False
+    if policy is not None and not host_allowed(policy, src.get("host"), purpose):
         return False
     if record.get("status") not in USABLE_STATUSES:
         return False
@@ -262,10 +265,39 @@ def llm_payload(record: dict) -> dict:
     return payload
 
 
-def host_allowed(policy: dict, host: str, purpose: str = "fetch") -> bool:
-    """host_policy.json の {host: {"fetch": allow|unknown|deny, "send_llm": ...}}。allow のときだけ True (unknown は進めない)"""
-    entry = (policy or {}).get(host) or {}
-    return entry.get(purpose) == "allow"
+POLICY_ACTIONS = ("fetch", "store", "send_llm")   # host_policy の allow / unknown / deny を持つ項目 (それ以外の purpose は用途の制限で見る)
+
+
+def host_policy_entry(policy: Optional[dict], host: Optional[str]) -> dict:
+    """host_policy.json の host の項目 (ホスト名は canonical_host で比較: 小文字、www. とポートを落とす)。無ければ空"""
+    from tools.team_build.article_parse import canonical_host
+    key = canonical_host(host)
+    if not key:
+        return {}
+    for h, entry in (policy or {}).items():
+        if isinstance(entry, dict) and canonical_host(h) == key:
+            return entry
+    return {}
+
+
+def host_allowed(policy: Optional[dict], host: Optional[str], purpose: str = "fetch", url: Optional[str] = None) -> bool:
+    """host_policy.json ({host: {"fetch" | "store" | "send_llm": allow|unknown|deny, "allowed_urls": [...], "purposes": [...]}}) の判定
+    (2026-10-06 ユーザー判断: ホスト全体を無条件に allow にせず、対象 URL と用途の制限も実装で守る)。
+    - fetch / store / send_llm: 値が allow のときだけ True (unknown は進めない)。fetch で allowed_urls があれば url が必須で、
+      正規化した URL (articles_ingest.normalize_url: 追跡クエリ・断片・末尾の / を落とす) が一覧のどれかと一致するときだけ True
+    - それ以外の purpose (pool / weakness / selection / parser_eval): purposes があればその中にあるときだけ True、無ければ True"""
+    entry = host_policy_entry(policy, host)
+    if purpose in POLICY_ACTIONS:
+        if entry.get(purpose) != "allow":
+            return False
+        if purpose == "fetch" and entry.get("allowed_urls") is not None:
+            from tools.team_build.articles_ingest import normalize_url
+            if not url:
+                return False
+            return normalize_url(url) in {normalize_url(u) for u in entry["allowed_urls"]}
+        return True
+    purposes = entry.get("purposes")
+    return True if purposes is None else purpose in purposes
 
 
 def bank_version(cases: list) -> str:

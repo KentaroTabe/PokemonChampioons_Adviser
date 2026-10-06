@@ -173,12 +173,41 @@ def test_save_load_synthetic_gate():
     print("test_save_load_synthetic_gate OK")
 
 
+def test_host_policy_urls_and_purposes():
+    """ホストの方針: allowed_urls があれば URL も見る (正規化して比較、URL 無しは不可)、purposes があれば用途を制限する、
+    ホスト名は www. とポートを落として比較、unknown は進めない。usable_for も policy を渡せば用途の制限を見る (2026-10-06 ユーザー判断)"""
+    policy = {"_schema": "host_policy/2", "_note": "値は allow / unknown / deny",
+              "gamewith.jp": {"fetch": "allow", "store": "allow", "send_llm": "unknown",
+                              "allowed_urls": ["https://gamewith.jp/pokemon-champions/555537"],
+                              "purposes": ["weakness", "selection", "parser_eval"]},
+              "open.example": {"fetch": "allow", "send_llm": "allow"},
+              "yakkun.com": {"fetch": "deny", "store": "deny", "send_llm": "deny"}}
+    gw = "gamewith.jp"
+    assert B.host_allowed(policy, gw, "fetch", url="https://gamewith.jp/pokemon-champions/555537")
+    assert B.host_allowed(policy, gw, "fetch", url="https://gamewith.jp/pokemon-champions/555537/?utm=x#top")   # 正規化して比較
+    assert B.host_allowed(policy, "www.gamewith.jp:443", "fetch", url="https://gamewith.jp/pokemon-champions/555537")
+    assert not B.host_allowed(policy, gw, "fetch", url="https://gamewith.jp/pokemon-champions/555538")          # 一覧に無い URL
+    assert not B.host_allowed(policy, gw, "fetch")                                                             # URL 無しは不可
+    assert B.host_allowed(policy, gw, "store") and not B.host_allowed(policy, gw, "send_llm")                  # unknown は進めない
+    assert B.host_allowed(policy, gw, "weakness") and B.host_allowed(policy, gw, "selection") and not B.host_allowed(policy, gw, "pool")
+    assert B.host_allowed(policy, "open.example", "fetch") and B.host_allowed(policy, "open.example", "pool")  # 制限が無ければ通る
+    assert not B.host_allowed(policy, "yakkun.com", "fetch", url="https://yakkun.com/ch/theory/") and B.host_allowed(policy, "yakkun.com", "weakness")
+    assert not B.host_allowed(policy, "unknown.example", "fetch") and not B.host_allowed(None, gw, "fetch", url="https://gamewith.jp/x")
+    assert B.host_policy_entry(policy, "_note") == {}                                                          # 注記の項目はホストではない
+    editorial = _team(source={"host": "www.gamewith.jp", "publisher_kind": "editorial_site", "usage_evidence": "battle_log_confirmed"})
+    assert B.usable_for(editorial, "pool", REG_MC) and not B.usable_for(editorial, "pool", REG_MC, policy=policy)   # 方針の用途の制限
+    assert B.usable_for(editorial, "weakness", REG_MC, policy=policy) and B.usable_for(editorial, "parser_eval", policy=policy)
+    assert B.usable_for(_team(source={"host": "open.example", "usage_evidence": "self_report"}), "pool", REG_MC, policy=policy)
+    print("test_host_policy_urls_and_purposes OK")
+
+
 def main() -> None:
     test_record_kind_branches()
     test_source_axes()
     test_usable_for_branches()
     test_set_regulation_history()
     test_save_load_synthetic_gate()
+    test_host_policy_urls_and_purposes()
     print("ALL OK")
 
 

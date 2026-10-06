@@ -124,6 +124,15 @@ def test_batch_host_gates():
     # policy を渡さなければどこも許可しない
     none = R.process_batch(units[2:], None, None, None, llm_resolver=fake, today=TODAY)
     assert [r["status"] for r in none["state_rows"]] == ["host_not_allowed"] and none["records"] == []
+    # allowed_urls のあるホストは、一覧の URL の unit だけ解析する (URL の無い unit も不可)
+    listed = {"listed.example": {"fetch": "allow", "allowed_urls": ["https://listed.example/a/1"]}}
+    src_ok = {"host": "listed.example", "url": "https://listed.example/a/1?utm=x", "synthetic": True, "publisher_kind": "editorial_site"}
+    src_ng = dict(src_ok, url="https://listed.example/a/2")
+    src_nourl = {"host": "listed.example", "url_hash": "p3", "synthetic": True, "publisher_kind": "editorial_site"}
+    res2 = R.process_batch([make_unit("team", SYNTHETIC, META, src_ok), make_unit("team", SYNTHETIC, META, src_ng),
+                            make_unit("team", SYNTHETIC, META, src_nourl)], None, None, None, policy=listed, today=TODAY)
+    assert [r["status"] for r in res2["state_rows"]] == ["ok", "host_not_allowed", "host_not_allowed"]
+    assert len(res2["records"]) == 1 and "url" not in json.dumps(B.llm_payload(res2["records"][0]))     # URL は LLM の入力に入れない
     print("test_batch_host_gates OK")
 
 
