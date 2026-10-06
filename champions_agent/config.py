@@ -566,16 +566,16 @@ BUILD_ARTICLE_CHARSET_ALIASES = {"shift_jis": "cp932", "shift-jis": "cp932", "sj
 # 往復一致 (canonical → 同じ id) は必須の検査だが、元の表記との対応は裏付けないので自動確定の条件にはしない。自動確定は次の 2 つだけ
 BUILD_ARTICLE_KNOWN_TRANSFORMS = (("万", "まん"),)   # 表記の既知の変換 (順に置換して厳密一致すれば basis=known_transform で確定。「10万ボルト」→「10まんボルト」)
 BUILD_ARTICLE_SITE_ID_PATTERNS = {"yakkun.com": {"species": r"/zukan/n(\w+)", "moves": r"[?&]move=(\d+)", "items": r"item_s=(\d+)",
-                                                 "abilities": r"tokusei=(\d+)"}}   # リンクのサイト固有 id (ホスト → 種別 → 正規表現の第 1 群)
+                                                 "abilities": r"tokusei=(\d+)"},
+                                  "gamewith.jp": {"species": r"/pokemon-champions/(\d+)$"}}   # リンクのサイト固有 id (ホスト → 種別 → 正規表現の第 1 群)。
+                                             # yakkun は添付の記事の例のリンクの形 (実ページ未確認、取得は deny)。gamewith は 10/6 に確認したページの種のリンク
+BUILD_ARTICLE_FETCH_MIN_INTERVAL_S = 10      # 同じホストへの要求の間隔の下限 (秒)。方針 (host_policy の min_interval_s) があればそちら
+BUILD_ARTICLE_FETCH_TIMEOUT_S = 30           # 1 回の取得の待ち時間の上限 (秒)
 BUILD_ARTICLE_SITE_ID_MIN_CONFIRMATIONS = 2   # サイト固有 id が単一の id にこの数の記事で対応していれば basis=site_id_verified で確定 (別 id が出たら以後使わない)
 BUILD_ARTICLE_ALIAS_LLM_MAX_NAMES = 50       # LLM に名前を送る 1 回の上限 (種別と表記だけ。本文は送らない)
 BUILD_ARTICLE_ALIAS_LLM_MAX_CALLS = 1        # 1 回の処理で名前の対応を LLM に聞く呼び出しの上限 (再試行を含む)。LLM だけが根拠の対応は candidate (自動確定しない)
 BUILD_ARTICLE_ALIAS_LLM_TIER = "sonnet"      # 名前の対応を聞くモデルの tier (BUILD_LLM_MODELS。回帰の測定なしの初期値)
 BUILD_ARTICLE_BATCH_MAX_BODY_CHARS = 400_000  # 1 回の処理で保持する本文 (リンクつきの本文) の合計文字数の上限。超えた unit は deferred (本文をディスクへ退避しない)
-# - CLI に載せるツール。空 = ツール定義を system prompt に載せない (9/24 実測: 12.8k トークン。不許可リスト方式は 24.7k)
-BUILD_LLM_CLI_TOOLS = ""
-# 視覚監査 (tools/audit_subtask, audit_session) のモデル。8/18 に haiku / sonnet / opus を同一フレーム 30 枚で比較して opus に固定、
-# 9/24 に同一の 5 対戦 20 枚で claude-opus-5 (331 秒) と claude-opus-5-5 (112 秒) を比較: 主要な乖離 (7 匹化、ひんし後の HP
 # 選出規則の schema 2 (article_parse.extract_selection_rules。2026-10-06 ユーザー判断、docs/ARTICLE_BANK_DESIGN_1006.md §3.4)。語の表は初期案 (測定なし)
 BUILD_ARTICLE_CONDITION_CONNECTORS = ("ならば", "なら", "の場合", "場合", "であれば", "なければ", "ければ", "のとき", "の時", "には")
                                              # 条件の節を閉じる語 (長い語から照合)。「〜がいる場合は」「〜が多い場合は」の「場合」単独も含める
@@ -620,6 +620,10 @@ BUILD_ARTICLE_FREE_SLOT_WORDS = ("自由", "相手に合わせ", "相手次第",
 BUILD_ARTICLE_FREE_SLOT_NAMES = ("自由枠",)     # 「+ 自由枠」(数が書かれていなければ free_slots = 0、未確定 selection_free_slot_count_unspecified)
 BUILD_ARTICLE_FREE_SLOT_COUNTERS = ("体", "匹", "枠")   # 未指定の枠の数え方の語
 BUILD_ARTICLE_SELECTION_ELSE_WORDS = ("それ以外", "他は", "その他", "以外は", "残り")   # 味方名の無い「それ以外は」の分岐 (規則にせず未確定)
+# - CLI に載せるツール。空 = ツール定義を system prompt に載せない (9/24 実測: 12.8k トークン。不許可リスト方式は 24.7k)
+BUILD_LLM_CLI_TOOLS = ""
+# 視覚監査 (tools/audit_subtask, audit_session) のモデル。8/18 に haiku / sonnet / opus を同一フレーム 30 枚で比較して opus に固定、
+# 9/24 に同一の 5 対戦 20 枚で claude-opus-5 (331 秒) と claude-opus-5-5 (112 秒) を比較: 主要な乖離 (7 匹化、ひんし後の HP
 # 再表示、HP の誤読、シーン誤判定) は両方が検出し、5.5 は技欄・メガ表示の記述がより具体的で幻覚なし → 安い 5.5 に切替
 AUDIT_MODEL = "claude-opus-5-5"
 # 測定の相手プール (S2、tools/team_build/opponents.py)。ranked = POOL_PIN の上位ランカー構築 (従来)、

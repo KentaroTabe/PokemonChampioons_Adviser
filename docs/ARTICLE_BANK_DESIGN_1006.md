@@ -305,6 +305,36 @@ case: {case_id, record_kind: team|single_set (§3.7),
 - `--check <file>` は検査だけ、`--import <file> [--bank-dir] [--base-version]` は問題が 1 件でもあれば保存しない。
   検査 (validate_record) の結果は記録の status に反映する (矛盾 → conflict。`--check` は status も表示。§3.7)。
 
+### 3.11 GameWith の変換層 (`tools/team_build/adapters/gamewith.py`。許可した 1 URL のページ構造を 2026-10-06 に 1 回閲覧して確認)
+
+- **訂正**: 「最強パーティランキング」のページには**構築ごとに 6 体全部の型**が入っている (`ol.wd-pkch-pkmlist` に 6 個体。通常 / メガの 2 form は
+  タブ切り替えで、文字抽出では代表 1 体しか見えていなかった)。各個体に 持ち物・特性・4 技・実数値 6・能力ポイント 6・性格。
+  よって `members_known` と `sets_known` は満たせる。詳細ページは選出の補足情報のための追加候補 (急がない)。
+- 構築 (h2「X構築」) ごとに 1 unit (kind = team)。既定表示 (`_active`) の form を採用 (メガ候補はメガ後の形態・特性。記事の慣例と同じ)。
+  正規形の本文: 使用ポケモン の節に 6 体の見出し行 `[種名](種のページ)@持ち物(性格)特性`・配分の行・実数値の行・技一覧の行、戦術と解説 の節に
+  構築の説明と選出紹介の文。選出の表は文に直す: 基本選出 →「基本選出は A(初手)、Bなど、C。」、他の見出し →「<見出し>の選出例は A(初手)、B、Cなど。」
+  (表の 3 体に条件を作らない。条件は同じ節のページの文から規則抽出が読む)。
+- meta: `team_code` (ゲーム内のチーム ID。ASCII)、`axis_species_id` (見出しの「X構築」の X を辞書で解決できたとき)、`regulation` は記事本体の
+  冒頭 (最初の構築の h2 まで) の文から `regulation_from_text` (根拠 article_text。サイトのナビの「M-C 情報」は見ない)。
+  source は editorial_site / none を既定 (呼び出し側で上書き可)。辞書で解決できない種名は `unit["local"]["unresolved_names"]` (記録に入れない。
+  `process_batch` が別名の候補に回す)。種のリンクのサイト固有 id は BUILD_ARTICLE_SITE_ID_PATTERNS に登録 (観測だけ。id は決めない)。
+- 登録は `tools/team_build/adapters.host_adapters()` → `article_units.default_adapters()` (許可したホストだけ)。
+- 合成 HTML (同じ class 名と入れ子、架空の数値) のテスト: 6 体 × 4 技、実数値の再計算が一致、チーム ID、規制、選出の文、未解決の種名。
+  実ページでの照合は取得 (§3.12) の `--dry-run` の後に人が行う。
+
+### 3.12 取得 (`articles_fetch`。巡回しない・並列しない・本文を保存しない)
+
+`python -m tools.team_build.articles_fetch --url <URL> [--dry-run] [--refetch] [--base-version V]`
+
+- 方針 (`host_policy.json`) で fetch が allow、かつ allowed_urls にある URL だけ取得する (`plan_urls`: 方針に通らない URL と、以前取得した URL
+  (`state.jsonl` に url_hash がある。`--refetch` のときだけ取り直す) は skip)。与えられた URL だけで、ページ内のリンクを辿らない。
+- 1 本ずつ (並列なし)。同じホストへの要求の間は方針の `min_interval_s` (無ければ BUILD_ARTICLE_FETCH_MIN_INTERVAL_S) 以上空ける。
+  User-Agent は `articles_ingest.USER_AGENT`。文字コードは `decode_html` (ヘッダ → meta → UTF-8)。
+- ページ → `units_for` (ホストの変換層) → `process_batch` (LLM なし) → バンクに保存 (`--base-version` で既存の版に足す)、state 行、
+  サイト固有 id の観測、別名辞書 (確定・候補があれば)。`--dry-run` は何も書かない。本文 (HTML・リンクつきの本文) はメモリの中だけで、
+  取得の失敗も `fetch_error:<例外の型>` だけを残す (URL も本文も文言に入れない)。
+- 取得の関数は注入できる (テストはネットワークに出ない。合成 HTML で、書かれたファイルに本文の断片が無いことまで確かめる)。
+
 ## 4. LLM の段 (段階 B。構造化データだけを渡す)
 
 - 入力 (`article_bank.llm_payload(record)`): 6 体の型 (id と数値)、個体間の役割の材料 (主張)、選出規則、未確定項目の分類と参照 id。
@@ -396,11 +426,13 @@ case: {case_id, record_kind: team|single_set (§3.7),
    テストは `test_article_bank` / `test_article_aliases` / `test_article_units` / `test_articles_process`。
 7. 追補 2 (同日): ホストの方針の URL 許可リストと用途の制限 (`host_allowed` / `usable_for(policy=)`、host_policy/2)、手入力の単体の型
    (`article_manual`、§3.10、`test_article_manual`)。3 ホストの取得条件の確認結果と判断は §0 と `logs/articles/host_policy.json`。
-8. 次: GameWith の変換層 (ランキングページ 1 件。構築ごとの unit、代表 1 体の型の表の読み取り、基本選出 (無条件 + 初手) と条件つき選出の語彙の
-   追加、規制は本文の M-C の記述を根拠に article_text) → 取得 (`articles_fetch`: 許可 URL だけ、間隔 min_interval_s、並列なし、本文はメモリだけ) →
-   実ページ少数の人による照合。LLM の段 (§4) は send_llm の判断の後。
-9. 追補 3 (2026-10-06 ユーザー判断、§0 の 7〜9): 記録の facets と status の incomplete / conflict の区別・用途ごとの要件・
+8. 追補 3 (2026-10-06 ユーザー判断、§0 の 7〜9): 記録の facets と status の incomplete / conflict の区別・用途ごとの要件・
    `build_validated_record` (`article_bank`)、種名だけ分かる個体 `members_named_only` の受け取り (`article_parse` / `article_units` /
    `articles_process`)、選出規則の schema 2 と条件の語彙・evaluation (`extract_selection_rules` / `parse_selection_condition`)、手入力の
    検査結果の status への反映 (`article_manual`)。版は article_parse/3、article_case/3。テストは既存のモジュールに追加
    (`test_article_parse.test_selection_schema_v2` は変換層の文の形 3 つをそのまま含む)。
+9. 追補 4 (同日): GameWith の変換層 (§3.11、`adapters/gamewith`、`test_adapter_gamewith`) と取得 (§3.12、`articles_fetch`、`test_articles_fetch`)、
+   変換層の登録 (`article_units.default_adapters`)、サイト固有 id の表に gamewith。一覧 CSV の形式判定の NFKC と除外語 (`articles_ingest`)。
+10. 次: 許可 URL 1 件の取得を `--dry-run` で 1 回行い、結果 (構築の数・6 体・選出規則・未解決の名前) を人が照合してから保存する。
+    詳細ページ 2 件 (基本選出が明確な構築 / 条件つき選出のある構築) の URL を確認して許可リストに足す。「ドラゴンタイプがいる」(タイプの在否) 等の
+    語彙の追加はユーザー判断。LLM の段 (§4) は send_llm の判断の後。

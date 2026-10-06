@@ -76,6 +76,8 @@ TESTS=(
   test_article_units
   test_articles_process
   test_article_manual
+  test_adapter_gamewith
+  test_articles_fetch
   test_env_match
   test_advice_trace
   test_team_build_experiments

@@ -71,7 +71,7 @@ def test_regulation_from_text():
 
 def test_units_and_adapters():
     """変換層の出力は構築ごとの配列。登録の無いホストは generic (ページ全体を 1 つの team unit)"""
-    assert U.ADAPTERS == {}                                                               # ホスト別の変換層は取得の許可待ち (登録口だけ)
+    assert U.ADAPTERS == {} and set(U.default_adapters()) == {"gamewith.jp"}             # 登録済みの変換層は許可したホストだけ (10/6: GameWith)
     html = "<html><body><nav>menu</nav><h2>使用ポケモン</h2><p>" + TEXT + "</p></body></html>"
     src, meta = {"host": "a.example", "url_hash": "u1"}, {"regulation": "unknown"}
     units = U.generic_units(html, src, meta)

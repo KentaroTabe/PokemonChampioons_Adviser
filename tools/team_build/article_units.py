@@ -51,10 +51,18 @@ def generic_units(html_text: str, source: Optional[dict] = None, meta: Optional[
     return [make_unit("team", html_to_marked_text(html_text), meta, source)]
 
 
+def default_adapters() -> dict:
+    """登録された変換層 (tools/team_build/adapters.host_adapters + このモジュールの ADAPTERS)。循環 import を避けて呼び出し時に読む"""
+    from tools.team_build.adapters import host_adapters
+    table = dict(host_adapters())
+    table.update(ADAPTERS)
+    return table
+
+
 def units_for(host: Optional[str], html_text: str, source: Optional[dict] = None, meta: Optional[dict] = None,
               adapters: Optional[dict] = None) -> list:
-    """ホストの変換層 (ADAPTERS。無ければ generic_units) でページ → unit の列。adapters はテスト用の差し替え"""
-    table = ADAPTERS if adapters is None else adapters
+    """ホストの変換層 (default_adapters。無ければ generic_units) でページ → unit の列。adapters はテスト用の差し替え"""
+    table = default_adapters() if adapters is None else adapters
     adapter: Optional[Callable] = table.get(canonical_host(host) or "")
     units = adapter(html_text, source, meta) if adapter else generic_units(html_text, source, meta)
     for u in units:

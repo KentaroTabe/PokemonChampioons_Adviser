@@ -147,6 +147,11 @@ def process_batch(units: list, dic: Optional[ArticleDictionary] = None, aliases:
         obs = parsed_by[i]["site_id_observations"]
         store = store.observe(obs, source_id=info[i]["page"])
         counts["site_observations"] += len(obs)
+        # 変換層がローカル用に残した解決できない名前 (種名など。tools/team_build/adapters) も別名の候補に入れる (記録には入れない)
+        for it in ((units[i].get("local") or {}).get("unresolved_names") or []):
+            if isinstance(it, dict) and it.get("category") and it.get("text") and it not in parsed_by[i]["unresolved_names"]:
+                parsed_by[i]["unresolved_names"].append({"category": it["category"], "text": it["text"], "host": it.get("host"),
+                                                         "site_key": it.get("site_key")})
     items = [(i, it) for i in sorted(parsed_by) for it in parsed_by[i]["unresolved_names"]]
     # 3. 元の表記との対応を裏付けられる別名だけ自動確定
     dec = decide(auto_entries([it for _i, it in items], work_dic, store, today), alias_data)
