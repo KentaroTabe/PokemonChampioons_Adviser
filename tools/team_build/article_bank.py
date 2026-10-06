@@ -9,17 +9,22 @@
 - validate_record: 個体の数 (種類ごと)・4 技・参戦種・配分の整合 (ポイント合計 / 252 表示との対応 / 実数値の再計算) ・メガ形態と石 ・
   選出規則の個体と種 ・出典の 2 軸。problem_is_insufficient で「情報不足」と「矛盾」を分ける
 - usable_for: 用途 (pool / weakness / selection / parser_eval) ごとに記録を使えるか (合成・処理状態・規制・種類・使用実績の根拠・
-  用途ごとの必要な情報 BUILD_ARTICLE_PURPOSE_REQUIREMENTS)
+  用途ごとの必要な情報 BUILD_ARTICLE_PURPOSE_REQUIREMENTS・系列の旧版でないこと)
 - set_regulation: 規制を更新し、根拠 (regulation_basis) と履歴 (regulation_history) を残す
 - assert_no_prose: 記録や LLM の入力に かな・漢字を含む文字列が無いこと (本文・引用の混入の門)
 - llm_payload: LLM に渡す部分集合 (個体の型、主張、選出規則、未確定項目の分類と参照 id)
 - host_allowed: ホストごとの可否 (fetch / send_llm が allow のときだけ通す。unknown は進めない)
+- lineage_key / merge_cases / extend_bank (2026-10-06 ユーザー判断、設計書 §5.1): 同じ記事 (url_hash) の同じ構築 (team_code、無ければ
+  unit_index) を 1 つの系列とし、同じ系列の同一内容 (case_id が同じ) は重複して入れず、内容の更新は新しい版を足して
+  supersedes (新版) / superseded_by (旧版) で旧版と結ぶ (旧版は消さない)。手入力は型の内容を系列の鍵にする。conflict / failed は入れない
 - save_bank / load_bank: logs/articles/bank/<version>/cases.jsonl + manifest.json (version = 内容のハッシュ)。合成の記録は
-  保存・読み出しの両方で既定で拒否する (allow_synthetic=True のときだけ。一時ディレクトリへの保存でも許可を別に要る)
-純粋関数 (save/load 以外はファイルに触れない)。テストは tests/test_article_parse.py / tests/test_article_bank.py。
+  保存・読み出しの両方で既定で拒否する (allow_synthetic=True のときだけ。一時ディレクトリへの保存でも許可を別に要る)。
+  保存は merge_cases で正規化してから、読み出しの既定は各系列の最新版だけ (latest_only)
+純粋関数 (save/load/extend 以外はファイルに触れない)。テストは tests/test_article_parse.py / tests/test_article_bank.py。
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
@@ -27,7 +32,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Optional
 
-from champions_agent.config import (BUILD_ARTICLE_EV252_OFFSET, BUILD_ARTICLE_EV252_PER_POINT,
+from champions_agent.config import (BUILD_ARTICLE_BANK_STATUSES, BUILD_ARTICLE_EV252_OFFSET, BUILD_ARTICLE_EV252_PER_POINT,
+                                    BUILD_ARTICLE_LINEAGE_MANUAL_FIELDS, BUILD_ARTICLE_LINEAGE_UNIT_KEYS,
                                     BUILD_ARTICLE_MOVES_PER_SET, BUILD_ARTICLE_POOL_EVIDENCE, BUILD_ARTICLE_PUBLISHER_KINDS,
                                     BUILD_ARTICLE_PURPOSE_RECORD_KINDS, BUILD_ARTICLE_PURPOSE_REQUIREMENTS, BUILD_ARTICLE_RECORD_KIND_MEMBERS,
                                     BUILD_ARTICLE_REGULATION_BASES, BUILD_ARTICLE_REGULATION_NAMES, BUILD_ARTICLE_SEASON_REGULATION,
@@ -37,7 +43,14 @@ from tools.team_build.article_parse import PARSER_VERSION, STAT_ORDER, mega_tabl
 # 2: record_kind、出典の 2 軸 (publisher_kind / usage_evidence) と synthetic、meta の regulation_basis / regulation_history (2026-10-06)
 # 3: members_named_only (種名だけ分かる個体)、facets、status の incomplete (情報不足) / conflict (検査の矛盾) の区別と problems、
 #    選出規則の schema 2 (article_parse/3) (2026-10-06 ユーザー判断)
-SCHEMA_VERSION = "article_case/3"
+# 4: バンクの記録に系列の旧版と新版の関係 supersedes / superseded_by (merge_cases が付ける。case_id は変えない)、manifest に
+#    n_lineages / n_superseded (2026-10-06 ユーザー判断)
+SCHEMA_VERSION = "article_case/4"
+MANUAL_ENTRY_METHOD = "manual"          # source.entry_method の値: 手入力 (tools/team_build/article_manual)。系列の鍵は型の内容
+LINK_KEYS = ("supersedes", "superseded_by")   # 系列の版の関係 (バンクの記録だけ。merge_cases が付け直す)
+# merge_cases の結果 (新しい記録 1 件ごと): added = 新しい系列 / updated = 更新 (新しい版を足して旧版と結ぶ) / duplicate = 最新版と同一内容 /
+# reverted = 旧版と同一内容 (入れず、最新も変えない) / rejected = 処理状態が BUILD_ARTICLE_BANK_STATUSES に無い
+MERGE_OUTCOMES = ("added", "updated", "duplicate", "reverted", "rejected")
 REPO = Path(__file__).resolve().parent.parent.parent
 DEFAULT_BANK_DIR = REPO / "logs" / "articles" / "bank"
 _PROSE_RE = re.compile(r"[ぁ-んァ-ヶ一-龥]")
@@ -374,12 +387,15 @@ def usable_for(record: dict, purpose: str, regulation: Optional[str] = None, pol
     - pool (相手プール本体): team だけ、かつ usage_evidence が BUILD_ARTICLE_POOL_EVIDENCE (自己申告 / 対戦記録で確認) に入ること。
       初版は編集部の推奨をプール本体に入れないが、判定は publisher_kind ではなく使用実績の根拠で行う
     - selection (選出予測): team だけ。weakness (似た構築の弱点): team / single_set
-    - policy (host_policy) を渡せば、出典ホストの purposes の制限 (host_allowed) も見る (ホスト全体の allow で全用途に通さない)"""
+    - policy (host_policy) を渡せば、出典ホストの purposes の制限 (host_allowed) も見る (ホスト全体の allow で全用途に通さない)
+    - 系列の旧版 (superseded_by の付いた記録: 同じ記事の同じ構築が更新された古い内容) は使わない (2026-10-06 ユーザー判断。設計書 §5.1)"""
     kinds = BUILD_ARTICLE_PURPOSE_RECORD_KINDS.get(purpose)
     if kinds is None:
         raise ValueError(f"purpose が表に無い値 (許可: {', '.join(BUILD_ARTICLE_PURPOSE_RECORD_KINDS)})")
     if purpose == "parser_eval":
         return True
+    if record.get("superseded_by"):
+        return False
     src = record.get("source") or {}
     if src.get("synthetic"):
         return False
@@ -494,13 +510,156 @@ def _is_synthetic(case: dict) -> bool:
     return bool((case.get("source") or {}).get("synthetic"))
 
 
+def _canonical_set_value(field: str, value):
+    """系列の鍵に使う個体の項目の正規形: 技は順を問わない (並べ替える)。辞書 (能力ポイント) は 0 / None の項目を省く"""
+    if field == "moves":
+        return sorted(str(v) for v in (value or []))
+    if isinstance(value, dict):
+        return {k: v for k, v in value.items() if v}
+    return value
+
+
+def set_content_hash(members: list) -> str:
+    """型の内容 (BUILD_ARTICLE_LINEAGE_MANUAL_FIELDS = 種・持ち物・性格・特性・技・能力ポイント) のハッシュ (16 桁。手入力の系列の鍵)。
+    技の順と能力ポイントの 0 の書き方は区別しない"""
+    ident = [{f: _canonical_set_value(f, (m or {}).get(f)) for f in BUILD_ARTICLE_LINEAGE_MANUAL_FIELDS} for m in members or []]
+    return hashlib.sha256(json.dumps(ident, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
+def lineage_key(record: dict) -> str:
+    """記録の系列 (同じ記事の同じ構築 / 同じ手入力の型) の鍵 (純粋。2026-10-06 ユーザー判断、設計書 §5.1)。
+    - 手入力 (source.entry_method = manual): "<record_kind>:manual:<型の内容のハッシュ>" (set_content_hash。出典 URL は見ない:
+      同じ型の二重登録を防ぐ)
+    - 記事: "<record_kind>:url:<source.url_hash>:<項目>:<値>"。項目は BUILD_ARTICLE_LINEAGE_UNIT_KEYS の順で meta にある最初のもの
+      (team_code → unit_index)。url_hash が無ければ source.url から作る (article_units.url_hash = 正規化した URL のハッシュ)。
+      どの項目も無ければ "<record_kind>:url:<url_hash>" (ページ全体が 1 つの構築)
+    - 出典の URL も手入力の印も無い記録 (試験の記録など): "<record_kind>:case:<case_id>" (同一内容の重複だけを除き、更新の関係は作らない)
+    record_kind を鍵に含める (構築と単体の型を同じ系列にしない)"""
+    kind = record.get("record_kind", "team")
+    src = record.get("source") or {}
+    if src.get("entry_method") == MANUAL_ENTRY_METHOD:
+        return f"{kind}:manual:{set_content_hash(record.get('members') or [])}"
+    uh = src.get("url_hash")
+    if not uh and src.get("url"):
+        from tools.team_build.article_units import url_hash
+        uh = url_hash(src["url"])
+    if uh:
+        meta = record.get("meta") or {}
+        for k in BUILD_ARTICLE_LINEAGE_UNIT_KEYS:
+            v = meta.get(k)
+            if v is not None and v != "":
+                return f"{kind}:url:{uh}:{k}:{v}"
+        return f"{kind}:url:{uh}"
+    return f"{kind}:case:{record.get('case_id')}"
+
+
+def _without_links(record: dict) -> dict:
+    """記録の複製 (入力を変えない) から系列の版の関係 (LINK_KEYS) を除いたもの"""
+    return {k: copy.deepcopy(v) for k, v in record.items() if k not in LINK_KEYS}
+
+
+def _merge_place(cases: list, latest_of: dict, seen: dict, rec: dict) -> tuple:
+    """1 件を併合の列に置く → (結果 MERGE_OUTCOMES のどれか, 情報)。cases (併合の列) / latest_of (系列 → 最新版の添字) /
+    seen (系列 → 置いた case_id の集合) を更新する"""
+    cid = rec.get("case_id")
+    if not cid:
+        raise ValueError("case_id の無い記録はバンクに入れない")
+    key = lineage_key(rec)
+    if rec.get("status") not in BUILD_ARTICLE_BANK_STATUSES:
+        return "rejected", {"lineage": key, "case_id": cid, "status": rec.get("status"), "lineage_in_bank": key in latest_of}
+    if key not in latest_of:
+        cases.append(_without_links(rec))
+        latest_of[key] = len(cases) - 1
+        seen[key] = {cid}
+        return "added", {"lineage": key, "case_id": cid, "supersedes": None}
+    i = latest_of[key]
+    old = cases[i]["case_id"]
+    if cid == old:
+        return "duplicate", {"lineage": key, "case_id": cid, "matched": "latest"}
+    if cid in seen[key]:
+        return "reverted", {"lineage": key, "case_id": cid, "matched": "superseded", "latest": old}
+    # 本文のハッシュが同じなら、内容の違いは記事ではなく解析器・辞書・変換層の変更による (どちらかに無ければ None)
+    old_body, new_body = (cases[i].get("source") or {}).get("body_hash"), (rec.get("source") or {}).get("body_hash")
+    same_body = (old_body == new_body) if old_body and new_body else None
+    cases[i] = dict(cases[i], superseded_by=cid)
+    new_rec = _without_links(rec)
+    new_rec["supersedes"] = old
+    cases.append(new_rec)
+    latest_of[key] = len(cases) - 1
+    seen[key].add(cid)
+    return "updated", {"lineage": key, "case_id": cid, "supersedes": old, "same_body_hash": same_body}
+
+
+def merge_cases(existing: Optional[list], new: Optional[list]) -> dict:
+    """既存の記録 (バンクの版。旧版を含む全部) に新しい記録を併合する (純粋。入力は変えない。2026-10-06 ユーザー判断、設計書 §5.1)。
+    新しい記録を順に、系列 (lineage_key) ごとに次の規則で置く:
+    - 処理状態が BUILD_ARTICLE_BANK_STATUSES に無い (conflict / failed) → 入れない (rejected。lineage_in_bank = その系列の記録が
+      既にあり、それが最新のまま残る: ページは変わったのに古い内容が使われ続けるので、人が確かめる)
+    - 系列が新しい → 追加 (added)
+    - 系列の最新版と case_id が同じ (同一内容) → 追加しない (duplicate。最新版の source.fetched_at 等は旧版のまま)
+    - 系列の旧版 (superseded_by の付いた版) と case_id が同じ (内容が旧版に戻った) → 追加せず、最新も変えない (reverted。
+      duplicates にも数える。最新を戻すかは判断待ち)
+    - 系列の最新版と内容が違う (更新) → 新しい記録を追加し (updated)、新しい方に supersedes = 旧 case_id、旧い方に
+      superseded_by = 新 case_id を付ける (旧版は消さない: 系列の履歴)
+    既存の記録も保存された順に同じ規則で置き直す (旧い形式のバンクの重複・結ばれていない更新・conflict も正す。正した数は counts の
+    existing_dropped / existing_relinked)。入力の supersedes / superseded_by は使わずに付け直す (併合の結果をもう一度併合しても同じ:
+    save_bank の正規化と冪等)。case_id の無い記録は ValueError。
+    → {"cases": 併合後の記録, "added": [{"lineage", "case_id", "supersedes"(, "same_body_hash")}] (追加した記録 = 新しい系列 + 更新),
+       "duplicates": [{"lineage", "case_id", "matched": latest | superseded}],
+       "superseded": [{"lineage", "old", "new", "same_body_hash"}] (same_body_hash = 新旧の source.body_hash が同じ: 記事は変わらず
+       解析器・辞書・変換層の変更で内容が変わった。どちらかに無ければ None),
+       "reverted": [...] (duplicates のうち旧版と同じもの), "rejected": [{"lineage", "case_id", "status", "lineage_in_bank"}],
+       "outcomes": [新しい記録ごとの結果 (new と同じ順)], "counts": {...}}"""
+    cases: list = []
+    latest_of: dict = {}
+    seen: dict = {}
+    stored_links: dict = {}                    # 置いた既存の記録の添字 → 保存されていた (supersedes, superseded_by)
+    n_existing_dropped = 0
+    for rec in existing or []:
+        outcome, _info = _merge_place(cases, latest_of, seen, rec)
+        if outcome in ("added", "updated"):
+            stored_links[len(cases) - 1] = (rec.get("supersedes"), rec.get("superseded_by"))
+        else:
+            n_existing_dropped += 1
+    n_existing_relinked = sum(1 for i, links in stored_links.items()
+                              if (cases[i].get("supersedes"), cases[i].get("superseded_by")) != links)
+    out: dict = {"added": [], "duplicates": [], "superseded": [], "reverted": [], "rejected": []}
+    outcomes: list = []
+    for rec in new or []:
+        outcome, info = _merge_place(cases, latest_of, seen, rec)
+        outcomes.append(outcome)
+        if outcome in ("added", "updated"):
+            out["added"].append(info)
+            if outcome == "updated":
+                out["superseded"].append({"lineage": info["lineage"], "old": info["supersedes"], "new": info["case_id"],
+                                          "same_body_hash": info["same_body_hash"]})
+        elif outcome in ("duplicate", "reverted"):
+            out["duplicates"].append(info)
+            if outcome == "reverted":
+                out["reverted"].append(info)
+        else:
+            out["rejected"].append(info)
+    counts = {k: len(v) for k, v in out.items()}
+    counts.update(existing_kept=len(stored_links), existing_dropped=n_existing_dropped, existing_relinked=n_existing_relinked)
+    return {"cases": cases, **out, "outcomes": outcomes, "counts": counts}
+
+
 def save_bank(cases: list, bank_dir: Path = DEFAULT_BANK_DIR, allow_synthetic: bool = False) -> Path:
     """cases → <bank_dir>/<version>/cases.jsonl + manifest.json。保存前に本文の混入を検査する (2026-10-06 から source / meta も含めて全体)。
     合成の記録 (source.synthetic) が 1 件でもあれば ValueError (allow_synthetic=True のときだけ通す。保存先が一時ディレクトリでも
-    許可は別に要る: 保存先と許可を分ける)"""
+    許可は別に要る: 保存先と許可を分ける)。
+    保存の前に merge_cases([], cases) で正規化する (2026-10-06 ユーザー判断: 同じ系列の同一内容は 1 件、更新は supersedes /
+    superseded_by で結ぶ。merge_cases / extend_bank の結果の列なら変わらない)。処理状態が BUILD_ARTICLE_BANK_STATUSES に無い記録
+    (conflict / failed) があれば ValueError (merge_cases で除いて数えてから保存する)。manifest に系列の数 n_lineages (= 最新版の数) と
+    旧版の数 n_superseded"""
     n_synthetic = sum(1 for c in cases if _is_synthetic(c))
     if n_synthetic and not allow_synthetic:
         raise ValueError(f"合成の記録 {n_synthetic} 件はバンクに保存しない (allow_synthetic=True のときだけ)")
+    norm = merge_cases([], cases)
+    if norm["rejected"]:
+        raise ValueError(f"処理状態が {' / '.join(BUILD_ARTICLE_BANK_STATUSES)} でない記録 {len(norm['rejected'])} 件はバンクに入れない "
+                         "(merge_cases で除いてから保存する)")
+    cases = norm["cases"]
     for c in cases:
         assert_no_prose(c)
     version = bank_version(cases)
@@ -509,15 +668,35 @@ def save_bank(cases: list, bank_dir: Path = DEFAULT_BANK_DIR, allow_synthetic: b
     (out / "cases.jsonl").write_text("".join(json.dumps(c, ensure_ascii=False) + "\n" for c in cases), encoding="utf-8")
     regs = Counter(str((c.get("meta") or {}).get("regulation")) for c in cases)
     (out / "manifest.json").write_text(json.dumps({"version": version, "schema": SCHEMA_VERSION, "parser": PARSER_VERSION, "n_cases": len(cases),
-                                                   "n_synthetic": n_synthetic, "by_regulation": dict(regs),
+                                                   "n_lineages": len({lineage_key(c) for c in cases}),
+                                                   "n_superseded": sum(1 for c in cases if c.get("superseded_by")),
+                                                   "n_synthetic": sum(1 for c in cases if _is_synthetic(c)), "by_regulation": dict(regs),
                                                    "by_record_kind": dict(Counter(c.get("record_kind", "team") for c in cases)),
                                                    "by_status": dict(Counter(c.get("status") for c in cases))},
                                                   ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     return out
 
 
-def load_bank(version: str, bank_dir: Path = DEFAULT_BANK_DIR, allow_synthetic: bool = False) -> list:
-    """固定版の読み出し (version を指定する。最新を暗黙に選ばない)。合成の記録は既定で除く (allow_synthetic=True のときだけ含める)"""
+def load_bank(version: str, bank_dir: Path = DEFAULT_BANK_DIR, allow_synthetic: bool = False, latest_only: bool = True) -> list:
+    """固定版の読み出し (版は version で指定する。最新の版を暗黙に選ばない)。合成の記録は既定で除く (allow_synthetic=True のときだけ含める)。
+    latest_only (既定 True、2026-10-06 ユーザー判断): 系列の旧版 (superseded_by の付いた記録) を除き、各系列の最新の記録だけを返す
+    (利用側は最新の記録だけを見る)。False なら旧版も含めた全部 (版に足すとき: extend_bank。旧版を消さないため)"""
     path = Path(bank_dir) / version / "cases.jsonl"
     cases = [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
-    return cases if allow_synthetic else [c for c in cases if not _is_synthetic(c)]
+    if not allow_synthetic:
+        cases = [c for c in cases if not _is_synthetic(c)]
+    if latest_only:
+        cases = [c for c in cases if not c.get("superseded_by")]
+    return cases
+
+
+def extend_bank(new: list, bank_dir: Path = DEFAULT_BANK_DIR, base_version: Optional[str] = None,
+                allow_synthetic: bool = False) -> dict:
+    """base_version の版 (旧版を含む全部の記録: latest_only=False) に新しい記録を併合して新しい版に保存する (merge_cases → save_bank)。
+    base_version が無ければ新しい記録だけの版。併合の結果に記録が無ければ保存しない。何も変わらなければ版は base_version と同じ
+    (同じ版に同じ内容を書く)。取得 (articles_fetch.run)・候補からの保存 (save_from_candidates)・手入力 (article_manual.import_entries) が使う。
+    → {"saved_to": Path | None, "n_cases": 併合後の件数, "merge": merge_cases の結果 (cases を除く)}"""
+    existing = load_bank(base_version, bank_dir, allow_synthetic=allow_synthetic, latest_only=False) if base_version else []
+    merged = merge_cases(existing, new)
+    saved_to = save_bank(merged["cases"], bank_dir, allow_synthetic=allow_synthetic) if merged["cases"] else None
+    return {"saved_to": saved_to, "n_cases": len(merged["cases"]), "merge": {k: v for k, v in merged.items() if k != "cases"}}

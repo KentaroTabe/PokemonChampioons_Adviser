@@ -56,9 +56,17 @@
     ピクシナイトは一次資料で確定できず別名のまま (basis agent)。はどうのぼうご は公式ポケモンずかんで確認。別名の根拠は human (人が実際に
     確認) と agent (実装エージェントの判断) を分ける。取得履歴 (`access.jsonl`) は dry-run のアクセスも数え、確認のやり直しは保存した
     構造化した候補 (`candidates/`) で行う (再取得を減らす)。
+14. 記録の系列と重複 (§5.1): 取得履歴 (`access.jsonl`) は追記してよいが、**利用するバンクでは同一内容を重複計上しない**。同じ記事
+    (url_hash) の同じ構築 (meta.team_code、無ければ meta.unit_index) を 1 つの系列 (lineage) とし、内容 (case_id) が同じ再取得は足さない。
+    **更新 (内容が変わった) は新しい版を足して旧版との関係を持たせる** (新版に `supersedes`、旧版に `superseded_by`。旧版は消さず、読み出しの
+    既定と用途の判定は最新版だけ)。手入力は型の内容 (種・持ち物・性格・特性・技・能力ポイント) を系列の鍵にして同じ型の二重登録を防ぐ。ブログ数が増えても
+    同じ規則で扱う。**保留中の構築 (conflict) はバンクに入れず候補 (`candidates/`) として保持する**。将来その値を採用して解決するなら
+    元の値を残し、解決根拠を記録する (10/6 の 1 構築 = ラグラージの通常形態の防御: 記事の 113 を残し、112 を採るなら「配分を優先して
+    再計算した」と記録する。未実装)。
 
 **判断待ち**: GameWith の構造化データの LLM 送信可否 (`send_llm`)。通常形態の実数値の 1 項目だけの不一致 (表示用の計算値の揺れと見られる)
-を矛盾 (conflict) のままにするか、注記にするか。
+を矛盾 (conflict) のままにするか、注記にするか。同じ系列で内容が旧版に戻ったとき (reverted) に最新を戻すか (今は足さず、最新も変えない)。
+手入力の系列の鍵には性格・特性も入れる (運用側の判断 10/6: 性格・特性が違えば別の型)。
 
 **初期案の設定値 (検証前。champions_agent/config `BUILD_ARTICLE_*`)**: 個体の節 / 全体の節の見出し語、個体 6 体・技 4 つ、能力名の表、
 252 表示と実数値のラベル、選出条件の語 → 述語、選出規則 schema 2 の語彙 (接続の語・選出の印・先発 / 後発の語・例示の語・未指定の枠の語・
@@ -233,7 +241,8 @@ case: {case_id, record_kind: team|single_set (§3.7),
        claims: [{kind, subject, object, object_kind: species|type|move, conditions: [...], basis: "author_explicit", source_ref}],
        selection_rules: [schema 2 (§3.4)], unresolved: [{category, source_ref}], counts: {...},
        versions: {parser, dictionary_hash, schema},
-       facets: {members_known, sets_known, selection_readable, any_set_or_claim}, status, problems: [...] (検査を渡したとき)}
+       facets: {members_known, sets_known, selection_readable, any_set_or_claim}, status, problems: [...] (検査を渡したとき),
+       supersedes: <旧 case_id> | (無し), superseded_by: <新 case_id> | (無し)}   (バンクの記録だけ。系列の版の関係、§5.1)
 ```
 
 文字列の値は id / 列挙値 / 参照 id だけ。`assert_no_prose(record)` が「かな・漢字を含む文字列が無い」ことを検査する (保存前と LLM 送信前の門)。
@@ -318,6 +327,8 @@ case: {case_id, record_kind: team|single_set (§3.7),
   しない。対戦記録で確認する経路は別)。`redistributable` の既定は False (yakkun の個人利用の範囲。公開バンクへの同梱は投稿者の許可などを別に確認)。
 - `--check <file>` は検査だけ、`--import <file> [--bank-dir] [--base-version]` は問題が 1 件でもあれば保存しない。
   検査 (validate_record) の結果は記録の status に反映する (矛盾 → conflict。`--check` は status も表示。§3.7)。
+- 同じ型を 2 回取り込んでも 1 件 (§5.1。系列の鍵は型の内容 = 種・持ち物・性格・特性・技・能力ポイント、出典 URL は見ない)。取り込みの結果は入力ごとに
+  追加 / 更新 / 重複 を表示する。
 
 ### 3.11 GameWith の変換層 (`tools/team_build/adapters/gamewith.py`。許可した 1 URL のページ構造を 2026-10-06 に 1 回閲覧して確認)
 
@@ -356,9 +367,10 @@ case: {case_id, record_kind: team|single_set (§3.7),
   履歴の仕組みができる前の 10/6 のアクセス 8 回は mode manual_note / count 8 の 1 行で記録した。
 - 1 本ずつ (並列なし)。同じホストへの要求の間は方針の `min_interval_s` (無ければ BUILD_ARTICLE_FETCH_MIN_INTERVAL_S) 以上空ける。
   User-Agent は `articles_ingest.USER_AGENT`。文字コードは `decode_html` (ヘッダ → meta → UTF-8)。
-- ページ → `units_for` (ホストの変換層) → `process_batch` (LLM なし) → バンクに保存 (`--base-version` で既存の版に足す)、state 行、
-  サイト固有 id の観測、別名辞書 (確定・候補があれば)。`--dry-run` は何も書かない。本文 (HTML・リンクつきの本文) はメモリの中だけで、
-  取得の失敗も `fetch_error:<例外の型>` だけを残す (URL も本文も文言に入れない)。
+- ページ → `units_for` (ホストの変換層) → `process_batch` (LLM なし) → バンクに保存 (`--base-version` で既存の版に併合する。同じ構築の
+  同一内容は足さず、内容が変わった構築は旧版と結ぶ: §5.1)、state 行、サイト固有 id の観測、別名辞書 (確定・候補があれば)。
+  `--dry-run` はバンク・state・別名・観測を書かない (取得履歴と候補は書く。`--base-version` があれば併合の見込みだけ数えて表示する)。
+  本文 (HTML・リンクつきの本文) はメモリの中だけで、取得の失敗も `fetch_error:<例外の型>` だけを残す (URL も本文も文言に入れない)。
 - 取得の関数は注入できる (テストはネットワークに出ない。合成 HTML で、書かれたファイルに本文の断片が無いことまで確かめる)。
 
 ## 4. LLM の段 (段階 B。構造化データだけを渡す)
@@ -376,8 +388,50 @@ case: {case_id, record_kind: team|single_set (§3.7),
 1 事例 (case) = 同じ使用期間・規制における一貫した 6 体と型の使用例。転載・複数の記事での紹介は同一事例、細かな型変更は子版 (variant)。
 記事や版の数で枠を増やさない。実戦の遭遇回数 `n` には入れず、`source = article`、`case_id`、採用枠の重みを別に持つ。
 メガ型と非メガ型は型・役割の仮説として区別し、基本種との対応を残す。選出時点で不明な相手の持ち物やメガ形態を記事だけで確定させない。
-保存先は `logs/articles/bank/<version>/cases.jsonl` + `manifest.json` (version = 内容のハッシュ、スキーマと解析器の版、件数、規制の内訳)。
-読み出しは固定版を指定する (`load_bank`)。対戦中・run 中に取得や LLM の呼び出しは起きない。
+保存先は `logs/articles/bank/<version>/cases.jsonl` + `manifest.json` (version = 内容のハッシュ、スキーマと解析器の版、件数、規制の内訳、
+系列の数 `n_lineages`、旧版の数 `n_superseded`)。読み出しは固定版を指定する (`load_bank`)。対戦中・run 中に取得や LLM の呼び出しは起きない。
+
+### 5.1 記録の系列・重複・更新 (2026-10-06 ユーザー判断、§0 の 14。`article_bank.lineage_key` / `merge_cases` / `extend_bank`)
+
+取得履歴 (`access.jsonl`) と処理状態 (`state.jsonl`) は取得のたびに追記してよい。**利用するバンクでは同じ記事・同じ構築の同一内容を重複計上
+しない**。ブログの数が増えても同じ規則で扱う。
+
+- 系列 (lineage) の鍵 `lineage_key(record)` (純粋。記録には保存せず、毎回計算する):
+  - 記事: `<record_kind>:url:<source.url_hash>:<項目>:<値>`。項目は BUILD_ARTICLE_LINEAGE_UNIT_KEYS の順で meta にある最初のもの
+    (`team_code` = ゲーム内のチーム ID → `unit_index` = ページ内の番号)。url_hash が無ければ source.url を正規化して作る。どちらの項目も
+    無ければ `<record_kind>:url:<url_hash>` (ページ全体が 1 つの構築)。
+  - 手入力 (`source.entry_method = manual`): `<record_kind>:manual:<型の内容のハッシュ>` (BUILD_ARTICLE_LINEAGE_MANUAL_FIELDS = 種・持ち物・
+    技・能力ポイント。技は順を問わず、ポイントの 0 は省く。出典 URL は見ない: 同じ型の二重登録を防ぐ)。
+  - 出典の URL も手入力の印も無い記録 (試験の記録など): `<record_kind>:case:<case_id>` (同一内容の重複だけを除き、更新の関係は作らない)。
+  - record_kind を鍵に含める (構築と単体の型を同じ系列にしない)。違う記事の同じチーム ID は別の系列 (記事をまたいだ同一事例の統合は §6)。
+- 同一内容 = `case_id` (記録の本体 = 個体・種名だけの個体・主張・選出規則・未確定項目のハッシュ) が同じ。source (取得日時など) と meta
+  (規制など) は case_id に入らない。
+- 併合 `merge_cases(existing, new)` (純粋) は新しい記録を順に置く:
+
+  | 場合 | 扱い | 結果 |
+  |---|---|---|
+  | 処理状態が BUILD_ARTICLE_BANK_STATUSES に無い (conflict / failed) | 入れない (従来どおり) | rejected。その系列の既存の記録が最新のまま残るときは `lineage_in_bank` で知らせる |
+  | 系列が新しい | 足す | added |
+  | 系列の最新版と case_id が同じ | 足さない。記録の `source.fetched_at` 等は旧いまま (見た日時は取得履歴と候補にある) | duplicate |
+  | 系列の旧版 (superseded_by あり) と case_id が同じ (内容が旧版に戻った) | 足さず、最新も変えない (判断待ち) | reverted (duplicates にも数える) |
+  | 系列の最新版と内容が違う (更新) | 新しい記録を足し、新版に `supersedes = 旧 case_id`、旧版に `superseded_by = 新 case_id`。旧版は消さない | updated (added と superseded に数える) |
+
+  既存の記録も保存された順に同じ規則で置き直す (旧い形式のバンクの重複・結ばれていない更新・conflict も正し、`existing_dropped` /
+  `existing_relinked` に数える)。入力の supersedes / superseded_by は使わずに付け直すので、併合の結果をもう一度併合しても同じ。
+  更新には `same_body_hash` (新旧の source.body_hash が同じ = 記事は変わらず、解析器・辞書・変換層の変更で内容が変わった) を付けて表示する
+  (どちらも「内容の更新」として同じに扱う。記録には入れない)。
+- 保存 `save_bank` は保存の前に `merge_cases([], cases)` で正規化する (併合済みの列は変わらない)。conflict / failed が混ざれば ValueError で
+  何も書かない。何も変わらない再取得は版も変わらない (同じ版に同じ内容を書く)。見た日時の列 (seen_at) は足さない (足すと同じ内容の再取得で
+  版が変わる。見た日時は取得履歴 `access.jsonl` と候補 `candidates/` に残る)。
+- 版に足す `extend_bank(new, bank_dir, base_version)`: 基の版を旧版も含めて読み (`latest_only=False`)、併合して新しい版に保存する。取得
+  (`articles_fetch.run`)・候補からの保存 (`--from-candidates`)・手入力 (`article_manual --import`) が使う。基の版 (固定版) は変えない。
+- 読み出し `load_bank(version, latest_only=True)`: 既定は各系列の最新版だけ (superseded_by の付いた旧版を除く)。`latest_only=False` で全部。
+- 用途 `usable_for`: 旧版 (superseded_by あり) は parser_eval 以外に使わない。
+- 保留中の構築 (conflict。10/6 の 1 構築) はバンクに入れず候補 (`candidates/`) として保持する。将来その値を採用して解決するなら、元の値
+  (記事の 113) を残し、解決根拠 (「配分を優先して再計算した」) を記録する (実装は未定。§0 の 14)。
+- 注意: `unit_index` はページの並びが変わると別の構築を指す (チーム ID の無い構築は、並べ替えで別の構築の旧版扱いになり得る)。変換層は
+  1 ページに複数の unit を返すとき `team_code` か `unit_index` を meta に付ける (無いと同じページの構築どうしが同じ系列になる)。
+- 判断待ち: 内容が旧版に戻ったとき (reverted) に最新を戻すか。手入力の鍵は性格・特性も含める (運用側の判断 10/6: 性格・特性が違えば別の型)。
 
 ## 6. 構築提案への接続 (段階 C。M-C の材料が揃ってから)
 
@@ -463,4 +517,9 @@ case: {case_id, record_kind: team|single_set (§3.7),
     通常形態の実数値 (`actual_base_form`) の保持と検算の記録 (`checks`)、`type_present`、同じ推奨の複数記述のまとめ (`merge_selection_rules`)、
     名前表の 2 石の修正と別名の根拠 human / agent の区別、取得履歴 (`access.jsonl`) と構造化した候補 (`candidates/`、`--from-candidates`)。
     実ページ再検査: 10 構築中 9 構築 ok → 版 7b5430a9c2270df8 として保存 (1 構築は conflict で保存せず)。
-11. 次: 詳細ページは不要 (ランキングページに 6 体全部ある)。LLM の段 (§4) は send_llm の判断の後。§6〜§8 の接続は M-C の材料が揃ってから。
+11. 追補 6 (同日、ユーザー判断 §0 の 14): 記録の系列の鍵 (`lineage_key`)、保存時の重複処理と版の関係 (`merge_cases` / `extend_bank`、
+    `save_bank` の正規化、conflict / failed の拒否)、最新版だけの読み出し (`load_bank(latest_only=True)`)、manifest の `n_lineages` /
+    `n_superseded`、`usable_for` が旧版を使わない (§5.1)。取得・候補からの保存・手入力の取り込みが `extend_bank` を使う。版は article_case/4。
+    設定は BUILD_ARTICLE_LINEAGE_UNIT_KEYS / BUILD_ARTICLE_LINEAGE_MANUAL_FIELDS / BUILD_ARTICLE_BANK_STATUSES。
+    テストの期待の変更 (ユーザー指示): `test_articles_fetch` の「同じ 2 構築の再取得でバンクが 4 件」は重複計上で仕様の誤り → 2 件のまま・重複 2。
+12. 次: 詳細ページは不要 (ランキングページに 6 体全部ある)。LLM の段 (§4) は send_llm の判断の後。§6〜§8 の接続は M-C の材料が揃ってから。

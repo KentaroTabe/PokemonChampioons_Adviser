@@ -632,6 +632,16 @@ BUILD_ARTICLE_FREE_SLOT_WORDS = ("自由", "相手に合わせ", "相手次第",
 BUILD_ARTICLE_FREE_SLOT_NAMES = ("自由枠",)     # 「+ 自由枠」(数が書かれていなければ free_slots = 0、未確定 selection_free_slot_count_unspecified)
 BUILD_ARTICLE_FREE_SLOT_COUNTERS = ("体", "匹", "枠")   # 未指定の枠の数え方の語
 BUILD_ARTICLE_SELECTION_ELSE_WORDS = ("それ以外", "他は", "その他", "以外は", "残り")   # 味方名の無い「それ以外は」の分岐 (規則にせず未確定)
+# 記事バンクの記録の系列と重複 (tools/team_build/article_bank.lineage_key / merge_cases。2026-10-06 ユーザー判断、docs/ARTICLE_BANK_DESIGN_1006.md §5.1)。
+# 取得履歴 (access.jsonl) は追記してよいが、利用するバンクでは同じ記事・同じ構築の同一内容を重複計上せず、更新は旧版との関係を持たせる
+BUILD_ARTICLE_LINEAGE_UNIT_KEYS = ("team_code", "unit_index")
+                                             # 記事の中の構築を区別する meta の項目 (先にあるものを使う): ゲーム内のチーム ID → ページ内の番号。
+                                             # 番号はページの並びが変わると別の構築を指す (チーム ID の無い構築は系列を取り違え得る)
+BUILD_ARTICLE_LINEAGE_MANUAL_FIELDS = ("species_id", "item", "nature", "ability", "moves", "points")   # 性格・特性が違えば別の型 (運用側の判断 10/6)
+                                             # 手入力 (source.entry_method = manual、url_hash なし) の系列の鍵にする個体の項目 = 種・持ち物・技・配分
+                                             # (能力ポイント)。技は順を問わない。性格・特性・実数値は鍵に入れない (鍵が同じで違えば同じ型の更新として扱う)
+BUILD_ARTICLE_BANK_STATUSES = ("ok", "warnings", "incomplete")
+                                             # バンクに入れる処理状態。conflict (検査の矛盾) / failed (個体が無い) は入れない (merge_cases が除いて rejected に数える)
 # - CLI に載せるツール。空 = ツール定義を system prompt に載せない (9/24 実測: 12.8k トークン。不許可リスト方式は 24.7k)
 BUILD_LLM_CLI_TOOLS = ""
 # 視覚監査 (tools/audit_subtask, audit_session) のモデル。8/18 に haiku / sonnet / opus を同一フレーム 30 枚で比較して opus に固定、

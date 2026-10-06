@@ -1,8 +1,10 @@
 """記事バンクの記録 (tools/team_build/article_bank) の種類・出典の 2 軸・用途の判定・規制の履歴・合成の門のテスト
 (docs/ARTICLE_BANK_DESIGN_1006.md §3.7、2026-10-06 ユーザー判断)。facets (用途ごとに必要な情報) と status (情報不足 / 矛盾) の区別も見る。
+記録の系列の鍵 (lineage_key)・保存時の重複処理と版の関係 (merge_cases / extend_bank)・最新版だけの読み出し (latest_only)・manifest の
+件数・旧版を使わない用途の判定 (§5.1、2026-10-06 ユーザー判断) も見る。
 
 素材は tests/test_article_parse.py の合成記事 SYNTHETIC と、その 1 体目だけの単体の型 (合成)、代表 1 体の型の記事 REP と
-種名だけ分かる 5 体 NAMED_FIVE。
+種名だけ分かる 5 体 NAMED_FIVE。系列の試験は型 1 体の最小の記録 (_mini)。
 
     python -m tests.test_article_bank
 """
@@ -170,6 +172,7 @@ def test_save_load_synthetic_gate():
         out = B.save_bank([real, syn], Path(d), allow_synthetic=True)
         man = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
         assert man["n_cases"] == 2 and man["n_synthetic"] == 1 and man["by_record_kind"] == {"team": 1, "single_set": 1}
+        assert man["n_lineages"] == 2 and man["n_superseded"] == 0                # 出典 URL の無い 2 記録は内容ごとの別の系列
         assert [c["case_id"] for c in B.load_bank(out.name, Path(d))] == [real["case_id"]]          # 既定は合成を除く
         assert [c["case_id"] for c in B.load_bank(out.name, Path(d), allow_synthetic=True)] == [real["case_id"], syn["case_id"]]
         only_real = B.save_bank([real], Path(d) / "real")                     # 合成が無ければ許可なしで保存できる
@@ -322,6 +325,179 @@ def test_validate_named_and_selected_species():
     print("test_validate_named_and_selected_species OK")
 
 
+def _mini(url_hash="u1", meta=None, move="hurricane", problems=None, kind="team", **src):
+    """系列・重複の試験用の最小の記録 (型 1 体。move で内容 = case_id を変える。problems で処理状態を変える。src は出典の追加項目)"""
+    member = {"id": "m1", "species_id": "pelipper", "base_species_id": "pelipper", "mega_stone": None, "item": "damprock",
+              "nature": "modest", "ability": "drizzle", "points": {"hp": 32, "spa": 29, "spd": 2, "spe": 3}, "ev252": None,
+              "actual": None, "moves": ["surf", "uturn", "tailwind", move], "warnings": []}
+    source = dict({"url_hash": url_hash, "host": "a.example", "usage_evidence": "self_report", "fetched_at": "2026-10-06"}, **src)
+    return B.build_record({"members": [member]}, source=source, meta=dict({"regulation": REG_MC}, **(meta or {})), record_kind=kind,
+                          problems=problems)
+
+
+def test_lineage_key():
+    """系列の鍵 (2026-10-06 ユーザー判断): 同じ記事 (url_hash) の同じ構築 (team_code、無ければ unit_index)。手入力は型の内容
+    (種・持ち物・技・能力ポイント)。出典の URL も手入力の印も無ければ内容そのもの (case_id)"""
+    # team_code があればそれ (unit_index より先)。並びの番号や内容が変わっても同じ系列
+    a = _mini(meta={"team_code": "E2E9MW0BQ7", "unit_index": 3})
+    assert B.lineage_key(a) == "team:url:u1:team_code:E2E9MW0BQ7"
+    assert B.lineage_key(_mini(meta={"team_code": "E2E9MW0BQ7", "unit_index": 5}, move="raindance")) == B.lineage_key(a)
+    # unit_index だけ (0 も番号として使う)
+    assert B.lineage_key(_mini(meta={"unit_index": 2})) == "team:url:u1:unit_index:2"
+    assert B.lineage_key(_mini(meta={"unit_index": 0})) == "team:url:u1:unit_index:0"
+    # どちらも無ければ url だけ (ページ全体が 1 つの構築)
+    assert B.lineage_key(_mini()) == "team:url:u1"
+    # 違う記事なら同じチーム ID でも別の系列。構築と単体の型も別の系列
+    assert B.lineage_key(_mini(url_hash="u2", meta={"team_code": "E2E9MW0BQ7"})) != B.lineage_key(a)
+    assert B.lineage_key(_mini(kind="single_set")) == "single_set:url:u1"
+    # url_hash が無ければ source.url を正規化して作る (追跡クエリ・断片が違っても同じ記事)
+    from tools.team_build.article_units import url_hash
+    u = "https://a.example/blog/1"
+    via_url = _mini(url_hash=None, url=u + "?utm_source=x#top", meta={"team_code": "T1"})
+    assert B.lineage_key(via_url) == f"team:url:{url_hash(u)}:team_code:T1"
+    assert B.lineage_key(via_url) == B.lineage_key(_mini(url_hash=url_hash(u), meta={"team_code": "T1"}))
+    # 出典の URL も手入力の印も無ければ内容そのもの: 同一内容の重複だけを除き、更新の関係は作らない
+    bare = _mini(url_hash=None)
+    assert B.lineage_key(bare) == f"team:case:{bare['case_id']}"
+    assert B.lineage_key(_mini(url_hash=None, move="raindance")) != B.lineage_key(bare)
+    # 手入力: 型の内容のハッシュ (出典 URL は見ない。技の順・能力ポイントの 0 の書き方は区別しない)
+    manual = _mini(url_hash=None, kind="single_set", entry_method="manual", url="https://yakkun.com/x")
+    k = B.lineage_key(manual)
+    assert k.startswith("single_set:manual:") and k == B.lineage_key(_mini(url_hash="zz", kind="single_set", entry_method="manual"))
+    reordered = json.loads(json.dumps(manual))
+    reordered["members"][0]["moves"] = list(reversed(reordered["members"][0]["moves"]))
+    reordered["members"][0]["points"]["atk"] = 0
+    assert B.lineage_key(reordered) == k
+    for field, value in (("points", {"hp": 32, "spa": 28, "spd": 3, "spe": 3}), ("item", "leftovers"), ("species_id", "politoed"),
+                         ("moves", ["surf", "uturn", "tailwind", "raindance"])):
+        changed = json.loads(json.dumps(manual))
+        changed["members"][0][field] = value
+        assert B.lineage_key(changed) != k, field                       # 種・持ち物・性格・特性・技・能力ポイントが違えば別の型
+    other = json.loads(json.dumps(manual))
+    other["members"][0]["nature"] = "calm"
+    other["members"][0]["ability"] = "keeneye"
+    assert B.lineage_key(other) != k                                    # 性格・特性も鍵に入れる: 違えば別の型 (運用側の判断 10/6。BUILD_ARTICLE_LINEAGE_MANUAL_FIELDS)
+    print("test_lineage_key OK")
+
+
+def test_merge_cases_branches():
+    """併合の規則 (2026-10-06 ユーザー判断): 同じ系列で同一内容 → 足さない (duplicate。記録は旧いまま)、同じ系列で内容が違う → 足して
+    supersedes / superseded_by で結ぶ (旧版は消さない)、系列が違う → 足す (同じ case_id でも)。conflict / failed は入れない。
+    内容が旧版に戻ったら足さず最新も変えない (reverted)。入力は変えない。併合の結果をもう一度併合しても同じ"""
+    t1 = "team:url:u1:team_code:T1"
+    a = _mini(meta={"team_code": "T1"})                                       # 系列 T1 の最初の内容
+    a_again = _mini(meta={"team_code": "T1"}, fetched_at="2026-10-07")        # 同じ内容の再取得 (取得日だけ違う)
+    b = _mini(meta={"team_code": "T1"}, move="raindance")                     # 系列 T1 の更新
+    c = _mini(meta={"team_code": "T2"})                                       # 別の系列 (内容は a と同じ)
+    assert a["case_id"] == a_again["case_id"] == c["case_id"] != b["case_id"]
+    first = B.merge_cases([], [a, c])
+    assert first["outcomes"] == ["added", "added"] and len(first["cases"]) == 2
+    snapshot = json.dumps([a, a_again, b, c], sort_keys=True)
+    m = B.merge_cases(first["cases"], [a_again, b])
+    assert m["outcomes"] == ["duplicate", "updated"]
+    assert m["duplicates"] == [{"lineage": t1, "case_id": a["case_id"], "matched": "latest"}]
+    # same_body_hash: 本文のハッシュが新旧どちらかに無ければ None (この試験の記録には無い)
+    assert m["added"] == [{"lineage": t1, "case_id": b["case_id"], "supersedes": a["case_id"], "same_body_hash": None}]
+    assert m["superseded"] == [{"lineage": t1, "old": a["case_id"], "new": b["case_id"], "same_body_hash": None}]
+    assert (m["counts"]["added"], m["counts"]["duplicates"], m["counts"]["superseded"], m["counts"]["rejected"]) == (1, 1, 1, 0)
+    old, other, new = m["cases"]
+    assert old["case_id"] == a["case_id"] and old["superseded_by"] == b["case_id"] and old["source"]["fetched_at"] == "2026-10-06"
+    assert new["case_id"] == b["case_id"] and new["supersedes"] == a["case_id"] and "superseded_by" not in new
+    assert other["case_id"] == c["case_id"] and not any(k in other for k in B.LINK_KEYS)        # 別の系列は同じ case_id でも結ばない
+    assert json.dumps([a, a_again, b, c], sort_keys=True) == snapshot and "superseded_by" not in first["cases"][0]   # 入力は変えない
+    # 更新が続けば鎖になる (a → b → d)。各系列の最新はいつも 1 つ
+    d = _mini(meta={"team_code": "T1"}, move="protect")
+    m2 = B.merge_cases(m["cases"], [d])
+    assert m2["outcomes"] == ["updated"]
+    assert m2["superseded"] == [{"lineage": t1, "old": b["case_id"], "new": d["case_id"], "same_body_hash": None}]
+    chain = {x["case_id"]: x for x in m2["cases"] if B.lineage_key(x) == t1}
+    assert chain[b["case_id"]]["supersedes"] == a["case_id"] and chain[b["case_id"]]["superseded_by"] == d["case_id"]
+    assert [x["case_id"] for x in m2["cases"] if not x.get("superseded_by")] == [c["case_id"], d["case_id"]]
+    # 内容が旧版に戻った (a と同じ) → 足さず、最新 (d) も変えない (reverted。duplicates にも数える。最新を戻すかは判断待ち)
+    m3 = B.merge_cases(m2["cases"], [a_again])
+    assert m3["outcomes"] == ["reverted"] and m3["cases"] == m2["cases"]
+    assert m3["reverted"] == [{"lineage": t1, "case_id": a["case_id"], "matched": "superseded", "latest": d["case_id"]}]
+    assert (m3["counts"]["duplicates"], m3["counts"]["reverted"], m3["counts"]["added"]) == (1, 1, 0)
+    # conflict / failed は入れない (rejected。lineage_in_bank = その系列の今の最新版が残る)
+    bad = _mini(meta={"team_code": "T1"}, move="substitute", problems=["m1:point_total:67"])
+    failed = B.build_record({"members": []}, source={"url_hash": "u1"}, meta={"team_code": "T9"})
+    assert bad["status"] == "conflict" and failed["status"] == "failed"
+    m4 = B.merge_cases(m2["cases"], [bad, failed])
+    assert m4["outcomes"] == ["rejected", "rejected"] and m4["cases"] == m2["cases"]
+    assert [(r["status"], r["lineage_in_bank"]) for r in m4["rejected"]] == [("conflict", True), ("failed", False)]
+    # 1 回の入力の中の重複・更新も同じ規則 (順に置く)
+    m5 = B.merge_cases([], [a, a_again, b])
+    assert m5["outcomes"] == ["added", "duplicate", "updated"] and len(m5["cases"]) == 2
+    assert set(m5["outcomes"]) <= set(B.MERGE_OUTCOMES)
+    # 本文のハッシュが同じで内容が違う更新 = 記事ではなく解析器・辞書・変換層の変更 (same_body_hash True)。本文が違えば False
+    h1 = _mini(meta={"team_code": "T5"}, body_hash="h1")
+    h1_parser = _mini(meta={"team_code": "T5"}, move="raindance", body_hash="h1")
+    h2_page = _mini(meta={"team_code": "T5"}, move="protect", body_hash="h2")
+    m6 = B.merge_cases([], [h1, h1_parser, h2_page])
+    assert m6["outcomes"] == ["added", "updated", "updated"] and [s["same_body_hash"] for s in m6["superseded"]] == [True, False]
+    # 併合の結果をもう一度併合しても同じ (save_bank の正規化はこれに頼る)
+    again = B.merge_cases([], m2["cases"])
+    assert again["cases"] == m2["cases"] and again["counts"]["duplicates"] == 0
+    assert B.merge_cases(m2["cases"], [])["counts"]["existing_relinked"] == 0
+    # 旧い形式のバンク (重複・結ばれていない更新・conflict を含む) も同じ規則で正し、正した数を数える
+    legacy = B.merge_cases([a, a_again, b, bad], [])
+    assert len(legacy["cases"]) == 2 and legacy["counts"]["existing_dropped"] == 2 and legacy["counts"]["existing_relinked"] == 2
+    assert legacy["cases"][0]["superseded_by"] == b["case_id"] and legacy["cases"][1]["supersedes"] == a["case_id"]
+    # case_id の無い記録は入れない (同一内容を判定できない)
+    _expect_value_error(B.merge_cases, [], [{"source": {}, "status": "ok"}])
+    print("test_merge_cases_branches OK")
+
+
+def test_bank_latest_only_and_manifest():
+    """保存は merge_cases で正規化する (併合済みの列は変わらない)。manifest に系列の数と旧版の数。読み出しの既定は各系列の最新の記録だけ
+    (latest_only=False で全部)。conflict / failed を保存しようとすると何も書かない。extend_bank は基の版を旧版も含めて読んで併合する"""
+    a = _mini(meta={"team_code": "T1"})
+    b = _mini(meta={"team_code": "T1"}, move="raindance")
+    c = _mini(meta={"team_code": "T2"}, move="protect")
+    merged = B.merge_cases([], [a, c, b])["cases"]
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        out = B.save_bank(merged, root)
+        man = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+        assert (man["n_cases"], man["n_lineages"], man["n_superseded"]) == (3, 2, 1) and man["schema"] == B.SCHEMA_VERSION
+        assert [x["case_id"] for x in B.load_bank(out.name, root)] == [c["case_id"], b["case_id"]]                 # 既定は最新だけ
+        assert [x["case_id"] for x in B.load_bank(out.name, root, latest_only=False)] == [a["case_id"], c["case_id"], b["case_id"]]
+        # 併合していない列を渡しても保存の前に正規化する (同一内容は 1 件、更新は結ぶ) → 併合済みの列と同じ版
+        assert B.save_bank([a, c, a, b], root).name == out.name
+        # 処理状態が conflict / failed の記録は保存しない (何も書かない)
+        bad = _mini(meta={"team_code": "T3"}, problems=["m1:point_total:67"])
+        msg = _expect_value_error(B.save_bank, [a, bad], root / "bad")
+        assert "merge_cases" in msg and not (root / "bad").exists()
+        # extend_bank: 基の版を旧版も含めて読んで併合する (旧版を消さない)。同じ内容だけなら版も同じ
+        same = B.extend_bank([b, c], root, base_version=out.name)
+        assert same["saved_to"].name == out.name and same["merge"]["outcomes"] == ["duplicate", "duplicate"] and same["n_cases"] == 3
+        e = _mini(meta={"team_code": "T2"}, move="haze")
+        ext = B.extend_bank([e], root, base_version=out.name)
+        assert ext["merge"]["outcomes"] == ["updated"] and ext["n_cases"] == 4 and ext["saved_to"].name != out.name
+        assert [x["case_id"] for x in B.load_bank(ext["saved_to"].name, root, latest_only=False)] == [a["case_id"], c["case_id"],
+                                                                                                    b["case_id"], e["case_id"]]
+        assert [x["case_id"] for x in B.load_bank(ext["saved_to"].name, root)] == [b["case_id"], e["case_id"]]
+        man2 = json.loads((ext["saved_to"] / "manifest.json").read_text(encoding="utf-8"))
+        assert (man2["n_cases"], man2["n_lineages"], man2["n_superseded"]) == (4, 2, 2)
+        assert len(B.load_bank(out.name, root, latest_only=False)) == 3                                         # 基の版は変わらない
+        # 記録が 1 件も残らなければ保存しない
+        assert B.extend_bank([bad], root / "none")["saved_to"] is None and not (root / "none").exists()
+    print("test_bank_latest_only_and_manifest OK")
+
+
+def test_usable_for_skips_superseded():
+    """系列の旧版 (superseded_by の付いた記録) は parser_eval 以外の用途に使わない。新版 (supersedes だけ) は使う (2026-10-06 ユーザー判断)"""
+    real = {"host": "a.example", "publisher_kind": "personal_blog", "usage_evidence": "self_report"}
+    team = _team(source=real)
+    assert all(B.usable_for(team, p, REG_MC) for p in ("pool", "weakness", "selection"))
+    old_team = dict(team, superseded_by="case_newer")
+    assert not any(B.usable_for(old_team, p, REG_MC) for p in ("pool", "weakness", "selection")) and B.usable_for(old_team, "parser_eval")
+    assert all(B.usable_for(dict(team, supersedes="case_older"), p, REG_MC) for p in ("pool", "weakness", "selection"))
+    old, new = B.merge_cases([], [_mini(meta={"team_code": "T1"}), _mini(meta={"team_code": "T1"}, move="raindance")])["cases"]
+    assert not B.usable_for(old, "weakness", REG_MC) and B.usable_for(new, "weakness", REG_MC)
+    print("test_usable_for_skips_superseded OK")
+
+
 def main() -> None:
     test_record_kind_branches()
     test_source_axes()
@@ -332,6 +508,10 @@ def main() -> None:
     test_host_policy_urls_and_purposes()
     test_facets_and_status()
     test_validate_named_and_selected_species()
+    test_lineage_key()
+    test_merge_cases_branches()
+    test_bank_latest_only_and_manifest()
+    test_usable_for_skips_superseded()
     print("ALL OK")
 
 

@@ -15,6 +15,9 @@
   例外の文言にも本文を入れない
 - 変換層はホストごと (tools/team_build/adapters)。無いホストはページ全体を 1 つの team unit にする (generic)
 - LLM は呼ばない (名前の対応は別の段で、送信の方針が allow のホストだけ)
+- 取得履歴 (access.jsonl) と処理状態 (state.jsonl) は取得のたびに追記するが、バンクには同じ記事の同じ構築の同一内容を重複して入れない
+  (article_bank.extend_bank → merge_cases。内容が変わった構築は新しい版を足して旧版と supersedes / superseded_by で結ぶ。
+  conflict / failed の記録は入れない。2026-10-06 ユーザー判断、設計書 §5.1)。--dry-run でも --base-version があれば併合の見込みを数える
 取得の関数 (fetcher) は注入できる (テストはネットワークに出ない)。
 """
 from __future__ import annotations
@@ -29,11 +32,11 @@ from pathlib import Path
 from typing import Callable, Optional
 from urllib.parse import urlparse
 
-from champions_agent.config import BUILD_ARTICLE_FETCH_MIN_INTERVAL_S, BUILD_ARTICLE_FETCH_TIMEOUT_S
+from champions_agent.config import BUILD_ARTICLE_BANK_STATUSES, BUILD_ARTICLE_FETCH_MIN_INTERVAL_S, BUILD_ARTICLE_FETCH_TIMEOUT_S
 from tools.team_build.adapters import host_adapters
 from tools.team_build.article_aliases import DEFAULT_PATH as ALIASES_PATH
 from tools.team_build.article_aliases import DEFAULT_SITE_IDS_PATH, SiteIdStore, load_aliases, save_aliases
-from tools.team_build.article_bank import DEFAULT_BANK_DIR, host_allowed, host_policy_entry, load_bank, save_bank
+from tools.team_build.article_bank import DEFAULT_BANK_DIR, extend_bank, host_allowed, host_policy_entry, load_bank, merge_cases
 from tools.team_build.article_parse import canonical_host, default_dictionary
 from tools.team_build.article_units import decode_html, units_for, url_hash
 from tools.team_build.articles_ingest import USER_AGENT
@@ -178,7 +181,10 @@ def run(urls: list, policy: dict, fetcher: Optional[Fetcher] = None, state_path:
         now: Optional[str] = None) -> dict:
     """取得 → unit → process_batch → 保存。dry_run でもアクセスは取得履歴 (access.jsonl) に残し、構造化した候補 (candidates/) を書く
     (本文は書かない。2026-10-06 ユーザー判断: 確認のたびの再取得を減らす)。バンク・state・別名・観測は dry_run でなければ書く。
-    → {"plan", "fetch_results", "batch_counts", "records", "saved_to", "state_rows", "candidates_paths", ...}"""
+    バンクへは extend_bank (base_version の版に併合: 同じ系列の同一内容は足さない、更新は旧版と結ぶ、conflict / failed は入れない)。
+    dry_run で base_version があれば併合の見込み (merge_cases、保存しない) を bank_merge に入れる (preview = True)。
+    → {"plan", "fetch_results", "batch_counts", "records" (処理した記録の全部。バンクに入ったかは bank_merge.outcomes), "saved_to",
+       "bank_merge" (merge_cases の結果から cases を除いたもの。記録が無ければ None), "state_rows", "candidates_paths", ...}"""
     today = today or datetime.date.today().isoformat()
     now = now or datetime.datetime.now().isoformat(timespec="seconds")
     plan = plan_urls(urls, policy, fetched_url_hashes(state_path, access_path), refetch)
@@ -205,25 +211,30 @@ def run(urls: list, policy: dict, fetcher: Optional[Fetcher] = None, state_path:
                    "counts": {k: v for k, v in res["counts"].items() if not str(k).startswith("llm_")}, "saved": not dry_run}
         candidates_paths.append(str(save_candidates(r["url_hash"], payload, candidates_dir)))
     saved_to = None
+    bank_merge = None
     if not dry_run:
         if res["records"]:
-            cases = list(load_bank(base_version, bank_dir)) if base_version else []
-            saved_to = save_bank(cases + res["records"], bank_dir)
+            bank = extend_bank(res["records"], bank_dir, base_version)
+            saved_to, bank_merge = bank["saved_to"], bank["merge"]
         if res["state_rows"]:
             append_state([r for r in res["state_rows"] if r], state_path)
         if res["alias_entries"]["confirmed"] or res["alias_entries"]["candidate"]:
             save_aliases(res["aliases"], aliases_path)
         res["site_store"].save(site_ids_path)
+    elif res["records"] and base_version:
+        preview = merge_cases(load_bank(base_version, bank_dir, latest_only=False), res["records"])   # 見込みだけ (保存しない)
+        bank_merge = dict({k: v for k, v in preview.items() if k != "cases"}, preview=True)
     units.clear()                                               # 本文の破棄
     return {"plan": plan, "fetch_results": fetch_results, "batch_counts": res["counts"], "records": res["records"],
-            "saved_to": str(saved_to) if saved_to else None, "state_rows": [r for r in res["state_rows"] if r],
+            "saved_to": str(saved_to) if saved_to else None, "bank_merge": bank_merge, "state_rows": [r for r in res["state_rows"] if r],
             "unresolved_names": res["unresolved_names"], "alias_entries": res["alias_entries"], "candidates_paths": candidates_paths}
 
 
 def save_from_candidates(paths: list, bank_dir: Path = DEFAULT_BANK_DIR, base_version: Optional[str] = None,
-                         state_path: Path = DEFAULT_STATE_PATH, only_statuses: tuple = ("ok", "warnings", "incomplete")) -> dict:
+                         state_path: Path = DEFAULT_STATE_PATH, only_statuses: tuple = BUILD_ARTICLE_BANK_STATUSES) -> dict:
     """保存済みの構造化した候補 (dry-run の出力) をバンクに入れる (再取得しない)。conflict / failed の記録は入れない。
-    → {"saved_to", "n_records", "skipped"}"""
+    バンクへは extend_bank (base_version の版に併合: 同じ系列の同一内容は足さない、更新は旧版と結ぶ。2026-10-06 ユーザー判断)。
+    → {"saved_to", "n_records" (状態で選んだ記録の数。重複を含む), "skipped", "bank_merge" (merge_cases の結果から cases を除いたもの)}"""
     records, rows, skipped = [], [], []
     for p in paths:
         c = load_candidates(Path(p))
@@ -234,12 +245,36 @@ def save_from_candidates(paths: list, bank_dir: Path = DEFAULT_BANK_DIR, base_ve
                 skipped.append({"case_id": rec.get("case_id"), "status": rec.get("status")})
         rows.extend(r for r in (c.get("state_rows") or []) if r)
     saved_to = None
+    bank_merge = None
     if records:
-        cases = list(load_bank(base_version, bank_dir)) if base_version else []
-        saved_to = save_bank(cases + records, bank_dir)
+        bank = extend_bank(records, bank_dir, base_version)
+        saved_to, bank_merge = bank["saved_to"], bank["merge"]
         if rows:
             append_state(rows, state_path)
-    return {"saved_to": str(saved_to) if saved_to else None, "n_records": len(records), "skipped": skipped}
+    return {"saved_to": str(saved_to) if saved_to else None, "n_records": len(records), "skipped": skipped, "bank_merge": bank_merge}
+
+
+def _merge_lines(bank_merge: Optional[dict]) -> list:
+    """バンクへの併合の結果の表示 (件数と、既存の記録が最新のまま残る系列・内容が旧版に戻った系列の注意)"""
+    if not bank_merge:
+        return []
+    c = bank_merge["counts"]
+    head = "バンク (見込み、dry-run)" if bank_merge.get("preview") else "バンク"
+    lines = [f"{head}: 追加 {c['added']} (うち更新 {c['superseded']})、重複 {c['duplicates']} (うち旧版と同じ {c['reverted']})、"
+             f"入れない {c['rejected']} (conflict / failed)"]
+    stale = [r for r in bank_merge.get("rejected") or [] if r.get("lineage_in_bank")]
+    if stale:
+        lines.append(f"注意: 入れなかった記録 {len(stale)} 件の系列は、バンクの既存の記録 (ページの今の内容ではない) が最新のまま: "
+                     + ", ".join(r["lineage"] for r in stale))
+    if bank_merge.get("reverted"):
+        lines.append("注意: 内容が旧版に戻った系列 (最新は変えていない。判断待ち): " + ", ".join(r["lineage"] for r in bank_merge["reverted"]))
+    same_body = [s for s in bank_merge.get("superseded") or [] if s.get("same_body_hash")]
+    if same_body:
+        lines.append(f"更新 {len(same_body)} 件は本文が同じ (記事ではなく解析器・辞書・変換層の変更で内容が変わった): "
+                     + ", ".join(s["lineage"] for s in same_body))
+    if c.get("existing_dropped") or c.get("existing_relinked"):
+        lines.append(f"基の版の正規化: 除いた記録 {c['existing_dropped']}、関係を付け直した記録 {c['existing_relinked']}")
+    return lines
 
 
 def _rule_ja(rule: dict, members: dict) -> str:
@@ -264,11 +299,13 @@ def _summary_lines(out: dict, ja: bool = False) -> list:
         lines.append(f"{p['action']:<5} {p['reason'] or 'ok':<26} {p['url']}")
     for r in out["fetch_results"]:
         lines.append(f"取得 {r['status']} host={r['host']} units={r['n_units']} chars={r['body_chars']}")
-    for rec in out["records"]:
+    outcomes = (out.get("bank_merge") or {}).get("outcomes") or []          # 記録と同じ順 (バンクに入ったか)
+    for i, rec in enumerate(out["records"]):
         meta = rec.get("meta") or {}
         members = ", ".join(m["species_id"] for m in rec["members"])
+        bank = f" bank={outcomes[i]}" if i < len(outcomes) else ""
         lines.append(f"記録 {rec['case_id']} {rec['record_kind']} status={rec['status']} reg={meta.get('regulation')} "
-                     f"team_code={meta.get('team_code')} members=[{members}] rules={len(rec['selection_rules'])} claims={len(rec['claims'])}")
+                     f"team_code={meta.get('team_code')} members=[{members}] rules={len(rec['selection_rules'])} claims={len(rec['claims'])}{bank}")
         if ja:
             from advisor.ja_names import set_line_ja
             id_map = {m["id"]: m["species_id"] for m in rec["members"]}
@@ -286,6 +323,7 @@ def _summary_lines(out: dict, ja: bool = False) -> list:
             lines.append(f"検算 {rec['case_id']}: 実数値 {json.dumps(checks.get('actual'), sort_keys=True)} 通常形態 {json.dumps(checks.get('actual_base_form'), sort_keys=True)}")
     for p in out.get("candidates_paths") or []:
         lines.append(f"候補: {p}")
+    lines.extend(_merge_lines(out.get("bank_merge")))
     lines.append(f"保存: {out['saved_to'] or '(なし)'}")
     return lines
 
@@ -300,7 +338,7 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--access", default=str(DEFAULT_ACCESS_PATH), help="取得履歴 (dry-run を含む。本文なし)")
     ap.add_argument("--candidates-dir", default=str(DEFAULT_CANDIDATES_DIR), help="構造化した候補の保存先 (照合用。本文なし)")
     ap.add_argument("--bank-dir", default=str(DEFAULT_BANK_DIR))
-    ap.add_argument("--base-version", help="この版の記録に足して新しい版を作る")
+    ap.add_argument("--base-version", help="この版の記録 (旧版を含む) に併合して新しい版を作る (同じ系列の同一内容は足さない、更新は旧版と結ぶ)")
     ap.add_argument("--aliases", default=str(ALIASES_PATH))
     ap.add_argument("--site-ids", default=str(DEFAULT_SITE_IDS_PATH))
     ap.add_argument("--dry-run", action="store_true", help="取得と解析だけ行う (バンク・state・別名・観測は書かない。取得履歴と候補は書く)")
@@ -310,6 +348,8 @@ def main(argv: Optional[list] = None) -> int:
     if args.from_candidates:
         res = save_from_candidates(args.from_candidates, Path(args.bank_dir), args.base_version, Path(args.state))
         print(f"候補から保存: 記録 {res['n_records']} 件、入れなかった記録 {len(res['skipped'])} 件 {res['skipped'] or ''}")
+        for ln in _merge_lines(res.get("bank_merge")):
+            print(ln)
         print(f"保存: {res['saved_to'] or '(なし)'}")
         return 0 if res["saved_to"] else 1
     policy = load_policy(Path(args.policy))

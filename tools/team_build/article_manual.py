@@ -19,6 +19,8 @@
 - source.entry_method = "manual" を付ける。note は記録に入れない (かな・漢字は記録に残さない)
 - 検査 (validate_record) の問題は記録の status に反映する (矛盾 → conflict、情報不足 → incomplete。--check は status も表示)。
   問題のある記録は保存しない
+- 同じ型の二重登録をしない (2026-10-06 ユーザー判断): 系列の鍵は型の内容 (種・持ち物・技・能力ポイント。article_bank.lineage_key)。
+  同じ系列で同一内容なら足さず (duplicate)、内容が違えば新しい版を足して旧版と supersedes / superseded_by で結ぶ (updated)
     python -m tools.team_build.article_manual --check <file>                       # 検査だけ (問題と解決した id を表示)
     python -m tools.team_build.article_manual --import <file> [--bank-dir DIR] [--base-version V]   # 検査を通った型をバンクに保存
 純粋関数 (check/import の入出力以外はファイルに触れない)。テストは tests/test_article_manual.py。
@@ -32,17 +34,20 @@ from pathlib import Path
 from typing import Optional
 
 from champions_agent.config import BUILD_ARTICLE_MOVES_PER_SET, BUILD_ARTICLE_REGULATION_NAMES
-from tools.team_build.article_bank import (DEFAULT_BANK_DIR, UNKNOWN_REGULATION, build_validated_record, known_regulations, load_bank,
-                                           save_bank, set_regulation)
+from tools.team_build.article_bank import (DEFAULT_BANK_DIR, MANUAL_ENTRY_METHOD, UNKNOWN_REGULATION, build_validated_record, extend_bank,
+                                           known_regulations, set_regulation)
 from tools.team_build.article_parse import STAT_ORDER, ArticleDictionary, default_dictionary, parse_member_head, value_id
 
 PARSER_VERSION = "article_manual/1"
-ENTRY_METHOD = "manual"
+ENTRY_METHOD = MANUAL_ENTRY_METHOD                      # source.entry_method (article_bank の系列の鍵が手入力を見分ける値)
 DEFAULT_USAGE_EVIDENCE = "none"
 DEFAULT_REGULATION_BASIS = "user_confirmed"
 FORBIDDEN_EVIDENCE = ("battle_log_confirmed",)          # 手入力では付けられない (対戦記録で確認する経路は別)
 _STAT_LETTERS = {"h": "hp", "a": "atk", "b": "def", "c": "spa", "d": "spd", "s": "spe"}
 REQUIRED_KEYS = ("species", "item", "nature", "moves")
+# 併合の結果 (article_bank.MERGE_OUTCOMES) の表示
+_BANK_LABELS = {"added": "追加", "updated": "更新 (旧版を残して結ぶ)", "duplicate": "重複 (足さない)",
+                "reverted": "旧版と同じ (足さない・最新は変えない)", "rejected": "入れない"}
 
 
 def points_from(value) -> Optional[dict]:
@@ -197,14 +202,17 @@ def load_entries(path: Path) -> list:
 
 def import_entries(entries: list, bank_dir: Path = DEFAULT_BANK_DIR, base_version: Optional[str] = None,
                    dic: Optional[ArticleDictionary] = None, today: Optional[str] = None) -> tuple:
-    """検査を通った記録だけをバンクに保存する (base_version を指定すればその版の記録に足した新しい版)。問題のある入力が 1 件でもあれば
-    保存しない。→ (保存先 or None, 検査結果)"""
+    """検査を通った記録だけをバンクに保存する (base_version を指定すればその版の記録 (旧版を含む) に併合した新しい版)。問題のある入力が
+    1 件でもあれば保存しない。同じ型は重複して入れない (2026-10-06 ユーザー判断。article_bank.extend_bank → merge_cases: 系列の鍵は
+    型の内容)。検査結果の各行に併合の結果 "bank" (added / updated / duplicate / reverted。article_bank.MERGE_OUTCOMES) を付ける。
+    同じ型だけなら版は base_version と同じ。→ (保存先 or None, 検査結果)"""
     results = check_entries(entries, dic, today)
     if any(r["problems"] for r in results) or not results:
         return None, results
-    cases = list(load_bank(base_version, bank_dir)) if base_version else []
-    cases += [r["record"] for r in results]
-    return save_bank(cases, bank_dir), results
+    bank = extend_bank([r["record"] for r in results], bank_dir, base_version)
+    for r, outcome in zip(results, bank["merge"]["outcomes"]):
+        r["bank"] = outcome
+    return bank["saved_to"], results
 
 
 def _describe(rec: dict) -> str:
@@ -221,7 +229,7 @@ def main(argv: Optional[list] = None) -> int:
     g.add_argument("--check", metavar="FILE", help="入力ファイルを検査して結果を表示する (保存しない)")
     g.add_argument("--import", dest="import_file", metavar="FILE", help="検査を通った型をバンクに保存する")
     ap.add_argument("--bank-dir", default=str(DEFAULT_BANK_DIR))
-    ap.add_argument("--base-version", help="この版の記録に足して新しい版を作る")
+    ap.add_argument("--base-version", help="この版の記録 (旧版を含む) に併合して新しい版を作る (同じ型は足さない、更新は旧版と結ぶ)")
     args = ap.parse_args(argv)
     path = Path(args.check or args.import_file)
     entries = load_entries(path)
@@ -237,7 +245,8 @@ def main(argv: Optional[list] = None) -> int:
             status = f" (status={r['status']})" if r.get("status") else ""
             print(f"#{r['index']}: 問題 {', '.join(r['problems'])}{status}")
         else:
-            print(f"#{r['index']}: {_describe(r['record'])}")
+            bank = f" バンク={_BANK_LABELS.get(r['bank'], r['bank'])}" if r.get("bank") else ""
+            print(f"#{r['index']}: {_describe(r['record'])}{bank}")
     print(f"{len(results)} 件、問題 {n_bad} 件")
     if args.import_file:
         print(f"保存: {out_path}" if out_path else "保存しない (問題のある入力がある)")

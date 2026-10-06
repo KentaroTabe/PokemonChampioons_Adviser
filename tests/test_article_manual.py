@@ -122,12 +122,46 @@ def test_validation_reflected_in_status():
     print("test_validation_reflected_in_status OK")
 
 
+def test_import_dedupes_same_set():
+    """同じ型を 2 回取り込んでも 1 件のまま (2026-10-06 ユーザー判断: 手入力の系列の鍵は型の内容 = 種・持ち物・技・能力ポイント。
+    同じ型の二重登録を防ぐ)。記録は最初に取り込んだときのまま、版も変わらない。1 回の入力の中の重複 (出典 URL だけ違う) も 1 件。
+    技が違えば別の型として足す"""
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        out, res = M.import_entries([GOOD], root, today="2026-10-06")
+        assert res[0]["bank"] == "added"
+        out2, res2 = M.import_entries([GOOD], root, base_version=out.name, today="2026-10-07")
+        assert res2[0]["bank"] == "duplicate" and out2.name == out.name                  # 何も変わらないので版も同じ
+        cases = B.load_bank(out2.name, root, latest_only=False)
+        assert len(cases) == 1 and cases[0]["meta"]["regulation_history"][0]["at"] == "2026-10-06"   # 最初の記録のまま
+        assert B.lineage_key(cases[0]).startswith("single_set:manual:")
+        # 1 回の入力の中の重複も 1 件 (出典 URL が違っても同じ型)
+        other_src = dict(GOOD, source=dict(GOOD["source"], url="https://yakkun.com/ch/theory/2"))
+        out3, res3 = M.import_entries([GOOD, other_src], root / "b3", today="2026-10-06")
+        assert [r["bank"] for r in res3] == ["added", "duplicate"] and len(B.load_bank(out3.name, root / "b3", latest_only=False)) == 1
+        # 技が違えば別の型 (別の系列) として足す
+        diff = dict(GOOD, moves=["ウェーブタックル", "じしん", "アームハンマー", "どくづき"])
+        out4, res4 = M.import_entries([diff], root, base_version=out.name, today="2026-10-06")
+        assert res4[0]["bank"] == "added" and len(B.load_bank(out4.name, root)) == 2
+        # CLI でも 2 回目は足さない (同じ版のまま)
+        p = root / "in.json"
+        p.write_text(json.dumps([GOOD], ensure_ascii=False), encoding="utf-8")
+        cli = root / "cli"
+        assert M.main(["--import", str(p), "--bank-dir", str(cli)]) == 0
+        first_version = [x.name for x in cli.iterdir()]
+        assert len(first_version) == 1
+        assert M.main(["--import", str(p), "--bank-dir", str(cli), "--base-version", first_version[0]]) == 0
+        assert [x.name for x in cli.iterdir()] == first_version and len(B.load_bank(first_version[0], cli, latest_only=False)) == 1
+    print("test_import_dedupes_same_set OK")
+
+
 def main() -> None:
     test_points_and_names()
     test_record_from_entry()
     test_problems_reported_not_guessed()
     test_check_and_import_file()
     test_validation_reflected_in_status()
+    test_import_dedupes_same_set()
     print("ALL OK")
 
 
