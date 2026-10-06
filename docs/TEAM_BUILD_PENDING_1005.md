@@ -856,3 +856,20 @@ CI の一覧 94 モジュール緑。本体への反映は改善 run の終了�
 残り (運用側): run 終了後に ff、煙試験 (`s06_lint.json` の `form_changes` と gen_sets の直した数、manifest の `season_pin`)、
 `register_selection --run-id improve_20261006_0128`、P1 の測定 (`check_advisor_player --no-rl-blend` 対 既定、登録チームで 300 戦ずつ)、
 P4 の局面の正解の記入 (`logs/scenes/newteam_1006.jsonl`、整合 20 + 失敗 10。候補 342: 整合 286 / 助言停止 29 / 無効 24 / 遅延 2 / HP 固着 1)。
+
+## 18. 統合後の煙試験と測定の取り直し (運用側、2026-10-07 0〜1 時台)
+
+統合 (feat/article-bank の --no-ff、c29bca4c) の CI は success (run 37489572933)。その後、ユーザー指示の順 (煙試験 → version_id / season_pin /
+自動起動なしの確認 → 測定の再開) で進めた。
+
+| 項目 | 実測 |
+|---|---|
+| 煙試験 `smoke_1007_c29b` (探索段、fast、LLM なし、10/5 朝と同じ条件、00:44:37〜00:58:31) | 構想 51、並び 47/47 合法、誤り 0/282 型 (生成型 0/213)、警告 6 (no_stab)、直した型 {gen_sets 195, legacy 255, representative 33}、直せず止めた 0、形態の変更 (form_changes) 0、**生成で落とした型 0** (10/5 の `smoke_1005_base` は 291: field_dup 6 / item 7 / nature_move 278)。どの変更で「落とす」から「直す」に変わったかは未確認 |
+| season_pin | 最初の run として M-C (gen9championsbssregmc) を固定: seed 20261005 (煙試験の run の seed)、使用率スナップショット 58、実在の構築の区切り 1791301478.47 (00:44:38)、source first_run。manifest に `split_seed` / `split_seed_source` (fixed:new) / `season_pin` が入る。次の run は `fixed:gen9championsbssregmc` で同じものを使った |
+| env match | 実戦 250 戦 (整合 39) のうちプールの構築と一致 0.026 (閾値 0.5、目標 0.4、実在の構築 0)。10/6 の run improve_20261006_1913 (seed 281610) は 0.128。分割の seed が変わった影響かは未確認 |
+| version_id (サーバーは起動していない) | `advisor.versions.runtime_versions` を今の HEAD で計算: version_id c2c5f5d42451、rules.git_commit c29bca4c、dex / effects の sha は旧版と同じ (8c44727bcca41efe / 5d1b789e6a0b9167)。次回の接続テストの 1 戦目の version 行と照合する |
+| 自動起動の経路 | 測定 run を自動で起こすのは `scripts/end_connection_test.sh` (操作パネルの「終了」も同じスクリプト) の `party_improvements --session --measure` だけ。pgrep では煙試験の間も後も run は 1 本 |
+| 測定の取り直し `improve_20261007_0100` (01:00:06 起動、pid 99419) | 終了処理と同じ経路 `python -m tools.party_improvements --last 11 --measure` (印は終了処理で消えているので --session でなく --last 11)。訂正後の 11 戦 (5 勝 6 敗) から重みを作り直し、上位 3 は ガオガエン / ギャラドス / ゲンガー、ガブリアス / カメックス、グソクムシャ / セグレイブ / ガブリアス (7 戦目のミミロップ軸は入らない)。重み: garchomp 1.0 / incineroar 0.5874 / blastoise 0.5478 / gengar 0.5169 / gyarados 0.4228 / golisopod 0.3288 / baxcalibur 0.3288。seed 302410、現行 + 近傍 3、medium、5 並列、commit c29bca4c |
+
+run の実行中はメインの作業ツリーで checkout / merge をしない (10/6 の事故の再発防止)。結果は `python -m tools.party_improvements --report improve_20261007_0100`。
+残り (運用側): `register_selection --run-id …` (改善 run の終了後)、P1 の測定、P4 の局面の正解の記入、GameWith の send_llm の判断 (送信は無効のまま)。
