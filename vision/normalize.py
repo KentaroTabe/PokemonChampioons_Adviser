@@ -13,6 +13,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
+from champions_agent.data.sim_cache import load_checked
+
 JP_NAMES_PATH = Path(__file__).resolve().parent / "data" / "jp_names.json"
 
 # カタカナ -> ひらがな
@@ -90,9 +92,22 @@ def stone_species_variants(species_part: str) -> list:
     return out
 
 
-_ILLEGAL_SPECIES_PATH = (Path(__file__).resolve().parent.parent
-                         / "pokemon-showdown" / "data" / "mods"
-                         / "champions" / "formats-data.ts")
+# 非参戦種の定義の元は Showdown の champions mod (pokemon-showdown/ はリポジトリに含めない)。読むのはコミット済みのキャッシュで、
+# Showdown があれば一致を検査する (2026-10-06: CI に Showdown が無く、非参戦種の除外が効かずに名前解決の結果が環境で変わっていた)
+SHOWDOWN_DIR = Path(__file__).resolve().parent.parent / "pokemon-showdown"
+ILLEGAL_IDS_SOURCE = "data/mods/champions/formats-data.ts"      # Showdown の中のパス
+_ILLEGAL_SPECIES_PATH = SHOWDOWN_DIR / ILLEGAL_IDS_SOURCE
+ILLEGAL_IDS_CACHE_PATH = Path(__file__).resolve().parent / "data" / "champions_illegal_ids.json"
+ILLEGAL_IDS_CACHE_KEY = "illegal_ids"
+
+
+def parse_illegal_ids(text: str) -> set:
+    """formats-data.ts の本文 → tier Illegal と明示された種族 id の集合 (1 タブの `id: {...}` ブロック)。純粋"""
+    out = set()
+    for m in re.finditer(r"^\t(\w+): \{([^}]*)\}", text or "", flags=re.M):
+        if '"Illegal"' in m.group(2):
+            out.add(m.group(1))
+    return out
 
 
 def champions_illegal_ids() -> set:
@@ -101,17 +116,12 @@ def champions_illegal_ids() -> set:
     全国図鑑ベースの辞書で解決すると、OCRの揺れが非参戦の近縁種へ飛ぶ
     (2026-08-05接続テスト: ゲッコウガ→ケイコウオ / メタグロス→メタング。
     どちらも非参戦)。明示的に Illegal とされた種族だけを除外し、
-    定義に無い種族は安全側で残す。ファイルが読めなければ空集合 (制限なし)。
+    定義に無い種族は安全側で残す。
+    値はコミット済みのキャッシュ (vision/data/champions_illegal_ids.json) から読み、Showdown の formats-data.ts があれば
+    一致を検査する (違えば警告してキャッシュの値を使う。champions_agent/data/sim_cache.load_checked)。
+    キャッシュも Showdown のデータも読めなければ空集合 (制限なし)。
     """
-    try:
-        text = _ILLEGAL_SPECIES_PATH.read_text(encoding="utf-8")
-    except OSError:
-        return set()
-    out = set()
-    for m in re.finditer(r"^\t(\w+): \{([^}]*)\}", text, flags=re.M):
-        if '"Illegal"' in m.group(2):
-            out.add(m.group(1))
-    return out
+    return load_checked(ILLEGAL_IDS_CACHE_PATH, ILLEGAL_IDS_CACHE_KEY, set, [_ILLEGAL_SPECIES_PATH], parse_illegal_ids)
 
 
 class NameResolver:

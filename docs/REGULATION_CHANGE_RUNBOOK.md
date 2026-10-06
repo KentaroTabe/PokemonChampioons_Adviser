@@ -48,6 +48,8 @@ pokedb詳細ページのスクレイピングは規約禁止 (opendataのみ可)
 - [ ] `champions_agent/data/champions_dex.json` に新種族/新技を反映
       (champions_dex_patch の適用件数が変わる)
 - [ ] `advisor/data/dex.json` 更新 (`python -m advisor.data.fetch_dex`)
+- [ ] Showdown 由来のキャッシュ (非参戦種 / シムの種 id / 使える持ち物) を `bash scripts/refresh_sim_caches.sh` で作り直してコミット
+      (読み手はキャッシュを先に使い、Showdown と違うと `[warn]` を出す。一致だけなら `--check`。2026-10-06〜)
 - [ ] `vision/data/jp_names.json` に新ポケモン/新メガストーンの日本語名
       (**欠落は過去に3件あった**: フラエッテナイト等)
 - [ ] 種族アイコン: species_harvest が実戦から自動収穫するので事前作業は不要

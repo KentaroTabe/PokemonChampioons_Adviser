@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
+from pathlib import Path
 
 from champions_agent.config import (
     USAGE_TARGET_FORMAT, DEFAULT_REGULATION, PLAY_STYLES, DEFAULT_PLAY_STYLE,
 )
 from champions_agent.data import database as db
+from champions_agent.data.sim_cache import load_checked
 from champions_agent.data.sources.name_mapping import to_showdown_name
 
 
@@ -269,6 +271,12 @@ def _legal_item_ids() -> set:
 
 
 _AVAILABLE_ITEM_IDS = None
+# Champions で使える持ち物の元は Showdown の items.ts (pokemon-showdown/ はリポジトリに含めない)。読むのはコミット済みのキャッシュで、
+# Showdown があれば一致を検査する (2026-10-06: CI に Showdown が無く、こだわりハチマキ等を「使えない」とする判定が効かなかった)
+SHOWDOWN_DIR = Path(__file__).resolve().parents[2] / "pokemon-showdown"
+AVAILABLE_ITEMS_SOURCES = ("data/items.ts", "data/mods/champions/items.ts")   # Showdown の中のパス (本体 → mod。parse_available_items の引数の順)
+AVAILABLE_ITEMS_CACHE_PATH = Path(__file__).resolve().parents[1] / "data" / "champions_available_items.json"
+AVAILABLE_ITEMS_CACHE_KEY = "available_items"
 
 
 def parse_item_status(text: str) -> dict:
@@ -304,19 +312,22 @@ def available_items(base: dict, mod: dict) -> set:
     return out
 
 
+def parse_available_items(base_text: str, mod_text: str) -> set:
+    """本体と champions mod の items.ts の本文 → Champions で使える持ち物 id (純粋)"""
+    return available_items(parse_item_status(base_text), parse_item_status(mod_text))
+
+
 def _available_item_ids() -> set:
     """Champions で実際に使える持ち物 id (champions mod で isNonstandard: "Past" のこだわりハチマキ / メガネ / じゃくてんほけん /
-    とつげきチョッキ等を除く。2026-10-02: 生成型のこだわりハチマキが validate-team で落ちた)。読めなければ _legal_item_ids"""
+    とつげきチョッキ等を除く。2026-10-02: 生成型のこだわりハチマキが validate-team で落ちた)。
+    値はコミット済みのキャッシュ (champions_agent/data/champions_available_items.json) から読み、Showdown の items.ts があれば
+    一致を検査する (違えば警告してキャッシュの値を使う。champions_agent/data/sim_cache.load_checked)。
+    キャッシュも Showdown のデータも読めなければ _legal_item_ids"""
     global _AVAILABLE_ITEM_IDS
     if _AVAILABLE_ITEM_IDS is None:
-        from pathlib import Path
-        repo = Path(__file__).resolve().parents[2]
-        try:
-            base = parse_item_status((repo / "pokemon-showdown" / "data" / "items.ts").read_text())
-            mod = parse_item_status((repo / "pokemon-showdown" / "data" / "mods" / "champions" / "items.ts").read_text())
-            _AVAILABLE_ITEM_IDS = available_items(base, mod)
-        except Exception:
-            _AVAILABLE_ITEM_IDS = set(_legal_item_ids())
+        ids = load_checked(AVAILABLE_ITEMS_CACHE_PATH, AVAILABLE_ITEMS_CACHE_KEY, set,
+                           [SHOWDOWN_DIR / s for s in AVAILABLE_ITEMS_SOURCES], parse_available_items)
+        _AVAILABLE_ITEM_IDS = ids if ids else set(_legal_item_ids())
     return _AVAILABLE_ITEM_IDS
 
 

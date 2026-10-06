@@ -19,9 +19,13 @@ from typing import Optional
 from champions_agent.config import BUILD_MAX_MEGA_STONES, BUILD_SET_USAGE_WEIGHT, USAGE_TARGET_FORMAT
 from champions_agent.data import database as db
 from champions_agent.data.build_meta import move_categories, nature_fits, parse_points
+from champions_agent.data.sim_cache import load_checked
 
 REPO = Path(__file__).resolve().parent.parent.parent
 SHOWDOWN_DIR = REPO / "pokemon-showdown"
+POKEDEX_SOURCE = "data/pokedex.ts"     # シムの種 id → 図鑑番号の元 (Showdown の中のパス)
+SIM_SPECIES_CACHE_PATH = Path(__file__).resolve().parent / "data" / "sim_species_table.json"   # その、コミット済みのキャッシュ
+SIM_SPECIES_CACHE_KEY = "species"
 ALT_MIN_PCT = 5.0          # 代替候補に採る最低使用率 (%) — config 化候補
 MAX_ALTERNATIVES = 12      # 種族ごとの型候補の上限
 REP_MARGIN = 0.05          # 代替が代表型をこの被覆差以上で上回らなければ代表型を採る
@@ -568,12 +572,10 @@ def resolve_sim_species(species_id: str, num: Optional[int], table: dict) -> str
 
 @lru_cache(maxsize=1)
 def sim_species_table() -> dict:
-    """シムの種 id → 図鑑番号 (pokemon-showdown/data/pokedex.ts。読めなければ空 = 変換しない)"""
-    p = Path(__file__).resolve().parents[2] / "pokemon-showdown" / "data" / "pokedex.ts"
-    try:
-        return parse_sim_species(p.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    """シムの種 id → 図鑑番号。コミット済みのキャッシュ (tools/team_build/data/sim_species_table.json) から読み、
+    Showdown の pokedex.ts があれば一致を検査する (違えば警告してキャッシュの値を使う。champions_agent/data/sim_cache)。
+    キャッシュも pokedex.ts も読めなければ空 = 変換しない (2026-10-06: CI に Showdown が無く変換が効かなかった)"""
+    return load_checked(SIM_SPECIES_CACHE_PATH, SIM_SPECIES_CACHE_KEY, dict, [SHOWDOWN_DIR / POKEDEX_SOURCE], parse_sim_species)
 
 
 def sim_species_id(species_id: str) -> str:
