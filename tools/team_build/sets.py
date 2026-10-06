@@ -230,7 +230,7 @@ def base_set(conn, snapshot_id: int, species_id: str, custom: Optional["SetCandi
             # 直せない代表型 (合成の代表型は持ち物と技を独立に選ぶのでカゴのみ + ねむる無し等が出る) → 門を通る代替か生成型
             alts = enumerate_sets(conn, snapshot_id, species_id, required=required, category_of=category_of, setup_moves=setup_moves,
                                   generated=generated)
-            rep = alts[0] if alts else None
+            rep = pick_alternative(rep, alts)
             if rep is not None:
                 return rep
     if rep is None and generated:
@@ -239,6 +239,24 @@ def base_set(conn, snapshot_id: int, species_id: str, custom: Optional["SetCandi
     if rep is None:
         return None
     return apply_required_moves(rep, required, category_of, setup_moves) if required else rep
+
+
+def pick_alternative(rep: "SetCandidate", alts: list) -> Optional["SetCandidate"]:
+    """直せない代表型 (rep) の代替を選ぶ (純粋): 同じ形態 (メガ石の有無が同じ) の代替を先に。無ければ別の形態の先頭を返すが、
+    黙って替えずに注記 form_change:<前の持ち物>-><後の持ち物> を付け、LINT_FORM_CHANGES に数える
+    (判断 §9.6: 非メガ型への変更は別の構築候補として明示的に扱う。2026-10-05 §11.3-2 までは石を持たない代替に黙って替わっていた)"""
+    if not alts:
+        return None
+    rep_mega = has_mega_stone(rep.item)
+    same = [a for a in alts if has_mega_stone(a.item) == rep_mega]
+    if same:
+        return same[0]
+    import dataclasses
+
+    from tools.team_build.set_lint import LINT_FORM_CHANGES
+    alt = alts[0]
+    LINT_FORM_CHANGES["mega->normal" if rep_mega else "normal->mega"] += 1
+    return dataclasses.replace(alt, notes=list(alt.notes) + [f"form_change:{rep.item or 'none'}->{alt.item or 'none'}"])
 
 
 def lint_gate(cands: list, source: str = "legacy", usage_moves=()) -> list:
@@ -327,9 +345,12 @@ def enumerate_sets(conn, snapshot_id: int, species_id: str, min_pct: float = ALT
             continue
         if it in stones and not rep_is_mega:
             continue      # メガ石は代表型がメガ石のときだけ (メガ後で評価すると常に強く見えて偏る)
-        # 代表型がメガ石なら、非メガ石の代替も残す (1 並びにメガ石 2 個のときの差し替え先)
+        # 代表型がメガ石なら、非メガ石の代替も残す (1 並びにメガ石 2 個のときの差し替え先)。形態が変わる候補は注記 form:normal で
+        # 明示する (判断 §9.6: 非メガ型は別の構築候補)
         cand = SetCandidate(species_id, rep.ability, it, rep.nature, rep.evs, list(rep.moves), "alt:item",
                             usage_gap=gap(item_pct, rep.item, it))
+        if rep_is_mega and it not in stones:
+            cand.notes.append("form:normal")
         if not set_sanity(cand):
             add(cand)
     for mv in moves:

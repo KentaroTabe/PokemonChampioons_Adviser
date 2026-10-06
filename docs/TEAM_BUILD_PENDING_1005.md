@@ -21,7 +21,7 @@
 | 1 | 次の run に載せる実験 | 選出計画の事前の A/B (`--plan-prior ab`)。相手プールは `latest` のまま。STRESS と ablation の条件化は手続きの変更として入れてよい |
 | 2 | 環境チームの操縦と選出の既定 | 操縦 `rl`、選出 `rule` (仮置きの値のまま確定)。ただし操縦を替えると並びの順位が変わる (§2.11) ので、過去 run の「現行チームが最良」は rl の下で測り直すまで保留にする |
 | 3 | テーマのエース選出率と門 | 閾値 0.5 のまま、門は off のまま。「1 run 記録してから on」は見送る |
-| 4 | 較正の標本 | K = 4・4 層で始める。測るのは軽い適応の腕だけにする |
+| 4 | 較正の標本 | K = 4・4 層で始める。測るのは軽い適応の腕だけにする → **2026-10-06 に改めた**: 汎用 (generic) の腕だけ (cheap は順位が崩れる。§16) |
 | 5 | 較正の採否規則の定数 | 格子の最小 0.25・並べ替え検定 95 点で仮置きのまま (実装は run が貯まってから) |
 | 6 | 戻りの縛り | 1 周・3 本・親との違い 2 枠以上か役割の変更、を承認 |
 | 7 | 昇格の定義 | 「full run 2 本 + 確認 1 回」と「別の封印の分割ごとに 1 回」は承認。最終検証の下限は 300 でなく 600 |
@@ -719,3 +719,97 @@ CI 86 モジュール緑、`test_advisor` も通過。対戦は回していな�
 - 登録チーム (10/5 の 6 体) の型は、新しい規則で誤り 0。警告は 2 つ (カメックスと ボーマンダ の「自分のタイプの攻撃技が無い」)。
   ボーマンダは のしかかり がメガ後の特性 スカイスキン でひこうタイプになるが、規則は登録の特性 (メガ前) で見るので警告になる。
   警告は記録だけで門には掛からない。メガ後の特性を見るのは、メガ型と非メガ型を別候補にする一貫化 (§10 の残り) の範囲。
+
+## 14. 対応 (実装側、4 回目。§10 の残り・§11.3・§13.3 の未実装分)
+
+feature/team-build (4228999) の上に実装した。対戦も run も回していない (純粋関数のテストと、既存の記録での確認だけ)。
+
+| 残っていた点 | 対応 |
+|---|---|
+| メガ型と非メガ型を別候補にする一貫化 (§9.6 の設計方針、§10 の残り) | **検査**: メガ石を持つ型の「場の重複」と「自分のタイプの技」はメガ後の特性・タイプで見る (`set_lint.DexInfo.mega_form`、`lint_set` の detail に form)。§13.3 のボーマンダ (のしかかり + スカイスキン) の警告は消える。性格と持ち物の規則は形態に依らない。**生成**: gen_sets はメガ後の種族値でメガ型を別に作り (既存)、role_sets は石の有無で別の候補を作る (既存)。**基本の型** (`sets.base_set`): 代表型が直せないとき、同じ形態 (石を保つ) の代替を先に選び、石を持たない代替しか無ければ注記 `form_change:<石>-><持ち物>` を付けて数える (`LINT_FORM_CHANGES`、s06_lint.json の `form_changes`)。黙って替わることは無くなる (§11.3-2)。`enumerate_sets` の形態が変わる代替には注記 `form:normal`。**戻り**: 同じ種のメガ型 ↔ 非メガ型の変種を独立した候補 (kind F) として作る (`repair.repair_variants`: 石の上限とエースの規則は並びの制約で見る、指定エースの形態は変えない、個体は残るので固定の個体でも可)。記録は `changes[].form` (normal->mega / mega->normal)、系譜の kind は `F_form`。2 体の入替 (A) の件数には含めない。測る順は A → B → F (`select_variants`)。**種族の重複** は従来どおり図鑑番号 (`constraints_ok(base_of)`)。**対戦中の個体の同一性**と**選出ごとのメガ枠**は助言側の既存の扱いのまま |
+| gen_sets の型は直さずに落とすまま (291) | `gen_sets.assemble_sets`: 誤りの型は捨てる前に直す (`repair_candidate`: 性格の下げる側、持ち物の予備、場の重複の技、4 つ未満の補充。補充は learnset と使用率の技から。メガ石は外さない)。直した数は `LINT_REPAIRS["gen_sets"]`、直せなければ従来どおり落とす。role_sets の門も同じ (今のデータでは落ちる型は 0 なので数は変わらない見込み) |
+| 段の写し: `[adapt:<名前>]` の名前がハイフンで切れる (§11.3-3) | 名前の文字集合に `-` を足した (`[adapt:L01_INC-R1A1_screen]` → S8a) |
+| run での通し (較正の標本 cheap のみ / STRESS の条件化 / 戻りの A 先の順と 2 枠・F の変種) | 未確認のまま。この環境では対戦を回せないので次の測定で |
+| §7.4 の残り (記事の取得を始める時期 / 相手の操縦を混ぜる案 / 探索の層の分割を季節内で固定する設計変更 / 確認 run の通し) | 判断待ちのまま (実装の問題ではない) |
+
+テスト: `tests/test_set_lint.py` (`test_mega_form_lint`: メガ後の特性・タイプでの検査と修理、形態の数の欄。`test_base_set_uses_repaired_set`:
+同じ形態の代替の優先と、形態の変更の注記)、`tests/test_team_build_gen_sets.py` (`test_assemble_repairs_before_drop`: おくびょう + フレアドライブ
+の生成型が せっかち に直って残る)、`tests/test_team_build_repair.py` (`test_form_change_variants`: normal->mega / mega->normal の変種、石の上限、
+指定エース、測る順、系譜の記録名)、`tests/test_env_match.py` (ハイフン)。
+
+次の run で見る場所: `s06_lint.json` の `repaired_in_generation` に gen_sets が増え `rejected_in_generation` の gen_sets:* が減ること、
+`form_changes` (今のデータでは 0 の見込み)、`s09_repair*.json` の kind F と系譜の `F_form`、登録チームのボーマンダの警告が消えること。
+
+## 15. 対応 (実装側、5 回目。運用側の実測 (第 18 回 15 戦、改善 run improve_20261006_0128) と提案への返答)
+
+受け取った数字: 第 18 回は 15 戦とも ◎ が規則 (trained: False、退避理由なし)、規則の 3 体と実際の選出の一致 1/15、未学習のモデルの推しの方が
+近い (3 体一致 2 戦 / 2 体 10 戦)。改善 run の S8a (参照 = 登録の 6 体、同じ操縦者、各 300 戦) は 配布版 0.703 / 汎用 0.613 / 規則 0.457 /
+軽い適応 1,000 戦 0.313。近傍 3 並びは全部脱落、戻りは L00_INC に 2 枠の入替が出て A → B の順に測られた。
+
+| 提案 | 受け止め | 対応 (このコミット) |
+|---|---|---|
+| 1. 適応が終わるまで ◎ をモデルにする (軽い適応では替えない) | 賛成。実戦の一致とシムの差の両方が同じ向き | `SELECTION_PRIMARY_UNTRAINED_MODEL = True`: 未学習の配布版の推しも ◎ (`choose_primary(allow_untrained)`)。表示は「◎ 推奨選出 (学習モデル・未学習)」、理由に未学習と書く。規則が ◎ になるのはモデルの推しが無いときだけ。記録は層別できるように `model_trained` を助言行 (`policy.model_trained`) と `selection_compliance` (`by_primary` の `model_untrained`) に残す。軽い適応のモデルは実戦の経路 (`advisor_model_path`: Package → 登録チーム向け → 配布版) に入らない |
+| 2. 新しくシムを回さず、改善 run の参照の適応を registered:<6 体の sha> で保存して次の接続テストから使う | 賛成 | `selection_dispatch.registered_team_model` (`logs/registry/registered/<key>/selection_model.pt` + manifest、鍵 = 6 体の種 id の集合の sha256 先頭 16 桁、特徴量の版が違えば引かない)、`advisor_model_path` の順は 試用 Package → 登録チーム向け → 配布版。登録は `python -m tools.team_build.register_selection --run-id improve_20261006_0128` (evaluation/s07_adapt.json の reference の、独立 fold の検証で選んだ checkpoint を写す。検証の無い適応は `--force`)。`--package <id>` / `--status` / `--remove <key>` も。version 行に `selection_model.source` (package / registered / deployed) |
+| 3. 作戦書の置き場 (Package は advisor_policy/plan.json、登録チームは config/my_team_plan.json、読み込みは 1 関数、my_team.json の形は変えない) | 賛成。P2 は「後」なので今回は設計の記録だけ | ADVISOR_NEW_TEAM_1006 §7 に記録 |
+| 4. 新チームを参照にして測る | 済 (改善 run) | — |
+| 5. 優先順 (S1 と P4 を先、次に S2 と P1 の測定、後に S3・P2、S4 は不要) | 賛成 | S1 は上の 2 の形で実装。**S2 も実装した**: 規則の自分側の評価を登録の型 (配分・性格・持ち物、解決した特性) で作る (`selection._own_view`。それまでは攻撃全振りの仮定)。P1 は測定待ち (`check_advisor_player --no-rl-blend` 対 既定)。P4 は運用側 |
+| 6. 以前からの判断待ち (§7.4) | 記事の取得: 維持。相手の操縦: rl 固定、再検討の条件 (版で層別した実戦 − シム > 0.2) は引き金の基準線との差 0.2 と同じ量 (`triggers`)。**分割の固定: 実装した** (下)。確認 run: 煙試験で `form_changes` と gen_sets の直した数を見る、で了解 | `tools/team_build/split_seed`: 規制ごとに最初の run の seed を `logs/registry/split_seeds.json` に記録し、同じ規制の run は S2 にその seed を使う (`BUILD_SPLIT_SEED_FIXED`、`--split-seed` で上書き)。manifest に `seed` (run) と `split_seed` / `split_seed_source` を分けて残す。holdout は封印のまま、測定の相手列の seed は run の seed のまま |
+| 7. 2ea39b71 の取り込み (run 終了後、--no-ff) | 了解 | このコミットも同じブランチに積む。設定ファイル (config/) は `SELECTION_PRIMARY_UNTRAINED_MODEL` と `BUILD_SPLIT_SEED_FIXED` の 2 定数を足しただけ |
+
+### 15.1 軽い適応 (cheap) が参照で 0.313 になる原因の見立て (実装側)
+
+コードから見える仕組み (`pipeline._screen_adapt_all` → `adapt.adapt_selection(min=max=1000)` → `train_selection.adapt_candidate`):
+
+1. 収集は 1,000 戦。半分は乱択の選出、残りはタイプ相性の簡易規則 (`search_expert.teampreview_order`) の選出で、勝敗が 0/1 の標本。
+2. 学習は汎用モデルを起点に lr 1e-4 で最大 200 epoch。同じ収集の 2 割 (約 200 件) の検証 MSE が最小の epoch を採る。独立 fold の実測で
+   checkpoint を選ぶ S7 の手順 (`adapt.select_checkpoint`) は cheap には無い。
+3. 単一チームでは相手の特徴が似通い、選出 120 通りの違いは特徴量の一部なので、ノイズの多い少数の標本では**そのチームの平均勝率**を
+   学ぶ方が損失を下げやすい。120 通りの予測勝率の差 (順位の情報) が平らになるか、ノイズで入れ替わる。検証 MSE の改善 (gain_pct) は
+   選択に使った同じ 200 件で測るので楽観的で、崩れを検出しない。
+4. 配布版 (以前の my_team の 5,000 戦で微調整) が汎用より 0.09 高いのは、標本が多く、別のチームでも順位の情報が残っているため。
+
+確かめ方 (実データ、対戦は不要): `python -m tools.team_build.experiments.cheap_drift --run-id improve_20261006_0128 --arm reference`。
+汎用と cheap の 120 通りの点を相手ごとに比べ、広がりの比 (spread_ratio)・順位相関 (rho)・最良の一致 (top1_same)・平均の差 (shift) を出す。
+広がりの比が 0.5 未満なら「平ら」、順位相関が 0.5 未満なら「入れ替わり」。`advisors/reference_screen/adapt_report.json` の gain_pct / improved も
+一緒に見る (improved が真なのに平らなら、仮説のとおり)。
+
+直し方の案 (判断待ち):
+- (a) 較正の標本の variant を cheap から generic に (`BUILD_CALIBRATION_VARIANTS`)。較正に使う Δ を、順位の崩れたモデルで測らない。安い。
+- (b) `adapt_candidate` に崩れの門: 微調整後の 120 通りの広がりが起点の半分未満なら起点の重みに戻す (報告に rejected: flattened)。
+  cheap と S7 の両方に効く。収集の対戦は増えない。
+- (c) cheap にも独立 fold の実測 (100 戦) で「起点より悪くない」ことを確かめる。確実だが腕ごとに +100 戦。
+実装側の推奨は (a) を今の run の次から、(b) を cheap_drift の結果で仮説が確かめられたら。
+
+### 15.2 残っている判断
+
+- プールのスナップショットも季節で固定するか。分割の seed を固定しても、使用率のスナップショット (latest) や mixed の実在の構築が変わると
+  分割は変わる。参照の適応を run 間で確実に再利用するには、プールの元も固定する必要がある (鮮度との引き換え)。
+- cheap の扱い (15.1 の a / b / c)。判断 #4 (較正の標本は cheap だけ) の前提にも関わる。
+- P1 (RL ヒントの門) は測定の結果で。
+
+## 16. 対応 (実装側、6 回目。運用側の判断 (10/6 11 時台) への返答)
+
+受け取ったもの: `cheap_drift` を改善 run の 4 腕に当てた結果 (4 腕とも「入れ替わり」: 広がりの比 1.33〜1.94、汎用との順位相関 −0.37〜0.40、
+最良の一致 0/4、平均の差 −0.16〜−0.29、報告上の検証 MSE の改善 +25〜41%)、表示の経路の実測 (12〜13 戦目は表示の行が無く、14 戦目に
+他の対戦の助言の表示 47 件が遅れ 290 秒でまとめて届いた)、判断 5 点、取り込みの段取り。
+
+**仮説の修正**: §15.1 では「120 通りの点が平らになる」と書いたが、実データでは広がりがむしろ 1.3〜1.9 倍に増え、順位が入れ替わっていた
+(ノイズへの当てはめ)。平均の差が負なのは基準率 (勝率 < 0.5) への引き寄せの向きと合う。崩れ方の見立ては直す。結論 (独立 fold の実測での
+検証が無い 1,000 戦の微調整は順位の情報を壊し、同じ収集の 2 割で測る検証 MSE はそれを検出しない) は変わらない。
+
+| 判断 | 対応 (このコミット) |
+|---|---|
+| 1. cheap: (a) を採り、S8a の cheap の腕そのものを外す (規則と汎用の 2 腕)。判断 #4 は汎用の腕に。(b)(c) は採らない | `BUILD_SCREEN_VARIANTS = ("rule", "generic")`、`BUILD_CALIBRATION_VARIANTS = ("generic",)`。`pipeline.needs_cheap`: 測る variant に cheap が無ければ S8a-1 と S9 の軽い適応 (収集 1,000 戦 × 腕 + 学習) を省略する (S8a の対戦の 1/3 と収集の時間が減る)。`"cheap"` を variant に指定すれば従来どおり。S9 の変種は S8a と同じ 2 腕で測り、2 周目の変種は従来どおり S7 の適応を与えてから S10 へ。§1 の判断 #4 の行に追記 |
+| 2. プールのスナップショットの固定 (規制ごと、META_PIN / POOL_PIN と同じ運用。新シーズンのデータが出たら 1 回固定し直す。鮮度の警告 0.8。mixed のバンクも同じ区切り) | 前回の `split_seed` を `tools/team_build/season_pin` に統合: 規制ごとに **分割の seed・使用率スナップショットの id・実在の構築のバンクの区切り (時刻)** を `logs/registry/season_pins.json` に最初の run の時点で記録し、同じ規制の run は同じものを使う。`opponents.build_split` は latest / mixed でその id と区切り (`real_rosters(until=)`) を使い、`opponent_families.json` に `pool_pin` を残す。run の manifest には `seed` (run) と `split_seed` / `season_pin` を分けて残す。鮮度: `season_pin --check` と `triggers` の記録 (`pool_freshness`。固定したスナップショットと最新の上位 30 種の順位の重みつきの重なりが 0.8 未満で警告。引き金にはしない)。固定し直しは `season_pin --repin <規制> [--snapshot ID]` (前の固定は previous に残す)。スナップショットの id が取れない環境では最新を使い、その旨をログに出す |
+| 3. P1 の測定 / 4. P4 の局面 / 5. 登録チーム向けモデルの登録 | 運用側。登録は `register_selection --run-id improve_20261006_0128` |
+| cheap_drift の既定の置き場 | `advisors_screen/<腕>_screen/selection_model.pt` に直した (S7 の適応は `advisors/`) |
+| 表示の経路 (隠れたタブ) | `index.html`: タブが隠れていれば requestAnimationFrame を待たず `hidden: true` を付けて即時に送る。`battle_logger.on_display`: 表示の行は**助言 id を書いた対戦のファイル**に書く (別の対戦に移っていれば `attributed: advice_battle`)、hidden を残す。`advice_trace`: hidden の表示は表示に数えず `n_hidden` に分ける (遅れ・stale の集計に混ざらない) |
+| 取り込みの段取り (fix/connection-test-18 → このブランチ、--no-ff) | 了解。このブランチの PR の base をどこにするかは判断待ち (下) |
+
+### 16.1 残っている判断
+
+- このブランチの PR の base: 統合ブランチ `feature/team-build` か `main` か (これまでの PR は feature/read_situation → main)。運用側が
+  --no-ff で取り込む予定なので、PR はその取り込みの単位 (feature/team-build) に出すのが自然と考えている。
+- S9 の変種の腕: cheap を外したので S8a と同じ 2 腕 (規則 / 汎用) で測る、としたが、変種だけ軽い適応を残す選択肢は採っていない (順位が崩れるのは同じ)。
+- 鮮度の警告の置き場: `triggers` の記録 (`python -m tools.team_build.triggers` を回したとき) と `season_pin --check`。日次の定点 (track_progress) や
+  使用率 DB の更新スクリプトに組み込むかは運用側の判断。

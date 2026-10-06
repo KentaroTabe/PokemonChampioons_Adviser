@@ -102,10 +102,62 @@ def experiment_package_model(mark: Optional[Path] = None, packages_dir: Optional
     return {"package_id": package_id, "path": model, "species": species}
 
 
-def advisor_model_path(my_species: Optional[list] = None, version: Optional[str] = None) -> tuple:
-    """助言サーバーの選出モデル → (path, package_id or None)。試用中 Package のモデルは、my_species (登録パーティの id) が
-    Package の 6 体に含まれるときだけ使う。my_species を渡さなければ Package のモデルをそのまま返す"""
+# ---- 登録チーム向けの選出モデル (2026-10-06 判断) ----
+# 構築の改善 run (終了処理) は参照 = 登録の 6 体にも S7 と同じ適応 (5,000〜8,000 戦、独立 fold の実測で checkpoint を選ぶ) を作る。
+# それを 6 体の鍵 (registered:<key>) で logs/registry/registered/<key>/selection_model.pt に置き (tools.team_build.register_selection)、
+# 助言サーバーは 試用 Package → 登録チーム向け → 配布版 の順に引く。鍵は 6 体の種 id の集合なので、パーティを替えれば自動で外れる。
+# 軽い適応 (S8a cheap、1,000 戦) のモデルはこの経路に置かない (参照で 0.313 と汎用 0.613 より弱い)
+REGISTERED_DIR = REPO_ROOT / "logs" / "registry" / "registered"
+REGISTERED_PREFIX = "registered:"
+
+
+def team_key(species: list) -> str:
+    """6 体の種 id の集合の鍵 (順序に依らない sha256 の先頭 16 桁)"""
+    import hashlib
+    ids = sorted({str(s).strip().lower() for s in (species or []) if s})
+    return hashlib.sha256("|".join(ids).encode("utf-8")).hexdigest()[:16]
+
+
+def registered_team_model(my_species: Optional[list], registered_dir: Optional[Path] = None,
+                          version: Optional[str] = None) -> Optional[dict]:
+    """登録チーム向けの選出モデル {"key", "path", "species", "manifest"}。無い / 6 体でない / 特徴量の版が違えば None"""
+    import json
+    if not my_species or len(set(my_species)) != 6:
+        return None
+    rdir = Path(registered_dir) if registered_dir is not None else REGISTERED_DIR
+    key = team_key(my_species)
+    model = rdir / key / "selection_model.pt"
+    if not model.exists():
+        return None
+    manifest: dict = {}
+    try:
+        manifest = json.loads((rdir / key / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        manifest = {}
+    feat = manifest.get("features")
+    if feat and features_version(feat) != features_version(version):
+        return None                        # 作ったときの特徴量の版でしか読めない
+    return {"key": key, "path": model, "species": list(manifest.get("species") or sorted(set(my_species))), "manifest": manifest}
+
+
+def advisor_model_path(my_species: Optional[list] = None, version: Optional[str] = None,
+                       registered_dir: Optional[Path] = None) -> tuple:
+    """助言サーバーの選出モデル → (path, source_id or None)。source_id は 試用 Package の id、登録チーム向けなら
+    "registered:<key>"、配布版なら None。試用中 Package のモデルは、my_species (登録パーティの id) が Package の 6 体に含まれるときだけ
+    使う。my_species を渡さなければ Package のモデルをそのまま返す。登録チーム向けは my_species の 6 体の鍵が一致するときだけ"""
     pkg = experiment_package_model()
     if pkg and (my_species is None or (pkg["species"] and set(my_species) <= set(pkg["species"]))):
         return Path(pkg["path"]), pkg["package_id"]
+    reg = registered_team_model(my_species, registered_dir, version)
+    if reg:
+        return Path(reg["path"]), REGISTERED_PREFIX + reg["key"]
     return deployed_model_path(version), None
+
+
+def model_label(source_id: Optional[str]) -> str:
+    """選出モデルの経路の表示名: experiment:<Package id> / registered:<key> / deployed"""
+    if not source_id:
+        return "deployed"
+    if str(source_id).startswith(REGISTERED_PREFIX):
+        return str(source_id)
+    return f"experiment:{source_id}"

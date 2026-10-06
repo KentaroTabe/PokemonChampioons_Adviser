@@ -304,6 +304,15 @@ BUILD_REPRO_GATE = True
 # 相手系統: 種族集合の Jaccard がこれ以上 (6体中4体共通 = 4/8) で同一系統
 BUILD_FAMILY_JACCARD = 0.5
 BUILD_SPLIT_RATIOS = {"search": 0.5, "selection": 0.3, "holdout": 0.2}
+# 季節 (規制) ごとの固定 (2026-10-06 判断、PENDING §7.4-3 / §15.2 / §16): 分割 (S2) の seed、相手プールの使用率スナップショット、
+# 実在の構築のバンク (mixed) の区切りを、最初の run の時点で logs/registry/season_pins.json に記録し、同じ規制の run は同じものを使う
+# (参照の適応・fold の記録を run 間で再利用するため。評価側の META_PIN / POOL_PIN と同じ運用)。holdout は封印のまま、測定の相手列の seed は
+# run の seed のまま。固定し直すのは pokedb の新シーズンのデータ (100 構築以上) が出たときに 1 回 (tools/team_build/season_pin --repin)。
+# 鮮度: 固定したスナップショットと最新の上位 BUILD_POOL_FRESHNESS_TOP_N 種 (順位の重みつき) の重なりが BUILD_POOL_FRESHNESS_WARN を切ったら
+# 警告 (triggers の記録 / season_pin --check)。固定し直すかはその時に判断する。False なら従来 (run の seed、最新のスナップショット)
+BUILD_SEASON_PIN = True
+BUILD_POOL_FRESHNESS_TOP_N = 30
+BUILD_POOL_FRESHNESS_WARN = 0.8
 BUILD_SEARCH_FOLDS = 3                 # SEARCH 内の cross-fitting (A: 適応の収集 / B: 評価 / V: checkpoint 選択の検証)
 BUILD_FOLD_ADAPT, BUILD_FOLD_EVAL, BUILD_FOLD_VALIDATE = 0, 1, 2
 # S7 の checkpoint 選択 (2026-09-07 決定): val_mse ではなく独立 fold (V) の実測勝率で選ぶ。learning curve で
@@ -334,7 +343,11 @@ BUILD_SCREEN_MAX = 300
 # ablation: #0 は generic が fresh より +0.07、#3 は fresh が generic より +0.26 と候補で逆なので測定で選ぶ
 # 2026-10-05 (操縦はアドバイザーが行う): モデル無しの基準の選出は、実戦の助言と同じ相性の規則 "rule" (advisor.selection、ダメージ計算の
 # 対面行列)。従来の "teampreview" (タイプ相性の簡易規則) は実戦の経路に無いので variant から外す (指定すれば使える)
-BUILD_SCREEN_VARIANTS = ("rule", "generic", "cheap")
+# 2026-10-06 判断: cheap (1,000 戦の軽い適応) を既定から外す。改善 run improve_20261006_0128 の S8a で cheap は 4 腕とも汎用より弱く
+# (参照 0.313 / 汎用 0.613、L01 −0.29 / −0.16、L03 −0.22 / −0.01)、cheap が最良になった候補が無いのに S8a の対戦の 1/3 を使っていた。
+# experiments/cheap_drift: 120 通りの点の順位が汎用と入れ替わる (順位相関 −0.37〜0.40、最良の一致 0/4)。"cheap" を足せば従来どおり
+# S8a-1 で適応してから測る。将来戻すなら S7 と同じ独立 fold の実測での検証を必須にする
+BUILD_SCREEN_VARIANTS = ("rule", "generic")
 BUILD_PICK_VARIANTS = ("rule", "generic", "fresh")
 # 環境チーム (相手) の操縦: heuristic = poke-env SimpleHeuristicsPlayer (従来) / rl = 学習済み行動方策 (ピンの ema)。選出は
 # heuristic (Player 自身) / matchup / rule (実戦の助言と同じ規則) / model (汎用の選出モデル) / prior (実戦の選出率に比例)。
@@ -732,7 +745,8 @@ BUILD_TRIO_MIX_BONUS = 0.03            # 3 体選出に攻撃役と補助・受�
 BUILD_CALIBRATION_SLOTS = 4            # 較正の標本 (2026-10-05 判断 #10): S5 が生成して保持しなかった並びから層化抽出でこの数を S8a だけ測る
                                        # (昇格・修理には使わない。上位だけを測る選択バイアスを避ける)。0 で無効
 BUILD_CALIBRATION_STRATA = 4           # 層化の層数 (代理の点の分位)
-BUILD_CALIBRATION_VARIANTS = ("cheap",)  # 較正の標本は軽い適応の腕だけ測る (較正に使うのはその Δ だけ。3 変種なら +1.5 時間、1 変種なら +0.7 時間。判断 #4)
+BUILD_CALIBRATION_VARIANTS = ("generic",)  # 較正の標本は 1 腕だけ測る (較正に使うのはその Δ だけ。3 変種なら +1.5 時間、1 変種なら +0.7 時間。判断 #4)。
+                                       # 2026-10-06 判断: cheap → 汎用 (generic)。cheap は順位が崩れるので、その Δ は構築の強さを表さない
 # 代理評価の採否の検定 (計画書 §3.1 / §3.2。experiments/learned_surrogate の層化と帰無分布、2026-10-05):
 BUILD_SURROGATE_MIN_GAIN = 0.2         # 学習の代理を探索の主項にする条件: 探索の並びでの run 内順位相関の中央値が被覆より これ以上 高い
 BUILD_NULL_ALPHA = 0.05                # 並べ替え検定の有意水準 (「帰無分布の 95 点を超える」= 片側 p < 0.05)
@@ -842,6 +856,12 @@ SELECTION_FEATURES = "v1"
 # 相性の規則の推奨は参考に併記する (advisor.selection.choose_primary)。False なら従来 (規則が ◎、モデルは併記)。
 # 2026-10-05: 実戦の 9 戦で推奨とモデルの推しが一致した対戦は 0、測定はモデルの選出で測っているのに実戦は規則で選んでいた
 SELECTION_PRIMARY_MODEL = True
+# 登録チームで学習していない (分布外の) 配布版の推しも第一候補にするか (2026-10-06 運用側の提案 → 判断)。
+# 第 18 回の 15 戦: ◎ は全部規則で、規則の 3 体と実際の選出の一致は 1/15。未学習のモデルの推しの方が実際の選出に近かった
+# (3 体一致 2 戦 / 2 体 10 戦)。改善 run (参照 = 登録の 6 体、同じ操縦者、各 300 戦) でも 配布版 0.703 / 汎用 0.613 / 規則 0.457。
+# 規則は「モデルがパーティの 6 体を評価できない」ときの予備。軽い適応 (1,000 戦、参照で 0.313) のモデルは実戦の経路には入れない
+# (advisor_model_path が返すのは試用 Package / 登録チーム向け (registered) / 配布版だけ)
+SELECTION_PRIMARY_UNTRAINED_MODEL = True
 # 自己加速 (S3 の役割 speed_boost = 加速後に上を取れる脅威の割合): 特性の倍率 (かるわざは消費アイテム持ちのときだけ) と
 # 加速技の倍率 (1 回積んだ後)。効果は最大のもの 1 つを採る
 BUILD_SPEED_BOOST_ABILITIES = {"speedboost": 1.5, "unburden": 2.0}

@@ -739,10 +739,17 @@
             const head = headIdx >= 0 ? lines[headIdx] : (lines[0] || '');
             document.getElementById('advice-headline').textContent = head;
             document.getElementById('advice-text').textContent = full;
-            // 表示の確認 (2026-10-05): 描画が済んだフレームでブラウザの時計を返す。サーバーの生成時刻 (t_gen) と分けて記録される
+            // 表示の確認 (2026-10-05): 描画が済んだフレームでブラウザの時計を返す。サーバーの生成時刻 (t_gen) と分けて記録される。
+            // タブが隠れていると requestAnimationFrame は止まり、見えた時にまとめて発火する (第18回: 他の対戦の助言の表示 47 件が
+            // 遅れ 290 秒で届いた)。隠れている間は描画されないので、その旨 (hidden) を付けて即時に送る (2026-10-06)
             if (a.advice_id) {
-                requestAnimationFrame(() => socket.emit('advice_shown',
-                    {advice_id: a.advice_id, kind: a.kind || null, t_shown: Date.now() / 1000}));
+                const payload = {advice_id: a.advice_id, kind: a.kind || null};
+                if (document.hidden) {
+                    socket.emit('advice_shown', Object.assign(payload, {t_shown: Date.now() / 1000, hidden: true}));
+                } else {
+                    requestAnimationFrame(() => socket.emit('advice_shown',
+                        Object.assign(payload, {t_shown: Date.now() / 1000, hidden: false})));
+                }
             }
         });
 

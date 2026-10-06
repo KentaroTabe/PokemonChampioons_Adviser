@@ -72,9 +72,10 @@ def test_build_split_and_sequence():
         teams.append(F.Team(team_id=tid, species=frozenset(sp), mega=None, rank=i + 1))
         by_id[tid] = text
     with tempfile.TemporaryDirectory() as d:
-        doc = O.build_split("run_t", Path(d), seed=5, teams=teams, by_id=by_id)
+        doc = O.build_split("run_t", Path(d), seed=5, teams=teams, by_id=by_id, pool_snapshot_id=57, roster_until=1234.5)
         assert (Path(d) / "opponent_families.json").exists()
         assert doc["n_teams"] == 40 and doc["sealed_id"]
+        assert doc["pool_pin"] == {"snapshot_id": 57, "roster_until": 1234.5}         # 季節の固定を記録に残す (2026-10-06)
         tiers = doc["tiers"]
         ids = tiers["search"] + tiers["selection"] + tiers["holdout"]
         assert len(ids) == len(set(ids)) == 40

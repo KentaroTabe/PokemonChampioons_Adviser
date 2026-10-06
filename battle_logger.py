@@ -156,6 +156,7 @@ class BattleLogger:
         self._revision = None                # 推定を更新した直後の情報 (server が 1 回だけ通知に使う)
         self._version = None        # この対戦の version 行 (advisor.versions.runtime_versions)
         self._advice_seq = 0        # 助言 ID の連番 (ファイル内で一意)
+        self._advice_files: dict = {}   # 助言 ID → その助言を書いた対戦ログ (表示の行を助言の対戦に帰属させる。2026-10-06)
 
     # ------------------------------------------------------------------
     def _open_new(self) -> None:
@@ -424,6 +425,9 @@ class BattleLogger:
             self._open_new()
         self._advice_seq += 1
         aid = f"{self._file.stem[7:]}-{self._advice_seq:04d}"      # battle_YYYYmmdd_HHMMSS → YYYYmmdd_HHMMSS-0001
+        self._advice_files[aid] = self._file
+        if len(self._advice_files) > 2000:
+            self._advice_files.pop(next(iter(self._advice_files)))
         advice["advice_id"] = aid
         advice["t_gen"] = round(time.time(), 2)
         slim = {k: v for k, v in advice.items() if k not in ("text",)}
@@ -442,17 +446,32 @@ class BattleLogger:
             mp = (advice.get("model_pick") or {}) if kind == "selection" else {}
             rec["policy"] = {"selection": (mp.get("model") if kind == "selection" else None),
                              "primary": advice.get("primary") if kind == "selection" else None,
+                             # ◎ がモデルのとき、登録チームで学習済みか (2026-10-06: 未学習の配布版も ◎ になるので層別に要る)
+                             "model_trained": (advice.get("model_trained") if kind == "selection" else None),
                              "rl_loaded": rl_loaded_now() if kind == "battle" else None}
         except Exception:
             pass
         self._write(rec)
         return aid
 
-    def on_display(self, advice_id: str, t_shown: Optional[float], kind: Optional[str] = None) -> None:
-        """ブラウザが助言を表示した時刻 (ブラウザの時計、秒)。生成時刻 (advice の t_gen) と分けて残す (受入条件 2)"""
-        if not advice_id or self._file is None:
+    def on_display(self, advice_id: str, t_shown: Optional[float], kind: Optional[str] = None, hidden: Optional[bool] = None) -> None:
+        """ブラウザが助言を表示した時刻 (ブラウザの時計、秒)。生成時刻 (advice の t_gen) と分けて残す (受入条件 2)。
+        表示の行は**助言を書いた対戦のファイル**に書く (2026-10-06: タブが隠れていると表示の確認が止まり、見えた時にまとめて届くので、
+        前の対戦の助言の表示が今の対戦のファイルに混ざっていた)。hidden = タブが隠れていて描画されずに送られた (表示とは数えない)"""
+        if not advice_id:
+            return
+        target = self._advice_files.get(str(advice_id))
+        if target is None and self._file is None:
             return
         rec = {"type": "display", "advice_id": str(advice_id), "t_shown": (round(float(t_shown), 3) if t_shown is not None else None)}
         if kind:
             rec["kind"] = kind
+        if hidden is not None:
+            rec["hidden"] = bool(hidden)
+        if target is not None and target != self._file:
+            rec["attributed"] = "advice_battle"
+            rec["t"] = round(time.time(), 2)
+            with target.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            return
         self._write(rec)

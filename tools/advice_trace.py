@@ -89,8 +89,12 @@ def display_rows(records: list) -> list:
     {advice_id, kind, turn, t_gen, t_shown, latency (表示 − 生成、秒。ブラウザとサーバーの時計差を含む), displayed,
      stale (表示時点で局面が進んでいた: 直近の scene の turn が助言の turn より大きい、または場の個体が違う。判定できなければ None)}"""
     shown: dict = {}
+    hidden: dict = {}
     for d in records:
         if d.get("type") == "display" and d.get("advice_id") and d.get("t_shown") is not None:
+            if d.get("hidden"):
+                hidden.setdefault(d["advice_id"], float(d["t_shown"]))     # タブが隠れていて描画されていない: 表示とは数えない (2026-10-06)
+                continue
             shown.setdefault(d["advice_id"], float(d["t_shown"]))
     scenes = [(float(d.get("t") or 0), d) for d in records if d.get("type") == "scene"]
     rows = []
@@ -104,7 +108,8 @@ def display_rows(records: list) -> list:
         t_shown = shown.get(d["advice_id"])
         row = {"advice_id": d["advice_id"], "kind": d.get("kind"), "turn": d.get("turn"), "t_gen": t_gen, "t_shown": t_shown,
                "latency": (round(t_shown - float(t_gen), 3) if (t_shown is not None and t_gen is not None) else None),
-               "displayed": t_shown is not None, "stale": None, "state_id": d.get("state_id"), "version_id": d.get("version_id")}
+               "displayed": t_shown is not None, "hidden": (t_shown is None and d["advice_id"] in hidden),
+               "stale": None, "state_id": d.get("state_id"), "version_id": d.get("version_id")}
         if t_shown is not None and d.get("kind") == "battle":
             last_scene = None
             for t, sc in scenes:
@@ -202,7 +207,8 @@ def summarize(records: list, package_sha: Optional[str] = None, late_sec: float 
                     "display_rate": _ratio(sum(1 for r in battle if r["displayed"]), len(battle)),
                     "latency_p50": (lat[len(lat) // 2] if lat else None), "latency_max": (lat[-1] if lat else None),
                     "n_late": sum(1 for x in lat if x > late_sec), "n_stale": sum(1 for r in battle if r["stale"] is True),
-                    "n_stale_unknown": sum(1 for r in battle if r["displayed"] and r["stale"] is None)},
+                    "n_stale_unknown": sum(1 for r in battle if r["displayed"] and r["stale"] is None),
+                    "n_hidden": sum(1 for r in battle if r.get("hidden"))},
         "feasibility": {"n": len(feas), "n_infeasible_system": sum(1 for r in feas if r["feasible_system"] is False),
                         "n_unknown_system": sum(1 for r in feas if r["feasible_system"] is None),
                         "infeasible_rate_system": _ratio(sum(1 for r in feas if r["feasible_system"] is False),
@@ -213,7 +219,7 @@ def summarize(records: list, package_sha: Optional[str] = None, late_sec: float 
 def summarize_paths(paths: list, package_sha: Optional[str] = None, late_sec: float = LATE_SEC) -> dict:
     """複数の対戦ログの集計: 版の一致 (一致 / 不一致 / 判定不能 の数と version_id の種類)、表示、実行不能"""
     agg = {"n_battles": 0, "version": {"n_match": 0, "n_mismatch": 0, "n_unknown": 0, "version_ids": {}, "fallback_reasons": {}},
-           "display": {"n_advice": 0, "n_displayed": 0, "n_late": 0, "n_stale": 0, "n_stale_unknown": 0, "latencies": []},
+           "display": {"n_advice": 0, "n_displayed": 0, "n_late": 0, "n_stale": 0, "n_stale_unknown": 0, "n_hidden": 0, "latencies": []},
            "feasibility": {"n": 0, "n_infeasible_system": 0, "n_unknown_system": 0}}
     for p in paths:
         recs = load_records(p)
@@ -228,7 +234,7 @@ def summarize_paths(paths: list, package_sha: Optional[str] = None, late_sec: fl
             agg["version"]["version_ids"][v["version_id"]] = agg["version"]["version_ids"].get(v["version_id"], 0) + 1
         if v["fallback_reason"]:
             agg["version"]["fallback_reasons"][v["fallback_reason"]] = agg["version"]["fallback_reasons"].get(v["fallback_reason"], 0) + 1
-        for k in ("n_advice", "n_displayed", "n_late", "n_stale", "n_stale_unknown"):
+        for k in ("n_advice", "n_displayed", "n_late", "n_stale", "n_stale_unknown", "n_hidden"):
             agg["display"][k] += s["display"][k]
         agg["display"]["latencies"] += [r["latency"] for r in display_rows(recs) if r["kind"] == "battle" and r["latency"] is not None]
         for k in ("n", "n_infeasible_system", "n_unknown_system"):

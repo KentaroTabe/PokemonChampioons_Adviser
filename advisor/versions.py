@@ -65,10 +65,15 @@ def summarize_versions(designated_package: Optional[str], selection_path: Option
             fallback = "package_model_missing"
     if selection_path and selection_sha is None:
         fallback = (fallback + "+" if fallback else "") + "selection_model_missing"
+    source = None
+    if selection_path:
+        source = ("registered" if str(selection_package or "").startswith("registered:") else "package" if selection_package
+                  else "deployed")
     doc = {
         "designated_package": designated_package,
+        # package: 試用 Package の id / registered:<6 体の鍵> (登録チーム向け、2026-10-06) / None (配布版)。source はその区分
         "selection_model": {"package": selection_package, "path": selection_path, "sha256": selection_sha,
-                            "fallback_reason": fallback},
+                            "fallback_reason": fallback, "source": source},
         "action_policy": {"path": rl_path, "sha256": rl_sha, "loaded": rl_loaded, "error": rl_error},
         "team": {"sha256": team_sha, "species": sorted(str(s) for s in (my_species or []))},
         "rules": {"git_commit": git, "dex_sha256": dex_sha, "effects_sha256": effects_sha, "selection_features": features},

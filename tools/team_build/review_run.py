@@ -45,8 +45,9 @@ def racing_summary(doc: dict) -> dict:
             "elapsed_s": doc.get("elapsed_s")}
 
 
-STAGE_TOKEN = re.compile(r"^(S\d+[a-z]?(?:-\d+)?|\[racing:([A-Za-z0-9_]+)\]|\[holdout\]|\[stress\]|\[ablation\]|\[adapt_action|"
-                         r"\[adapt(?::([A-Za-z0-9_]+))?|\[validate|\[screen-adapt\]|\[concepts\]|最終候補|再現性の門|registry)")
+# 名前にはハイフンも許す (修理の変種の id: [adapt:L01_INC-R1A1_screen]。2026-10-05 §11.3-3: 切れて S7 に入っていた)
+STAGE_TOKEN = re.compile(r"^(S\d+[a-z]?(?:-\d+)?|\[racing:([A-Za-z0-9_-]+)\]|\[holdout\]|\[stress\]|\[ablation\]|\[adapt_action|"
+                         r"\[adapt(?::([A-Za-z0-9_-]+))?|\[validate|\[screen-adapt\]|\[concepts\]|最終候補|再現性の門|registry)")
 RACING_STAGE = (("s08a", "S8a"), ("s09_repair", "S9 repair"), ("s08b", "S8b"), ("s10", "S10"), ("s12_holdout", "S12 holdout"),
                 ("opp_pilot", "experiment"))
 

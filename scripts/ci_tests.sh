@@ -103,6 +103,9 @@ TESTS=(
   test_type_inference_prior
   test_win_lose_screen
   test_rate_chain
+  test_season_pin
+  test_cheap_drift
+  test_register_selection
 )
 
 fail=0

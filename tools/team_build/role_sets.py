@@ -507,7 +507,7 @@ def generate_role_sets(species_id: str, role: str, ctx: RoleContext) -> list:
     from tools.team_build.interaction import _points_to_ev, view_from_set
     from tools.team_build.learnsets import learnset_of
     from tools.team_build.sets import legal_item, set_sanity
-    from tools.team_build.set_lint import CONSUMABLE_ITEMS, fill_to_four, gate_rejects, lint_candidate
+    from tools.team_build.set_lint import CONSUMABLE_ITEMS, LINT_REPAIRS, fill_to_four, gate_rejects, lint_candidate, repair_candidate
 
     dex = get_dex()
     sp = dex.species(species_id)
@@ -855,6 +855,7 @@ def generate_role_sets(species_id: str, role: str, ctx: RoleContext) -> list:
                       ability, stone, ctx.mega_allowed, bool(setup_choices[0]) or req_status, selfdrop_any)
     if not items:
         items = [None]
+    usage_order = [m for m, _p in sorted((ctx.move_pct or {}).items(), key=lambda kv: -float(kv[1] or 0.0))]
     for item in items:
         for sc in setup_choices:
             c = build(item, sc)
@@ -872,10 +873,17 @@ def generate_role_sets(species_id: str, role: str, ctx: RoleContext) -> list:
             if set_sanity(c):
                 c.notes.append("sanity:" + ";".join(set_sanity(c)))
                 continue
-            # 常識規則 (set_lint、2026-10-05): 誤りの型は作らない (数は LINT_REJECTS → S5 のログ / s06_lint.json)。警告は注記に残す
+            # 常識規則 (set_lint、2026-10-05): 誤りの型は捨てる前に直し (補充は learnset と使用率の技。2026-10-06)、直せなければ作らない
+            # (数は LINT_REJECTS → S5 のログ / s06_lint.json)。警告は注記に残す
             lint = lint_candidate(c)
-            if lint["errors"] and gate_rejects(c, source="role_sets"):
-                continue
+            if lint["errors"]:
+                fixed = repair_candidate(c, usage_moves=usage_order, legal_item=legal_item, learnset=learnset)
+                if fixed is not None and fixed.key() not in seen:
+                    LINT_REPAIRS["role_sets"] += 1
+                    c = fixed
+                    lint = lint_candidate(c)
+                elif gate_rejects(c, source="role_sets"):
+                    continue
             if lint["warnings"]:
                 c.notes.append("lint:" + ";".join(lint["warnings"]))
             seen.add(c.key())

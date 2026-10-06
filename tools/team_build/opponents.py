@@ -183,10 +183,12 @@ def _base_species(sid: str) -> str:
     return sid
 
 
-def real_rosters(days: Optional[float] = None, min_n: int = 1, battles_dir: Optional[Path] = None) -> list:
+def real_rosters(days: Optional[float] = None, min_n: int = 1, battles_dir: Optional[Path] = None,
+                 until: Optional[float] = None) -> list:
     """実戦で当たった構築 (6 体の組) とその遭遇回数と元の対戦ファイル [(ids (昇順), n, [file])] (遭遇の多い順)。
     対象は整合した対戦だけ: 選出画面で相手 6 体が読めて、対戦中に見えた相手がその 6 体に含まれ、自分の 6 体も記録されている
-    (experiments/env_validity.read_real_battle の consistent)。メガ形態は基本種に丸める"""
+    (experiments/env_validity.read_real_battle の consistent)。メガ形態は基本種に丸める。
+    until = バンクの区切り (この時刻より後の対戦は入れない。季節の固定: tools/team_build/season_pin、2026-10-06)"""
     from champions_agent.config import BUILD_POOL_REAL_DAYS, BUILD_POOL_REAL_MIN_N
     from tools.team_build.env_match import load_real_battles
     days = BUILD_POOL_REAL_DAYS if days is None else days
@@ -195,6 +197,8 @@ def real_rosters(days: Optional[float] = None, min_n: int = 1, battles_dir: Opti
     files: dict = {}
     for b in load_real_battles(days, battles_dir):
         if not (b.get("opp_full") and b.get("consistent")):
+            continue
+        if until is not None and float(b.get("ts") or 0.0) > float(until):
             continue
         ids = tuple(sorted({_base_species(s) for s in b.get("opp_species") or []}))
         if len(ids) != 6:
@@ -205,7 +209,7 @@ def real_rosters(days: Optional[float] = None, min_n: int = 1, battles_dir: Opti
 
 
 def mixed_pool(n: int = BUILD_POOL_TOP_N, seed: int = 0, snapshot_id: Optional[int] = None, days: Optional[float] = None,
-               min_n: Optional[int] = None, battles_dir: Optional[Path] = None, log=None) -> tuple:
+               min_n: Optional[int] = None, battles_dir: Optional[Path] = None, log=None, until: Optional[float] = None) -> tuple:
     """実戦で当たった構築 (6 体の組は実在、型は合成) を先に入れ、足りない分だけ合成で埋めた相手プール
     (Team 一覧, team_id → 本文, snapshot_id, 実在の構築数, 実在の構築の記録 [{team_id, species, n, files}])。
     2026-10-05 判断 #1 (構築単位の一致率 17.8% → 季節内に 40% が目標。一致率はプールに入れた対戦を除いて測る)"""
@@ -214,7 +218,7 @@ def mixed_pool(n: int = BUILD_POOL_TOP_N, seed: int = 0, snapshot_id: Optional[i
     by_id: dict = {}
     rosters: list = []          # プールに入れた実在の構築とその元の対戦 (env_match はこの対戦を除いて一致率を測る。判断 #1)
     skipped = 0
-    for ids, cnt, files in real_rosters(days, min_n, battles_dir):
+    for ids, cnt, files in real_rosters(days, min_n, battles_dir, until=until):
         if len(teams) >= n:
             break
         made = _team_from_ids(ids, tables, by_id, len(teams) + 1)
@@ -262,18 +266,22 @@ def build_split(run_id: str, out_dir: Path, seed: int, top_n: int = BUILD_POOL_T
                 meta_snapshot_id: Optional[int] = None, ratios: dict = BUILD_SPLIT_RATIOS,
                 min_jaccard: float = BUILD_FAMILY_JACCARD, folds: int = BUILD_SEARCH_FOLDS,
                 teams: Optional[list] = None, by_id: Optional[dict] = None,
-                pool_source: Optional[str] = None) -> dict:
+                pool_source: Optional[str] = None, pool_snapshot_id: Optional[int] = None,
+                roster_until: Optional[float] = None) -> dict:
     """系統化 → 層化分割 → fold → 封印。結果を out_dir/opponent_families.json に保存して返す。
-    pool_source: ranked (POOL_PIN の上位構築) / latest (最新スナップショットからの合成)。既定 config BUILD_POOL_SOURCE"""
+    pool_source: ranked (POOL_PIN の上位構築) / latest (最新スナップショットからの合成)。既定 config BUILD_POOL_SOURCE。
+    pool_snapshot_id / roster_until: 季節で固定した使用率スナップショットと実在の構築のバンクの区切り (latest / mixed に使う。
+    None なら最新。tools/team_build/season_pin、2026-10-06)"""
     pool_source = pool_source or BUILD_POOL_SOURCE
     pool_snapshot = meta_snapshot_id
     n_real = 0
     real_rosters_doc: list = []
     if teams is None or by_id is None:
         if pool_source == "latest":
-            teams, by_id, pool_snapshot = synthetic_pool(n=top_n, seed=seed)
+            teams, by_id, pool_snapshot = synthetic_pool(n=top_n, seed=seed, snapshot_id=pool_snapshot_id)
         elif pool_source == "mixed":
-            teams, by_id, pool_snapshot, n_real, real_rosters_doc = mixed_pool(n=top_n, seed=seed)
+            teams, by_id, pool_snapshot, n_real, real_rosters_doc = mixed_pool(n=top_n, seed=seed, snapshot_id=pool_snapshot_id,
+                                                                               until=roster_until)
         else:
             teams, by_id = pool_teams(top_n=top_n, meta_snapshot_id=meta_snapshot_id, source=pool_source)
     fams = F.cluster_families(teams, min_jaccard=min_jaccard)
@@ -288,6 +296,7 @@ def build_split(run_id: str, out_dir: Path, seed: int, top_n: int = BUILD_POOL_T
     doc = {
         "schema_version": "1", "run_id": run_id, "seed": seed, "top_n": top_n,
         "meta_snapshot_id": meta_snapshot_id, "pool_source": pool_source, "pool_snapshot": pool_snapshot, "n_real_teams": n_real,
+        "pool_pin": {"snapshot_id": pool_snapshot_id, "roster_until": roster_until},
         "real_rosters": real_rosters_doc,
         "min_jaccard": min_jaccard, "ratios": ratios,
         "n_teams": len(teams), "n_families": len(fams),

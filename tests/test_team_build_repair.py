@@ -199,9 +199,73 @@ def test_repair_variants():
     print("test_repair_variants OK")
 
 
+def test_form_change_variants():
+    """形態の変更の変種 (F、判断 §9.6): 同じ種のメガ型 ↔ 非メガ型を独立した候補として作り、「型・役割の変更」として記録する
+    (2 体の入替 A には数えない)。石の上限とエースの規則は並びの制約で見る。指定エースの形態は変えない"""
+    # 合成の世界に、非メガ型の方が強い種 (flex) を足す
+    W.WORLD["flex"] = {"breaker": [("flex_x", "assaultvest", False, W._vec(a=0.9, c=0.9), {}),
+                                   ("flex_s", "flexite", True, W._vec(a=0.5), {})]}
+    for name, _i, _st, cov, _f in W.WORLD["flex"]["breaker"]:
+        W.COV[name] = cov
+    s = W._search()
+    cfg = L.SearchConfig(species_k=10)
+    pool_species = ["core1", "core2", "fillC", "fillD", "tune", "weak", "sun", "rain", "flex"]
+    diag = {"must_cover": ["C"], "threat_species": [], "ko": [], "vulnerable": [], "replace_candidates": [], "unused_items": [],
+            "mega_review": False, "notes": ["t"]}
+    # 親 1: core2 は非メガ型、石持ちなし → core2 の normal->mega が点を上げる (b 0.9 → 0.95 + a 0.3)
+    ents = [W._entry("core1", "breaker", "core1_x", "lifeorb", False, {}),
+            W._entry("core2", "sweeper_setup", "core2_x", "sitrusberry", False, {}),
+            W._entry("fillC", "breaker", "fillC_x", "choicescarf", False, {}),
+            W._entry("fillD", "hazard_lead", "fillD_x", "focussash", False, {}),
+            W._entry("weak", "breaker", "weak_x", "leftovers", False, {}),
+            W._entry("sun", "sun_setter", "sun_x", "heatrock", False, {"weather": "sun"})]
+    combo = [s.lib.add(e) for e in ents]
+    sc, _ = s.score_of(combo, [], cfg)
+    parent = s._finalize(sc, combo, {}, "C001", [], cfg)
+    vs = RP.repair_variants(s, parent, diag, cfg, pool_species, W._roles_of, [], fixed={"core1", "core2"}, parent_id="L01_C001",
+                            round_no=1, max_changes=1, max_arms=8, boost=2.0, min_gain=0.001, min_changes=1)
+    fs = [v for v in vs if v.origin["variant"] == "F"]
+    assert fs, [(v.origin["variant"], v.origin["changes"]) for v in vs]
+    f = fs[0]
+    assert f.members == parent.members and f.origin["changes"] == [dict(f.origin["changes"][0])]
+    ch = f.origin["changes"][0]
+    assert ch["species"] == "core2" and ch["form"] == "normal->mega" and ch["from"]["item"] == "sitrusberry" and ch["to"]["item"] == "core2ite"
+    assert sum(1 for e in f.entries if e.stone) == 1 and f.origin["repair_score"] > f.origin["parent_repair_score"]
+    # 親 2: flex はメガ型で石を持つ → mega->normal が点を上げる。固定 (fixed) の個体でも形態の変更は可 (個体は残る)
+    ents2 = [W._entry("core1", "breaker", "core1_x", "lifeorb", False, {}),
+             W._entry("flex", "breaker", "flex_s", "flexite", True, {}),
+             W._entry("fillC", "breaker", "fillC_x", "choicescarf", False, {}),
+             W._entry("fillD", "hazard_lead", "fillD_x", "focussash", False, {}),
+             W._entry("weak", "breaker", "weak_x", "leftovers", False, {}),
+             W._entry("sun", "sun_setter", "sun_x", "heatrock", False, {"weather": "sun"})]
+    combo2 = [s.lib.add(e) for e in ents2]
+    sc2, _ = s.score_of(combo2, [], cfg)
+    parent2 = s._finalize(sc2, combo2, {}, "C002", [], cfg)
+    vs2 = RP.repair_variants(s, parent2, diag, cfg, pool_species, W._roles_of, [], fixed={"core1", "flex"}, parent_id="L02_C002",
+                             round_no=1, max_changes=1, max_arms=8, boost=2.0, min_gain=0.001, min_changes=1)
+    f2 = [v for v in vs2 if v.origin["variant"] == "F"]
+    assert f2 and all(v.origin["changes"][0]["species"] == "flex" and v.origin["changes"][0]["form"] == "mega->normal" for v in f2)
+    assert all(sum(1 for e in v.entries if e.stone) == 0 and "flex" in v.members for v in f2)
+    # 石持ちが居る親では、他の個体は normal->mega になれない (石の上限)。指定エースの形態は変えない
+    cfg_ace = L.SearchConfig(species_k=10, ace="flex", favorites=("flex",))
+    vs3 = RP.repair_variants(s, parent2, diag, cfg_ace, pool_species, W._roles_of, [], fixed={"flex"}, parent_id="L02_C002",
+                             round_no=1, max_changes=1, max_arms=8, boost=2.0, min_gain=0.001, min_changes=1)
+    assert not [v for v in vs3 if v.origin["variant"] == "F"], [v.origin["changes"] for v in vs3 if v.origin["variant"] == "F"]
+    assert not [v for v in vs2 if v.origin["variant"] == "F" and v.origin["changes"][0]["species"] != "flex"]
+    # 測る順は A → B → F、系譜の記録名は F_form
+    class V:
+        def __init__(self, kind, score):
+            self.origin = {"variant": kind, "repair_score": score}
+    chosen = RP.select_variants([("P1", [V("F", 0.99), V("B", 0.5), V("A", 0.4)])], 3)
+    assert [v.origin["variant"] for _p, v in chosen] == ["A", "B", "F"]
+    assert RP.KIND_LABEL == {"A": "member", "B": "set", "F": "form"} and RP.variant_id("L01_C001", 1, "F", 1) == "L01_C001-R1F1"
+    print("test_form_change_variants OK")
+
+
 def main() -> None:
     test_diagnose()
     test_repair_variants()
+    test_form_change_variants()
     print("ALL OK")
 
 

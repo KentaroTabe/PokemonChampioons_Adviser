@@ -20,8 +20,12 @@
                   (しぜんのちから系のだいちのはどうも同じ扱い)。-ate 系の特性で変わるタイプ、へんげんじざい、フォルムでタイプが決まる技
                   (めざめるダンス等) は一致とみなす
 
-純粋関数: 技の情報は info (MoveInfo 互換: move(id) → dict、types_of(species_id) → [タイプ]) で渡す。既定は図鑑 + 効果表 (DexInfo)。
-生成 (role_sets / joint_stage の代表型 / gen_sets) は has_errors で候補を落とし、S6 は lint_rows で run ごとの該当率を記録する。
+メガ石を持つ型 (2026-10-06、判断 §9.6 の一貫化): 場の重複と自分のタイプの技はメガ後の特性・タイプで見る (info.mega_form(species, item)。
+ボーマンダの のしかかり は スカイスキン でひこうタイプ、メガリザードン Y の ひでり と にほんばれ は重複)。性格と持ち物の規則は形態に依らない。
+
+純粋関数: 技の情報は info (MoveInfo 互換: move(id) → dict、types_of(species_id) → [タイプ]、任意で mega_form(species, item)) で渡す。
+既定は図鑑 + 効果表 (DexInfo)。生成 (role_sets / joint_stage の代表型 / gen_sets / 従来方式の門) は誤りの型を repair_set で直してから残し、
+直せなければ落とす。S6 は lint_rows で run ごとの該当率と、落とした / 直した / 止めた / 形態を変えた数を記録する。
 """
 from __future__ import annotations
 
@@ -85,6 +89,8 @@ LINT_REJECTS: Counter = Counter()
 LINT_REJECT_SPECIES: dict = {}
 LINT_REPAIRS: Counter = Counter()
 LINT_REPAIR_BLOCKED: Counter = Counter()
+# 形態の変更 (メガ型の代表型が直せず、非メガ型の代替を基本の型にした等): 別の構築候補として明示する (判断 §9.6)。理由 → n
+LINT_FORM_CHANGES: Counter = Counter()
 
 
 # ------------------------------------------------------------------ 技の情報
@@ -127,6 +133,26 @@ class DexInfo:
     def types_of(self, species_id: str) -> list:
         sp = self._dex.species(species_id) or {}
         return list(sp.get("types") or [])
+
+    def mega_form(self, species_id: str, item: Optional[str]) -> Optional[dict]:
+        """その種がその石でなるメガ後のフォルム {"form", "ability", "types"}。石でない / その種の石でなければ None。
+        メガ石を持つ型の規則 (場の重複 / 自分のタイプの技) はメガ後の特性・タイプで見る (2026-10-06、判断 §9.6 の一貫化:
+        ボーマンダの のしかかり は スカイスキン でひこうタイプになる)"""
+        it = (item or "").lower()
+        if not it:
+            return None
+        try:
+            from advisor.gimmick import mega_forms, stone_table
+            from tools.team_build.interaction import mega_ability
+            form = stone_table().get(it)
+            if not form or form not in mega_forms(str(species_id or "").lower()):
+                return None
+            sp = self._dex.species(form) or {}
+            if not sp:
+                return None
+            return {"form": form, "ability": mega_ability(form), "types": list(sp.get("types") or [])}
+        except Exception:
+            return None
 
 
 _INFO: Optional[DexInfo] = None
@@ -285,6 +311,11 @@ def lint_set(species_id: str, ability: Optional[str], item: Optional[str], natur
     move_of = info.move
     moves = [str(m) for m in (moves or []) if m]
     errors, warnings, detail = [], [], {}
+    # メガ石を持つ型は、場の重複と自分のタイプの技をメガ後の特性・タイプで見る (メガ前の 1 ターンではなくメガ後で戦う型)
+    form = form_of(info, species_id, item)
+    ab_eff = (form or {}).get("ability") or ability
+    if form:
+        detail["form"] = {"species": form.get("form"), "ability": ab_eff, "types": list(form.get("types") or [])}
     bad = nature_move_mismatch(nature, moves, move_of, item=item)
     if bad:
         errors.append("nature_move")
@@ -293,15 +324,15 @@ def lint_set(species_id: str, ability: Optional[str], item: Optional[str], natur
     if ip:
         errors.append("item")
         detail["item"] = {"item": item, "problems": ip}
-    fd = field_dup(ability, moves)
+    fd = field_dup(ab_eff, moves)
     if fd:
         errors.append("field_dup")
-        detail["field_dup"] = {"ability": ability, "moves": fd}
+        detail["field_dup"] = {"ability": ab_eff, "moves": fd}
     if len(set(moves)) < 4 and not few_moves_exempt(species_id, info):
         errors.append("few_moves")
         detail["few_moves"] = {"n": len(set(moves))}
-    types = list(own_types) if own_types is not None else list(info.types_of(species_id) or [])
-    if stab_missing(types, ability, moves, move_of):
+    types = list(own_types) if own_types is not None else list((form or {}).get("types") or info.types_of(species_id) or [])
+    if stab_missing(types, ab_eff, moves, move_of):
         warnings.append("no_stab")
         detail["no_stab"] = {"types": types}
     return {"errors": errors, "warnings": warnings, "detail": detail}
@@ -337,12 +368,27 @@ def rejects_snapshot(reset: bool = False) -> dict:
         LINT_REJECT_SPECIES.clear()
         LINT_REPAIRS.clear()
         LINT_REPAIR_BLOCKED.clear()
+        LINT_FORM_CHANGES.clear()
     return out
 
 
 def repairs_snapshot() -> dict:
-    """直した型の数 (source → n) と、直せず止めた理由 (reason → n)"""
-    return {"repaired": dict(sorted(LINT_REPAIRS.items())), "blocked": dict(sorted(LINT_REPAIR_BLOCKED.items()))}
+    """直した型の数 (source → n)、直せず止めた理由 (reason → n)、形態の変更 (reason → n)"""
+    return {"repaired": dict(sorted(LINT_REPAIRS.items())), "blocked": dict(sorted(LINT_REPAIR_BLOCKED.items())),
+            "form_changes": dict(sorted(LINT_FORM_CHANGES.items()))}
+
+
+def form_of(info, species_id: str, item: Optional[str]) -> Optional[dict]:
+    """メガ石を持つ型のメガ後のフォルム (info.mega_form があれば)。無ければ None (純粋な述語は引数の info で閉じる)"""
+    if not is_mega_stone(item):
+        return None
+    fn = getattr(info, "mega_form", None)
+    if fn is None:
+        return None
+    try:
+        return fn(species_id, item) or None
+    except Exception:
+        return None
 
 
 def is_mega_stone(item: Optional[str]) -> bool:
@@ -428,7 +474,8 @@ def repair_set(species_id: str, ability: Optional[str], item: Optional[str], nat
         # 外した技は補充の候補にしない。使用率の一覧には代表型の技がそのまま入っているので、除かないと外した技が先頭で戻る
         # (2026-10-05: ルチャブルナイト + アクロバット の代表型で、外したアクロバットを入れ直して「直せない」になっていた)
         util = [m for m in usage_moves if m not in mv and m not in removed]
-        mv = fill_to_four(mv, [], util, set(learnset or ()) | set(usage_moves) | set(mv), item=it, ability=ability,
+        ab_eff = ((form_of(info, species_id, it) or {}).get("ability")) or ability      # メガ石なら補充もメガ後の特性で (場の重複)
+        mv = fill_to_four(mv, [], util, set(learnset or ()) | set(usage_moves) | set(mv), item=it, ability=ab_eff,
                           exclude=removed, move_of=info.move)
         repairs.append("few_moves")
     left = lint_set(species_id, ability, it, nat, mv, info=info)["errors"]
@@ -533,7 +580,8 @@ def lint_rows(rows: list, info=None) -> dict:
             "generated": {"n_sets": gen_n, "n_error_sets": gen_err, "error_rate": round(gen_err / gen_n, 4) if gen_n else None},
             "by_code": dict(sorted(by_code.items())), "by_source": by_source, "examples": examples,
             "rejected_in_generation": rejects_snapshot(), "rejected_species_top": rejects_species_top(),
-            "repaired_in_generation": repairs_snapshot()["repaired"], "repair_blocked": repairs_snapshot()["blocked"]}
+            "repaired_in_generation": repairs_snapshot()["repaired"], "repair_blocked": repairs_snapshot()["blocked"],
+            "form_changes": repairs_snapshot()["form_changes"]}
 
 
 def write_lint_report(run_dir, rows: list, log: Optional[Callable] = None, info=None) -> dict:
@@ -547,5 +595,6 @@ def write_lint_report(run_dir, rows: list, log: Optional[Callable] = None, info=
         g = rep["generated"]
         log(f"S6 lint: 誤り {rep['n_error_sets']}/{rep['n_sets']} 型 ({rep['error_rate']})、生成型 {g['n_error_sets']}/{g['n_sets']} "
             f"({g['error_rate']}、目標 0)、警告 {rep['n_warning_sets']} ({rep['warning_rate']})、code {rep['by_code']}、"
-            f"生成で落とした型 {rep['rejected_in_generation']}、直した型 {rep['repaired_in_generation']}、直せず止めた {rep['repair_blocked']}")
+            f"生成で落とした型 {rep['rejected_in_generation']}、直した型 {rep['repaired_in_generation']}、直せず止めた {rep['repair_blocked']}、"
+            f"形態の変更 {rep['form_changes']}")
     return rep

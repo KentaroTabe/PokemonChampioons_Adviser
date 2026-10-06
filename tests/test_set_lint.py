@@ -61,7 +61,11 @@ MOVES = {
 }
 TYPES = {"charizard": ["Fire", "Flying"], "blissey": ["Normal"], "corviknight": ["Flying", "Steel"], "torkoal": ["Fire"],
          "pelipper": ["Water", "Flying"], "altaria": ["Dragon", "Fairy"], "greninja": ["Water", "Dark"], "hawlucha": ["Fighting", "Flying"],
-         "garchomp": ["Dragon", "Ground"]}
+         "garchomp": ["Dragon", "Ground"], "salamence": ["Dragon", "Flying"]}
+# メガ後のフォルム (偽の表): 種 + 石 → フォルム・特性・タイプ
+MEGA_FORMS = {("salamence", "salamencite"): {"form": "salamencemega", "ability": "aerilate", "types": ["Dragon", "Flying"]},
+              ("charizard", "charizarditey"): {"form": "charizardmegay", "ability": "drought", "types": ["Fire", "Flying"]},
+              ("charizard", "charizarditex"): {"form": "charizardmegax", "ability": "toughclaws", "types": ["Fire", "Dragon"]}}
 
 
 class FakeInfo:
@@ -76,11 +80,53 @@ class FakeInfo:
         return list(TYPES.get(sid, []))
 
 
+class MegaInfo(FakeInfo):
+    """メガ後のフォルムを引ける info (本物の DexInfo.mega_form と同じ形)"""
+
+    def mega_form(self, sid, item):
+        return MEGA_FORMS.get((sid, item))
+
+
 INFO = FakeInfo()
+MINFO = MegaInfo()
 
 
 def lint(sid, ability, item, nature, moves):
     return L.lint_set(sid, ability, item, nature, moves, info=INFO)
+
+
+def test_mega_form_lint():
+    """メガ石を持つ型は、場の重複と自分のタイプの技をメガ後の特性・タイプで見る (2026-10-06、判断 §9.6 の一貫化)。
+    §13.3: ボーマンダの のしかかり (ここでは おんがえし) は スカイスキン でひこうタイプになるので警告にしない"""
+    moves = ["return", "earthquake", "roost", "protect"]
+    plain = L.lint_set("salamence", "intimidate", "salamencite", "jolly", moves, info=INFO)        # 形態を引けない info → 従来どおり
+    assert plain["warnings"] == ["no_stab"] and "form" not in plain["detail"]
+    mega = L.lint_set("salamence", "intimidate", "salamencite", "jolly", moves, info=MINFO)
+    assert mega["errors"] == [] and mega["warnings"] == [], mega
+    assert mega["detail"]["form"] == {"species": "salamencemega", "ability": "aerilate", "types": ["Dragon", "Flying"]}
+    # 石が無ければメガ後では見ない (同じ型で持ち物だけ違えば警告)
+    assert L.lint_set("salamence", "intimidate", "leftovers", "jolly", moves, info=MINFO)["warnings"] == ["no_stab"]
+    # 場の重複: メガリザードン Y の ひでり と にほんばれ (メガ前の特性 もうか では重複にならない)
+    sunny = ["flamethrower", "sunnyday", "roost", "protect"]
+    assert L.lint_set("charizard", "blaze", "charizarditey", "timid", sunny, info=INFO)["errors"] == []
+    r = L.lint_set("charizard", "blaze", "charizarditey", "timid", sunny, info=MINFO)
+    assert r["errors"] == ["field_dup"] and r["detail"]["field_dup"] == {"ability": "drought", "moves": ["sunnyday"]}
+    # 直すときも石は保持し、外した にほんばれ は戻さず使用率の次の技で補充する
+    fixed = L.repair_set("charizard", "blaze", "charizarditey", "timid", sunny, info=MINFO, usage_moves=["sunnyday", "shadowball"])
+    assert fixed and fixed["item"] == "charizarditey" and fixed["moves"] == ["flamethrower", "roost", "protect", "shadowball"]
+    assert fixed["repairs"] == ["field_dup", "few_moves"]
+    # X はタイプが変わる (ほのお / ドラゴン): ドラゴン技は一致、ひこう技 (アクロバット) はメガ後では一致しない (メガ前のタイプなら一致)
+    assert L.lint_set("charizard", "blaze", "charizarditex", "adamant", ["dragontail", "earthquake", "roost", "protect"],
+                      info=MINFO)["warnings"] == []
+    assert L.lint_set("charizard", "blaze", "charizarditex", "adamant", ["acrobatics", "earthquake", "roost", "protect"],
+                      info=MINFO)["warnings"] == ["no_stab"]
+    assert L.lint_set("charizard", "blaze", "charizarditex", "adamant", ["acrobatics", "earthquake", "roost", "protect"],
+                      info=INFO)["warnings"] == []
+    # 記録の欄: 形態の変更の数は repaired / blocked と分けて持つ
+    L.rejects_snapshot(reset=True)
+    assert L.repairs_snapshot() == {"repaired": {}, "blocked": {}, "form_changes": {}}
+    assert L.lint_rows([], info=INFO)["form_changes"] == {}
+    print("test_mega_form_lint OK")
 
 
 def test_nature_move_rule():
@@ -299,10 +345,13 @@ def test_base_set_uses_repaired_set():
         conn.execute("INSERT INTO move_usage VALUES (1, 'hawlucha', ?, ?)", (m, p))
     alt = SetCandidate("hawlucha", "unburden", "sitrusberry", "adamant", "0/32/0/0/2/32", ["swordsdance", "acrobatics", "closecombat", "protect"],
                        "alt:item")
-    old = (L.default_info, S.enumerate_sets, S.legal_item)
+    alt_same = SetCandidate("hawlucha", "unburden", "hawluchanite", "adamant", "0/32/0/0/2/32", ["swordsdance", "closecombat", "protect", "roost"],
+                            "alt:move")                 # 同じ形態 (石を保つ) の代替
+    old = (L.default_info, S.enumerate_sets, S.legal_item, S.has_mega_stone)
     L.default_info = lambda: INFO
     S.enumerate_sets = lambda *a, **k: [alt]            # 門で代表型が落ちたときの代替 (石を持たない型)
     S.legal_item = lambda it: True
+    S.has_mega_stone = L.is_mega_stone                  # 図鑑の石の表が無い環境でも綴りで判定
     L.rejects_snapshot(reset=True)
     try:
         base = S.base_set(conn, 1, "hawlucha")
@@ -312,8 +361,12 @@ def test_base_set_uses_repaired_set():
         blocked = L.repairs_snapshot()["blocked"]
         unfixable = S.base_set(conn, 2, "hawlucha")
         blocked2 = L.repairs_snapshot()["blocked"]
+        forms2 = L.repairs_snapshot()["form_changes"]
+        S.enumerate_sets = lambda *a, **k: [alt, alt_same]
+        same_form = S.base_set(conn, 2, "hawlucha")
+        forms3 = L.repairs_snapshot()["form_changes"]
     finally:
-        L.default_info, S.enumerate_sets, S.legal_item = old
+        L.default_info, S.enumerate_sets, S.legal_item, S.has_mega_stone = old
         L.rejects_snapshot(reset=True)
     # メガ石は残り、アクロバットは使用率の次の技に替わる
     assert base is not None and base.item == "hawluchanite", (base.item if base else None, blocked)
@@ -325,8 +378,12 @@ def test_base_set_uses_repaired_set():
     # 誤りが無ければ代表型のまま
     assert clean.nature == "timid" and clean.item == "leftovers" and not [n for n in clean.notes if str(n).startswith("lint_repair")]
     assert repaired == {"legacy": 2} and blocked == {}, (repaired, blocked)
-    # 直せない (補充に使える技が無い) ときだけ代替に替える
-    assert unfixable is alt and blocked2 == {"unfixed:few_moves": 1}, (unfixable, blocked2)
+    # 直せない (補充に使える技が無い) ときだけ代替に替える。石を持たない代替しか無ければ替えるが、黙って替えずに
+    # 注記 form_change を付けて数える (判断 §9.6: 非メガ型への変更は別の構築候補として明示的に扱う)
+    assert unfixable.key() == alt.key() and unfixable.notes == ["form_change:hawluchanite->sitrusberry"], unfixable
+    assert blocked2 == {"unfixed:few_moves": 1} and forms2 == {"mega->normal": 1}, (blocked2, forms2)
+    # 同じ形態 (石を保つ) の代替があればそれを先に選ぶ (形態の変更には数えない)
+    assert same_form is alt_same and forms3 == {"mega->normal": 1}, (same_form, forms3)
     print("test_base_set_uses_repaired_set OK")
 
 
@@ -399,6 +456,7 @@ def test_rows_report_and_gate():
 
 
 def main() -> None:
+    test_mega_form_lint()
     test_nature_move_rule()
     test_priority_move_by_set()
     test_item_rule()

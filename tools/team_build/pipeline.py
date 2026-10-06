@@ -1,8 +1,9 @@
 """測定段 (S7〜S13) のオーケストレーション。run.py から呼ぶ。
 
-S8a 全候補 (代理スコアで絞らない) を cheap adaptation (BUILD_SCREEN_ADAPT_BATTLES) してから Team × PickVariant で
-    screening racing (variant = teampreview / generic / cheap、チームの実力 = variant の最善。参照も同じ variant の最善。
-    SEARCH fold B、脱落は伸び代 margin 込み)
+S8a 全候補 (代理スコアで絞らない) を Team × PickVariant で screening racing (variant = rule / generic、チームの実力 = variant の最善。
+    参照も同じ variant の最善。SEARCH fold B、脱落は伸び代 margin 込み)。cheap (BUILD_SCREEN_ADAPT_BATTLES 戦の軽い適応) は
+    2026-10-06 判断で既定の variant から外した (順位が崩れて汎用より弱い: experiments/cheap_drift)。variant に "cheap" を指定した
+    ときだけ S8a-1 で適応してから測る (needs_cheap)
 S7  生存チーム (最善 variant の Δ 順に max_candidates まで) の選出モデル適応 (SEARCH fold A、収束まで、checkpoint 保存)
     → checkpoint は独立 fold V の実測勝率で選ぶ (val_mse では選ばない)
 S7b 参照 (登録チーム) にも S7 と同じ適応を与え (BUILD_REFERENCE_FULL_ADAPT)、fresh を参照の variant に加えて S8a-2 と同じ
@@ -11,8 +12,8 @@ S7b 参照 (登録チーム) にも S7 と同じ適応を与え (BUILD_REFERENCE
     (参照 teampreview 0.757 / 参照+適応 0.830 / 勝者 0.788。docs/incidents/reports/2026-09-15-reference-adaptation-asymmetry.md)
 S8b チーム × variant (teampreview / generic / fresh) × 参照の racing (fold B、別 seed)。チームごとに variant を測定で選ぶ
 S9  測定からの戻り (repairs 周、既定 config BUILD_REPAIR_ROUNDS): S8a 後と S8b 後に上位の並びを探索 fold の記録で診断し、
-    修理モード (tools/team_build/repair.py: 型だけの変種 B / 個体の入替 A、エースと核は固定、変更 ≤ BUILD_MAX_CHANGES) の変種を
-    cheap adaptation + racing で測って生存したものを次の段の候補に加える。LLM の仮説は使わない (docs/TEAM_BUILD_REDESIGN_1002.md §14)
+    修理モード (tools/team_build/repair.py: 型だけの変種 B / 形態の変更 F / 個体の入替 A、エースと核は固定、変更 ≤ BUILD_MAX_CHANGES) の
+    変種を S8a と同じ variant の racing で測って生存したものを次の段の候補に加える。LLM の仮説は使わない (docs/TEAM_BUILD_REDESIGN_1002.md §14)
 S10 SELECTION で contenders を比較
 S11 (任意、既定 off) 勝者の選出モデルを SEARCH + SELECTION で再学習。checkpoint 選択の検証 fold が学習に入るため
     既定では S7 の検証済み checkpoint をそのまま最終モデルにする
@@ -178,9 +179,17 @@ def team_survivors(chosen: dict, max_candidates: Optional[int]) -> list:
 
 
 def variants_for(cid: str, rows_by: dict, screen_variants, calibration_variants) -> tuple:
-    """S8a で測る variant (純粋): 較正の標本 (tag calibration) は軽い適応の腕だけ、それ以外は screen_variants (判断 #4)"""
+    """S8a で測る variant (純粋): 較正の標本 (tag calibration) は 1 腕 (BUILD_CALIBRATION_VARIANTS、2026-10-06 から汎用) だけ、
+    それ以外は screen_variants (判断 #4)"""
     tag = (rows_by.get(cid) or {}).get("tag") or ""
     return tuple(calibration_variants) if tag == "calibration" else tuple(screen_variants)
+
+
+def needs_cheap(screen_variants, calibration_variants=()) -> bool:
+    """S8a-1 / S9 の軽い適応 (cheap、BUILD_SCREEN_ADAPT_BATTLES 戦の収集で 1 回学習) を回す必要があるか (純粋): 測る variant に
+    cheap が含まれるときだけ。2026-10-06 判断で既定の variant から cheap を外した (規則と汎用の 2 腕。改善 run で cheap は 4 腕とも
+    汎用より弱く、最良になった候補が無いのに S8a の対戦の 1/3 を使っていた) ので、既定では回らず収集と対戦を節約する"""
+    return "cheap" in tuple(screen_variants or ()) or "cheap" in tuple(calibration_variants or ())
 
 
 def should_run_stress(verdict: Optional[str], only_on_pass: bool) -> bool:
@@ -366,6 +375,9 @@ def _repair_round(run_dir: Path, eval_dir: Path, round_no: int, parents: list, b
                 log(f"S9 repair {round_no}: cheap adaptation は resume (s09_repair{round_no}_models.json を再利用)")
         except Exception:
             models = None
+    if models is None and not needs_cheap(screen_variants):
+        models = {}
+        log(f"S9 repair {round_no}: cheap adaptation は省略 (variant に cheap が無い: 2026-10-06 判断)")
     if models is None:
         models = _screen_adapt_all(arms, split, run_dir / "advisors_screen", seed + 100 * round_no, screen_adapt, adapt_chunk,
                                    parallel, log, plan_prior=plan_prior)
@@ -531,9 +543,13 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
         variants = tuple(variants) + ("fresh_plan",)
     eval_dir = run_dir / "evaluation"
 
-    # S8a-1: 全候補 + 参照を同じ予算で cheap adaptation
+    # S8a-1: 全候補 + 参照を同じ予算で cheap adaptation (variant に cheap があるときだけ。2026-10-06 判断で既定からは外した)
+    from champions_agent.config import BUILD_CALIBRATION_VARIANTS
     screen_models = _load_json(eval_dir / "s08a_screen_models.json") if resume else None
-    if screen_models and all(a.arm_id in screen_models for a in [ref] + cands):
+    if not needs_cheap(screen_variants, BUILD_CALIBRATION_VARIANTS):
+        screen_models = {}
+        log("S8a cheap adaptation: 省略 (variant に cheap が無い: 2026-10-06 判断。規則と汎用の 2 腕で測る)")
+    elif screen_models and all(a.arm_id in screen_models for a in [ref] + cands):
         log(f"S8a cheap adaptation: resume (s08a_screen_models.json を再利用)")
     else:
         log(f"S8a cheap adaptation: {len(cands)} 候補 + 参照 × {screen_adapt} 戦")
@@ -577,7 +593,6 @@ def run_measurement(run_dir: Path, seed: int, steps: tuple = BUILD_RACE_STEPS, m
     if res8a and {split_variant(a["arm_id"])[0] for a in res8a.get("arms", [])} >= {c.arm_id for c in cands}:
         log("S8a screening: resume (s08a_screen.json を再利用)")
     else:
-        from champions_agent.config import BUILD_CALIBRATION_VARIANTS
         arms8a = [a for c in cands
                   for a in (_variant_arm(c, v, screen_models, generic, plan_prior=plan_prior)
                             for v in variants_for(c.arm_id, rows_by_all, screen_variants, BUILD_CALIBRATION_VARIANTS)) if a]

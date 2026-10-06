@@ -81,6 +81,13 @@ def gather(run_id: Optional[str] = None, real_days: float = BUILD_TRIGGER_REAL_D
            "real_days": real_days}
     rec = registered_real_record(real_days)
     cur.update({"real_win_rate": rec.get("win_rate"), "real_n": rec.get("n") or 0, "registered_species": rec.get("species")})
+    # プールの鮮度 (2026-10-06 判断 2): 季節で固定した使用率スナップショットと最新の上位種の重なり。記録だけで引き金にしない
+    # (0.8 を切ったら警告。固定し直すかはその時に判断する: tools/team_build/season_pin --repin)
+    try:
+        from tools.team_build.season_pin import check as pin_check
+        cur["pool_freshness"] = pin_check()
+    except Exception as e:
+        cur["pool_freshness"] = {"error": repr(e)}
     try:
         ev = json.loads((EXPERIMENTS / "env_validity.json").read_text(encoding="utf-8"))
         cur["sim_reference_win_rate"] = ev.get("sim_reference_win_rate")
@@ -124,6 +131,11 @@ def main() -> None:
     except Exception:
         pass
     res = evaluate(cur, base)
+    fresh = cur.get("pool_freshness") or {}
+    for reg, f in (fresh.get("regulations") or {}).items():
+        if f.get("warn"):
+            print(f"警告: 規制 {reg} の固定したスナップショット {f.get('pinned')} と最新 {f.get('latest')} の上位 {f.get('top_n')} 種の重なりが "
+                  f"{f.get('overlap')} (< {f.get('warn_below')})。固定し直すなら python -m tools.team_build.season_pin --repin {reg}")
     print(json.dumps({"current": cur, "baseline": base, "result": res}, ensure_ascii=False, indent=1))
 
 

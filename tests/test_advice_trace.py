@@ -26,6 +26,12 @@ def test_versions():
     doc = V.summarize_versions("pkg1", "/m/sel.pt", "abc123", "pkg1", ["a", "b", "c", "d", "e", "f"], ["a", "b", "c", "d", "e", "f"],
                                "/m/rl.zip", "def456", True, None, "teamsha", "gitsha", "dex", "eff", "v1")
     assert doc["selection_model"]["fallback_reason"] is None and doc["version_id"] == V.digest(doc)
+    assert doc["selection_model"]["source"] == "package"
+    # 登録チーム向けのモデル (registered:<鍵>) は source registered。Package のラベルがあればその退避理由は残る
+    dr = V.summarize_versions("pkg1", "/m/reg.pt", "r1", "registered:abcd", ["a", "b", "c", "d", "e", "f"], ["a", "b", "c", "d", "e", "x"],
+                              None, None, None, None, "t", "g", "d", "e", "v1")
+    assert dr["selection_model"]["source"] == "registered" and dr["selection_model"]["fallback_reason"] == "party_not_in_package"
+    assert V.summarize_versions(None, "/m/deployed.pt", "z", None, None, ["a"], None, None, None, None, "t", "g", "d", "e", "v1")["selection_model"]["source"] == "deployed"
     assert V.digest(dict(doc, collected_at=1.0)) == doc["version_id"]                       # 時刻は digest に入らない
     # ラベルはあるが登録パーティが Package の 6 体に含まれない → 配布版に退避
     d2 = V.summarize_versions("pkg1", "/m/deployed.pt", "zzz", None, ["a", "b", "c", "d", "e", "f"], ["a", "b", "c", "d", "e", "x"],
@@ -58,6 +64,18 @@ def test_logger_records():
         assert rows[3]["advice_id"] == aid and rows[3]["t_shown"] > a["advice"]["t_gen"]
         assert rows[4]["policy"]["selection"] == "deployed" and rows[4]["policy"]["primary"] == "rule" and aid2.endswith("-0002")
         assert rows[1].get("version_id") and a["version_id"] == rows[1]["version_id"]
+        # 表示の行は助言を書いた対戦のファイルに帰属させる (2026-10-06: タブが隠れている間の表示が次の対戦のファイルに混ざっていた)。
+        # 隠れていた旨 (hidden) も残す
+        first = lg._file
+        lg._open_new()
+        assert lg._file != first
+        lg.on_display(aid2, time.time() + 300, "selection", hidden=True)
+        lg.on_display("unknown-9999", time.time(), "battle")                       # 知らない id は今のファイルへ
+        rows_first = [json.loads(l) for l in first.read_text(encoding="utf-8").splitlines()]
+        rows_now = [json.loads(l) for l in lg._file.read_text(encoding="utf-8").splitlines()]
+        late = rows_first[-1]
+        assert late["type"] == "display" and late["advice_id"] == aid2 and late["hidden"] is True and late["attributed"] == "advice_battle"
+        assert [r["type"] for r in rows_now] == ["session", "version", "display"] and rows_now[-1]["advice_id"] == "unknown-9999"
     print("test_logger_records OK")
 
 
@@ -80,6 +98,22 @@ def _records(stale_turn=False, display=True, latency=0.8):
         recs.append({"t": t0 + 2 + latency, "type": "display", "advice_id": "x-0001", "t_shown": t0 + 2 + latency, "kind": "battle"})
     recs.append({"t": t0 + 9, "type": "events", "turn": 1, "fired": ["move_player_uturn"], "texts": []})
     return recs
+
+
+def test_display_hidden():
+    """タブが隠れていて描画されずに送られた表示 (hidden) は表示とは数えず、n_hidden に数える (2026-10-06)"""
+    recs = _records(display=False)
+    recs.append({"t": 1300.0, "type": "display", "advice_id": "x-0001", "t_shown": 1300.0, "kind": "battle", "hidden": True})
+    rows = [r for r in T.display_rows(recs) if r["kind"] == "battle"]
+    assert len(rows) == 1 and rows[0]["displayed"] is False and rows[0]["hidden"] is True and rows[0]["latency"] is None
+    s = T.summarize(recs)["display"]
+    assert s["n_displayed"] == 0 and s["n_hidden"] == 1 and s["n_late"] == 0
+    # 同じ助言に後から本物の表示が来れば表示に数える
+    recs.append({"t": 1301.0, "type": "display", "advice_id": "x-0001", "t_shown": 1301.0, "kind": "battle", "hidden": False})
+    rows2 = [r for r in T.display_rows(recs) if r["kind"] == "battle"]
+    assert rows2[0]["displayed"] is True and rows2[0]["hidden"] is False
+    assert T.summarize(_records())["display"]["n_hidden"] == 0
+    print("test_display_hidden OK")
 
 
 def test_trace_functions():
@@ -161,6 +195,7 @@ def test_scene_eval():
 
 
 def main() -> None:
+    test_display_hidden()
     test_versions()
     test_logger_records()
     test_trace_functions()

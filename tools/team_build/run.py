@@ -114,7 +114,8 @@ def stage_s0(run_dir: Path, spec: BuildSpec, legal: set) -> BuildSpec:
 
 
 def stage_s1_s3(run_dir: Path, spec: BuildSpec, prof: dict, seed: int, top_n: int,
-                extra_threats: Optional[list] = None, pool_source: Optional[str] = None) -> tuple:
+                extra_threats: Optional[list] = None, pool_source: Optional[str] = None,
+                pool_snapshot_id: Optional[int] = None, roster_until: Optional[float] = None) -> tuple:
     doc = build_snapshot()
     save_snapshot(doc, run_dir)
     ingame_only = (doc.get("threat_source") or {}).get("ingame_only") or []
@@ -124,9 +125,10 @@ def stage_s1_s3(run_dir: Path, spec: BuildSpec, prof: dict, seed: int, top_n: in
     from champions_agent.env.ranked_teams import pinned_meta_snapshot_id
     pool_source = pool_source or BUILD_POOL_SOURCE
     # 相手プール: latest = 最新スナップショット (この run の S1 と同じ) の全種から合成 (ピンを使わない)、ranked = POOL_PIN の上位構築
+    # 季節で固定した使用率スナップショットと実在の構築の区切り (latest / mixed。None なら最新。2026-10-06)
     split = build_split(run_dir.name, run_dir, seed=seed, top_n=top_n,
                         meta_snapshot_id=(None if pool_source == "latest" else pinned_meta_snapshot_id()),
-                        pool_source=pool_source)
+                        pool_source=pool_source, pool_snapshot_id=pool_snapshot_id, roster_until=roster_until)
     log(run_dir, f"S2 opponents: source={pool_source} snapshot={split.get('pool_snapshot')} teams={split['n_teams']} "
                  f"families={split['n_families']} split={split['summary']} sealed={split['sealed_id']}")
     # 環境モデルの整合 (判断 #1): 実戦の相手 (整合した対戦) がプールの構築とどれだけ一致するかを run ごとに記録する (目標 0.4)
@@ -905,6 +907,8 @@ def main() -> None:
     ap.add_argument("--llm", choices=["none", "headless"], default="none")
     ap.add_argument("--top-n", type=int, default=BUILD_POOL_TOP_N)
     ap.add_argument("--seed", type=int, default=20260906)
+    ap.add_argument("--split-seed", type=int, default=None,
+                    help="S2 の分割の seed を上書きする (既定: 規制ごとに固定した seed。tools/team_build/season_pin、BUILD_SEASON_PIN)")
     ap.add_argument("--stages", choices=["search", "measure", "all"], default="search",
                     help="search=S0〜S6 / measure=S7〜S13 (既存の run に対して) / all")
     ap.add_argument("--reuse-concepts", action="store_true",
@@ -1026,6 +1030,18 @@ def main() -> None:
     write_manifest(run_dir, manifest)
     log(run_dir, f"run {args.run_id} start (commit {str(manifest.get('git_commit'))[:8]})")
     spec = stage_s0(run_dir, spec, legal)
+    # 季節 (規制) ごとの固定 (2026-10-06 判断): S2 の分割の seed、相手プールの使用率スナップショット、実在の構築のバンクの区切りを
+    # 最初の run の時点で記録し、同じ規制の run は同じものを使う。run の seed と分けて manifest に残す (tools/team_build/season_pin)
+    from tools.team_build.season_pin import pin_for
+    pin, pin_src = pin_for(spec.regulation, args.seed, override_seed=args.split_seed)
+    split_seed = pin["seed"]
+    manifest.update({"split_seed": split_seed, "split_seed_source": pin_src, "regulation": spec.regulation,
+                     "season_pin": dict(pin, source=pin_src)})
+    write_manifest(run_dir, manifest)
+    log(run_dir, f"S2 season pin: split seed {split_seed}, pool snapshot {pin.get('pool_snapshot_id') or 'latest'}, "
+                 f"roster until {pin.get('roster_until')} ({pin_src}; run seed {args.seed})")
+    if pin_src.startswith("fixed") and pin.get("pool_snapshot_id") is None:
+        log(run_dir, "S2 season pin: 注意 使用率スナップショットの id が取れず最新を使う (プールは固定されない)")
     session_w = {}
     if args.threat_weights_file:
         session_w = {k: float(v) for k, v in json.loads(Path(args.threat_weights_file).read_text(encoding="utf-8")).items()}
@@ -1036,8 +1052,9 @@ def main() -> None:
             sid = resolve_species_token(tok)
             if sid:
                 session_w[sid] = max(session_w.get(sid, 0.0), 1.0)
-    doc, split, tv, feats = stage_s1_s3(run_dir, spec, prof, args.seed, args.top_n, extra_threats=list(session_w),
-                                        pool_source=args.pool_source)
+    doc, split, tv, feats = stage_s1_s3(run_dir, spec, prof, split_seed, args.top_n, extra_threats=list(session_w),
+                                        pool_source=args.pool_source, pool_snapshot_id=pin.get("pool_snapshot_id"),
+                                        roster_until=pin.get("roster_until"))
     threats = list(tv.keys())
     threat_weights = {t["id"]: threat_weight(t) for t in doc["top"] if t["id"] in tv}
     if session_w:
