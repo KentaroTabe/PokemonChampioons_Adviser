@@ -7,9 +7,12 @@
 - ホストの方針 (logs/articles/host_policy.json) で fetch が allow、かつ allowed_urls があればその URL のときだけ取得する (host_allowed)。
   方針に無いホスト・unknown は取得しない。巡回しない (与えられた URL だけ。ページ内のリンクを辿らない)
 - 並列取得をしない (1 本ずつ)。同じホストへの要求の間は方針の min_interval_s (無ければ BUILD_ARTICLE_FETCH_MIN_INTERVAL_S) 以上空ける
-- 再取得は必要な更新時だけ: 以前に取得した URL (state.jsonl に url_hash がある) は --refetch を付けたときだけ取り直す
+- 再取得は必要な更新時だけ: 以前に取得した URL (state.jsonl か access.jsonl に url_hash がある。dry-run のアクセスも数える) は
+  --refetch を付けたときだけ取り直す。照合のやり直しは --dry-run が書いた構造化した候補 (candidates/) で行い、保存は
+  --from-candidates で再取得なしに行う (2026-10-06 ユーザー判断: 確認のたびの再取得を減らす)
 - 本文 (HTML・リンクつきの本文) はメモリの中だけで扱い、ディスクに書かない。保存するのは構造化した記録 (バンク)、処理状態 (state.jsonl)、
-  別名辞書・サイト固有 id の観測 (ローカル) だけ。例外の文言にも本文を入れない
+  取得履歴 (access.jsonl: 日時・URL・ハッシュ・回数)、構造化した候補 (candidates/)、別名辞書・サイト固有 id の観測 (ローカル) だけ。
+  例外の文言にも本文を入れない
 - 変換層はホストごと (tools/team_build/adapters)。無いホストはページ全体を 1 つの team unit にする (generic)
 - LLM は呼ばない (名前の対応は別の段で、送信の方針が allow のホストだけ)
 取得の関数 (fetcher) は注入できる (テストはネットワークに出ない)。
@@ -38,7 +41,10 @@ from tools.team_build.articles_process import DEFAULT_STATE_PATH, append_state, 
 
 REPO = Path(__file__).resolve().parent.parent.parent
 DEFAULT_POLICY_PATH = REPO / "logs" / "articles" / "host_policy.json"
+DEFAULT_ACCESS_PATH = REPO / "logs" / "articles" / "access.jsonl"          # 取得履歴 (dry-run を含む全部のアクセス。本文なし)
+DEFAULT_CANDIDATES_DIR = REPO / "logs" / "articles" / "candidates"         # 取得から作った構造化した候補 (照合用。本文なし)
 Fetcher = Callable[[str], tuple]          # url -> (body: bytes, content_type: str | None)
+ACCESS_ROW_KEYS = ("at", "url", "url_hash", "host", "mode", "status", "body_hash", "body_chars", "n_units", "count")
 
 
 def load_policy(path: Path = DEFAULT_POLICY_PATH) -> dict:
@@ -48,9 +54,8 @@ def load_policy(path: Path = DEFAULT_POLICY_PATH) -> dict:
     return json.loads(p.read_text(encoding="utf-8"))
 
 
-def fetched_url_hashes(state_path: Path = DEFAULT_STATE_PATH) -> set:
-    """state.jsonl にある url_hash (以前に取得した URL)"""
-    p = Path(state_path)
+def _jsonl_url_hashes(path: Path) -> set:
+    p = Path(path)
     if not p.exists():
         return set()
     out = set()
@@ -60,6 +65,42 @@ def fetched_url_hashes(state_path: Path = DEFAULT_STATE_PATH) -> set:
             if uh:
                 out.add(uh)
     return out
+
+
+def fetched_url_hashes(state_path: Path = DEFAULT_STATE_PATH, access_path: Path = DEFAULT_ACCESS_PATH) -> set:
+    """以前に取得した URL の url_hash: state.jsonl (保存した処理) と access.jsonl (dry-run を含む全部のアクセス) の両方
+    (2026-10-06 ユーザー判断: dry-run のアクセスも取得履歴に数え、再取得の防止を効かせる)"""
+    return _jsonl_url_hashes(state_path) | _jsonl_url_hashes(access_path)
+
+
+def append_access(rows: list, path: Path = DEFAULT_ACCESS_PATH) -> Path:
+    """取得履歴に追記する (本文なし。ACCESS_ROW_KEYS 以外の項目は書かない)"""
+    for r in rows:
+        if set(r) - set(ACCESS_ROW_KEYS):
+            raise ValueError("access 行に知らない項目がある")
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("a", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False, sort_keys=True) + "\n")
+    return p
+
+
+def save_candidates(url_hash_: str, payload: dict, out_dir: Path = DEFAULT_CANDIDATES_DIR) -> Path:
+    """取得から作った構造化した候補 (記録・state 行・件数) を照合用に保存する (本文なし: assert_no_prose を通す)。
+    次の確認・保存は --from-candidates でこのファイルを使い、再取得しない"""
+    from tools.team_build.article_bank import assert_no_prose
+    assert_no_prose(payload.get("records") or [], "$.records")
+    assert_no_prose(payload.get("state_rows") or [], "$.state_rows")
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / f"{url_hash_}_{payload.get('fetched_at', 'na')}.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    return path
+
+
+def load_candidates(path: Path) -> dict:
+    return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
 def default_fetcher(timeout: int = BUILD_ARTICLE_FETCH_TIMEOUT_S) -> Fetcher:
@@ -133,15 +174,36 @@ def fetch_units(plan: list, policy: dict, fetcher: Optional[Fetcher] = None, sle
 def run(urls: list, policy: dict, fetcher: Optional[Fetcher] = None, state_path: Path = DEFAULT_STATE_PATH, bank_dir: Path = DEFAULT_BANK_DIR,
         base_version: Optional[str] = None, aliases_path: Path = ALIASES_PATH, site_ids_path: Path = DEFAULT_SITE_IDS_PATH,
         dry_run: bool = False, refetch: bool = False, sleeper: Callable[[float], None] = time.sleep, today: Optional[str] = None,
-        adapters: Optional[dict] = None) -> dict:
-    """取得 → unit → process_batch → 保存 (dry_run なら何も書かない)。→ {"plan", "fetch_results", "batch_counts", "records", "saved_to", "state_rows"}"""
+        adapters: Optional[dict] = None, access_path: Path = DEFAULT_ACCESS_PATH, candidates_dir: Path = DEFAULT_CANDIDATES_DIR,
+        now: Optional[str] = None) -> dict:
+    """取得 → unit → process_batch → 保存。dry_run でもアクセスは取得履歴 (access.jsonl) に残し、構造化した候補 (candidates/) を書く
+    (本文は書かない。2026-10-06 ユーザー判断: 確認のたびの再取得を減らす)。バンク・state・別名・観測は dry_run でなければ書く。
+    → {"plan", "fetch_results", "batch_counts", "records", "saved_to", "state_rows", "candidates_paths", ...}"""
     today = today or datetime.date.today().isoformat()
-    plan = plan_urls(urls, policy, fetched_url_hashes(state_path), refetch)
+    now = now or datetime.datetime.now().isoformat(timespec="seconds")
+    plan = plan_urls(urls, policy, fetched_url_hashes(state_path, access_path), refetch)
     units, fetch_results = fetch_units(plan, policy, fetcher, sleeper, today, adapters)
     dic = default_dictionary()
     aliases = load_aliases(aliases_path)
     store = SiteIdStore.load(site_ids_path)
     res = process_batch(units, dic, aliases, store, llm_resolver=None, policy=policy, today=today)
+    # 取得履歴 (dry-run も含む)。本文なし
+    url_of = {p["url_hash"]: p["url"] for p in plan}
+    body_hash_of = {(u.get("source") or {}).get("url_hash"): (u.get("source") or {}).get("body_hash") for u in units}
+    append_access([{"at": now, "url": url_of.get(r["url_hash"]), "url_hash": r["url_hash"], "host": r["host"],
+                    "mode": "dry_run" if dry_run else "save", "status": r["status"], "body_hash": body_hash_of.get(r["url_hash"]),
+                    "body_chars": r["body_chars"], "n_units": r["n_units"], "count": 1} for r in fetch_results], access_path)
+    # 構造化した候補 (照合用。--from-candidates で再取得なしに保存できる)
+    candidates_paths = []
+    for r in fetch_results:
+        if r["status"] != "fetched":
+            continue
+        recs = [rec for rec in res["records"] if (rec.get("source") or {}).get("url_hash") == r["url_hash"]]
+        rows = [row for row in res["state_rows"] if row and row.get("url_hash") == r["url_hash"]]
+        payload = {"fetched_at": today, "at": now, "url": url_of.get(r["url_hash"]), "url_hash": r["url_hash"], "host": r["host"],
+                   "body_hash": body_hash_of.get(r["url_hash"]), "records": recs, "state_rows": rows,
+                   "counts": {k: v for k, v in res["counts"].items() if not str(k).startswith("llm_")}, "saved": not dry_run}
+        candidates_paths.append(str(save_candidates(r["url_hash"], payload, candidates_dir)))
     saved_to = None
     if not dry_run:
         if res["records"]:
@@ -155,7 +217,29 @@ def run(urls: list, policy: dict, fetcher: Optional[Fetcher] = None, state_path:
     units.clear()                                               # 本文の破棄
     return {"plan": plan, "fetch_results": fetch_results, "batch_counts": res["counts"], "records": res["records"],
             "saved_to": str(saved_to) if saved_to else None, "state_rows": [r for r in res["state_rows"] if r],
-            "unresolved_names": res["unresolved_names"], "alias_entries": res["alias_entries"]}
+            "unresolved_names": res["unresolved_names"], "alias_entries": res["alias_entries"], "candidates_paths": candidates_paths}
+
+
+def save_from_candidates(paths: list, bank_dir: Path = DEFAULT_BANK_DIR, base_version: Optional[str] = None,
+                         state_path: Path = DEFAULT_STATE_PATH, only_statuses: tuple = ("ok", "warnings", "incomplete")) -> dict:
+    """保存済みの構造化した候補 (dry-run の出力) をバンクに入れる (再取得しない)。conflict / failed の記録は入れない。
+    → {"saved_to", "n_records", "skipped"}"""
+    records, rows, skipped = [], [], []
+    for p in paths:
+        c = load_candidates(Path(p))
+        for rec in c.get("records") or []:
+            if rec.get("status") in only_statuses:
+                records.append(rec)
+            else:
+                skipped.append({"case_id": rec.get("case_id"), "status": rec.get("status")})
+        rows.extend(r for r in (c.get("state_rows") or []) if r)
+    saved_to = None
+    if records:
+        cases = list(load_bank(base_version, bank_dir)) if base_version else []
+        saved_to = save_bank(cases + records, bank_dir)
+        if rows:
+            append_state(rows, state_path)
+    return {"saved_to": str(saved_to) if saved_to else None, "n_records": len(records), "skipped": skipped}
 
 
 def _rule_ja(rule: dict, members: dict) -> str:
@@ -196,26 +280,42 @@ def _summary_lines(out: dict, ja: bool = False) -> list:
                 lines.append("    問題: " + ", ".join(rec["problems"]))
     lines.append(f"counts: {json.dumps(out['batch_counts'], ensure_ascii=False, sort_keys=True)}")
     lines.append(f"未解決の名前: {len(out['unresolved_names'])} 件、別名 confirmed {len(out['alias_entries']['confirmed'])} / candidate {len(out['alias_entries']['candidate'])}")
+    for rec in out["records"]:
+        checks = rec.get("checks") or {}
+        if checks:
+            lines.append(f"検算 {rec['case_id']}: 実数値 {json.dumps(checks.get('actual'), sort_keys=True)} 通常形態 {json.dumps(checks.get('actual_base_form'), sort_keys=True)}")
+    for p in out.get("candidates_paths") or []:
+        lines.append(f"候補: {p}")
     lines.append(f"保存: {out['saved_to'] or '(なし)'}")
     return lines
 
 
 def main(argv: Optional[list] = None) -> int:
     ap = argparse.ArgumentParser(description="許可した URL だけを取得して記事バンクに入れる (巡回しない・並列しない・本文を保存しない)")
-    ap.add_argument("--url", action="append", required=True, help="取得する URL (複数可)。方針で許可された URL だけが取得される")
+    g = ap.add_mutually_exclusive_group(required=True)
+    g.add_argument("--url", action="append", help="取得する URL (複数可)。方針で許可された URL だけが取得される")
+    g.add_argument("--from-candidates", nargs="+", metavar="FILE", help="dry-run で保存した構造化した候補をバンクに入れる (再取得しない)")
     ap.add_argument("--policy", default=str(DEFAULT_POLICY_PATH))
     ap.add_argument("--state", default=str(DEFAULT_STATE_PATH))
+    ap.add_argument("--access", default=str(DEFAULT_ACCESS_PATH), help="取得履歴 (dry-run を含む。本文なし)")
+    ap.add_argument("--candidates-dir", default=str(DEFAULT_CANDIDATES_DIR), help="構造化した候補の保存先 (照合用。本文なし)")
     ap.add_argument("--bank-dir", default=str(DEFAULT_BANK_DIR))
     ap.add_argument("--base-version", help="この版の記録に足して新しい版を作る")
     ap.add_argument("--aliases", default=str(ALIASES_PATH))
     ap.add_argument("--site-ids", default=str(DEFAULT_SITE_IDS_PATH))
-    ap.add_argument("--dry-run", action="store_true", help="取得と解析だけ行い、何も書かない")
+    ap.add_argument("--dry-run", action="store_true", help="取得と解析だけ行う (バンク・state・別名・観測は書かない。取得履歴と候補は書く)")
     ap.add_argument("--refetch", action="store_true", help="以前に取得した URL も取り直す (必要な更新時だけ)")
     ap.add_argument("--ja", action="store_true", help="記録の型と選出規則を日本語名で表示する (人の照合用。名前は表からの逆引き)")
     args = ap.parse_args(argv)
+    if args.from_candidates:
+        res = save_from_candidates(args.from_candidates, Path(args.bank_dir), args.base_version, Path(args.state))
+        print(f"候補から保存: 記録 {res['n_records']} 件、入れなかった記録 {len(res['skipped'])} 件 {res['skipped'] or ''}")
+        print(f"保存: {res['saved_to'] or '(なし)'}")
+        return 0 if res["saved_to"] else 1
     policy = load_policy(Path(args.policy))
     out = run(args.url, policy, state_path=Path(args.state), bank_dir=Path(args.bank_dir), base_version=args.base_version,
-              aliases_path=Path(args.aliases), site_ids_path=Path(args.site_ids), dry_run=args.dry_run, refetch=args.refetch)
+              aliases_path=Path(args.aliases), site_ids_path=Path(args.site_ids), dry_run=args.dry_run, refetch=args.refetch,
+              access_path=Path(args.access), candidates_dir=Path(args.candidates_dir))
     for ln in _summary_lines(out, ja=args.ja):
         print(ln)
     return 0 if any(p["action"] == "fetch" for p in out["plan"]) else 1

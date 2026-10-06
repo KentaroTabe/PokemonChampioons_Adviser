@@ -43,8 +43,22 @@
    「基本選出は A(初手)、B など、C。」「<見出し>の選出例は A(初手)、B、C など。」(見出しは捨てて条件にしない) と、接続の語「場合」単独を読む (§3.4)。
 9. 条件の語彙を増やし、「認識できる」と「判定できる」を分ける: 条件に `evaluation` (species / species_count / set_known_only / unknown) を
    付け、unknown の規則も保存する (条件付きの上乗せに使わないだけ)。予測で使うときは記事の「相手」= 今回の自分 (側の取り違えに注意。§3.4)。
+10. GameWith のランキングページ (許可 URL 1 件) の 10 構築は**検証用の固定版として保存してよい** (editorial_site / none、用途は weakness / selection)。
+    ただし ok は抽出の正しさを保証しない: メガ後の特性の補正は「元の特性が基本形態で合法」のときだけ行い、それ以外は矛盾 (conflict) にする
+    (メガリザードン Y に ちからもち が ok で通った不具合の修正)。通常形態の data-stat は形態を明示して基本種の計算値と比べ、検算で一致した部分と
+    値が無くて検査が通った部分を記録 (`checks`) で区別する。2026-10-06 の保存: 版 7b5430a9c2270df8 (9 構築 ok、1 構築は通常形態の実数値の
+    1 項目 (ラグラージ 防御 113 vs 計算 112) が合わず conflict で保存しない)。
+11. タイプの在否 `type_present` を条件の語彙に追加。判定の結果は true / false / unknown (確定した個体に対象タイプがあれば true、全枠が確定して
+    無ければ false、未確定枠やフォルムで結果が変われば unknown)。条件はメガ前 (選出時点で確認できる形態) について (value.form = base)。
+12. 同一構築・同一条件・同じ個体と種・同じ初手・同じ推奨の複数記述は 1 つの規則にまとめる (`source_refs` に根拠を全部残し、予測では重複して
+    加点しない。どれかに「など」があれば example = true / exact_trio = false。条件や初手が違えば別の規則)。
+13. 名前表: カイリュナイト・マフォクシナイトは公式表記 (ユーザーが任天堂の公式紹介で確認) → 名前表を修正し、旧表記を別名 (basis human) に。
+    ピクシナイトは一次資料で確定できず別名のまま (basis agent)。はどうのぼうご は公式ポケモンずかんで確認。別名の根拠は human (人が実際に
+    確認) と agent (実装エージェントの判断) を分ける。取得履歴 (`access.jsonl`) は dry-run のアクセスも数え、確認のやり直しは保存した
+    構造化した候補 (`candidates/`) で行う (再取得を減らす)。
 
-**判断待ち**: GameWith の構造化データの LLM 送信可否 (`send_llm`)。
+**判断待ち**: GameWith の構造化データの LLM 送信可否 (`send_llm`)。通常形態の実数値の 1 項目だけの不一致 (表示用の計算値の揺れと見られる)
+を矛盾 (conflict) のままにするか、注記にするか。
 
 **初期案の設定値 (検証前。champions_agent/config `BUILD_ARTICLE_*`)**: 個体の節 / 全体の節の見出し語、個体 6 体・技 4 つ、能力名の表、
 252 表示と実数値のラベル、選出条件の語 → 述語、選出規則 schema 2 の語彙 (接続の語・選出の印・先発 / 後発の語・例示の語・未指定の枠の語・
@@ -310,6 +324,13 @@ case: {case_id, record_kind: team|single_set (§3.7),
 - **訂正**: 「最強パーティランキング」のページには**構築ごとに 6 体全部の型**が入っている (`ol.wd-pkch-pkmlist` に 6 個体。通常 / メガの 2 form は
   タブ切り替えで、文字抽出では代表 1 体しか見えていなかった)。各個体に 持ち物・特性・4 技・実数値 6・能力ポイント 6・性格。
   よって `members_known` と `sets_known` は満たせる。詳細ページは選出の補足情報のための追加候補 (急がない)。
+- 生の HTML では個体は `li` の data-* 属性 (data-name / data-url / data-item-name / data-ability / data-moveN-name / data-nature / data-ev /
+  data-stat / data-init-form / data-form1-*)。表示は JS が組み立てる (描画後の `div._form` は生の HTML に無い)。変換層は data-* を先に読む。
+  **data-stat は通常の形態の実数値**なので、メガの個体 (form1 を使う / data-name がメガの名前 / 基本種名 + メガ石) では「通常形態の実数値」
+  (BUILD_ARTICLE_ACTUAL_BASE_LABEL) として形態を明示して渡し、基本種 (メガフラエッテは えいえんのはな: BUILD_ARTICLE_MEGA_BASE_FORM_OVERRIDES)
+  の計算値と比べる。通常の形態の個体はそのまま実数値。検算の結果は記録の `checks` (verified / mismatch / absent) に残す。
+- トグルの無い個体 (data-name がメガの名前) の data-ability はメガ前の特性 → 基本形態で合法なら `pre_mega_ability` に残して ability をメガ後に、
+  合法でなければ補正せず矛盾 (§3.5)。
 - 構築 (h2「X構築」) ごとに 1 unit (kind = team)。既定表示 (`_active`) の form を採用 (メガ候補はメガ後の形態・特性。記事の慣例と同じ)。
   正規形の本文: 使用ポケモン の節に 6 体の見出し行 `[種名](種のページ)@持ち物(性格)特性`・配分の行・実数値の行・技一覧の行、戦術と解説 の節に
   構築の説明と選出紹介の文。選出の表は文に直す: 基本選出 →「基本選出は A(初手)、Bなど、C。」、他の見出し →「<見出し>の選出例は A(初手)、B、Cなど。」
@@ -327,7 +348,12 @@ case: {case_id, record_kind: team|single_set (§3.7),
 `python -m tools.team_build.articles_fetch --url <URL> [--dry-run] [--refetch] [--base-version V]`
 
 - 方針 (`host_policy.json`) で fetch が allow、かつ allowed_urls にある URL だけ取得する (`plan_urls`: 方針に通らない URL と、以前取得した URL
-  (`state.jsonl` に url_hash がある。`--refetch` のときだけ取り直す) は skip)。与えられた URL だけで、ページ内のリンクを辿らない。
+  (`state.jsonl` か `access.jsonl` に url_hash がある。dry-run のアクセスも数える。`--refetch` のときだけ取り直す) は skip)。与えられた URL だけで、
+  ページ内のリンクを辿らない。
+- 取得履歴 `logs/articles/access.jsonl` (日時・URL・ハッシュ・回数・mode dry_run / save。本文なし) と、構造化した候補 `logs/articles/candidates/`
+  (記録・state 行・件数。本文なし) は dry-run でも書く。照合のやり直しは候補で行い、保存は `--from-candidates <file>` で再取得なしに行う
+  (conflict / failed の記録は入れない)。解析器を直した後の再検査だけは再取得が要る (本文を残さないため)。
+  履歴の仕組みができる前の 10/6 のアクセス 8 回は mode manual_note / count 8 の 1 行で記録した。
 - 1 本ずつ (並列なし)。同じホストへの要求の間は方針の `min_interval_s` (無ければ BUILD_ARTICLE_FETCH_MIN_INTERVAL_S) 以上空ける。
   User-Agent は `articles_ingest.USER_AGENT`。文字コードは `decode_html` (ヘッダ → meta → UTF-8)。
 - ページ → `units_for` (ホストの変換層) → `process_batch` (LLM なし) → バンクに保存 (`--base-version` で既存の版に足す)、state 行、
@@ -433,6 +459,8 @@ case: {case_id, record_kind: team|single_set (§3.7),
    (`test_article_parse.test_selection_schema_v2` は変換層の文の形 3 つをそのまま含む)。
 9. 追補 4 (同日): GameWith の変換層 (§3.11、`adapters/gamewith`、`test_adapter_gamewith`) と取得 (§3.12、`articles_fetch`、`test_articles_fetch`)、
    変換層の登録 (`article_units.default_adapters`)、サイト固有 id の表に gamewith。一覧 CSV の形式判定の NFKC と除外語 (`articles_ingest`)。
-10. 次: 許可 URL 1 件の取得を `--dry-run` で 1 回行い、結果 (構築の数・6 体・選出規則・未解決の名前) を人が照合してから保存する。
-    詳細ページ 2 件 (基本選出が明確な構築 / 条件つき選出のある構築) の URL を確認して許可リストに足す。「ドラゴンタイプがいる」(タイプの在否) 等の
-    語彙の追加はユーザー判断。LLM の段 (§4) は send_llm の判断の後。
+10. 追補 5 (同日、ユーザー判断 §0 の 10〜13): メガ後の特性の補正に基本形態での合法性の条件、特性の合法性の検査 (`ability_illegal`)、
+    通常形態の実数値 (`actual_base_form`) の保持と検算の記録 (`checks`)、`type_present`、同じ推奨の複数記述のまとめ (`merge_selection_rules`)、
+    名前表の 2 石の修正と別名の根拠 human / agent の区別、取得履歴 (`access.jsonl`) と構造化した候補 (`candidates/`、`--from-candidates`)。
+    実ページ再検査: 10 構築中 9 構築 ok → 版 7b5430a9c2270df8 として保存 (1 構築は conflict で保存せず)。
+11. 次: 詳細ページは不要 (ランキングページに 6 体全部ある)。LLM の段 (§4) は send_llm の判断の後。§6〜§8 の接続は M-C の材料が揃ってから。

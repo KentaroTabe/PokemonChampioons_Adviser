@@ -47,40 +47,61 @@ def test_plan_urls():
 
 
 def test_run_writes_only_structured_outputs():
-    """取得 → 記録の保存・state・観測。本文は書かれない。2 回目は already_fetched で取得しない。dry-run は何も書かない"""
+    """取得 → 記録の保存・state・観測。本文は書かれない。dry-run は取得履歴と構造化した候補だけ書き (バンク・state は書かない)、
+    dry-run のアクセスも取得履歴に数えて 2 回目は already_fetched。候補からの保存は再取得しない"""
     fetcher = FakeFetcher()
     sleeps = []
     with tempfile.TemporaryDirectory() as d:
         root = Path(d)
         kw = dict(state_path=root / "state.jsonl", bank_dir=root / "bank", aliases_path=root / "aliases.json",
-                  site_ids_path=root / "site_ids.json", sleeper=sleeps.append, today="2026-10-06", adapters=host_adapters())
+                  site_ids_path=root / "site_ids.json", sleeper=sleeps.append, today="2026-10-06", adapters=host_adapters(),
+                  access_path=root / "access.jsonl", candidates_dir=root / "candidates", now="2026-10-06T20:00:00")
         dry = F.run([URL], POLICY, fetcher=fetcher, dry_run=True, **kw)
-        assert fetcher.calls == [URL] and dry["saved_to"] is None and not any(root.iterdir())
+        assert fetcher.calls == [URL] and dry["saved_to"] is None
+        assert sorted(p.name for p in root.iterdir()) == ["access.jsonl", "candidates"]          # バンク・state・観測は書かない
+        access = [json.loads(ln) for ln in (root / "access.jsonl").read_text(encoding="utf-8").splitlines()]
+        assert len(access) == 1 and access[0]["mode"] == "dry_run" and access[0]["status"] == "fetched" and access[0]["count"] == 1
+        assert access[0]["url"] == URL and access[0]["n_units"] == 2 and access[0]["at"] == "2026-10-06T20:00:00"
+        assert len(dry["candidates_paths"]) == 1 and Path(dry["candidates_paths"][0]).exists()
+        cand = F.load_candidates(Path(dry["candidates_paths"][0]))
+        assert [r["status"] for r in cand["records"]] == ["ok", "incomplete"] and cand["saved"] is False and len(cand["state_rows"]) == 2
         assert len(dry["records"]) == 2 and dry["records"][0]["status"] == "ok" and dry["records"][1]["status"] == "incomplete"
-        out = F.run([URL], POLICY, fetcher=fetcher, **kw)
+        assert dry["records"][0]["checks"]["actual"]["m1"] == "verified"                          # 検算して一致 (削除で通ったのではない)
+        # dry-run のアクセスも取得履歴に数える → 取り直さない。候補から保存する (再取得なし)
+        again = F.run([URL], POLICY, fetcher=fetcher, **kw)
+        assert fetcher.calls == [URL] and again["plan"][0]["reason"] == "already_fetched" and again["records"] == []
+        saved = F.save_from_candidates(dry["candidates_paths"], root / "bank", state_path=root / "state.jsonl")
+        assert saved["n_records"] == 2 and saved["skipped"] == [] and len(B.load_bank(Path(saved["saved_to"]).name, root / "bank")) == 2
+        assert len((root / "state.jsonl").read_text(encoding="utf-8").splitlines()) == 2
+        # --refetch で取り直して保存 (既存の版に足す)
+        out = F.run([URL], POLICY, fetcher=fetcher, refetch=True, base_version=Path(saved["saved_to"]).name, **kw)
         assert fetcher.calls == [URL, URL] and out["saved_to"] and sleeps == []            # 1 URL なので待ち時間なし
+        assert len(B.load_bank(Path(out["saved_to"]).name, root / "bank")) == 4
         rec = out["records"][0]
         assert rec["source"]["host"] == "gamewith.jp" and rec["source"]["publisher_kind"] == "editorial_site"
         assert rec["source"]["usage_evidence"] == "none" and rec["source"]["url"] == URL and rec["meta"]["team_code"] == "E2E9MW0BQ7"
         assert rec["meta"]["regulation"] == "gen9championsbssregmc" and rec["meta"]["regulation_basis"] == "article_text"
         assert B.usable_for(rec, "weakness", "gen9championsbssregmc", policy=POLICY)
         assert not B.usable_for(rec, "pool", "gen9championsbssregmc", policy=POLICY)        # 編集部の推奨 (実績の根拠なし) はプールに入れない
-        saved = B.load_bank(Path(out["saved_to"]).name, root / "bank")
-        assert [c["case_id"] for c in saved] == [r["case_id"] for r in out["records"]]
+        saved2 = B.load_bank(Path(out["saved_to"]).name, root / "bank")
+        assert [c["case_id"] for c in saved2[2:]] == [r["case_id"] for r in out["records"]]
         rows = [json.loads(ln) for ln in (root / "state.jsonl").read_text(encoding="utf-8").splitlines()]
-        assert [r["status"] for r in rows] == ["ok", "incomplete"] and all(r["url_hash"] == out["plan"][0]["url_hash"] for r in rows)
+        assert [r["status"] for r in rows] == ["ok", "incomplete", "ok", "incomplete"] and all(r["url_hash"] == out["plan"][0]["url_hash"] for r in rows)
         assert (root / "site_ids.json").exists()
-        # 本文の断片がどのファイルにも無い
+        access = [json.loads(ln) for ln in (root / "access.jsonl").read_text(encoding="utf-8").splitlines()]
+        assert [a["mode"] for a in access] == ["dry_run", "save"]                              # 取り直さなかった回はアクセスしていない
+        # 本文の断片がどのファイルにも無い (バンク・state・取得履歴・候補・観測)
         for p in root.rglob("*"):
             if p.is_file():
                 text = p.read_text(encoding="utf-8")
                 assert not any(frag in text for frag in BODY_FRAGMENTS), p
-        # 2 回目: 取り直さない
-        again = F.run([URL], POLICY, fetcher=fetcher, **kw)
-        assert fetcher.calls == [URL, URL] and again["plan"][0]["reason"] == "already_fetched" and again["records"] == []
-        # --refetch で取り直し、既存の版に足す
-        more = F.run([URL], POLICY, fetcher=fetcher, refetch=True, base_version=Path(out["saved_to"]).name, **kw)
-        assert len(fetcher.calls) == 3 and len(B.load_bank(Path(more["saved_to"]).name, root / "bank")) == 4
+        # 候補からの保存は conflict / failed の記録を入れない
+        cand_path = Path(dry["candidates_paths"][0])
+        bad = json.loads(cand_path.read_text(encoding="utf-8"))
+        bad["records"][1]["status"] = "conflict"
+        cand_path.write_text(json.dumps(bad, ensure_ascii=False), encoding="utf-8")
+        res = F.save_from_candidates([cand_path], root / "bank2", state_path=root / "state2.jsonl")
+        assert res["n_records"] == 1 and res["skipped"] == [{"case_id": bad["records"][1]["case_id"], "status": "conflict"}]
     print("test_run_writes_only_structured_outputs OK")
 
 

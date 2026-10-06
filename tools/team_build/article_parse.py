@@ -29,7 +29,8 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
-from champions_agent.config import (BSS_PICK_COUNT, BUILD_ARTICLE_ABSENCE_WORDS, BUILD_ARTICLE_ACTUAL_LABEL, BUILD_ARTICLE_BACK_WORDS,
+from champions_agent.config import (BSS_PICK_COUNT, BUILD_ARTICLE_ABSENCE_WORDS, BUILD_ARTICLE_ACTUAL_BASE_LABEL, BUILD_ARTICLE_ACTUAL_LABEL,
+                                    BUILD_ARTICLE_BACK_WORDS,
                                     BUILD_ARTICLE_CONDITION_AND_WORDS, BUILD_ARTICLE_CONDITION_CONNECTORS, BUILD_ARTICLE_CONDITION_EVALUATION,
                                     BUILD_ARTICLE_CONDITION_EVALUATION_ORDER, BUILD_ARTICLE_CONDITION_MANY_EVALUATION,
                                     BUILD_ARTICLE_CONDITION_OR_WORDS, BUILD_ARTICLE_CONDITION_SUBJECT_WORDS, BUILD_ARTICLE_CONDITION_WORDS,
@@ -45,7 +46,7 @@ from champions_agent.config import (BSS_PICK_COUNT, BUILD_ARTICLE_ABSENCE_WORDS,
                                     BUILD_ARTICLE_SELECTION_PREDICATE_EXCLUDES, BUILD_ARTICLE_SELECTION_PREDICATES,
                                     BUILD_ARTICLE_SELECTION_REQUIRED_WORDS, BUILD_ARTICLE_SITE_ID_PATTERNS, BUILD_ARTICLE_STAT_WORDS,
                                     BUILD_ARTICLE_TARGET_MOD_WORDS, BUILD_ARTICLE_TEAM_SECTION_WORDS, BUILD_ARTICLE_TYPE_KANJI_WORDS,
-                                    BUILD_GEN_EV_POINT_CAP)
+                                    BUILD_ARTICLE_MEGA_BASE_FORM_OVERRIDES, BUILD_ARTICLE_TYPE_PRESENT_FORM, BUILD_GEN_EV_POINT_CAP)
 from vision.normalize import JP_NAMES_PATH, normalize
 
 # 2: unresolved_names を {"category", "text", "host", "site_key"} に、site_id_observations と max_members (single_set) を追加 (2026-10-06)
@@ -215,14 +216,32 @@ def mega_table() -> dict:
         dex = json.loads(DEX.read_text(encoding="utf-8")).get("species", {})
     except Exception:
         return {"forms": {}, "stones": {}, "abilities": {}}
-    forms, stones, abilities = {}, {}, {}
+    forms, stones, abilities, base_abilities = {}, {}, {}, {}
     for sid, _name, _req, stone in mega_stones():
         base = re.sub(r"[^a-z0-9]", "", (dex.get(sid, {}).get("baseSpecies") or "").lower()) or None
+        base = BUILD_ARTICLE_MEGA_BASE_FORM_OVERRIDES.get(sid, base)      # メガ前の形態が種と違うメガ (メガフラエッテ = えいえんのはな)
         forms[sid] = (base, stone)
         if stone:
             stones[stone] = sid
         abilities[sid] = [re.sub(r"[^a-z0-9]", "", str(a).lower()) for a in (dex.get(sid, {}).get("abilities") or {}).values() if a]
-    return {"forms": forms, "stones": stones, "abilities": abilities}
+        base_abilities[sid] = [re.sub(r"[^a-z0-9]", "", str(a).lower()) for a in (dex.get(base or "", {}).get("abilities") or {}).values() if a]
+    return {"forms": forms, "stones": stones, "abilities": abilities, "base_abilities": base_abilities}
+
+
+@lru_cache(maxsize=1)
+def species_abilities() -> dict:
+    """種 id → 合法な特性 id の集合 (図鑑 champions_dex。無い種は載せない)。記録の検査 (特性が形態に合法か) に使う"""
+    try:
+        from tools.check_mega_items import DEX
+        dex = json.loads(DEX.read_text(encoding="utf-8")).get("species", {})
+    except Exception:
+        return {}
+    out = {}
+    for sid, e in dex.items():
+        ids = {re.sub(r"[^a-z0-9]", "", str(a).lower()) for a in (e.get("abilities") or {}).values() if a}
+        if ids:
+            out[sid] = ids
+    return out
 
 
 # ------------------------------------------------------------------------------------------------------------------
@@ -465,12 +484,17 @@ def parse_member_head(line: str, dic: ArticleDictionary) -> Optional[dict]:
         else:
             notes.append("mega_form_from_stone")
     # メガ形態の特性: 記事がメガ前の特性 (げきりゅう / もうか) を書くことがある (GameWith はトグルの無い個体でそう書く。10/6 の取得で確認)。
-    # 図鑑のメガ後の特性が 1 つに決まるなら、記事の特性はメガ前として pre_mega_ability に残し、ability はメガ後の特性にする
+    # 図鑑のメガ後の特性が 1 つに決まり、かつ記事の特性が基本形態で合法なら、記事の特性はメガ前として pre_mega_ability に残し、
+    # ability はメガ後の特性にする。基本形態でも合法でない特性 (メガリザードン Y に ちからもち) は補正せず、そのまま残して検査で矛盾にする
+    # (2026-10-06 ユーザー指摘: 合法性を見ずに補正すると不正な入力が ok で通った)
     pre_mega_ability = None
     mega_abilities = mega["abilities"].get(form_id) or []
-    if form_id in mega["forms"] and ability_id and ability_id not in mega_abilities and len(mega_abilities) == 1:
-        pre_mega_ability, ability_id = ability_id, mega_abilities[0]
-        notes.append("ability_pre_mega")
+    if form_id in mega["forms"] and ability_id and ability_id not in mega_abilities:
+        if len(mega_abilities) == 1 and ability_id in (mega["base_abilities"].get(form_id) or []):
+            pre_mega_ability, ability_id = ability_id, mega_abilities[0]
+            notes.append("ability_pre_mega")
+        else:
+            warnings.append("ability_not_legal_for_form")
     return {"species_id": form_id, "base_species_id": base_id, "mega_stone": stone, "item": item_id, "nature": nature_id,
             "ability": ability_id, "pre_mega_ability": pre_mega_ability, "display": species_text, "warnings": warnings, "notes": notes,
             "unresolved": unresolved}
@@ -496,8 +520,9 @@ def _stat_key(word: str) -> Optional[str]:
 
 
 def parse_stat_line(line: str) -> Optional[dict]:
-    """配分の行 → {"kind": "points" | "ev252" | "actual", "values": {...} | [6], "unlabeled": bool}。配分の行でなければ None。
-    3 種類は別に保持し、換算しない。ラベルの無い行は値の範囲で種類を決めて unlabeled を付ける"""
+    """配分の行 → {"kind": "points" | "ev252" | "actual" | "actual_base_form", "values": {...} | [6], "unlabeled": bool}。配分の行でなければ None。
+    種類は別に保持し、換算しない。actual_base_form = メガの個体の通常形態の実数値 (BUILD_ARTICLE_ACTUAL_BASE_LABEL)。
+    ラベルの無い行は値の範囲で種類を決めて unlabeled を付ける"""
     s = unicodedata.normalize("NFKC", flatten(strip_bullet(line)))
     if not s or LINK_RE.search(line):
         return None
@@ -505,7 +530,8 @@ def parse_stat_line(line: str) -> Optional[dict]:
         m = _ACTUAL_RE.search(s)
         if not m:
             return None
-        return {"kind": "actual", "values": [int(x) for x in m.groups()], "unlabeled": False}
+        kind = "actual_base_form" if BUILD_ARTICLE_ACTUAL_BASE_LABEL in s else "actual"
+        return {"kind": kind, "values": [int(x) for x in m.groups()], "unlabeled": False}
     pairs = [(m.group("name"), int(m.group("val"))) for m in _STAT_PAIR_RE.finditer(s)]
     if not pairs:
         return None
@@ -875,7 +901,9 @@ def _type_patterns(type_items: tuple) -> dict:
             "move_type_present": re.compile(type_alt(True) + rf"(?:の)?(?:{_alt(BUILD_ARTICLE_MOVE_TYPE_WORDS)})"),
             "type_count": re.compile(type_alt(False) + mod + rf"(?:が|は|を|も)?\s*(?P<num>{_NUM_PAT})\s*"
                                      rf"(?:{_alt(BUILD_ARTICLE_COUNTER_WORDS)})\s*(?P<cmp>{_alt(BUILD_ARTICLE_COUNT_COMPARATORS)})"),
-            "type_many": re.compile(type_alt(False) + mod + rf"(?:が|は|も)?\s*(?:{_alt(BUILD_ARTICLE_MANY_WORDS)})")}
+            "type_many": re.compile(type_alt(False) + mod + rf"(?:が|は|も)?\s*(?:{_alt(BUILD_ARTICLE_MANY_WORDS)})"),
+            # 「<タイプ>(タイプ)(のポケモン)が いる / いない」→ type_present (在否。2026-10-06 ユーザー判断)
+            "type_present": re.compile(type_alt(False) + mod + rf"(?:が|は|も)\s*(?P<verb>{_alt(BUILD_ARTICLE_ABSENCE_WORDS + BUILD_ARTICLE_PRESENCE_WORDS)})")}
 
 
 def _type_of(m, ents: list, lex: dict) -> Optional[str]:
@@ -974,6 +1002,11 @@ def parse_selection_condition(cond_text: str, ents: list, dic: ArticleDictionary
         ty = _type_of(m, ents, pats["lex"])
         if ty and not _absent_after(cond_text, m.end()):
             add(m.start(), m.end(), "type_many", {"type": ty})
+    for m in pats["type_present"].finditer(cond_text):
+        ty = _type_of(m, ents, pats["lex"])
+        if ty:
+            add(m.start(), m.end(), "type_present",
+                {"type": ty, "present": m.group("verb") not in _ABSENCE, "form": BUILD_ARTICLE_TYPE_PRESENT_FORM})
     for m in _SPECIES_COND_RE.finditer(cond_text):
         absent = bool(m.group("verb")) and m.group("verb") in _ABSENCE
         g0 = m.start("group")
@@ -1321,7 +1354,7 @@ def parse_article(marked: str, dic: Optional[ArticleDictionary] = None, max_memb
                 cur = None
                 continue
             mid = f"m{len(members) + 1}"
-            head.update({"id": mid, "points": None, "ev252": None, "actual": None, "moves": [], "alt_move_lines": 0})
+            head.update({"id": mid, "points": None, "ev252": None, "actual": None, "actual_base_form": None, "moves": [], "alt_move_lines": 0})
             for u in head.pop("unresolved"):
                 unresolved.append({"category": u, "source_ref": mid})
             members.append(head)
@@ -1385,6 +1418,11 @@ def parse_article(marked: str, dic: Optional[ArticleDictionary] = None, max_memb
         mem.pop("display", None)
         if not mem["moves"]:
             mem["warnings"].append("no_moves_line")
+        # 「基本種の名前 @ メガ石」で書かれた個体 (使用形態は石から補った) の実数値は、書かれた種 = メガ前の形態の値として扱う
+        # (10/6 の GameWith の実ページ: ラグラージ@ラグラージナイト の実数値はラグラージの計算値と一致し、メガラグラージとは合わない)
+        if "mega_form_from_stone" in mem.get("notes", []) and mem.get("actual") and mem.get("actual_base_form") is None:
+            mem["actual_base_form"], mem["actual"] = mem["actual"], None
+            mem["notes"].append("actual_as_base_form")
     counts = {"members": len(members), "claims": len(claims), "selection_rules": len(rules), "unresolved": len(unresolved),
               "team_sentences": len(split_sentences(team_lines))}
     return {"members": members, "members_named_only": named, "claims": claims, "selection_rules": rules, "selection_combinable": combinable,

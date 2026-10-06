@@ -32,7 +32,7 @@ from champions_agent.config import (BUILD_ARTICLE_EV252_OFFSET, BUILD_ARTICLE_EV
                                     BUILD_ARTICLE_PURPOSE_RECORD_KINDS, BUILD_ARTICLE_PURPOSE_REQUIREMENTS, BUILD_ARTICLE_RECORD_KIND_MEMBERS,
                                     BUILD_ARTICLE_REGULATION_BASES, BUILD_ARTICLE_REGULATION_NAMES, BUILD_ARTICLE_SEASON_REGULATION,
                                     BUILD_ARTICLE_USAGE_EVIDENCE, BUILD_GEN_EV_POINT_CAP, BUILD_GEN_POINT_BUDGET)
-from tools.team_build.article_parse import PARSER_VERSION, STAT_ORDER, mega_table, normalize_named_only
+from tools.team_build.article_parse import PARSER_VERSION, STAT_ORDER, mega_table, normalize_named_only, species_abilities
 
 # 2: record_kind、出典の 2 軸 (publisher_kind / usage_evidence) と synthetic、meta の regulation_basis / regulation_history (2026-10-06)
 # 3: members_named_only (種名だけ分かる個体)、facets、status の incomplete (情報不足) / conflict (検査の矛盾) の区別と problems、
@@ -108,6 +108,42 @@ def record_facets(record: dict) -> dict:
                           record.get("selection_rules") or [], kind if kind in BUILD_ARTICLE_RECORD_KIND_MEMBERS else "team")
 
 
+def _rule_key(rule: dict) -> tuple:
+    return (json.dumps(rule.get("condition"), sort_keys=True, ensure_ascii=False), tuple(sorted(rule.get("selected_members") or [])),
+            tuple(sorted(s.get("species_id") or "" for s in (rule.get("selected_species") or []))), rule.get("lead"), rule.get("lead_species"),
+            rule.get("recommendation"))
+
+
+def merge_selection_rules(rules: list) -> list:
+    """同じ構築の中で、同じ条件・同じ個体と種・同じ初手・同じ推奨の規則は「同じ推奨の複数記述」として 1 つにまとめる
+    (2026-10-06 ユーザー判断: 根拠位置は source_refs に全部残し、予測では重複して加点しない。どれかに「など」があれば example = True、
+    exact_trio = False (本文側に「など」が無いだけで表側の柔らかい指定を固定選出に格上げしない)。条件や初手が違えば別の規則のまま)。
+    source_ref は最初の記述、source_refs は全部。元の列は変えない (純粋)"""
+    merged: dict = {}
+    order: list = []
+    for r in rules or []:
+        k = _rule_key(r)
+        if k not in merged:
+            m = dict(r)
+            m["source_refs"] = [r.get("source_ref")]
+            merged[k] = m
+            order.append(k)
+            continue
+        m = merged[k]
+        m["source_refs"].append(r.get("source_ref"))
+        if r.get("example"):
+            m["example"] = True
+        if (r.get("free_slots") or 0) > (m.get("free_slots") or 0):
+            m["free_slots"] = r["free_slots"]
+    out = []
+    for k in order:
+        m = merged[k]
+        if m.get("example") or (m.get("free_slots") or 0):
+            m["exact_trio"] = False
+        out.append(m)
+    return out
+
+
 def record_status(members: list, warnings: list, record_kind: str, problems: Optional[list] = None,
                   named_only: Optional[list] = None) -> str:
     """処理状態: 個体が無い (型のある個体も種名だけの個体も無い) → failed、検査の矛盾 (problems のうち情報不足でないもの) → conflict、
@@ -138,7 +174,8 @@ def build_record(parsed: dict, source: dict, meta: Optional[dict] = None, case_i
     members = [{k: v for k, v in m.items() if k != "display"} for m in parsed.get("members", [])]
     named = normalize_named_only(parsed.get("members_named_only"))
     body = {"members": members, "members_named_only": named, "claims": parsed.get("claims", []),
-            "selection_rules": parsed.get("selection_rules", []), "selection_combinable": parsed.get("selection_combinable"),
+            "selection_rules": merge_selection_rules(parsed.get("selection_rules", [])),
+            "selection_combinable": parsed.get("selection_combinable"),
             "unresolved": parsed.get("unresolved", [])}
     digest = hashlib.sha256(json.dumps(body, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
     warnings = list(parsed.get("warnings", []))
@@ -155,11 +192,31 @@ def build_record(parsed: dict, source: dict, meta: Optional[dict] = None, case_i
     return rec
 
 
+def stat_checks(record: dict, dex=None) -> dict:
+    """実数値の検算の結果を個体ごとに残す (2026-10-06 ユーザー判断: 「削除したことで検査が通った」と「検算して一致した」を区別する)。
+    {"actual": {m1: verified | mismatch | absent}, "actual_base_form": {...}} (actual = 使用形態の実数値、actual_base_form = メガの個体の通常形態の実数値)"""
+    out: dict = {"actual": {}, "actual_base_form": {}}
+    for m in record.get("members") or []:
+        mid = m.get("id")
+        pts = m.get("points")
+        for key, sid in (("actual", m.get("species_id")), ("actual_base_form", m.get("base_species_id") or m.get("species_id"))):
+            vals = m.get(key)
+            if not vals or not pts:
+                out[key][mid] = "absent"
+                continue
+            exp = expected_actual(sid, pts, m.get("nature"), dex)
+            out[key][mid] = "verified" if exp == list(vals) else ("mismatch" if exp else "absent")
+    return out
+
+
 def build_validated_record(parsed: dict, source: dict, meta: Optional[dict] = None, case_id: Optional[str] = None,
                            record_kind: str = "team", legal_ids: Optional[set] = None, dex=None) -> dict:
-    """build_record → validate_record → その問題を渡した build_record (status に矛盾 / 情報不足を反映し、problems を残した記録)"""
+    """build_record → validate_record → その問題を渡した build_record (status に矛盾 / 情報不足を反映し、problems を残した記録)。
+    記録の checks に実数値の検算の結果 (stat_checks) を残す"""
     first = build_record(parsed, source, meta, case_id, record_kind)
-    return build_record(parsed, source, meta, case_id, record_kind, problems=validate_record(first, legal_ids, dex))
+    rec = build_record(parsed, source, meta, case_id, record_kind, problems=validate_record(first, legal_ids, dex))
+    rec["checks"] = stat_checks(rec, dex)
+    return rec
 
 
 def _expected_ev252(points: int) -> int:
@@ -238,6 +295,14 @@ def validate_record(record: dict, legal_ids: Optional[set] = None, dex=None) -> 
             exp = expected_actual(m.get("species_id"), pts, m.get("nature"), dex)
             if exp and exp != list(act):
                 problems.append(f"{mid}:actual_mismatch:" + ",".join(k for k, a, e in zip(STAT_ORDER, act, exp) if a != e))
+        # 通常の形態の実数値 (メガの個体で、記事がメガ前の形態の値を載せているとき。形態を明示して基本種の計算値と比べる)
+        act_base = m.get("actual_base_form")
+        if act_base is not None and len(act_base) != len(STAT_ORDER):
+            problems.append(f"{mid}:actual_base_len:{len(act_base)}")
+        elif act_base and pts:
+            exp = expected_actual(m.get("base_species_id") or m.get("species_id"), pts, m.get("nature"), dex)
+            if exp and exp != list(act_base):
+                problems.append(f"{mid}:actual_base_mismatch:" + ",".join(k for k, a, e in zip(STAT_ORDER, act_base, exp) if a != e))
         sid = m.get("species_id")
         if sid in mega["forms"]:
             _base, stone = mega["forms"][sid]
@@ -245,6 +310,14 @@ def validate_record(record: dict, legal_ids: Optional[set] = None, dex=None) -> 
                 problems.append(f"{mid}:mega_item:{m.get('item')}")
         elif m.get("item") in mega["stones"] and mega["stones"][m["item"]] != sid:
             problems.append(f"{mid}:stone_without_form")
+        # 特性が形態に合法か (図鑑に特性の無い種は見ない)。メガ前の特性 (pre_mega_ability) は基本種で合法か
+        legal_abilities = species_abilities()
+        if m.get("ability") and sid in legal_abilities and m["ability"] not in legal_abilities[sid]:
+            problems.append(f"{mid}:ability_illegal:{m['ability']}")
+        pre = m.get("pre_mega_ability")
+        base_sid = m.get("base_species_id")
+        if pre and base_sid in legal_abilities and pre not in legal_abilities[base_sid]:
+            problems.append(f"{mid}:pre_mega_ability_illegal:{pre}")
     for k, n in enumerate(named):
         sid = n.get("species_id")
         if legal_ids and sid not in legal_ids and n.get("base_species_id") not in legal_ids:

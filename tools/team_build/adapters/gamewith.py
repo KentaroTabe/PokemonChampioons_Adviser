@@ -31,6 +31,7 @@ import re
 from html.parser import HTMLParser
 from typing import Optional
 
+from champions_agent.config import BUILD_ARTICLE_ACTUAL_BASE_LABEL, BUILD_ARTICLE_ACTUAL_LABEL
 from tools.team_build.article_units import make_unit, regulation_from_text
 
 HOST = "gamewith.jp"
@@ -208,10 +209,10 @@ def parse_form(form: Node) -> Optional[dict]:
 
 
 def parse_li_data(li: Node) -> Optional[dict]:
-    """生の HTML の li (data-* 属性に個体の情報。表示は JS が組み立てる。2026-10-06 の取得で確認) → parse_form と同じ形。
-    data-init-form = form1 ならメガ後の形態 (data-form1-name / -url / -ability) を使う。data-stat (実数値) は出さない: 表示用に
-    JS が組み立てる値で、メガ後の形態の個体 (data-name がメガの名前のものも含む) では通常の形態の値になっていて再計算と合わない
-    (10/6 の取得で 2 構築が矛盾になった)。能力ポイント (data-ev) と性格が正で、実数値はこちらで再計算できる。data-name が無ければ None"""
+    """生の HTML の li (data-* 属性に個体の情報。表示は JS が組み立てる。2026-10-06 の取得で確認) → parse_form と同じ形 + actual_is_base_form。
+    data-init-form = form1 ならメガ後の形態 (data-form1-name / -url / -ability) を使う。data-stat (実数値) は**通常の形態**の値
+    (メガの個体では再計算と合わない。10/6 の取得で 2 構築が矛盾になった) なので、メガの個体では「通常形態の実数値」として形態を明示して渡し、
+    基本種の計算値と比べる (actual_is_base_form = True)。通常の形態の個体はそのまま実数値。data-name が無ければ None"""
     a = li.attrs
     name = (a.get("data-name") or "").strip()
     if not name:
@@ -228,9 +229,12 @@ def parse_li_data(li: Node) -> Optional[dict]:
     moves = [(a.get(f"data-move{i}-name") or "").strip() for i in range(1, 5)]
     moves = [m for m in moves if m]
     points = [p.strip() for p in (a.get("data-ev") or "").split(",") if p.strip() != ""]
+    actual = [s.strip() for s in (a.get("data-stat") or "").split(",") if s.strip() != ""]
     href = f"https://{HOST}/pokemon-champions/{url_id}" if url_id.isdigit() else None
+    # メガの個体では data-stat は通常の形態の値。form1 を使ったときはここで分かる。data-name 自体がメガの名前 (トグル無し) の個体は
+    # team_unit_text が辞書で種を解決して判定する (名前の「メガ」で決めない: メガニウム・メガヤンマは種名)
     return {"name": name, "href": href, "item": (a.get("data-item-name") or "").strip(), "ability": ability, "moves": moves,
-            "actual": [], "points": points, "nature": (a.get("data-nature") or "").strip()}
+            "actual": actual, "actual_is_base_form": bool(use_alt), "points": points, "nature": (a.get("data-nature") or "").strip()}
 
 
 def active_form(li: Node) -> Optional[Node]:
@@ -263,7 +267,8 @@ def member_lines(member: dict) -> list:
             lines.append("* " + " / ".join(parts))
     act = [_int_or_zero(a) for a in member["actual"]]
     if len(act) == len(STAT_LABELS) and all(act):
-        lines.append("* 実数値:" + "-".join(str(a) for a in act))
+        label = BUILD_ARTICLE_ACTUAL_BASE_LABEL if member.get("actual_is_base_form") else BUILD_ARTICLE_ACTUAL_LABEL
+        lines.append(f"* {label}:" + "-".join(str(a) for a in act))
     if member["moves"]:
         lines.append("* " + " / ".join(member["moves"]))
     return lines
@@ -317,13 +322,15 @@ def _paragraph_lines(node: Node) -> list:
     return [text] if text else []
 
 
-def team_unit_text(block: list) -> tuple:
-    """1 構築の要素の列 → (正規形の本文, 個体 (表示名の辞書) の列, 選出の文の数)"""
+def team_unit_text(block: list, dic=None) -> tuple:
+    """1 構築の要素の列 → (正規形の本文, 個体 (表示名の辞書) の列, 選出の文の数)。dic (ArticleDictionary) を渡すと、data-name 自体が
+    メガの名前の個体 (トグル無し) を辞書で見分けて、その data-stat を通常形態の実数値として扱う"""
     members: list = []
     desc_lines: list = []
     selection_lines: list = []
     in_selection = False
     current_title = ""
+    mega_forms = None
     for node in block:
         if node.tag == "ol" and PARTY_LIST_CLASS in node.classes():
             for li in node.find_all("li"):
@@ -334,6 +341,12 @@ def team_unit_text(block: list) -> tuple:
                     form = active_form(li)
                     m = parse_form(form) if form is not None else None
                 if m:
+                    if dic is not None and m.get("actual") and not m.get("actual_is_base_form") and li.attrs.get("data-name"):
+                        if mega_forms is None:
+                            from tools.team_build.article_parse import mega_table
+                            mega_forms = mega_table()["forms"]
+                        if dic.species_id(m["name"]) in mega_forms:
+                            m["actual_is_base_form"] = True     # 名前がメガの形態なら data-stat は通常形態の値
                     members.append(m)
             continue
         if node.tag == "h3":
@@ -384,7 +397,7 @@ def gamewith_units(html_text: str, source: Optional[dict] = None, meta: Optional
     src.setdefault("host", HOST)
     units = []
     for idx, (title, block) in enumerate(blocks):
-        marked, members, n_sel = team_unit_text(block)
+        marked, members, n_sel = team_unit_text(block, dic)
         if not members:
             continue
         m = dict(base_meta)

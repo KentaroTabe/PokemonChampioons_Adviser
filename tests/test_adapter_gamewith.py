@@ -43,7 +43,7 @@ def _td(name, sid, mark=None):
 # 1 構築目: メガ候補 1 体 (通常 / メガ の 2 form、既定はメガ) + 5 体。記事の例と同じ型の数値 (メガラグラージ / ペリッパー …)
 TEAM1_MEMBERS = [
     _li([_form("ラグラージ", "100", "ラグラージナイト", "げきりゅう", ["ウェーブタックル", "じしん", "れいとうパンチ", "どくづき"],
-               [177, 162, 120, 103, 110, 102], [2, 32, "-", "-", "-", 32], "ようき"),
+               [177, 162, 110, 94, 110, 123], [2, 32, "-", "-", "-", 32], "ようき"),
          _form("メガラグラージ", "101", "ラグラージナイト", "すいすい", ["ウェーブタックル", "じしん", "れいとうパンチ", "どくづき"],
                [177, 202, 130, 103, 130, 134], [2, 32, "-", "-", "-", 32], "ようき", active=True)], toggle=True),
     _li([_form("ペリッパー", "102", "しめったいわ", "あめふらし", ["ぼうふう", "なみのり", "とんぼがえり", "おいかぜ"],
@@ -158,7 +158,7 @@ RAW_HTML = f"""<html><body><div id="article-body">
 <div class="gw_all_table"><table><tbody><tr><th>評価</th><th>チームID</th></tr><tr><td>S</td><td>RAW0001</td></tr></tbody></table></div>
 <ol class="wd-pkch-pkmlist" data-auto-generate="true">
 {_li_raw('ラグラージ', '100', 'ラグラージナイト', 'げきりゅう', ['ウェーブタックル', 'じしん', 'れいとうパンチ', 'どくづき'], 'ようき',
-         [177, 162, 120, 103, 110, 102], [2, 32, 0, 0, 0, 32], init='form1', form1=('メガラグラージ', '101', 'すいすい'))}
+         [177, 162, 110, 94, 110, 123], [2, 32, 0, 0, 0, 32], init='form1', form1=('メガラグラージ', '101', 'すいすい'))}
 {_li_raw('ペリッパー', '102', 'しめったいわ', 'あめふらし', ['ぼうふう', 'なみのり', 'とんぼがえり', 'おいかぜ'], 'ひかえめ',
          [167, 63, 120, 158, 92, 88], [32, 0, 0, 29, 2, 3])}
 </ol>
@@ -175,15 +175,19 @@ def test_raw_data_attributes():
     assert len(units) == 1 and units[0]["meta"]["team_code"] == "RAW0001" and units[0]["meta"]["regulation"] == "gen9championsbssregmc"
     lines = units[0]["marked"].splitlines()
     assert lines[1] == f"* [メガラグラージ]({GW}/101)@ラグラージナイト(ようき)すいすい"
-    assert lines[2] == "* HP:2 / 攻撃:32 / 素早:32" and lines[3] == "* ウェーブタックル / じしん / れいとうパンチ / どくづき"   # 実数値の行は無い
-    assert lines[4] == f"* [ペリッパー]({GW}/102)@しめったいわ(ひかえめ)あめふらし"
-    assert lines[5] == "* HP:32 / 特攻:29 / 特防:2 / 素早:3" and lines[6] == "* ぼうふう / なみのり / とんぼがえり / おいかぜ"   # data-stat は使わない
+    assert lines[2] == "* HP:2 / 攻撃:32 / 素早:32" and lines[3] == "* 通常形態の実数値:177-162-110-94-110-123"   # メガの個体: data-stat は通常形態の値 (形態を明示)
+    assert lines[4] == "* ウェーブタックル / じしん / れいとうパンチ / どくづき"
+    assert lines[5] == f"* [ペリッパー]({GW}/102)@しめったいわ(ひかえめ)あめふらし"
+    assert lines[6] == "* HP:32 / 特攻:29 / 特防:2 / 素早:3" and lines[7] == "* 実数値:167-63-120-158-92-88"     # 通常の形態はそのまま実数値
     assert "基本選出はペリッパー(初手)、メガラグラージ。" in lines
     parsed = P.parse_article(units[0]["marked"], dic, host="gamewith.jp")
     assert [m["species_id"] for m in parsed["members"]] == ["swampertmega", "pelipper"]
-    assert parsed["members"][0]["actual"] is None and parsed["members"][1]["actual"] is None
+    assert parsed["members"][0]["actual"] is None and parsed["members"][0]["actual_base_form"] == [177, 162, 110, 94, 110, 123]
+    assert parsed["members"][1]["actual"] == [167, 63, 120, 158, 92, 88] and parsed["members"][1]["actual_base_form"] is None
     rec = B.build_validated_record(parsed, dict(units[0]["source"], synthetic=True), units[0]["meta"])
     assert rec["status"] == "incomplete" and all(not p.startswith("m") or ":moves:" in p or p.startswith("members") for p in rec["problems"])
+    # 検算の記録: メガの個体は通常形態の実数値が基本種 (ラグラージ) の計算値と一致、通常の個体は使用形態の実数値が一致
+    assert rec["checks"]["actual"] == {"m1": "absent", "m2": "verified"} and rec["checks"]["actual_base_form"] == {"m1": "verified", "m2": "absent"}
     rules = [r for r in rec["selection_rules"] if r["recommendation"] == "default"]
     assert len(rules) == 1 and rules[0]["lead"] == "m2" and sorted(rules[0]["selected_members"]) == ["m1", "m2"]
     # 注記つきの種名 (イエッサン(オス) → indeedeemale) は見出しで解決し、文中の短い名前「イエッサン」も同じ味方として読む (別の種にしない)
@@ -198,6 +202,19 @@ def test_raw_data_attributes():
     assert [m["species_id"] for m in gp["members"]] == ["swampertmega", "indeedeemale"]
     grec = B.build_validated_record(gp, dict(gu[0]["source"], synthetic=True), gu[0]["meta"])
     assert not any("species_outside_team" in p for p in grec["problems"]) and grec["selection_rules"][0]["lead"] == "m2"
+    # メガの個体の特性: メガ前の特性 (げきりゅう = ラグラージで合法) は pre_mega_ability に残して ability をメガ後 (すいすい) に。
+    # 基本形態でも合法でない特性 (メガリザードン Y に ちからもち) は補正せず、検査で矛盾 (conflict) にする (2026-10-06 ユーザー指摘)
+    pre = RAW_HTML.replace("data-form1-ability='すいすい'", "data-form1-ability='げきりゅう'")
+    pu = G.gamewith_units(pre, source={"url": f"{GW}/555537"}, dic=dic)
+    pp = P.parse_article(pu[0]["marked"], dic, host="gamewith.jp")
+    assert pp["members"][0]["ability"] == "swiftswim" and pp["members"][0]["pre_mega_ability"] == "torrent" and "ability_pre_mega" in pp["members"][0]["notes"]
+    bad_ab = RAW_HTML.replace("data-form1-ability='すいすい'", "data-form1-ability='ちからもち'")
+    bu = G.gamewith_units(bad_ab, source={"url": f"{GW}/555537"}, dic=dic)
+    bp = P.parse_article(bu[0]["marked"], dic, host="gamewith.jp")
+    assert bp["members"][0]["ability"] == "hugepower" and bp["members"][0]["pre_mega_ability"] is None
+    assert "ability_not_legal_for_form" in bp["members"][0]["warnings"]
+    brec = B.build_validated_record(bp, dict(bu[0]["source"], synthetic=True), bu[0]["meta"])
+    assert brec["status"] == "conflict" and "m1:ability_illegal:hugepower" in brec["problems"]
     print("test_raw_data_attributes OK")
 
 

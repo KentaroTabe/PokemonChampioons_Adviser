@@ -122,6 +122,8 @@ SELECTION_V2 = (
     "相手にトリルがいるならペリッパー、カイリュー。",                                       # s15: 述語の無い列挙の味方でない種は採らない
     "相手構築にゴリランダーとカイリューがいる場合はサーフゴーを選出します。",               # s16: 「と」→ all_of
     "基本選出はペリッパー、メガラグラージ、ブリジュラスですが、相手にゴリランダーがいる場合はサーフゴーを選出します。",  # s17: 1 文に 2 規則
+    "相手に炎タイプがいる場合はサーフゴーとバンギラスを選出します。",                        # s18: type_present (在、タイプの漢字の略記)
+    "相手にゴーストタイプのポケモンがいなければメガラグラージを選出します。",               # s19: type_present (不在)
 )
 SYNTHETIC_V2 = MEMBERS_PART + "戦術と解説\n" + "\n".join(SELECTION_V2) + "\n"
 # 代表 1 体だけ型があり、全体の節に述語の無い列挙の選出規則がある合成記事 (種名だけ分かる個体は変換層が別に渡す)
@@ -456,6 +458,14 @@ def test_selection_schema_v2():
     r_default, r_cond = one[17]
     assert r_default["condition"] is None and r_default["selected_members"] == ["m1", "m2", "m3"] and r_default["exact_trio"] is True
     assert r_cond["condition"]["predicate"] == "species_present" and r_cond["selected_members"] == ["m5"]
+    # s18 / s19: タイプの在否 (type_present。2026-10-06 ユーザー判断)。判定の結果 (true / false / unknown) は予測側が出す。
+    # 条件はメガ前 (選出時点で見える形態) について (value.form = base)
+    (r,) = one[18]
+    assert r["condition"] == _cond("type_present", {"type": "Fire", "present": True, "form": "base"}, "species")
+    assert r["selected_members"] == ["m5", "m6"] and r["exact_trio"] is False
+    (r,) = one[19]
+    assert r["condition"] == _cond("type_present", {"type": "Ghost", "present": False, "form": "base"}, "species")
+    assert r["selected_members"] == ["m2"]
     # どの規則にも確率は無く、記録の門 (本文なし) を通る
     assert not any(k in r for r in parsed["selection_rules"] for k in ("probability", "prob", "weight"))
     rec = B.build_record(parsed, source={"synthetic": True}, meta={})

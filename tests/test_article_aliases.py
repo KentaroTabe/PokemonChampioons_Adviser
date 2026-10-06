@@ -275,13 +275,17 @@ def test_dictionary_uses_confirmed_only():
     assert dic.alias_count == 2 and "aliases:2:" in dic.version
     base = P.ArticleDictionary(raw)
     assert base.alias_count == 0 and base.version.endswith("/aliases:0") and dic.with_aliases(None).version == base.version
-    # 同梱の別名辞書 (vision/data/article_aliases.json): 10/6 に GameWith の実ページで見つけたメガ石の略記 3 件を人が足した (basis human、confirmed)。
-    # 同梱の entry は全部 confirmed で、辞書の件数と一致し、往復一致を通る
+    # 同梱の別名辞書 (vision/data/article_aliases.json、10/6): ピクシナイト → ピクシーナイト (basis agent: 正式表記は未確定)、
+    # カイリューナイト → カイリュナイト / マフォクシーナイト → マフォクシナイト (basis human: ユーザーが公式資料で確認して名前表を直した)。
+    # 同梱の entry は全部 confirmed で、辞書の件数と一致し、往復一致を通る。根拠は人の確認 (human) と実装エージェントの判断 (agent) を分ける
     bundled = A.load_aliases()
-    assert bundled["entries"] and all(e["status"] == "confirmed" and e["basis"] == "human" for e in bundled["entries"])
+    assert bundled["entries"] and all(e["status"] == "confirmed" and e["basis"] in ("human", "agent") for e in bundled["entries"])
+    assert {e["alias"]: e["basis"] for e in bundled["entries"]} == {"ピクシナイト": "agent", "カイリューナイト": "human", "マフォクシーナイト": "human"}
     assert P.default_dictionary().alias_count == len(bundled["entries"])
     assert all(A.roundtrip_ok(P.default_dictionary(), e["category"], e["canonical"], e["id"]) for e in bundled["entries"])
     assert P.default_dictionary().lookup("items", "ピクシナイト") == "clefablite"
+    assert P.default_dictionary().lookup_exact("items", "カイリュナイト") == "dragoninite"          # 名前表の正規表記 (公式)
+    assert P.default_dictionary().lookup("items", "カイリューナイト") == "dragoninite"              # 旧表記は別名
     # 解析: confirmed の別名で説明文の「地震」が技 id になり、未解決の名前から消える
     parsed = P.parse_article(SYNTHETIC, dic)
     assert parsed["unresolved_names"] == [] and parsed["dictionary_version"] == dic.version
@@ -299,9 +303,11 @@ def test_add_alias_and_real_page_names():
     dic = P.default_dictionary()
     data = A.empty_aliases()
     data, code = A.add_alias(data, "items", "ピクシナイト", "ピクシーナイト", today=TODAY, dic=dic)
-    assert code == "added" and data["entries"][0]["id"] == "clefablite" and data["entries"][0]["basis"] == "human"
+    assert code == "added" and data["entries"][0]["id"] == "clefablite" and data["entries"][0]["basis"] == "agent"   # 既定は agent (人の確認なし)
     assert A.add_alias(data, "items", "ピクシナイト", "ピクシーナイト", today=TODAY, dic=dic)[1] == "exists"
-    assert A.add_alias(data, "items", "ピクシナイト", "マフォクシーナイト", today=TODAY, dic=dic)[1] == "conflict"
+    assert A.add_alias(data, "items", "ピクシナイト", "マフォクシナイト", today=TODAY, dic=dic)[1] == "conflict"
+    data2, code2 = A.add_alias(data, "items", "カイリューナイト", "カイリュナイト", today=TODAY, dic=dic, basis="human")
+    assert code2 == "added" and data2["entries"][1]["basis"] == "human" and A.add_alias(data, "items", "x", "ピクシーナイト", dic=dic, basis="llm")[1] == "basis"
     assert A.add_alias(data, "items", "謎の石", "存在しない石", today=TODAY, dic=dic)[1] == "canonical_unresolved"
     assert A.add_alias(data, "items", "文です。", "ピクシーナイト", today=TODAY, dic=dic)[1] == "not_name_token"
     assert P.ArticleDictionary(P.json.loads(P.JP_NAMES_PATH.read_text(encoding="utf-8")), data).lookup("items", "ピクシナイト") == "clefablite"

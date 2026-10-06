@@ -182,6 +182,27 @@ def test_save_load_synthetic_gate():
     print("test_save_load_synthetic_gate OK")
 
 
+def test_merge_selection_rules():
+    """同じ条件・個体・初手・推奨の複数記述は 1 つにまとめ (source_refs に根拠を全部残す)、どれかに「など」があれば example / exact_trio False。
+    条件や初手が違えば別の規則のまま (2026-10-06 ユーザー判断)"""
+    base = {"kind": "author_selection_rule", "condition": None, "selected_members": ["m1", "m2", "m3"], "selected_species": [], "lead": "m1",
+            "lead_species": None, "recommendation": "default", "exact_trio": True, "example": False, "free_slots": 0}
+    table = dict(base, example=True, exact_trio=False, source_ref="team:s1")                  # 表の文 (など)
+    prose = dict(base, source_ref="team:s3", selected_members=["m3", "m1", "m2"])            # 本文の文 (順が違う、など無し)
+    other_lead = dict(base, lead="m2", source_ref="team:s4")
+    cond = dict(base, condition={"predicate": "species_present"}, recommendation="preferred", source_ref="team:s5")
+    merged = B.merge_selection_rules([table, prose, other_lead, cond])
+    assert len(merged) == 3
+    assert merged[0]["source_refs"] == ["team:s1", "team:s3"] and merged[0]["source_ref"] == "team:s1"
+    assert merged[0]["example"] is True and merged[0]["exact_trio"] is False                  # 本文に「など」が無くても格上げしない
+    assert merged[1]["source_refs"] == ["team:s4"] and merged[1]["exact_trio"] is True and merged[2]["source_refs"] == ["team:s5"]
+    assert prose["source_ref"] == "team:s3" and "source_refs" not in prose                     # 元の列は変えない
+    assert B.merge_selection_rules([]) == []
+    rec = B.build_record({"members": [], "selection_rules": [table, prose]}, source={"synthetic": True})
+    assert len(rec["selection_rules"]) == 1 and rec["selection_rules"][0]["source_refs"] == ["team:s1", "team:s3"]
+    print("test_merge_selection_rules OK")
+
+
 def test_host_policy_urls_and_purposes():
     """ホストの方針: allowed_urls があれば URL も見る (正規化して比較、URL 無しは不可)、purposes があれば用途を制限する、
     ホスト名は www. とポートを落として比較、unknown は進めない。usable_for も policy を渡せば用途の制限を見る (2026-10-06 ユーザー判断)"""
@@ -307,6 +328,7 @@ def main() -> None:
     test_usable_for_branches()
     test_set_regulation_history()
     test_save_load_synthetic_gate()
+    test_merge_selection_rules()
     test_host_policy_urls_and_purposes()
     test_facets_and_status()
     test_validate_named_and_selected_species()

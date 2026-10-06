@@ -122,7 +122,8 @@ def member_from_entry(entry: dict, dic: ArticleDictionary) -> tuple:
         actual = None
     member = {"species_id": head["species_id"], "base_species_id": head["base_species_id"], "mega_stone": head["mega_stone"],
               "item": head["item"], "nature": head["nature"], "ability": head["ability"], "id": "m1", "points": pts, "ev252": None,
-              "actual": actual, "moves": moves, "alt_move_lines": 0, "warnings": list(head["warnings"]), "notes": list(head["notes"])}
+              "actual": actual, "actual_base_form": None, "pre_mega_ability": head.get("pre_mega_ability"), "moves": moves, "alt_move_lines": 0,
+              "warnings": list(head["warnings"]), "notes": list(head["notes"])}
     return member, problems
 
 

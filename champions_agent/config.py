@@ -518,6 +518,8 @@ BUILD_ARTICLE_STAT_WORDS = {"hp": ("HP", "H", "体力"), "atk": ("攻撃", "A"),
                             "spd": ("特防", "D", "特殊防御"), "spe": ("素早", "素早さ", "S", "すばやさ")}   # 配分の行の能力名
 BUILD_ARTICLE_EV252_LABEL = "252表示"        # 配分の行がこの語を含めば 252 表示 (能力ポイントと別の種類として保持)
 BUILD_ARTICLE_ACTUAL_LABEL = "実数値"        # 実数値の行の語 (6 つの数を - で繋いだもの)
+BUILD_ARTICLE_ACTUAL_BASE_LABEL = "通常形態の実数値"   # メガの個体で、記事がメガ前 (通常の形態) の実数値を載せているときの行の語。基本種の計算値と比べる
+                                             # (GameWith の data-stat は通常の形態の値。形態を明示して保持し、検算の有無を記録に残す。2026-10-06 ユーザー判断)
 BUILD_ARTICLE_EV252_MAX = 252                # 252 表示の 1 能力の上限。ラベルの無い配分の行は、全部が能力ポイントの上限 (BUILD_GEN_EV_POINT_CAP) 以下なら能力ポイント
 BUILD_ARTICLE_EV252_PER_POINT, BUILD_ARTICLE_EV252_OFFSET = 8, 4   # 能力ポイント p (> 0) の 252 表示 = 8p − 4 (32 → 252、2 → 12)。整合性の検査にだけ使う (換算して保存しない)
 BUILD_ARTICLE_HEADING_MAX_CHARS = 24         # リンクの無い短い行が節の見出し語を含めば見出しとみなす長さの上限
@@ -602,11 +604,18 @@ BUILD_ARTICLE_MANY_WORDS = ("多い", "多め", "多く")   # 「多い」→ ty
 BUILD_ARTICLE_COUNT_COMPARATORS = {"以上": ">=", "以下": "<=", "超": ">", "未満": "<"}   # type_count の比較の語 → op (比較の語の無い数は条件にしない)
 BUILD_ARTICLE_COUNTER_WORDS = ("体", "匹")       # type_count の数え方の語
 BUILD_ARTICLE_NUMERAL_WORDS = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6}   # 漢数字 (算用数字は NFKC で読む)
-BUILD_ARTICLE_CONDITION_EVALUATION = {"species_present": "species", "type_count": "species_count", "type_many": "unknown", "role": "unknown",
-                                      "move_type_present": "set_known_only", "weather_control": "set_known_only", "trick_room": "set_known_only",
-                                      "sand": "set_known_only", "rain": "set_known_only", "setup": "unknown", "stall": "unknown"}
+BUILD_ARTICLE_CONDITION_EVALUATION = {"species_present": "species", "type_present": "species", "type_count": "species_count", "type_many": "unknown",
+                                      "role": "unknown", "move_type_present": "set_known_only", "weather_control": "set_known_only",
+                                      "trick_room": "set_known_only", "sand": "set_known_only", "rain": "set_known_only", "setup": "unknown",
+                                      "stall": "unknown"}
                                              # 述語 → 判定の可否: species = 確定した種で判定 / species_count = 判明している種・フォルムの範囲で数える /
                                              # set_known_only = 相手の型が確認できたときだけ / unknown = 初版は判定しない (規則は保存する)。表に無い述語は unknown
+                                             # type_present (2026-10-06 ユーザー判断): 判定の結果は true / false / unknown。確定した個体に対象タイプがあれば true、
+                                             # 全枠が確定して無ければ false、未確定枠やフォルムで結果が変わるなら unknown。タイプは選出時点で見える形態 (メガ前) で見る
+BUILD_ARTICLE_TYPE_PRESENT_FORM = "base"      # type_present の value.form: 条件はメガ前 (選出時点で確認できる形態) について。メガ後の形態を成立済みとして扱わない
+BUILD_ARTICLE_MEGA_BASE_FORM_OVERRIDES = {"floettemega": "floetteeternal"}
+                                             # メガ前の形態が図鑑の baseSpecies (種) と違うメガ: メガフラエッテは えいえんのはな の形態からだけ (champions_dex に
+                                             # その情報が無い)。10/6 の GameWith の実ページで通常形態の実数値が floetteeternal の計算値と一致した
 BUILD_ARTICLE_CONDITION_EVALUATION_ORDER = ("species", "species_count", "set_known_only", "unknown")   # 強い → 弱い (複数の条件の全体は最も弱いもの)
 BUILD_ARTICLE_CONDITION_MANY_EVALUATION = "unknown"   # quantity = many の条件の判定 (「多い」の基準を付け足さない。type_many と同じ理由)
 BUILD_ARTICLE_SELECTION_MARKERS = {"基本選出": "default", "基本選出例": "default", "選出例": "preferred"}
