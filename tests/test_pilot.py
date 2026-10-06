@@ -63,12 +63,20 @@ def test_choose_primary():
     assert adv["mega_picks"] == ["B"] and "学習モデル" in adv["reason"]
     txt = format_selection_advice(dict(adv, kind="selection"))
     assert txt.startswith("◎ 推奨選出 (学習モデル): ★D → B → A") and "参考 (相性の規則): ★A → B → C" in txt and "🤖" not in txt
-    # 未学習 (参考値) なら規則が第一候補のまま、モデルは併記
-    untrained = dict(base, model_pick=dict(base["model_pick"], trained=False))
-    adv2 = choose_primary(untrained, prefer_model=True)
-    assert adv2["primary"] == "rule" and [r["index"] for r in adv2["recommend"]] == [0, 1, 2]
+    assert adv["model_trained"] is True
+    # 未学習の配布版の推しも第一候補 (2026-10-06 判断: 第 18 回で規則の一致 1/15、シム 配布版 0.703 / 規則 0.457)。記録用に未学習を残す
+    untrained = dict(base, model_pick=dict(base["model_pick"], trained=False, model="deployed"))
+    adv2 = choose_primary(dict(untrained), prefer_model=True)
+    assert adv2["primary"] == "model" and adv2["model_trained"] is False and [r["index"] for r in adv2["recommend"]] == [3, 1, 0]
     txt2 = format_selection_advice(dict(adv2, kind="selection"))
-    assert txt2.startswith("◎ 推奨選出: ★A → B → C") and "🤖 学習モデルの推し" in txt2 and "参考値" in txt2
+    assert txt2.startswith("◎ 推奨選出 (学習モデル・未学習): ★D → B → A") and "未学習" in adv2["reason"] and "参考 (相性の規則)" in txt2
+    # 未学習を ◎ にしない設定なら従来どおり規則が第一候補で、モデルは参考値として併記
+    adv3 = choose_primary(dict(untrained), prefer_model=True, allow_untrained=False)
+    assert adv3["primary"] == "rule" and [r["index"] for r in adv3["recommend"]] == [0, 1, 2] and "model_trained" not in adv3
+    txt3 = format_selection_advice(dict(adv3, kind="selection"))
+    assert txt3.startswith("◎ 推奨選出: ★A → B → C") and "🤖 学習モデルの推し" in txt3 and "参考値" in txt3
+    # モデルの推しが無ければ規則
+    assert choose_primary(dict(base, model_pick={}), prefer_model=True)["primary"] == "rule"
     # 設定 off なら従来どおり
     assert choose_primary(dict(base), prefer_model=False)["primary"] == "rule"
     assert choose_primary({"ok": False, "reason": "x"}, prefer_model=True)["primary"] == "rule"

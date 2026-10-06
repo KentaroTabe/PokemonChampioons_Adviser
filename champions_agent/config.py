@@ -263,6 +263,10 @@ BUILD_REPRO_GATE = True
 # 相手系統: 種族集合の Jaccard がこれ以上 (6体中4体共通 = 4/8) で同一系統
 BUILD_FAMILY_JACCARD = 0.5
 BUILD_SPLIT_RATIOS = {"search": 0.5, "selection": 0.3, "holdout": 0.2}
+# 分割 (S2) の seed を規制ごとに固定する (2026-10-06 判断、PENDING §7.4-3): 最初の run の seed を logs/registry/split_seeds.json に記録し、
+# 同じ規制の run は同じ seed で分割する (参照の適応・fold の記録を run 間で再利用するため)。holdout は封印のまま。測定の相手列の seed は
+# run の seed のまま。False なら従来 (run の seed)。tools/team_build/split_seed
+BUILD_SPLIT_SEED_FIXED = True
 BUILD_SEARCH_FOLDS = 3                 # SEARCH 内の cross-fitting (A: 適応の収集 / B: 評価 / V: checkpoint 選択の検証)
 BUILD_FOLD_ADAPT, BUILD_FOLD_EVAL, BUILD_FOLD_VALIDATE = 0, 1, 2
 # S7 の checkpoint 選択 (2026-09-07 決定): val_mse ではなく独立 fold (V) の実測勝率で選ぶ。learning curve で
@@ -801,6 +805,12 @@ SELECTION_FEATURES = "v1"
 # 相性の規則の推奨は参考に併記する (advisor.selection.choose_primary)。False なら従来 (規則が ◎、モデルは併記)。
 # 2026-10-05: 実戦の 9 戦で推奨とモデルの推しが一致した対戦は 0、測定はモデルの選出で測っているのに実戦は規則で選んでいた
 SELECTION_PRIMARY_MODEL = True
+# 登録チームで学習していない (分布外の) 配布版の推しも第一候補にするか (2026-10-06 運用側の提案 → 判断)。
+# 第 18 回の 15 戦: ◎ は全部規則で、規則の 3 体と実際の選出の一致は 1/15。未学習のモデルの推しの方が実際の選出に近かった
+# (3 体一致 2 戦 / 2 体 10 戦)。改善 run (参照 = 登録の 6 体、同じ操縦者、各 300 戦) でも 配布版 0.703 / 汎用 0.613 / 規則 0.457。
+# 規則は「モデルがパーティの 6 体を評価できない」ときの予備。軽い適応 (1,000 戦、参照で 0.313) のモデルは実戦の経路には入れない
+# (advisor_model_path が返すのは試用 Package / 登録チーム向け (registered) / 配布版だけ)
+SELECTION_PRIMARY_UNTRAINED_MODEL = True
 # 自己加速 (S3 の役割 speed_boost = 加速後に上を取れる脅威の割合): 特性の倍率 (かるわざは消費アイテム持ちのときだけ) と
 # 加速技の倍率 (1 回積んだ後)。効果は最大のもの 1 つを採る
 BUILD_SPEED_BOOST_ABILITIES = {"speedboost": 1.5, "unburden": 2.0}

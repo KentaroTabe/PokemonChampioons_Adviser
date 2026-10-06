@@ -144,6 +144,9 @@ sonnetは疑い箇所の検証+少数サンプルの網羅に専念する (タ�
 | `python -m tools.team_build.articles_ingest --csv logs/articles/blogs.csv [--include-unconfirmed] [--check-robots] [--out F]` | 記事バンクの前段: 上位プレイヤーのブログ一覧 (CSV) → 取得対象の一覧 logs/articles/manifest.json (URL の正規化と重複排除、ダブル / シングルの分類、シーズン → 規制、順位、robots.txt の可否)。本文の取得と LLM の抽出はしない (次の段) |
 | `python -m tools.advice_trace [--last N \| --battle F] [--json]` | 助言の追跡 (2026-10-05 ②): 対戦ログの version 行 (指定 Package / 実際に読んだ選出モデルの sha / 退避理由) と Package の manifest の一致、助言 ID ごとの生成時刻と表示時刻 (ブラウザが返す)、古い状態への表示、推奨がシステムの状態で選べたか、を 1 本で出す。docs/ADVICE_TRACE_1005.md |
 | `python -m tools.scene_eval extract --out logs/scenes/set1.jsonl [--consistent 20] [--failure 10]` / `evaluate --set F [--json]` | 正解つき局面 (③): 対戦中の助言から整合 20 + 既知の失敗 10 の雛形を切り出し (truth は人が埋める: 正しい状態・選べる行動・表示期限)、当時の推奨 / 復元した状態での推奨 / 正しい状態での推奨と、feasible_system / feasible_truth、期限内の表示を比べる。この局面集の誤り率は実戦全体の発生率ではない |
+| `python -m tools.team_build.register_selection --run-id R [--arm reference] [--force]` / `--package <id>` / `--status` / `--remove <key>` | 登録チーム向けの選出モデル (2026-10-06): run の参照 (= 登録の 6 体) の適応 (独立 fold の検証で選んだ checkpoint) を 6 体の鍵で `logs/registry/registered/<key>/` に置く。助言サーバーは 試用 Package → 登録チーム向け → 配布版 の順に引く (`selection_dispatch.advisor_model_path`)。軽い適応 (S8a cheap) は登録しない |
+| `python -m tools.team_build.experiments.cheap_drift --run-id R [--arm reference] [--n 60] [--tier selection]` | 実験 14: 軽い適応 (cheap) の選出モデルと汎用モデルの 120 通りの点を相手ごとに比べる (広がりの比 / 順位相関 / 最良の一致 / 平均の差)。改善 run で cheap が参照で 0.313 (汎用 0.613) になった原因 (順位の情報が平らになる) の確認用 |
+| `python -m tools.team_build.run … [--split-seed N]` | S2 の分割の seed は規制ごとに固定 (2026-10-06、`BUILD_SPLIT_SEED_FIXED`、`logs/registry/split_seeds.json`)。manifest に `seed` (run) と `split_seed` / `split_seed_source` を分けて残す。`--split-seed` で上書き |
 
 進化探索は相手分布に `--forecast-mix` (使用率トレンドの1期外挿。履歴が
 2ヶ月分たまるまで自動無効) と `--archive-mix` (過去の優勝チーム=PSRO反復)

@@ -905,6 +905,8 @@ def main() -> None:
     ap.add_argument("--llm", choices=["none", "headless"], default="none")
     ap.add_argument("--top-n", type=int, default=BUILD_POOL_TOP_N)
     ap.add_argument("--seed", type=int, default=20260906)
+    ap.add_argument("--split-seed", type=int, default=None,
+                    help="S2 の分割の seed を指定する (既定: 規制ごとに固定した seed。tools/team_build/split_seed、BUILD_SPLIT_SEED_FIXED)")
     ap.add_argument("--stages", choices=["search", "measure", "all"], default="search",
                     help="search=S0〜S6 / measure=S7〜S13 (既存の run に対して) / all")
     ap.add_argument("--reuse-concepts", action="store_true",
@@ -1026,6 +1028,12 @@ def main() -> None:
     write_manifest(run_dir, manifest)
     log(run_dir, f"run {args.run_id} start (commit {str(manifest.get('git_commit'))[:8]})")
     spec = stage_s0(run_dir, spec, legal)
+    # S2 の分割の seed は規制ごとに固定 (2026-10-06 判断): run の seed と分割の seed を manifest に分けて残す
+    from tools.team_build.split_seed import split_seed_for
+    split_seed, split_src = split_seed_for(spec.regulation, args.seed, override=args.split_seed)
+    manifest.update({"split_seed": split_seed, "split_seed_source": split_src, "regulation": spec.regulation})
+    write_manifest(run_dir, manifest)
+    log(run_dir, f"S2 split seed {split_seed} ({split_src}; run seed {args.seed})")
     session_w = {}
     if args.threat_weights_file:
         session_w = {k: float(v) for k, v in json.loads(Path(args.threat_weights_file).read_text(encoding="utf-8")).items()}
@@ -1036,7 +1044,7 @@ def main() -> None:
             sid = resolve_species_token(tok)
             if sid:
                 session_w[sid] = max(session_w.get(sid, 0.0), 1.0)
-    doc, split, tv, feats = stage_s1_s3(run_dir, spec, prof, args.seed, args.top_n, extra_threats=list(session_w),
+    doc, split, tv, feats = stage_s1_s3(run_dir, spec, prof, split_seed, args.top_n, extra_threats=list(session_w),
                                         pool_source=args.pool_source)
     threats = list(tv.keys())
     threat_weights = {t["id"]: threat_weight(t) for t in doc["top"] if t["id"] in tv}

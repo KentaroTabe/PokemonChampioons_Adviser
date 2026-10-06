@@ -371,6 +371,8 @@ class BattleLogger:
             mp = (advice.get("model_pick") or {}) if kind == "selection" else {}
             rec["policy"] = {"selection": (mp.get("model") if kind == "selection" else None),
                              "primary": advice.get("primary") if kind == "selection" else None,
+                             # ◎ がモデルのとき、登録チームで学習済みか (2026-10-06: 未学習の配布版も ◎ になるので層別に要る)
+                             "model_trained": (advice.get("model_trained") if kind == "selection" else None),
                              "rl_loaded": rl_loaded_now() if kind == "battle" else None}
         except Exception:
             pass

@@ -26,6 +26,12 @@ def test_versions():
     doc = V.summarize_versions("pkg1", "/m/sel.pt", "abc123", "pkg1", ["a", "b", "c", "d", "e", "f"], ["a", "b", "c", "d", "e", "f"],
                                "/m/rl.zip", "def456", True, None, "teamsha", "gitsha", "dex", "eff", "v1")
     assert doc["selection_model"]["fallback_reason"] is None and doc["version_id"] == V.digest(doc)
+    assert doc["selection_model"]["source"] == "package"
+    # 登録チーム向けのモデル (registered:<鍵>) は source registered。Package のラベルがあればその退避理由は残る
+    dr = V.summarize_versions("pkg1", "/m/reg.pt", "r1", "registered:abcd", ["a", "b", "c", "d", "e", "f"], ["a", "b", "c", "d", "e", "x"],
+                              None, None, None, None, "t", "g", "d", "e", "v1")
+    assert dr["selection_model"]["source"] == "registered" and dr["selection_model"]["fallback_reason"] == "party_not_in_package"
+    assert V.summarize_versions(None, "/m/deployed.pt", "z", None, None, ["a"], None, None, None, None, "t", "g", "d", "e", "v1")["selection_model"]["source"] == "deployed"
     assert V.digest(dict(doc, collected_at=1.0)) == doc["version_id"]                       # 時刻は digest に入らない
     # ラベルはあるが登録パーティが Package の 6 体に含まれない → 配布版に退避
     d2 = V.summarize_versions("pkg1", "/m/deployed.pt", "zzz", None, ["a", "b", "c", "d", "e", "f"], ["a", "b", "c", "d", "e", "x"],

@@ -140,7 +140,9 @@ def selection_compliance(records: list) -> dict:
             if adv.get("recommend"):
                 final, t_adv = adv, d.get("t")
     out = {"has_advice": final is not None, "primary": (final or {}).get("primary"), "members_match": None, "basis": "none",
-           "timely": None, "latency_s": None}
+           "timely": None, "latency_s": None,
+           # モデルが ◎ のとき、そのモデルが登録チームで学習済みか (2026-10-06: 未学習の配布版も ◎ になるので層別に要る)
+           "model_trained": ((final or {}).get("model_trained") if (final or {}).get("primary") == "model" else None)}
     if final is None:
         return out
     rec_idx = [r.get("index") for r in final["recommend"]]
@@ -193,6 +195,8 @@ def selection_compliance_rows(paths: list) -> dict:
             continue
         agg["n_with_advice"] += 1
         key = c["primary"] or "unknown"
+        if key == "model" and c.get("model_trained") is False:
+            key = "model_untrained"             # 未学習の配布版が ◎ だった対戦は分けて数える
         b = agg["by_primary"].setdefault(key, {"n": 0, "match": 0, "mismatch": 0})
         b["n"] += 1
         if c["members_match"] is True:

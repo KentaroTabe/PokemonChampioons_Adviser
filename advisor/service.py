@@ -105,8 +105,8 @@ class Advisor:
                                        format_selection_advice)
         try:
             result = advise_selection(state_dict, self.resolver)
-            # 学習済み選出モデルの推し (実戦比較では モデル0.51 > 相性0.29 > 乱択0.25)。登録チーム用の検証済みモデルか
-            # 分布内の配布版があればそれを第一候補にし、規則の推奨は参考に併記する (2026-10-05、choose_primary)
+            # 学習済み選出モデルの推し (実戦比較では モデル0.51 > 相性0.29 > 乱択0.25)。モデルの推しがあればそれを第一候補にし
+            # (未学習の配布版も: 2026-10-06 判断、SELECTION_PRIMARY_UNTRAINED_MODEL)、規則の推奨は参考に併記する (choose_primary)
             attach_model_pick(result,
                               state_dict.get("player", {}).get("party", []),
                               state_dict.get("opponent", {}).get("party", []))
