@@ -228,6 +228,10 @@ RATE_MAX_DELTA_PER_BATTLE = 30.0
 # battle_logger に直書きされていた 60)。下限未満の差は小数の読み違いとして増減に数えない (実測の 1 戦の変動は 12〜19)
 RATE_INFER_MAX_DELTA = 60.0
 RATE_INFER_MIN_DELTA = 1.0
+# 読み手 (analyze_battles / party_improvements / real_eval) がレートの読みの並びを対戦をまたいで解くとき (tools.battle_outcome.
+# solve_rate_chain)、同じ起動 (レートの読みが続く) とみなす対戦ログの間隔の上限 (秒)。1 戦の変動は RATE_MAX_DELTA_PER_BATTLE 以内、
+# RATE_INFER_MIN_DELTA 以上とする
+RATE_CHAIN_GAP_SEC = 1200.0
 # 勝敗の推定「最後に HP 0% を観測した側の負け」に使う観測の有効時間 (秒。これより前の観測は使わない。2026-10-06 まで
 # battle_logger に直書き)
 OUTCOME_LAST_ZERO_MAX_SEC = 180.0

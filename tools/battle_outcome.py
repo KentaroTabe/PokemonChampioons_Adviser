@@ -90,6 +90,137 @@ def outcome_from_records(records) -> tuple:
     return ot.result()
 
 
+def rate_reads_of(records) -> list:
+    """レコード列 → その対戦で読めたレート (値が変わるたびに 1 つ、時刻順)。読み手が rate_chain に渡す"""
+    reads: list = []
+    for d in records:
+        if d.get("type") == "rate" and d.get("value") is not None:
+            v = float(d["value"])
+            if not reads or reads[-1] != v:
+                reads.append(v)
+    return reads
+
+
+def solve_rate_chain(battles: list, min_delta: float, max_delta: float, max_vars: int = 16) -> list:
+    """同じ起動の対戦列 (レートの読みが続く) について、レートの読みの並びだけから決まる勝敗を解く (純粋)。
+    battles (時系列順): [{"outcome": "win" | "loss" | None (確定した勝敗。推定・不明は None), "reads": [レートの読み]}]
+    戻り値 (同じ長さ): [{"by_rate": "win" | "loss" | None, "n_solutions": int, "suspect_reads": bool}]
+
+    モデル: 対戦 i の前後のレートを ρ_{i-1}, ρ_i とし、勝ちなら +[min_delta, max_delta]、負けなら −[min_delta, max_delta] 動く。
+    終了画面で 1 回だけ読めた値は ρ_{i-1} (対戦前) か ρ_i (対戦後) のどちらか分からない (2026-10-06 第18回)。2 回以上読めたら
+    最初が ρ_{i-1}、最後が ρ_i。読みの種別と不明な勝敗の全組み合わせを数え上げ、読みで決まる値どうしの差が勝敗の数で
+    説明できる組み合わせだけを残す。不明な対戦の勝敗が、残った全組み合わせで同じならそれを by_rate にする。
+    組み合わせが 1 つも残らなければ (数字の誤読など)、読みを 1 対戦分だけ除いて解き直し、それで残るならその対戦の読みを
+    suspect_reads にする。変数 (1 回だけの読み + 不明な勝敗) が max_vars を超えるときは解かない (全部 None)。
+    第18回の 15 戦では、2 戦目 (記録は負けの推定、実際は勝ち) と 10・14 戦目 (記録は不明、実際は勝ち) が決まる"""
+    n = len(battles)
+    out = [{"by_rate": None, "n_solutions": 0, "suspect_reads": False} for _ in range(n)]
+    if n == 0:
+        return out
+
+    def _solve(skip: Optional[int]):
+        singles, fixed_pins = [], {}
+        for i, b in enumerate(battles):
+            reads = [float(v) for v in (b.get("reads") or [])] if i != skip else []
+            if len(reads) == 1:
+                singles.append((i, reads[0]))
+            elif len(reads) >= 2:
+                fixed_pins.setdefault(i, []).append(reads[0])          # 位置 i = 対戦 i (0 始まり) の前のレート
+                fixed_pins.setdefault(i + 1, []).append(reads[-1])     # 位置 i + 1 = 対戦 i の後のレート
+        # 読みが 1 つも掛からない範囲 (最初の読みより前 / 最後の読みより後) の不明な対戦は、どの差にも効かないので変数にしない
+        spots = [p for p in fixed_pins] + [p for i, _v in singles for p in (i, i + 1)]
+        if not spots:
+            return []
+        lo_pos, hi_pos = min(spots), max(spots)
+        unknowns = [i for i, b in enumerate(battles)
+                    if b.get("outcome") not in ("win", "loss") and lo_pos <= i < hi_pos]
+        if len(singles) + len(unknowns) > max_vars:
+            return None
+        base_pins: dict = {}
+        for pos, vals in fixed_pins.items():
+            if any(abs(v - vals[0]) >= min_delta for v in vals):
+                return []           # 同じ位置の読みが食い違う
+            base_pins[pos] = vals[0]
+        solutions = []
+        n_single, n_unk = len(singles), len(unknowns)
+        for mask in range(1 << (n_single + n_unk)):
+            pins = dict(base_pins)
+            ok = True
+            for k, (i, v) in enumerate(singles):
+                pos = i if (mask >> k) & 1 else i + 1          # 0 = 対戦後 (ρ_i)、1 = 対戦前 (ρ_{i-1})
+                if pos in pins and abs(pins[pos] - v) >= min_delta:
+                    ok = False
+                    break
+                pins[pos] = v
+            if not ok:
+                continue
+            outcomes = [b.get("outcome") for b in battles]
+            for k, i in enumerate(unknowns):
+                outcomes[i] = "win" if (mask >> (n_single + k)) & 1 else "loss"
+            positions = sorted(pins)
+            for a, bpos in zip(positions, positions[1:]):
+                seg = outcomes[a:bpos]              # 対戦 a+1 .. bpos (0 始まりでは a .. bpos-1)
+                w = sum(1 for o in seg if o == "win")
+                lo_sum, hi_sum = w * min_delta - (len(seg) - w) * max_delta, w * max_delta - (len(seg) - w) * min_delta
+                s = pins[bpos] - pins[a]
+                if not (lo_sum - 1e-9 <= s <= hi_sum + 1e-9):
+                    ok = False
+                    break
+            if ok:
+                solutions.append(tuple(outcomes[i] for i in unknowns))
+        return [(unknowns, sol) for sol in solutions]
+
+    found = _solve(None)
+    suspect = None
+    if found is not None and not found:
+        for i, b in enumerate(battles):
+            if b.get("reads"):
+                alt = _solve(i)
+                if alt:
+                    found, suspect = alt, i
+                    break
+    if not found:
+        return out
+    unknowns = found[0][0]
+    sols = [sol for _u, sol in found]
+    for k, i in enumerate(unknowns):
+        vals = {sol[k] for sol in sols}
+        out[i]["by_rate"] = vals.pop() if len(vals) == 1 else None
+    for i in range(n):
+        out[i]["n_solutions"] = len(sols)
+    if suspect is not None:
+        out[suspect]["suspect_reads"] = True
+    return out
+
+
+def apply_rate_chain(battles: list, gap_sec: float, min_delta: float, max_delta: float) -> int:
+    """読み手の対戦の一覧 (時系列順。各要素に t0 / t1 / outcome / inferred / reads) に rate_chain の結果を当てる (副作用: 一覧を書き換える)。
+    同じ起動の区切りは「前のログの最後から次のログの最初まで gap_sec 以内」。
+    勝敗が不明、または推定で、レートの並びで決まる値と違う対戦は outcome を置き換え、inferred=True と by_rate=True を付ける。
+    確定した勝敗 (文言・画面・ひんし) は変えない。戻り値: 置き換えた数"""
+    changed = 0
+    groups: list = []
+    for b in battles:
+        if groups and b.get("t0") is not None and groups[-1][-1].get("t1") is not None \
+                and (b["t0"] - groups[-1][-1]["t1"]) <= gap_sec:
+            groups[-1].append(b)
+        else:
+            groups.append([b])
+    for g in groups:
+        known = [{"outcome": (b.get("outcome") if (b.get("outcome") in ("win", "loss") and not b.get("inferred")) else None),
+                  "reads": b.get("reads") or []} for b in g]
+        res = solve_rate_chain(known, min_delta, max_delta)
+        for b, r in zip(g, res):
+            b["rate_chain"] = r
+            if r["by_rate"] and (b.get("outcome") not in ("win", "loss") or b.get("inferred")) and b.get("outcome") != r["by_rate"]:
+                b["outcome_recorded"] = b.get("outcome")
+                b["outcome"] = r["by_rate"]
+                b["inferred"] = True
+                b["by_rate"] = True
+                changed += 1
+    return changed
+
+
 def rate_inference(reads: list, rate_open: Optional[float], open_fresh: bool, open_is_post: bool,
                    prev_outcome: Optional[str], min_delta: float, max_delta: float) -> Optional[dict]:
     """ランク画面のレートの読みから、この対戦の勝敗を推定する (純粋)。推定できなければ None。

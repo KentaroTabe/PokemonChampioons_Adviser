@@ -102,6 +102,7 @@ TESTS=(
   test_stale_notice
   test_type_inference_prior
   test_win_lose_screen
+  test_rate_chain
 )
 
 fail=0

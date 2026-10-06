@@ -23,8 +23,8 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from champions_agent.config import RATE_MAX_DELTA_PER_BATTLE
-from tools.battle_outcome import OutcomeTracker
+from champions_agent.config import RATE_CHAIN_GAP_SEC, RATE_INFER_MIN_DELTA, RATE_MAX_DELTA_PER_BATTLE
+from tools.battle_outcome import OutcomeTracker, apply_rate_chain
 
 REPO = Path(__file__).resolve().parent.parent
 BATTLE_DIR = REPO / "logs" / "battles"
@@ -45,16 +45,19 @@ def _parse_battle(path: str) -> dict:
     slot_last: dict = {}          # 相手の枠 index → 最後に見えた種 (途中で置き換わった枠の前の種は誤同定)
     n_battle_scenes = 0
     t0 = None
+    t1 = None
     for line in open(path):
         try:
             d = json.loads(line)
         except ValueError:
             continue
         t0 = t0 or d.get("t")
+        t1 = d.get("t") or t1
         typ = d.get("type")
         ot.feed(d)
         if typ == "rate":
-            rates.append(d.get("value"))
+            if d.get("value") is not None and (not rates or rates[-1] != float(d["value"])):
+                rates.append(float(d["value"]))
         elif typ == "scene":
             st = d.get("state") or {}
             in_battle = d.get("scene") in _BATTLE_SCENES
@@ -84,9 +87,10 @@ def _parse_battle(path: str) -> dict:
     opp_species = {ja for ja in opp_species if ja in final or ja in opp_fielded}
     # 勝負の文言は最も強い根拠 (2026-09-29 第17回 15:53: 3 体目のひんしからの誤った「負け」の後に「勝負に勝った」)
     outcome, inferred, corrected = ot.result()
-    return {"file": Path(path).name, "t0": t0 or 0.0,
+    return {"file": Path(path).name, "t0": t0 or 0.0, "t1": t1 or t0 or 0.0,
             "outcome": outcome, "inferred": inferred, "corrected": corrected,
             "rate": rates[-1] if rates else None,
+            "reads": rates,     # 読めたレート (値が変わるたびに 1 つ)。対戦をまたいだ並びの解決に使う (load_battles)
             "opp_species": sorted(opp_species),
             "opp_fielded": sorted(opp_fielded),
             "opp_benched": sorted(opp_species - opp_fielded),
@@ -113,6 +117,9 @@ def load_battles(days: float | None = None, last: int | None = None,
         files = [f for f in files if Path(f).stat().st_mtime >= cutoff]
     battles = [_parse_battle(f) for f in files]
     battles = [b for b in battles if b["n_battle_scenes"] >= MIN_BATTLE_SCENES]
+    # レートの読みの並びを対戦をまたいで解き、不明・推定の勝敗を埋める / 直す (2026-10-06 第18回: 推定の 1 戦が誤り、
+    # 不明の 2 戦が勝ちだった。確定した勝敗は変えない。tools.battle_outcome.apply_rate_chain)
+    apply_rate_chain(battles, RATE_CHAIN_GAP_SEC, RATE_INFER_MIN_DELTA, RATE_MAX_DELTA_PER_BATTLE)
     if last:
         battles = battles[-last:]
     return battles
@@ -174,6 +181,9 @@ def summarize(battles: list) -> dict:
             "win_rate": wins / len(decided) if decided else None,
             "rates": rates, "rate_flags": rate_flags(battles),
             "n_corrected": sum(1 for b in battles if b.get("corrected")),
+            # レートの読みの並びで埋めた / 直した勝敗 (apply_rate_chain): [(ファイル, 記録, 並びから)]
+            "by_rate": [(b["file"], b.get("outcome_recorded"), b["outcome"]) for b in battles if b.get("by_rate")],
+            "suspect_reads": [b["file"] for b in battles if (b.get("rate_chain") or {}).get("suspect_reads")],
             "opp_stats": opp_stats,
             "opp_fielded_stats": opp_fielded_stats,
             "opp_benched_stats": opp_benched_stats,
@@ -207,6 +217,10 @@ def report(s: dict) -> str:
                 lines.append(f"  ⚠ {r['file']}: 前戦比 {r['delta']:+.1f}: {r['flag']}")
     if s.get("n_corrected"):
         lines.append(f"勝敗の訂正: {s['n_corrected']}戦 (勝負の文言が先の記録と食い違い、文言を採用)")
+    for fname, recorded, got in s.get("by_rate") or []:
+        lines.append(f"  レートの並びから勝敗を決定: {fname}: 記録 {recorded or '不明'} → {got}")
+    for fname in s.get("suspect_reads") or []:
+        lines.append(f"  ⚠ {fname}: レートの読みが並びと合わない (数字の誤読の疑い。この対戦の読みを除いて解いた)")
 
     if s["pick_stats"]:
         lines.append("\n🎯 自分の選出3匹ベースの勝率 (全件):")
