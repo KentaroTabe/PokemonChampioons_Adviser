@@ -382,7 +382,8 @@
             const menu = prompt(
                 '修正する項目を番号で選択:\n0=タイプ (選出画面の誤認識向け)\n' +
                 '1=HP%  2=状態異常  3=持ち物  4=特性\n' +
-                '5=攻撃ランク  6=特攻ランク  7=素早さランク  8=メガ済み切替');
+                '5=攻撃ランク  6=特攻ランク  7=素早さランク  8=メガ済み切替' +
+                (side === 'opponent' ? '\n9=種族 (相手のみ。推定が違うとき、日本語名で入力)' : ''));
             if (!menu) return;
             const send = (field, value) =>
                 socket.emit('set_state', {target: 'mon', side, index: i, field, value});
@@ -398,6 +399,10 @@
                 case '6': { const v = prompt('特攻ランク (-6〜+6):'); if (v !== null) send('boost:spa', +v); break; }
                 case '7': { const v = prompt('素早さランク (-6〜+6):'); if (v !== null) send('boost:spe', +v); break; }
                 case '8': { send('is_mega', !confirm('現在メガ済み表示ですか? OK=メガ解除 / キャンセル=メガ設定') ? true : false); break; }
+                // 相手の種族の手入力 (候補のプルダウンに無い種・候補を出していない「ほぼ確定」の枠の訂正)。種族 id はサーバーが名前から引く
+                case '9': { if (side !== 'opponent') break;
+                            const v = prompt('種族 (日本語名。例: ボーマンダ):');
+                            if (v && v.trim()) socket.emit('set_species', {index: i, species_ja: v.trim()}); break; }
             }
         }
         function fixField() {
@@ -450,14 +455,17 @@
                     p.moves.map(m => `${m.name_ja}${m.pp!=null?`(${m.pp})`:''}`).join(' / ') + '</div>';
             if (p.revealed_moves && p.revealed_moves.length)
                 moves += `<div style="font-size:11px;color:#c98">判明技: ${p.revealed_moves.join(' / ')}</div>`;
-            // 相手の未確定ポケモン: タイプ推論の候補から手動で確定できる
+            // 相手の未確定ポケモン: タイプ推論の候補から手動で確定できる。
+            // 選出画面の推定の枠は、選ばなくてもその種として扱われる (プルダウンは推定が違うときの訂正用)。
+            // ほぼ確定の推定 (guess_sure) にはサーバーが候補を付けないので、プルダウンは出ない (2026-10-06 第18回)
             let picker = '';
             if (side === 'opp' && (!p.species_ja || p.species_guess) && p.candidates && p.candidates.length) {
                 const opts = p.candidates.map(c =>
                     `<option value="${c.id}|${c.ja}">${c.ja} (${c.pct}%)</option>`).join('');
+                const label = p.species_guess ? '違う場合は選択…' : '候補から確定…';
                 picker = `<select onchange="setSpecies(${i}, this.value, this)"
                     style="margin-left:6px;font-size:11px;background:#223;color:#cde;border:1px solid #446;border-radius:4px">
-                    <option value="">候補から確定…</option>${opts}</select>`;
+                    <option value="">${label}</option>${opts}</select>`;
             }
             const fixBtn = `<span style="cursor:pointer;opacity:.55;margin-left:6px" title="手動修正"
                 onclick="fixMon('${side === 'opp' ? 'opponent' : 'player'}', ${i})">✏️</span>`;

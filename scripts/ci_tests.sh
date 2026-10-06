@@ -98,6 +98,11 @@ TESTS=(
   test_outcome_correction
   test_team_build_ace
   test_undefined_names
+  test_rate_outcome_attribution
+  test_stale_notice
+  test_type_inference_prior
+  test_win_lose_screen
+  test_rate_chain
 )
 
 fail=0

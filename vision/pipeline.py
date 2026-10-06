@@ -21,7 +21,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from vision import zones, ocr, scenes, extractors
+from vision import zones, ocr, scenes, extractors, win_lose
 from vision.events import EventParser
 from vision.normalize import NameResolver
 from vision.state import BattleStateV2
@@ -448,6 +448,17 @@ class VisionPipeline:
 
         # 破棄フレームから救出したメッセージ域の消化 (rescue_scan 参照)
         self._drain_rescue(fired)
+
+        # WIN / LOSE の画面 (勝負の文言のあと、ランク画面の前に数秒) から勝敗を確定する。色の割合だけなので毎フレーム見る。
+        # 対戦文脈 (対戦中か終了直後) に限り、選出・待機画面では見ない (2026-10-06 第18回: 文言の読み落としが 15 戦中 6 戦)
+        if (in_battle_context or self.state.battle_ended) and scene not in (
+                scenes.SCENE_SELECTION, scenes.SCENE_STANDBY) and not self.state.win_lose_screen:
+            try:
+                got = self.parser.end_by_win_lose_screen(win_lose.read_win_lose(img))
+            except Exception:
+                got = None
+            if got:
+                fired.append(got)
 
         # 3体目のひんしの終了見込みを、猶予後に確定 (その陣営の交代を観測したら取り消し)
         conf = self.parser.confirm_end_hint()

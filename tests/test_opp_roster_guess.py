@@ -8,6 +8,7 @@
 - replacement_slot / switch_to_species: 場に出た種は推定の重複 → タイプ一致 → 推定 → 未特定の順に置き換える
 - extract_selection: 推定の印を付け、重複を保留する
 - 分析 (analyze_battles / party_improvements): 推定 (guess) は相手の 6 体に数えない
+- apply_manual_species: 手入力は推定の枠を上書きできる (2026-10-06 第18回: 推定の枠への手入力が 9 回続けて無視された)
 
     scripts/run_test.sh test_opp_roster_guess
 """
@@ -239,6 +240,64 @@ def test_compact_log_carries_guess_flag():
     print("test_compact_log_carries_guess_flag OK")
 
 
+def _guessed_party(rows):
+    """rows: [(日本語名, id, 推定か)] → 相手の 6 枠 (None は未確定の枠)"""
+    party = []
+    for row in rows:
+        p = PokemonState(types=["ノーマル"])
+        if row:
+            p.merge_species(row[0], row[1], guess=row[2], score=0.9 if row[2] else None)
+        party.append(p)
+    return party
+
+
+def test_manual_species_overrides_guess():
+    """2026-10-06 第18回接続テスト: 6 枠とも選出画面の推定で埋まっているとき、推定の カイリュー を ボーマンダ に直す手入力が
+    「確定済み・空き枠なし」として無視された (15 戦で 9 回)。推定は確定ではないので、その枠に上書きする"""
+    from vision.state import apply_manual_species
+    party = _guessed_party([("フシギバナ", "venusaur", True), ("カイリュー", "dragonite", True),
+                            ("ドヒドイデ", "toxapex", True), ("サーフゴー", "gholdengo", True),
+                            ("カバルドン", "hippowdon", True), ("クエスパトラ", "espathra", True)])
+    res = apply_manual_species(party, 1, "ボーマンダ", "salamence")
+    assert res == {"index": 1, "moved": False, "cleared": [], "reason": None}, res
+    assert party[1].species_ja == "ボーマンダ" and party[1].species_id == "salamence" and not party[1].species_guess
+    assert [p.species_ja for i, p in enumerate(party) if i != 1] == ["フシギバナ", "ドヒドイデ", "サーフゴー", "カバルドン", "クエスパトラ"]
+    # 推定と同じ種を選ぶ = 推定の確定 (印が消える)
+    res = apply_manual_species(party, 0, "フシギバナ", "venusaur")
+    assert res["index"] == 0 and not party[0].species_guess and party[0].species_ja == "フシギバナ"
+    print("test_manual_species_overrides_guess OK")
+
+
+def test_manual_species_confirmed_slot_and_duplicates():
+    from vision.state import apply_manual_species
+    # 対象枠が別の種で確定済み → 未確定の枠へ付け替える (2026-08-20 の挙動を保つ)。推定の枠には付け替えない
+    party = _guessed_party([("ハッサム", "scizor", False), ("カイリュー", "dragonite", True), None])
+    res = apply_manual_species(party, 0, "ガブリアス", "garchomp")
+    assert res["index"] == 2 and res["moved"] is True and party[2].species_ja == "ガブリアス", res
+    assert party[0].species_ja == "ハッサム" and party[1].species_ja == "カイリュー" and party[1].species_guess
+    # 未確定の枠が無ければ入れない (理由つき)
+    party = _guessed_party([("ハッサム", "scizor", False), ("カイリュー", "dragonite", True)])
+    res = apply_manual_species(party, 0, "ガブリアス", "garchomp")
+    assert res["index"] is None and "確定済み" in res["reason"], res
+    assert [p.species_ja for p in party] == ["ハッサム", "カイリュー"]
+    # 同じ種で確定済みの枠はそのまま
+    res = apply_manual_species(party, 0, "ハッサム", "scizor")
+    assert res["index"] == 0 and res["moved"] is False and party[0].species_ja == "ハッサム"
+    # 入れる種が別の枠の「推定」にある → そちらを取り消して入れる (同種 2 体はあり得ない)
+    party = _guessed_party([("カイリュー", "dragonite", True), ("ボーマンダ", "salamence", True)])
+    res = apply_manual_species(party, 0, "ボーマンダ", "salamence")
+    assert res["index"] == 0 and res["cleared"] == [1], res
+    assert party[0].species_ja == "ボーマンダ" and party[1].species_ja is None and party[1].types == ["ノーマル"]
+    # 入れる種が別の枠で「確定済み」→ 入れない (確定した枠は動かさない)
+    party = _guessed_party([("カイリュー", "dragonite", True), ("ボーマンダ", "salamence", False)])
+    res = apply_manual_species(party, 0, "ボーマンダ", "salamence")
+    assert res["index"] is None and "slot1" in res["reason"], res
+    assert party[0].species_ja == "カイリュー" and party[0].species_guess
+    # 範囲外の枠
+    assert apply_manual_species(party, 9, "ボーマンダ", "salamence")["index"] is None
+    print("test_manual_species_confirmed_slot_and_duplicates OK")
+
+
 def main() -> None:
     test_adopt_guess_dedupes_same_species()
     test_confirmed_merge_clears_guess()
@@ -250,6 +309,8 @@ def main() -> None:
     test_parsers_skip_guessed_roster_entries()
     test_parsers_drop_species_of_replaced_slot()
     test_compact_log_carries_guess_flag()
+    test_manual_species_overrides_guess()
+    test_manual_species_confirmed_slot_and_duplicates()
     print("ALL OK")
 
 

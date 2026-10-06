@@ -27,8 +27,9 @@ from champions_agent.config import (PARTY_IMPROVE_DEFAULT_LAST, PARTY_IMPROVE_FR
                                     PARTY_IMPROVE_FRAIL_FAST_SPE, PARTY_IMPROVE_LOSS_WEIGHT, PARTY_IMPROVE_LOW_SCORE,
                                     PARTY_IMPROVE_MEASURE_NEIGHBORS, PARTY_IMPROVE_MEASURE_PROFILE,
                                     PARTY_IMPROVE_MIN_DECISIONS, PARTY_IMPROVE_SLOW_SPE, PARTY_IMPROVE_TOP_PARTIES,
-                                    PARTY_IMPROVE_TOP_PROPOSALS, PARTY_IMPROVE_TOP_THREATS, USAGE_TARGET_FORMAT)
-from tools.battle_outcome import OutcomeTracker
+                                    PARTY_IMPROVE_TOP_PROPOSALS, PARTY_IMPROVE_TOP_THREATS, RATE_CHAIN_GAP_SEC,
+                                    RATE_INFER_MIN_DELTA, RATE_MAX_DELTA_PER_BATTLE, USAGE_TARGET_FORMAT)
+from tools.battle_outcome import OutcomeTracker, apply_rate_chain
 
 REPO = Path(__file__).resolve().parent.parent
 BATTLE_DIR = REPO / "logs" / "battles"
@@ -111,7 +112,8 @@ def parse_battle(path: str) -> dict:
     slot_last: dict = {}   # 相手の枠 index → 最後に見えた種。途中で別の種に置き換わった枠の前の種は選出画面の誤同定
     opp_active_ja, my_active_ja = None, None
     decisions, events = [], []
-    n_battle_scenes, t0 = 0, None
+    n_battle_scenes, t0, t1 = 0, None, None
+    reads: list = []       # 読めたレート (値が変わるたびに 1 つ)。対戦をまたいだ並びの解決に使う (load_battles)
     opp_mega = False
     opp_lead_ja, opp_mega_ja = None, set()
     for line in open(path, encoding="utf-8"):
@@ -120,9 +122,12 @@ def parse_battle(path: str) -> dict:
         except ValueError:
             continue
         t0 = t0 or d.get("t")
+        t1 = d.get("t") or t1
         typ = d.get("type")
         ot.feed(d)
-        if typ == "scene":
+        if typ == "rate" and d.get("value") is not None and (not reads or reads[-1] != float(d["value"])):
+            reads.append(float(d["value"]))
+        elif typ == "scene":
             st = d.get("state") or {}
             in_battle = d.get("scene") in _BATTLE_SCENES
             if in_battle:
@@ -172,7 +177,8 @@ def parse_battle(path: str) -> dict:
     final = set(slot_last.values())
     opp_roster = [ja for ja in opp_roster if ja in final or ja in opp_fielded]
     outcome, inferred, corrected = ot.result()
-    return {"file": Path(path).name, "t0": t0 or 0.0, "outcome": outcome, "inferred": inferred, "corrected": corrected,
+    return {"file": Path(path).name, "t0": t0 or 0.0, "t1": t1 or t0 or 0.0, "reads": reads,
+            "outcome": outcome, "inferred": inferred, "corrected": corrected,
             "opp_roster": opp_roster, "opp_fielded": sorted(opp_fielded), "my_picked": sorted(my_picked),
             "opp_lead": opp_lead_ja, "opp_mega_ja": sorted(opp_mega_ja),
             "decisions": decisions, "events": events, "n_battle_scenes": n_battle_scenes, "opp_mega": opp_mega}
@@ -194,6 +200,8 @@ def load_battles(since_ts: Optional[float] = None, last: Optional[int] = None, d
         files = [f for f in files if Path(f).stat().st_mtime >= cutoff]
     battles = [parse_battle(f) for f in files]
     battles = [b for b in battles if b["n_battle_scenes"] >= 3]
+    # レートの読みの並びで、不明・推定の勝敗を埋める / 直す (確定した勝敗は変えない。2026-10-06 第18回)
+    apply_rate_chain(battles, RATE_CHAIN_GAP_SEC, RATE_INFER_MIN_DELTA, RATE_MAX_DELTA_PER_BATTLE)
     return battles[-last:] if last else battles
 
 

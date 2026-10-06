@@ -19,7 +19,8 @@ import json
 from pathlib import Path
 from typing import Optional
 
-from tools.battle_outcome import OutcomeTracker
+from champions_agent.config import RATE_CHAIN_GAP_SEC, RATE_INFER_MIN_DELTA, RATE_MAX_DELTA_PER_BATTLE
+from tools.battle_outcome import OutcomeTracker, apply_rate_chain
 from tools.team_build.verdict import binomial_halfwidth, blended_score, real_weight
 
 REPO = Path(__file__).resolve().parent.parent.parent
@@ -32,7 +33,8 @@ def read_battle_labels(path: Path) -> dict:
     """1 対戦ログの由来ラベル (session 行) と勝敗、助言/実行の件数、自分のパーティ (species: 選出画面で 6 枠読めた種、
     読めなければ対戦中に場に出た自分の種)。party_read = 選出画面で読めたか"""
     out = {"file": Path(path).name, "path": str(path), "source": "organic", "package_id": None, "outcome": None,
-           "n_advice": 0, "n_manual_fix": 0, "species": [], "party_read": False}
+           "n_advice": 0, "n_manual_fix": 0, "species": [], "party_read": False,
+           "t0": None, "t1": None, "reads": []}     # t0 / t1 / reads: 対戦をまたいだレートの並びの解決に使う (labeled_rows)
     party_species = None
     actives: list = []
     ot = OutcomeTracker()   # 勝敗: outcome 行 (最後) + ランク画面前の勝負文言 (tools.battle_outcome)
@@ -43,6 +45,11 @@ def read_battle_labels(path: Path) -> dict:
             d = json.loads(line)
             t = d.get("type")
             ot.feed(d)
+            if d.get("t"):
+                out["t0"] = out["t0"] or d["t"]
+                out["t1"] = d["t"]
+            if t == "rate" and d.get("value") is not None and (not out["reads"] or out["reads"][-1] != float(d["value"])):
+                out["reads"].append(float(d["value"]))
             if t == "session":
                 out["source"] = d.get("source", "organic")
                 out["package_id"] = d.get("package_id")
@@ -61,8 +68,9 @@ def read_battle_labels(path: Path) -> dict:
                     actives.append(party[idx]["species"])
     except Exception:
         pass
-    outcome, _inferred, corrected = ot.result()
+    outcome, inferred, corrected = ot.result()
     out["outcome"] = outcome if outcome in ("win", "loss") else None
+    out["inferred"] = inferred
     out["corrected"] = corrected
     out["species"] = sorted(set(party_species or actives))
     out["party_read"] = party_species is not None
@@ -82,11 +90,12 @@ def labeled_rows(battles_dir: Path = BATTLES_DIR, package_id: Optional[str] = No
     package_species (Package の 6 体) を渡すと各行に team_match (True / False / None) を付ける:
     experiment ラベルは切り忘れると別のパーティの対戦にも付く (2026-09-29 第16回: 13 ログ中 10 が別パーティ) ので、
     集計 (summarize_rows) は team_match=False の行を勝敗から除く"""
+    all_rows = [read_battle_labels(p) for p in sorted(Path(battles_dir).glob("battle_*.jsonl"))
+                if since_ts is None or p.stat().st_mtime >= since_ts]
+    # レートの読みの並びで、不明・推定の勝敗を埋める / 直す (ラベルで絞る前に、同じ起動の対戦列として解く。2026-10-06 第18回)
+    apply_rate_chain(all_rows, RATE_CHAIN_GAP_SEC, RATE_INFER_MIN_DELTA, RATE_MAX_DELTA_PER_BATTLE)
     rows = []
-    for p in sorted(Path(battles_dir).glob("battle_*.jsonl")):
-        if since_ts is not None and p.stat().st_mtime < since_ts:
-            continue
-        r = read_battle_labels(p)
+    for r in all_rows:
         if package_id and r["package_id"] != package_id:
             continue
         if source and r["source"] != source:
