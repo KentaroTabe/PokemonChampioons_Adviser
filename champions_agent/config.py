@@ -506,6 +506,40 @@ BUILD_ARTICLE_SEASON_REGULATION = {"M-1": "gen9championsbssregma", "M-2": "gen9c
                                    "M-4": "gen9championsbssregmb", "M-5": "gen9championsbssregmb", "M-6": "gen9championsbssregmc"}
                                    # 2026-10-05 判断 #9: M-1 = M-A (題名の表記 4 件)、M-2〜M-5 = M-B (M-5 は手順書)、M-6 = M-C (9/9 から)。MCS だけの行は unknown
 BUILD_ARTICLE_DOUBLE_WORDS = ("ダブル", "double", "vgc")   # 記事の題名にあればダブルの記事 (記事バンクから除く)
+# 記事バンク (tools/team_build/article_parse + article_bank、docs/ARTICLE_BANK_DESIGN_1006.md)。2026-10-06 の初期案 (検証前の値)。
+# 本文は LLM に渡さない: 定型部分 (使用ポケモン) を決定的に解析し、解説は限定した規則で構造化する。LLM には構造化した結果だけ渡す
+BUILD_ARTICLE_MEMBER_SECTION_WORDS = ("使用ポケモン", "個体紹介", "個別解説", "構築紹介", "パーティ紹介", "採用理由")  # 個体の節の見出し語
+BUILD_ARTICLE_TEAM_SECTION_WORDS = ("戦術", "解説", "選出", "立ち回り", "基本選出", "重いポケモン", "苦手", "総括", "おわりに", "あとがき")
+                                             # ここからはチーム全体の節 (個体の節を閉じる)
+BUILD_ARTICLE_MAX_MEMBERS = 6                # 1 記事の使用個体の上限 (超えた個体見出しは警告にして採らない)
+BUILD_ARTICLE_MOVES_PER_SET = 4              # 採用技の数 (技一覧の行から。説明文の技は足さない)
+BUILD_ARTICLE_STAT_WORDS = {"hp": ("HP", "H", "体力"), "atk": ("攻撃", "A"), "def": ("防御", "B"), "spa": ("特攻", "C", "特殊攻撃"),
+                            "spd": ("特防", "D", "特殊防御"), "spe": ("素早", "素早さ", "S", "すばやさ")}   # 配分の行の能力名
+BUILD_ARTICLE_EV252_LABEL = "252表示"        # 配分の行がこの語を含めば 252 表示 (能力ポイントと別の種類として保持)
+BUILD_ARTICLE_ACTUAL_LABEL = "実数値"        # 実数値の行の語 (6 つの数を - で繋いだもの)
+BUILD_ARTICLE_EV252_MAX = 252                # 252 表示の 1 能力の上限。ラベルの無い配分の行は、全部が能力ポイントの上限 (BUILD_GEN_EV_POINT_CAP) 以下なら能力ポイント
+BUILD_ARTICLE_EV252_PER_POINT, BUILD_ARTICLE_EV252_OFFSET = 8, 4   # 能力ポイント p (> 0) の 252 表示 = 8p − 4 (32 → 252、2 → 12)。整合性の検査にだけ使う (換算して保存しない)
+BUILD_ARTICLE_HEADING_MAX_CHARS = 24         # リンクの無い短い行が節の見出し語を含めば見出しとみなす長さの上限
+BUILD_ARTICLE_CONDITION_WORDS = {"weather_control": ("天候を操", "天候操作", "天候変化", "天候パ"), "trick_room": ("トリックルーム", "トリル"),
+                                 "setup": ("積み", "積む"), "stall": ("受けループ", "受け構築"), "sand": ("砂パ",), "rain": ("雨パ",)}
+                                             # 選出の条件の語 → 述語 (記事の「相手に X がいるなら」の X)。表に無い条件は未確定にする
+BUILD_ARTICLE_TARGET_MOD_WORDS = {"max_speed": ("最速",), "neutral_max_speed": ("準速",), "no_investment": ("無振り",),
+                                  "choice_scarf": ("スカーフ",), "non_mega": ("通常の", "非メガ")}   # 対象の直前の修飾語 → 相手の型条件 (表に無い修飾は mods_unparsed)
+BUILD_ARTICLE_SELECTION_REQUIRED_WORDS = ("必ず", "固定", "確定")   # 選出規則がこれを含めば recommendation = required (無ければ preferred)
+BUILD_ARTICLE_SELECTION_COMBINABLE_WORDS = ("混ぜ", "ぐちゃぐちゃ", "組み替え", "組み合わせても")   # 2 組を混ぜてよい、の明記
+BUILD_ARTICLE_NEGATION_SUFFIXES = ("わけではない", "わけでもない", "とは思わない", "ことはない")   # 「に弱い」等の直後にあれば主張にしない
+BUILD_ARTICLE_NAME_TOKEN_MAX_CHARS = 20      # 辞書で解決できなかった名前を辞書の補修用に残す長さの上限 (記事の文は残さない)
+BUILD_ARTICLE_PLAIN_NAME_MIN_CHARS = 3       # リンクの無い素の文字列から種名を探すときの名前の最短長 (2 文字の種名は誤検出が多い)
+BUILD_ARTICLE_LLM_MAX_INPUT_TOKENS = 3000    # 1 記事の構造化データ (本文なし) の入力上限。超えたら LLM の段を飛ばす (規則の段だけで完了)
+BUILD_ARTICLE_LLM_MAX_OUTPUT_TOKENS = 2000   # 出力の上限
+BUILD_ARTICLE_LLM_MAX_CALLS = 2              # 記事 1 本の呼び出しの上限 (初回 + 修正 1 回。再試行を含む)。超えたら未完了にして増やさない
+BUILD_ARTICLE_LLM_TIMEOUT_S = 180            # 1 呼び出しの待ち時間の上限 (秒)
+BUILD_ARTICLE_BATCH_MAX_ARTICLES = 20        # 1 回の処理で扱う記事の数の上限
+BUILD_ARTICLE_BATCH_MAX_USD = 3.0            # 1 回の処理の費用の上限 (USD。呼び出しの usage の合計で止める)
+BUILD_ARTICLE_CHARS_PER_TOKEN = 1.0          # トークンの見積もり (日本語は 1 文字 ≈ 1 トークンの安全側)
+BUILD_ARTICLE_POOL_SHARE_MAX = 0.10          # 記事由来の構築が相手プールに占める上限 (件数・評価重みの両方。後続の段階で使う)
+BUILD_ARTICLE_MATCH_MIN_COMMON = 4           # 選出の照合: 相手の 6 体のうち確定した基本種が記事の 6 体と一致する数の下限
+BUILD_ARTICLE_MIX_ALPHAS = (0.0, 0.05, 0.10)  # 選出予測の混合の割合 (並行して記録。初期は判断に使わない)
 # - CLI に載せるツール。空 = ツール定義を system prompt に載せない (9/24 実測: 12.8k トークン。不許可リスト方式は 24.7k)
 BUILD_LLM_CLI_TOOLS = ""
 # 視覚監査 (tools/audit_subtask, audit_session) のモデル。8/18 に haiku / sonnet / opus を同一フレーム 30 枚で比較して opus に固定、
