@@ -52,7 +52,7 @@
 - **CI の既知の赤 4 件を名前で持つ**。この環境では showdown のデータ・使用率 DB・torch・gymnasium が無く、4 モジュールが必ず赤になる。
   名前を決めておけば、他の赤がすぐ分かる。
 - **自分のテストの穴**。`assert A if False else True` のように常に真になる書き方を一度残した。テストが落ちることを確かめてから直す
-  (運用側は「直す前のコードで落ちることを確認した」と毎回書いている) 習慣に合わせる。
+  習慣に合わせる (運用側は、確認したときは「直す前のコードで落ちることを確認した」と書いている)。
 
 ## 4. 登場した仕組みの説明 (前提の知識なしで読めるように)
 
@@ -83,8 +83,8 @@
 
 ## 5. 残っている判断と、次に見る場所
 
-- 判断: このブランチの PR の base (feature/team-build か main)。S9 の変種の腕 (規則 / 汎用の 2 腕で測る、で進めた)。鮮度の警告を日次の
-  定点に組み込むか。
+- 判断 (10/6 に運用側から回答済み): PR の base は feature/team-build。S9 の変種の腕は規則 / 汎用の 2 腕。鮮度の警告は使用率 DB の日次更新
+  (`update_usage_db.sh`) の最後に `season_pin --check` を入れて同じ更新ログに出す (運用側で実装済み)。
 - 次の接続テストで見る: version 行の `selection_model.source` (registered になるか)、選出の `primary` と `model_trained`、display 行の
   `hidden` と `attributed`、遵守率の `by_primary`。
 - 次の run で見る: manifest の `season_pin`、`s02` の `pool_pin`、S8a のログに「cheap adaptation: 省略」が出ること、`s06_lint.json` の
