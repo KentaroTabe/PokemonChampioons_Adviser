@@ -5,6 +5,7 @@
 # - 一部テストは未コミットの実データ (使用率DB / RLチェックポイント /
 #   config/my_team.json / debug_frames) に依存
 # - 実対戦を伴うテストはローカルShowdown (8100) と長い実行時間が必要
+# - 一部テストは RL モデルのライブラリ (torch) が要る (scripts/run_test.sh local。理由は scripts/ci_tests.sh の冒頭)
 # CIで回すのは「モックとコミット済みデータで閉じるテスト」のみ
 # (対象は scripts/ci_tests.sh に列挙)。
 name: ci

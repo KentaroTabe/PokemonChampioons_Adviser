@@ -8,7 +8,9 @@
 """
 from __future__ import annotations
 
-from champions_agent.env.showdown_env import prune_finished_battles
+# 2026-10-06: 関数は showdown_env_pure に移した (showdown_env は poke-env / gymnasium を先頭で読み、CI の最小依存では
+# import できないため)。showdown_env は同じ関数をそのまま import して使う。アサーションは変えていない
+from champions_agent.env.showdown_env_pure import prune_finished_battles
 
 
 class _FakeBattle:
@@ -81,7 +83,7 @@ def main() -> None:
 
 def test_ignorable_unknown_effect_warning():
     """poke-env の "Unexpected effect 'X' received." は X が config の既知リストにあるときだけ抑止する"""
-    from champions_agent.env.showdown_env import is_ignorable_unknown_effect_warning as ok
+    from champions_agent.env.showdown_env_pure import is_ignorable_unknown_effect_warning as ok
     msg = "Unexpected effect 'MEGA_SOL' received. Effect.UNKNOWN will be used instead."
     assert ok(msg, ("MEGA_SOL",)) and not ok(msg, ())
     assert not ok("Unexpected effect 'SOMETHING_NEW' received.", ("MEGA_SOL",))     # 未知のものは出す

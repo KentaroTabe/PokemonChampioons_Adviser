@@ -7,6 +7,16 @@
 # - 未コミットの実データ (使用率DB / RLチェックポイント / config/my_team.json /
 #   debug_frames) 依存のテスト
 # はここに含めない。CIは「純粋ロジック+モックで閉じるテスト」だけを回す。
+#
+# CI の依存は requirements-ci.txt (numpy / opencv-python-headless / requests) だけ。それ以外のライブラリが要るテストは
+# ここに入れず、ローカル専用の一覧 (scripts/run_test.sh local の LOCAL_ONLY_TESTS) に置く (2026-10-06):
+# - test_migrate_obs: torch が要る。検証の対象が nn.Linear の入力次元のゼロ拡張そのもので、torch なしでは確かめられない。
+#   torch は RL モデル用の重い依存 (requirements-full.txt で固定) で、requirements-ci.txt の「RL モデル非依存のテストだけを
+#   回すので画像処理の土台だけで足りる」という方針に合わないため、CI の最小依存に入れない
+# test_battle_prune は検証する関数を champions_agent/env/showdown_env_pure.py に分けて CI に残した (showdown_env は
+# poke-env を先頭で読み、poke-env 0.10 は numpy>=2.0.2 を要求して CI の numpy<2 と両立しない)。
+# Showdown のデータ (pokemon-showdown/、未コミット) の読み手は、コミット済みのキャッシュを先に読むので CI でも同じ結果になる
+# (champions_agent/data/sim_cache.py、作り直しは scripts/refresh_sim_caches.sh)。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -79,7 +89,6 @@ TESTS=(
   test_gimmick
   test_usage_ingame_rank
   test_selection_v3
-  test_migrate_obs
   test_env_legality
   test_search
   test_battle_prune
@@ -106,6 +115,7 @@ TESTS=(
   test_season_pin
   test_cheap_drift
   test_register_selection
+  test_sim_caches
 )
 
 fail=0

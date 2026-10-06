@@ -4,9 +4,16 @@
 #   scripts/run_test.sh test_events                # 1件
 #   scripts/run_test.sh test_events test_rl_bridge # 複数
 #   scripts/run_test.sh all                        # tests/ 全件
+#   scripts/run_test.sh local                      # CI (scripts/ci_tests.sh) から外したローカル専用のテスト
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 source .venv/bin/activate
+
+# ローカル専用: CI の最小依存 (requirements-ci.txt) に無いライブラリが要るため CI から外したテスト。
+# 外した理由は scripts/ci_tests.sh の冒頭 (2026-10-06)。関連する変更をしたらここで回す (all にも含まれる)
+LOCAL_ONLY_TESTS=(
+  test_migrate_obs
+)
 
 targets=("$@")
 if [ "${1:-}" = "all" ]; then
@@ -14,9 +21,11 @@ if [ "${1:-}" = "all" ]; then
   for f in tests/test_*.py; do
     targets+=("$(basename "$f" .py)")
   done
+elif [ "${1:-}" = "local" ]; then
+  targets=("${LOCAL_ONLY_TESTS[@]}")
 fi
 if [ ${#targets[@]} -eq 0 ]; then
-  echo "使い方: scripts/run_test.sh <test_名...|all>"
+  echo "使い方: scripts/run_test.sh <test_名...|all|local>"
   exit 2
 fi
 

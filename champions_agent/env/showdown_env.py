@@ -50,6 +50,9 @@ from champions_agent.config import (
     TRAINING_BATTLE_FORMAT, TRAINING_TEAM_SIZE,
 )
 from champions_agent.env.reward import get_reward_config
+# 純粋な関数 (poke-env を使わない) は showdown_env_pure に分けた (CI の最小依存でテストするため。2026-10-06)。
+# 従来どおりこのモジュールからも同じ名前で参照できる
+from champions_agent.env.showdown_env_pure import is_ignorable_unknown_effect_warning, prune_finished_battles
 from champions_agent.env.team_builder import ChampionsTeambuilder
 
 # アドバイザーのバックエンド (8000) と併用するため、学習用Showdownは別ポートで動かす
@@ -61,16 +64,6 @@ TrainingServerConfiguration = ServerConfiguration(
 # poke-envの静的データへチャンピオンズの新フォーム/リバランス技を注入する
 from champions_agent.env import champions_dex_patch
 champions_dex_patch.apply()
-
-
-def is_ignorable_unknown_effect_warning(message: str, names=None) -> bool:
-    """poke-env の "Unexpected effect 'X' received." のうち、X が既知のチャンピオンズ固有効果 (config) なら True。純粋"""
-    from champions_agent.config import TRAIN_IGNORED_UNKNOWN_EFFECTS
-    names = TRAIN_IGNORED_UNKNOWN_EFFECTS if names is None else names
-    if not message.startswith("Unexpected effect '"):
-        return False
-    name = message[len("Unexpected effect '"):].split("'", 1)[0]
-    return name in names
 
 
 class _IgnoreKnownUnknownEffects(logging.Filter):
@@ -267,36 +260,6 @@ def apply_train_teampreview(player) -> None:
         apply_model_teampreview(player)
     else:
         apply_matchup_teampreview(player)
-
-
-def prune_finished_battles(players, keep: int) -> int:
-    """終了済みバトルを (新しい順に keep 件残して) 破棄する。戻り値は削除数。
-
-    poke-env の Player._battles は reset_battles() (close時のみ呼ばれる) まで
-    全対戦を保持し続け、Battleオブジェクト (ターンごとのイベント履歴を含む)
-    がプロセスRSSを対戦数に比例して押し上げる (2026-08-19 実測:
-    学習ワーカーが1スタイル実行内で数百MB単位の線形増加)。
-    エピソード完結型の学習は過去バトルを参照しないため挙動には影響しない。
-
-    ⚠ poke-env の勝敗カウンタ (n_won_battles 等) は _battles の走査で
-    実装されているため、勝率をカウンタから読む評価系 (train/evaluate.py)
-    にはこの関数を適用しないこと。
-    """
-    removed = 0
-    for pl in players:
-        if pl is None:
-            continue
-        battles = getattr(pl, "battles", None)
-        if not battles:
-            continue
-        # dict は挿入順 = 対戦の時系列。終了済みの古い方から削除する
-        finished = [tag for tag, b in list(battles.items())
-                    if getattr(b, "finished", False)]
-        drop = finished[:-keep] if keep > 0 else finished
-        for tag in drop:
-            battles.pop(tag, None)
-            removed += 1
-    return removed
 
 
 class MaskedSingleAgentWrapper(SingleAgentWrapper):
