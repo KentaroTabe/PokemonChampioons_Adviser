@@ -505,7 +505,8 @@ BUILD_LLM_MAX_BUDGET_USD = 5.0
 BUILD_ARTICLE_SEASON_REGULATION = {"M-1": "gen9championsbssregma", "M-2": "gen9championsbssregmb", "M-3": "gen9championsbssregmb",
                                    "M-4": "gen9championsbssregmb", "M-5": "gen9championsbssregmb", "M-6": "gen9championsbssregmc"}
                                    # 2026-10-05 判断 #9: M-1 = M-A (題名の表記 4 件)、M-2〜M-5 = M-B (M-5 は手順書)、M-6 = M-C (9/9 から)。MCS だけの行は unknown
-BUILD_ARTICLE_DOUBLE_WORDS = ("ダブル", "double", "vgc")   # 記事の題名にあればダブルの記事 (記事バンクから除く)
+BUILD_ARTICLE_DOUBLE_WORDS = ("ダブル", "double", "vgc")   # 記事の題名にあればダブルの記事 (記事バンクから除く)。NFKC で見る (半角カナも当たる)
+BUILD_ARTICLE_DOUBLE_EXCLUDE_WORDS = ("ダブルエース",)      # ダブルバトルを意味しない複合語 (先に取り除く。10/6 の一覧更新: 「勝てるダブルエース構築」はシングル)
 # 記事バンク (tools/team_build/article_parse + article_bank、docs/ARTICLE_BANK_DESIGN_1006.md)。2026-10-06 の初期案 (検証前の値)。
 # 本文は LLM に渡さない: 定型部分 (使用ポケモン) を決定的に解析し、解説は限定した規則で構造化する。LLM には構造化した結果だけ渡す
 BUILD_ARTICLE_MEMBER_SECTION_WORDS = ("使用ポケモン", "個体紹介", "個別解説", "構築紹介", "パーティ紹介", "採用理由")  # 個体の節の見出し語

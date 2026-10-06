@@ -18,12 +18,13 @@ import csv
 import io
 import json
 import re
+import unicodedata
 from collections import Counter
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse, urlunparse
 
-from champions_agent.config import BUILD_ARTICLE_DOUBLE_WORDS, BUILD_ARTICLE_SEASON_REGULATION
+from champions_agent.config import BUILD_ARTICLE_DOUBLE_EXCLUDE_WORDS, BUILD_ARTICLE_DOUBLE_WORDS, BUILD_ARTICLE_SEASON_REGULATION
 
 REPO = Path(__file__).resolve().parent.parent.parent
 DEFAULT_CSV = REPO / "logs" / "articles" / "blogs.csv"
@@ -73,12 +74,16 @@ def split_titles(title: str) -> list:
     return parts
 
 
-def classify_format(title: str, words=BUILD_ARTICLE_DOUBLE_WORDS) -> str:
-    """題名から形式: ダブルの語があれば double、題名が無ければ unknown、それ以外 single"""
-    t = (title or "").lower()
+def classify_format(title: str, words=BUILD_ARTICLE_DOUBLE_WORDS, exclude=BUILD_ARTICLE_DOUBLE_EXCLUDE_WORDS) -> str:
+    """題名から形式: ダブルの語があれば double、題名が無ければ unknown、それ以外 single。
+    NFKC で正規化してから見る (半角カナの「ﾀﾞﾌﾞﾙ」も当たる。2026-10-06 の一覧の更新で見つかった)。
+    exclude の語 (「ダブルエース」のようにダブルバトルを意味しない複合語) は先に取り除く"""
+    t = unicodedata.normalize("NFKC", title or "").lower()
     if not t:
         return "unknown"
-    return "double" if any(w.lower() in t for w in words) else "single"
+    for ex in exclude:
+        t = t.replace(unicodedata.normalize("NFKC", ex).lower(), "")
+    return "double" if any(unicodedata.normalize("NFKC", w).lower() in t for w in words) else "single"
 
 
 def seasons_of(s: str) -> list:

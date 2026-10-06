@@ -22,6 +22,9 @@ def test_parse_and_manifest():
     assert A.split_urls(rows[2]["article_urls"]) == ["https://c.hatenablog.com/entry/1", "https://c.hatenablog.com/entry/2"]
     assert A.normalize_url("HTTPS://Note.com/x/?a=1#f") == "https://note.com/x"
     assert A.classify_format(rows[1]["title"]) == "double" and A.classify_format(rows[0]["title"]) == "single" and A.classify_format("") == "unknown"
+    assert A.classify_format("【ﾎﾟﾁｬﾋﾟﾀﾞﾌﾞﾙ/構築記事】指＋範囲技") == "double"            # 半角カナ (NFKC で当たる。10/6 の一覧更新で発見)
+    assert A.classify_format("【シングルM-2最終43位】勝てるダブルエース構築の組み方") == "single"   # 「ダブルエース」はダブルバトルではない
+    assert A.classify_format("【M-4ダブル】貰い火ウインディ採用") == "double"
     assert A.seasons_of(rows[2]["season"]) == ["M-3", "MCS2026.06"] and A.seasons_of("M-1,M-4") == ["M-1", "M-4"]
     assert A.seasons_of("マンスリーチャレンジ") == ["MCS"] and A.seasons_of("") == []
     assert A.rank_of("最終470位 / 最終286位") == 286 and A.rank_of("") is None
