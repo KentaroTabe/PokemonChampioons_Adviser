@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from tests.test_article_bank import SINGLE
-from tests.test_article_parse import SYNTHETIC
+from tests.test_article_parse import NAMED_FIVE, REP, SYNTHETIC
 from tools.team_build import article_parse as P
 from tools.team_build import article_units as U
 from tools.team_build.articles_ingest import normalize_url
@@ -103,11 +103,28 @@ def test_units_and_adapters():
     print("test_units_and_adapters OK")
 
 
+def test_units_members_named_only():
+    """unit の members_named_only (変換層が渡す種名だけの個体): 既定は空、形を検査して正規化、parse_units が解析器に渡す"""
+    assert U.make_unit("team", SYNTHETIC)["members_named_only"] == []
+    u = U.make_unit("team", REP, members_named_only=list(NAMED_FIVE))
+    assert u["members_named_only"][0] == {"species_id": "pelipper", "base_species_id": "pelipper", "mega_stone": None}
+    ((_u, parsed),) = U.parse_units([u])
+    assert parsed["members_named_only"] == u["members_named_only"] and parsed["counts"]["members"] == 1
+    assert [s["species_id"] for s in parsed["selection_rules"][0]["selected_species"]] == ["gholdengo", "salamencemega"]
+    try:
+        U.make_unit("team", REP, members_named_only=[{"display": "メガボーマンダ"}])
+        raise AssertionError("species_id の無い要素を通した")
+    except ValueError as e:
+        assert "メガボーマンダ" not in str(e)                                                 # 例外の文言に表記を残さない
+    print("test_units_members_named_only OK")
+
+
 def main() -> None:
     test_decode_html_order()
     test_url_key_keeps_percent_encoding()
     test_regulation_from_text()
     test_units_and_adapters()
+    test_units_members_named_only()
     print("ALL OK")
 
 

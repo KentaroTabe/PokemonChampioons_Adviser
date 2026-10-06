@@ -33,12 +33,22 @@
    少数を手元に登録するのは可、公開・再配布は別 (公開バンクへの同梱は投稿者の許可などを別に確認)。
 6. 受け入れテストの素材: ユーザーが添付した記事の例そのものはコミットしない (第三者の本文)。同じ構造・同じ型の数値で解説文を書き直した
    合成記事 (`tests/test_article_parse.py` の `SYNTHETIC`) をテストに使い、添付の例は手元で解析して結果だけ報告する (§9 の末尾)。
+7. 用途ごとに「必要な情報が揃っているか」で判定する (GameWith のように構築ごとに代表 1 体の型しか無いページへの対応): 部分的な構築は
+   `record_kind = team`・`status = incomplete` で保存し、選出紹介の和集合から 6 体を補完しない。記録に `facets` (members_known /
+   sets_known / selection_readable、weakness 用の any_set_or_claim) を持たせ、`usable_for` は incomplete を一律に除外せず
+   `BUILD_ARTICLE_PURPOSE_REQUIREMENTS` で判定する。「矛盾・解析失敗」(conflict / failed) と「単なる情報不足」(incomplete) を分ける (§3.7)。
+8. 選出規則に種 id の記述を許す (schema 2): 型の紹介が無い種は `selected_species` (基本種とフォルムを区別、個体 id を作らない)、変換層が
+   渡す種名だけの個体 (`members_named_only`) も味方として扱う。基本選出は無条件の推奨 (`recommendation = default`。必須・選出確率 100%
+   ではない)、(初手) → lead / lead_species、「など」→ example、未指定の枠 → free_slots、明確な 3 体組 → exact_trio。変換層の文の形
+   「基本選出は A(初手)、B など、C。」「<見出し>の選出例は A(初手)、B、C など。」(見出しは捨てて条件にしない) と、接続の語「場合」単独を読む (§3.4)。
+9. 条件の語彙を増やし、「認識できる」と「判定できる」を分ける: 条件に `evaluation` (species / species_count / set_known_only / unknown) を
+   付け、unknown の規則も保存する (条件付きの上乗せに使わないだけ)。予測で使うときは記事の「相手」= 今回の自分 (側の取り違えに注意。§3.4)。
 
-**判断待ち**: GameWith の構造化データの LLM 送信可否 (`send_llm`)。GameWith の変換層を作るときの選出条件の語彙 (種の在否・タイプの多さ・
-物理受け) と「基本選出 (無条件 + 初手)」「など」の扱い。
+**判断待ち**: GameWith の構造化データの LLM 送信可否 (`send_llm`)。
 
 **初期案の設定値 (検証前。champions_agent/config `BUILD_ARTICLE_*`)**: 個体の節 / 全体の節の見出し語、個体 6 体・技 4 つ、能力名の表、
-252 表示と実数値のラベル、選出条件の語 → 述語、速度の修飾語、否定の接尾、LLM の入力 3,000 / 出力 2,000 トークン・呼び出し 2 回・
+252 表示と実数値のラベル、選出条件の語 → 述語、選出規則 schema 2 の語彙 (接続の語・選出の印・先発 / 後発の語・例示の語・未指定の枠の語・
+役割の語・タイプの漢字の略記・比較の語) と述語ごとの判定の可否、用途ごとの必要な情報、速度の修飾語、否定の接尾、LLM の入力 3,000 / 出力 2,000 トークン・呼び出し 2 回・
 処理 20 記事 $3、記事由来の構築はプールの最大 10%、照合は確定した基本種で 4 体以上の一致、混合は α = 0 / 0.05 / 0.10 を並行して記録。
 
 ## 1. 用途ごとに使う情報
@@ -121,30 +131,80 @@
 次は**展開しない**: 「大体物理アタッカーはカモ」「どんなポケモンも……耐えられる」のような対象が種でない広い表現 (→ 未確定 `broad_matchup_claim`)、
 行動助言 (「追い風しましょう」「はたき落とすが安定」→ 捨てる。未確定にも入れない)、採用理由の感情表現 (「嫌いすぎて採用」→ 捨てる)。
 
-### 3.4 選出規則 (明記された 3 体と未解決の記述を分ける)
+### 3.4 選出規則 (schema 2。2026-10-06 ユーザー判断。`extract_selection_rules` / `parse_selection_condition`)
 
-全体の節で「相手に <条件> なら <味方名…>」の形だけを `author_selection_rule` にする:
+全体の節の文から、条件つきの規則 (「相手に <条件> の場合は <味方…> を選出」) と無条件の規則 (基本選出・選出例) を `author_selection_rule` にする:
 
 ```json
 {"kind": "author_selection_rule",
- "condition": {"subject": "article_opponent", "predicate": "weather_control", "value": "present"},
- "selected_members": ["m4", "m5", "m6"], "lead": null, "recommendation": "preferred", "source_ref": "team:s1"}
+ "condition": null | {"subject": "article_opponent", "predicate": "species_present",
+                      "value": {"species_id": "rillaboom", "base_species_id": "rillaboom", "present": true}, "evaluation": "species"},
+ "selected_members": ["m5"], "selected_species": [{"species_id": "salamencemega", "base_species_id": "salamence"}],
+ "lead": "m6" | null, "lead_species": "corviknight" | null, "recommendation": "preferred" | "required" | "default",
+ "exact_trio": false, "example": false, "free_slots": 0, "source_ref": "team:s4"}
 ```
 
-- 条件の語は BUILD_ARTICLE_CONDITION_WORDS で述語に直す。表に無い条件は規則にしない (未確定 `selection_condition_unknown`)。
-- `selected_members` は文中で解決できた**味方の個体 id** だけ。先発は「先発」「初手」と味方名が同じ文にあるときだけ入れ、それ以外は null。
+- 1 文の区切り: 「列挙が続く選出の印 (基本選出 / 選出例)」の位置と「接続の語で閉じる『相手』の節」の始まり (直前の読点の後) で分けて
+  区間ごとに読む (「基本選出は A、B、C ですが、相手に X がいる場合は D を選出します」は 2 規則。条件の節の味方を基本選出に混ぜない)。
+- 条件つき: 「相手」(BUILD_ARTICLE_CONDITION_SUBJECT_WORDS) の後の接続の語 (BUILD_ARTICLE_CONDITION_CONNECTORS。「〜がいる場合は」の
+  「場合」単独を含む) までを条件の節にし、`parse_selection_condition` で読む。語彙の表に無い条件は規則にしない (未確定
+  `selection_condition_unknown`)。recommendation は「必ず / 固定 / 確定」があれば required、無ければ preferred。
+- 無条件: 「基本選出は A(初手)、B、C」「基本選出: A / B / C」「初手 A、後発 B と C」→ condition = null、recommendation = default
+  (無条件の推奨。必須・選出確率 100% ではない)。「<見出し>の選出例は A(初手)、B、C など」→ condition = null、preferred。見出しの部分は
+  捨てて条件にしない (同じ節の別の文「相手に…場合は X や Y を選出します」が別の規則になる。例示と条件つき規則を結びつけない)。
+  GameWith の変換層 (tools/team_build/adapters/gamewith.py) は選出の表をこの 2 形の文に直して渡す。「基本選出: …」の行は節の見出しにしない。
+- 候補: 味方の個体 (型あり) → `selected_members`、それ以外の種 → `selected_species` (辞書で解決した種。基本種とフォルムを区別し、
+  個体 id を作らない)。変換層が渡す種名だけの個体 (`members_named_only`) は味方として扱う (書かれた基本種名「ボーマンダ」はその個体の
+  形態「メガボーマンダ」に対応させる)。それ以外の辞書の種は**選出の列挙**の中だけ候補にする: 印・先発・後発の語の直後の列挙か、
+  「を選出 / を出す」(否定・受け身でない) の直前の列挙。述語の無い列挙 (「…ならペリッパー、カイリュー。」) の味方でない種は採らない
+  (相手への言及を混ぜない)。味方の個体と種名だけの個体は、条件つきの規則では区間のどこにあっても候補にする (段階 A と同じ)。
+- `lead` / `lead_species`: (初手) / （初手） の印、「初手は X」「先発は X」「X を先発」が候補の中で 1 つに決まるときだけ (記載順から推測しない)。
+- `example`: 例示の語 (BUILD_ARTICLE_EXAMPLE_WORDS = など / 等 / とか) が選出の列挙に付く。`free_slots`: 「残り 1 体は相手に合わせて」
+  「自由枠 1」のように**書かれた**未指定の枠の数 (書かれていなければ 0。「+ 自由枠」だけなら 0 にして未確定
+  `selection_free_slot_count_unspecified`)。未指定の枠の語 (「相手に合わせて」) の中の「相手」は条件の主体にしない。
+  `exact_trio`: 候補がちょうど BSS_PICK_COUNT (3) 体で、例示・未指定の枠が無い。
 - 「それ以外は雨パ」のように味方名が無い分岐は規則にせず、未確定 `selection_else_branch_members_unspecified` にする。
-  「雨パ = 残りの 3 体」は有力な解釈だが筆者の明記ではないので、保存するなら `system_hypothesis` として別に持つ (段階 A では作らない)。
-- `recommendation` は「必ず / 固定 / 確定」があれば required、無ければ preferred。「混ぜてもよい」の明記は `combinable = true`
-  (無ければ null。2 組だけに制限しない)。選出確率は作らない。
-- 予測で使うときは記事の筆者側を今回の相手側に写す: こちらの 6 体に天候操作があると判定できたときだけ、相手が m4〜m6 を選ぶ仮説を少し強める。
-  判定できなければ「なし」の分岐へ進めない (§8)。
+  「雨パ = 残りの 3 体」は有力な解釈だが筆者の明記ではないので、保存するなら `system_hypothesis` として別に持つ (作らない)。
+  「混ぜてもよい」の明記は `combinable = true` (無ければ null。2 組だけに制限しない)。選出確率は作らない。
+
+条件の語彙 (BUILD_ARTICLE_*。初期案、測定なし) と判定の可否 `evaluation` (BUILD_ARTICLE_CONDITION_EVALUATION):
+
+| 述語 | 文の形 | value | evaluation |
+|---|---|---|---|
+| species_present | 「相手 (構築) に <種> がいる / いない / 入り」 | {species_id, base_species_id, present} (書かれた形態のまま) | species |
+| type_count | 「<タイプ>(タイプ) が 3 体以上」(以上 / 以下 / 超 / 未満) | {type, op, n} | species_count |
+| type_many | 「<タイプ>(タイプ) が多い」 | {type} | unknown |
+| role | 「物理受け / 特殊受け / 受けポケモン」 | physical_wall / special_wall / wall | unknown |
+| move_type_present | 「<タイプ>技持ち / 技を持つ」 | {move_type} | set_known_only |
+| weather_control / trick_room / sand / rain | 既存の語の表 (BUILD_ARTICLE_CONDITION_WORDS) | present / absent | set_known_only |
+| setup / stall | 既存の語の表 | present / absent | unknown |
+
+- evaluation: species = 確定した種で判定できる / species_count = 判明している種・フォルムの範囲で数える / set_known_only = 相手の型が
+  確認できたときだけ (覚えられるだけでは成立しない) / unknown = 初版は判定しない (規則は保存し、条件付きの上乗せに使わない)。
+- 1 文の複数の条件は `{"any_of": [...], "evaluation": ...}`、間に「と / かつ / 〜て、」があれば `{"all_of": [...]}`。全体の evaluation は
+  要素の最も弱いもの (unknown > set_known_only > species_count > species の順に弱い)。「多い」が付いた条件 (type_many 以外) は
+  `quantity = "many"` を持ち、evaluation を unknown との弱い方にする (「氷技持ちが多い」= move_type_present + 多い → unknown)。
+  「多い」の基準の数は付け足さない。
+- 比較の語の無い数 (「ドラゴンタイプが 2 体いる」) は条件にしない (未確定)。在否は条件の語の後で最初に現れた語で決め、不在を値で
+  表せない述語 (role / type_count / type_many / move_type_present) の不在は条件にしない。認識できない部分は条件に入れない (any_of なら
+  適用が減るだけ)。タイプは辞書のひらがな・カタカナと漢字の略記 (BUILD_ARTICLE_TYPE_KANJI_WORDS。「超」は比較の語と重なるので除く) で読む。
+- species_present の不在 (present = false) は、未確定の枠に X が残り得るなら成立と断定しない (評価側の注意)。
+
+**予測で使うときの注意 (側の取り違え)**: 相手の選出を予測するとき、記事の「相手に X がいる」は**自分側の構築**についての条件
+(記事の筆者側 = 今回の相手、記事の「相手」= 今回の自分)。条件は自分の 6 体 (と型) で判定し、筆者の構築の側で見ない
+(条件を見る側が自分なので、set_known_only も自分の型で判定できる)。初版で組の予測分布に直接使うのは exact_trio かつ条件が
+評価できる (evaluation が unknown でない) 規則だけ。基本選出 (default) は無条件の推奨として扱い、必須・確率 100% にしない。
+判定できない条件の規則は「なし」の分岐へ進めない (§7)。
 
 ### 3.5 検査 (`article_bank.validate_record`) と処理状態
 
-6 体・各 4 技、種 id が参戦種、基本種の重複なし、能力ポイントの合計 = BUILD_GEN_POINT_BUDGET と 1 能力 ≤ BUILD_GEN_EV_POINT_CAP、
-252 表示と能力ポイントの対応 (8p − 4)、実数値は 6 つ、メガ形態と石の整合、選出規則の個体が 6 体に含まれる、技が learnset にある (警告)。
-結果は status = ok / warnings / incomplete (6 体に満たない・技一覧が無い) / failed (個体見出しが無い)。初期標本は人が照合する
+6 体・各 4 技、種 id が参戦種、基本種の重複なし (種名だけ分かる個体も含めて)、能力ポイントの合計 = BUILD_GEN_POINT_BUDGET と
+1 能力 ≤ BUILD_GEN_EV_POINT_CAP、252 表示と能力ポイントの対応 (8p − 4)、実数値は 6 つ、メガ形態と石の整合、選出規則の個体が 6 体に
+含まれる、技が learnset にある (警告)。2026-10-06 から: 型のある個体 + 種名だけの個体が種類の数を超えない (`members_total`)、種名だけの
+個体のメガ石、選出規則の種 (型のある個体の基本種なら個体 id で書くべき `selected_species_is_member`、種名だけの個体と形態が違う
+`selected_species_form_mismatch`、6 体の種が全部分かっているのにその外の種 `species_outside_team`)、先発の種が選出の種に含まれる。
+結果は status = ok / warnings / incomplete (情報不足: 6 体に満たない・技一覧が無い・技が足りない) / conflict (検査の矛盾。§3.7) /
+failed (個体が無い: 型のある個体も種名だけの個体も無い)。初期標本は人が照合する
 (完了条件: 項目別の正確さ・抽出率、「記載なし」「抽出失敗」「未確認」の区別)。
 
 ### 3.6 記録の形 (本文を含まない)
@@ -155,9 +215,11 @@ case: {case_id, record_kind: team|single_set (§3.7),
        meta: {seasons, regulation, regulation_basis, regulation_history, rank, format},
        members: [{id: "m1", species_id (使用形態), base_species_id, mega_stone, item, nature, ability,
                   points: {hp..spe} | null, ev252: {...} | null, actual: [6] | null, moves: [4], warnings: [...]}],
+       members_named_only: [{species_id, base_species_id, mega_stone}]   (種名だけ分かる個体。個体 id なし。§3.7)
        claims: [{kind, subject, object, object_kind: species|type|move, conditions: [...], basis: "author_explicit", source_ref}],
-       selection_rules: [...], unresolved: [{category, source_ref}], counts: {...},
-       versions: {parser, dictionary_hash, schema}, status}
+       selection_rules: [schema 2 (§3.4)], unresolved: [{category, source_ref}], counts: {...},
+       versions: {parser, dictionary_hash, schema},
+       facets: {members_known, sets_known, selection_readable, any_set_or_claim}, status, problems: [...] (検査を渡したとき)}
 ```
 
 文字列の値は id / 列挙値 / 参照 id だけ。`assert_no_prose(record)` が「かな・漢字を含む文字列が無い」ことを検査する (保存前と LLM 送信前の門)。
@@ -169,9 +231,26 @@ case: {case_id, record_kind: team|single_set (§3.7),
 - 出典は 2 軸を別項目にする: `source.publisher_kind` (誰が掲載したか: personal_blog / user_submission_site / editorial_site / unknown) と
   `source.usage_evidence` (使用実績の根拠: self_report / battle_log_confirmed / none / unknown)。編集部の記事でも実績のある構築を紹介する
   ことがあるので同じ軸にしない。無指定は unknown、表に無い値は ValueError。合成の記事は `source.synthetic = true`。
-- `usable_for(record, purpose, regulation)`: parser_eval は常に可 (合成も可)。それ以外は 合成でない・status が ok / warnings・
+- `usable_for(record, purpose, regulation)`: parser_eval は常に可 (合成も可)。それ以外は 合成でない・status が conflict / failed でない・
   meta.regulation が既知で引数と一致 (指定しなければ不可) を満たし、weakness = team / single_set、selection = team、
-  pool = team かつ usage_evidence ∈ BUILD_ARTICLE_POOL_EVIDENCE (self_report / battle_log_confirmed)。
+  pool = team かつ usage_evidence ∈ BUILD_ARTICLE_POOL_EVIDENCE (self_report / battle_log_confirmed)、さらに用途ごとの必要な情報
+  (facets、下記) が揃うこと。
+- **ユーザー判断 (2026-10-06)**: 用途ごとに「必要な情報が揃っているか」で判定する (incomplete を一律に除外しない)。`build_record` が
+  記録の `facets` を計算する: members_known (team なら 6 体の**種**が分かる: 型のある個体 `members` + 種名だけ分かる個体
+  `members_named_only` の基本種の数)、sets_known (型のある個体が 6 体で各 4 技。従来の ok の条件)、selection_readable (選出規則が
+  1 つ以上)、any_set_or_claim (4 技の揃った型か筆者の主張が 1 つ以上)。必要な情報は BUILD_ARTICLE_PURPOSE_REQUIREMENTS =
+  pool: members_known + sets_known / selection: members_known + selection_readable / weakness: any_set_or_claim / parser_eval: なし。
+  代表 1 体しか分からない構築 (members_known が偽) は selection に使えない (§7 の照合の条件を満たさない)。facets の無い古い記録は
+  中身から計算する (`record_facets`)。
+- `members_named_only` は変換層が unit で渡し (`make_unit(..., members_named_only=...)` → `parse_units` / `process_batch` →
+  `parse_article(members_named_only=...)`)、`parse_article` は本文から作らない。記録では `members` と別の項目に置き、個体 id を付けない
+  (架空の m2 を作らない。選出紹介の和集合から 6 体を確定しない)。
+- **ユーザー判断 (2026-10-06)**: 「矛盾・解析失敗」と「単なる情報不足」を分ける。status = ok / warnings / incomplete (情報不足) /
+  conflict (validate_record の矛盾: ポイント合計・252 表示の対応・実数値の再計算・メガ石・選出規則の個体と種・確率の混入・重複・
+  多すぎる数など) / failed (個体が無い)。`build_record(..., problems=validate_record(...))` で反映し (`build_validated_record`)、記録の
+  `problems` (id と数値だけ) に残す。情報不足の問題 (`members:<n>` で n が種類の数未満、`m<i>:moves:<n>` で n < 4) だけなら
+  incomplete、矛盾が 1 つでもあれば conflict (`problem_is_insufficient`)。problems を渡さなければ従来どおり (解析の結果だけで決める)。
+  `process_batch` と手入力 (`article_manual`) は渡す。conflict / failed は parser_eval 以外のどの用途にも使わない。
 - **ユーザー判断**: 編集部の推奨は初版ではプール本体に入れない。判定は publisher_kind ではなく usage_evidence で行う。
 - `set_regulation(record, regulation, basis)`: `meta.regulation_basis` (article_text / site_tag / user_confirmed / manifest_season) と
   `meta.regulation_history` (旧値・新値・basis。本文なし) を残す。
@@ -224,6 +303,7 @@ case: {case_id, record_kind: team|single_set (§3.7),
 - `source.entry_method = "manual"`。usage_evidence の既定は none、`battle_log_confirmed` は受け付けない (記事由来の手入力を「実戦で観測した型」に
   しない。対戦記録で確認する経路は別)。`redistributable` の既定は False (yakkun の個人利用の範囲。公開バンクへの同梱は投稿者の許可などを別に確認)。
 - `--check <file>` は検査だけ、`--import <file> [--bank-dir] [--base-version]` は問題が 1 件でもあれば保存しない。
+  検査 (validate_record) の結果は記録の status に反映する (矛盾 → conflict。`--check` は status も表示。§3.7)。
 
 ## 4. LLM の段 (段階 B。構造化データだけを渡す)
 
@@ -286,6 +366,7 @@ case: {case_id, record_kind: team|single_set (§3.7),
    技の目的 (どくづき → メガメガニウム)、役割 (サーフゴーがキラフロルを唯一見る)、補完 (バンギラスがリザ Y に弱い 2 体を助ける)、
    速度調整 (無振りアーマーガア抜き / 最速アシレーヌ・ギルガルド抜き / 最速スカーフマスカーニャに抜かれる) が構造化される。
 5. 天候操作の条件つき 3 体 (m4, m5, m6) は取れるが、雨側の 3 体・先発・選出確率は作らない (それ以外の分岐は未確定の分類になる)。
+   schema 2 では evaluation = set_known_only、exact_trio = true、example = false、free_slots = 0。
 6. 本文と引用が記録と LLM の入力に混入しない (`assert_no_prose`)。
 7. 否定文 (「X に弱いわけではない」)、相手への言及の行 (性格の無い「相手の X @ 持ち物」)、技一覧の 2 行目 (変更前後) を含む合成例でも
    採用技・6 体・主張が崩れない。HTML → リンクつき本文の変換の小テスト。
@@ -318,3 +399,8 @@ case: {case_id, record_kind: team|single_set (§3.7),
 8. 次: GameWith の変換層 (ランキングページ 1 件。構築ごとの unit、代表 1 体の型の表の読み取り、基本選出 (無条件 + 初手) と条件つき選出の語彙の
    追加、規制は本文の M-C の記述を根拠に article_text) → 取得 (`articles_fetch`: 許可 URL だけ、間隔 min_interval_s、並列なし、本文はメモリだけ) →
    実ページ少数の人による照合。LLM の段 (§4) は send_llm の判断の後。
+9. 追補 3 (2026-10-06 ユーザー判断、§0 の 7〜9): 記録の facets と status の incomplete / conflict の区別・用途ごとの要件・
+   `build_validated_record` (`article_bank`)、種名だけ分かる個体 `members_named_only` の受け取り (`article_parse` / `article_units` /
+   `articles_process`)、選出規則の schema 2 と条件の語彙・evaluation (`extract_selection_rules` / `parse_selection_condition`)、手入力の
+   検査結果の status への反映 (`article_manual`)。版は article_parse/3、article_case/3。テストは既存のモジュールに追加
+   (`test_article_parse.test_selection_schema_v2` は変換層の文の形 3 つをそのまま含む)。

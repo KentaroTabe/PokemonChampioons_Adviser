@@ -1,8 +1,11 @@
 """記事のページ → 構築ごとの配列 (unit)、文字コード、規制名 (docs/ARTICLE_BANK_DESIGN_1006.md §3.9)。HTTP はしない (取得はホストの許可待ち)。
 
-unit = {"kind": "team" | "single_set", "marked": <リンクつきの本文>, "meta": {...}, "source": {...}}
+unit = {"kind": "team" | "single_set", "marked": <リンクつきの本文>, "meta": {...}, "source": {...},
+        "members_named_only": [{"species_id", "base_species_id", "mega_stone"}]}
 - 変換層の出力は「区切り線つきの文章」ではなく構築ごとの配列。1 ページに複数の構築・単体の型があれば unit を分け、
   解析器は unit ごとに parse_article を呼ぶ (parse_units)。unit の本文はメモリ上だけで扱い、記録には入れない
+- members_named_only: 型は載っていないが種名だけ分かる個体 (変換層がページの構造から渡す。既定は空)。解析器は本文から作らない。
+  記録では members とは別の項目に置き、個体 id を付けない (選出紹介の和集合から 6 体を補完しない)
 - ホスト固有の変換層は ADAPTERS (ホスト → 関数) に登録する。取得可否とページ構造を確認してから足す (今回は登録口だけ)。
   登録の無いホストは generic_units (ページ全体を 1 つの team unit にする)
 - 文字コード (decode_html): HTTP ヘッダの charset → HTML の <meta charset> / <meta http-equiv="Content-Type"> → 既定 UTF-8
@@ -22,7 +25,7 @@ from typing import Callable, Optional
 
 from champions_agent.config import (BUILD_ARTICLE_CHARSET_ALIASES, BUILD_ARTICLE_RECORD_KIND_MEMBERS, BUILD_ARTICLE_REGULATION_DASHES,
                                     BUILD_ARTICLE_REGULATION_NAMES)
-from tools.team_build.article_parse import ArticleDictionary, canonical_host, html_to_marked_text, parse_article
+from tools.team_build.article_parse import ArticleDictionary, canonical_host, html_to_marked_text, normalize_named_only, parse_article
 from tools.team_build.articles_ingest import normalize_url
 
 # ホスト (canonical_host の形) → 変換層 (html_text, source, meta) -> [unit]。取得可否とページ構造を確認してから登録する
@@ -33,11 +36,14 @@ _HEAD_END_RE = re.compile(rb"</head\s*>", re.I)
 _DEFAULT_CODEC = "utf-8"
 
 
-def make_unit(kind: str, marked: str, meta: Optional[dict] = None, source: Optional[dict] = None) -> dict:
-    """unit を作る (kind は BUILD_ARTICLE_RECORD_KIND_MEMBERS の種類だけ)"""
+def make_unit(kind: str, marked: str, meta: Optional[dict] = None, source: Optional[dict] = None,
+              members_named_only: Optional[list] = None) -> dict:
+    """unit を作る (kind は BUILD_ARTICLE_RECORD_KIND_MEMBERS の種類だけ)。members_named_only は article_parse.normalize_named_only で
+    形を検査する (種 id だけ。形が違えば ValueError)"""
     if kind not in BUILD_ARTICLE_RECORD_KIND_MEMBERS:
         raise ValueError(f"unit の kind が表に無い値 (許可: {', '.join(BUILD_ARTICLE_RECORD_KIND_MEMBERS)})")
-    return {"kind": kind, "marked": marked or "", "meta": dict(meta or {}), "source": dict(source or {})}
+    return {"kind": kind, "marked": marked or "", "meta": dict(meta or {}), "source": dict(source or {}),
+            "members_named_only": normalize_named_only(members_named_only)}
 
 
 def generic_units(html_text: str, source: Optional[dict] = None, meta: Optional[dict] = None) -> list:
@@ -58,14 +64,14 @@ def units_for(host: Optional[str], html_text: str, source: Optional[dict] = None
 
 
 def parse_units(units: list, dic: Optional[ArticleDictionary] = None) -> list:
-    """unit ごとに parse_article (個体の上限は種類ごと: team = 6、single_set = 1) → [(unit, parsed)]"""
+    """unit ごとに parse_article (個体の上限は種類ごと: team = 6、single_set = 1。種名だけ分かる個体は unit から渡す) → [(unit, parsed)]"""
     out = []
     for u in units:
         kind = u.get("kind")
         if kind not in BUILD_ARTICLE_RECORD_KIND_MEMBERS:
             raise ValueError("unit の kind が表に無い値")
         parsed = parse_article(u.get("marked") or "", dic, max_members=BUILD_ARTICLE_RECORD_KIND_MEMBERS[kind],
-                               host=(u.get("source") or {}).get("host"))
+                               host=(u.get("source") or {}).get("host"), members_named_only=u.get("members_named_only"))
         out.append((u, parsed))
     return out
 

@@ -5,7 +5,10 @@
      配分 (能力ポイント / 252 表示 / 実数値を別に保持) と技一覧 (技名だけの最初の行から 4 技) を取る。
   2. 解説: 限定した規則 (W1 弱点 / W2 全体の弱点 / F1 有利 / P1 技の目的 / S1 抜き / S2 抜かれる / D1 耐え / R1 見れる / C1 助ける)
      だけで「誰についての、どんな関係か」を取る。対象は辞書で解決した種 id・タイプ・技 id だけ。文は残さない。
-  3. 全体の節: 「相手に <条件> なら <味方名…>」だけを author_selection_rule にする。先発・残りの 3 体・確率は作らない。
+  3. 全体の節: 選出規則 (schema 2、docs §3.4): 条件つき (「相手に <条件> の場合は <味方名…> を選出」) と無条件 (「基本選出は A(初手)、B、C」
+     「<見出し>の選出例は A、B、C など」「初手 A、後発 B と C」) を author_selection_rule にする。条件は語彙の表で述語に直し、判定の可否
+     (evaluation) を付ける。先発は明記されたときだけ、残りの枠・確率は作らない。
+  変換層 (ホスト別) が渡す「種名だけ分かる個体」(members_named_only) は受け取って結果に載せるだけ (parse_article 自身は作らない)。
 出力は id と数値と列挙値だけの辞書。出典は source_ref (個体番号 + 文番号、例 "m2:s3")。
 辞書は vision/data/jp_names.json (vision.normalize.normalize の正規化キーで厳密一致。あいまい一致はしない。リンクの番号で id を決めない)。
 厳密一致の表に無い表記は、記事専用の別名辞書 (vision/data/article_aliases.json、tools/team_build/article_aliases) の confirmed だけで引く
@@ -26,17 +29,29 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
-from champions_agent.config import (BUILD_ARTICLE_ACTUAL_LABEL, BUILD_ARTICLE_CONDITION_WORDS, BUILD_ARTICLE_EV252_LABEL,
-                                    BUILD_ARTICLE_EV252_MAX, BUILD_ARTICLE_HEADING_MAX_CHARS, BUILD_ARTICLE_MAX_MEMBERS,
-                                    BUILD_ARTICLE_MEMBER_SECTION_WORDS, BUILD_ARTICLE_MOVES_PER_SET, BUILD_ARTICLE_NAME_TOKEN_MAX_CHARS,
-                                    BUILD_ARTICLE_NEGATION_SUFFIXES, BUILD_ARTICLE_PLAIN_NAME_MIN_CHARS,
-                                    BUILD_ARTICLE_SELECTION_COMBINABLE_WORDS, BUILD_ARTICLE_SELECTION_REQUIRED_WORDS,
-                                    BUILD_ARTICLE_SITE_ID_PATTERNS, BUILD_ARTICLE_STAT_WORDS, BUILD_ARTICLE_TARGET_MOD_WORDS,
-                                    BUILD_ARTICLE_TEAM_SECTION_WORDS, BUILD_GEN_EV_POINT_CAP)
+from champions_agent.config import (BSS_PICK_COUNT, BUILD_ARTICLE_ABSENCE_WORDS, BUILD_ARTICLE_ACTUAL_LABEL, BUILD_ARTICLE_BACK_WORDS,
+                                    BUILD_ARTICLE_CONDITION_AND_WORDS, BUILD_ARTICLE_CONDITION_CONNECTORS, BUILD_ARTICLE_CONDITION_EVALUATION,
+                                    BUILD_ARTICLE_CONDITION_EVALUATION_ORDER, BUILD_ARTICLE_CONDITION_MANY_EVALUATION,
+                                    BUILD_ARTICLE_CONDITION_OR_WORDS, BUILD_ARTICLE_CONDITION_SUBJECT_WORDS, BUILD_ARTICLE_CONDITION_WORDS,
+                                    BUILD_ARTICLE_COUNT_COMPARATORS, BUILD_ARTICLE_COUNTER_WORDS, BUILD_ARTICLE_EV252_LABEL,
+                                    BUILD_ARTICLE_EV252_MAX, BUILD_ARTICLE_EXAMPLE_WORDS, BUILD_ARTICLE_FREE_SLOT_COUNTERS,
+                                    BUILD_ARTICLE_FREE_SLOT_NAMES, BUILD_ARTICLE_FREE_SLOT_WORDS, BUILD_ARTICLE_HEADING_MAX_CHARS,
+                                    BUILD_ARTICLE_LEAD_WORDS, BUILD_ARTICLE_MANY_WORDS, BUILD_ARTICLE_MAX_MEMBERS,
+                                    BUILD_ARTICLE_MEMBER_SECTION_WORDS, BUILD_ARTICLE_MOVE_TYPE_WORDS, BUILD_ARTICLE_MOVES_PER_SET,
+                                    BUILD_ARTICLE_NAME_TOKEN_MAX_CHARS, BUILD_ARTICLE_NEGATION_SUFFIXES, BUILD_ARTICLE_NUMERAL_WORDS,
+                                    BUILD_ARTICLE_PLAIN_NAME_MIN_CHARS, BUILD_ARTICLE_PRESENCE_ATTACHED_WORDS, BUILD_ARTICLE_PRESENCE_WORDS,
+                                    BUILD_ARTICLE_ROLE_WORDS, BUILD_ARTICLE_SELECTION_COMBINABLE_WORDS, BUILD_ARTICLE_SELECTION_ELSE_WORDS,
+                                    BUILD_ARTICLE_SELECTION_LIST_SEPARATORS, BUILD_ARTICLE_SELECTION_MARKERS,
+                                    BUILD_ARTICLE_SELECTION_PREDICATE_EXCLUDES, BUILD_ARTICLE_SELECTION_PREDICATES,
+                                    BUILD_ARTICLE_SELECTION_REQUIRED_WORDS, BUILD_ARTICLE_SITE_ID_PATTERNS, BUILD_ARTICLE_STAT_WORDS,
+                                    BUILD_ARTICLE_TARGET_MOD_WORDS, BUILD_ARTICLE_TEAM_SECTION_WORDS, BUILD_ARTICLE_TYPE_KANJI_WORDS,
+                                    BUILD_GEN_EV_POINT_CAP)
 from vision.normalize import JP_NAMES_PATH, normalize
 
 # 2: unresolved_names を {"category", "text", "host", "site_key"} に、site_id_observations と max_members (single_set) を追加 (2026-10-06)
-PARSER_VERSION = "article_parse/2"
+# 3: 選出規則の schema 2 (無条件の基本選出・選出例、selected_species / lead_species / exact_trio / example / free_slots、条件の語彙と
+#    evaluation、any_of / all_of)、members_named_only の受け取り、「場合」単独の接続の語 (2026-10-06 ユーザー判断)
+PARSER_VERSION = "article_parse/3"
 ARTICLE_ALIASES_PATH = Path(JP_NAMES_PATH).parent / "article_aliases.json"   # 記事専用の別名辞書 (OCR 用の jp_names.json とは別)
 DICT_CATEGORIES = ("species", "items", "moves", "abilities", "natures", "types")
 STAT_ORDER = ("hp", "atk", "def", "spa", "spd", "spe")
@@ -48,9 +63,14 @@ ENTITY_GROUP = r"(?:〔\d+〕(?:や|、|と|・|,|,|\s)*)+"
 CLAUSE_SEP = "、。！!？?（）()「」"
 # 未確定項目の分類 (本文の代わりに残す列挙値。文は残さない)
 UNRESOLVED_CATEGORIES = ("broad_matchup_claim", "move_purpose_non_species_target", "selection_else_branch_members_unspecified",
-                         "selection_condition_unknown", "selection_members_unresolved", "unresolved_species", "unresolved_item",
-                         "unresolved_nature", "unresolved_ability", "unresolved_move", "member_head_incomplete", "stat_line_unlabeled",
-                         "extra_member_head", "durability_benchmark_ambiguous_modifiers")
+                         "selection_condition_unknown", "selection_members_unresolved", "selection_free_slot_count_unspecified",
+                         "unresolved_species", "unresolved_item", "unresolved_nature", "unresolved_ability", "unresolved_move",
+                         "member_head_incomplete", "stat_line_unlabeled", "extra_member_head", "durability_benchmark_ambiguous_modifiers")
+
+
+def _alt(words) -> str:
+    """語の列 → 正規表現の選択 (長い語から照合する)"""
+    return "|".join(re.escape(w) for w in sorted(set(words), key=len, reverse=True))
 
 
 # ------------------------------------------------------------------------------------------------------------------
@@ -333,12 +353,16 @@ def site_id_observations(lines: list, dic: "ArticleDictionary", host: Optional[s
 # ------------------------------------------------------------------------------------------------------------------
 # 節の見出しと個体の見出し
 # ------------------------------------------------------------------------------------------------------------------
+_MARKER_LINE_RE = re.compile(rf"^(?:{_alt(BUILD_ARTICLE_SELECTION_MARKERS)})\s*(?:は|:|：|→)\s*\S")
+
+
 def _heading_text(line: str) -> Optional[str]:
-    """見出しとみなせる行ならその文字列。`#` 始まり、または 箇条書きでもリンクでも文 (。で終わる) でもない短い行"""
+    """見出しとみなせる行ならその文字列。`#` 始まり、または 箇条書きでもリンクでも文 (。で終わる) でもない短い行。
+    「基本選出: A / B / C」のように選出の印の後に列挙が続く行は見出しにしない (選出規則の文として読む)"""
     s = line.strip()
     if s.startswith("#"):
         return s.lstrip("#").strip()
-    if BULLET_RE.match(s) or LINK_RE.search(s) or s.endswith(("。", "．", ".")):
+    if BULLET_RE.match(s) or LINK_RE.search(s) or s.endswith(("。", "．", ".")) or _MARKER_LINE_RE.match(s):
         return None
     t = re.sub(r"[【】\[\]■□●○◆◇▼▽★☆:：]", "", s).strip()
     return t if 0 < len(t) <= BUILD_ARTICLE_HEADING_MAX_CHARS else None
@@ -526,15 +550,17 @@ def _replace_word(flat: str, word: str, make_token) -> str:
 
 def entities_of(sentence: str, members: list, dic: ArticleDictionary, own_moves: Optional[list] = None) -> tuple:
     """文 → (実体を 〔i〕 に置き換えた文, 実体の列)。実体 = リンク (種・技・タイプ・持ち物) + 素の文字列の 「X タイプ」・味方名・
-    辞書の種名 (長い順、カタカナ語の境界で) ・その個体の採用技名。味方の種のリンク・味方名は member_id を持つ"""
+    辞書の種名 (長い順、カタカナ語の境界で) ・その個体の採用技名。味方の種のリンク・味方名は member_id を持つ。
+    実体は {"kind", "id", "member_id", "written"}。written は書かれた表記が辞書で指す種 id (味方名で置き換えた実体の id は味方の
+    使用形態なので、相手についての条件 (「相手にボーマンダがいる」) は written で読む。種以外は id と同じ)"""
     ents: list = []
     member_by_species = {}
     for mem in members:
         member_by_species.setdefault(mem["species_id"], mem["id"])
         member_by_species.setdefault(mem["base_species_id"], mem["id"])
 
-    def add(kind, ident, member_id=None):
-        ents.append({"kind": kind, "id": ident, "member_id": member_id})
+    def add(kind, ident, member_id=None, written=None):
+        ents.append({"kind": kind, "id": ident, "member_id": member_id, "written": ident if written is None else written})
         return f"〔{len(ents) - 1}〕"
 
     def link_repl(m):
@@ -560,7 +586,8 @@ def entities_of(sentence: str, members: list, dic: ArticleDictionary, own_moves:
     for name, mid in _member_names(members, dic):
         if name in flat:
             sid = next(mem["species_id"] for mem in members if mem["id"] == mid)
-            flat = _replace_word(flat, name, lambda sid=sid, mid=mid: add("species", sid, mid))
+            written = dic.species_id(name) or sid
+            flat = _replace_word(flat, name, lambda sid=sid, mid=mid, written=written: add("species", sid, mid, written))
     for ja, sid in dic.species_words():
         if ja in flat:
             flat = _replace_word(flat, ja, lambda sid=sid: add("species", sid, member_by_species.get(sid)))
@@ -710,38 +737,477 @@ def extract_claims(sentence: str, subject: str, members: list, dic: ArticleDicti
     return claims, unresolved, unresolved_names
 
 
-def extract_selection_rules(sentence: str, members: list, dic: ArticleDictionary, source_ref: str) -> tuple:
-    """全体の節の 1 文 → (選出規則の列, 未確定の列)。「相手に <条件> なら <味方名…>」だけを規則にする。
-    先発は「先発 / 初手」と味方名が同じ文にあるときだけ。それ以外の分岐 (味方名なし) は未確定"""
+# ------------------------------------------------------------------------------------------------------------------
+# 選出規則 (schema 2。docs/ARTICLE_BANK_DESIGN_1006.md §3.4)
+# ------------------------------------------------------------------------------------------------------------------
+def species_ref(species_id: str) -> dict:
+    """種 id → {"species_id" (使用形態), "base_species_id"}。基本種はメガ形態の表 (mega_table。図鑑の requiredItem が正) だけで決める
+    (parse_member_head と同じ。個体 id は作らない)"""
+    base = (mega_table()["forms"].get(species_id) or (None, None))[0]
+    return {"species_id": species_id, "base_species_id": base or species_id}
+
+
+def normalize_named_only(entries) -> list:
+    """変換層が渡す「種名だけ分かる個体」→ [{"species_id", "base_species_id", "mega_stone"}] (個体 id は付けない。他の項目は捨てる)。
+    base_species_id が無ければ species_ref (メガ形態の表) で補い、mega_stone が無ければ None (未知)。形が違えば ValueError"""
+    out = []
+    for e in entries or []:
+        if not isinstance(e, dict) or not isinstance(e.get("species_id"), str) or not e["species_id"]:
+            raise ValueError("members_named_only の要素は species_id (文字列) を持つ dict にする")
+        base = e.get("base_species_id") or species_ref(e["species_id"])["base_species_id"]
+        stone = e.get("mega_stone")
+        if not isinstance(base, str) or (stone is not None and not isinstance(stone, str)):
+            raise ValueError("members_named_only の base_species_id / mega_stone は文字列 (mega_stone は None も可) にする")
+        out.append({"species_id": e["species_id"], "base_species_id": base, "mega_stone": stone})
+    return out
+
+
+_CONNECTOR_RE = re.compile(_alt(BUILD_ARTICLE_CONDITION_CONNECTORS))
+_OPPONENT_RE = re.compile(_alt(BUILD_ARTICLE_CONDITION_SUBJECT_WORDS))
+_FREE_WORD_RE = re.compile(_alt(BUILD_ARTICLE_FREE_SLOT_WORDS))
+_MARKER_RE = re.compile(rf"(?P<marker>{_alt(BUILD_ARTICLE_SELECTION_MARKERS)})\s*(?:は|:|：|→)?\s*")
+_LEAD_BACK_RE = re.compile(rf"(?:{_alt(BUILD_ARTICLE_LEAD_WORDS + BUILD_ARTICLE_BACK_WORDS)})\s*(?:は|に|で|:|：)?\s*")
+_LEAD_AFTER_RE = re.compile(rf"(?:{_alt(BUILD_ARTICLE_LEAD_WORDS)})\s*(?:は|に|で|:|：)?\s*〔(\d+)〕")
+_LEAD_BEFORE_RE = re.compile(rf"〔(\d+)〕(?:を|が|から)?(?:{_alt(BUILD_ARTICLE_LEAD_WORDS)})")
+_LEAD_MARK_RE = re.compile(rf"\s*[（(]\s*(?:{_alt(BUILD_ARTICLE_LEAD_WORDS)})\s*[）)]")
+_LIST_SEP_RE = re.compile(rf"(?:{_alt(BUILD_ARTICLE_SELECTION_LIST_SEPARATORS)}|\s)+")
+# 例示の語。漢字 1 文字の語 (「等」) は直後が漢字なら例示にしない (「等倍」)
+_EXAMPLE_RE = re.compile("|".join(re.escape(w) + (r"(?![一-龥])" if re.fullmatch(r"[一-龥]", w) else "")
+                                  for w in sorted(BUILD_ARTICLE_EXAMPLE_WORDS, key=len, reverse=True)))
+_SEL_PRED_RE = re.compile(rf"\s*(?:{_alt(BUILD_ARTICLE_SELECTION_PREDICATES)})(?!{_alt(BUILD_ARTICLE_SELECTION_PREDICATE_EXCLUDES)})")
+_NUM_PAT = rf"(?:[0-9０-９]+|{_alt(BUILD_ARTICLE_NUMERAL_WORDS)})"
+_FREE_COUNT_RE = re.compile(rf"(?P<n>{_NUM_PAT})\s*(?:{_alt(BUILD_ARTICLE_FREE_SLOT_COUNTERS)})\s*(?:は|を|も)?\s*"
+                            rf"(?:{_alt(BUILD_ARTICLE_FREE_SLOT_WORDS)})")
+_FREE_NAME_COUNT_RE = re.compile(rf"(?:{_alt(BUILD_ARTICLE_FREE_SLOT_NAMES)})\s*(?:[×xX✕＊*]\s*)?(?P<n>{_NUM_PAT})")
+_POLARITY_RE = re.compile(_alt(BUILD_ARTICLE_ABSENCE_WORDS + BUILD_ARTICLE_PRESENCE_WORDS))
+_ABSENCE = frozenset(BUILD_ARTICLE_ABSENCE_WORDS)
+_SPECIES_COND_RE = re.compile(rf"(?P<group>{ENTITY_GROUP})(?:(?:が|は|も)(?P<verb>{_alt(BUILD_ARTICLE_ABSENCE_WORDS + BUILD_ARTICLE_PRESENCE_WORDS)})"
+                              rf"|(?P<attached>{_alt(BUILD_ARTICLE_PRESENCE_ATTACHED_WORDS)}))")
+_MANY_RE = re.compile(_alt(BUILD_ARTICLE_MANY_WORDS))
+_PARTICLES_ONLY_RE = re.compile(r"(?:が|は|も|の|ポケモン|\s)*")
+_CLAUSE_BREAKS = "、，,"
+_EVAL_RANK = {e: i for i, e in enumerate(BUILD_ARTICLE_CONDITION_EVALUATION_ORDER)}
+_WEAKEST = BUILD_ARTICLE_CONDITION_EVALUATION_ORDER[-1]
+_MANY_EXEMPT = ("type_many", "type_count", "species_present")   # 「多い」を付けない述語 (述語自体が多さ・数・在否を表す)
+
+
+def weakest_evaluation(evaluations) -> str:
+    """判定の可否の列 → 最も弱いもの (BUILD_ARTICLE_CONDITION_EVALUATION_ORDER の後ろほど弱い。表に無い値は最も弱いものとして扱う)"""
+    ranks = [_EVAL_RANK.get(e, len(_EVAL_RANK) - 1) for e in evaluations]
+    return BUILD_ARTICLE_CONDITION_EVALUATION_ORDER[max(ranks)] if ranks else _WEAKEST
+
+
+def _condition(predicate: str, value) -> dict:
+    return {"subject": "article_opponent", "predicate": predicate, "value": value,
+            "evaluation": BUILD_ARTICLE_CONDITION_EVALUATION.get(predicate, _WEAKEST)}
+
+
+def _type_items(dic: ArticleDictionary) -> tuple:
+    """タイプの表記 → 英語名の組 (辞書のひらがな・カタカナ + 漢字の略記 BUILD_ARTICLE_TYPE_KANJI_WORDS)"""
+    return tuple(dic.type_words()) + tuple(sorted(BUILD_ARTICLE_TYPE_KANJI_WORDS.items()))
+
+
+@lru_cache(maxsize=4)
+def _type_patterns(type_items: tuple) -> dict:
+    """タイプの言及を読む正規表現 (move_type_present / type_count / type_many)。タイプ = 実体 〔i〕 (「Xタイプ」・タイプのリンク) か
+    素の語 (カタカナ語・漢字の略記。前が同じ字種なら語の一部とみて読まない。ひらがなの語は技の語が続くときだけ)"""
+    lex = dict(type_items)
+    kata = [w for w in lex if re.fullmatch(r"[ァ-ヶー]+", w)]
+    hira = [w for w in lex if re.fullmatch(r"[ぁ-ん]+", w)]
+    kanji = [w for w in lex if w not in kata and w not in hira]
+
+    def type_alt(bare_hiragana: bool) -> str:
+        alts = [r"〔(?P<ent>\d+)〕"]
+        if kata:
+            alts.append(rf"(?<![ァ-ヶー])(?P<kata>{_alt(kata)})(?:タイプ)?")
+        if kanji:
+            alts.append(rf"(?<![一-龥])(?P<kanji>{_alt(kanji)})(?:タイプ)?")
+        if bare_hiragana and hira:
+            alts.append(rf"(?P<hira>{_alt(hira)})(?:タイプ)?")
+        return "(?:" + "|".join(alts) + ")"
+    mod = r"(?:の(?:ポケモン)?)?"
+    return {"lex": lex,
+            "move_type_present": re.compile(type_alt(True) + rf"(?:の)?(?:{_alt(BUILD_ARTICLE_MOVE_TYPE_WORDS)})"),
+            "type_count": re.compile(type_alt(False) + mod + rf"(?:が|は|を|も)?\s*(?P<num>{_NUM_PAT})\s*"
+                                     rf"(?:{_alt(BUILD_ARTICLE_COUNTER_WORDS)})\s*(?P<cmp>{_alt(BUILD_ARTICLE_COUNT_COMPARATORS)})"),
+            "type_many": re.compile(type_alt(False) + mod + rf"(?:が|は|も)?\s*(?:{_alt(BUILD_ARTICLE_MANY_WORDS)})")}
+
+
+def _type_of(m, ents: list, lex: dict) -> Optional[str]:
+    """タイプの言及の一致 → 英語のタイプ名 (実体がタイプでなければ None)"""
+    g = m.groupdict()
+    if g.get("ent") is not None:
+        e = ents[int(g["ent"])]
+        return e["id"] if e["kind"] == "type" else None
+    for key in ("kata", "kanji", "hira"):
+        if g.get(key):
+            return lex.get(g[key])
+    return None
+
+
+def _num_value(text: str) -> int:
+    t = unicodedata.normalize("NFKC", text)
+    return int(t) if t.isdigit() else BUILD_ARTICLE_NUMERAL_WORDS[text]
+
+
+def _absent_after(text: str, pos: int) -> bool:
+    """pos より後で最初に現れた在否の語が不在の語か (どちらも無ければ False = 在る)"""
+    m = _POLARITY_RE.search(text, pos)
+    return bool(m) and m.group(0) in _ABSENCE
+
+
+def _strip_or_words(joint: str) -> str:
+    for w in sorted(BUILD_ARTICLE_CONDITION_OR_WORDS, key=len, reverse=True):
+        joint = joint.replace(w, "")
+    return joint
+
+
+def _joint_is_and(joint: str) -> bool:
+    """2 つの条件の間の文字列が「かつ」か (2 文字以上の AND の語はそのまま見る。「と」は OR の語 (「とか」等) を除いてから見る)"""
+    if any(w in joint for w in BUILD_ARTICLE_CONDITION_AND_WORDS if len(w) > 1):
+        return True
+    rest = _strip_or_words(joint)
+    return any(w in rest for w in BUILD_ARTICLE_CONDITION_AND_WORDS if len(w) == 1)
+
+
+def _apply_many(cond_text: str, found: list) -> None:
+    """「多い」を、その直前の条件と、そこから OR の語 (「や / 、」) だけで繋がる前の条件に付ける (quantity = many、判定は
+    BUILD_ARTICLE_CONDITION_MANY_EVALUATION との弱い方)。found は始まりの順。type_many は述語自体が「多い」なので変えない"""
+    for mm in _MANY_RE.finditer(cond_text):
+        p = mm.start()
+        idx = max((k for k, (s, _e, _c) in enumerate(found) if s <= p), default=None)
+        if idx is None:
+            continue
+        s, e, _c = found[idx]
+        if not (s <= p < e) and not _PARTICLES_ONLY_RE.fullmatch(cond_text[e:p]):
+            continue                                   # 「多い」が直前の条件に付いていない
+        k = idx
+        while True:
+            c = found[k][2]
+            if c["predicate"] not in _MANY_EXEMPT:
+                c["quantity"] = "many"
+                c["evaluation"] = weakest_evaluation([c["evaluation"], BUILD_ARTICLE_CONDITION_MANY_EVALUATION])
+            if k == 0 or _strip_or_words(cond_text[found[k - 1][1]:found[k][0]]).strip():
+                break
+            k -= 1
+
+
+def parse_selection_condition(cond_text: str, ents: list, dic: ArticleDictionary) -> Optional[dict]:
+    """条件の節 (「相手 … 場合」。接続の語まで。実体は 〔i〕) → 条件 (dict) / None (語彙の表に無い条件)。
+    条件 = {"subject": "article_opponent", "predicate", "value", "evaluation" (BUILD_ARTICLE_CONDITION_EVALUATION)(, "quantity": "many")}。
+    1 文の複数の条件は {"any_of" | "all_of": [条件…], "evaluation": 要素の最も弱いもの} (間に「と / かつ / 〜て、」があれば all_of)。
+    - species_present: 「(相手構築に) <種> がいる / いない / 入り」→ value {"species_id", "base_species_id", "present"} (書かれた形態のまま。
+      味方と同じ種名でも味方の形態に読み替えない)
+    - type_count: 「<タイプ>(タイプ)が 3 体以上」→ value {"type", "op", "n"} (比較の語の無い数は条件にしない)
+    - type_many: 「<タイプ>(タイプ)が多い」→ value {"type"} (「多い」の基準の数を付け足さない)
+    - role: 「物理受け / 特殊受け / 受けポケモン」→ value = BUILD_ARTICLE_ROLE_WORDS の鍵 (種だけで断定しない)
+    - move_type_present: 「<タイプ>技持ち」→ value {"move_type"} (覚えられるだけでは成立しない)
+    - 既存の語の表 (BUILD_ARTICLE_CONDITION_WORDS: weather_control / trick_room / setup / stall / sand / rain) → value "present" / "absent"
+    「多い」は直前の条件 (と「や」で繋がる前の条件) に quantity = many を付ける。在否は条件の語の後で最初に現れた語で決め、不在を値で
+    表せない述語 (role / type_count / type_many / move_type_present) の不在は条件にしない。認識できない部分は条件に入れない"""
+    pats = _type_patterns(_type_items(dic))
+    found: list = []                                   # [始まり, 終わり, 条件] (重ならない)
+
+    def overlaps(s: int, e: int) -> bool:
+        return any(not (e <= a or s >= b) for a, b, _c in found)
+
+    def add(s: int, e: int, predicate: str, value) -> None:
+        if overlaps(s, e) or any(c["predicate"] == predicate and c["value"] == value for _a, _b, c in found):
+            return
+        found.append([s, e, _condition(predicate, value)])
+
+    for m in pats["move_type_present"].finditer(cond_text):
+        ty = _type_of(m, ents, pats["lex"])
+        if ty and not _absent_after(cond_text, m.end()):
+            add(m.start(), m.end(), "move_type_present", {"move_type": ty})
+    for m in pats["type_count"].finditer(cond_text):
+        ty = _type_of(m, ents, pats["lex"])
+        if ty and not _absent_after(cond_text, m.end()):
+            add(m.start(), m.end(), "type_count",
+                {"type": ty, "op": BUILD_ARTICLE_COUNT_COMPARATORS[m.group("cmp")], "n": _num_value(m.group("num"))})
+    for m in pats["type_many"].finditer(cond_text):
+        ty = _type_of(m, ents, pats["lex"])
+        if ty and not _absent_after(cond_text, m.end()):
+            add(m.start(), m.end(), "type_many", {"type": ty})
+    for m in _SPECIES_COND_RE.finditer(cond_text):
+        absent = bool(m.group("verb")) and m.group("verb") in _ABSENCE
+        g0 = m.start("group")
+        for t in ENTITY_RE.finditer(m.group("group")):
+            e = ents[int(t.group(1))]
+            if e["kind"] == "species":
+                add(g0 + t.start(), g0 + t.end(), "species_present", dict(species_ref(e["written"]), present=not absent))
+    for key, words in BUILD_ARTICLE_ROLE_WORDS.items():
+        for m in re.finditer(_alt(words), cond_text):
+            if not _absent_after(cond_text, m.end()):
+                add(m.start(), m.end(), "role", key)
+    for predicate, words in BUILD_ARTICLE_CONDITION_WORDS.items():
+        spans = [(m.start(), m.end()) for m in re.finditer(_alt(words), cond_text)]
+        move_ids = {value_id(dic.lookup("moves", w)) for w in words} - {None}     # 技のリンク (「[トリックルーム](…)」) も同じ述語
+        spans += [(t.start(), t.end()) for t in ENTITY_RE.finditer(cond_text)
+                  if ents[int(t.group(1))]["kind"] == "move" and ents[int(t.group(1))]["id"] in move_ids]
+        for s, e in sorted(spans):
+            if not overlaps(s, e):
+                add(s, e, predicate, "absent" if _absent_after(cond_text, e) else "present")
+                break
+    if not found:
+        return None
+    found.sort(key=lambda x: x[0])
+    _apply_many(cond_text, found)
+    conds = [c for _s, _e, c in found]
+    if len(conds) == 1:
+        return conds[0]
+    joints = [cond_text[found[k][1]:found[k + 1][0]] for k in range(len(found) - 1)]
+    op = "all_of" if any(_joint_is_and(j) for j in joints) else "any_of"
+    return {op: conds, "evaluation": weakest_evaluation([c["evaluation"] for c in conds])}
+
+
+def _scan_list(flat: str, pos: int, limit: int, ents: list) -> Optional[dict]:
+    """flat[pos:limit] の先頭からの選出の列挙 (種の実体・区切り・(初手) の印・例示の語) → {"start", "end", "ents", "leads", "example"}。
+    種の実体で始まらなければ None。種以外の実体・他の文字で終わる"""
+    i = end = pos
+    idxs, leads, example = [], [], False
+    while i < limit:
+        m = ENTITY_RE.match(flat, i)
+        if m and m.end() <= limit:
+            k = int(m.group(1))
+            if ents[k]["kind"] != "species":
+                break
+            idxs.append(k)
+            i = end = m.end()
+            continue
+        if not idxs:
+            break
+        m = _LEAD_MARK_RE.match(flat, i)
+        if m and m.end() <= limit:
+            leads.append(idxs[-1])                     # 名前の直後の (初手) / （初手）
+            i = end = m.end()
+            continue
+        m = _EXAMPLE_RE.match(flat, i)
+        if m and m.end() <= limit:
+            example = True
+            i = end = m.end()
+            continue
+        m = _LIST_SEP_RE.match(flat, i)
+        if m and m.end() <= limit:
+            i = m.end()
+            continue
+        break
+    return {"start": pos, "end": end, "ents": idxs, "leads": leads, "example": example} if idxs else None
+
+
+def _lists_in(flat: str, a: int, b: int, ents: list) -> list:
+    """区間 [a, b) の選出の列挙の候補 (種の実体から始まる最長の列挙) の列"""
+    out, covered = [], a
+    for t in ENTITY_RE.finditer(flat, a, b):
+        if t.start() < covered or ents[int(t.group(1))]["kind"] != "species":
+            continue
+        lst = _scan_list(flat, t.start(), b, ents)
+        if lst:
+            out.append(lst)
+            covered = lst["end"]
+    return out
+
+
+def _list_starts(flat: str, a: int, b: int) -> set:
+    """選出の印 (基本選出 / 選出例) と先発・後発の語の直後 (助詞・区切りを除く) の位置"""
+    out = set()
+    for rx in (_MARKER_RE, _LEAD_BACK_RE):
+        for m in rx.finditer(flat, a, b):
+            sep = _LIST_SEP_RE.match(flat, m.end())
+            out.add(sep.end() if sep else m.end())
+    return out
+
+
+def _named_ref(entity: dict, named: list) -> Optional[dict]:
+    """種の実体が種名だけ分かる個体 (使用形態か基本種が一致) なら、その個体の {"species_id", "base_species_id"}"""
+    for n in named:
+        if entity["id"] in (n["species_id"], n["base_species_id"]):
+            return {"species_id": n["species_id"], "base_species_id": n["base_species_id"]}
+    return None
+
+
+def _candidates(flat: str, a: int, b: int, ents: list, named: list, anywhere: bool) -> tuple:
+    """区間 [a, b) の選出の候補 → ([(実体の番号, "member" | "species", 個体 id | 種の参照)], 列挙の列)。
+    味方の個体 (型あり) と種名だけ分かる個体は anywhere なら区間のどこでも、そうでなければ選出の列挙の中だけ。
+    それ以外の辞書の種は選出の列挙 (印・先発の語の直後か、選出の述語の直前) の中だけ (相手への言及を候補に混ぜない)"""
+    lists = _lists_in(flat, a, b, ents)
+    starts = _list_starts(flat, a, b)
+    selected = {k for lst in lists if lst["start"] in starts or _SEL_PRED_RE.match(flat, lst["end"]) for k in lst["ents"]}
+    out = []
+    for t in ENTITY_RE.finditer(flat, a, b):
+        k = int(t.group(1))
+        e = ents[k]
+        if e["kind"] != "species":
+            continue
+        ours = anywhere or k in selected
+        if e["member_id"]:
+            if ours:
+                out.append((k, "member", e["member_id"]))
+            continue
+        ref = _named_ref(e, named)
+        if ref is not None:
+            if ours:
+                out.append((k, "species", ref))
+        elif k in selected:
+            out.append((k, "species", species_ref(e["written"])))
+    return out, lists
+
+
+def _free_slots(text: str) -> tuple:
+    """未指定の枠 → (数, 言及があるか, 数の書かれていない自由枠があるか)。数は書かれたものだけ (推測しない)"""
+    n, spans = 0, []
+    for rx in (_FREE_COUNT_RE, _FREE_NAME_COUNT_RE):
+        for m in rx.finditer(text):
+            if all(m.end() <= s or m.start() >= e for s, e in spans):
+                spans.append((m.start(), m.end()))
+                n += _num_value(m.group("n"))
+    named_slot = any(w in text for w in BUILD_ARTICLE_FREE_SLOT_NAMES)
+    return n, bool(spans) or named_slot, named_slot and not spans
+
+
+def _make_rule(condition: Optional[dict], flat: str, a: int, b: int, cands: list, lists: list, recommendation: str,
+               source_ref: str) -> tuple:
+    """候補と区間 → (選出規則, 未確定の列)。先発は (初手) の印・「初手は X」「X を先発」が候補の中で 1 つに決まるときだけ"""
+    members, species, key_of, seen = [], [], {}, set()
+    for k, kind, v in cands:
+        key = (kind, v if kind == "member" else v["species_id"])
+        key_of[k] = key
+        if key not in seen:
+            seen.add(key)
+            (members if kind == "member" else species).append(v)
+    lead_ks = [k for lst in lists for k in lst["leads"]]
+    lead_ks += [int(m.group(1)) for rx in (_LEAD_AFTER_RE, _LEAD_BEFORE_RE) for m in rx.finditer(flat, a, b)]
+    lead_keys = {key_of[k] for k in lead_ks if k in key_of}
+    lead = lead_species = None
+    if len(lead_keys) == 1:
+        kind, ident = next(iter(lead_keys))
+        if kind == "member":
+            lead = ident
+        else:
+            lead_species = ident
+    example = any(lst["example"] for lst in lists if set(lst["ents"]) & set(key_of))
+    free, free_mentioned, free_unspecified = _free_slots(flat[a:b])
+    exact = len(members) + len(species) == BSS_PICK_COUNT and not example and free == 0 and not free_mentioned
+    rule = {"kind": "author_selection_rule", "condition": condition, "selected_members": members, "selected_species": species,
+            "lead": lead, "lead_species": lead_species, "recommendation": recommendation, "exact_trio": exact, "example": example,
+            "free_slots": free, "source_ref": source_ref}
+    unresolved = [{"category": "selection_free_slot_count_unspecified", "source_ref": source_ref}] if free_unspecified else []
+    return rule, unresolved
+
+
+def _mask_free_words(flat: str) -> str:
+    """未指定の枠の語 (「相手に合わせて」等) を同じ長さの埋め字にした文字列 (その中の「相手」を条件の主体にしない。位置は flat と同じ)"""
+    return _FREE_WORD_RE.sub(lambda m: "\0" * len(m.group(0)), flat)
+
+
+def _selection_units(flat: str, ents: list, masked: str) -> list:
+    """1 文 → [(種類, 始まり, 終わり)]。種類 = "marker" (列挙が続く選出の印から) / "heading" (印の直前の「<見出し>の」: 捨てる) / "plain"。
+    区切りは 選出の印の位置と、接続の語で閉じる「相手」の節の始まり (直前の読点の後)"""
+    bounds, markers = {0}, set()
+    for m in _MARKER_RE.finditer(flat):
+        sep = _LIST_SEP_RE.match(flat, m.end())
+        p = sep.end() if sep else m.end()
+        if _scan_list(flat, p, len(flat), ents) or _LEAD_BACK_RE.match(flat, p):
+            bounds.add(m.start())
+            markers.add(m.start())
+    opps = [m.start() for m in _OPPONENT_RE.finditer(masked)]
+    conns = [m.start() for m in _CONNECTOR_RE.finditer(flat)]
+    for k, p in enumerate(opps):
+        nxt = opps[k + 1] if k + 1 < len(opps) else len(flat)
+        if any(p < c < nxt for c in conns):
+            bounds.add(max(flat.rfind(ch, 0, p) for ch in _CLAUSE_BREAKS) + 1)
+    order = sorted(bounds)
+    units = []
+    for k, s in enumerate(order):
+        e = order[k + 1] if k + 1 < len(order) else len(flat)
+        if s >= e:
+            continue
+        if s in markers:
+            kind = "marker"
+        elif e in markers and flat[s:e].rstrip().endswith("の"):
+            kind = "heading"
+        else:
+            kind = "plain"
+        units.append((kind, s, e))
+    return units
+
+
+def _marker_rules(flat: str, a: int, b: int, ents: list, named: list, masked: str, dic: ArticleDictionary, source_ref: str) -> tuple:
+    """選出の印 (基本選出 / 選出例) からの無条件の規則。候補は印・先発・後発の語の直後の列挙の中だけ"""
+    m = _MARKER_RE.match(flat, a)
+    recommendation = BUILD_ARTICLE_SELECTION_MARKERS[m.group("marker")]
+    cands, lists = _candidates(flat, a, b, ents, named, anywhere=False)
+    if not cands:
+        return [], [{"category": "selection_members_unresolved", "source_ref": source_ref}]
+    rule, unresolved = _make_rule(None, flat, a, b, cands, lists, recommendation, source_ref)
+    return [rule], unresolved
+
+
+def _plain_rules(flat: str, a: int, b: int, ents: list, named: list, masked: str, dic: ArticleDictionary, source_ref: str) -> tuple:
+    """印の無い区間: それ以外の分岐 (味方名なし) → 未確定 / 「相手 … 接続の語」の条件つきの規則 / 「初手 A、後発 B と C」の基本選出"""
+    unit = flat[a:b]
+
+    def miss(category: str) -> tuple:
+        return [], [{"category": category, "source_ref": source_ref}]
+
+    if any(w in unit for w in BUILD_ARTICLE_SELECTION_ELSE_WORDS) and not _candidates(flat, a, b, ents, named, anywhere=True)[0]:
+        return miss("selection_else_branch_members_unspecified")
+    conns = [c for c in _CONNECTOR_RE.finditer(flat, a, b) if _OPPONENT_RE.search(masked, a, c.start())]
+    if conns:
+        cond = conn = None
+        for conn in conns:                             # 条件の節は接続の語まで (「いなければ」の否定を見る)。読めた最初の接続の語で閉じる
+            cond = parse_selection_condition(flat[a:conn.end()], ents, dic)
+            if cond is not None:
+                break
+        if cond is None:
+            return miss("selection_condition_unknown")
+        cands, lists = _candidates(flat, conn.end(), b, ents, named, anywhere=True)
+        if not cands:
+            return miss("selection_members_unresolved")
+        rec = "required" if any(w in unit for w in BUILD_ARTICLE_SELECTION_REQUIRED_WORDS) else "preferred"
+        rule, unresolved = _make_rule(cond, flat, conn.end(), b, cands, lists, rec, source_ref)
+        return [rule], unresolved
+    if any(w in unit for w in BUILD_ARTICLE_LEAD_WORDS) and any(w in unit for w in BUILD_ARTICLE_BACK_WORDS):
+        cands, lists = _candidates(flat, a, b, ents, named, anywhere=False)
+        if cands:
+            rule, unresolved = _make_rule(None, flat, a, b, cands, lists, "default", source_ref)
+            return [rule], unresolved
+    return [], []
+
+
+def extract_selection_rules(sentence: str, members: list, dic: ArticleDictionary, source_ref: str,
+                            members_named_only: Optional[list] = None) -> tuple:
+    """全体の節の 1 文 → (選出規則の列, 未確定の列)。規則の形 (schema 2、docs/ARTICLE_BANK_DESIGN_1006.md §3.4):
+    {"kind": "author_selection_rule", "condition": None | 条件 (parse_selection_condition), "selected_members": [個体 id],
+     "selected_species": [{"species_id", "base_species_id"}], "lead": 個体 id | None, "lead_species": 種 id | None,
+     "recommendation": "preferred" | "required" | "default", "exact_trio": bool, "example": bool, "free_slots": int, "source_ref"}
+    - 条件つき: 「相手」の後の接続の語 (BUILD_ARTICLE_CONDITION_CONNECTORS。「場合」単独を含む) までを条件の節にする。語彙の表に無い
+      条件は規則にせず未確定 (selection_condition_unknown)。evaluation が unknown の規則も保存する (条件付きの上乗せに使わないだけ)。
+      recommendation は必須の語があれば required、無ければ preferred
+    - 無条件: 「基本選出は A(初手)、B、C」→ default、「<見出し>の選出例は A、B、C など」→ preferred (見出しは捨てて条件にしない。同じ節の
+      別の文の条件つき規則と結びつけない)、「初手 A、後発 B と C」→ default。default は無条件の推奨 (必須・選出確率 100% ではない)
+    - 候補: 味方の個体 (型あり) → selected_members、それ以外の種 → selected_species (基本種とフォルムを区別し、個体 id を作らない)。
+      種名だけ分かる個体 (members_named_only。変換層が渡す) は味方として扱う。それ以外の辞書の種は選出の列挙 (印・先発の語の直後か
+      「を選出」の直前) の中だけ (相手への言及を混ぜない)
+    - 先発は (初手) / （初手） の印・「初手は X」「X を先発」が 1 つに決まるときだけ (記載順から推測しない)。example = 例示の語
+      (BUILD_ARTICLE_EXAMPLE_WORDS) が列挙に付く、free_slots = 書かれた未指定の枠の数 (書かれていなければ 0)、exact_trio = 候補が
+      ちょうど BSS_PICK_COUNT 体で例示・未指定の枠が無い。選出確率は作らない。それ以外の分岐 (味方名なし) は未確定
+    予測で使うときの注意: 相手の選出を予測するとき、記事の「相手に X がいる」は**自分側の構築**についての条件 (記事の筆者側 = 今回の相手、
+    記事の「相手」= 今回の自分)。判定は自分の 6 体 (と型) で行う (取り違えると筆者の構築の側で条件を見てしまう。条件を見る側が自分なので
+    set_known_only も自分の型で判定できる)。初版で組の予測分布に直接使うのは exact_trio かつ条件が評価できる (evaluation が unknown
+    でない) 規則だけ。基本選出 (default) は必須・確率 100% にしない。species_present の不在 (present = False) は、未確定の枠に X が
+    残り得るなら成立と断定しない"""
     flat, ents = entities_of(sentence, members, dic)
+    named = normalize_named_only(members_named_only)
+    masked = _mask_free_words(flat)
     rules, unresolved = [], []
-    member_ids = [ents[i]["member_id"] for i in _group_ids(flat) if ents[i]["member_id"]]
-    member_ids = list(dict.fromkeys(member_ids))
-    if re.search(r"それ以外|他は|その他|以外は|残り", flat) and not member_ids:
-        unresolved.append({"category": "selection_else_branch_members_unspecified", "source_ref": source_ref})
-        return rules, unresolved
-    conn = re.search(r"ならば|なら|の場合|であれば|なければ|ければ|のとき|の時|には", flat)
-    if not conn or "相手" not in flat[:conn.start()]:
-        return rules, unresolved
-    cond_text, body = flat[:conn.end()], flat[conn.end():]       # 条件の節は接続の語まで含める (「いなければ」の否定を見るため)
-    predicate = next((pred for pred, words in BUILD_ARTICLE_CONDITION_WORDS.items() if any(w in cond_text for w in words)), None)
-    body_members = [ents[i]["member_id"] for i in _group_ids(body) if ents[i]["member_id"]]
-    body_members = list(dict.fromkeys(body_members))
-    if predicate is None:
-        unresolved.append({"category": "selection_condition_unknown", "source_ref": source_ref})
-        return rules, unresolved
-    if not body_members:
-        unresolved.append({"category": "selection_members_unresolved", "source_ref": source_ref})
-        return rules, unresolved
-    lead = None
-    lm = re.search(r"〔(\d+)〕(?:を|が|から)?(?:先発|初手)|(?:先発|初手)(?:は|に|で)〔(\d+)〕", flat)
-    if lm:
-        e = ents[int(lm.group(1) or lm.group(2))]
-        lead = e["member_id"] if e["member_id"] in body_members else None
-    value = "absent" if re.search(r"(?:いない|いなければ|無い|なし)", cond_text) else "present"
-    rec = "required" if any(w in flat for w in BUILD_ARTICLE_SELECTION_REQUIRED_WORDS) else "preferred"
-    rules.append({"kind": "author_selection_rule", "condition": {"subject": "article_opponent", "predicate": predicate, "value": value},
-                  "selected_members": body_members, "lead": lead, "recommendation": rec, "source_ref": source_ref})
+    for kind, a, b in _selection_units(flat, ents, masked):
+        if kind == "heading":
+            continue
+        fn = _marker_rules if kind == "marker" else _plain_rules
+        rs, us = fn(flat, a, b, ents, named, masked, dic, source_ref)
+        rules.extend(rs)
+        unresolved.extend(us)
     return rules, unresolved
 
 
@@ -769,16 +1235,19 @@ def _unique_names(items: list) -> list:
 
 
 def parse_article(marked: str, dic: Optional[ArticleDictionary] = None, max_members: int = BUILD_ARTICLE_MAX_MEMBERS,
-                  host: Optional[str] = None) -> dict:
+                  host: Optional[str] = None, members_named_only: Optional[list] = None) -> dict:
     """リンクつきの本文 → 構造化した結果 (本文を含まない)。
     max_members: 個体の上限 (構築 = BUILD_ARTICLE_MAX_MEMBERS、単体の型 = 1。超えた個体の見出しは警告にして採らない)。
     host: ページのホスト (相対リンクのサイト固有 id を引くためだけに使う)。
-    {"members": [...], "claims": [...], "selection_rules": [...], "selection_combinable": bool|None, "unresolved": [...],
-     "warnings": [...], "counts": {...}, "parser_version", "dictionary_version",
+    members_named_only: 変換層が渡す「種名だけ分かる個体」([{"species_id", "base_species_id", "mega_stone"}]。既定は空)。
+    受け取って結果に載せ、選出規則の候補 (味方) に使うだけで、本文から作らない (個体 id も付けない)。
+    {"members": [...], "members_named_only": [...], "claims": [...], "selection_rules": [...], "selection_combinable": bool|None,
+     "unresolved": [...], "warnings": [...], "counts": {...}, "parser_version", "dictionary_version",
      ローカル用 (記録と LLM の入力には入れない):
      "unresolved_names": [{"category", "text", "host", "site_key"}] (辞書の補修用。名前 1 語だけ),
      "site_id_observations": [{"host", "category", "key", "id"}] (リンクの表示名が厳密一致で解決できたときのサイト固有 id の観測)}"""
     dic = dic or default_dictionary()
+    named = normalize_named_only(members_named_only)
     lines = [ln for ln in (marked or "").splitlines() if ln.strip()]
     members: list = []
     blocks: dict = {}                 # member_id → 説明文の行
@@ -789,6 +1258,10 @@ def parse_article(marked: str, dic: Optional[ArticleDictionary] = None, max_memb
     section = None                    # None / "member" / "team"
     cur: Optional[dict] = None
     for ln in lines:
+        if _MARKER_LINE_RE.match(strip_bullet(ln)):
+            section, cur = "team", None              # 「基本選出: A / B / C」: 全体の節に入り (見出しと同じ)、選出の文として読む
+            team_lines.append(ln)
+            continue
         kind = section_kind(ln)
         if kind:
             section = kind
@@ -858,7 +1331,7 @@ def parse_article(marked: str, dic: Optional[ArticleDictionary] = None, max_memb
         claims.extend(cs)
         unresolved.extend(us)
         unresolved_names.extend(names)
-        rs, us2 = extract_selection_rules(s, members, dic, ref)
+        rs, us2 = extract_selection_rules(s, members, dic, ref, named)
         rules.extend(rs)
         unresolved.extend(us2)
         if any(w in flatten(s) for w in BUILD_ARTICLE_SELECTION_COMBINABLE_WORDS):
@@ -869,7 +1342,7 @@ def parse_article(marked: str, dic: Optional[ArticleDictionary] = None, max_memb
             mem["warnings"].append("no_moves_line")
     counts = {"members": len(members), "claims": len(claims), "selection_rules": len(rules), "unresolved": len(unresolved),
               "team_sentences": len(split_sentences(team_lines))}
-    return {"members": members, "claims": claims, "selection_rules": rules, "selection_combinable": combinable,
+    return {"members": members, "members_named_only": named, "claims": claims, "selection_rules": rules, "selection_combinable": combinable,
             "unresolved": unresolved, "warnings": warnings, "counts": counts, "unresolved_names": _unique_names(unresolved_names),
             "site_id_observations": site_id_observations(lines, dic, host),
             "parser_version": PARSER_VERSION, "dictionary_version": dic.version}

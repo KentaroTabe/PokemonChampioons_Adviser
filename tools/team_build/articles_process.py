@@ -1,7 +1,8 @@
 """記事のバッチ処理の骨格 (docs/ARTICLE_BANK_DESIGN_1006.md §3.9)。HTTP はしない (取得の関数は作らない: ホストの許可待ち)。
 
 process_batch(units, dic, aliases, site_store, llm_resolver=None, limits=None, policy=None) の手順:
-  0. 入力の検査: unit の kind が表にあること、source / meta に本文が無いこと (assert_no_prose)、出典の 2 軸が表の値であること
+  0. 入力の検査: unit の kind が表にあること、source / meta / members_named_only に本文が無いこと (assert_no_prose)、出典の 2 軸が
+     表の値であること、members_named_only の形 (article_parse.normalize_named_only)
   1. ホストの門と上限: host_allowed(policy, source.host, "fetch", url=source.url) が偽の unit は解析しない (status = host_not_allowed。
      方針に allowed_urls があれば、その URL 以外も偽)。
      ページ (url_hash。無ければ本文のハッシュ) 単位で、BUILD_ARTICLE_BATCH_MAX_ARTICLES ページ・本文の合計
@@ -11,7 +12,8 @@ process_batch(units, dic, aliases, site_store, llm_resolver=None, limits=None, p
   4. llm_resolver が与えられていれば、host_allowed(policy, host, "send_llm") が真の unit の名前だけを 1 回で LLM に渡して
      candidate を得る (自動確定しない。確認待ちの候補がある名前は送り直さない)
   5. 新たに confirmed になった別名に関係する unit だけ、メモリ上の本文で再解析する
-  6. build_record → 本文の門 (assert_no_prose を記録全体に掛ける)
+  6. build_record → validate_record → 問題を渡した build_record (article_bank.build_validated_record。検査の矛盾 → status = conflict、
+     情報不足 → incomplete。問題は記録の problems に残す) → 本文の門 (assert_no_prose を記録全体に掛ける)
   7. 本文は破棄する (戻り値に unit・本文を入れない)。失敗・上限超過は未解決のまま state 行に残す
 戻り値: {"records", "state_rows" (本文なし: url_hash / body_hash / unit / kind / status / parser_version / n_unresolved /
          n_unresolved_names), "alias_entries": {"confirmed", "candidate"} (この処理で足した・格上げした entry),
@@ -33,8 +35,8 @@ from champions_agent.config import (BUILD_ARTICLE_BATCH_MAX_ARTICLES, BUILD_ARTI
                                     BUILD_ARTICLE_RECORD_KIND_MEMBERS)
 from tools.team_build.article_aliases import (ACTIVE_STATUSES, SiteIdStore, alias_key, auto_entries, decide, empty_aliases,
                                               propose_with_llm)
-from tools.team_build.article_bank import assert_no_prose, build_record, host_allowed, normalize_source
-from tools.team_build.article_parse import ArticleDictionary, default_dictionary, parse_article
+from tools.team_build.article_bank import assert_no_prose, build_validated_record, host_allowed, normalize_source
+from tools.team_build.article_parse import ArticleDictionary, default_dictionary, normalize_named_only, parse_article
 from tools.team_build.article_units import url_hash
 
 REPO = Path(__file__).resolve().parent.parent.parent
@@ -66,7 +68,9 @@ def _unit_info(units: list) -> list:
         src, meta = u.get("source") or {}, u.get("meta") or {}
         assert_no_prose(src, "$.source")
         assert_no_prose(meta, "$.meta")
+        assert_no_prose(u.get("members_named_only") or [], "$.members_named_only")
         normalize_source(src)                                     # 出典の 2 軸の検査 (記録を作る前に失敗させる)
+        normalize_named_only(u.get("members_named_only"))        # 種名だけ分かる個体の形の検査 (同上)
         marked = u.get("marked") or ""
         body_hash = src.get("body_hash") or _hash16(marked)
         uh = src.get("url_hash") or (url_hash(src["url"]) if src.get("url") else None)
@@ -85,7 +89,8 @@ def _state_row(inf: dict, status: str, parsed: Optional[dict] = None, record: Op
 
 
 def _parse(unit: dict, inf: dict, dic: ArticleDictionary) -> dict:
-    return parse_article(unit.get("marked") or "", dic, max_members=BUILD_ARTICLE_RECORD_KIND_MEMBERS[inf["kind"]], host=inf["host"])
+    return parse_article(unit.get("marked") or "", dic, max_members=BUILD_ARTICLE_RECORD_KIND_MEMBERS[inf["kind"]], host=inf["host"],
+                         members_named_only=unit.get("members_named_only"))
 
 
 def process_batch(units: list, dic: Optional[ArticleDictionary] = None, aliases: Optional[dict] = None, site_store=None,
@@ -173,11 +178,11 @@ def process_batch(units: list, dic: Optional[ArticleDictionary] = None, aliases:
                     counts["reparsed"] += 1
                 except Exception as e:                             # 再解析の失敗は最初の解析結果を使う
                     counts[f"reparse_error:{type(e).__name__}"] += 1
-    # 6. 記録と本文の門
+    # 6. 記録 (検査の結果を status に反映: 矛盾 → conflict、情報不足 → incomplete) と本文の門
     records: list = []
     for i in sorted(parsed_by):
         u = units[i]
-        rec = build_record(parsed_by[i], u.get("source") or {}, u.get("meta") or {}, record_kind=info[i]["kind"])
+        rec = build_validated_record(parsed_by[i], u.get("source") or {}, u.get("meta") or {}, record_kind=info[i]["kind"])
         assert_no_prose(rec)
         records.append(rec)
         rows[i] = _state_row(info[i], rec["status"], parsed_by[i], rec)

@@ -103,11 +103,31 @@ def test_check_and_import_file():
     print("test_check_and_import_file OK")
 
 
+def test_validation_reflected_in_status():
+    """validate_record の結果が記録の status に反映される: 実数値の再計算と矛盾する入力 → conflict (2026-10-06 ユーザー判断)。
+    既定では従来どおり記録を返さず、検査 (check_entries) と keep_rejected=True で status を見られる。保存はしない"""
+    bad_actual = dict(GOOD, actual=[177, 200, 130, 103, 130, 134])
+    rec, probs = M.record_from_entry(bad_actual, today="2026-10-06", keep_rejected=True)
+    assert rec["status"] == "conflict" and rec["problems"] == probs and any(p.startswith("m1:actual_mismatch:atk") for p in probs)
+    assert not any(B.usable_for(rec, p, REG_MC) for p in ("pool", "weakness", "selection")) and B.usable_for(rec, "parser_eval")
+    assert M.record_from_entry(bad_actual, today="2026-10-06")[0] is None                 # 既定は従来どおり
+    good, good_probs = M.record_from_entry(GOOD, today="2026-10-06")
+    assert good_probs == [] and good["status"] == "ok" and good["problems"] == [] and good["facets"]["sets_known"] is True
+    results = M.check_entries([GOOD, bad_actual, dict(GOOD, moves=["じしん"])], today="2026-10-06")
+    assert [r["status"] for r in results] == ["ok", "conflict", None]                     # 入力の問題 (技が 1 つ) は記録を作らない
+    assert results[1]["record"] is None and results[0]["record"]["status"] == "ok"
+    with tempfile.TemporaryDirectory() as d:
+        out, _res = M.import_entries([GOOD, bad_actual], Path(d), today="2026-10-06")
+        assert out is None and not any(Path(d).iterdir())                                # 矛盾のある入力があれば保存しない
+    print("test_validation_reflected_in_status OK")
+
+
 def main() -> None:
     test_points_and_names()
     test_record_from_entry()
     test_problems_reported_not_guessed()
     test_check_and_import_file()
+    test_validation_reflected_in_status()
     print("ALL OK")
 
 

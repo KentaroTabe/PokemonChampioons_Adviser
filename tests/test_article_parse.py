@@ -3,6 +3,8 @@
 素材はユーザーが添付した記事の例と同じ構造 (雨パ 3 体 + 天候対策 3 体、yakkun 風のリンク) で解説文を書き直した合成記事。
 否定文 (「弱いわけではない」)、相手への言及 (性格の無い「相手の X @ 持ち物」と 「相手の X @ 持ち物 (性格) 特性」)、
 技一覧の 2 行目 (変更前)、リンクの番号の矛盾 (n261m) を含む。
+選出規則の schema 2 (2026-10-06) は SYNTHETIC_V2 (同じ 6 体 + 変換層の文の形 3 つと条件の語彙の文) と、代表 1 体 + 種名だけ分かる
+個体 (REP + NAMED_FIVE) で見る。
 
     python -m tests.test_article_parse
 """
@@ -99,8 +101,54 @@ EXPECTED_SETS = {
 }
 
 
+# 選出規則の schema 2 の受け入れ (2026-10-06 ユーザー判断)。SYNTHETIC の個体の節 (6 体) に全体の節の文を差し替えた合成記事。
+# 先頭の 3 文は GameWith の変換層が出す文の形 (ページの文 1 つと、選出の表を直した文 2 つ) をそのまま入れたもの
+MEMBERS_PART = "使用ポケモン\n" + SYNTHETIC.split("使用ポケモン\n", 1)[1].split("戦術と解説", 1)[0]
+SELECTION_V2 = (
+    "相手に天候を操るポケモンがいる場合はサーフゴーやバンギラスを選出します。",            # s1: 「場合」単独の接続の語
+    "基本選出はペリッパー(初手)、メガラグラージ、ブリジュラスなど。",                     # s2: 基本選出 (default)、(初手)、など
+    "天候対策選出の選出例はサーフゴー(初手)、バンギラス、アーマーガアなど。",              # s3: <見出し>の選出例 (見出しは捨てる)
+    "相手構築にゴリランダーがいる場合はサーフゴーやメガボーマンダを選出します。",           # s4: species_present、型の無い種
+    "相手に物理受けやドラゴンタイプが多い場合はサーフゴーやバンギラスを選出します。",       # s5: role + type_many (any_of、unknown)
+    "相手にドラゴンタイプが3体以上ならメガムクホーク、サーフゴー、バンギラスを選出します。",  # s6: type_count
+    "相手に氷技持ちが多い場合はバンギラスとサーフゴーを選出します。",                      # s7: move_type_present + 多い
+    "基本選出はペリッパーとメガラグラージ + 残り1体は相手に合わせて選びます。",             # s8: 未指定の枠 1
+    "初手ペリッパー、後発メガラグラージとブリジュラス。",                                   # s9: 初手 A、後発 B と C
+    "基本選出はブリジュラス（初手）、ペリッパー、メガラグラージ。",                         # s10: 全角括弧の （初手）
+    "相手にゴリランダーがいなければペリッパーとメガラグラージを選出します。",               # s11: 種の不在
+    "基本選出はサーフゴー・バンギラス + 自由枠。",                                         # s12: 数の書かれていない自由枠
+    "相手にドラゴンタイプが2体いる場合はサーフゴーを選出します。",                          # s13: 比較の語の無い数 → 条件にしない
+    "基本選出: ペリッパー / メガラグラージ / ブリジュラス",                                 # s14: 「基本選出:」の行 (見出しにしない)
+    "相手にトリルがいるならペリッパー、カイリュー。",                                       # s15: 述語の無い列挙の味方でない種は採らない
+    "相手構築にゴリランダーとカイリューがいる場合はサーフゴーを選出します。",               # s16: 「と」→ all_of
+    "基本選出はペリッパー、メガラグラージ、ブリジュラスですが、相手にゴリランダーがいる場合はサーフゴーを選出します。",  # s17: 1 文に 2 規則
+)
+SYNTHETIC_V2 = MEMBERS_PART + "戦術と解説\n" + "\n".join(SELECTION_V2) + "\n"
+# 代表 1 体だけ型があり、全体の節に述語の無い列挙の選出規則がある合成記事 (種名だけ分かる個体は変換層が別に渡す)
+REP = f"""使用ポケモン
+* [メガラグラージ]({L}/zukan/n261m)@[ラグラージナイト]({L}/item?item_s=200)([ようき]({L}/nature#jolly))[すいすい]({L}/ability/33)
+* HP:2 / 攻撃:32 / 素早:32
+* 実数値:177-202-130-103-130-134
+* [ウェーブタックル]({L}/move/849)[じしん]({L}/move/89)[れいとうパンチ]({L}/move/8)[どくづき]({L}/move/398)
+戦術と解説
+相手にゴリランダーがいるならサーフゴー、ボーマンダ、メガラグラージ。
+"""
+NAMED_FIVE = ({"species_id": "pelipper"}, {"species_id": "archaludon"}, {"species_id": "gholdengo"},
+              {"species_id": "salamencemega", "base_species_id": "salamence", "mega_stone": "salamencite"}, {"species_id": "tyranitar"})
+
+
 def _claims(parsed, kind, subject=None):
     return [c for c in parsed["claims"] if c["kind"] == kind and (subject is None or c["subject"] == subject)]
+
+
+def _rules_at(parsed, k):
+    return [r for r in parsed["selection_rules"] if r["source_ref"] == f"team:s{k}"]
+
+
+def _cond(predicate, value, evaluation, **extra):
+    c = {"subject": "article_opponent", "predicate": predicate, "value": value, "evaluation": evaluation}
+    c.update(extra)
+    return c
 
 
 def test_members_sets_and_moves():
@@ -165,8 +213,12 @@ def test_selection_rules_without_fabrication():
     rules = parsed["selection_rules"]
     assert len(rules) == 1
     r = rules[0]
-    assert r["condition"] == {"subject": "article_opponent", "predicate": "weather_control", "value": "present"}
+    # schema 2 (2026-10-06) で条件に判定の可否 evaluation が加わった (天候操作は相手の型が確認できたときだけ判定できる)。他の項目は同じ
+    assert r["condition"] == {"subject": "article_opponent", "predicate": "weather_control", "value": "present", "evaluation": "set_known_only"}
     assert r["selected_members"] == ["m4", "m5", "m6"] and r["lead"] is None and r["recommendation"] == "preferred"
+    # schema 2 の項目: 明確な 3 体組 (例示・未指定の枠なし)、型の無い種は無い、先発の種も無い
+    assert r["selected_species"] == [] and r["lead_species"] is None
+    assert r["exact_trio"] is True and r["example"] is False and r["free_slots"] == 0
     assert not any(k in r for k in ("probability", "prob", "weight"))
     assert parsed["selection_combinable"] is True
     cats = [u["category"] for u in parsed["unresolved"]]
@@ -280,7 +332,9 @@ def test_negative_and_variant_articles():
     absent = P.parse_article("使用ポケモン\n" + SYNTHETIC.split("使用ポケモン\n", 1)[1].split("戦術と解説", 1)[0]
                              + "戦術と解説\n相手にトリックルームがいなければペリッパーとメガラグラージ。")
     ra = absent["selection_rules"][0]
-    assert ra["condition"] == {"subject": "article_opponent", "predicate": "trick_room", "value": "absent"} and ra["selected_members"] == ["m1", "m2"]
+    # schema 2 で evaluation が加わった (トリックルームは相手の型が確認できたときだけ判定できる)。述語・値・個体は同じ
+    assert ra["condition"] == {"subject": "article_opponent", "predicate": "trick_room", "value": "absent", "evaluation": "set_known_only"}
+    assert ra["selected_members"] == ["m1", "m2"]
     unknown = P.parse_article("使用ポケモン\n" + SYNTHETIC.split("使用ポケモン\n", 1)[1].split("戦術と解説", 1)[0]
                               + "戦術と解説\n相手に壁がいるならペリッパー。")
     assert unknown["selection_rules"] == [] and [u["category"] for u in unknown["unresolved"] if u["source_ref"].startswith("team")] == ["selection_condition_unknown"]
@@ -325,6 +379,125 @@ def test_single_set_and_local_outputs():
     print("test_single_set_and_local_outputs OK")
 
 
+def test_selection_schema_v2():
+    """選出規則の schema 2 (2026-10-06 ユーザー判断): 無条件の基本選出 / 選出例、(初手)、例示、未指定の枠、条件の語彙と evaluation、
+    型の無い種。変換層の文の形 3 つ (s1〜s3) はそのまま読めること"""
+    parsed = P.parse_article(SYNTHETIC_V2)
+    assert parsed["counts"]["members"] == 6 and parsed["members_named_only"] == []
+    one = {k: _rules_at(parsed, k) for k in range(1, len(SELECTION_V2) + 1)}
+    # s1 (ページの文): 「場合」単独で条件の節を閉じる。味方名が「を選出」の目的語
+    (r,) = one[1]
+    assert r["condition"] == _cond("weather_control", "present", "set_known_only")
+    assert (r["selected_members"], r["selected_species"], r["lead"], r["recommendation"]) == (["m5", "m6"], [], None, "preferred")
+    assert r["exact_trio"] is False and r["example"] is False and r["free_slots"] == 0
+    # s2 (基本選出の表): 無条件 (default)、(初手) → lead、「など」→ example (3 体でも exact_trio にしない)
+    (r,) = one[2]
+    assert r["condition"] is None and r["recommendation"] == "default"
+    assert r["selected_members"] == ["m1", "m2", "m3"] and r["lead"] == "m1" and r["lead_species"] is None
+    assert r["example"] is True and r["exact_trio"] is False
+    # s3 (他の見出しの表): 「<見出し>の選出例は」の見出しは捨てる (天候の語があっても条件にしない)、preferred。
+    # アーマーガアは SYNTHETIC の 6 体にいない → 型の無い種として selected_species (個体 id を作らない)
+    (r,) = one[3]
+    assert r["condition"] is None and r["recommendation"] == "preferred" and r["lead"] == "m5"
+    assert r["selected_members"] == ["m5", "m6"] and r["selected_species"] == [{"species_id": "corviknight", "base_species_id": "corviknight"}]
+    assert r["example"] is True and r["exact_trio"] is False
+    # s4: species_present (確定した種で判定できる)。型の無いメガボーマンダは基本種とフォルムを区別して保持
+    (r,) = one[4]
+    assert r["condition"] == _cond("species_present", {"species_id": "rillaboom", "base_species_id": "rillaboom", "present": True}, "species")
+    assert r["selected_members"] == ["m5"] and r["selected_species"] == [{"species_id": "salamencemega", "base_species_id": "salamence"}]
+    # s5: 物理受け (role) とドラゴンタイプが多い (type_many) の any_of。どちらも判定しない (unknown) が規則は保存する
+    (r,) = one[5]
+    assert r["condition"] == {"any_of": [_cond("role", "physical_wall", "unknown", quantity="many"),
+                                         _cond("type_many", {"type": "Dragon"}, "unknown")], "evaluation": "unknown"}
+    assert r["selected_members"] == ["m5", "m6"]
+    # s6: type_count (判明している種の範囲で数える)。3 体の明確な組
+    (r,) = one[6]
+    assert r["condition"] == _cond("type_count", {"type": "Dragon", "op": ">=", "n": 3}, "species_count")
+    assert r["selected_members"] == ["m4", "m5", "m6"] and r["exact_trio"] is True
+    # s7: 氷技持ち (move_type_present: 型が確認できたときだけ) が「多い」→ 弱い方 (unknown)
+    (r,) = one[7]
+    assert r["condition"] == _cond("move_type_present", {"move_type": "Ice"}, "unknown", quantity="many")
+    assert r["selected_members"] == ["m6", "m5"]
+    # s8: A と B + 残り 1 体は相手に合わせて → free_slots 1 (「相手に合わせて」の「相手」は条件にしない)。初手の記載が無いので lead は null
+    (r,) = one[8]
+    assert r["condition"] is None and r["recommendation"] == "default" and r["selected_members"] == ["m1", "m2"]
+    assert r["free_slots"] == 1 and r["exact_trio"] is False and r["lead"] is None and r["lead_species"] is None
+    # s9: 初手 A、後発 B と C → default、lead は初手の A
+    (r,) = one[9]
+    assert (r["condition"], r["recommendation"], r["selected_members"], r["lead"], r["exact_trio"]) == (None, "default", ["m1", "m2", "m3"], "m1", True)
+    # s10: 全角括弧の （初手）
+    (r,) = one[10]
+    assert r["lead"] == "m3" and r["selected_members"] == ["m3", "m1", "m2"] and r["exact_trio"] is True
+    # s11: 種の不在 (present = False)
+    (r,) = one[11]
+    assert r["condition"] == _cond("species_present", {"species_id": "rillaboom", "base_species_id": "rillaboom", "present": False}, "species")
+    assert r["selected_members"] == ["m1", "m2"]
+    # s12: 数の書かれていない自由枠 → free_slots 0 (推測しない)、exact_trio にしない、未確定の分類を残す
+    (r,) = one[12]
+    assert r["free_slots"] == 0 and r["exact_trio"] is False and r["selected_members"] == ["m5", "m6"]
+    team_unres = [(u["category"], u["source_ref"]) for u in parsed["unresolved"] if u["source_ref"].startswith("team")]
+    assert ("selection_free_slot_count_unspecified", "team:s12") in team_unres
+    # s13: 比較の語の無い数 (「2体いる」) は条件にしない → 規則なし、未確定
+    assert one[13] == [] and ("selection_condition_unknown", "team:s13") in team_unres
+    assert sorted(team_unres) == [("selection_condition_unknown", "team:s13"), ("selection_free_slot_count_unspecified", "team:s12")]
+    # s14: 「基本選出:」の後に列挙が続く行は見出しではなく選出の文 (列挙の無い「基本選出」は従来どおり見出し)
+    (r,) = one[14]
+    assert r["selected_members"] == ["m1", "m2", "m3"] and r["exact_trio"] is True and r["lead"] is None
+    assert P.section_kind("基本選出: ペリッパー / メガラグラージ / ブリジュラス") is None and P.section_kind("基本選出") == "team"
+    # s15: 「を選出」も印も無い列挙の、味方でない種 (カイリュー) は採らない (相手への言及を混ぜない)
+    (r,) = one[15]
+    assert r["condition"] == _cond("trick_room", "present", "set_known_only") and r["selected_members"] == ["m1"] and r["selected_species"] == []
+    # s16: 「A と B がいる」は all_of
+    (r,) = one[16]
+    assert r["condition"] == {"all_of": [_cond("species_present", {"species_id": "rillaboom", "base_species_id": "rillaboom", "present": True}, "species"),
+                                         _cond("species_present", {"species_id": "dragonite", "base_species_id": "dragonite", "present": True}, "species")],
+                              "evaluation": "species"}
+    # s17: 基本選出の節と条件つきの節が 1 文にある → 2 つの規則 (条件の節の味方を基本選出に混ぜない)
+    r_default, r_cond = one[17]
+    assert r_default["condition"] is None and r_default["selected_members"] == ["m1", "m2", "m3"] and r_default["exact_trio"] is True
+    assert r_cond["condition"]["predicate"] == "species_present" and r_cond["selected_members"] == ["m5"]
+    # どの規則にも確率は無く、記録の門 (本文なし) を通る
+    assert not any(k in r for r in parsed["selection_rules"] for k in ("probability", "prob", "weight"))
+    rec = B.build_record(parsed, source={"synthetic": True}, meta={})
+    B.assert_no_prose(rec)
+    # s3 のアーマーガアは 6 体が全部分かっている構築の外の種 → 検査で矛盾 (species_outside_team)
+    s3_idx = next(i for i, r in enumerate(rec["selection_rules"]) if r["source_ref"] == "team:s3")
+    assert f"rule{s3_idx}:species_outside_team:corviknight" in B.validate_record(rec)
+    # 全体の節の見出しが無く、個体の節の直後に「基本選出: …」の行が来ても、そこから全体の節として読む (最後の個体の説明文にしない)
+    no_heading = P.parse_article(MEMBERS_PART + SELECTION_V2[13] + "\n" + SELECTION_V2[0] + "\n")
+    assert [(r["source_ref"], r["recommendation"], r["selected_members"]) for r in no_heading["selection_rules"]] == [
+        ("team:s1", "default", ["m1", "m2", "m3"]), ("team:s2", "preferred", ["m5", "m6"])]
+    assert len(_claims(no_heading, "supports", "m6")) == 1 and no_heading["counts"]["team_sentences"] == 2
+    print("test_selection_schema_v2 OK")
+
+
+def test_selection_named_only():
+    """変換層が渡す「種名だけ分かる個体」: 結果に載せる (個体 id なし)、選出規則では味方として扱う (述語の無い列挙でも採る)。
+    書かれた基本種名 (ボーマンダ) はその個体の形態 (メガボーマンダ) に対応させる"""
+    plain = P.parse_article(REP)
+    (r,) = plain["selection_rules"]
+    assert plain["members_named_only"] == [] and r["selected_members"] == ["m1"] and r["selected_species"] == []
+    named = P.parse_article(REP, members_named_only=list(NAMED_FIVE))
+    assert named["members_named_only"][0] == {"species_id": "pelipper", "base_species_id": "pelipper", "mega_stone": None}
+    assert named["members_named_only"][3] == {"species_id": "salamencemega", "base_species_id": "salamence", "mega_stone": "salamencite"}
+    assert all("id" not in n for n in named["members_named_only"]) and named["counts"]["members"] == 1
+    (r,) = named["selection_rules"]
+    assert r["condition"]["predicate"] == "species_present" and r["selected_members"] == ["m1"]
+    assert r["selected_species"] == [{"species_id": "gholdengo", "base_species_id": "gholdengo"},
+                                     {"species_id": "salamencemega", "base_species_id": "salamence"}]
+    assert r["exact_trio"] is True
+    # 変換層の渡し方の検査: 知らない項目は捨てる、形が違えば ValueError
+    assert P.normalize_named_only([{"species_id": "pelipper", "display": "ペリッパー"}]) == [
+        {"species_id": "pelipper", "base_species_id": "pelipper", "mega_stone": None}]
+    for bad in ([{"display": "x"}], ["pelipper"], [{"species_id": "pelipper", "mega_stone": 1}]):
+        try:
+            P.normalize_named_only(bad)
+            raise AssertionError("形の違う members_named_only を通した")
+        except ValueError:
+            pass
+    print("test_selection_named_only OK")
+
+
 def main() -> None:
     test_members_sets_and_moves()
     test_claims_distinguish_team_and_member()
@@ -335,6 +508,8 @@ def main() -> None:
     test_html_to_marked_text()
     test_negative_and_variant_articles()
     test_single_set_and_local_outputs()
+    test_selection_schema_v2()
+    test_selection_named_only()
     print("ALL OK")
 
 

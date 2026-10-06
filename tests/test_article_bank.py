@@ -1,7 +1,8 @@
 """記事バンクの記録 (tools/team_build/article_bank) の種類・出典の 2 軸・用途の判定・規制の履歴・合成の門のテスト
-(docs/ARTICLE_BANK_DESIGN_1006.md §3.7、2026-10-06 ユーザー判断)。
+(docs/ARTICLE_BANK_DESIGN_1006.md §3.7、2026-10-06 ユーザー判断)。facets (用途ごとに必要な情報) と status (情報不足 / 矛盾) の区別も見る。
 
-素材は tests/test_article_parse.py の合成記事 SYNTHETIC と、その 1 体目だけの単体の型 (合成)。
+素材は tests/test_article_parse.py の合成記事 SYNTHETIC と、その 1 体目だけの単体の型 (合成)、代表 1 体の型の記事 REP と
+種名だけ分かる 5 体 NAMED_FIVE。
 
     python -m tests.test_article_bank
 """
@@ -11,7 +12,7 @@ import json
 import tempfile
 from pathlib import Path
 
-from tests.test_article_parse import SYNTHETIC
+from tests.test_article_parse import NAMED_FIVE, REP, SYNTHETIC
 from tools.team_build import article_bank as B
 from tools.team_build import article_parse as P
 
@@ -113,9 +114,17 @@ def test_usable_for_branches():
         assert not B.usable_for(rec, "weakness", REG_MC) and B.usable_for(rec, "parser_eval")
     assert not B.usable_for(team, "weakness", REG_MB)
     assert not B.usable_for(team, "weakness")                   # regulation を指定しなければ一致しない (規制を問わずに使わない)
-    # 処理状態が ok / warnings 以外は使わない
+    # 1 体だけの構築 (incomplete)。2026-10-06 ユーザー判断で incomplete を一律に除外せず、用途ごとの必要な情報で判定する。
+    # この記録にはペリッパーの型 (4 技) が 1 つあるので weakness の要件 (any_set_or_claim) を満たす → 期待を「使える」に変えた。
+    # 6 体の種が分からないので pool / selection には使えない (従来の「情報不足の記録を構築・選出に使わない」は保つ)
     inc = B.build_record(P.parse_article(SINGLE), source=real, meta={"regulation": REG_MC})
-    assert inc["status"] == "incomplete" and not B.usable_for(inc, "weakness", REG_MC) and B.usable_for(inc, "parser_eval")
+    assert inc["status"] == "incomplete" and inc["members"][0]["moves"] and inc["claims"] == []
+    assert B.usable_for(inc, "weakness", REG_MC) and B.usable_for(inc, "parser_eval")
+    assert not B.usable_for(inc, "pool", REG_MC) and not B.usable_for(inc, "selection", REG_MC)
+    # 型も主張も無い incomplete (技一覧の無い単体の型) は weakness にも使わない (従来の期待の意図)
+    no_moves = SINGLE.rsplit("\n* [ぼうふう]", 1)[0] + "\n"
+    bare = B.build_record(P.parse_article(no_moves, max_members=1), source=real, meta={"regulation": REG_MC}, record_kind="single_set")
+    assert bare["status"] == "incomplete" and not B.usable_for(bare, "weakness", REG_MC) and B.usable_for(bare, "parser_eval")
     warn = B.build_record(P.parse_article(SYNTHETIC, max_members=1), source=real, meta={"regulation": REG_MC}, record_kind="single_set")
     assert warn["status"] == "warnings" and B.usable_for(warn, "weakness", REG_MC)
     # 編集部の記事で使用実績の根拠なし: プール本体には入れないが、弱点の検査と選出には使える
@@ -201,6 +210,97 @@ def test_host_policy_urls_and_purposes():
     print("test_host_policy_urls_and_purposes OK")
 
 
+def test_facets_and_status():
+    """facets (用途ごとに必要な情報) と status (情報不足 incomplete / 検査の矛盾 conflict / 個体なし failed) の区別 (2026-10-06 ユーザー判断)"""
+    real = {"host": "a.example", "publisher_kind": "personal_blog", "usage_evidence": "self_report"}
+    meta = {"regulation": REG_MC}
+    # 6 体・各 4 技・選出規則あり: 全部揃う
+    team = B.build_validated_record(P.parse_article(SYNTHETIC), real, meta)
+    assert team["facets"] == {"members_known": True, "sets_known": True, "selection_readable": True, "any_set_or_claim": True}
+    assert team["status"] == "ok" and team["problems"] == [] and team["members_named_only"] == []
+    # 代表 1 体 + 選出規則: 6 体の種が分からない → selection 不可 (照合の条件を満たさない)、型があるので weakness 可。
+    # 個体が足りないのは情報不足なので incomplete (矛盾ではない)
+    rep = B.build_validated_record(P.parse_article(REP), real, meta)
+    assert rep["facets"] == {"members_known": False, "sets_known": False, "selection_readable": True, "any_set_or_claim": True}
+    assert rep["status"] == "incomplete" and rep["problems"] == ["members:1"]
+    assert not B.usable_for(rep, "selection", REG_MC) and B.usable_for(rep, "weakness", REG_MC) and not B.usable_for(rep, "pool", REG_MC)
+    # 代表 1 体の型 + 5 体の種名 (変換層が渡す) + 選出規則: 6 体の種が分かる → selection 可、型が 1 体だけなので pool 不可
+    named = B.build_validated_record(P.parse_article(REP, members_named_only=list(NAMED_FIVE)), real, meta)
+    assert named["facets"] == {"members_known": True, "sets_known": False, "selection_readable": True, "any_set_or_claim": True}
+    assert named["status"] == "incomplete" and named["problems"] == ["members:1"] and len(named["members"]) == 1
+    assert [n["species_id"] for n in named["members_named_only"]] == ["pelipper", "archaludon", "gholdengo", "salamencemega", "tyranitar"]
+    assert all("id" not in n for n in named["members_named_only"])                  # 架空の個体 id (m2 …) を作らない
+    assert B.usable_for(named, "selection", REG_MC) and not B.usable_for(named, "pool", REG_MC) and B.usable_for(named, "weakness", REG_MC)
+    B.assert_no_prose(named)
+    assert B.llm_payload(named)["members_named_only"] == named["members_named_only"]
+    # 検査の矛盾 (ポイント合計 67・252 表示との対応・実数値の再計算) → conflict。用途は parser_eval 以外すべて不可
+    bad = SYNTHETIC.replace("HP:32 / 特攻:29 / 特防:2 / 素早:3", "HP:32 / 特攻:30 / 特防:2 / 素早:3")
+    conflict = B.build_validated_record(P.parse_article(bad), real, meta)
+    assert conflict["status"] == "conflict" and "m1:point_total:67" in conflict["problems"] and "m1:ev252_mismatch:spa" in conflict["problems"]
+    assert not any(B.usable_for(conflict, p, REG_MC) for p in ("pool", "weakness", "selection")) and B.usable_for(conflict, "parser_eval")
+    # 問題を渡さなければ従来どおり (status は解析の結果だけで決まり、problems の項目は作らない)
+    plain = B.build_record(P.parse_article(bad), real, meta)
+    assert plain["status"] == "ok" and "problems" not in plain
+    # 情報不足だけ (技が 3 つ) → incomplete (矛盾ではない)。渡さなければ従来どおり warnings。6 体の種と選出規則はあるので selection は可
+    three = P.parse_article(SYNTHETIC.replace(f"[ラスターカノン]({L}/move/430)", ""))
+    assert B.build_record(three, real, meta)["status"] == "warnings"
+    rec3 = B.build_validated_record(three, real, meta)
+    assert rec3["status"] == "incomplete" and rec3["problems"] == ["m3:moves:3"] and rec3["facets"]["sets_known"] is False
+    assert not B.usable_for(rec3, "pool", REG_MC) and B.usable_for(rec3, "selection", REG_MC) and B.usable_for(rec3, "weakness", REG_MC)
+    # 矛盾と情報不足が両方あれば conflict
+    assert B.build_record(three, real, meta, problems=["m3:moves:3", "m1:point_total:67"])["status"] == "conflict"
+    # 個体が無い → failed。種名だけ 6 体 (型・主張・選出規則なし) は failed ではなく incomplete で、どの用途にも足りない
+    assert B.build_record(P.parse_article("本文だけ"), real, meta)["status"] == "failed"
+    six_named = [{"species_id": "swampertmega", "base_species_id": "swampert", "mega_stone": "swampertite"}] + list(NAMED_FIVE)
+    only_named = B.build_validated_record(P.parse_article("本文だけ", members_named_only=six_named), real, meta)
+    assert only_named["status"] == "incomplete" and only_named["problems"] == ["members:0"]
+    assert only_named["facets"] == {"members_known": True, "sets_known": False, "selection_readable": False, "any_set_or_claim": False}
+    assert not any(B.usable_for(only_named, p, REG_MC) for p in ("pool", "weakness", "selection"))
+    # 情報不足の分類 (個体・技が足りない) と矛盾 (多すぎる・整合しない)
+    assert B.problem_is_insufficient("members:1") and B.problem_is_insufficient("m2:moves:3")
+    assert not B.problem_is_insufficient("members:7") and not B.problem_is_insufficient("m2:moves:5")
+    assert not B.problem_is_insufficient("members:2", "single_set") and not B.problem_is_insufficient("m1:point_total:67")
+    assert not B.problem_is_insufficient("rule0:members_outside_team")
+    # facets の無い古い記録は中身から計算する
+    old = {k: v for k, v in team.items() if k != "facets"}
+    assert B.record_facets(old) == team["facets"] and B.usable_for(old, "selection", REG_MC)
+    print("test_facets_and_status OK")
+
+
+def test_validate_named_and_selected_species():
+    """検査: 種名だけの個体 (重複・数の超過・メガ石)、選出規則の種 (型のある個体の種・形態の違い・構築の外の種)、先発の種"""
+    real = {"host": "a.example", "usage_evidence": "self_report"}
+    named = B.build_record(P.parse_article(REP, members_named_only=list(NAMED_FIVE)), real, {"regulation": REG_MC})
+    assert B.validate_record(named) == ["members:1"]
+    dup = json.loads(json.dumps(named))
+    dup["members_named_only"].append({"species_id": "swampert", "base_species_id": "swampert", "mega_stone": None})   # 型のある個体と同じ基本種
+    probs = B.validate_record(dup)
+    assert "duplicate_base_species" in probs and "members_total:7" in probs
+    stone = json.loads(json.dumps(named))
+    stone["members_named_only"][3]["mega_stone"] = "swampertite"              # メガボーマンダに別のメガ石
+    stone["members_named_only"][0]["mega_stone"] = "salamencite"              # メガ形態でない種にメガ石
+    probs = B.validate_record(stone)
+    assert "named3:mega_stone:swampertite" in probs and "named0:stone_without_form" in probs
+    rule = json.loads(json.dumps(named))
+    r = rule["selection_rules"][0]
+    r["selected_species"] = [{"species_id": "swampert", "base_species_id": "swampert"},       # 型のある個体 (m1) の基本種 → 個体 id で書くべき
+                             {"species_id": "salamence", "base_species_id": "salamence"},     # 種名だけの個体はメガボーマンダ (形態の違い)
+                             {"species_id": "dragonite", "base_species_id": "dragonite"}]     # 6 体が分かっている構築の外
+    r["lead"], r["lead_species"] = "m1", "garchomp"
+    probs = B.validate_record(rule)
+    for p in ("rule0:selected_species_is_member:swampert", "rule0:selected_species_form_mismatch:salamence",
+              "rule0:species_outside_team:dragonite", "rule0:lead_species_outside_selection", "rule0:two_leads"):
+        assert p in probs, p
+    assert B.build_record(P.parse_article(REP, members_named_only=list(NAMED_FIVE)), real, {"regulation": REG_MC},
+                          problems=probs)["status"] == "conflict"
+    # 6 体が分かっていなければ、型の無い種を選出に挙げても矛盾にしない (残りの枠のどれかかもしれない)
+    rep = B.build_record(P.parse_article(REP.replace("サーフゴー、ボーマンダ、メガラグラージ。", "サーフゴーやカイリューを選出します。")),
+                         real, {"regulation": REG_MC})
+    assert [s["species_id"] for s in rep["selection_rules"][0]["selected_species"]] == ["gholdengo", "dragonite"]
+    assert B.validate_record(rep) == ["members:1"]
+    print("test_validate_named_and_selected_species OK")
+
+
 def main() -> None:
     test_record_kind_branches()
     test_source_axes()
@@ -208,6 +308,8 @@ def main() -> None:
     test_set_regulation_history()
     test_save_load_synthetic_gate()
     test_host_policy_urls_and_purposes()
+    test_facets_and_status()
+    test_validate_named_and_selected_species()
     print("ALL OK")
 
 

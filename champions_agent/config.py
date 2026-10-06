@@ -549,6 +549,11 @@ BUILD_ARTICLE_POOL_EVIDENCE = ("self_report", "battle_log_confirmed")   # 相手
                                              # 入れないが、判定は publisher_kind ではなく usage_evidence で行う (編集部の記事でも実績のある構築を紹介することがある)
 BUILD_ARTICLE_PURPOSE_RECORD_KINDS = {"pool": ("team",), "weakness": ("team", "single_set"), "selection": ("team",),
                                       "parser_eval": ("team", "single_set")}   # 用途 → 使える記録の種類 (article_bank.usable_for)
+BUILD_ARTICLE_PURPOSE_REQUIREMENTS = {"pool": ("members_known", "sets_known"), "selection": ("members_known", "selection_readable"),
+                                      "weakness": ("any_set_or_claim",), "parser_eval": ()}
+                                             # 用途 → 記録に揃っていなければならない情報 (record["facets"]。2026-10-06 ユーザー判断: incomplete を一律に
+                                             # 除外しない)。members_known = 種類の個体数の種が分かる / sets_known = 種類の個体数の型が各 4 技で揃う /
+                                             # selection_readable = 選出規則が 1 つ以上 / any_set_or_claim = 4 技の揃った型か筆者の主張が 1 つ以上
 BUILD_ARTICLE_REGULATION_NAMES = {"M-A": "gen9championsbssregma", "M-B": "gen9championsbssregmb", "M-C": "gen9championsbssregmc"}
                                              # 記事固有の記載 (題名・タグ) の規制名 → 規制 id (article_units.regulation_from_text。全角は NFKC で吸収)
 BUILD_ARTICLE_REGULATION_DASHES = "-‐‒–—―−ー"   # 規制名の区切りとみなす文字: U+002D, U+2010, U+2012〜2015, U+2212, U+30FC
@@ -571,6 +576,50 @@ BUILD_ARTICLE_BATCH_MAX_BODY_CHARS = 400_000  # 1 回の処理で保持する本
 BUILD_LLM_CLI_TOOLS = ""
 # 視覚監査 (tools/audit_subtask, audit_session) のモデル。8/18 に haiku / sonnet / opus を同一フレーム 30 枚で比較して opus に固定、
 # 9/24 に同一の 5 対戦 20 枚で claude-opus-5 (331 秒) と claude-opus-5-5 (112 秒) を比較: 主要な乖離 (7 匹化、ひんし後の HP
+# 選出規則の schema 2 (article_parse.extract_selection_rules。2026-10-06 ユーザー判断、docs/ARTICLE_BANK_DESIGN_1006.md §3.4)。語の表は初期案 (測定なし)
+BUILD_ARTICLE_CONDITION_CONNECTORS = ("ならば", "なら", "の場合", "場合", "であれば", "なければ", "ければ", "のとき", "の時", "には")
+                                             # 条件の節を閉じる語 (長い語から照合)。「〜がいる場合は」「〜が多い場合は」の「場合」単独も含める
+BUILD_ARTICLE_CONDITION_SUBJECT_WORDS = ("相手",)   # 条件の主体の語 (記事の筆者から見た相手 = article_opponent)。この語の後の接続の語で条件の節を閉じる
+BUILD_ARTICLE_PRESENCE_WORDS = ("いる", "いれ", "いて", "居る", "居れ", "入っている", "入っていれ", "入って")
+BUILD_ARTICLE_ABSENCE_WORDS = ("いない", "いなけれ", "いなく", "居ない", "居なけれ", "無い", "無けれ", "なし", "入っていない", "入っていなけれ")
+                                             # 条件の語の後で最初に現れた方で在否を決める (どちらも無ければ在る)。不在を値で表せない述語
+                                             # (role / type_count / type_many / move_type_present) の不在は条件にしない
+BUILD_ARTICLE_PRESENCE_ATTACHED_WORDS = ("入り",)   # 種名の直後に付く在の語 (「ゴリランダー入り」)
+BUILD_ARTICLE_CONDITION_OR_WORDS = ("とか", "または", "もしくは", "や", "か", "、", "・")   # 1 文の複数の条件の間の「または」(先に取り除いてから「と」を見る)
+BUILD_ARTICLE_CONDITION_AND_WORDS = ("と", "かつ", "且つ", "て、", "で、")   # 条件の間にこれがあれば all_of、無ければ any_of
+BUILD_ARTICLE_ROLE_WORDS = {"physical_wall": ("物理受け",), "special_wall": ("特殊受け",), "wall": ("受けポケモン", "耐久ポケモン")}
+                                             # 役割の語 → role の値 (種だけで断定しない: evaluation unknown)。重なる語は表の順で先の鍵
+BUILD_ARTICLE_TYPE_KANJI_WORDS = {"氷": "Ice", "炎": "Fire", "水": "Water", "電気": "Electric", "草": "Grass", "格闘": "Fighting", "毒": "Poison",
+                                  "地面": "Ground", "飛行": "Flying", "虫": "Bug", "岩": "Rock", "悪": "Dark", "鋼": "Steel", "竜": "Dragon",
+                                  "霊": "Ghost", "妖精": "Fairy"}
+                                             # 選出の条件で読むタイプの漢字の略記 (辞書 jp_names.json のタイプはひらがな・カタカナだけ)。
+                                             # 「超」(エスパー) は比較の語 (BUILD_ARTICLE_COUNT_COMPARATORS) と重なるので入れない
+BUILD_ARTICLE_MOVE_TYPE_WORDS = ("技持ち", "技を持つ", "技を持っ", "技を覚え")   # 「<タイプ>技持ち」→ move_type_present (覚えられるだけでは成立しない)
+BUILD_ARTICLE_MANY_WORDS = ("多い", "多め", "多く")   # 「多い」→ type_many、他の条件には quantity = many (基準の数を付け足さない)
+BUILD_ARTICLE_COUNT_COMPARATORS = {"以上": ">=", "以下": "<=", "超": ">", "未満": "<"}   # type_count の比較の語 → op (比較の語の無い数は条件にしない)
+BUILD_ARTICLE_COUNTER_WORDS = ("体", "匹")       # type_count の数え方の語
+BUILD_ARTICLE_NUMERAL_WORDS = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6}   # 漢数字 (算用数字は NFKC で読む)
+BUILD_ARTICLE_CONDITION_EVALUATION = {"species_present": "species", "type_count": "species_count", "type_many": "unknown", "role": "unknown",
+                                      "move_type_present": "set_known_only", "weather_control": "set_known_only", "trick_room": "set_known_only",
+                                      "sand": "set_known_only", "rain": "set_known_only", "setup": "unknown", "stall": "unknown"}
+                                             # 述語 → 判定の可否: species = 確定した種で判定 / species_count = 判明している種・フォルムの範囲で数える /
+                                             # set_known_only = 相手の型が確認できたときだけ / unknown = 初版は判定しない (規則は保存する)。表に無い述語は unknown
+BUILD_ARTICLE_CONDITION_EVALUATION_ORDER = ("species", "species_count", "set_known_only", "unknown")   # 強い → 弱い (複数の条件の全体は最も弱いもの)
+BUILD_ARTICLE_CONDITION_MANY_EVALUATION = "unknown"   # quantity = many の条件の判定 (「多い」の基準を付け足さない。type_many と同じ理由)
+BUILD_ARTICLE_SELECTION_MARKERS = {"基本選出": "default", "基本選出例": "default", "選出例": "preferred"}
+                                             # 無条件の選出の印 → recommendation (default = 基本選出: 無条件の推奨で、必須・選出確率 100% ではない)。
+                                             # 印の前 (「<見出し>の選出例は」の見出し) は捨てて条件にしない (2026-10-06 変換層の文の形)
+BUILD_ARTICLE_LEAD_WORDS = ("初手", "先発")     # 先発の語 (「初手は X」「X(初手)」「X（初手）」。明記されたときだけ lead / lead_species)
+BUILD_ARTICLE_BACK_WORDS = ("後発",)            # 「初手 A、後発 B と C」の後発の語 (先発の語と両方あれば無条件の基本選出)
+BUILD_ARTICLE_SELECTION_PREDICATES = ("を選出", "を出す", "を出し")   # 「X や Y を選出 (します)」: 直前の列挙を選出の候補にする
+BUILD_ARTICLE_SELECTION_PREDICATE_EXCLUDES = ("しない", "しません", "せず", "できない", "できません", "され", "ません", "ない")
+                                             # 選出の述語の直後にあれば選出の述語にしない (否定・受け身 = 相手の選出)
+BUILD_ARTICLE_SELECTION_LIST_SEPARATORS = ("、", ",", "，", "・", "/", "／", "+", "＋", "や", "と")   # 選出の列挙の区切り
+BUILD_ARTICLE_EXAMPLE_WORDS = ("など", "等", "とか")   # 選出の列挙に付く例示の語 → example = True (exact_trio にしない)
+BUILD_ARTICLE_FREE_SLOT_WORDS = ("自由", "相手に合わせ", "相手次第", "相手を見て")   # 「残り 1 体は相手に合わせて」の未指定の枠の語 (この中の「相手」は条件の主体にしない)
+BUILD_ARTICLE_FREE_SLOT_NAMES = ("自由枠",)     # 「+ 自由枠」(数が書かれていなければ free_slots = 0、未確定 selection_free_slot_count_unspecified)
+BUILD_ARTICLE_FREE_SLOT_COUNTERS = ("体", "匹", "枠")   # 未指定の枠の数え方の語
+BUILD_ARTICLE_SELECTION_ELSE_WORDS = ("それ以外", "他は", "その他", "以外は", "残り")   # 味方名の無い「それ以外は」の分岐 (規則にせず未確定)
 # 再表示、HP の誤読、シーン誤判定) は両方が検出し、5.5 は技欄・メガ表示の記述がより具体的で幻覚なし → 安い 5.5 に切替
 AUDIT_MODEL = "claude-opus-5-5"
 # 測定の相手プール (S2、tools/team_build/opponents.py)。ranked = POOL_PIN の上位ランカー構築 (従来)、

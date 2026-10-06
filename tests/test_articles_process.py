@@ -9,7 +9,8 @@ import json
 import tempfile
 from pathlib import Path
 
-from tests.test_article_parse import SYNTHETIC
+from tests.test_article_bank import SINGLE
+from tests.test_article_parse import NAMED_FIVE, REP, SYNTHETIC
 from tools.team_build import article_aliases as A
 from tools.team_build import article_bank as B
 from tools.team_build import article_parse as P
@@ -176,11 +177,44 @@ def test_batch_input_gates_and_state_file():
     print("test_batch_input_gates_and_state_file OK")
 
 
+def test_batch_validation_status():
+    """validate_record の結果が status に反映される: 矛盾のある入力 → conflict、個体が足りないだけ → incomplete (2026-10-06 ユーザー判断)。
+    変換層が渡す種名だけの個体は解析と記録に渡る (個体 id なし)"""
+    bad = SYNTHETIC.replace("HP:32 / 特攻:29 / 特防:2 / 素早:3", "HP:32 / 特攻:30 / 特防:2 / 素早:3")   # ポイント合計 67
+    assert bad != SYNTHETIC
+    named_src = {"host": HOST, "url_hash": "page_named", "synthetic": True, "publisher_kind": "editorial_site"}
+    units = [_unit(bad, "page_bad"), _unit(SINGLE, "page_one"), _unit(SYNTHETIC, "page_ok"),
+             make_unit("team", REP, META, named_src, members_named_only=list(NAMED_FIVE))]
+    res = R.process_batch(units, None, None, None, policy=POLICY, today=TODAY)
+    assert [r["status"] for r in res["state_rows"]] == ["conflict", "incomplete", "ok", "incomplete"]
+    rec_bad, rec_one, rec_ok, rec_named = res["records"]
+    assert rec_bad["status"] == "conflict" and "m1:point_total:67" in rec_bad["problems"]
+    assert any(p.startswith("m1:actual_mismatch:spa") for p in rec_bad["problems"])
+    assert rec_one["problems"] == ["members:1"] and rec_ok["problems"] == []
+    assert res["counts"]["status:conflict"] == 1 and res["counts"]["status:incomplete"] == 2
+    assert rec_named["members_named_only"][3] == {"species_id": "salamencemega", "base_species_id": "salamence", "mega_stone": "salamencite"}
+    assert rec_named["facets"]["members_known"] is True and rec_named["facets"]["sets_known"] is False
+    assert rec_named["selection_rules"][0]["selected_species"][1] == {"species_id": "salamencemega", "base_species_id": "salamence"}
+    for rec in res["records"]:
+        B.assert_no_prose(rec)
+    # 種名だけの個体の渡し方の門: 本文 (かな・漢字) や形の違うものは処理の前に止める
+    leak = make_unit("team", REP, META, named_src)
+    leak["members_named_only"] = [{"species_id": "salamencemega", "note": "雨パ"}]
+    for bad_unit in (leak, dict(make_unit("team", REP, META, named_src), members_named_only=[{"display": "x"}])):
+        try:
+            R.process_batch([bad_unit], None, None, None, policy=POLICY, today=TODAY)
+            raise AssertionError("種名だけの個体の門が効いていない")
+        except ValueError as e:
+            assert "雨" not in str(e)
+    print("test_batch_validation_status OK")
+
+
 def main() -> None:
     test_batch_aliases_and_reparse()
     test_batch_limits_defer()
     test_batch_host_gates()
     test_batch_input_gates_and_state_file()
+    test_batch_validation_status()
     print("ALL OK")
 
 

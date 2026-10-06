@@ -17,6 +17,8 @@
 - 単体の型から 6 体の構築や 3 体の選出を補完しない (record_kind = single_set、claims / selection_rules は空)
 - 既定は redistributable = False (yakkun の「一般公開しない個人的な利用」の範囲。公開バンクへの同梱は投稿者の許可などを別に確認する)
 - source.entry_method = "manual" を付ける。note は記録に入れない (かな・漢字は記録に残さない)
+- 検査 (validate_record) の問題は記録の status に反映する (矛盾 → conflict、情報不足 → incomplete。--check は status も表示)。
+  問題のある記録は保存しない
     python -m tools.team_build.article_manual --check <file>                       # 検査だけ (問題と解決した id を表示)
     python -m tools.team_build.article_manual --import <file> [--bank-dir DIR] [--base-version V]   # 検査を通った型をバンクに保存
 純粋関数 (check/import の入出力以外はファイルに触れない)。テストは tests/test_article_manual.py。
@@ -30,8 +32,8 @@ from pathlib import Path
 from typing import Optional
 
 from champions_agent.config import BUILD_ARTICLE_MOVES_PER_SET, BUILD_ARTICLE_REGULATION_NAMES
-from tools.team_build.article_bank import (DEFAULT_BANK_DIR, UNKNOWN_REGULATION, build_record, known_regulations, load_bank, save_bank,
-                                           set_regulation, validate_record)
+from tools.team_build.article_bank import (DEFAULT_BANK_DIR, UNKNOWN_REGULATION, build_validated_record, known_regulations, load_bank,
+                                           save_bank, set_regulation)
 from tools.team_build.article_parse import STAT_ORDER, ArticleDictionary, default_dictionary, parse_member_head, value_id
 
 PARSER_VERSION = "article_manual/1"
@@ -142,9 +144,13 @@ def source_from_entry(entry: dict) -> tuple:
     return src, problems
 
 
-def record_from_entry(entry: dict, dic: Optional[ArticleDictionary] = None, today: Optional[str] = None) -> tuple:
+def record_from_entry(entry: dict, dic: Optional[ArticleDictionary] = None, today: Optional[str] = None,
+                      keep_rejected: bool = False) -> tuple:
     """入力 1 件 → (記録 or None, 問題の列)。記録は record_kind = single_set、claims / selection_rules は空 (補完しない)。
-    規制は set_regulation で根拠つき (既定 user_confirmed)。validate_record の問題 (ポイント合計・実数値の再計算等) も問題に足す"""
+    規制は set_regulation で根拠つき (既定 user_confirmed)。validate_record の問題 (ポイント合計・実数値の再計算等) も問題に足し、
+    記録の status に反映する (矛盾 → conflict、情報不足 → incomplete。article_bank.build_validated_record)。
+    検査の問題がある記録は既定で返さない (None)。keep_rejected=True なら status を見るために返す (保存はしない: import は使わない)。
+    入力の問題 (名前の解決・項目の不足・形式・根拠・規制) があるときは記録を作らない"""
     dic = dic or default_dictionary()
     member, problems = member_from_entry(entry, dic)
     src, sp = source_from_entry(entry)
@@ -159,24 +165,25 @@ def record_from_entry(entry: dict, dic: Optional[ArticleDictionary] = None, toda
               "counts": {"members": 1, "claims": 0, "selection_rules": 0, "unresolved": 0, "team_sentences": 0},
               "parser_version": PARSER_VERSION, "dictionary_version": dic.version}
     try:
-        rec = build_record(parsed, src, {}, record_kind="single_set")
+        rec = build_validated_record(parsed, src, {}, record_kind="single_set")
         rec = set_regulation(rec, reg, basis, at=today or datetime.date.today().isoformat())
     except ValueError as e:
         return None, [f"record:{type(e).__name__}"]
-    problems = validate_record(rec)
-    return (rec if not problems else None), problems
+    problems = list(rec["problems"])
+    return (rec if not problems or keep_rejected else None), problems
 
 
 def check_entries(entries: list, dic: Optional[ArticleDictionary] = None, today: Optional[str] = None) -> list:
-    """入力の配列 → [{"index", "record" or None, "problems"}]"""
+    """入力の配列 → [{"index", "record" or None, "problems", "status"}]。record は問題が無いときだけ。status は記録を作れたときの
+    処理状態 (検査の問題があれば conflict / incomplete)、入力の問題で記録を作れなければ None"""
     dic = dic or default_dictionary()
     out = []
     for i, e in enumerate(entries):
         if not isinstance(e, dict):
-            out.append({"index": i, "record": None, "problems": ["not_object"]})
+            out.append({"index": i, "record": None, "problems": ["not_object"], "status": None})
             continue
-        rec, probs = record_from_entry(e, dic, today)
-        out.append({"index": i, "record": rec, "problems": probs})
+        rec, probs = record_from_entry(e, dic, today, keep_rejected=True)
+        out.append({"index": i, "record": rec if not probs else None, "problems": probs, "status": rec["status"] if rec else None})
     return out
 
 
@@ -226,7 +233,8 @@ def main(argv: Optional[list] = None) -> int:
     for r in results:
         if r["problems"]:
             n_bad += 1
-            print(f"#{r['index']}: 問題 {', '.join(r['problems'])}")
+            status = f" (status={r['status']})" if r.get("status") else ""
+            print(f"#{r['index']}: 問題 {', '.join(r['problems'])}{status}")
         else:
             print(f"#{r['index']}: {_describe(r['record'])}")
     print(f"{len(results)} 件、問題 {n_bad} 件")
