@@ -91,6 +91,21 @@ def test_apply_rate_chain_fills_unknown_and_fixes_inferred():
     print("test_apply_rate_chain_fills_unknown_and_fixes_inferred OK")
 
 
+def test_rate_flags_are_suppressed_when_chain_explains_reads():
+    """第18回: 文言で確定した 4 戦目 (負け) の最後の読みは前の読みから +35.0 (2 戦目・3 戦目の 2 勝分)、5 戦目 (勝ち) は −13.0。
+    並びで説明できている対戦には「読み違い」「矛盾」の印を出さない。並びの情報が無い一覧では従来どおり"""
+    from tools.analyze_battles import rate_flags
+    plain = [{"file": "a", "rate": 1682.807, "outcome": "loss"}, {"file": "b", "rate": 1717.762, "outcome": "loss"},
+             {"file": "c", "rate": 1704.741, "outcome": "win"}]
+    by = {r["file"]: r for r in rate_flags(plain)}
+    assert "読み違い" in by["b"]["flag"] and "矛盾" in by["c"]["flag"]
+    chained = [dict(b, rate_chain={"n_solutions": 3, "suspect_reads": False}) for b in plain]
+    assert all(r["flag"] is None for r in rate_flags(chained)), rate_flags(chained)
+    chained[1]["rate_chain"] = {"n_solutions": 3, "suspect_reads": True}      # 誤読の疑いの印が付いた対戦は従来どおり出す
+    assert "読み違い" in {r["file"]: r for r in rate_flags(chained)}["b"]["flag"]
+    print("test_rate_flags_are_suppressed_when_chain_explains_reads OK")
+
+
 def test_rate_reads_of_dedupes_consecutive_values():
     recs = [{"type": "rate", "value": 1705.906}, {"type": "scene"}, {"type": "rate", "value": 1705.906},
             {"type": "rate", "value": 1686.715}, {"type": "rate", "value": None}]
@@ -104,6 +119,7 @@ def main() -> None:
     test_suspect_reads_are_dropped()
     test_too_many_variables_are_skipped()
     test_apply_rate_chain_fills_unknown_and_fixes_inferred()
+    test_rate_flags_are_suppressed_when_chain_explains_reads()
     test_rate_reads_of_dedupes_consecutive_values()
     print("ALL OK")
 

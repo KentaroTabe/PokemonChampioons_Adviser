@@ -129,6 +129,9 @@ def rate_flags(battles: list, max_delta: float = RATE_MAX_DELTA_PER_BATTLE) -> l
     """連続する対戦 (時系列順、レート観測ありのもの) のレート差から、読み違いの疑い (|Δ| が 1 戦の変動 max_delta を超える) と
     勝敗との矛盾 (記録は勝ちなのに下がった / 負けなのに上がった) を出す (純粋)。自動では直さない。
     (2026-09-29 第17回: 15:25 → 15:34 の差 −38 は数字の誤読、15:53 の +15.6 は「負け」の誤記録を示していた)
+    2026-10-06: ランク画面の読みは対戦前の値のことがあり、最後の読みどうしの差は 1 戦の増減とは限らない (2 戦分や 0 のこともある)。
+    対戦をまたいだ並びの解決 (apply_rate_chain の rate_chain) が付いていて、読みが並びで説明できている (組み合わせが残り、
+    誤読の疑いの印が無い) 対戦には、この差からの印を出さない (誤検出を避ける)。
     戻り値: [{"file", "delta", "outcome", "flag"}] (flag は None か説明文)"""
     out, prev = [], None
     for b in battles:
@@ -138,11 +141,13 @@ def rate_flags(battles: list, max_delta: float = RATE_MAX_DELTA_PER_BATTLE) -> l
         if prev is not None:
             delta = r - prev
             flag = None
-            if abs(delta) > max_delta:
+            chain = b.get("rate_chain") or {}
+            explained = chain.get("n_solutions", 0) >= 1 and not chain.get("suspect_reads")
+            if abs(delta) > max_delta and not explained:
                 flag = f"読み違いの疑い (1 戦の変動 {max_delta:.0f} を超える)"
-            elif b.get("outcome") == "win" and delta < 0:
+            elif not explained and b.get("outcome") == "win" and delta < 0:
                 flag = "勝敗と矛盾 (記録は勝ちだがレートが下がった)"
-            elif b.get("outcome") == "loss" and delta > 0:
+            elif not explained and b.get("outcome") == "loss" and delta > 0:
                 flag = "勝敗と矛盾 (記録は負けだがレートが上がった)"
             out.append({"file": b.get("file"), "delta": round(delta, 1), "outcome": b.get("outcome"), "flag": flag})
         prev = r
