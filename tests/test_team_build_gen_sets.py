@@ -334,7 +334,36 @@ def test_avoid_belch():
     print("test_avoid_belch OK")
 
 
+def test_assemble_repairs_before_drop():
+    """誤りの生成型は捨てる前に直す (2026-10-06): おくびょう + 物理技 (フレアドライブ) が選ばれた型は、性格を直して残す
+    (両方の攻撃技を使うので下げる側を防御へ: おくびょう → せっかち)。直せない型は従来どおり落とす"""
+    from tools.team_build import set_lint as L
+    pool = G.prune_moves(set(MOVES), MOVES.get, DELPHOX, ("Fire", "Psychic"), ROLES)
+    table = {"flareblitz": {"t1": 0.9, "t2": 0.9}, "psychic": {"t1": 0.3, "t2": 0.9}, "flamethrower": {"t1": 0.5, "t2": 0.2},
+             "shadowball": {"t1": 0.4, "t2": 0.4}}
+
+    def pick(n, exclude):
+        return G.greedy_attacks({m: r for m, r in table.items() if m not in exclude}, n)
+    templates = ({"name": "attack3_setup", "attacks": 3, "utility": ("setup",)},)
+    L.rejects_snapshot(reset=True)
+    try:
+        sets = G.assemble_sets("delphox", pool, pick, "fast_special", "timid", "blaze", templates=templates,
+                               learnset=set(MOVES), usage_moves=["psychic", "flamethrower"])
+        repaired = dict(L.repairs_snapshot()["repaired"])
+        rejected = dict(L.rejects_snapshot())
+        # lint を切れば直さない (元の誤りのある型)
+        raw = G.assemble_sets("delphox", pool, pick, "fast_special", "timid", "blaze", templates=templates, lint=False)
+    finally:
+        L.rejects_snapshot(reset=True)
+    assert raw and raw[0].nature == "timid" and "flareblitz" in raw[0].moves
+    assert sets and sets[0].nature == "hasty" and sets[0].moves == raw[0].moves and sets[0].item == raw[0].item, sets
+    assert sets[0].notes[-1] == "lint_repair:nature_move" and sets[0].notes[0] == "gen:attack3_setup:fast_special"
+    assert repaired == {"gen_sets": 1} and not rejected, (repaired, rejected)
+    print("test_assemble_repairs_before_drop OK")
+
+
 if __name__ == "__main__":
+    test_assemble_repairs_before_drop()
     test_prune_moves()
     test_greedy_attacks_and_shares()
     test_archetype_ability_and_assembly()

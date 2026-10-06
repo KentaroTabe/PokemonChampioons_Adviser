@@ -136,11 +136,13 @@ def repair_variants(search: LineupSearch, parent: LineupResult, diag: dict, cfg:
                     max_changes: int = BUILD_MAX_CHANGES, max_arms: int = BUILD_REPAIR_ARMS,
                     boost: float = BUILD_REPAIR_FAMILY_BOOST, min_gain: float = BUILD_REPAIR_MIN_GAIN,
                     min_changes: int = BUILD_REPAIR_MIN_CHANGES) -> list:
-    """親の並び → 変種 [LineupResult] (型だけの変種 B を先に、個体の入替 A を次に。親より点が上がるものだけ、点の降順で
+    """親の並び → 変種 [LineupResult] (型だけの変種 B、形態の変更 F、個体の入替 A。親より点が上がるものだけ、点の降順で
     max_arms まで)。fixed = 入替えない個体 (エース・核・固定枠)。評価は負けに効いた系統の重みを上げたもの (boosted_weights)。
     min_changes: 入替 (A) は親との違いがこの枠数以上のものだけ作る (2026-10-05 判断 #6: 1 枠の変種 ±0.04 は測っても分からない。
     型だけの変種 B は役割・型の変更として可)。
-    変種の origin = {"kind": "repair", "parent", "round", "variant": "B"|"A", "changes": [...], "diagnosis": 要約}"""
+    F = 同じ種のメガ型 ↔ 非メガ型 (判断 §9.6: 独立した候補として生成し、役割と構築全体を評価し直す。「型・役割の変更」として記録し、
+    2 体の入替の件数には含めない。個体は残るので fixed でも可。指定エースの形態は変えない)。
+    変種の origin = {"kind": "repair", "parent", "round", "variant": "B"|"F"|"A", "changes": [...], "diagnosis": 要約}"""
     combo = [search.lib.by_key[e.key] for e in parent.entries]
     species = list(diag.get("threat_species") or []) + [k["by"] for k in (diag.get("ko") or []) if k.get("by")]
     eff_boost = float(boost) * float(diag.get("evidence", 1.0) if diag.get("evidence") is not None else 1.0)
@@ -195,6 +197,33 @@ def repair_variants(search: LineupSearch, parent: LineupResult, diag: dict, cfg:
             if best:
                 c = search.lib.entries[best[2]].cand
                 item = (best[0], best[1], "B", [{"species": e.species_id, "from": _set_summary(e.cand), "to": _set_summary(c)}])
+                tried.append(item)
+                if best[0] >= base_sc + min_gain:
+                    found.append(item)
+        # F: 形態の変更 (同じ種のメガ型 ↔ 非メガ型)。石の上限・エースの規則は constraints_ok で (親に石持ちが居れば他の個体は
+        # メガ型になれない)。候補はメガ石を持てるものとして引く (mega_allowed=True)
+        for k in order:
+            e = parent.entries[k]
+            if e.locked or (cfg.ace and e.species_id == cfg.ace):
+                continue
+            others = [search.lib.entries[i] for j, i in enumerate(combo) if j != k]
+            used = frozenset(o.item for o in others if o.item)
+            tfield = team_field_from(others)
+            best = None
+            for c in search.candidates_fn(e.species_id, e.role, used, True, tfield, cfg.speed_plan, targets=targets):
+                if c.stone == e.stone or (c.item and c.item in used):
+                    continue
+                i = search.lib.add(c)
+                trial = combo[:k] + [i] + combo[k + 1:]
+                if not constraints_ok([search.lib.entries[x] for x in trial], ace, max_stones, cfg.base_of)[0]:
+                    continue
+                sc, _ = search.score_of(trial, required, cfg)
+                if best is None or sc > best[0]:
+                    best = (sc, trial, i)
+            if best:
+                c = search.lib.entries[best[2]].cand
+                item = (best[0], best[1], "F", [{"species": e.species_id, "from": _set_summary(e.cand), "to": _set_summary(c),
+                                                 "form": "mega->normal" if e.stone else "normal->mega"}])
                 tried.append(item)
                 if best[0] >= base_sc + min_gain:
                     found.append(item)
@@ -291,8 +320,8 @@ def repair_variants(search: LineupSearch, parent: LineupResult, diag: dict, cfg:
 
 def select_variants(per_parent: list, max_arms: int) -> list:
     """親ごとの変種の候補 [(parent_id, [LineupResult ...])] から測る変種を選ぶ (純粋)。
-    親を順に回り、まず各親の最良の入替 (A、2 枠以上) を 1 本ずつ、次に各親の最良の型だけの変種 (B) を 1 本ずつ、残りは修理の点
-    (origin.repair_score) の降順で max_arms まで。A を先にするのは次の run で 2 枠の入替を検証する機会を確保するため
+    親を順に回り、まず各親の最良の入替 (A、2 枠以上) を 1 本ずつ、次に各親の最良の型だけの変種 (B)、次に形態の変更 (F) を
+    1 本ずつ、残りは修理の点 (origin.repair_score) の降順で max_arms まで。A を先にするのは次の run で 2 枠の入替を検証する機会を確保するため
     (2026-10-05 判断 §9.6。2 枠の方が強いと結論したわけではない)。親ごとの上限 (max_arms // 親の数) だと 3 本 2 親で 1 本ずつになり、
     2 枠の入替が測られなかった"""
     chosen: list = []
@@ -301,7 +330,7 @@ def select_variants(per_parent: list, max_arms: int) -> list:
     def best_of(vs: list, kind: str):
         cands = [v for v in vs if v.origin.get("variant") == kind and id(v) not in taken]
         return max(cands, key=lambda v: float(v.origin.get("repair_score") or 0.0), default=None)
-    for kind in ("A", "B"):
+    for kind in ("A", "B", "F"):
         for pid, vs in per_parent:
             if len(chosen) >= max_arms:
                 return chosen
@@ -317,6 +346,10 @@ def select_variants(per_parent: list, max_arms: int) -> list:
         chosen.append((pid, v))
         taken.add(id(v))
     return chosen
+
+
+# 変種の種類 → 系譜 (lineage) の記録名: A = 個体の入替、B = 型だけ、F = 形態の変更 (メガ型 ↔ 非メガ型。入替には数えない)
+KIND_LABEL = {"A": "member", "B": "set", "F": "form"}
 
 
 def _set_summary(cand) -> dict:
@@ -400,7 +433,7 @@ def run_repair_round(run_dir: Path, parents: list, round_no: int, battles_prefix
             rows.append(r)
             made.append({"candidate_id": vid, "ok": ok, "score": v.score, "repair_score": v.origin.get("repair_score"),
                          "changes": v.origin.get("changes"), "kind": kind, "measured": True})
-            lineage.append({"variant_id": vid, "kind": f"{kind}_{'set' if kind == 'B' else 'member'}", "members": list(v.members),
+            lineage.append({"variant_id": vid, "kind": f"{kind}_{KIND_LABEL.get(kind, kind)}", "members": list(v.members),
                             "changes": v.origin.get("changes")})
             if ok:
                 new_ids.append(vid)

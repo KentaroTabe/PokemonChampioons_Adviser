@@ -401,9 +401,12 @@ def choose_ability(abilities, priority=BUILD_GEN_ABILITY_PRIORITY) -> Optional[s
 def assemble_sets(species_id: str, pool: dict, pick_attacks: Callable, archetype: str, nature: str,
                   ability: Optional[str], templates=BUILD_GEN_TEMPLATES, archetypes=BUILD_GEN_ARCHETYPES,
                   setup_items=BUILD_GEN_SETUP_ITEMS, fixed_item: Optional[str] = None, extra_notes=(),
-                  max_sets: int = BUILD_GEN_MAX_SETS, lint: bool = True) -> list:
+                  max_sets: int = BUILD_GEN_MAX_SETS, lint: bool = True, learnset=None, usage_moves=()) -> list:
     """テンプレートごとに 1 型。pick_attacks(n, exclude) → [move]。役割が埋まらないテンプレートは捨てる。
-    fixed_item (メガ石) があれば全型その持ち物。戻り値 [SetCandidate (source learnset)]。lint: 常識規則の最終検査 (set_lint) で誤りの型を落とす"""
+    fixed_item (メガ石) があれば全型その持ち物。戻り値 [SetCandidate (source learnset)]。
+    lint: 常識規則の最終検査 (set_lint)。誤りの型は捨てる前に直す (set_lint.repair_candidate: 性格の下げる側、持ち物の予備、場の重複の技、
+    4 つ未満の補充。補充は learnset と usage_moves (使用率の順) から。メガ石は外さない)。直せなければ落とす (2026-10-06。それまで
+    gen_sets の型は直さず落としていた: 煙試験で 291 型)"""
     arch = archetypes[archetype]
     out: list = []
     seen: set = set()
@@ -433,9 +436,18 @@ def assemble_sets(species_id: str, pool: dict, pick_attacks: Callable, archetype
                          notes=[f"gen:{tpl['name']}:{archetype}"] + list(extra_notes))
         if lint:
             try:
-                from tools.team_build.set_lint import gate_rejects
-                if gate_rejects(c, source="gen_sets"):
-                    continue                              # 常識規則の誤り (性格と技 / 持ち物 / 場の重複) の型は作らない
+                from tools.team_build.set_lint import LINT_REPAIRS, gate_rejects, lint_candidate, repair_candidate
+                from tools.team_build.sets import legal_item as _legal_item
+                if lint_candidate(c)["errors"]:
+                    fixed = repair_candidate(c, usage_moves=list(usage_moves or ()), legal_item=_legal_item, learnset=learnset)
+                    if fixed is None:
+                        if gate_rejects(c, source="gen_sets"):
+                            continue                      # 直せない誤り (性格と技 / 持ち物 / 場の重複 / 4 つ未満) の型は作らない
+                    elif any(o.key() == fixed.key() for o in out):
+                        continue                          # 直した結果が既にある型と同じ
+                    else:
+                        LINT_REPAIRS["gen_sets"] += 1
+                        c = fixed
             except Exception:
                 pass
         out.append(c)
@@ -659,8 +671,10 @@ def _generate_form(species_id: str, learnset, base: dict, types: list, eval_abil
         sub = {m: row for m, row in tbl.items() if m not in exclude}
         return greedy_attacks(sub, n, weights)
 
+    usage_order = [m for m, _p in sorted((move_pct or {}).items(), key=lambda kv: -float(kv[1] or 0.0))]
     sets = assemble_sets(species_id, pool, pick_attacks, archetype, nature, ability_set, archetypes=archetypes,
-                         setup_items=setup_items, fixed_item=fixed_item, extra_notes=extra_notes, max_sets=max_sets)
+                         setup_items=setup_items, fixed_item=fixed_item, extra_notes=extra_notes, max_sets=max_sets,
+                         learnset=learnset, usage_moves=usage_order)
     if archetype.startswith("wall"):
         # 壁型の性格は型ごとの攻撃技の分類で決め直す (特殊技だけの型に −SpA を付けない)
         sets = [replace(s, nature=wall_nature_for_moves(arch["natures"], [cat_of[m] for m in s.moves if m in cat_of],

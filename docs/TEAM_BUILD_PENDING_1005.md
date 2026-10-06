@@ -719,3 +719,23 @@ CI 86 モジュール緑、`test_advisor` も通過。対戦は回していな�
 - 登録チーム (10/5 の 6 体) の型は、新しい規則で誤り 0。警告は 2 つ (カメックスと ボーマンダ の「自分のタイプの攻撃技が無い」)。
   ボーマンダは のしかかり がメガ後の特性 スカイスキン でひこうタイプになるが、規則は登録の特性 (メガ前) で見るので警告になる。
   警告は記録だけで門には掛からない。メガ後の特性を見るのは、メガ型と非メガ型を別候補にする一貫化 (§10 の残り) の範囲。
+
+## 14. 対応 (実装側、4 回目。§10 の残り・§11.3・§13.3 の未実装分)
+
+feature/team-build (4228999) の上に実装した。対戦も run も回していない (純粋関数のテストと、既存の記録での確認だけ)。
+
+| 残っていた点 | 対応 |
+|---|---|
+| メガ型と非メガ型を別候補にする一貫化 (§9.6 の設計方針、§10 の残り) | **検査**: メガ石を持つ型の「場の重複」と「自分のタイプの技」はメガ後の特性・タイプで見る (`set_lint.DexInfo.mega_form`、`lint_set` の detail に form)。§13.3 のボーマンダ (のしかかり + スカイスキン) の警告は消える。性格と持ち物の規則は形態に依らない。**生成**: gen_sets はメガ後の種族値でメガ型を別に作り (既存)、role_sets は石の有無で別の候補を作る (既存)。**基本の型** (`sets.base_set`): 代表型が直せないとき、同じ形態 (石を保つ) の代替を先に選び、石を持たない代替しか無ければ注記 `form_change:<石>-><持ち物>` を付けて数える (`LINT_FORM_CHANGES`、s06_lint.json の `form_changes`)。黙って替わることは無くなる (§11.3-2)。`enumerate_sets` の形態が変わる代替には注記 `form:normal`。**戻り**: 同じ種のメガ型 ↔ 非メガ型の変種を独立した候補 (kind F) として作る (`repair.repair_variants`: 石の上限とエースの規則は並びの制約で見る、指定エースの形態は変えない、個体は残るので固定の個体でも可)。記録は `changes[].form` (normal->mega / mega->normal)、系譜の kind は `F_form`。2 体の入替 (A) の件数には含めない。測る順は A → B → F (`select_variants`)。**種族の重複** は従来どおり図鑑番号 (`constraints_ok(base_of)`)。**対戦中の個体の同一性**と**選出ごとのメガ枠**は助言側の既存の扱いのまま |
+| gen_sets の型は直さずに落とすまま (291) | `gen_sets.assemble_sets`: 誤りの型は捨てる前に直す (`repair_candidate`: 性格の下げる側、持ち物の予備、場の重複の技、4 つ未満の補充。補充は learnset と使用率の技から。メガ石は外さない)。直した数は `LINT_REPAIRS["gen_sets"]`、直せなければ従来どおり落とす。role_sets の門も同じ (今のデータでは落ちる型は 0 なので数は変わらない見込み) |
+| 段の写し: `[adapt:<名前>]` の名前がハイフンで切れる (§11.3-3) | 名前の文字集合に `-` を足した (`[adapt:L01_INC-R1A1_screen]` → S8a) |
+| run での通し (較正の標本 cheap のみ / STRESS の条件化 / 戻りの A 先の順と 2 枠・F の変種) | 未確認のまま。この環境では対戦を回せないので次の測定で |
+| §7.4 の残り (記事の取得を始める時期 / 相手の操縦を混ぜる案 / 探索の層の分割を季節内で固定する設計変更 / 確認 run の通し) | 判断待ちのまま (実装の問題ではない) |
+
+テスト: `tests/test_set_lint.py` (`test_mega_form_lint`: メガ後の特性・タイプでの検査と修理、形態の数の欄。`test_base_set_uses_repaired_set`:
+同じ形態の代替の優先と、形態の変更の注記)、`tests/test_team_build_gen_sets.py` (`test_assemble_repairs_before_drop`: おくびょう + フレアドライブ
+の生成型が せっかち に直って残る)、`tests/test_team_build_repair.py` (`test_form_change_variants`: normal->mega / mega->normal の変種、石の上限、
+指定エース、測る順、系譜の記録名)、`tests/test_env_match.py` (ハイフン)。
+
+次の run で見る場所: `s06_lint.json` の `repaired_in_generation` に gen_sets が増え `rejected_in_generation` の gen_sets:* が減ること、
+`form_changes` (今のデータでは 0 の見込み)、`s09_repair*.json` の kind F と系譜の `F_form`、登録チームのボーマンダの警告が消えること。
