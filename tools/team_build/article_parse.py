@@ -8,27 +8,37 @@
   3. 全体の節: 「相手に <条件> なら <味方名…>」だけを author_selection_rule にする。先発・残りの 3 体・確率は作らない。
 出力は id と数値と列挙値だけの辞書。出典は source_ref (個体番号 + 文番号、例 "m2:s3")。
 辞書は vision/data/jp_names.json (vision.normalize.normalize の正規化キーで厳密一致。あいまい一致はしない。リンクの番号で id を決めない)。
+厳密一致の表に無い表記は、記事専用の別名辞書 (vision/data/article_aliases.json、tools/team_build/article_aliases) の confirmed だけで引く
+(candidate は使わない)。
+ローカル用の出力 (記録・LLM の入力には入れない): unresolved_names (解決できなかった名前 1 語ずつ) と site_id_observations
+(リンクの表示名が厳密一致で解決できたときの (ホスト, 種別, サイト固有 id) → id の観測。別名の自動確定の根拠に使う)。
 純粋関数 (ファイル・ネットワークに触れない。辞書と図鑑は読み取りだけ)。テストは tests/test_article_parse.py。
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import unicodedata
 from functools import lru_cache
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 from champions_agent.config import (BUILD_ARTICLE_ACTUAL_LABEL, BUILD_ARTICLE_CONDITION_WORDS, BUILD_ARTICLE_EV252_LABEL,
                                     BUILD_ARTICLE_EV252_MAX, BUILD_ARTICLE_HEADING_MAX_CHARS, BUILD_ARTICLE_MAX_MEMBERS,
                                     BUILD_ARTICLE_MEMBER_SECTION_WORDS, BUILD_ARTICLE_MOVES_PER_SET, BUILD_ARTICLE_NAME_TOKEN_MAX_CHARS,
                                     BUILD_ARTICLE_NEGATION_SUFFIXES, BUILD_ARTICLE_PLAIN_NAME_MIN_CHARS,
                                     BUILD_ARTICLE_SELECTION_COMBINABLE_WORDS, BUILD_ARTICLE_SELECTION_REQUIRED_WORDS,
-                                    BUILD_ARTICLE_STAT_WORDS, BUILD_ARTICLE_TARGET_MOD_WORDS, BUILD_ARTICLE_TEAM_SECTION_WORDS,
-                                    BUILD_GEN_EV_POINT_CAP)
+                                    BUILD_ARTICLE_SITE_ID_PATTERNS, BUILD_ARTICLE_STAT_WORDS, BUILD_ARTICLE_TARGET_MOD_WORDS,
+                                    BUILD_ARTICLE_TEAM_SECTION_WORDS, BUILD_GEN_EV_POINT_CAP)
 from vision.normalize import JP_NAMES_PATH, normalize
 
-PARSER_VERSION = "article_parse/1"
+# 2: unresolved_names を {"category", "text", "host", "site_key"} に、site_id_observations と max_members (single_set) を追加 (2026-10-06)
+PARSER_VERSION = "article_parse/2"
+ARTICLE_ALIASES_PATH = Path(JP_NAMES_PATH).parent / "article_aliases.json"   # 記事専用の別名辞書 (OCR 用の jp_names.json とは別)
+DICT_CATEGORIES = ("species", "items", "moves", "abilities", "natures", "types")
 STAT_ORDER = ("hp", "atk", "def", "spa", "spd", "spe")
 LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)\s]+)\)")
 BULLET_RE = re.compile(r"^\s*(?:[*\-・•]|\d+[.)])\s*")
@@ -46,32 +56,71 @@ UNRESOLVED_CATEGORIES = ("broad_matchup_claim", "move_purpose_non_species_target
 # ------------------------------------------------------------------------------------------------------------------
 # 辞書 (日本語名 → id。厳密一致だけ)
 # ------------------------------------------------------------------------------------------------------------------
-class ArticleDictionary:
-    """jp_names.json の正規化キー → id。種は {"id", "num"}、タイプは英語名、他は id 文字列。あいまい一致はしない"""
+def value_id(value) -> Optional[str]:
+    """辞書の値 → id (種は {"id", "num"} の id、他は文字列そのもの)"""
+    if isinstance(value, dict):
+        return value.get("id")
+    return value if isinstance(value, str) else None
 
-    def __init__(self, raw: dict):
+
+class ArticleDictionary:
+    """jp_names.json の正規化キー → id。種は {"id", "num"}、タイプは英語名、他は id 文字列。あいまい一致はしない。
+    aliases (記事専用の別名辞書のデータ、tools/team_build/article_aliases.load_aliases の形) を渡すと、厳密一致の表に無い表記を
+    confirmed の別名だけで引く (candidate / rejected は使わない)。素の文字列から種名・技名を探す一覧には別名を入れない"""
+
+    def __init__(self, raw: dict, aliases: Optional[dict] = None):
+        self._raw = raw
         self._tables: dict = {}
-        for cat in ("species", "items", "moves", "abilities", "natures", "types"):
+        self._names: dict = {}            # 種別 → id → 日本語名 (最初の表記。別名の canonical に使う)
+        for cat in DICT_CATEGORIES:
             table: dict = {}
+            names: dict = {}
             for ja, val in (raw.get(cat) or {}).items():
                 table.setdefault(normalize(ja), val)
+                vid = value_id(val)
+                if vid:
+                    names.setdefault(vid, ja)
             self._tables[cat] = table
-        self._species_ja = {}
-        for ja, v in (raw.get("species") or {}).items():
-            if isinstance(v, dict):
-                self._species_ja.setdefault(v["id"], ja)
-        self._move_ja = {}
-        for ja, v in (raw.get("moves") or {}).items():
-            self._move_ja.setdefault(v, ja)
+            self._names[cat] = names
+        self._species_ja = dict(self._names["species"])
+        self._move_ja = dict(self._names["moves"])
         self._type_words = sorted((raw.get("types") or {}).items(), key=lambda kv: -len(kv[0]))
         # 素の文字列から種名を探すための一覧 (長い順。短すぎる名前は誤検出するので省く)
         self._species_words = sorted(((ja, v["id"]) for ja, v in (raw.get("species") or {}).items()
                                       if isinstance(v, dict) and len(ja) >= BUILD_ARTICLE_PLAIN_NAME_MIN_CHARS), key=lambda kv: -len(kv[0]))
-        self.version = str(len(raw.get("species") or {})) + "/" + str(len(raw.get("moves") or {})) + "/" + str(len(raw.get("items") or {}))
+        if aliases:
+            from tools.team_build.article_aliases import confirmed_map     # 循環 import を避けて呼び出し時に読む
+            self._aliases = confirmed_map(aliases)
+        else:
+            self._aliases = {}
+        self.alias_count = sum(len(t) for t in self._aliases.values())
+        base = str(len(raw.get("species") or {})) + "/" + str(len(raw.get("moves") or {})) + "/" + str(len(raw.get("items") or {}))
+        alias_hash = hashlib.sha256(json.dumps(self._aliases, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+        self.version = f"{base}/aliases:{self.alias_count}" + (f":{alias_hash}" if self.alias_count else "")
 
-    def lookup(self, category: str, text: str):
+    def with_aliases(self, aliases: Optional[dict]) -> "ArticleDictionary":
+        """同じ辞書の表で、別名だけ差し替えた辞書 (別名を確定した後の再解析に使う)"""
+        return ArticleDictionary(self._raw, aliases)
+
+    def lookup_exact(self, category: str, text: str):
+        """厳密一致の表だけで引く (別名を含まない。往復一致の検査とサイト固有 id の観測に使う)"""
         key = normalize(text)
         return self._tables.get(category, {}).get(key) if key else None
+
+    def lookup(self, category: str, text: str):
+        """厳密一致の表 → 無ければ confirmed の別名。値の形は表と同じ (種は {"id", "num"})"""
+        v = self.lookup_exact(category, text)
+        if v is not None:
+            return v
+        key = normalize(text)
+        aid = self._aliases.get(category, {}).get(key) if key else None
+        if aid is None:
+            return None
+        return {"id": aid, "num": self.species_num(aid)} if category == "species" else aid
+
+    def name_of(self, category: str, ident: str) -> Optional[str]:
+        """id → 辞書の日本語名 (最初の表記)"""
+        return self._names.get(category, {}).get(ident)
 
     def species_id(self, text: str) -> Optional[str]:
         v = self.lookup("species", text)
@@ -100,7 +149,12 @@ class ArticleDictionary:
 
 @lru_cache(maxsize=1)
 def default_dictionary() -> ArticleDictionary:
-    return ArticleDictionary(json.loads(JP_NAMES_PATH.read_text(encoding="utf-8")))
+    """jp_names.json + 記事専用の別名辞書 (ファイルがあれば。使うのは confirmed だけ)"""
+    aliases = None
+    if ARTICLE_ALIASES_PATH.exists():
+        from tools.team_build.article_aliases import load_aliases
+        aliases = load_aliases(ARTICLE_ALIASES_PATH)
+    return ArticleDictionary(json.loads(JP_NAMES_PATH.read_text(encoding="utf-8")), aliases)
 
 
 @lru_cache(maxsize=1)
@@ -215,6 +269,65 @@ def _link_species_num(href: Optional[str]) -> Optional[int]:
         return None
     m = re.search(r"/zukan/n(\d+)", href)
     return int(m.group(1)) if m else None
+
+
+def canonical_host(host: Optional[str]) -> Optional[str]:
+    """ホスト名の比較用の形 (小文字、ポートと先頭の www. を落とす)。空なら None"""
+    h = (host or "").strip().lower()
+    if not h:
+        return None
+    h = h.rsplit("@", 1)[-1].split(":", 1)[0]
+    if h.startswith("www."):
+        h = h[len("www."):]
+    return h or None
+
+
+def link_host(host: Optional[str], href: Optional[str]) -> Optional[str]:
+    """リンクの属するホスト (比較用の形)。href が絶対 URL ならそのホスト、相対ならページのホスト host"""
+    if not href:
+        return None
+    try:
+        netloc = urlparse(href).netloc
+    except ValueError:
+        return None
+    return canonical_host(netloc) if netloc else canonical_host(host)
+
+
+def site_key(host: Optional[str], href: Optional[str]) -> Optional[tuple]:
+    """リンクのサイト固有 id → (種別, key)。リンクのホストに表 (BUILD_ARTICLE_SITE_ID_PATTERNS) が無い・どの形にも合わなければ None。
+    host はページのホスト (相対リンクの解決にだけ使う)。id はこの key で決めない (表示名の厳密一致との対応を観測するだけ)"""
+    pats = BUILD_ARTICLE_SITE_ID_PATTERNS.get(link_host(host, href) or "")
+    if not pats:
+        return None
+    for cat, pat in pats.items():
+        m = re.search(pat, href)
+        if m:
+            return cat, m.group(1)
+    return None
+
+
+def _name_item(category: str, text: str, href: Optional[str], host: Optional[str]) -> dict:
+    """解決できなかった名前 1 語 (ローカルの辞書補修用)。リンクがあれば、そのホストと同じ種別のサイト固有 id を添える"""
+    lh = link_host(host, href) if href else None
+    sk = site_key(host, href) if href else None
+    return {"category": category, "text": text, "host": lh, "site_key": sk[1] if sk and sk[0] == category else None}
+
+
+def site_id_observations(lines: list, dic: "ArticleDictionary", host: Optional[str] = None) -> list:
+    """全部の行のリンクのうち、表示名がサイト固有 id と同じ種別で厳密一致 (別名を含まない) に解決できたもの →
+    [{"host", "category", "key", "id"}] (重複なし、並びは決定的)。別名の自動確定 (site_id_verified) の根拠"""
+    seen: set = set()
+    for ln in lines:
+        for text, href in tokenize_links(ln):
+            if href is None:
+                continue
+            sk = site_key(host, href)
+            if not sk:
+                continue
+            ident = value_id(dic.lookup_exact(sk[0], text))
+            if ident:
+                seen.add((link_host(host, href), sk[0], sk[1], ident))
+    return [{"host": h, "category": c, "key": k, "id": i} for h, c, k, i in sorted(seen)]
 
 
 # ------------------------------------------------------------------------------------------------------------------
@@ -504,7 +617,8 @@ def _claim(kind, subject, obj, obj_kind, source_ref, **extra) -> dict:
 
 
 def extract_claims(sentence: str, subject: str, members: list, dic: ArticleDictionary, source_ref: str) -> tuple:
-    """1 文 → (主張の列, 未確定の列, 解決できなかった技名の列)。subject は "m1" 等の個体 id か "team"。規則は docs §3.3 の表のとおり"""
+    """1 文 → (主張の列, 未確定の列, 解決できなかった名前の列)。subject は "m1" 等の個体 id か "team"。規則は docs §3.3 の表のとおり。
+    名前は {"category", "text", "host", "site_key"} (説明文の素の文字列なので host / site_key は None)"""
     own_moves = next((m["moves"] for m in members if m["id"] == subject), [])
     flat, ents = entities_of(sentence, members, dic, own_moves)
     claims, unresolved, unresolved_names = [], [], []
@@ -581,7 +695,7 @@ def extract_claims(sentence: str, subject: str, members: list, dic: ArticleDicti
             if move_id is None:
                 unresolved.append({"category": "unresolved_move", "source_ref": source_ref})
                 if len(mv_text) <= BUILD_ARTICLE_NAME_TOKEN_MAX_CHARS:
-                    unresolved_names.append(mv_text)
+                    unresolved_names.append(_name_item("moves", mv_text, None, None))
         prefix = _strip_own_stat(_prefix_clause(flat, m.start()))
         ambiguous = bool(_PARTICLES_RE.sub("", prefix))
         if ambiguous:
@@ -634,22 +748,36 @@ def extract_selection_rules(sentence: str, members: list, dic: ArticleDictionary
 # ------------------------------------------------------------------------------------------------------------------
 # 記事全体
 # ------------------------------------------------------------------------------------------------------------------
-def _collect_unresolved_names(line: str, dic: ArticleDictionary) -> list:
-    """技一覧らしい行 (リンクが 2 つ以上で、解決できたものが半分以上) の解決できなかった表示名 (辞書の補修用。短い語だけ)"""
-    links = [t for t, h in tokenize_links(strip_bullet(line)) if h is not None]
+def _collect_unresolved_names(line: str, dic: ArticleDictionary, host: Optional[str] = None) -> list:
+    """技一覧らしい行 (リンクが 2 つ以上で、解決できたものが半分以上) の解決できなかった表示名 (辞書の補修用。短い語だけ) →
+    [{"category": "moves", "text", "host", "site_key"}]"""
+    links = [(t, h) for t, h in tokenize_links(strip_bullet(line)) if h is not None]
     if len(links) < 2:
         return []
-    bad = [t for t in links if not isinstance(dic.lookup("moves", t), str)]
+    bad = [(t, h) for t, h in links if not isinstance(dic.lookup("moves", t), str)]
     if len(bad) * 2 > len(links):
         return []
-    return [t for t in bad if len(t) <= BUILD_ARTICLE_NAME_TOKEN_MAX_CHARS]
+    return [_name_item("moves", t, h, host) for t, h in bad if len(t) <= BUILD_ARTICLE_NAME_TOKEN_MAX_CHARS]
 
 
-def parse_article(marked: str, dic: Optional[ArticleDictionary] = None) -> dict:
+def _unique_names(items: list) -> list:
+    """名前の列の重複を除き、(種別, 表記, ホスト, key) の順に並べる (決定的)"""
+    seen = {}
+    for it in items:
+        seen.setdefault((it["category"], it["text"], it["host"] or "", it["site_key"] or ""), it)
+    return [seen[k] for k in sorted(seen)]
+
+
+def parse_article(marked: str, dic: Optional[ArticleDictionary] = None, max_members: int = BUILD_ARTICLE_MAX_MEMBERS,
+                  host: Optional[str] = None) -> dict:
     """リンクつきの本文 → 構造化した結果 (本文を含まない)。
+    max_members: 個体の上限 (構築 = BUILD_ARTICLE_MAX_MEMBERS、単体の型 = 1。超えた個体の見出しは警告にして採らない)。
+    host: ページのホスト (相対リンクのサイト固有 id を引くためだけに使う)。
     {"members": [...], "claims": [...], "selection_rules": [...], "selection_combinable": bool|None, "unresolved": [...],
-     "warnings": [...], "counts": {...}, "unresolved_names": [...] (ローカルの辞書補修用。記録と LLM の入力には入れない),
-     "parser_version", "dictionary_version"}"""
+     "warnings": [...], "counts": {...}, "parser_version", "dictionary_version",
+     ローカル用 (記録と LLM の入力には入れない):
+     "unresolved_names": [{"category", "text", "host", "site_key"}] (辞書の補修用。名前 1 語だけ),
+     "site_id_observations": [{"host", "category", "key", "id"}] (リンクの表示名が厳密一致で解決できたときのサイト固有 id の観測)}"""
     dic = dic or default_dictionary()
     lines = [ln for ln in (marked or "").splitlines() if ln.strip()]
     members: list = []
@@ -669,7 +797,7 @@ def parse_article(marked: str, dic: Optional[ArticleDictionary] = None) -> dict:
             continue
         head = parse_member_head(ln, dic) if section != "team" else None
         if head:
-            if len(members) >= BUILD_ARTICLE_MAX_MEMBERS:
+            if len(members) >= max_members:
                 warnings.append("extra_member_head")
                 unresolved.append({"category": "extra_member_head", "source_ref": f"m{len(members) + 1}"})
                 cur = None
@@ -708,7 +836,7 @@ def parse_article(marked: str, dic: Optional[ArticleDictionary] = None) -> dict:
             else:
                 cur["alt_move_lines"] += 1
             continue
-        bad_names = _collect_unresolved_names(ln, dic)
+        bad_names = _collect_unresolved_names(ln, dic, host)
         if bad_names:
             unresolved_names.extend(bad_names)
             if not cur["moves"]:
@@ -742,5 +870,6 @@ def parse_article(marked: str, dic: Optional[ArticleDictionary] = None) -> dict:
     counts = {"members": len(members), "claims": len(claims), "selection_rules": len(rules), "unresolved": len(unresolved),
               "team_sentences": len(split_sentences(team_lines))}
     return {"members": members, "claims": claims, "selection_rules": rules, "selection_combinable": combinable,
-            "unresolved": unresolved, "warnings": warnings, "counts": counts, "unresolved_names": sorted(set(unresolved_names)),
+            "unresolved": unresolved, "warnings": warnings, "counts": counts, "unresolved_names": _unique_names(unresolved_names),
+            "site_id_observations": site_id_observations(lines, dic, host),
             "parser_version": PARSER_VERSION, "dictionary_version": dic.version}

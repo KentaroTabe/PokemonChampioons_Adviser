@@ -540,6 +540,32 @@ BUILD_ARTICLE_CHARS_PER_TOKEN = 1.0          # トークンの見積もり (日�
 BUILD_ARTICLE_POOL_SHARE_MAX = 0.10          # 記事由来の構築が相手プールに占める上限 (件数・評価重みの両方。後続の段階で使う)
 BUILD_ARTICLE_MATCH_MIN_COMMON = 4           # 選出の照合: 相手の 6 体のうち確定した基本種が記事の 6 体と一致する数の下限
 BUILD_ARTICLE_MIX_ALPHAS = (0.0, 0.05, 0.10)  # 選出予測の混合の割合 (並行して記録。初期は判断に使わない)
+# 記録の種類と出典の 2 軸 (2026-10-06 ユーザー判断、docs/ARTICLE_BANK_DESIGN_1006.md §3.7)。「誰が掲載したか」と「使用実績の根拠」は別の軸
+BUILD_ARTICLE_RECORD_KIND_MEMBERS = {"team": BUILD_ARTICLE_MAX_MEMBERS, "single_set": 1}   # 記録の種類 → 個体の数 (team = 6 体、single_set = 単体の型)
+BUILD_ARTICLE_PUBLISHER_KINDS = ("personal_blog", "user_submission_site", "editorial_site", "unknown")   # source.publisher_kind (誰が掲載したか)
+BUILD_ARTICLE_USAGE_EVIDENCE = ("self_report", "battle_log_confirmed", "none", "unknown")              # source.usage_evidence (使用実績の根拠)
+BUILD_ARTICLE_POOL_EVIDENCE = ("self_report", "battle_log_confirmed")   # 相手プール本体に入れてよい使用実績の根拠。初版は編集部の推奨 (実績の根拠なし) を
+                                             # 入れないが、判定は publisher_kind ではなく usage_evidence で行う (編集部の記事でも実績のある構築を紹介することがある)
+BUILD_ARTICLE_PURPOSE_RECORD_KINDS = {"pool": ("team",), "weakness": ("team", "single_set"), "selection": ("team",),
+                                      "parser_eval": ("team", "single_set")}   # 用途 → 使える記録の種類 (article_bank.usable_for)
+BUILD_ARTICLE_REGULATION_NAMES = {"M-A": "gen9championsbssregma", "M-B": "gen9championsbssregmb", "M-C": "gen9championsbssregmc"}
+                                             # 記事固有の記載 (題名・タグ) の規制名 → 規制 id (article_units.regulation_from_text。全角は NFKC で吸収)
+BUILD_ARTICLE_REGULATION_DASHES = "-‐‒–—―−ー"   # 規制名の区切りとみなす文字: U+002D, U+2010, U+2012〜2015, U+2212, U+30FC
+                                             # (NFKC で - にならないダッシュ類・マイナス記号・長音。全角の － と半角の ｰ は NFKC で - / ー になる)
+BUILD_ARTICLE_REGULATION_BASES = ("article_text", "site_tag", "user_confirmed", "manifest_season")
+                                             # meta.regulation_basis の列挙値 (article_bank.set_regulation)。manifest_season = blogs.csv のシーズン列 → BUILD_ARTICLE_SEASON_REGULATION
+BUILD_ARTICLE_CHARSET_ALIASES = {"shift_jis": "cp932", "shift-jis": "cp932", "sjis": "cp932", "x-sjis": "cp932", "windows-31j": "cp932",
+                                 "x-euc-jp": "euc_jp"}   # HTML の charset 名 → Python の codec (Shift_JIS は WHATWG と同じく cp932 で読む)
+# 記事専用の別名辞書 (tools/team_build/article_aliases、vision/data/article_aliases.json。OCR 用の jp_names.json とは別)。
+# 往復一致 (canonical → 同じ id) は必須の検査だが、元の表記との対応は裏付けないので自動確定の条件にはしない。自動確定は次の 2 つだけ
+BUILD_ARTICLE_KNOWN_TRANSFORMS = (("万", "まん"),)   # 表記の既知の変換 (順に置換して厳密一致すれば basis=known_transform で確定。「10万ボルト」→「10まんボルト」)
+BUILD_ARTICLE_SITE_ID_PATTERNS = {"yakkun.com": {"species": r"/zukan/n(\w+)", "moves": r"[?&]move=(\d+)", "items": r"item_s=(\d+)",
+                                                 "abilities": r"tokusei=(\d+)"}}   # リンクのサイト固有 id (ホスト → 種別 → 正規表現の第 1 群)
+BUILD_ARTICLE_SITE_ID_MIN_CONFIRMATIONS = 2   # サイト固有 id が単一の id にこの数の記事で対応していれば basis=site_id_verified で確定 (別 id が出たら以後使わない)
+BUILD_ARTICLE_ALIAS_LLM_MAX_NAMES = 50       # LLM に名前を送る 1 回の上限 (種別と表記だけ。本文は送らない)
+BUILD_ARTICLE_ALIAS_LLM_MAX_CALLS = 1        # 1 回の処理で名前の対応を LLM に聞く呼び出しの上限 (再試行を含む)。LLM だけが根拠の対応は candidate (自動確定しない)
+BUILD_ARTICLE_ALIAS_LLM_TIER = "sonnet"      # 名前の対応を聞くモデルの tier (BUILD_LLM_MODELS。回帰の測定なしの初期値)
+BUILD_ARTICLE_BATCH_MAX_BODY_CHARS = 400_000  # 1 回の処理で保持する本文 (リンクつきの本文) の合計文字数の上限。超えた unit は deferred (本文をディスクへ退避しない)
 # - CLI に載せるツール。空 = ツール定義を system prompt に載せない (9/24 実測: 12.8k トークン。不許可リスト方式は 24.7k)
 BUILD_LLM_CLI_TOOLS = ""
 # 視覚監査 (tools/audit_subtask, audit_session) のモデル。8/18 に haiku / sonnet / opus を同一フレーム 30 枚で比較して opus に固定、

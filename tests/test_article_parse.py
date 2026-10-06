@@ -153,7 +153,8 @@ def test_claims_distinguish_team_and_member():
     assert "durability_benchmark_ambiguous_modifiers" in cats and "unresolved_move" in cats
     assert cats.count("move_purpose_non_species_target") == 1                               # 「ふきとばしは詰み技対策」: 対象が種でないので主張にせず未確定
     assert not any(c["kind"] == "move_purpose" and c["subject"] == "m4" for c in parsed["claims"])
-    assert parsed["unresolved_names"] == ["地震"]
+    # 解決できなかった名前は「地震」だけ (説明文の素の文字列なのでリンクのホスト・サイト固有 id は無い)
+    assert parsed["unresolved_names"] == [{"category": "moves", "text": "地震", "host": None, "site_key": None}]
     assert all(c["basis"] == "author_explicit" for c in parsed["claims"])
     print("test_claims_distinguish_team_and_member OK")
 
@@ -178,8 +179,9 @@ def test_record_payload_no_prose():
     import tempfile
     from pathlib import Path
     parsed = P.parse_article(SYNTHETIC)
-    rec = B.build_record(parsed, source={"url_hash": "synthetic", "host": "example.invalid"}, meta={"regulation": "gen9championsbssregmc"})
-    assert rec["status"] == "ok" and "unresolved_names" not in rec
+    rec = B.build_record(parsed, source={"url_hash": "synthetic", "host": "example.invalid", "synthetic": True},
+                         meta={"regulation": "gen9championsbssregmc"})
+    assert rec["status"] == "ok" and "unresolved_names" not in rec and "site_id_observations" not in rec
     assert B.validate_record(rec) == []                                                     # ポイント合計 66、252 表示の対応、実数値の再計算、メガ石
     B.assert_no_prose(rec)
     payload = B.llm_payload(rec)
@@ -193,9 +195,9 @@ def test_record_payload_no_prose():
     except ValueError as e:
         assert "雨" not in str(e) and "claims" in str(e)                                   # 違反の報告にも本文を含めない
     with tempfile.TemporaryDirectory() as d:
-        out = B.save_bank([rec], Path(d))
+        out = B.save_bank([rec], Path(d), allow_synthetic=True)            # 素材は合成の記事なので許可を明示する
         version = out.name
-        assert (out / "manifest.json").exists() and B.load_bank(version, Path(d))[0]["case_id"] == rec["case_id"]
+        assert (out / "manifest.json").exists() and B.load_bank(version, Path(d), allow_synthetic=True)[0]["case_id"] == rec["case_id"]
         assert json.loads((out / "manifest.json").read_text(encoding="utf-8"))["n_cases"] == 1
     assert B.host_allowed({"a.example": {"fetch": "allow"}}, "a.example") and not B.host_allowed({"a.example": {"fetch": "unknown"}}, "a.example")
     assert not B.host_allowed({}, "b.example", "send_llm")
@@ -285,6 +287,44 @@ def test_negative_and_variant_articles():
     print("test_negative_and_variant_articles OK")
 
 
+def test_single_set_and_local_outputs():
+    """max_members=1 (単体の型)、ローカル用の出力の形 (unresolved_names = 種別・表記・リンクのホスト・サイト固有 id、
+    site_id_observations = 表示名が厳密一致で解決したリンクだけ)。記録には入れない"""
+    from tools.team_build import article_aliases as A
+    p1 = P.parse_article(SYNTHETIC, max_members=1)
+    assert p1["counts"]["members"] == 1 and p1["members"][0]["species_id"] == "pelipper" and p1["members"][0]["moves"]
+    assert p1["warnings"].count("extra_member_head") == 5                                  # 2 体目以降の見出しは採らない
+    assert P.parse_article(SYNTHETIC)["site_id_observations"] == []                        # 表の無いホスト (example.invalid) は観測しない
+    text = ("* [ペリッパー](/ch/zukan/n279)@[しめったいわ](/ch/item?item_s=137)([ひかえめ](/ch/nature))[あめふらし](/ch/zukan/search/?tokusei=2)\n"
+            "* [ぼうふう](/ch/move?move=542)[なみのり](https://www.yakkun.com/ch/move?move=57)[蜻蛉返り](/ch/move?move=369)"
+            "[おいかぜ](/ch/move?move=366)\n")
+    p = P.parse_article(text, max_members=1, host="yakkun.com")
+    obs = p["site_id_observations"]
+    assert all(set(o) == {"host", "category", "key", "id"} for o in obs) and obs == sorted(obs, key=lambda o: (o["host"], o["category"], o["key"], o["id"]))
+    for o in ({"host": "yakkun.com", "category": "species", "key": "279", "id": "pelipper"},
+              {"host": "yakkun.com", "category": "items", "key": "137", "id": "damprock"},
+              {"host": "yakkun.com", "category": "abilities", "key": "2", "id": "drizzle"},
+              {"host": "yakkun.com", "category": "moves", "key": "57", "id": "surf"}):
+        assert o in obs, o
+    assert not any(o["key"] == "369" for o in obs)                                         # 解決できなかった表示名は観測にしない
+    assert p["unresolved_names"] == [{"category": "moves", "text": "蜻蛉返り", "host": "yakkun.com", "site_key": "369"}]
+    assert p["members"][0]["moves"] == [] and "unresolved_move" in [u["category"] for u in p["unresolved"]]
+    # 相対リンクはページのホストで引く (host が無ければ、www つきの絶対 URL のリンクだけ観測する)
+    p0 = P.parse_article(text, max_members=1)
+    assert [(o["host"], o["key"]) for o in p0["site_id_observations"]] == [("yakkun.com", "57")]
+    assert p0["unresolved_names"] == [{"category": "moves", "text": "蜻蛉返り", "host": None, "site_key": None}]
+    # 別名で解決した表示名は観測にしない (観測は別名を含まない厳密一致だけ。別名から別名を確定させない)
+    aliases = {"schema": A.SCHEMA, "entries": [A.make_entry("moves", "蜻蛉返り", "とんぼがえり", "uturn", "confirmed", "human", "2026-10-06")]}
+    pa = P.parse_article(text, P.default_dictionary().with_aliases(aliases), max_members=1, host="yakkun.com")
+    assert pa["members"][0]["moves"] == ["hurricane", "surf", "uturn", "tailwind"] and pa["unresolved_names"] == []
+    assert not any(o["key"] == "369" for o in pa["site_id_observations"])
+    rec = B.build_record(pa, source={"host": "yakkun.com"}, record_kind="single_set")
+    assert rec["status"] == "ok" and "site_id_observations" not in rec and "unresolved_names" not in rec
+    assert P.site_key("yakkun.com", "/ch/zukan/n445z") == ("species", "445z") and P.site_key(None, "https://yakkun.com/i?item_s=200") == ("items", "200")
+    assert P.site_key("example.invalid", "/zukan/n279") is None and P.canonical_host("WWW.Yakkun.com:443") == "yakkun.com"
+    print("test_single_set_and_local_outputs OK")
+
+
 def main() -> None:
     test_members_sets_and_moves()
     test_claims_distinguish_team_and_member()
@@ -294,6 +334,7 @@ def main() -> None:
     test_line_level_rules()
     test_html_to_marked_text()
     test_negative_and_variant_articles()
+    test_single_set_and_local_outputs()
     print("ALL OK")
 
 

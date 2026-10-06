@@ -135,7 +135,9 @@
 ### 3.6 記録の形 (本文を含まない)
 
 ```
-case: {case_id, source: {url_hash, host, fetched_at, published_at, updated_at, body_hash}, meta: {seasons, regulation, rank, format},
+case: {case_id, record_kind: team|single_set (§3.7),
+       source: {url_hash, host, fetched_at, published_at, updated_at, body_hash, publisher_kind, usage_evidence, synthetic},
+       meta: {seasons, regulation, regulation_basis, regulation_history, rank, format},
        members: [{id: "m1", species_id (使用形態), base_species_id, mega_stone, item, nature, ability,
                   points: {hp..spe} | null, ev252: {...} | null, actual: [6] | null, moves: [4], warnings: [...]}],
        claims: [{kind, subject, object, object_kind: species|type|move, conditions: [...], basis: "author_explicit", source_ref}],
@@ -144,6 +146,55 @@ case: {case_id, source: {url_hash, host, fetched_at, published_at, updated_at, b
 ```
 
 文字列の値は id / 列挙値 / 参照 id だけ。`assert_no_prose(record)` が「かな・漢字を含む文字列が無い」ことを検査する (保存前と LLM 送信前の門)。
+
+### 3.7 記録の種類と出典の 2 軸 (2026-10-06 ユーザー判断。`article_bank`)
+
+- `record_kind` = `team` (6 体) / `single_set` (単体の型 1 体)。`parse_article(max_members=…)` と `build_record(record_kind=…)` で分ける
+  (team は 6 体・各 4 技、single_set は 1 体・4 技で ok)。`validate_record` も個体の数を種類ごとに見て、基本種の重複は team だけ見る。
+- 出典は 2 軸を別項目にする: `source.publisher_kind` (誰が掲載したか: personal_blog / user_submission_site / editorial_site / unknown) と
+  `source.usage_evidence` (使用実績の根拠: self_report / battle_log_confirmed / none / unknown)。編集部の記事でも実績のある構築を紹介する
+  ことがあるので同じ軸にしない。無指定は unknown、表に無い値は ValueError。合成の記事は `source.synthetic = true`。
+- `usable_for(record, purpose, regulation)`: parser_eval は常に可 (合成も可)。それ以外は 合成でない・status が ok / warnings・
+  meta.regulation が既知で引数と一致 (指定しなければ不可) を満たし、weakness = team / single_set、selection = team、
+  pool = team かつ usage_evidence ∈ BUILD_ARTICLE_POOL_EVIDENCE (self_report / battle_log_confirmed)。
+- **ユーザー判断**: 編集部の推奨は初版ではプール本体に入れない。判定は publisher_kind ではなく usage_evidence で行う。
+- `set_regulation(record, regulation, basis)`: `meta.regulation_basis` (article_text / site_tag / user_confirmed / manifest_season) と
+  `meta.regulation_history` (旧値・新値・basis。本文なし) を残す。
+- **ユーザー判断**: 合成の記事は `save_bank` / `load_bank` の両方で既定で拒否する (`allow_synthetic=True` のときだけ。一時ディレクトリへの
+  保存でも許可は別に要る)。`save_bank` の本文の門は source / meta も含めた記録全体に掛ける。
+
+### 3.8 記事専用の別名辞書 (`vision/data/article_aliases.json`、`article_aliases`)
+
+- OCR 用の `jp_names.json` とは分離し、記事の解析だけが読む。entry = category / alias (記事の表記 1 語) / canonical / id /
+  status (confirmed・candidate・rejected) / basis (known_transform・site_id_verified・llm_only・human) / source (host・site_key) / added / history。
+  `ArticleDictionary` は厳密一致の表に無い表記を **confirmed だけ**で引く。`dictionary_version` に別名の件数 (とハッシュ) を含める。
+- **ユーザー判断**: 往復一致 (`roundtrip_ok`: canonical が別名を含まない厳密一致で同じ id に解決する) は必須の検査だが、元の表記との対応は
+  裏付けない (「地震」に「じならし」と正しい id を返しても通る) ので、自動確定の条件にはしない。
+- 自動確定は元の表記との対応を裏付けられる 2 つだけ: **known_transform** (BUILD_ARTICLE_KNOWN_TRANSFORMS。「10万ボルト」→「10まんボルト」) と
+  **site_id_verified** (リンクのサイト固有 id (BUILD_ARTICLE_SITE_ID_PATTERNS) が、別の記事で表示名の厳密一致 (別名を含まない) から単一の id に
+  BUILD_ARTICLE_SITE_ID_MIN_CONFIRMATIONS 記事以上で対応。同じ key に別の id が出たら ambiguous にして以後使わない: yakkun の item_s=200)。
+  観測は `parse_article` の `site_id_observations` (ローカル用) → `SiteIdStore` (`logs/articles/site_ids.json`)。
+- **ユーザー判断**: LLM だけが根拠の別名は candidate (自動確定しない)。送るのは種別と表記だけ (名前 1 語 ≤ BUILD_ARTICLE_NAME_TOKEN_MAX_CHARS の門)、
+  1 回の処理で最大 50 語・1 呼び出し。往復一致を通らない対応は捨てて件数だけ数える。記事本文の LLM 入力 (§4) とは別の経路。
+- 既存の confirmed / candidate と id が矛盾する対応は conflict として反映しない。人の確認は
+  `python -m tools.team_build.article_aliases --list / --confirm / --reject` (history に basis = human)。記事ごとではなく、
+  別名の対応を一度確認すれば次回から辞書で解決する。
+- 未解決の名前を集めるのは今は技一覧らしい行のリンクと D1 の技名だけ。個体の見出しの種族・持ち物・性格の表記ゆれ (見出しとして
+  認識されない) と特性の表記ゆれ (見出しは認識されるが名前を集めていない) は集まらない (収集の規則を足すかは判断待ち)。
+
+### 3.9 構築ごとの配列 (unit) とバッチ処理 (`article_units`、`articles_process`)
+
+- **ユーザー判断**: 1 ページに複数の構築・単体の型があれば、変換層の出力は区切り線つきの文章ではなく構築ごとの配列
+  (unit = {kind, marked, meta, source})。解析は unit ごと。ホスト別の変換層 (`ADAPTERS`) は取得可否とページ構造を確認してから足し、
+  無ければ `generic_units` (ページ全体を 1 つの team unit)。
+- **ユーザー判断**: 文字コードは URL から決めない。HTTP ヘッダの charset → HTML の meta → UTF-8 (errors="replace") の順 (`decode_html`)。
+  URL のパーセント表現は変えず、`normalize_url` は重複排除の鍵 (`url_hash`) にだけ使い、取得には元の URL を使う。
+- 規制名: `regulation_from_text` は記事固有の記載 (題名・タグ) の M-A / M-B / M-C を規制 id にする (違う規制が 2 つ以上なら曖昧で None)。
+  サイト共通のメニュー (「M-C 情報」等) は渡さない。
+- `process_batch`: 入力の検査 (source / meta に本文なし) → ホストの門 (fetch が allow でなければ解析しない) と上限 (BUILD_ARTICLE_BATCH_MAX_ARTICLES
+  ページ、本文の合計 BUILD_ARTICLE_BATCH_MAX_BODY_CHARS 文字。超えたページは deferred、本文をディスクへ退避しない) → 解析と観測 →
+  自動確定 → LLM (send_llm が allow のホストの名前だけ、確認待ちの名前は送り直さない) → 新たに確定した別名に関係する unit だけメモリ上の本文で
+  再解析 → 記録と本文の門 → 本文の破棄。処理状態は `logs/articles/state.jsonl` (本文なし)。取得 (HTTP) の関数は作らない (ホストの許可待ち)。
 
 ## 4. LLM の段 (段階 B。構造化データだけを渡す)
 
@@ -230,3 +281,6 @@ case: {case_id, source: {url_hash, host, fetched_at, published_at, updated_at, b
 4. 添付の例を手元で解析 (scratchpad)、結果は §9 の末尾。辞書の表記ゆれ (「10まんボルト」は表では全角「１０まんボルト」: NFKC 正規化で一致) を確認。
 5. 次 (段階 B 以降、未実装): 取得 (`articles_fetch`: manifest + host_policy → HTML → `html_to_marked_text` → `parse_article` → `build_record`、
    本文はメモリだけ)、未解決の名前のローカル記録、LLM の段 (`llm_payload` → 検査候補・役割仮説)、§6〜§8 の接続。
+6. 追補 (2026-10-06 ユーザー判断、§3.7〜§3.9): 記録の種類と出典の 2 軸・`usable_for`・`set_regulation`・合成の門 (`article_bank`)、
+   記事専用の別名辞書 (`article_aliases`)、unit・文字コード・規制名 (`article_units`)、バッチ処理の骨格 (`articles_process`、HTTP なし)。
+   テストは `test_article_bank` / `test_article_aliases` / `test_article_units` / `test_articles_process`。

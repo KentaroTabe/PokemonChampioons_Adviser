@@ -1,44 +1,93 @@
-"""記事バンク (docs/ARTICLE_BANK_DESIGN_1006.md §3.5〜§5): 解析結果 → 本文を含まない記録 → 検査 → バンクの保存・読み出し。
+"""記事バンク (docs/ARTICLE_BANK_DESIGN_1006.md §3.5〜§5, §3.7): 解析結果 → 本文を含まない記録 → 検査 → バンクの保存・読み出し。
 
-- build_record: article_parse.parse_article の結果 + 出典・メタ → case の記録 (unresolved_names は入れない)
-- validate_record: 6 体・4 技・参戦種・配分の整合 (ポイント合計 / 252 表示との対応 / 実数値の再計算) ・メガ形態と石 ・選出規則の個体
+- build_record: article_parse.parse_article の結果 + 出典・メタ → case の記録 (unresolved_names / site_id_observations は入れない)。
+  記録の種類 record_kind = team (6 体) / single_set (単体の型 1 体)。出典は 2 軸 (publisher_kind = 誰が掲載したか /
+  usage_evidence = 使用実績の根拠) と合成の印 synthetic を別項目で持つ
+- validate_record: 個体の数 (種類ごと)・4 技・参戦種・配分の整合 (ポイント合計 / 252 表示との対応 / 実数値の再計算) ・メガ形態と石 ・
+  選出規則の個体 ・出典の 2 軸
+- usable_for: 用途 (pool / weakness / selection / parser_eval) ごとに記録を使えるか (合成・処理状態・規制・種類・使用実績の根拠)
+- set_regulation: 規制を更新し、根拠 (regulation_basis) と履歴 (regulation_history) を残す
 - assert_no_prose: 記録や LLM の入力に かな・漢字を含む文字列が無いこと (本文・引用の混入の門)
 - llm_payload: LLM に渡す部分集合 (個体の型、主張、選出規則、未確定項目の分類と参照 id)
 - host_allowed: ホストごとの可否 (fetch / send_llm が allow のときだけ通す。unknown は進めない)
-- save_bank / load_bank: logs/articles/bank/<version>/cases.jsonl + manifest.json (version = 内容のハッシュ)
-純粋関数 (save/load 以外はファイルに触れない)。テストは tests/test_article_parse.py。
+- save_bank / load_bank: logs/articles/bank/<version>/cases.jsonl + manifest.json (version = 内容のハッシュ)。合成の記録は
+  保存・読み出しの両方で既定で拒否する (allow_synthetic=True のときだけ。一時ディレクトリへの保存でも許可を別に要る)
+純粋関数 (save/load 以外はファイルに触れない)。テストは tests/test_article_parse.py / tests/test_article_bank.py。
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Optional
 
-from champions_agent.config import (BUILD_ARTICLE_EV252_OFFSET, BUILD_ARTICLE_EV252_PER_POINT, BUILD_ARTICLE_MAX_MEMBERS,
-                                    BUILD_ARTICLE_MOVES_PER_SET, BUILD_GEN_EV_POINT_CAP, BUILD_GEN_POINT_BUDGET)
+from champions_agent.config import (BUILD_ARTICLE_EV252_OFFSET, BUILD_ARTICLE_EV252_PER_POINT,
+                                    BUILD_ARTICLE_MOVES_PER_SET, BUILD_ARTICLE_POOL_EVIDENCE, BUILD_ARTICLE_PUBLISHER_KINDS,
+                                    BUILD_ARTICLE_PURPOSE_RECORD_KINDS, BUILD_ARTICLE_RECORD_KIND_MEMBERS,
+                                    BUILD_ARTICLE_REGULATION_BASES, BUILD_ARTICLE_REGULATION_NAMES, BUILD_ARTICLE_SEASON_REGULATION,
+                                    BUILD_ARTICLE_USAGE_EVIDENCE, BUILD_GEN_EV_POINT_CAP, BUILD_GEN_POINT_BUDGET)
 from tools.team_build.article_parse import PARSER_VERSION, STAT_ORDER, mega_table
 
-SCHEMA_VERSION = "article_case/1"
+# 2: record_kind、出典の 2 軸 (publisher_kind / usage_evidence) と synthetic、meta の regulation_basis / regulation_history (2026-10-06)
+SCHEMA_VERSION = "article_case/2"
 REPO = Path(__file__).resolve().parent.parent.parent
 DEFAULT_BANK_DIR = REPO / "logs" / "articles" / "bank"
 _PROSE_RE = re.compile(r"[ぁ-んァ-ヶ一-龥]")
 PAYLOAD_MEMBER_KEYS = ("id", "species_id", "base_species_id", "mega_stone", "item", "nature", "ability", "points", "ev252", "actual", "moves")
+SOURCE_AXES = (("publisher_kind", BUILD_ARTICLE_PUBLISHER_KINDS), ("usage_evidence", BUILD_ARTICLE_USAGE_EVIDENCE))
+USABLE_STATUSES = ("ok", "warnings")          # 用途 (parser_eval 以外) に使える処理状態
+UNKNOWN_REGULATION = "unknown"
 
 
-def build_record(parsed: dict, source: dict, meta: Optional[dict] = None, case_id: Optional[str] = None) -> dict:
-    """解析結果 → case の記録。本文・文・解決できなかった名前は入れない (unresolved_names はローカルの辞書補修用で別扱い)"""
+def normalize_source(source: Optional[dict]) -> dict:
+    """出典の検査と既定値: publisher_kind / usage_evidence は無指定 (None) → "unknown"、表に無い値は ValueError。
+    synthetic (合成の記事) は bool で既定 False。他の項目はそのまま (本文を入れないことは呼び出し側と assert_no_prose で守る)"""
+    src = dict(source or {})
+    for key, table in SOURCE_AXES:
+        v = src.get(key)
+        if v is None:
+            src[key] = "unknown"
+        elif v not in table:
+            raise ValueError(f"source.{key} が表に無い値 (許可: {', '.join(table)})")
+    syn = src.get("synthetic", False)
+    if not isinstance(syn, bool):
+        raise ValueError("source.synthetic は bool にする")
+    src["synthetic"] = syn
+    return src
+
+
+def record_status(members: list, warnings: list, record_kind: str) -> str:
+    """処理状態: 個体が無い → failed、種類の個体数に満たない・技一覧の無い個体 → incomplete、警告 → warnings、それ以外 → ok"""
+    expected = BUILD_ARTICLE_RECORD_KIND_MEMBERS[record_kind]
+    if not members:
+        return "failed"
+    if len(members) < expected or any(not m["moves"] for m in members):
+        return "incomplete"
+    if warnings or any(m["warnings"] for m in members):
+        return "warnings"
+    return "ok"
+
+
+def build_record(parsed: dict, source: dict, meta: Optional[dict] = None, case_id: Optional[str] = None,
+                 record_kind: str = "team") -> dict:
+    """解析結果 → case の記録。本文・文・解決できなかった名前・サイト固有 id の観測は入れない (ローカル用で別扱い)。
+    record_kind: "team" (6 体と各 4 技で ok) / "single_set" (1 体と 4 技で ok)。source は normalize_source で検査する"""
+    if record_kind not in BUILD_ARTICLE_RECORD_KIND_MEMBERS:
+        raise ValueError(f"record_kind が表に無い値 (許可: {', '.join(BUILD_ARTICLE_RECORD_KIND_MEMBERS)})")
+    src = normalize_source(source)
     members = [{k: v for k, v in m.items() if k != "display"} for m in parsed.get("members", [])]
     body = {"members": members, "claims": parsed.get("claims", []), "selection_rules": parsed.get("selection_rules", []),
             "selection_combinable": parsed.get("selection_combinable"), "unresolved": parsed.get("unresolved", [])}
     digest = hashlib.sha256(json.dumps(body, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
-    status = "failed" if not members else ("incomplete" if len(members) < BUILD_ARTICLE_MAX_MEMBERS or any(not m["moves"] for m in members)
-                                           else ("warnings" if (parsed.get("warnings") or any(m["warnings"] for m in members)) else "ok"))
-    return {"case_id": case_id or f"case_{digest}", "source": dict(source or {}), "meta": dict(meta or {}), **body,
-            "counts": dict(parsed.get("counts", {})), "warnings": list(parsed.get("warnings", [])),
+    warnings = list(parsed.get("warnings", []))
+    if len(members) > BUILD_ARTICLE_RECORD_KIND_MEMBERS[record_kind]:
+        warnings.append("members_exceed_kind")
+    return {"case_id": case_id or f"case_{digest}", "record_kind": record_kind, "source": src, "meta": dict(meta or {}), **body,
+            "counts": dict(parsed.get("counts", {})), "warnings": warnings,
             "versions": {"parser": parsed.get("parser_version", PARSER_VERSION), "dictionary": parsed.get("dictionary_version"),
-                         "schema": SCHEMA_VERSION}, "status": status}
+                         "schema": SCHEMA_VERSION}, "status": record_status(members, warnings, record_kind)}
 
 
 def _expected_ev252(points: int) -> int:
@@ -63,14 +112,26 @@ def expected_actual(species_id: str, points: Optional[dict], nature: Optional[st
 
 
 def validate_record(record: dict, legal_ids: Optional[set] = None, dex=None) -> list:
-    """記録の検査 → 問題の列 (空なら OK)。警告の文言は id と数値だけ (本文を含まない)"""
+    """記録の検査 → 問題の列 (空なら OK)。警告の文言は id と数値だけ (本文を含まない)。
+    個体の数の期待値は record_kind ごと (team = 6、single_set = 1。record_kind の無い古い記録は team)、基本種の重複は team だけ見る"""
     problems: list = []
     members = record.get("members", [])
-    if len(members) != BUILD_ARTICLE_MAX_MEMBERS:
+    kind = record.get("record_kind", "team")
+    if kind not in BUILD_ARTICLE_RECORD_KIND_MEMBERS:
+        problems.append("record_kind_unknown")
+        kind = "team"
+    if len(members) != BUILD_ARTICLE_RECORD_KIND_MEMBERS[kind]:
         problems.append(f"members:{len(members)}")
-    bases = [m.get("base_species_id") for m in members]
-    if len(set(bases)) != len(bases):
-        problems.append("duplicate_base_species")
+    if kind == "team":
+        bases = [m.get("base_species_id") for m in members]
+        if len(set(bases)) != len(bases):
+            problems.append("duplicate_base_species")
+    src = record.get("source") or {}
+    for key, table in SOURCE_AXES:
+        if src.get(key, "unknown") not in table:
+            problems.append(f"source_{key}_unknown_value")
+    if not isinstance(src.get("synthetic", False), bool):
+        problems.append("source_synthetic_not_bool")
     mega = mega_table()
     for m in members:
         mid = m.get("id")
@@ -121,6 +182,59 @@ def validate_record(record: dict, legal_ids: Optional[set] = None, dex=None) -> 
     return problems
 
 
+def usable_for(record: dict, purpose: str, regulation: Optional[str] = None) -> bool:
+    """記録を用途に使えるか (2026-10-06 ユーザー判断)。purpose ∈ BUILD_ARTICLE_PURPOSE_RECORD_KINDS ("pool" / "weakness" /
+    "selection" / "parser_eval")。
+    - parser_eval (解析器の評価) は常に True (合成の記事も可)
+    - それ以外: 合成 (source.synthetic) は False、status が ok / warnings 以外は False、meta.regulation が None / "unknown" か
+      引数の regulation と違えば False (regulation を指定しなければ一致しないので False。規制を問わずに使う用途は作らない)
+    - pool (相手プール本体): team だけ、かつ usage_evidence が BUILD_ARTICLE_POOL_EVIDENCE (自己申告 / 対戦記録で確認) に入ること。
+      初版は編集部の推奨をプール本体に入れないが、判定は publisher_kind ではなく使用実績の根拠で行う
+    - selection (選出予測): team だけ。weakness (似た構築の弱点): team / single_set"""
+    kinds = BUILD_ARTICLE_PURPOSE_RECORD_KINDS.get(purpose)
+    if kinds is None:
+        raise ValueError(f"purpose が表に無い値 (許可: {', '.join(BUILD_ARTICLE_PURPOSE_RECORD_KINDS)})")
+    if purpose == "parser_eval":
+        return True
+    src = record.get("source") or {}
+    if src.get("synthetic"):
+        return False
+    if record.get("status") not in USABLE_STATUSES:
+        return False
+    reg = (record.get("meta") or {}).get("regulation")
+    if reg in (None, UNKNOWN_REGULATION) or reg != regulation:
+        return False
+    if record.get("record_kind", "team") not in kinds:
+        return False
+    if purpose == "pool" and src.get("usage_evidence", "unknown") not in BUILD_ARTICLE_POOL_EVIDENCE:
+        return False
+    return True
+
+
+def known_regulations() -> set:
+    """規制 id として受け付ける値 (記事の規制名の表と、シーズン → 規制の表の値)"""
+    return set(BUILD_ARTICLE_REGULATION_NAMES.values()) | set(BUILD_ARTICLE_SEASON_REGULATION.values())
+
+
+def set_regulation(record: dict, regulation: Optional[str], basis: str, at: Optional[str] = None) -> dict:
+    """meta.regulation を更新した新しい記録 (元の記録は変えない)。meta.regulation_basis (BUILD_ARTICLE_REGULATION_BASES の列挙値) と
+    meta.regulation_history ([{"from", "to", "basis"(, "at")}]。本文は入れない) を残す。regulation は既知の規制 id / "unknown" / None"""
+    if basis not in BUILD_ARTICLE_REGULATION_BASES:
+        raise ValueError(f"regulation の basis が表に無い値 (許可: {', '.join(BUILD_ARTICLE_REGULATION_BASES)})")
+    if regulation is not None and regulation != UNKNOWN_REGULATION and regulation not in known_regulations():
+        raise ValueError("regulation が既知の規制 id ではない (BUILD_ARTICLE_REGULATION_NAMES / BUILD_ARTICLE_SEASON_REGULATION)")
+    rec = dict(record)
+    meta = dict(rec.get("meta") or {})
+    history = [dict(h) for h in meta.get("regulation_history") or []]
+    step = {"from": meta.get("regulation"), "to": regulation, "basis": basis}
+    if at:
+        step["at"] = at
+    history.append(step)
+    meta.update({"regulation": regulation, "regulation_basis": basis, "regulation_history": history})
+    rec["meta"] = meta
+    return rec
+
+
 def assert_no_prose(obj, path: str = "$") -> None:
     """記録・LLM の入力に かな・漢字を含む文字列が無いことを確かめる (本文・引用の混入の門)。違反は場所と長さだけを報告する"""
     if isinstance(obj, dict):
@@ -137,7 +251,8 @@ def assert_no_prose(obj, path: str = "$") -> None:
 
 def llm_payload(record: dict) -> dict:
     """LLM に渡す部分集合: 個体の型 (id と数値)、主張、選出規則、未確定項目の分類と参照 id。本文・出典 URL・メタの自由記述は含まない"""
-    payload = {"case_id": record.get("case_id"), "regulation": (record.get("meta") or {}).get("regulation"),
+    payload = {"case_id": record.get("case_id"), "record_kind": record.get("record_kind", "team"),
+               "regulation": (record.get("meta") or {}).get("regulation"),
                "members": [{k: m.get(k) for k in PAYLOAD_MEMBER_KEYS} for m in record.get("members", [])],
                "claims": [dict(c) for c in record.get("claims", [])],
                "selection_rules": [dict(r) for r in record.get("selection_rules", [])],
@@ -157,23 +272,34 @@ def bank_version(cases: list) -> str:
     return hashlib.sha256(json.dumps(cases, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
 
 
-def save_bank(cases: list, bank_dir: Path = DEFAULT_BANK_DIR) -> Path:
-    """cases → <bank_dir>/<version>/cases.jsonl + manifest.json。保存前に本文の混入を検査する"""
+def _is_synthetic(case: dict) -> bool:
+    return bool((case.get("source") or {}).get("synthetic"))
+
+
+def save_bank(cases: list, bank_dir: Path = DEFAULT_BANK_DIR, allow_synthetic: bool = False) -> Path:
+    """cases → <bank_dir>/<version>/cases.jsonl + manifest.json。保存前に本文の混入を検査する (2026-10-06 から source / meta も含めて全体)。
+    合成の記録 (source.synthetic) が 1 件でもあれば ValueError (allow_synthetic=True のときだけ通す。保存先が一時ディレクトリでも
+    許可は別に要る: 保存先と許可を分ける)"""
+    n_synthetic = sum(1 for c in cases if _is_synthetic(c))
+    if n_synthetic and not allow_synthetic:
+        raise ValueError(f"合成の記録 {n_synthetic} 件はバンクに保存しない (allow_synthetic=True のときだけ)")
     for c in cases:
-        assert_no_prose({k: v for k, v in c.items() if k not in ("source", "meta")})
+        assert_no_prose(c)
     version = bank_version(cases)
     out = Path(bank_dir) / version
     out.mkdir(parents=True, exist_ok=True)
     (out / "cases.jsonl").write_text("".join(json.dumps(c, ensure_ascii=False) + "\n" for c in cases), encoding="utf-8")
-    from collections import Counter
     regs = Counter(str((c.get("meta") or {}).get("regulation")) for c in cases)
     (out / "manifest.json").write_text(json.dumps({"version": version, "schema": SCHEMA_VERSION, "parser": PARSER_VERSION, "n_cases": len(cases),
-                                                   "by_regulation": dict(regs), "by_status": dict(Counter(c.get("status") for c in cases))},
+                                                   "n_synthetic": n_synthetic, "by_regulation": dict(regs),
+                                                   "by_record_kind": dict(Counter(c.get("record_kind", "team") for c in cases)),
+                                                   "by_status": dict(Counter(c.get("status") for c in cases))},
                                                   ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     return out
 
 
-def load_bank(version: str, bank_dir: Path = DEFAULT_BANK_DIR) -> list:
-    """固定版の読み出し (version を指定する。最新を暗黙に選ばない)"""
+def load_bank(version: str, bank_dir: Path = DEFAULT_BANK_DIR, allow_synthetic: bool = False) -> list:
+    """固定版の読み出し (version を指定する。最新を暗黙に選ばない)。合成の記録は既定で除く (allow_synthetic=True のときだけ含める)"""
     path = Path(bank_dir) / version / "cases.jsonl"
-    return [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    cases = [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    return cases if allow_synthetic else [c for c in cases if not _is_synthetic(c)]
