@@ -133,9 +133,36 @@ def test_measure_command_and_measured_report():
     print("test_measure_command_and_measured_report OK")
 
 
+def test_active_measurement_detection():
+    """2026-10-07: pgrep に無い option (-m) を渡していて出力が常に空になり、run の実行中に終了処理が 2 本目の run を起動した
+    (improve_20261007_0133)。引数が実際の pgrep に通ること、出力の読み方、pgrep が失敗したら起動を見送る側に倒すことを確かめる"""
+    import subprocess
+    argv = PI.pgrep_argv(PI.MEASUREMENT_PROCESS_PATTERN)
+    assert argv[0] == "pgrep" and "-m" not in argv and argv[-1] == "tools.team_build.run", argv
+    assert all(a.startswith("-") and set(a[1:]) <= set("fl") for a in argv[1:-1]), argv   # -f と -l 以外の option を渡さない
+    res = subprocess.run(argv, capture_output=True, text=True)
+    assert res.returncode in (0, 1), (res.returncode, res.stderr)                           # 2 = 使い方の誤り (illegal option)
+    out = ("99419 /opt/python -m tools.team_build.run --run-id improve_x --stages all\n"
+           "123 bash scripts/team_build_watch.sh improve_x\n"
+           "456 /opt/python -m tools.check_advisor_player --battles 300\n")
+    assert PI.measurement_lines(out) == [out.splitlines()[0]]
+    assert PI.measurement_lines("") == []
+
+    class Res:
+        def __init__(self, rc, stdout="", stderr=""):
+            self.returncode, self.stdout, self.stderr = rc, stdout, stderr
+
+    assert PI.active_measurement(run=lambda argv: Res(1)) is None                           # 一致なし → 起動してよい
+    assert PI.active_measurement(run=lambda argv: Res(0, out)) == out.splitlines()[0]       # run あり → その行
+    bad = PI.active_measurement(run=lambda argv: Res(2, "", "pgrep: illegal option -- m"))
+    assert bad and "pgrep" in bad and "rc=2" in bad                                         # pgrep が使えない → 見送る側
+    print("test_active_measurement_detection OK")
+
+
 if __name__ == "__main__":
     test_parse_showdown_sets()
     test_pressure_and_difficulty()
     test_team_concepts_psychic_terrain()
     test_priority_dependence_and_proposals_with_dex()
     test_measure_command_and_measured_report()
+    test_active_measurement_detection()

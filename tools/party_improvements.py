@@ -598,11 +598,32 @@ def measure_command(run_id: str, weights_file: Path, neighbors: int, profile: st
             "--threat-weights-file", str(weights_file), "--parallel", str(parallel), "--seed", str(seed)]
 
 
-def active_measurement() -> Optional[str]:
-    """走っている構築 run (tools.team_build.run) のコマンドライン。無ければ None"""
+MEASUREMENT_PROCESS_PATTERN = "tools.team_build.run"      # 構築 run の親プロセス (pgrep -f の検索語)
+MEASUREMENT_CMDLINE_MARK = "-m tools.team_build.run"       # pgrep の出力のうち run 本体の行 (watch 等の別プロセスを除く)
+
+
+def pgrep_argv(pattern: str) -> list:
+    """走っているプロセスをコマンドラインで探す pgrep の引数 (純粋)。
+    2026-10-07: 以前は "-m" を渡していたが、macOS / Linux の pgrep にその option は無く "illegal option" で出力が空になり、
+    run の実行中に終了処理が 2 本目の run を起動した (improve_20261007_0133)。option は -f (コマンドライン全体) と -l (表示) だけ"""
+    return ["pgrep", "-fl", pattern]
+
+
+def measurement_lines(stdout: str) -> list:
+    """pgrep -fl の出力から構築 run 本体の行だけを取り出す (純粋)"""
+    return [ln for ln in stdout.splitlines() if MEASUREMENT_CMDLINE_MARK in ln]
+
+
+def active_measurement(run=None) -> Optional[str]:
+    """走っている構築 run (tools.team_build.run) のコマンドライン。無ければ None。
+    pgrep 自体が使えなかったとき (rc が 0 = 一致あり / 1 = 一致なし 以外) は、その旨の文字列を返して起動を見送る側に倒す
+    (黙って None を返すと二重起動になる: 2026-10-07)。run は subprocess.run 互換の呼び出し (テストで差し替える)"""
     import subprocess
-    res = subprocess.run(["pgrep", "-fl", "-m", "tools.team_build.run"], capture_output=True, text=True)
-    lines = [ln for ln in res.stdout.splitlines() if "-m tools.team_build.run" in ln]
+    call = run or (lambda argv: subprocess.run(argv, capture_output=True, text=True))
+    res = call(pgrep_argv(MEASUREMENT_PROCESS_PATTERN))
+    if res.returncode not in (0, 1):
+        return f"pgrep が使えない (rc={res.returncode}: {(res.stderr or '').strip()[:80]})"
+    lines = measurement_lines(res.stdout or "")
     return lines[0] if lines else None
 
 
@@ -623,7 +644,7 @@ def launch_measurement(rep: dict, neighbors: int, profile: str, parallel: int) -
         return {"skipped": f"現行チームの検証に失敗: {e!r}"}
     active = active_measurement()
     if active:
-        return {"skipped": f"構築 run が実行中 ({active[:80]}…)。終了後に --measure を再実行"}
+        return {"skipped": f"構築 run が実行中か確認できない ({active[:80]}…)。終了後に --measure を再実行"}
     ts = time.strftime("%Y%m%d_%H%M")
     run_id = f"improve_{ts}"
     wdir = REPO / "logs" / "build_search"
