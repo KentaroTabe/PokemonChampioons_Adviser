@@ -14,16 +14,28 @@
 段階 B (次): LLM に構造化データだけ渡して検査候補・役割仮説を出す (印は「モデルの推測」)。送信可否はホストごとの判断。
 段階 C (M-C の材料が揃ってから): 相手プール・弱点検査・選出予測への接続 (§6〜§8。規則だけで処理でき、LLM は要らない)。
 
-**判断待ち (取得を始める前にユーザーが決める)**:
-1. 取得開始の時期 (10/5 の判断: 季節 M-6 が終わるか、pokedb の新シーズンのデータが出た時点で一覧を作り直してから)。
-2. ホストごとの 2 項目: 取得可否 / 保存可能な範囲。本文を外部に送らなくなったので「外部 LLM への本文送信可否」は要らなくなった。
-   段階 B で送るのは構造化した事実 (種・持ち物・配分・技の id と、主張の関係) だけなので、送信の判断は「派生データの送信」として別に残す
-   (`host_policy.send_llm`、既定 unknown = 送らない)。未確認のホストは取得しない。
-3. 辞書で解決できなかった名前 (技・持ち物の表記ゆれ等) を辞書の補修用にローカルに残すか。残すなら名前 1 語だけ
-   (BUILD_ARTICLE_NAME_TOKEN_MAX_CHARS 以下) で、記事の文は残さない。初期案は「残す (ローカルの `logs/articles/unresolved_names.jsonl` だけ、
-   バンクの記録と LLM の入力には入れない)」。
-4. 受け入れテストの素材: ユーザーが添付した記事の例そのものはコミットしない (第三者の本文)。同じ構造・同じ型の数値で解説文を書き直した
+**判断済み (2026-10-06 ユーザー)**:
+1. 取得開始の時期: シーズン終了を待たない。取得条件を確認できた情報源から、シーズン中でも少数で解析精度を確かめてから広げる。
+   記事の公開日と、その構築が使われたシーズン・規制は別々に確認する。バンクの更新と実行用の相手プールへの反映は分ける (版の固定)。
+   規制が確定できない記事は `regulation = unknown` で記録し、現行規制の用途 (プール・弱点検査・選出予測) から除く (解析器の精度確認には使える)。
+   後から確認できたら根拠を付けて更新する (`set_regulation`)。更新日だけでは規制を確定しない (更新日は鮮度の補助情報)。
+2. ホストごとの判断 (robots.txt と規約を 2026-10-06 に確認。`logs/articles/host_policy.json`、ローカル。保守的な運用判断で、サイトからの
+   許諾取得を意味しない): **yakkun.com は自動取得 deny** (規約に自動収集の禁止が明記)、**game8.jp は当面 deny** (独自の収集プログラムが
+   許されるとは判断できず、継続的な収集への適用が不明)、**gamewith.jp は条件つき allow** (非商用のローカル検証として、指定した少数の URL
+   (最初はランキングページ 1 件) に限定。並列取得・巡回をしない、再取得は必要な更新時だけ、保存は構造化した結果と出典だけ、
+   編集部の推奨として当初は弱点検査と選出仮説に使う (プールには入れない))。方針は URL の許可リスト (`allowed_urls`) と用途の制限
+   (`purposes`) を持ち、実装 (`host_allowed`) が守る。構造化データの LLM 送信 (`send_llm`) は GameWith でも未判断 (unknown)。
+3. 未解決の名前: 種別と表記だけを LLM に渡して対応を提案させ、別名辞書 (記事専用、OCR 用の表とは分離) に登録する (§3.8)。
+   往復一致は必須の検査だが自動確定の条件ではない。LLM だけが根拠の対応は candidate で、人が別名の対応を一度確認すれば次回から辞書で解決。
+4. 合成記事は解析器の受入・回帰テストにだけ使う。実在の記事本文はコミットしない。合成の記録はバンクの保存・読み出しの両方で既定で拒否。
+5. 手入力の `single_set` (§3.10) を、自作の型・ゲーム内で確認した型・許可された記事の型を登録する共通の入口にする。記事由来の手入力を
+   「実戦で使用を観測した型」に分類しない。単体の型から 6 体構築や 3 体選出を補完しない。yakkun の型は一般公開しない個人利用の範囲で
+   少数を手元に登録するのは可、公開・再配布は別 (公開バンクへの同梱は投稿者の許可などを別に確認)。
+6. 受け入れテストの素材: ユーザーが添付した記事の例そのものはコミットしない (第三者の本文)。同じ構造・同じ型の数値で解説文を書き直した
    合成記事 (`tests/test_article_parse.py` の `SYNTHETIC`) をテストに使い、添付の例は手元で解析して結果だけ報告する (§9 の末尾)。
+
+**判断待ち**: GameWith の構造化データの LLM 送信可否 (`send_llm`)。GameWith の変換層を作るときの選出条件の語彙 (種の在否・タイプの多さ・
+物理受け) と「基本選出 (無条件 + 初手)」「など」の扱い。
 
 **初期案の設定値 (検証前。champions_agent/config `BUILD_ARTICLE_*`)**: 個体の節 / 全体の節の見出し語、個体 6 体・技 4 つ、能力名の表、
 252 表示と実数値のラベル、選出条件の語 → 述語、速度の修飾語、否定の接尾、LLM の入力 3,000 / 出力 2,000 トークン・呼び出し 2 回・
@@ -42,8 +54,11 @@
 
 - 一覧: `logs/articles/blogs.csv` (ユーザーが URL を足す) → `articles_ingest` の manifest (規制・形式・順位・robots)。URL が足されても
   そのホストの取得が承認済みとは扱わない。記事内リンクを辿って範囲を広げない。
-- ホストの可否: `logs/articles/host_policy.json` = {host: {"fetch", "store", "send_llm", "checked_at", "note"}}。値は allow / unknown / deny。
-  `article_bank.host_allowed(policy, host, purpose)` は purpose ("fetch" / "send_llm") が allow のときだけ通す (unknown は進めない)。
+- ホストの可否: `logs/articles/host_policy.json` (host_policy/2) = {host: {"fetch", "store", "send_llm" (allow / unknown / deny),
+  "allowed_urls": [...] (任意。あればこの URL だけ取得), "purposes": [...] (任意。あればこの用途だけ), "max_parallel", "min_interval_s",
+  "refetch", "checked_at", "decided_at", "note"}}。`article_bank.host_allowed(policy, host, purpose, url=None)` は fetch / store / send_llm が
+  allow のときだけ通し (unknown は進めない)、fetch で allowed_urls があれば正規化した URL が一覧にあるときだけ、用途 (pool / weakness /
+  selection / parser_eval) は purposes があればその中だけ。`usable_for(..., policy=...)` も用途の制限を見る。ホスト全体の allow で全部を通さない。
 - 保存するもの (本文を含まない): 6 体の型 (id と数値)、筆者の主張 (関係の種類と対象 id)、選出規則、未確定項目の分類と参照 id、
   出典 URL・公開・更新・取得日時・本文のハッシュ、解析器と辞書の版、検査の警告、処理状態。
 - 保存しないもの: HTML、本文、段落、文、根拠の引用。処理中のメモリだけで扱う。主張の出典は `source_ref` (個体番号 + 文番号、例 `m2:s3`)
@@ -196,6 +211,20 @@ case: {case_id, record_kind: team|single_set (§3.7),
   自動確定 → LLM (send_llm が allow のホストの名前だけ、確認待ちの名前は送り直さない) → 新たに確定した別名に関係する unit だけメモリ上の本文で
   再解析 → 記録と本文の門 → 本文の破棄。処理状態は `logs/articles/state.jsonl` (本文なし)。取得 (HTTP) の関数は作らない (ホストの許可待ち)。
 
+### 3.10 手入力の単体の型 (`article_manual`。2026-10-06 ユーザー判断)
+
+自作の型・ゲーム内で確認した型・許可された記事の型 (人が読んで手で写す) を登録する共通の入口。最初は入力ファイルと検査コマンドだけ。
+
+- 入力は JSON の配列 (名前は日本語名か id): species / item / ability / nature / points (`{"H": 2, "A": 32, "S": 32}` か `"2/32/0/0/0/32"`) /
+  moves (4 技) / actual (任意。再計算と照合) / source (publisher_kind, usage_evidence, url, host, redistributable) / regulation ("M-C" か規制 id、
+  無ければ unknown) / regulation_basis (既定 user_confirmed) / note (ローカルのメモ。記録に入れない)。
+- 名前は辞書の厳密一致と confirmed の別名だけで解決し、解決できなければ問題として報告する (推測で埋めない)。種・持ち物・性格・特性の
+  読み方とメガ形態の分解は `parse_member_head` と同じ。
+- `record_kind = single_set`、claims / selection_rules は空 (単体の型から 6 体構築や 3 体選出を補完しない)。`usable_for` は weakness だけ通る。
+- `source.entry_method = "manual"`。usage_evidence の既定は none、`battle_log_confirmed` は受け付けない (記事由来の手入力を「実戦で観測した型」に
+  しない。対戦記録で確認する経路は別)。`redistributable` の既定は False (yakkun の個人利用の範囲。公開バンクへの同梱は投稿者の許可などを別に確認)。
+- `--check <file>` は検査だけ、`--import <file> [--bank-dir] [--base-version]` は問題が 1 件でもあれば保存しない。
+
 ## 4. LLM の段 (段階 B。構造化データだけを渡す)
 
 - 入力 (`article_bank.llm_payload(record)`): 6 体の型 (id と数値)、個体間の役割の材料 (主張)、選出規則、未確定項目の分類と参照 id。
@@ -284,3 +313,8 @@ case: {case_id, record_kind: team|single_set (§3.7),
 6. 追補 (2026-10-06 ユーザー判断、§3.7〜§3.9): 記録の種類と出典の 2 軸・`usable_for`・`set_regulation`・合成の門 (`article_bank`)、
    記事専用の別名辞書 (`article_aliases`)、unit・文字コード・規制名 (`article_units`)、バッチ処理の骨格 (`articles_process`、HTTP なし)。
    テストは `test_article_bank` / `test_article_aliases` / `test_article_units` / `test_articles_process`。
+7. 追補 2 (同日): ホストの方針の URL 許可リストと用途の制限 (`host_allowed` / `usable_for(policy=)`、host_policy/2)、手入力の単体の型
+   (`article_manual`、§3.10、`test_article_manual`)。3 ホストの取得条件の確認結果と判断は §0 と `logs/articles/host_policy.json`。
+8. 次: GameWith の変換層 (ランキングページ 1 件。構築ごとの unit、代表 1 体の型の表の読み取り、基本選出 (無条件 + 初手) と条件つき選出の語彙の
+   追加、規制は本文の M-C の記述を根拠に article_text) → 取得 (`articles_fetch`: 許可 URL だけ、間隔 min_interval_s、並列なし、本文はメモリだけ) →
+   実ページ少数の人による照合。LLM の段 (§4) は send_llm の判断の後。

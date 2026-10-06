@@ -75,6 +75,7 @@ TESTS=(
   test_article_aliases
   test_article_units
   test_articles_process
+  test_article_manual
   test_env_match
   test_advice_trace
   test_team_build_experiments
