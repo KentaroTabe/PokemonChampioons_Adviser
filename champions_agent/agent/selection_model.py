@@ -242,6 +242,46 @@ def solve_matrix_game(M: np.ndarray, iters: int = 2000):
     return p, q, value
 
 
+def combo_prior(opp_species: list, pick_prob: dict, combos: list) -> np.ndarray:
+    """相手 3 体組の事前分布 (純粋): 各個体の選出確率 (実戦の観測) の独立近似を 3 体組に正規化する。
+    pick_prob に無い個体は平均で埋める。全部無ければ一様"""
+    opp = [s for s in opp_species if s]
+    probs = [pick_prob.get(_to_id(s)) for s in opp]
+    known = [p for p in probs if p is not None]
+    if not known:
+        return np.full(len(combos), 1.0 / max(1, len(combos)), dtype=np.float64)
+    mean = sum(known) / len(known)
+    p = np.array([x if x is not None else mean for x in probs], dtype=np.float64)
+    p = np.clip(p, 1e-3, 1 - 1e-3)
+    w = np.array([float(np.prod([p[j] for j in combo]) * np.prod([1 - p[j] for j in range(len(opp)) if j not in combo]))
+                  for combo in combos])
+    s = w.sum()
+    return w / s if s > 0 else np.full(len(combos), 1.0 / max(1, len(combos)))
+
+
+def expected_best(M: np.ndarray, q: np.ndarray) -> tuple:
+    """利得行列 M (行=自分の選出) と相手 3 体組の分布 q → (最良の行, 期待勝率, 各行の期待勝率)。純粋"""
+    ev = M @ q
+    i = int(np.argmax(ev))
+    return i, float(ev[i]), ev
+
+
+def predict_with_prior(my_species: list, opp_species: list, pick_prob: dict,
+                       path: Path = COND_MODEL_PATH):
+    """実戦の選出傾向 (pick_prob: species_id → 選出率) に条件づけた選出。
+    相手 3 体組の分布 q を pick_prob から作り、条件付きモデルの利得行列で期待勝率を最大化する。
+    戻り値: (perm, 期待勝率, q の要約) / 前提を満たさないときは None (呼び出し側は score_all へ)"""
+    made = payoff_matrix(my_species, opp_species, path)
+    if made is None:
+        return None
+    M, my_perms, combos = made
+    q = combo_prior(opp_species, pick_prob or {}, combos)
+    i, value, _ev = expected_best(M, q)
+    opp = [s for s in opp_species if s]
+    marginal = {opp[j]: float(sum(q[c] for c, combo in enumerate(combos) if j in combo)) for j in range(len(opp))}
+    return my_perms[i], value, marginal
+
+
 def predict_maximin(my_species: list, opp_species: list,
                     path: Path = COND_MODEL_PATH):
     """読み合いを織り込んだ選出。

@@ -26,6 +26,7 @@ from pathlib import Path
 
 from tools.audit_extraction import collect_pairs
 from tools.audit_subtask import MODEL, PROMPT_HEADER, REPORT_DIR
+from tools.claude_cli import claude_command
 
 REPO = Path(__file__).resolve().parent.parent
 BATTLE_DIR = REPO / "logs" / "battles"
@@ -214,7 +215,7 @@ def run(battles: list, budget: int, timeout: int,
           flush=True)
     t0 = time.time()
     res = subprocess.run(
-        ["claude", "-p", prompt, "--model", model,
+        [claude_command(), "-p", prompt, "--model", model,
          "--allowedTools", "Read", "--max-turns", str(n_frames * 2 + 10)],
         capture_output=True, text=True, timeout=timeout, cwd=str(REPO))
     if res.returncode != 0:

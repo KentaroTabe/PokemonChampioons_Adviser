@@ -1,17 +1,19 @@
-"""自分のチームの型 (能力ポイント/性格/持ち物) の登録と参照。
+"""自分のチームの型 (能力ポイント/性格/持ち物/特性/技) の登録と参照。
 
-登録は「もっと見る」画面 (選出画面/交代画面) の自動読み取りで行われる
-(vision/extractors.py の様子見抽出がステータスタブ/能力タブを読んで
-update_build を呼ぶ)。config/my_team.json を手で編集しても良い。
-未登録の個体は攻撃系252振りを仮定してダメージ計算する。
+登録は**手入力がベース** (2026-09-06 ユーザー決定): config/my_team.json を直接編集するか、
+推奨構築から一括登録する tools/register_my_team.py (scripts/register_my_team.sh) を使う。
+画面 (もっと見る/選出画面/パーティ管理画面) の自動読み取りによる登録経路は残してあるが
+既定で無効 (AUTO_REGISTER_FROM_SCREEN)。未登録の個体は攻撃系252振りを仮定してダメージ計算する。
 
 config/my_team.json の形式 (config/my_team.example.json 参照):
 {
-  "ペリッパー": {
-    "能力ポイント": {"h": 32, "c": 32, "s": 2},   # ゲーム内の0-32スケール
+  "ロトム": {                       # キーは HUD に表示される名前 (フォルム名は省かれる)
+    "種族ID": "rotomwash",          # 任意。フォルムの showdown id (種族値・タイプの解決に使う)
+    "能力ポイント": {"h": 2, "c": 32, "s": 32},   # ゲーム内の0-32スケール
     "性格": "ひかえめ",
-    "持ち物": "こだわりメガネ",   # 任意 (画面から読めた値が優先)
-    "特性": "あめふらし"          # 任意
+    "持ち物": "こだわりスカーフ",   # 任意
+    "特性": "ふゆう",               # 任意
+    "技": ["ハイドロポンプ", "ボルトチェンジ", "おにび", "１０まんボルト"]   # 任意
   }
 }
 ステータスキーはHABCDS表記 (h/a/b/c/d/s) と英語名 (hp/atk/def/spa/spd/spe) の
@@ -24,6 +26,14 @@ from pathlib import Path
 from typing import Optional
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "my_team.json"
+
+# 画面 (もっと見る/選出画面/パーティ管理画面) の読み取り結果を my_team.json に自動登録するか。
+# 2026-09-06 ユーザー決定: 型登録は手入力 (config/my_team.json / tools/register_my_team) を
+# ベースにし、画面認識による登録は諦める。自動登録が有効だと部分読み (持ち物だけ・特性なし)
+# や誤読で手入力の値が上書きされる (第12回接続テスト: ドドゲザンは持ち物/配分/性格のみ登録、
+# ブリジュラスは特性・技が旧登録のまま)。読み取り経路は残し、必要なら True に戻す。
+AUTO_REGISTER_FROM_SCREEN = False
+_SCREEN_SKIP_NOTICED: set = set()
 
 # 性格 -> (上昇ステータス, 下降ステータス)。無補正はNone
 _NATURES = {
@@ -129,7 +139,18 @@ def get_my_build(species_ja: Optional[str]) -> Optional[dict]:
 
 
 def has_build(species_ja: Optional[str]) -> bool:
-    return get_my_build(species_ja) is not None
+    """実質的な登録 (技 or 能力ポイント) があるか。
+
+    もっと見るの部分取り込みや種族シェルの自動作成で「全フィールドNone」の
+    空エントリができることがあり、空を登録済みと扱うと理論最大HP集合・
+    技権限などのガードが誤作動する (2026-08-21 第8回: パーティ追加直後の
+    マスカーニャが空登録になり、HP読取が全棄却されて認識不全に見えた)。
+    """
+    if not species_ja:
+        return False
+    entry = _load().get(species_ja) or {}
+    return bool((entry.get("技") or entry.get("moves"))
+                or (entry.get("能力ポイント") or entry.get("evs")))
 
 
 def nature_names_ja() -> list:
@@ -158,6 +179,12 @@ def update_build(species_ja: str, patch: dict) -> bool:
     """
     if not species_ja:
         return False
+    if not AUTO_REGISTER_FROM_SCREEN:
+        if species_ja not in _SCREEN_SKIP_NOTICED:
+            _SCREEN_SKIP_NOTICED.add(species_ja)
+            print(f"[my_team] 画面からの自動登録は無効 (手入力ベース): "
+                  f"{species_ja} {sorted(patch.keys())} は登録しない")
+        return False
     if "能力ポイント" in patch and patch["能力ポイント"]:
         patch = dict(patch)
         patch["能力ポイント"] = {
@@ -185,6 +212,64 @@ def update_build(species_ja: str, patch: dict) -> bool:
         return False
     print(f"[my_team] {species_ja} の型を更新: {list(patch.keys())}")
     return True
+
+
+def _normalize_points(points: dict) -> dict:
+    return {_POINT_KEYS.get(k, k): int(v) for k, v in (points or {}).items() if v}
+
+
+_BUILD_KEYS = ("能力ポイント", "性格", "持ち物", "特性", "技")
+
+
+def merge_build_patch(entry: Optional[dict], patch: Optional[dict]) -> dict:
+    """詳細パネルからの部分更新 (純粋): patch にあるキーだけ置き換え (空値はそのキーを削除)、
+    種族ID など patch に無いキーは残す"""
+    out = dict(entry or {})
+    for key in _BUILD_KEYS:
+        if key not in (patch or {}):
+            continue
+        val = patch[key]
+        if val in (None, "", [], {}):
+            out.pop(key, None)
+        else:
+            out[key] = val
+    return out
+
+
+def set_build(species_ja: str, entry: dict) -> bool:
+    """手入力ベースの登録: エントリを丸ごと置き換えて保存する (他の種は残す)。
+
+    entry: {"種族ID": str, "能力ポイント": {stat: 0-32}, "性格": str, "持ち物": str,
+            "特性": str, "技": [str]} の部分集合 (空値は落とす)。
+    """
+    if not species_ja:
+        return False
+    clean = {}
+    for key, val in (entry or {}).items():
+        if val in (None, "", [], {}):
+            continue
+        clean[key] = _normalize_points(val) if key == "能力ポイント" else val
+    data = {k: dict(v) for k, v in _load().items()}
+    data[species_ja] = clean
+    try:
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CONFIG_PATH.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8")
+    except OSError as e:
+        print(f"[my_team] 保存失敗: {e}")
+        return False
+    print(f"[my_team] {species_ja} を登録 (手入力): {sorted(clean.keys())}")
+    return True
+
+
+def registered_species_id(species_ja: Optional[str]) -> Optional[str]:
+    """登録エントリの「種族ID」(フォルムの showdown id)。無ければ None"""
+    if not species_ja:
+        return None
+    entry = _load().get(species_ja) or {}
+    sid = entry.get("種族ID") or entry.get("species_id")
+    return str(sid) if sid else None
 
 
 def get_my_moves(species_ja: Optional[str]) -> list:

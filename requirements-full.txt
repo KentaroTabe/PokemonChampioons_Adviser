@@ -1,0 +1,31 @@
+# フル実行環境 (アドバイザー + 構築システム + 学習) の依存。venv の作り直しは scripts/venv_rebuild.sh。
+# 2026-09-24: Python 3.9 (Xcode 付属、EOL) → 3.12 へ移行するために作成。版は移行前の venv (3.9) に入っていたものに固定
+# (poke-env は 0.16 で API が変わっているため 0.10 のまま。上げるときは champions_agent の環境を回帰させてから)。
+-r requirements-core.txt
+-r champions_agent/requirements.txt
+
+# --- 版の固定 (移行前の venv と同じ) ---
+numpy==2.0.2
+opencv-python==5.0.0.93
+pillow==11.3.0
+fastapi==0.128.8
+uvicorn==0.39.0
+python-socketio==5.16.3
+poke-env==0.10.0
+gymnasium==1.1.1
+stable-baselines3==2.7.1
+sb3-contrib==2.7.1
+torch==2.8.0
+pydantic==2.13.4
+requests==2.32.5
+
+# --- macOS の画面認識 (Apple Vision) と Foundation ---
+pyobjc-framework-Cocoa>=11 ; sys_platform == "darwin"
+pyobjc-framework-CoreML>=11 ; sys_platform == "darwin"
+
+# --- ツール類 (学習の推移図、進捗表示) ---
+matplotlib>=3.9
+tqdm>=4.66
+tabulate>=0.9
+orjson>=3.10
+websockets>=15

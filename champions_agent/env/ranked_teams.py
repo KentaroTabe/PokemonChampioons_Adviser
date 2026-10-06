@@ -16,7 +16,8 @@ from pathlib import Path
 
 from champions_agent.config import USAGE_MIN_RANKED_TEAMS
 from champions_agent.data import database as db
-from champions_agent.data.sources.pokedb_opendata import _species_id, _item_id
+from champions_agent.data.sources.pokedb_opendata import (
+    _species_id, _item_id, set_fallback_species)
 from champions_agent.data.sources.name_mapping import to_showdown_name
 from champions_agent.env.team_builder import (
     PokemonSet, _sanitize_species, _sanitize_item, _enforce_item_clause,
@@ -38,6 +39,19 @@ MIN_POOL_TEAMS = USAGE_MIN_RANKED_TEAMS
 # シーズンデータの蓄積でプールが黙って切り替わるのを防ぐ。
 # 基盤を切り替えるときは POOL_PIN を書き換え、training_changes.json に記録する
 PIN_PATH = ARCHIVE_DIR / "POOL_PIN"
+# 評価側 meta_sets のピン止め (snapshot_id を1行で書く)。cbd由来の型は日次で
+# 回転し (2026-08-19: 127種、09-02: 67種)、評価軸のチーム中身を動かす。
+# 評価 (train/evaluate.py) だけがこのピンを読み、学習は最新を追い続ける。
+# ピンを動かすときは training_changes.json に記録する
+META_PIN_PATH = ARCHIVE_DIR / "META_PIN"
+
+
+def pinned_meta_snapshot_id() -> int | None:
+    """META_PIN があればその snapshot_id、無ければ None (=最新を使う)"""
+    try:
+        return int(META_PIN_PATH.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
 
 
 def _load_ladder_teams() -> list:
@@ -69,10 +83,12 @@ def _load_ladder_teams() -> list:
     return teams
 
 
-def _load_meta_sets() -> dict:
-    """species_id -> meta_sets行 (技/特性/性格/能力ポイント)"""
+def _load_meta_sets(snapshot_id: int | None = None) -> dict:
+    """species_id -> meta_sets行 (技/特性/性格/能力ポイント)。
+    snapshot_id を渡すとそのスナップショットに固定する (評価軸のピン)"""
     with db.get_connection() as conn:
-        snap = db.latest_snapshot_id(conn)
+        snap = (snapshot_id if snapshot_id is not None
+                else db.latest_snapshot_id(conn))
         if snap is None:
             return {}
         rows = conn.execute(
@@ -82,6 +98,26 @@ def _load_meta_sets() -> dict:
             (snap,),
         ).fetchall()
     return {r["pokemon_name"]: dict(r) for r in rows}
+
+
+def _load_move_usage(snapshot_id: int | None = None, limit: int = 12) -> dict:
+    """{species_id: [技 (使用率順)]}: champions mod の learnset で落ちた技の埋め合わせ用"""
+    out: dict = {}
+    try:
+        with db.get_connection() as conn:
+            snap = (snapshot_id if snapshot_id is not None else db.latest_snapshot_id(conn))
+            if snap is None:
+                return out
+            rows = conn.execute(
+                "SELECT pokemon_name, move_name, usage_percent FROM move_usage WHERE snapshot_id = ? "
+                "ORDER BY pokemon_name, usage_percent DESC", (snap,)).fetchall()
+    except Exception:
+        return out
+    for r in rows:
+        lst = out.setdefault(r[0], [])
+        if len(lst) < limit:
+            lst.append(r[1])
+    return out
 
 
 EXTERNAL_PATH = (Path(__file__).resolve().parents[1] / "data" / "teams" /
@@ -108,8 +144,10 @@ def _load_external_teams() -> list:
     return out
 
 
-def _to_team_text(t: dict, meta: dict, team_size: int) -> str | None:
-    """{"team": [{"pokemon","item"}]} -> Showdownチームテキスト (組めなければNone)"""
+def _to_team_text(t: dict, meta: dict, team_size: int, move_pool: dict | None = None) -> str | None:
+    """{"team": [{"pokemon","item"}]} -> Showdownチームテキスト (組めなければNone)。
+    技は champions mod の learnset で検査し、覚えない技は move_pool (使用率順) の合法な技で埋める (2026-09-13 障害対応)"""
+    from champions_agent.env.legality import fill_moves
     sets = []
     seen = set()
     for m in t.get("team", []):
@@ -117,10 +155,16 @@ def _to_team_text(t: dict, meta: dict, team_size: int) -> str | None:
         meta_row = meta.get(sid)
         if meta_row is None:
             # メガ形態ページの構成を参照できる場合がある
-            for cand in (sid + "mega", sid + "megax", sid + "megay"):
+            for cand in (sid + "mega", sid + "megax", sid + "megay", sid + "megaz"):
                 if cand in meta:
                     meta_row = meta[cand]
                     break
+        if meta_row is None:
+            # フォルム専用ページが無い種族 (えいえんのはなフラエッテ等) は
+            # ベース種名義の実測型を使う (pokedb_forms.json の set_fallback)
+            fb = set_fallback_species(sid)
+            if fb:
+                meta_row = meta.get(fb)
         if meta_row is None:
             continue
         base_key = _base_species_key(sid)
@@ -128,6 +172,10 @@ def _to_team_text(t: dict, meta: dict, team_size: int) -> str | None:
             continue
         seen.add(base_key)
         item = _item_id((m.get("item") or "").strip()) or meta_row["item_name"]
+        moves = fill_moves(sid, [meta_row["move1"], meta_row["move2"], meta_row["move3"], meta_row["move4"]],
+                           (move_pool or {}).get(sid) or (move_pool or {}).get(meta_row.get("pokemon_name", ""), []))
+        if not moves:
+            continue
         sets.append(PokemonSet(
             species=to_showdown_name(_sanitize_species(sid)),
             ability=meta_row["ability_name"],
@@ -135,8 +183,7 @@ def _to_team_text(t: dict, meta: dict, team_size: int) -> str | None:
             tera_type=None,
             nature=meta_row["nature"],
             evs=meta_row["evs"],
-            moves=[meta_row["move1"], meta_row["move2"],
-                   meta_row["move3"], meta_row["move4"]],
+            moves=moves,
         ))
     if len(sets) < team_size:
         return None
@@ -146,7 +193,8 @@ def _to_team_text(t: dict, meta: dict, team_size: int) -> str | None:
 
 
 def build_ranked_teams(top_n: int | None = None, team_size: int = 6,
-                       include_external: bool = True) -> list:
+                       include_external: bool = True,
+                       meta_snapshot_id: int | None = None) -> list:
     """構築プールのチームテキスト一覧を作る。
 
     - 種族と持ち物: ラダー構築 / 取り込んだ外部構築そのまま
@@ -156,25 +204,26 @@ def build_ranked_teams(top_n: int | None = None, team_size: int = 6,
     top_n はラダー構築側の上限 (None で全件)。外部構築は常に全件使う。
     選出モデルの汎化はチームの「種類」で頭打ちになるため、既定を全件にしている。
     """
-    key = (top_n, team_size, include_external)
+    key = (top_n, team_size, include_external, meta_snapshot_id)
     if key in _cache:
         return _cache[key]
 
-    meta = _load_meta_sets()
+    meta = _load_meta_sets(meta_snapshot_id)
+    move_pool = _load_move_usage(meta_snapshot_id)
     ladder = _load_ladder_teams()
     if top_n is not None:
         ladder = ladder[:top_n * 2]
 
     result = []
     for t in ladder:
-        text = _to_team_text(t, meta, team_size)
+        text = _to_team_text(t, meta, team_size, move_pool)
         if text:
             result.append(text)
         if top_n is not None and len(result) >= top_n:
             break
     if include_external:
         for t in _load_external_teams():
-            text = _to_team_text(t, meta, team_size)
+            text = _to_team_text(t, meta, team_size, move_pool)
             if text:
                 result.append(text)
 
@@ -193,9 +242,11 @@ class RankedTeambuilder(_PokeEnvTeambuilder):
 
     def __init__(self, top_n: int | None = None,
                  rng: random.Random | None = None,
-                 include_external: bool = True):
+                 include_external: bool = True,
+                 meta_snapshot_id: int | None = None):
         self.teams = build_ranked_teams(top_n=top_n,
-                                        include_external=include_external)
+                                        include_external=include_external,
+                                        meta_snapshot_id=meta_snapshot_id)
         self.rng = rng or random.Random()
         if not self.teams:
             raise RuntimeError(

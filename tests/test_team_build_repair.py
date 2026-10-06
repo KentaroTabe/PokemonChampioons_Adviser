@@ -1,0 +1,273 @@
+"""測定からの戻り (tools/team_build/repair) のテスト: 診断 (純粋) と修理モード (合成の相手プール・候補で閉じる)。
+
+    python -m tests.test_team_build_repair
+"""
+from __future__ import annotations
+
+import numpy as np
+
+from tests import test_lineup_search as W
+from tools.team_build import lineup_search as L
+from tools.team_build import repair as RP
+from tools.team_build.loss_stats import loss_stats
+
+
+def _rec(won, fam, opp_sel, our_sel, ko=None, items=None, mega=None):
+    return {"won": won, "opponent_family_id": fam, "opponent_selection": opp_sel, "our_selection": our_sel,
+            "lead": {"ours": our_sel[0], "theirs": f"p2a: {opp_sel[0].capitalize()}"}, "ko_events": ko or [],
+            "resource_usage": items or [], "mega_usage": mega or [], "turn_count": 10}
+
+
+def test_diagnose():
+    members = ["core1", "core2", "fillC", "fillD", "weak", "sun"]
+    recs = []
+    # F_A に 12 戦 10 敗 (負けに効いた系統)、F_B に 10 戦 8 敗、F_C に 10 戦 1 敗。相手 a1 に負け続け、core1 が a1 の Boom に 5 回倒される。
+    # weak は一度も選出されない。fillD の きあいのタスキ は 1 回も発動しない
+    for i in range(12):
+        recs.append(_rec(i >= 10, "F_A", ["a1", "a2", "x"], ["core1", "core2", "fillD"],
+                         ko=[{"fainted": "p1a: Core1", "by": "p2a: A1", "move": "Boom"}] if i < 5 else [],
+                         items=[{"turn": 1, "target": "p1a: Core2", "item": "Sitrus Berry", "kind": "-enditem"}]))
+    for i in range(10):
+        recs.append(_rec(i >= 8, "F_B", ["b1", "b2", "y"], ["core1", "fillC", "fillD"]))
+    for i in range(10):
+        recs.append(_rec(i >= 1, "F_C", ["c1", "c2", "z"], ["core2", "fillC", "sun"]))
+    st = loss_stats(recs, our_species=members)
+    items_of = {"core1": "lifeorb", "core2": "sitrusberry", "fillD": "focussash", "fillC": "choicescarf"}
+    consumed = RP.resource_counts(recs)
+    assert consumed == {"core2": 12}
+    d = RP.diagnose(st, members, items_of, consumed, min_n=20, loss_rate_min=0.5, unused_rate=0.05, ko_min_n=3, min_n_share=1.0)
+    assert d["must_cover"] == ["F_A", "F_B"] and d["must_cover_n"] == 22 and d["must_cover_enough"] and d["evidence"] == 1.0
+    assert d["threat_species"][:2] == ["a1", "a2"] and "c1" not in d["threat_species"]
+    assert d["ko"] and d["ko"][0]["ours"] == "core1" and d["ko"][0]["by"] == "a1" and d["ko"][0]["n"] == 5
+    assert d["vulnerable"] == ["core1"]
+    assert d["replace_candidates"] == ["weak"]
+    assert [u["species"] for u in d["unused_items"]] == ["fillD"] and d["unused_items"][0]["consumed"] == 0
+    assert d["mega_review"] is False and len(d["notes"]) >= 4
+    # 束ねた対戦数が下限に届かなくても must_cover は部分の証拠として残す (must_cover_enough=False、evidence = 届いた比率)
+    d2 = RP.diagnose(st, members, items_of, consumed, min_n=40, min_n_share=1.0)
+    assert d2["must_cover"] == ["F_A", "F_B"] and d2["must_cover_n"] == 22 and not d2["must_cover_enough"]
+    assert d2["min_n"] == 32 and d2["evidence"] == round(22 / 32, 3) and "部分の証拠" in d2["notes"][0]
+    # 下限は対戦数に相対 (min(min_n, n × share)): 32 戦 × 0.5 = 16 → F_A (12) + F_B (10) で届く。× 0.06 なら最小 5 → F_A だけ
+    d3 = RP.diagnose(st, members, items_of, consumed, min_n=40, min_n_share=0.5)
+    assert d3["min_n"] == 16 and d3["must_cover"] == ["F_A", "F_B"] and d3["must_cover_enough"]
+    d4 = RP.diagnose(st, members, items_of, consumed, min_n=20)
+    assert d4["min_n"] == 5 and d4["must_cover"] == ["F_A"] and d4["must_cover_enough"]
+    # 系統の重みの引き上げ: must_cover と負けに効いた相手の居る系統
+    pool = W._pool()
+    fam_w = pool.family_matrix()[1]
+    w, idx = RP.boosted_weights(fam_w, pool.families, pool.sets, ["B"], ["c1"], boost=2.0)
+    assert idx == [1, 2] and float(w[1]) == 3.0 and float(w[2]) == 3.0 and float(w[0]) == 1.0
+    assert np.allclose(fam_w, [1, 1, 1, 1])
+    print("test_diagnose OK")
+
+
+def test_repair_variants():
+    """親の並びに対して、型だけの変種 (B) と入替 (A) を作る。エース・核・固定枠は入替えず、親より点が上がるものだけ"""
+    s = W._search()
+    cfg = L.SearchConfig(species_k=10, favorites=("core1",))
+    pool_species = ["core1", "core2", "fillC", "fillD", "tune", "weak", "sun", "rain", "stone2"]
+    ents = [W._entry("core1", "breaker", "core1_x", "lifeorb", False, {}),
+            W._entry("core2", "sweeper_setup", "core2_stone", "core2ite", True, {}),
+            W._entry("tune", "breaker", "tune_x", "expertbelt", False, {}),
+            W._entry("weak", "breaker", "weak_x", "leftovers", False, {}),
+            W._entry("sun", "sun_setter", "sun_x", "heatrock", False, {"weather": "sun"}),
+            W._entry("rain", "rain_setter", "rain_x", "damprock", False, {"weather": "rain"})]
+    combo = [s.lib.add(e) for e in ents]
+    sc, _ = s.score_of(combo, [], cfg)
+    parent = s._finalize(sc, combo, {}, "C001", [], cfg)
+    # 診断: 系統 C / D が穴、weak は選出されない、tune が c1 に倒される
+    diag = {"must_cover": ["C", "D"], "threat_species": ["c1"], "ko": [{"ours": "tune", "by": "c1", "move": "x", "n": 4}],
+            "vulnerable": ["tune"], "replace_candidates": ["weak"], "unused_items": [], "mega_review": False, "notes": ["t"]}
+    vs = RP.repair_variants(s, parent, diag, cfg, pool_species, W._roles_of, [], fixed={"core1", "core2"}, parent_id="L01_C001",
+                            round_no=1, max_changes=2, max_arms=6, boost=2.0, min_gain=0.001, min_changes=1)
+    assert vs, "変種が出る"
+    kinds = [v.origin["variant"] for v in vs]
+    assert "B" in kinds and "A" in kinds, kinds
+    for v in vs:
+        assert v.tag == "repair" and v.origin["kind"] == "repair" and v.origin["parent"] == "L01_C001" and v.origin["round"] == 1
+        assert v.origin["repair_score"] > v.origin["parent_repair_score"]
+        assert {"core1", "core2"} <= set(v.members), "固定した個体は残る"
+        assert sum(1 for e in v.entries if e.stone) == 1
+        items = [e.item for e in v.entries if e.item]
+        assert len(items) == len(set(items))
+    b = next(v for v in vs if v.origin["variant"] == "B")
+    assert b.origin["changes"][0]["species"] == "tune" and b.members == parent.members
+    assert [e.key[0] for e in b.entries if e.species_id == "tune"] == ["tune_t"], "担当向けの型に変わる"
+    a = next(v for v in vs if v.origin["variant"] == "A")
+    assert a.origin["changes"][0]["out"] == "weak" and "weak" not in a.members
+    assert a.origin["changes"][0]["in"] in ("fillC", "fillD")
+    # 「c1 に倒される」への受け: 入替先は c1 の型への被覆が BUILD_REPAIR_ANSWER_MIN 以上の種 (fillC は c 0.9、fillD は d だけ → fillC)
+    a_in = [v.origin["changes"][0]["in"] for v in vs if v.origin["variant"] == "A" and len(v.origin["changes"]) == 1]
+    assert a_in and all(x == "fillC" for x in a_in), a_in
+    assert all(c.get("answers_ko") for v in vs if v.origin["variant"] == "A" for c in v.origin["changes"] if "in" in c)
+    # 入替先を散らす: ko の無い診断では、入れる種が初出の変種が同じ種の 2 つ目より先に並ぶ
+    vs_d = RP.repair_variants(s, parent, dict(diag, ko=[], vulnerable=[]), cfg, pool_species, W._roles_of, [],
+                              fixed={"core1", "core2"}, parent_id="L01_C001", round_no=1, max_changes=2, max_arms=6, boost=2.0,
+                              min_gain=0.001, min_changes=1)
+    ins_d = [tuple(sorted(c["in"] for c in v.origin["changes"] if "in" in c)) for v in vs_d if v.origin["variant"] == "A"]
+    first_seen = []
+    for x in ins_d:
+        if x not in first_seen:
+            first_seen.append(x)
+    assert len(first_seen) >= 2, ins_d
+    # 既定 (BUILD_REPAIR_MIN_CHANGES = 2、判断 #6): 入替 (A) は 2 枠以上だけ。型だけの変種 (B) は残る
+    vs_min = RP.repair_variants(s, parent, dict(diag, replace_candidates=["weak", "tune"]), cfg, pool_species, W._roles_of, [],
+                                fixed={"core1", "core2"}, parent_id="L01_C001", round_no=1, max_changes=2, max_arms=6, boost=2.0,
+                                min_gain=0.001)
+    assert vs_min and all(len(v.origin["changes"]) >= 2 for v in vs_min if v.origin["variant"] == "A"), \
+        [(v.origin["variant"], len(v.origin["changes"])) for v in vs_min]
+    assert any(v.origin["variant"] == "B" for v in vs_min)
+    # 差し替え対象が 1 体でも、2 枠以上の規則なら 2 体目を足して入替の変種を作る (1003: 現行チームに入替が出なかった)
+    vs_one = RP.repair_variants(s, parent, dict(diag, replace_candidates=["weak"]), cfg, pool_species, W._roles_of, [],
+                                fixed={"core1", "core2"}, parent_id="L01_C001", round_no=1, max_changes=2, max_arms=6, boost=2.0,
+                                min_gain=0.001)
+    a_one = [v for v in vs_one if v.origin["variant"] == "A"]
+    assert a_one and all(len(v.origin["changes"]) == 2 for v in a_one) and all("weak" in {c["out"] for c in v.origin["changes"]} for v in a_one)
+    # 親をまたいだ選び方: 各親の最良の B と A を 1 本ずつ先に、残りは点の順 (純粋)
+    class V:
+        def __init__(self, kind, score):
+            self.origin = {"variant": kind, "repair_score": score}
+    p1 = [V("B", 0.9), V("A", 0.8), V("A", 0.7)]
+    p2 = [V("B", 0.95), V("B", 0.6)]
+    chosen = RP.select_variants([("P1", p1), ("P2", p2)], 3)
+    # 2 枠の入替 (A) を各親から先に、次に型だけ (B) (判断 §9.6: 次の run で 2 枠の入替を検証できるように)
+    assert [(pid, v.origin["variant"], v.origin["repair_score"]) for pid, v in chosen] == [("P1", "A", 0.8), ("P1", "B", 0.9), ("P2", "B", 0.95)]
+    p3 = [V("B", 0.99), V("A", 0.5)]
+    chosen3 = RP.select_variants([("P1", p1), ("P2", p2), ("P3", p3)], 3)
+    assert [(pid, v.origin["variant"]) for pid, v in chosen3] == [("P1", "A"), ("P3", "A"), ("P1", "B")]
+    chosen5 = RP.select_variants([("P1", p1), ("P2", p2)], 5)
+    assert [v.origin["repair_score"] for _p, v in chosen5] == [0.8, 0.9, 0.95, 0.7, 0.6] and len(RP.select_variants([("P1", p1)], 0)) == 0
+    # 上限と順序: 点の降順、最大 max_arms
+    assert [v.origin["repair_score"] for v in vs] == sorted((v.origin["repair_score"] for v in vs), reverse=True)
+    vs2 = RP.repair_variants(s, parent, diag, cfg, pool_species, W._roles_of, [], fixed={"core1", "core2"}, parent_id="L01_C001",
+                             round_no=1, max_changes=2, max_arms=1, boost=2.0, min_gain=0.001, min_changes=1)
+    assert len(vs2) == 1
+    # 差し替え対象が無ければ担当の少ない個体 (固定でない) を入替える。重みは元に戻っている
+    diag2 = dict(diag, replace_candidates=[])
+    vs3 = RP.repair_variants(s, parent, diag2, cfg, pool_species, W._roles_of, [], fixed={"core1", "core2"}, parent_id="L01_C001",
+                             round_no=2, max_changes=1, max_arms=6, boost=2.0, min_gain=0.001, min_changes=1)
+    assert any(v.origin["variant"] == "A" for v in vs3)
+    assert np.allclose(s.fam_w, [1, 1, 1, 1])
+    # 親が石 2 個 (現行チーム) でエース指定があっても、その親の修理ではエースの規則を当てず石の数は親のまま (変種が出る。新しい石は足さない)
+    ents2 = [W._entry("core1", "breaker", "core1_x", "lifeorb", False, {}),
+             W._entry("core2", "sweeper_setup", "core2_stone", "core2ite", True, {}),
+             W._entry("stone2", "breaker", "stone2_s", "stone2ite", True, {}),
+             W._entry("weak", "breaker", "weak_x", "leftovers", False, {}),
+             W._entry("sun", "sun_setter", "sun_x", "heatrock", False, {"weather": "sun"}),
+             W._entry("rain", "rain_setter", "rain_x", "damprock", False, {"weather": "rain"})]
+    for e in ents2:
+        e.locked = True
+    combo2 = [s.lib.add(e) for e in ents2]
+    sc2, _ = s.score_of(combo2, [], cfg)
+    parent2 = s._finalize(sc2, combo2, {}, "INC", [], cfg, tag="incumbent")
+    cfg_ace = L.SearchConfig(species_k=10, ace="core2", favorites=("core2",))
+    vs5 = RP.repair_variants(s, parent2, dict(diag, replace_candidates=["weak"]), cfg_ace, pool_species, W._roles_of, [],
+                             fixed={"core2"}, parent_id="L00_INC", round_no=1, max_changes=1, max_arms=6, boost=2.0, min_gain=0.001, min_changes=1)
+    assert vs5, "石 2 個の現行チームからも変種が出る"
+    # 登録の型の個体 (locked) でも固定 (エース・固定枠・核) でなければ 2 体目の差し替え候補になる (判断 §9.6)
+    vs6 = RP.repair_variants(s, parent2, dict(diag, replace_candidates=["weak"], ko=[]), cfg_ace, pool_species, W._roles_of, [],
+                             fixed={"core2"}, parent_id="L00_INC", round_no=1, max_changes=2, max_arms=6, boost=2.0, min_gain=0.001)
+    a6 = [v for v in vs6 if v.origin["variant"] == "A"]
+    assert a6 and all(len(v.origin["changes"]) == 2 for v in a6), [(v.origin["variant"], v.origin["changes"]) for v in vs6]
+    assert all({c["out"] for c in v.origin["changes"]} >= {"weak"} and "core2" not in {c["out"] for c in v.origin["changes"]} for v in a6)
+    for v in vs5:
+        assert sum(1 for e in v.entries if e.stone) == 2 and "weak" not in v.members
+    # 外した種は候補に戻さない: 親で C を見ている fillC を外すと、最良の候補は fillC 自身だが戻さず別の種を入れる。
+    # 親と同じ型の組は変種にしない (戻せる候補が無ければ変種なし)
+    ents3 = [W._entry("core1", "breaker", "core1_x", "lifeorb", False, {}),
+             W._entry("core2", "sweeper_setup", "core2_x", "sitrusberry", False, {}),
+             W._entry("fillC", "breaker", "fillC_x", "choicescarf", False, {}),
+             W._entry("fillD", "hazard_lead", "fillD_x", "focussash", False, {}),
+             W._entry("weak", "breaker", "weak_x", "leftovers", False, {}),
+             W._entry("sun", "sun_setter", "sun_x", "heatrock", False, {"weather": "sun"})]
+    combo3 = [s.lib.add(e) for e in ents3]
+    sc3, _ = s.score_of(combo3, [], cfg)
+    parent3 = s._finalize(sc3, combo3, {}, "C001", [], cfg)
+    diag3 = dict(diag, replace_candidates=["fillC"], vulnerable=[], must_cover=["C"], threat_species=["c1"], ko=[])
+    vs6 = RP.repair_variants(s, parent3, diag3, cfg, pool_species, W._roles_of, [], fixed={"core1", "core2"}, parent_id="L02_C001",
+                             round_no=2, max_changes=1, max_arms=6, boost=2.0, min_gain=0.001, min_changes=1)
+    pkey = tuple(sorted(e.key for e in parent3.entries))
+    for v in vs6:
+        assert tuple(sorted(e.key for e in v.entries)) != pkey, "親と同じ変種は作らない"
+        if v.origin["variant"] == "A":
+            assert "fillC" not in v.members, "外した種を戻さない"
+    # 点が上がる変種が無くても最良の 1 つは forced で測る
+    vs4 = RP.repair_variants(s, parent, diag, cfg, pool_species, W._roles_of, [], fixed={"core1", "core2"}, parent_id="L01_C001",
+                             round_no=1, max_changes=2, max_arms=6, boost=2.0, min_gain=10.0)
+    assert len(vs4) == 1 and vs4[0].origin["forced"] is True and all(v.origin["forced"] is False for v in vs)
+    assert RP.variant_id("L01_C001", 1, "B", 2) == "L01_C001-R1B2"
+    print("test_repair_variants OK")
+
+
+def test_form_change_variants():
+    """形態の変更の変種 (F、判断 §9.6): 同じ種のメガ型 ↔ 非メガ型を独立した候補として作り、「型・役割の変更」として記録する
+    (2 体の入替 A には数えない)。石の上限とエースの規則は並びの制約で見る。指定エースの形態は変えない"""
+    # 合成の世界に、非メガ型の方が強い種 (flex) を足す
+    W.WORLD["flex"] = {"breaker": [("flex_x", "assaultvest", False, W._vec(a=0.9, c=0.9), {}),
+                                   ("flex_s", "flexite", True, W._vec(a=0.5), {})]}
+    for name, _i, _st, cov, _f in W.WORLD["flex"]["breaker"]:
+        W.COV[name] = cov
+    s = W._search()
+    cfg = L.SearchConfig(species_k=10)
+    pool_species = ["core1", "core2", "fillC", "fillD", "tune", "weak", "sun", "rain", "flex"]
+    diag = {"must_cover": ["C"], "threat_species": [], "ko": [], "vulnerable": [], "replace_candidates": [], "unused_items": [],
+            "mega_review": False, "notes": ["t"]}
+    # 親 1: core2 は非メガ型、石持ちなし → core2 の normal->mega が点を上げる (b 0.9 → 0.95 + a 0.3)
+    ents = [W._entry("core1", "breaker", "core1_x", "lifeorb", False, {}),
+            W._entry("core2", "sweeper_setup", "core2_x", "sitrusberry", False, {}),
+            W._entry("fillC", "breaker", "fillC_x", "choicescarf", False, {}),
+            W._entry("fillD", "hazard_lead", "fillD_x", "focussash", False, {}),
+            W._entry("weak", "breaker", "weak_x", "leftovers", False, {}),
+            W._entry("sun", "sun_setter", "sun_x", "heatrock", False, {"weather": "sun"})]
+    combo = [s.lib.add(e) for e in ents]
+    sc, _ = s.score_of(combo, [], cfg)
+    parent = s._finalize(sc, combo, {}, "C001", [], cfg)
+    vs = RP.repair_variants(s, parent, diag, cfg, pool_species, W._roles_of, [], fixed={"core1", "core2"}, parent_id="L01_C001",
+                            round_no=1, max_changes=1, max_arms=8, boost=2.0, min_gain=0.001, min_changes=1)
+    fs = [v for v in vs if v.origin["variant"] == "F"]
+    assert fs, [(v.origin["variant"], v.origin["changes"]) for v in vs]
+    f = fs[0]
+    assert f.members == parent.members and f.origin["changes"] == [dict(f.origin["changes"][0])]
+    ch = f.origin["changes"][0]
+    assert ch["species"] == "core2" and ch["form"] == "normal->mega" and ch["from"]["item"] == "sitrusberry" and ch["to"]["item"] == "core2ite"
+    assert sum(1 for e in f.entries if e.stone) == 1 and f.origin["repair_score"] > f.origin["parent_repair_score"]
+    # 親 2: flex はメガ型で石を持つ → mega->normal が点を上げる。固定 (fixed) の個体でも形態の変更は可 (個体は残る)
+    ents2 = [W._entry("core1", "breaker", "core1_x", "lifeorb", False, {}),
+             W._entry("flex", "breaker", "flex_s", "flexite", True, {}),
+             W._entry("fillC", "breaker", "fillC_x", "choicescarf", False, {}),
+             W._entry("fillD", "hazard_lead", "fillD_x", "focussash", False, {}),
+             W._entry("weak", "breaker", "weak_x", "leftovers", False, {}),
+             W._entry("sun", "sun_setter", "sun_x", "heatrock", False, {"weather": "sun"})]
+    combo2 = [s.lib.add(e) for e in ents2]
+    sc2, _ = s.score_of(combo2, [], cfg)
+    parent2 = s._finalize(sc2, combo2, {}, "C002", [], cfg)
+    vs2 = RP.repair_variants(s, parent2, diag, cfg, pool_species, W._roles_of, [], fixed={"core1", "flex"}, parent_id="L02_C002",
+                             round_no=1, max_changes=1, max_arms=8, boost=2.0, min_gain=0.001, min_changes=1)
+    f2 = [v for v in vs2 if v.origin["variant"] == "F"]
+    assert f2 and all(v.origin["changes"][0]["species"] == "flex" and v.origin["changes"][0]["form"] == "mega->normal" for v in f2)
+    assert all(sum(1 for e in v.entries if e.stone) == 0 and "flex" in v.members for v in f2)
+    # 石持ちが居る親では、他の個体は normal->mega になれない (石の上限)。指定エースの形態は変えない
+    cfg_ace = L.SearchConfig(species_k=10, ace="flex", favorites=("flex",))
+    vs3 = RP.repair_variants(s, parent2, diag, cfg_ace, pool_species, W._roles_of, [], fixed={"flex"}, parent_id="L02_C002",
+                             round_no=1, max_changes=1, max_arms=8, boost=2.0, min_gain=0.001, min_changes=1)
+    assert not [v for v in vs3 if v.origin["variant"] == "F"], [v.origin["changes"] for v in vs3 if v.origin["variant"] == "F"]
+    assert not [v for v in vs2 if v.origin["variant"] == "F" and v.origin["changes"][0]["species"] != "flex"]
+    # 測る順は A → B → F、系譜の記録名は F_form
+    class V:
+        def __init__(self, kind, score):
+            self.origin = {"variant": kind, "repair_score": score}
+    chosen = RP.select_variants([("P1", [V("F", 0.99), V("B", 0.5), V("A", 0.4)])], 3)
+    assert [v.origin["variant"] for _p, v in chosen] == ["A", "B", "F"]
+    assert RP.KIND_LABEL == {"A": "member", "B": "set", "F": "form"} and RP.variant_id("L01_C001", 1, "F", 1) == "L01_C001-R1F1"
+    print("test_form_change_variants OK")
+
+
+def main() -> None:
+    test_diagnose()
+    test_repair_variants()
+    test_form_change_variants()
+    print("ALL OK")
+
+
+if __name__ == "__main__":
+    main()

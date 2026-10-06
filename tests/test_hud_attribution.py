@@ -192,6 +192,347 @@ def test_opponent_zero_read_needs_corroboration():
     print("test_opponent_zero_read_needs_corroboration OK")
 
 
+def test_opponent_zero_read_on_unknown_hp_needs_corroboration():
+    """HP未知 (登場直後) の相手への0%読みも裏付けが揃うまで書かない。
+
+    2026-08-20 第5回: 従来のガードは既知HP>5%の個体のみ対象で、
+    HP未知の新規スロットは登場演出中の空バー1フレームで0%が素通りし、
+    満タンのロトムがひんし扱いになった。
+    """
+    st = BattleStateV2()
+    mon = PokemonState(species_ja="ロトム", species_id="rotom",
+                       display_name="ロトム")
+    st.opponent.party.append(mon)
+    st.opponent.active_index = 0
+    assert mon.hp_percent is None
+    _run_hud(st, "ロトム", "0%")     # 1回目: 見送り
+    assert mon.hp_percent is None and mon.status != "fainted", \
+        (mon.hp_percent, mon.status)
+    _run_hud(st, "ロトム", "0%")     # 連続2回目: 受理
+    assert mon.hp_percent == 0.0 and mon.status == "fainted", \
+        (mon.hp_percent, mon.status)
+    print("test_opponent_zero_read_on_unknown_hp_needs_corroboration OK")
+
+
+def test_my_max_hp_adoption_after_consistent_reads():
+    """登録から計算した最大HPと食い違っても、バー割合と一致する同じ実測が
+    続けば実測を採用する (2026-08-20 第5回: ムクホーク 登録161 vs 実測181
+    で全読取が棄却されHPが100%固着 → 交代助言の被ダメ前提が崩れた)。"""
+    from vision import extractors
+    from vision.normalize import NameResolver
+
+    st = BattleStateV2()
+    mon = PokemonState(species_ja="ムクホーク", species_id="staraptor",
+                       display_name="ムクホーク")
+    mon.hp_percent = 100.0
+    st.player.party.append(mon)
+    st.player.active_index = 0
+
+    orig_read = ocr.read_zone_text
+    orig_bar = ocr.hp_bar_ratio
+    orig_expected = extractors._expected_my_max
+
+    def fake_read(img, zone, **kw):
+        if zone is zones.BATTLE["my_name"]:
+            return "ムクホーク"
+        if zone is zones.BATTLE["my_hp_text"]:
+            return "161/181"
+        return ""
+
+    ocr.read_zone_text = fake_read
+    ocr.hp_bar_ratio = lambda img: 161.0 / 181.0
+    extractors._expected_my_max = lambda m: 161   # 登録側が古い想定
+    try:
+        img = np.zeros((720, 1280, 3), dtype=np.uint8)
+        for i in range(extractors.MY_MAX_ADOPT_READS - 1):
+            extractors.extract_my_hud(img, st, NameResolver())
+            assert mon.hp_max != 181, f"{i + 1}回目で早期採用された"
+        extractors.extract_my_hud(img, st, NameResolver())  # 採用回
+        assert getattr(mon, "_my_max_adopted", None) == 181
+        assert mon.hp_max == 181 and mon.hp_current == 161, \
+            (mon.hp_current, mon.hp_max)
+        assert abs(mon.hp_percent - 89.0) < 1.0, mon.hp_percent
+        assert any("実測を採用" in e.get("text", "")
+                   for e in st.events), st.events[-3:]
+    finally:
+        ocr.read_zone_text = orig_read
+        ocr.hp_bar_ratio = orig_bar
+        extractors._expected_my_max = orig_expected
+    print("test_my_max_hp_adoption_after_consistent_reads OK")
+
+
+def test_my_max_mismatch_without_bar_agreement_is_discarded():
+    """バー割合と食い違う読み ("135/178"→"35/78"型の桁落ち) は採用しない"""
+    from vision import extractors
+    from vision.normalize import NameResolver
+
+    st = BattleStateV2()
+    mon = PokemonState(species_ja="ムクホーク", species_id="staraptor",
+                       display_name="ムクホーク")
+    mon.hp_percent = 100.0
+    st.player.party.append(mon)
+    st.player.active_index = 0
+
+    orig_read = ocr.read_zone_text
+    orig_bar = ocr.hp_bar_ratio
+    orig_expected = extractors._expected_my_max
+
+    def fake_read(img, zone, **kw):
+        if zone is zones.BATTLE["my_name"]:
+            return "ムクホーク"
+        if zone is zones.BATTLE["my_hp_text"]:
+            return "35/78"      # 桁落ち誤読 (実際は135/178=76%)
+        return ""
+
+    ocr.read_zone_text = fake_read
+    ocr.hp_bar_ratio = lambda img: 0.76   # バーは本当の割合を示す
+    extractors._expected_my_max = lambda m: 178
+    try:
+        img = np.zeros((720, 1280, 3), dtype=np.uint8)
+        for _ in range(extractors.MY_MAX_ADOPT_READS + 2):
+            extractors.extract_my_hud(img, st, NameResolver())
+        assert getattr(mon, "_my_max_adopted", None) is None
+        assert mon.hp_max != 78, mon.hp_max
+    finally:
+        ocr.read_zone_text = orig_read
+        ocr.hp_bar_ratio = orig_bar
+        extractors._expected_my_max = orig_expected
+    print("test_my_max_mismatch_without_bar_agreement_is_discarded OK")
+
+
+def test_field_check_skips_unresolved_or_foreign_species():
+    """場の状況抽出は、種族行が既存パーティに解決できない画面では
+    何も書かない (2026-08-20 第5回: 不参加のムクホークが生成され
+    161/161が混入。activeへのフォールバックも汚染源だった)。"""
+    from vision import extractors
+    from vision.normalize import NameResolver
+
+    st = BattleStateV2()
+    mon = PokemonState(species_ja="サザンドラ", species_id="hydreigon")
+    mon.hp_percent = 100.0
+    st.player.party.append(mon)
+    st.player.active_index = 0
+
+    orig_lines = ocr.apple_ocr_lines
+    orig_text = ocr.apple_ocr_text
+    # 画面はムクホーク (パーティ外) の詳細ページという想定
+    ocr.apple_ocr_lines = lambda img, scale=1.0: [
+        ("効果と場の状態", (0.5, 0.05, 0.8, 0.09)),
+        ("ムクホーク", (0.20, 0.22, 0.35, 0.26)),
+        ("0/159", (0.20, 0.28, 0.30, 0.32)),
+    ]
+    ocr.apple_ocr_text = lambda img, scale=1.0, langs=None: "0/159"
+    try:
+        img = np.zeros((720, 1280, 3), dtype=np.uint8)
+        extractors.extract_field_check(img, st, NameResolver())
+        assert len(st.player.party) == 1, [p.species_ja for p in st.player.party]
+        assert st.player.party[0].hp_percent == 100.0
+    finally:
+        ocr.apple_ocr_lines = orig_lines
+        ocr.apple_ocr_text = orig_text
+    print("test_field_check_skips_unresolved_or_foreign_species OK")
+
+
+def test_field_check_reads_garbled_hazard_state():
+    """場の状況の「ステルスロック状態」はOCR化け (状要/状感) でも取り込む。
+
+    2026-08-21 第6回: 「ステルスロック状要」が『状態/状感を含む行』の
+    ゲートで弾かれ、自陣ステロが取得されず被ダメ予測が1/8ずれた。
+    """
+    from vision import extractors
+    from vision.normalize import NameResolver
+
+    st = BattleStateV2()
+    st.player.party.append(
+        PokemonState(species_ja="サザンドラ", species_id="hydreigon"))
+    st.player.active_index = 0
+
+    orig_lines = ocr.apple_ocr_lines
+    ocr.apple_ocr_lines = lambda img, scale=1.0: [
+        ("効果と場の状感", (0.52, 0.22, 0.63, 0.25)),
+        ("サザンドラ", (0.20, 0.22, 0.30, 0.26)),
+        ("ステルスロック状要", (0.53, 0.32, 0.68, 0.36)),
+    ]
+    try:
+        img = np.zeros((720, 1280, 3), dtype=np.uint8)
+        extractors.extract_field_check(img, st, NameResolver())
+        assert st.player.stealth_rock is True, "化けた状態行が弾かれた"
+    finally:
+        ocr.apple_ocr_lines = orig_lines
+    print("test_field_check_reads_garbled_hazard_state OK")
+
+
+def test_watch_opp_zero_needs_corroboration():
+    """相手一覧 (watch側柱) の0%書き込みにもHUDと同じ裏付けを要求する"""
+    from vision import extractors, spriteid
+    from vision.normalize import NameResolver
+
+    st = BattleStateV2()
+    mon = PokemonState(species_ja="ガブリアス", species_id="garchomp")
+    mon.hp_percent = 21.0
+    st.opponent.party.append(mon)
+    st.opponent.active_index = 0
+
+    orig_read = ocr.read_zone_text
+    orig_ident = spriteid.identify_species_color
+
+    def fake_read(img, zone, **kw):
+        allow = kw.get("allowlist") or ""
+        return "0%" if "%" in allow else ""
+
+    ocr.read_zone_text = fake_read
+    spriteid.identify_species_color = lambda crop_img, cands: (0.9, "ガブリアス")
+    try:
+        img = np.zeros((720, 1280, 3), dtype=np.uint8)
+        extractors.extract_watch_side_columns(img, st, NameResolver())
+        assert mon.hp_percent == 21.0, mon.hp_percent   # 1回目: 見送り
+        extractors.extract_watch_side_columns(img, st, NameResolver())
+        assert mon.hp_percent == 0.0 and mon.status == "fainted", \
+            (mon.hp_percent, mon.status)                # 2回目: 受理
+    finally:
+        ocr.read_zone_text = orig_read
+        spriteid.identify_species_color = orig_ident
+    print("test_watch_opp_zero_needs_corroboration OK")
+
+
+def test_watch_my_max_hp_species_bound():
+    """watch側柱の自分HP読みは、最大HPが種族として物理的にあり得る範囲
+    (図鑑種族値・EV0〜252) を外れたら棄却する (2026-08-25 第9回監査:
+    つよさ表示の誤分類フレームで max=353 (実153の桁誤読) が初回観測として
+    通り、マスカーニャに 153/353=43% が付いた)"""
+    from vision import extractors
+    from vision.extractors import _plausible_max_hp
+    from vision.normalize import NameResolver
+
+    # 単体: meowscarada (HP種族値76) の可能域は約151〜183。353は棄却
+    assert not _plausible_max_hp("meowscarada", 353)
+    assert _plausible_max_hp("meowscarada", 153)
+    assert _plausible_max_hp("staraptor", 181)   # 実測採用済みの正常値
+    assert _plausible_max_hp(None, 353)          # 種族不明は判定しない
+
+    # 経路: 側柱読みが 153/353 を返しても書き込まれない
+    st = BattleStateV2()
+    mon = PokemonState(species_ja="マスカーニャ", species_id="meowscarada")
+    st.player.party.append(mon)
+
+    orig_read = ocr.read_zone_text
+
+    def fake_read(img, zone, **kw):
+        allow = kw.get("allowlist") or ""
+        if "/" in allow:
+            return "153/353"
+        if "%" in allow:
+            return ""
+        return "マスカーニャ"
+
+    ocr.read_zone_text = fake_read
+    try:
+        img = np.zeros((720, 1280, 3), dtype=np.uint8)
+        extractors.extract_watch_side_columns(img, st, NameResolver())
+        assert mon.hp_percent is None, mon.hp_percent
+        # 正常な読み (153/153) は通る
+        def fake_read2(img, zone, **kw):
+            allow = kw.get("allowlist") or ""
+            if "/" in allow:
+                return "153/153"
+            if "%" in allow:
+                return ""
+            return "マスカーニャ"
+        ocr.read_zone_text = fake_read2
+        extractors.extract_watch_side_columns(img, st, NameResolver())
+        extractors.extract_watch_side_columns(img, st, NameResolver())
+        assert mon.hp_percent == 100.0, mon.hp_percent
+    finally:
+        ocr.read_zone_text = orig_read
+    print("test_watch_my_max_hp_species_bound OK")
+
+
+def test_watch_my_team_update_needs_two_reads():
+    """能力タブからの my_team 自動更新は同一内容の2フレーム連続を要求する。
+
+    watchファミリー画面 (パーティ一覧等) の単発誤読が設定ファイルを
+    汚染しうるため (2026-08-21: 分類器での画面分離は困難と判断し、
+    書き込み側の裏付けで守る方針)。
+    """
+    from vision import extractors
+    from vision.normalize import NameResolver
+    import advisor.my_team as mt
+
+    st = BattleStateV2()
+    mon = PokemonState(species_ja="ブリジュラス", species_id="archaludon")
+    st.player.party.append(mon)
+    st.player.active_index = 0
+
+    calls = []
+    orig_update = mt.update_build
+    orig_read = ocr.read_zone_text
+    orig_reg = extractors._registered_move_ids
+    mt.update_build = lambda ja, patch: calls.append((ja, dict(patch))) or True
+    extractors._registered_move_ids = \
+        lambda ja, r: {"dragonpulse", "flashcannon"}
+
+    def fake_read(img, zone, **kw):
+        if zone is zones.WATCH["type_row"]:
+            return "はがね ドラゴン"
+        if zone is zones.WATCH["ability_value"]:
+            return "がんじょう"
+        if zone is zones.WATCH["item_value"]:
+            return "こだわりスカーフ"
+        for i, row in enumerate(zones.WATCH_MOVES):
+            if zone is row["name"]:
+                return ["りゅうのはどう", "ラスターカノン",
+                        "１０まんボルト", "りゅうせいぐん"][i]
+        return ""
+
+    ocr.read_zone_text = fake_read
+    try:
+        img = np.zeros((720, 1280, 3), dtype=np.uint8)
+        extractors._extract_watch_ability(img, st, NameResolver())
+        assert not calls, f"1回目で書き込まれた: {calls}"
+        extractors._extract_watch_ability(img, st, NameResolver())
+        assert len(calls) == 1 and calls[0][0] == "ブリジュラス", calls
+    finally:
+        mt.update_build = orig_update
+        ocr.read_zone_text = orig_read
+        extractors._registered_move_ids = orig_reg
+    print("test_watch_my_team_update_needs_two_reads OK")
+
+
+def test_hud_base_name_keeps_form_variant_active():
+    """HUD名は基本形表記のため、場のフォーム個体 (rotomwash) を
+    基本形スロットへ切り替えない (第5回持ち越しのロトム系同名混同)"""
+    st = BattleStateV2()
+    rotom = PokemonState(species_ja="ロトム", species_id="rotom")
+    rotom.hp_percent = 100.0
+    wash = PokemonState(species_ja="ウォッシュロトム", species_id="rotomwash",
+                        display_name="ロトム")
+    wash.hp_percent = 40.0
+    st.opponent.party.extend([rotom, wash])
+    st.opponent.active_index = 1
+    for _ in range(3):
+        _run_hud(st, "ロトム", "35%")
+        st.opponent.active()._hp_stable_since = 0.0
+    assert st.opponent.active_index == 1, "基本形スロットへ切り替わった"
+    assert wash.hp_percent == 35.0, wash.hp_percent
+    assert rotom.hp_percent == 100.0, rotom.hp_percent
+    print("test_hud_base_name_keeps_form_variant_active OK")
+
+
+def test_hud_mega_name_sets_mega_flag():
+    """HUD名がメガ形 (メガハッサム等) なら is_mega を立てて枠は維持する
+    (第6-7回持ち越しのメガ表記ファミリー: メガシンカ文言の取り逃し対策)"""
+    st = BattleStateV2()
+    mon = PokemonState(species_ja="ハッサム", species_id="scizor")
+    mon.hp_percent = 100.0
+    st.opponent.party.append(mon)
+    st.opponent.active_index = 0
+    _run_hud(st, "メガハッサム", "80%")
+    assert mon.is_mega is True, mon.is_mega
+    assert st.opponent.active_index == 0
+    assert len(st.opponent.party) == 1, [p.species_ja for p in st.opponent.party]
+    print("test_hud_mega_name_sets_mega_flag OK")
+
+
 def test_verified_name_updates_hp():
     st, mon = _state_with_opp("ドリュウズ", "excadrill", 33.0)
     for _ in range(3):
@@ -212,6 +553,16 @@ def main() -> None:
     test_new_species_needs_two_reads()
     test_missed_switch_marks_prev_uncertain()
     test_opponent_zero_read_needs_corroboration()
+    test_opponent_zero_read_on_unknown_hp_needs_corroboration()
+    test_my_max_hp_adoption_after_consistent_reads()
+    test_my_max_mismatch_without_bar_agreement_is_discarded()
+    test_field_check_skips_unresolved_or_foreign_species()
+    test_field_check_reads_garbled_hazard_state()
+    test_watch_opp_zero_needs_corroboration()
+    test_watch_my_max_hp_species_bound()
+    test_watch_my_team_update_needs_two_reads()
+    test_hud_base_name_keeps_form_variant_active()
+    test_hud_mega_name_sets_mega_flag()
     test_verified_name_updates_hp()
     print("ALL OK")
 

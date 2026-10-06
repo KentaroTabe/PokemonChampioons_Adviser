@@ -19,7 +19,7 @@ import shutil
 import time
 from pathlib import Path
 
-from champions_agent.config import MODELS_DIR
+from champions_agent.config import MODELS_DIR, TRAIN_OPP_POLICY_CACHE
 
 POOL_DIR = MODELS_DIR / "pool"
 STATE_PATH = POOL_DIR / "pool_state.json"
@@ -35,15 +35,24 @@ EPSILON_HEURISTIC = 0.25  # 上位構築ヒューリスティクス相手を混�
 # 探索エンジン相手 (advisor/searchのダメ計+択読み)。実測強度はベンチ勝率
 # 0.41で学習済み方策と同格だが、ヒューリスティクスとは読み筋・交代傾向が
 # 異なるため相手多様性として混入する (2026-07-24導入。heuristic 0.35→0.25
-# に減らして枠を捻出、selfplayプール枠は0.45)
+# に減らして枠を捻出、selfplayプール枠は0.45)。
+# 2026-08-25: P1棄却後の登録済み次候補として 0.20→0.30 (P4)。
+# 2026-09-02: 事前登録判定で棄却し 0.20 に復帰。主要指標 h2h vs 3_best は
+# 18,000戦で 0.5662 (基準 0.6061 比 -0.040、ゲート +0.10 に遠く未達)。
+# 軸対照 (凍結アンカー 0.5552、登録時 0.6061 から z≈8 で下方回転) を
+# 補正した同一軸差も +0.009±0.008 で効果なし。ベンチ同日ペアは +0.045 で
+# ガードレール通過 (害は無い)。selfplayプール枠は 0.45 に復帰。
+# 詳細は training_changes.json 2026-09-02 17:55
 EPSILON_SEARCH = 0.20
 # 歴史的アンカー (_best 3本 + anchors/ の週次スナップショット) を相手に混ぜる
-# 確率。プールは「性格ごと最新5件 ≒ 直近2時間の自己コピー」しか持たず、
-# 古い戦略族への対応を忘れて 8/2 の _best に頭打ち 0.405 で負けていた
-# (2026-08-18 導入、docs/AXIS_GAP_ANALYSIS.md P1。事前登録:
-#  head-to-head vs 3_best 平均 0.43 → 7日で +0.10、ベンチ -0.02 以内で採用)。
-# 枠は selfplay プール分 (旧0.45) から捻出し、直近自己対戦は 0.20 に減る
-EPSILON_ANCHOR = 0.25
+# 確率。2026-08-18 に 0.25 で導入 (docs/AXIS_GAP_ANALYSIS.md P1) したが、
+# 2026-08-25 の事前登録判定で棄却し 0 に戻した: 主要指標 h2h vs 3_best は
+# 0.514→0.606 (+0.092) でゲート +0.10 に未達 (2回測定18,000戦、詳細は
+# training_changes.json)。ベンチガードレールは +0.140 で通過 (害は無い) が、
+# 「通常学習を超える効果」の証明に届かなかった。selfplay プール枠は
+# 0.45 に復帰。抽選機構と週次アンカー保存 (P2 測定基盤) は残置し、
+# 再導入時はこの値を戻して新たに事前登録すること
+EPSILON_ANCHOR = 0.0
 ANCHORS_DIR = MODELS_DIR / "anchors"
 ANCHOR_INTERVAL_DAYS = 7   # 週次アンカー保存の間隔
 MAX_ANCHORS_PER_STYLE = 4  # anchors/ の性格ごと保持数 (_best は別枠で常時参照)
@@ -202,6 +211,34 @@ class OpponentPool:
         return POOL_DIR / chosen["file"]
 
 
+def lru_get_or_load(cache: dict, key, loader, cap: int):
+    """挿入順を参照順として使うLRUキャッシュの取得/ロード (純粋関数)。
+
+    dict は挿入順を保つため、ヒット時に pop→再挿入で末尾 (最新) へ動かし、
+    cap 超過時は先頭 (最古) から捨てる。loader はミス時のみ呼ばれる。
+    2026-08-20 メモリ枯渇対策: 相手方策キャッシュが無上限で、全世代の
+    torchモデルがワーカーごとに載っていた。
+    """
+    if key in cache:
+        cache[key] = cache.pop(key)
+    else:
+        cache[key] = loader()
+        while len(cache) > max(1, cap):
+            cache.pop(next(iter(cache)))
+    return cache[key]
+
+
+def prune_finished_assignments(assign: dict, battles: dict) -> None:
+    """終了済みバトルの相手割当を破棄する (純粋な辞書操作)。
+
+    割当が残っていると、キャッシュから追い出した方策オブジェクトが
+    参照で延命される。進行中バトルの割当は変えない (相手は不変)。
+    """
+    for tag in [t for t, b in list(battles.items())
+                if getattr(b, "finished", False)]:
+        assign.pop(tag, None)
+
+
 class PoolOpponentPlayer:
     """バトルごとにプールから方策を抽選して指す対戦相手プレイヤー。
 
@@ -233,16 +270,22 @@ def make_pool_opponent(pool: OpponentPool, epsilon_random: float = EPSILON_RANDO
             self._policy_cache: dict = {}
 
         def _load_policy(self, path):
-            """チェックポイントを方策としてロードする (失敗は None、キャッシュ付き)"""
+            """チェックポイントを方策としてロードする (失敗は None)。
+
+            キャッシュは LRU 上限つき (TRAIN_OPP_POLICY_CACHE)。抽選分布は
+            変えず保持数だけ絞る。追い出された世代は次回抽選時に再ロード。
+            """
             if path is None:
                 return None
-            key = str(path)
-            if key not in self._policy_cache:
+
+            def _loader():
                 try:
-                    self._policy_cache[key] = BattlePolicy(model_path=path)
+                    return BattlePolicy(model_path=path)
                 except Exception:
-                    self._policy_cache[key] = None
-            policy = self._policy_cache[key]
+                    return None
+
+            policy = lru_get_or_load(self._policy_cache, str(path),
+                                     _loader, cap=TRAIN_OPP_POLICY_CACHE)
             return policy if (policy is not None
                               and policy.model is not None) else None
 
@@ -268,6 +311,9 @@ def make_pool_opponent(pool: OpponentPool, epsilon_random: float = EPSILON_RANDO
                     self._assign[tag] = policy if policy else "heuristic"
                 else:
                     self._assign[tag] = kind
+                # 終了済みバトルの割当を掃除 (キャッシュから追い出した方策が
+                # 割当参照で延命されるのを防ぐ)。上限トリムは異常時の backstop
+                prune_finished_assignments(self._assign, self.battles)
                 if len(self._assign) > 50:
                     for k in list(self._assign.keys())[:-25]:
                         del self._assign[k]

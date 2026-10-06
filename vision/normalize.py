@@ -13,6 +13,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
+from champions_agent.data.sim_cache import load_checked
+
 JP_NAMES_PATH = Path(__file__).resolve().parent / "data" / "jp_names.json"
 
 # カタカナ -> ひらがな
@@ -63,9 +65,49 @@ def similarity(a: str, b: str) -> float:
     return max(n1, n2)
 
 
-_ILLEGAL_SPECIES_PATH = (Path(__file__).resolve().parent.parent
-                         / "pokemon-showdown" / "data" / "mods"
-                         / "champions" / "formats-data.ts")
+# メガストーン名の構文: 名前表は「<種族名>ナイト[X|Y|Z]」(リザードンナイトX / ガブリアスナイトZ) だが、手入力の登録では
+# 「メガ<種族名>Zナイト」のような並びも使われる。文字列全体の類似度で照合すると接尾辞 (X/Y/Z) の位置違いが
+# 無印の石に吸われる (2026-09-29 第17回: 登録の「メガガブリアスZナイト」が ガブリアスナイト (通常のメガ) に解決され、
+# 助言のメガ後の種族値・タイプが別フォルムになっていた)。種族部と接尾辞を分けて取り出し、接尾辞は厳密一致で照合する
+_STONE_RE = re.compile(r"^(.+?)([XYZ])?(?:ナイト|ナイド)([XYZ])?$")
+
+
+def parse_mega_stone_name(text: str) -> Optional[tuple]:
+    """メガストーン名 → (種族部, 接尾辞 'x' / 'y' / 'z' / '')。ストーン名の形 (…ナイト…) でなければ None。純粋。
+    種族部に「メガ」の接頭辞が付いていてもそのまま返す (メガニウムナイトのような種族名と区別できないため、呼び出し側が
+    接頭辞なしの候補も試す)"""
+    t = unicodedata.normalize("NFKC", text or "").strip()
+    t = re.sub(r"[\s!！]", "", t)
+    m = _STONE_RE.match(t)
+    if not m or not m.group(1).strip():
+        return None
+    return m.group(1).strip(), (m.group(2) or m.group(3) or "").lower()
+
+
+def stone_species_variants(species_part: str) -> list:
+    """ストーン名の種族部の照合候補: そのまま + 先頭の「メガ」を外したもの (「メガガブリアスZナイト」→ ガブリアス)"""
+    out = [species_part]
+    if species_part.startswith("メガ") and len(species_part) > len("メガ"):
+        out.append(species_part[len("メガ"):])
+    return out
+
+
+# 非参戦種の定義の元は Showdown の champions mod (pokemon-showdown/ はリポジトリに含めない)。読むのはコミット済みのキャッシュで、
+# Showdown があれば一致を検査する (2026-10-06: CI に Showdown が無く、非参戦種の除外が効かずに名前解決の結果が環境で変わっていた)
+SHOWDOWN_DIR = Path(__file__).resolve().parent.parent / "pokemon-showdown"
+ILLEGAL_IDS_SOURCE = "data/mods/champions/formats-data.ts"      # Showdown の中のパス
+_ILLEGAL_SPECIES_PATH = SHOWDOWN_DIR / ILLEGAL_IDS_SOURCE
+ILLEGAL_IDS_CACHE_PATH = Path(__file__).resolve().parent / "data" / "champions_illegal_ids.json"
+ILLEGAL_IDS_CACHE_KEY = "illegal_ids"
+
+
+def parse_illegal_ids(text: str) -> set:
+    """formats-data.ts の本文 → tier Illegal と明示された種族 id の集合 (1 タブの `id: {...}` ブロック)。純粋"""
+    out = set()
+    for m in re.finditer(r"^\t(\w+): \{([^}]*)\}", text or "", flags=re.M):
+        if '"Illegal"' in m.group(2):
+            out.add(m.group(1))
+    return out
 
 
 def champions_illegal_ids() -> set:
@@ -74,17 +116,12 @@ def champions_illegal_ids() -> set:
     全国図鑑ベースの辞書で解決すると、OCRの揺れが非参戦の近縁種へ飛ぶ
     (2026-08-05接続テスト: ゲッコウガ→ケイコウオ / メタグロス→メタング。
     どちらも非参戦)。明示的に Illegal とされた種族だけを除外し、
-    定義に無い種族は安全側で残す。ファイルが読めなければ空集合 (制限なし)。
+    定義に無い種族は安全側で残す。
+    値はコミット済みのキャッシュ (vision/data/champions_illegal_ids.json) から読み、Showdown の formats-data.ts があれば
+    一致を検査する (違えば警告してキャッシュの値を使う。champions_agent/data/sim_cache.load_checked)。
+    キャッシュも Showdown のデータも読めなければ空集合 (制限なし)。
     """
-    try:
-        text = _ILLEGAL_SPECIES_PATH.read_text(encoding="utf-8")
-    except OSError:
-        return set()
-    out = set()
-    for m in re.finditer(r"^\t(\w+): \{([^}]*)\}", text, flags=re.M):
-        if '"Illegal"' in m.group(2):
-            out.add(m.group(1))
-    return out
+    return load_checked(ILLEGAL_IDS_CACHE_PATH, ILLEGAL_IDS_CACHE_KEY, set, [_ILLEGAL_SPECIES_PATH], parse_illegal_ids)
 
 
 class NameResolver:
@@ -107,18 +144,51 @@ class NameResolver:
                     continue
                 rows.append((jp, val, normalize(jp), loose_key(jp)))
             self._entries[cat] = rows
+        # メガストーン: (日本語名, id, 種族部の正規化キー, 種族部の緩いキー, 接尾辞)
+        self._stones: list[tuple] = []
+        for jp, val, _nk, _lk in self._entries.get("items", []):
+            parsed = parse_mega_stone_name(jp)
+            if parsed:
+                self._stones.append((jp, val, normalize(parsed[0]), loose_key(parsed[0]), parsed[1]))
 
     def categories(self):
         return list(self._entries.keys())
+
+    def resolve_mega_stone(self, text: str, cutoff: float = 0.8) -> Optional[tuple]:
+        """メガストーン名を「種族部の類似 + 接尾辞 (X/Y/Z) の厳密一致」で解決する。
+        戻り値: (日本語名, id, 種族部のスコア) または None (ストーン名の形でない / 一致なし)"""
+        parsed = parse_mega_stone_name(text)
+        if not parsed or not self._stones:
+            return None
+        species_part, suffix = parsed
+        best, best_score = None, 0.0
+        for variant in stone_species_variants(species_part):
+            key, lkey = normalize(variant), loose_key(variant)
+            if not key:
+                continue
+            for jp, val, nk, lk, sfx in self._stones:
+                if sfx != suffix:
+                    continue
+                s = SequenceMatcher(None, key, nk).ratio()
+                if lk and lkey:
+                    s = max(s, SequenceMatcher(None, lkey, lk).ratio())
+                if s > best_score:
+                    best, best_score = (jp, val, s), s
+        return best if best and best_score >= cutoff else None
 
     @lru_cache(maxsize=4096)
     def resolve(self, text: str, category: str, cutoff: float = 0.8) -> Optional[tuple]:
         """text に最も近い名前を返す。戻り値: (日本語名, 値, スコア) または None。
 
         値は species の場合 {"id":..., "num":...}、それ以外は英語ID文字列。
+        持ち物はメガストーン名の構文を先に見る (接尾辞 X/Y/Z を厳密に扱う。resolve_mega_stone 参照)
         """
         if not text:
             return None
+        if category == "items":
+            stone = self.resolve_mega_stone(text, cutoff)
+            if stone:
+                return stone
         key = normalize(text)
         lkey = loose_key(text)
         if not key:

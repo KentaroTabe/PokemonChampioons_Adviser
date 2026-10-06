@@ -1,0 +1,40 @@
+{
+  "_comment": "フィールド/天候の補正表。advisor.damage (助言のダメージ計算) と tools/team_build/gen_sets (型生成) の唯一の源。倍率はゲームの仕様値。sources = 場を張る特性/技、type_boost = タイプ別の威力補正 (フィールドは接地した使用者だけ)、terrain_target_nerf = 接地した相手への減衰、weather_defense = 天候による防御側の実数補正、moves = 技固有の効果 (grounded: user/target/none、types: 変化後のタイプ、other_weather_mult: 条件外の天候での倍率)、priority = 優先度の変化",
+  "sources": {
+    "abilities": {
+      "psychicsurge": ["terrain", "psychic"], "electricsurge": ["terrain", "electric"],
+      "grassysurge": ["terrain", "grassy"], "mistysurge": ["terrain", "misty"],
+      "drought": ["weather", "sun"], "drizzle": ["weather", "rain"],
+      "sandstream": ["weather", "sandstorm"], "snowwarning": ["weather", "snow"]
+    },
+    "moves": {
+      "psychicterrain": ["terrain", "psychic"], "electricterrain": ["terrain", "electric"],
+      "grassyterrain": ["terrain", "grassy"], "mistyterrain": ["terrain", "misty"],
+      "sunnyday": ["weather", "sun"], "raindance": ["weather", "rain"],
+      "sandstorm": ["weather", "sandstorm"], "snowscape": ["weather", "snow"]
+    }
+  },
+  "type_boost": {
+    "terrain": {"psychic": {"Psychic": 1.3}, "electric": {"Electric": 1.3}, "grassy": {"Grass": 1.3}},
+    "weather": {"sun": {"Fire": 1.5, "Water": 0.5}, "rain": {"Water": 1.5, "Fire": 0.5}}
+  },
+  "terrain_target_nerf": {"misty": {"Dragon": 0.5}},
+  "weather_defense": {"sandstorm": {"Rock": {"spd": 1.5}}, "snow": {"Ice": {"def": 1.5}}},
+  "moves": {
+    "expandingforce": {"kind": "terrain", "cond": "psychic", "mult": 1.5, "grounded": "user"},
+    "risingvoltage": {"kind": "terrain", "cond": "electric", "mult": 2.0, "grounded": "target"},
+    "mistyexplosion": {"kind": "terrain", "cond": "misty", "mult": 1.5, "grounded": "user"},
+    "terrainpulse": {"kind": "terrain", "cond": "any", "mult": 2.0, "grounded": "user",
+                     "types": {"electric": "Electric", "grassy": "Grass", "psychic": "Psychic", "misty": "Fairy"}},
+    "weatherball": {"kind": "weather", "cond": "any", "mult": 2.0, "grounded": "none",
+                    "types": {"sun": "Fire", "rain": "Water", "sandstorm": "Rock", "snow": "Ice"}},
+    "solarbeam": {"kind": "weather", "cond": "sun", "mult": 1.0, "grounded": "none", "other_weather_mult": 0.5},
+    "solarblade": {"kind": "weather", "cond": "sun", "mult": 1.0, "grounded": "none", "other_weather_mult": 0.5},
+    "earthquake": {"kind": "terrain", "cond": "grassy", "mult": 0.5, "grounded": "target"},
+    "bulldoze": {"kind": "terrain", "cond": "grassy", "mult": 0.5, "grounded": "target"},
+    "magnitude": {"kind": "terrain", "cond": "grassy", "mult": 0.5, "grounded": "target"}
+  },
+  "priority": {
+    "grassyglide": {"kind": "terrain", "cond": "grassy", "grounded": "user", "delta": 1}
+  }
+}

@@ -232,6 +232,31 @@ def _weather_synergy_bonus(members: list) -> float:
     return bonus
 
 
+def _with_mega_candidates(cands: list, p: dict, state: dict) -> list:
+    """相手 1 枠の候補 [(sid, prob, ja)] に、メガ後の姿を確率で混ぜる: (sid, prob×(1−Σp)) + (mega_sid, prob×p_f)。
+    判明情報 (持ち物・メガ済み・相手の権利消費) は advisor.gimmick が上書きする。純粋 (usage は DB から)"""
+    try:
+        from advisor.gimmick import expected_mega
+        from advisor.infer import species_ja_name
+    except Exception:
+        return cands
+    item_id = p.get("item_id")
+    if item_id == "megastone":
+        item_id = None
+    used = bool((state.get("mega_used") or {}).get("opponent"))
+    out = []
+    for sid, prob, ja in cands:
+        forms = expected_mega(sid, item_id, bool(p.get("is_mega")), used)
+        total = min(1.0, sum(forms.values()))
+        if total <= 0:
+            out.append((sid, prob, ja))
+            continue
+        out.append((sid, prob * (1.0 - total), ja))
+        for msid, pf in forms.items():
+            out.append((msid, prob * pf, species_ja_name(msid)))
+    return out
+
+
 def _make_view(species_id: str) -> Optional[MonView]:
     dex = get_dex()
     sp = dex.species(species_id)
@@ -239,6 +264,49 @@ def _make_view(species_id: str) -> Optional[MonView]:
         return None
     return MonView(species_id=species_id, types=sp["types"],
                    base=sp["baseStats"], ev=dict(OFFENSIVE_EV))
+
+
+def _resolve_item_id(item_ja: Optional[str]) -> Optional[str]:
+    """登録の持ち物 (日本語) → id。解決できなければ None"""
+    if not item_ja:
+        return None
+    try:
+        from vision.normalize import NameResolver
+        global _SEL_RESOLVER
+        if _SEL_RESOLVER is None:
+            _SEL_RESOLVER = NameResolver()
+        r = _SEL_RESOLVER.resolve(item_ja, "items", cutoff=0.7)
+        return r[1] if r else None
+    except Exception:
+        return None
+
+
+def _own_view(p: dict, species_id: Optional[str], use_registered: bool = True, ability: Optional[str] = None) -> Optional[MonView]:
+    """自分の個体のビュー。登録の型 (config/my_team.json: 能力ポイント・性格・持ち物) があればそれで作る (2026-10-06 S2)。
+    それまでは自分側も攻撃全振り (OFFENSIVE_EV) の仮定で、耐久振りの受け役が速くて脆い攻撃役として評価されていた
+    (第 18 回: 規則の 3 体と実際の選出の一致 1/15)。登録が無ければ従来の仮定。ability は呼び出し側で解決したもの (メガ後なら メガ後の特性)"""
+    view = _make_view(species_id) if species_id else None
+    if view is None:
+        return None
+    if ability:
+        view.ability = ability
+    if not use_registered:
+        return view
+    try:
+        from advisor.my_team import get_my_build
+        b = get_my_build(p.get("species_ja"))
+    except Exception:
+        b = None
+    if not b:
+        return view
+    if b.get("ev"):
+        view.ev = dict(b["ev"])
+    if b.get("nature"):
+        view.nature = dict(b["nature"])
+    item = p.get("item_id") or _resolve_item_id(b.get("item_ja"))
+    if item and item != "megastone":
+        view.item = item
+    return view
 
 
 def _predicted_attack_moves(species_id: str, limit: int = 6) -> list:
@@ -290,9 +358,10 @@ def _species_matchup_score(my_view: MonView, my_moves: list,
     return offense / 100.0 - 0.8 * (threat / 100.0)
 
 
-def advise_selection(state: dict, resolver=None) -> dict:
-    """状態辞書から選出提案を作る。
+def advise_selection(state: dict, resolver=None, use_registered: bool = True) -> dict:
+    """状態辞書から選出提案を作る (相性の規則: ダメージ計算の対面行列)。
 
+    use_registered: 自分側の技に登録 (my_team) の技を使う (実戦と自分側の測定)。相手側の操縦に使うときは False。
     戻り値: {"ok": bool, "picked": N, "done": bool,
              "recommend": [{"name","index","lead"}], "reason": str,
              "matrix": [[score]]}
@@ -317,6 +386,8 @@ def advise_selection(state: dict, resolver=None) -> dict:
         is_mega_holder = _is_mega_holder(p)
         item_id = p.get("item_id") or ""
         mega_sid = _mega_species_id(sid, item_id) if is_mega_holder else None
+        ability = _own_ability(p, sid)
+        mega_ability = _own_ability(p, mega_sid or sid, is_mega=True, item_id=item_id) if mega_sid else None
         mine.append({
             "index": i,
             "name": p.get("species_ja") or p.get("display_name") or sid,
@@ -328,10 +399,11 @@ def advise_selection(state: dict, resolver=None) -> dict:
             "mega_holder": is_mega_holder,
             # メガ後の姿での評価用 (種族値/タイプ/特性が変わる)
             "mega_sid": mega_sid,
-            "ability": _own_ability(p, sid),
-            "mega_ability": (_own_ability(p, mega_sid or sid, is_mega=True,
-                                          item_id=item_id)
-                             if mega_sid else None),
+            "ability": ability,
+            "mega_ability": mega_ability,
+            # 自分側のビュー: 登録の型 (配分・性格・持ち物) と解決した特性で作る (2026-10-06)。相手候補の view_cache とは分ける
+            "view": _own_view(p, sid, use_registered, ability),
+            "mega_view": _own_view(p, mega_sid, use_registered, mega_ability) if mega_sid else None,
         })
 
     inference = get_inference()
@@ -354,6 +426,8 @@ def advise_selection(state: dict, resolver=None) -> dict:
                       p.get("species_ja") or species_ja_name(p["species_id"]))]
         else:
             cands = inference.candidates(types_ja)
+        # 1 試合 1 回の資源: メガ石を持つ見込み (使用率の事前分布 + 判明情報) でメガ後の姿も候補に混ぜる
+        cands = _with_mega_candidates(cands, p, state)
         label = p.get("species_ja") or "/".join(types_ja)
         opps.append({"index": j, "types": types_en, "label": label,
                      "types_ja": types_ja, "candidates": cands})
@@ -370,15 +444,29 @@ def advise_selection(state: dict, resolver=None) -> dict:
     def get_view(sid):
         if sid not in view_cache:
             view_cache[sid] = _make_view(sid)
-            moves_cache[sid] = _predicted_attack_moves(sid) if view_cache[sid] else []
+            moves = _predicted_attack_moves(sid) if view_cache[sid] else []
+            if view_cache[sid] is not None and not moves:
+                # メガ後の姿は使用率データが無い → 基本種の予測技を使う
+                try:
+                    from advisor.gimmick import _base_of, is_mega_form
+                    if is_mega_form(sid):
+                        moves = _predicted_attack_moves(_base_of(sid))
+                except Exception:
+                    pass
+            moves_cache[sid] = moves
         return view_cache[sid], moves_cache[sid]
 
     # スコア行列: 候補種族分布で加重したダメージ計算ベース。
     # メガストーン持ちはメガ後の姿 (種族値/タイプ) でも行を作る
     def score_row(eval_sid, m):
         my_view, my_moves = get_view(eval_sid)
+        # 自分側は登録の型のビュー (配分・性格・持ち物・特性) で評価する (無ければ攻撃全振りの仮定のまま)
+        if eval_sid == m.get("species_id") and m.get("view") is not None:
+            my_view = m["view"]
+        elif eval_sid == m.get("mega_sid") and m.get("mega_view") is not None:
+            my_view = m["mega_view"]
         # 自分側は登録技を優先する (使用率予測技は実際の型と乖離し得る)
-        reg = _own_registered_moves(m.get("name"))
+        reg = _own_registered_moves(m.get("name")) if use_registered else []
         if reg:
             my_moves = reg
         row = {}
@@ -422,16 +510,35 @@ def advise_selection(state: dict, resolver=None) -> dict:
             return matrix_mega[(m["index"], j)]
         return matrix[(m["index"], j)]
 
+    # 実戦の相手バンク (advisor/real_prior): 相手スロットを実戦の選出率で重みづけする (平均 1 を保つ)。
+    # 選ばれやすい個体への対面を重く、ほぼ選ばれない個体を軽く見る (2026-09-09、机上の均等重みの補正)
+    slot_w = {o["index"]: 1.0 for o in opps}
+    pick_prior_view = []
+    try:
+        from advisor.real_prior import slot_weights, species_pick_prior
+        priors = []
+        for o in opps:
+            sid = (o["candidates"][0][0] if o["candidates"] and o["candidates"][0][1] >= 1.0 else None)
+            priors.append(species_pick_prior(sid) if sid else None)
+        ws = slot_weights(priors)
+        for o, w, p in zip(opps, ws, priors):
+            slot_w[o["index"]] = w
+            if p is not None:
+                pick_prior_view.append({"label": o["label"], "pick_rate": round(p, 2), "weight": w})
+    except Exception:
+        pass
+    n_w = sum(slot_w.values()) or 1.0
+
     best = None
     for combo in combinations(mine, 3):
         holders = [m for m in combo if m["mega_holder"]]
         # メガ割当の候補: ストーン持ちそれぞれ + 割当なし
         for assignee in (holders or [None]):
             coverage = sum(
-                max(cell(m, o["index"], m is assignee) for m in combo)
+                slot_w[o["index"]] * max(cell(m, o["index"], m is assignee) for m in combo)
                 for o in opps)
             individual = sum(
-                sum(cell(m, o["index"], m is assignee) for o in opps) / len(opps)
+                sum(slot_w[o["index"]] * cell(m, o["index"], m is assignee) for o in opps) / n_w
                 for m in combo)
             total = coverage + 0.3 * individual
             # メガ枠以外のストーン持ちは持ち物が死ぬ
@@ -449,7 +556,7 @@ def advise_selection(state: dict, resolver=None) -> dict:
     _, combo, mega_assignee = best
     # 先発: 平均スコア最大 + 設置技持ちのボーナス (設置は初手に置けて
     # 初めて全交代に乗る。欠陥#4: 設置役を後発に回していた)
-    lead = max(combo, key=lambda m: sum(matrix[(m["index"], o["index"])]
+    lead = max(combo, key=lambda m: sum(slot_w[o["index"]] * matrix[(m["index"], o["index"])]
                                          for o in opps)
                + (HAZARD_LEAD_BONUS if m.get("hazard_setter") else 0.0))
     ordered = [lead] + [m for m in combo if m is not lead]
@@ -504,6 +611,8 @@ def advise_selection(state: dict, resolver=None) -> dict:
         "inference": inference_view,
         "mega_picks": mega_picks,
         "synergy": synergy,
+        # 実戦の選出傾向 (バンクにある種だけ)。空なら重みは均等
+        "opp_pick_prior": pick_prior_view,
     }
 
 
@@ -523,25 +632,109 @@ def attach_model_pick(advice: dict, my_party: list, opp_party: list) -> None:
         mine = [my_party[i]["species_id"] for i in idx]
         if len(mine) < 3:
             return
+        # 試用中 Package (experiment ラベル) に同梱の選出モデルがあり、パーティがその 6 体なら、それを使う (2026-09-25)。
+        # 次に登録チーム向けのモデル (registered:<6 体の鍵>、2026-10-06)、無ければ配布版 (以前の my_team に寄せた微調整済み)
+        from champions_agent.agent.selection_dispatch import advisor_model_path, model_label
+        model_path, package_id = advisor_model_path(mine)
         best = predict_best(
-            mine, [p.get("species_id") for p in opp_party if p.get("species_id")])
+            mine, [p.get("species_id") for p in opp_party if p.get("species_id")], path=model_path)
         if best is None:
             return
         perm, prob = best
         names = [my_party[idx[i]].get("species_ja")
                  or my_party[idx[i]].get("species_id") or "?" for i in perm]
         from champions_agent.agent.selection_model import is_in_distribution
+        indices = [idx[i] for i in perm]
+        holders = [k for k in indices if _is_mega_holder(my_party[k])]
+        # メガ枠: 規則の推奨が同じ個体を割り当てていればそれ、無ければ先頭の石持ち (モデルはメガ枠を決めない)
+        rule_assign = next((r.get("index") for r in (advice.get("recommend") or []) if r.get("mega_assign")), None)
+        assignee = rule_assign if rule_assign in holders else (holders[0] if holders else None)
         advice["model_pick"] = {
-            "names": names, "win_prob": round(prob, 3),
-            "trained": is_in_distribution(mine),
+            "names": names, "win_prob": round(prob, 3), "indices": indices,
+            # Package / 登録チーム向けのモデルはそのパーティで適応済み。配布版は学習分布に入っているかで参考値かどうかを示す
+            "trained": True if package_id else is_in_distribution(mine),
+            "model": model_label(package_id),
+            "recommend": [{"index": k, "name": names[j], "lead": j == 0, "mega_holder": k in holders, "mega_assign": k == assignee}
+                          for j, k in enumerate(indices)],
         }
+        # 実戦の選出傾向に条件づけた推し (条件付きモデル + バンクの選出率)。前提を満たさなければ出さない
+        try:
+            from advisor.real_prior import load_bank, species_pick_prior
+            from champions_agent.agent.selection_model import predict_with_prior
+            bank = load_bank()
+            opp_ids = [p.get("species_id") for p in opp_party if p.get("species_id")]
+            prior = {sid: species_pick_prior(sid, bank) for sid in opp_ids}
+            prior = {k: v for k, v in prior.items() if v is not None}
+            if bank and prior:
+                got = predict_with_prior(mine, opp_ids, prior)
+                if got:
+                    perm2, ev, marginal = got
+                    advice["model_pick_real"] = {
+                        "names": [my_party[idx[i]].get("species_ja") or my_party[idx[i]].get("species_id") or "?"
+                                  for i in perm2],
+                        "expected_win_prob": round(ev, 3),
+                        "opp_pick_marginal": {k: round(v, 2) for k, v in marginal.items()},
+                        "n_prior": len(prior),
+                    }
+        except Exception:
+            pass
     except Exception:
         pass
+
+
+def choose_primary(advice: dict, prefer_model: Optional[bool] = None, allow_untrained: Optional[bool] = None) -> dict:
+    """第一候補 (◎) を決める (純粋。2026-10-05: 操縦はアドバイザーが行う)。
+    登録チーム用の検証済みモデル (試用 Package / registered) か分布内の配布版の推し (model_pick.trained) があればそれを第一候補にし、
+    相性の規則の推奨は rule_recommend / rule_reason に残して参考に併記する。
+    allow_untrained (config SELECTION_PRIMARY_UNTRAINED_MODEL、2026-10-06): 登録チームで学習していない配布版の推しも第一候補にする
+    (第 18 回: 規則の 3 体と実際の選出の一致 1/15、未学習のモデルの方が近い。シム 配布版 0.703 / 規則 0.457)。
+    規則が第一候補になるのは、モデルの推しが無い (モデルが読めない / 6 体を評価できない) ときだけ。
+    advice["primary"] = "model" | "rule"、advice["model_trained"] = モデルが ◎ のときその学習の有無 (記録の層別用)。
+    選出助言の記録 (battle_log) と決定監査はこの recommend を見る"""
+    if prefer_model is None:
+        try:
+            from champions_agent.config import SELECTION_PRIMARY_MODEL
+            prefer_model = bool(SELECTION_PRIMARY_MODEL)
+        except Exception:
+            prefer_model = True
+    if allow_untrained is None:
+        try:
+            from champions_agent.config import SELECTION_PRIMARY_UNTRAINED_MODEL
+            allow_untrained = bool(SELECTION_PRIMARY_UNTRAINED_MODEL)
+        except Exception:
+            allow_untrained = True
+    advice["primary"] = "rule"
+    mp = advice.get("model_pick") or {}
+    if not prefer_model or not advice.get("ok") or not mp.get("recommend") or not (mp.get("trained") or allow_untrained):
+        return advice
+    advice["rule_recommend"] = list(advice.get("recommend") or [])
+    advice["rule_reason"] = advice.get("reason")
+    advice["recommend"] = [dict(r) for r in mp["recommend"]]
+    advice["model_trained"] = bool(mp.get("trained"))
+    note = "" if mp.get("trained") else "、このチームでは未学習: 規則より実際の選出に近い (2026-10-06)"
+    advice["reason"] = f"学習モデルの推し (予測勝率 {float(mp.get('win_prob') or 0.0):.0%}、{mp.get('model')}{note})"
+    holders = [r["name"] for r in advice["recommend"] if r.get("mega_holder")]
+    assign = next((r["name"] for r in advice["recommend"] if r.get("mega_assign")), None)
+    if assign in holders:
+        holders.remove(assign)
+        holders.insert(0, assign)
+    advice["mega_picks"] = holders
+    advice["primary"] = "model"
+    return advice
 
 
 def format_selection_advice(advice: dict) -> str:
     if not advice.get("ok"):
         base = f"[選出評価不可] {advice.get('reason')}"
+    elif advice.get("primary") == "model":
+        rec = advice["recommend"]
+        names = " → ".join(("★" if r["lead"] else "") + r["name"] for r in rec)
+        label = "学習モデル" if advice.get("model_trained", True) else "学習モデル・未学習"
+        base = f"◎ 推奨選出 ({label}): {names} (★=先発)\n  {advice['reason']}"
+        rr = advice.get("rule_recommend") or []
+        if rr:
+            base += ("\n  参考 (相性の規則): " + " → ".join(("★" if r["lead"] else "") + r["name"] for r in rr)
+                     + (f"\n  {advice['rule_reason']}" if advice.get("rule_reason") else ""))
     else:
         rec = advice["recommend"]
         names = " → ".join(("★" if r["lead"] else "") + r["name"] for r in rec)
@@ -557,7 +750,7 @@ def format_selection_advice(advice: dict) -> str:
                      f"(ストーン持ち{len(mega)}体: {'/'.join(mega)}。"
                      "メガシンカは1試合1回、他の持ち物は死にます)")
         mp = advice.get("model_pick")
-        if mp:
+        if mp and advice.get("primary") != "model":
             note = ("" if mp.get("trained")
                     else " ※このチームは未学習のため参考値")
             base += (f"\n  🤖 学習モデルの推し: {' → '.join(mp['names'])} "

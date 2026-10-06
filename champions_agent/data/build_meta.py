@@ -7,8 +7,214 @@ usage_snapshot(使用率統計)の最新スナップショットから、各ポ�
 """
 from __future__ import annotations
 
-from champions_agent.config import USAGE_TARGET_FORMAT
+from champions_agent.config import (
+    META_SET_CHANGE_WARN, META_THIN_LOG_MIN_USAGE, META_THIN_MOVE_PCT,
+    NATURE_ALIGN_MIN_POINTS,
+    OFFENSIVE_ITEM_IDS, SPREAD_OFFENSE_MIN_POINTS, USAGE_TARGET_FORMAT)
 from champions_agent.data import database as db
+
+# 性格 -> (補正先, 補正元)。無補正性格は含めない (整合チェック不要)
+_NATURE_STATS = {
+    "lonely": ("atk", "def"), "brave": ("atk", "spe"),
+    "adamant": ("atk", "spa"), "naughty": ("atk", "spd"),
+    "bold": ("def", "atk"), "relaxed": ("def", "spe"),
+    "impish": ("def", "spa"), "lax": ("def", "spd"),
+    "timid": ("spe", "atk"), "hasty": ("spe", "def"),
+    "jolly": ("spe", "spa"), "naive": ("spe", "spd"),
+    "modest": ("spa", "atk"), "mild": ("spa", "def"),
+    "quiet": ("spa", "spe"), "rash": ("spa", "spd"),
+    "calm": ("spd", "atk"), "gentle": ("spd", "def"),
+    "sassy": ("spd", "spe"), "careful": ("spd", "spa"),
+}
+_STAT_KEYS = ("hp", "atk", "def", "spa", "spd", "spe")
+
+
+def parse_points(evs: str | None) -> dict | None:
+    """"2/0/0/32/0/32" -> {"hp":2, "atk":0, ...} (不正な形式はNone)"""
+    if not evs:
+        return None
+    parts = evs.split("/")
+    if len(parts) != 6:
+        return None
+    try:
+        return dict(zip(_STAT_KEYS, (int(p) for p in parts)))
+    except ValueError:
+        return None
+
+
+def _is_offensive_spread(evs: str | None) -> bool:
+    pts = parse_points(evs)
+    return bool(pts and (pts["atk"] >= SPREAD_OFFENSE_MIN_POINTS
+                         or pts["spa"] >= SPREAD_OFFENSE_MIN_POINTS))
+
+
+def move_categories(moves: list) -> list:
+    """技ID列 -> 分類 (physical/special/status) の列。
+
+    DBの moves テーブルは部分取り込みで欠落があるため図鑑を使う
+    (実測: ハッサムの4技中3技が引けず攻撃補正の例外が発火しなかった)。
+    """
+    from advisor.dex import get_dex
+    dex = get_dex()
+    out = []
+    for m in moves:
+        if not m:
+            continue
+        mv = dex.move(m)
+        if mv and mv.get("category"):
+            out.append(str(mv["category"]).lower())
+    return out
+
+
+def nature_fits(nature: str | None, evs: str | None,
+                move_categories: list) -> bool:
+    """性格が配分・技構成と整合するか (純粋関数)。
+
+    - 補正元 (下降) が投資されていたら不整合
+    - 攻撃/特攻補正: 投資があるか、該当分類の技があれば整合
+      (種族値受けのいじっぱりハッサム H32/A2/B32 等の実在型)
+    - 防御/特防補正: 投資があるか、配分が攻撃的でなければ整合
+      (ずぶとい+HP極振りメタモンのような「補正で片受け・振りで耐久」は実在。
+       不整合なのは ずぶとい+CS極振り のような攻撃配分との組み合わせだけ)
+    - 素早さ補正: 投資を要求
+    - 配分不明・無補正性格は整合扱い (棄却する根拠がない)
+    """
+    if not nature:
+        return True
+    stats = _NATURE_STATS.get(str(nature).lower())
+    if stats is None:
+        return True
+    pts = parse_points(evs)
+    if pts is None:
+        return True
+    plus, minus = stats
+    if pts[minus] >= NATURE_ALIGN_MIN_POINTS:
+        return False
+    if pts[plus] >= NATURE_ALIGN_MIN_POINTS:
+        return True
+    if plus == "atk" and "physical" in move_categories:
+        return True
+    if plus == "spa" and "special" in move_categories:
+        return True
+    if plus in ("def", "spd") and not _is_offensive_spread(evs):
+        return True
+    return False
+
+
+def choose_coherent_spread(natures: list, spreads: list,
+                           move_categories: list, item: str | None) -> tuple:
+    """(性格候補, 配分候補, 技分類, 持ち物) -> 整合する (nature, evs)。
+
+    natures/spreads は (値, 使用率%) を使用率降順で並べたリスト。
+    整合する (性格, 配分) ペアのうち使用率の積が最大のものを選ぶ。
+    最多同士の独立合成だと、受け型は配分の票が細かく割れるため
+    「最多性格 (受け) + 最多配分 (攻撃)」の実在しない縫い合わせになる。
+    ペアの積最大化なら「ずぶとい47%+HB9.5%」が「ひかえめ24.5%+CS13.8%」に
+    勝ち、受け型が正しく復元される。
+    攻撃的持ち物 (OFFENSIVE_ITEM_IDS) のときは攻撃的配分
+    (atk/spa >= SPREAD_OFFENSE_MIN_POINTS) に候補を絞る (絞って全滅なら解除)。
+    整合ペアが無ければ最多同士 (棄却より実測値を残す方が安全)。
+    攻撃技を持たない種 (へんしんのみのメタモン等) は持ち物がスカーフでも
+    攻撃的配分に誘導しない。
+    """
+    spread_pool = spreads
+    has_damaging = ("physical" in move_categories
+                    or "special" in move_categories)
+    if item and item in OFFENSIVE_ITEM_IDS and has_damaging:
+        offensive = [(v, u) for v, u in spreads if _is_offensive_spread(v)]
+        if offensive:
+            spread_pool = offensive
+    best, best_score = None, 0.0
+    for nv, nu in natures:
+        for ev, eu in spread_pool:
+            if not nature_fits(nv, ev, move_categories):
+                continue
+            score = max(nu, 0.0) * max(eu, 0.0)
+            if score > best_score:
+                best, best_score = (nv, ev), score
+    if best:
+        return best
+    return ((natures[0][0] if natures else None),
+            (spread_pool[0][0] if spread_pool else None))
+
+
+def count_substantive_changes(prev: dict, new: dict) -> int:
+    """2スナップショットのmeta_setsで「実質変化」した種の数を返す。
+
+    prev/new: pokemon_name -> (ability, item, nature, evs, 技のfrozenset)。
+    技の並び順だけの違いは変化に数えない (frozensetで吸収)。
+    評価軸のチーム中身はここから補完されるため、この数が大きい日は
+    ベンチ絶対値の前後比較が壊れる (2026-08-19 インシデント)。
+    """
+    return sum(1 for k in prev.keys() & new.keys() if prev[k] != new[k])
+
+
+def _set_signature_rows(conn, snapshot_id: int) -> dict:
+    rows = conn.execute(
+        """
+        SELECT pokemon_name, ability_name, item_name, nature, evs,
+               move1, move2, move3, move4
+        FROM meta_sets WHERE snapshot_id = ?
+        """,
+        (snapshot_id,),
+    ).fetchall()
+    return {
+        r["pokemon_name"]: (
+            r["ability_name"], r["item_name"], r["nature"], r["evs"],
+            frozenset(m for m in (r["move1"], r["move2"],
+                                  r["move3"], r["move4"]) if m),
+        )
+        for r in rows
+    }
+
+
+def _report_axis_drift(conn, snapshot_id: int) -> None:
+    """前スナップショットからのセット回転量を日次更新ログに残す。"""
+    prev_row = conn.execute(
+        "SELECT DISTINCT snapshot_id FROM meta_sets WHERE snapshot_id < ? "
+        "ORDER BY snapshot_id DESC LIMIT 1",
+        (snapshot_id,),
+    ).fetchone()
+    if prev_row is None:
+        return
+    prev_id = prev_row["snapshot_id"]
+    changed = count_substantive_changes(
+        _set_signature_rows(conn, prev_id),
+        _set_signature_rows(conn, snapshot_id))
+    mark = "⚠ " if changed >= META_SET_CHANGE_WARN else ""
+    print(f"[build_meta] {mark}実質セット変化: snapshot {prev_id}→{snapshot_id} "
+          f"で {changed}種 (警告閾値 {META_SET_CHANGE_WARN})。"
+          + ("この日を跨ぐベンチ絶対値の比較は不可" if mark else ""))
+
+
+def is_thin_moveset(max_move_pct: float | None,
+                    threshold: float = META_THIN_MOVE_PCT) -> bool:
+    """最多技の採用率が閾値未満なら技データが薄い (純粋関数)"""
+    return (max_move_pct or 0.0) < threshold
+
+
+def carry_forward_row(conn, pokemon_name: str, snapshot_id: int,
+                      threshold: float = META_THIN_MOVE_PCT):
+    """直近の『技データが健全な』スナップショットの meta_sets 行を返す (無ければ None)。
+
+    snapshot_id より前のスナップショットを新しい順に見て、その種の最多技採用率が
+    閾値以上で meta_sets 行を持つものを採用する。
+    """
+    rows = conn.execute(
+        """SELECT m.snapshot_id, m.ability_name, m.item_name, m.nature, m.evs,
+                  m.move1, m.move2, m.move3, m.move4
+           FROM meta_sets m
+           WHERE m.pokemon_name = ? AND m.snapshot_id < ? AND m.move1 IS NOT NULL
+           ORDER BY m.snapshot_id DESC LIMIT 10""",
+        (pokemon_name, snapshot_id)).fetchall()
+    for r in rows:
+        mx = conn.execute(
+            "SELECT MAX(usage_percent) FROM move_usage "
+            "WHERE snapshot_id = ? AND pokemon_name = ?",
+            (r[0], pokemon_name)).fetchone()[0]
+        if not is_thin_moveset(mx, threshold):
+            return r
+    return None
 
 
 def _top_n(conn, table: str, col: str, snapshot_id: int, pokemon_name: str, n: int) -> list[str]:
@@ -30,14 +236,20 @@ def _top1(conn, table: str, col: str, snapshot_id: int, pokemon_name: str) -> st
     return names[0] if names else None
 
 
-def build_meta_sets(fmt: str = USAGE_TARGET_FORMAT, source: str | None = None) -> int:
+def build_meta_sets(fmt: str = USAGE_TARGET_FORMAT, source: str | None = None,
+                    snapshot_id: int | None = None) -> int:
+    """スナップショット (既定: 最新) から meta_sets を再構築する。戻り値: 生成した行数。
 
-    """最新スナップショットからmeta_setsを再構築する。戻り値: 生成した行数。"""
+    snapshot_id を指定すると過去スナップショットを作り直す (技データ欠落の修復用、
+    tools/repair_meta_thin.py)。評価軸に使っているスナップショット (META_PIN) を
+    作り直すと軸が動くので、呼び出し側で除外すること。
+    """
     with db.get_connection() as conn:
         # require_meta=False: meta_sets を作る側なので、meta_sets が
         # まだ無い出来たてのスナップショットを対象にする必要がある
-        snapshot_id = db.latest_snapshot_id(conn, source=source, fmt=fmt,
-                                            require_meta=False)
+        if snapshot_id is None:
+            snapshot_id = db.latest_snapshot_id(conn, source=source, fmt=fmt,
+                                                require_meta=False)
         if snapshot_id is None:
             raise RuntimeError(
                 f"usage_snapshot が見つかりません(source={source}, format={fmt})。"
@@ -55,8 +267,36 @@ def build_meta_sets(fmt: str = USAGE_TARGET_FORMAT, source: str | None = None) -
         ).fetchall()
 
         inserted = 0
+        carried = 0
+        carried_major = []
         for row in pokemon_rows:
             name = row["pokemon_name"]
+
+            # 技データが薄い種 (主要技の欠落) は直近の健全な型を引き継ぐ
+            mx = conn.execute(
+                "SELECT MAX(usage_percent) FROM move_usage "
+                "WHERE snapshot_id = ? AND pokemon_name = ?",
+                (snapshot_id, name)).fetchone()[0]
+            if is_thin_moveset(mx):
+                prev = carry_forward_row(conn, name, snapshot_id)
+                if prev is not None:
+                    usage_row = conn.execute(
+                        "SELECT usage_percent FROM pokemon_usage "
+                        "WHERE snapshot_id = ? AND pokemon_name = ?",
+                        (snapshot_id, name)).fetchone()
+                    conn.execute(
+                        """INSERT INTO meta_sets
+                            (snapshot_id, pokemon_name, ability_name, item_name,
+                             tera_type, nature, evs, move1, move2, move3, move4, weight)
+                           VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)""",
+                        (snapshot_id, name, prev[1], prev[2], prev[3], prev[4],
+                         prev[5], prev[6], prev[7], prev[8],
+                         usage_row["usage_percent"] if usage_row else 0.0))
+                    inserted += 1
+                    carried += 1
+                    if usage_row and usage_row["usage_percent"] >= META_THIN_LOG_MIN_USAGE:
+                        carried_major.append(f"{name}({prev[0]})")
+                    continue
 
             ability = _top1(conn, "ability_usage", "ability_name", snapshot_id, name)
             item = _top1(conn, "item_usage", "item_name", snapshot_id, name)
@@ -65,27 +305,25 @@ def build_meta_sets(fmt: str = USAGE_TARGET_FORMAT, source: str | None = None) -
             while len(moves) < 4:
                 moves.append(None)
 
-            # 性格とEV配分は別行に分かれて格納されることがある
-            # (championsbattledata由来: stat_alignment行=natureのみ / stat_points行=evsのみ)
-            # ため、それぞれ「値が入っている行の中の最上位」を独立に取得して合成する
-            nature_row = conn.execute(
+            # 性格とEV配分は別行に分かれて格納される
+            # (championsbattledata由来: stat_alignment行=natureのみ /
+            #  stat_points行=evsのみ)。それぞれの最多を独立に貼り合わせると
+            # 「ずぶとい+CS極振り」のような実在しない型が合成されるため、
+            # 持ち物の系統で配分を選び、配分と整合する性格を使用率順に選ぶ
+            natures = [(r["nature"], r["usage_percent"]) for r in conn.execute(
                 """
-                SELECT nature FROM spread_usage
+                SELECT nature, usage_percent FROM spread_usage
                 WHERE snapshot_id = ? AND pokemon_name = ? AND nature IS NOT NULL
-                ORDER BY usage_percent DESC LIMIT 1
-                """,
-                (snapshot_id, name),
-            ).fetchone()
-            evs_row = conn.execute(
+                ORDER BY usage_percent DESC
+                """, (snapshot_id, name))]
+            spreads = [(r["evs"], r["usage_percent"]) for r in conn.execute(
                 """
-                SELECT evs FROM spread_usage
+                SELECT evs, usage_percent FROM spread_usage
                 WHERE snapshot_id = ? AND pokemon_name = ? AND evs IS NOT NULL
-                ORDER BY usage_percent DESC LIMIT 1
-                """,
-                (snapshot_id, name),
-            ).fetchone()
-            nature = nature_row["nature"] if nature_row else None
-            evs = evs_row["evs"] if evs_row else None
+                ORDER BY usage_percent DESC
+                """, (snapshot_id, name))]
+            nature, evs = choose_coherent_spread(
+                natures, spreads, move_categories(moves), item)
 
             usage_row = conn.execute(
                 """
@@ -108,7 +346,12 @@ def build_meta_sets(fmt: str = USAGE_TARGET_FORMAT, source: str | None = None) -
             )
             inserted += 1
 
+        if carried:
+            print(f"[build_meta] 技データが薄い {carried}種 は直近の健全な型を引き継ぎ "
+                  f"(閾値 {META_THIN_MOVE_PCT:.0f}%)。使用率{META_THIN_LOG_MIN_USAGE:.0f}%以上: "
+                  + (", ".join(carried_major) if carried_major else "なし"))
         conn.commit()
+        _report_axis_drift(conn, snapshot_id)
 
     print(f"[build_meta] meta_sets 生成完了: snapshot_id={snapshot_id}, rows={inserted}")
     return inserted

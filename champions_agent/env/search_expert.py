@@ -175,7 +175,7 @@ def _meta_move_ids(species: str) -> list:
         except Exception:
             pass
     key = _squash(species)
-    for k in (key, key.removesuffix("megay").removesuffix("megax")
+    for k in (key, key.removesuffix("megay").removesuffix("megax").removesuffix("megaz")
               .removesuffix("mega")):
         if k in _meta_moves_cache:
             return _meta_moves_cache[k]
@@ -232,8 +232,214 @@ def search_options(battle, depth: int = 1,
                   depth=depth)
 
 
+_est_cache: dict = {}
+
+
+_battle_est: dict = {}   # (battle_tag, species) -> SpreadEstimator (観測更新つき)
+
+
+def _parse_hp(token: str) -> Optional[float]:
+    """poke-env イベントの HP 表記 ("45/100", "123/200 brn", "0 fnt") -> 0..1"""
+    try:
+        head = str(token).split(" ")[0]
+        if "/" in head:
+            a, b = head.split("/", 1)
+            return max(0.0, min(1.0, float(a) / float(b)))
+        return 0.0 if head in ("0", "fnt") else None
+    except Exception:
+        return None
+
+
+def _turn_events(battle, turn: int) -> list:
+    obs = getattr(battle, "observations", None) or {}
+    o = obs.get(turn)
+    return list(getattr(o, "events", None) or [])
+
+
+def update_estimator_from_events(est, battle, my_view, opp_view, my_field,
+                                 opp_field) -> None:
+    """直前ターンの観測 (先後・被ダメージ・持ち物) で相手型の仮説分布を更新する。
+
+    - 先後: 両者が技を使い、優先度が同じなら、どちらが先に動いたかで
+      実効素早さの上下 (observe_speed)
+    - 被ダメージ: 自分の攻撃技の直後の相手 |-damage| から観測ダメージ%を得て
+      仮説ごとの耐久と照合 (observe_damage、[from] つきの間接ダメージは除外)
+    - 持ち物: 相手の持ち物が判明していれば他の持ち物の仮説を除外 (observe_item)
+    同じターンは一度だけ処理する。
+    """
+    turn = getattr(battle, "turn", 0) or 0
+    if turn <= 1 or getattr(est, "_last_update_turn", None) == turn:
+        return
+    est._last_update_turn = turn
+    role = getattr(battle, "player_role", None) or "p1"
+    opp_role = "p2" if role == "p1" else "p1"
+    events = _turn_events(battle, turn - 1)
+    if not events:
+        return
+    from advisor.dex import get_dex
+    from advisor.damage import effective_speed
+    dex = get_dex()
+    opp_state = {"boosts": dict(opp_view.boosts or {}),
+                 "ability_id": opp_view.ability}
+    rain = (getattr(opp_field, "weather", None) == "rain")
+
+    # --- 先後 ---
+    moves = [(str(ev[2])[:2], _squash(ev[3])) for ev in events
+             if len(ev) >= 4 and ev[1] == "move"]
+    if len(moves) >= 2 and {moves[0][0], moves[1][0]} == {role, opp_role}:
+        m_me = next(m for r, m in moves if r == role)
+        m_op = next(m for r, m in moves if r == opp_role)
+        pr_me = (dex.move(m_me) or {}).get("priority") or 0
+        pr_op = (dex.move(m_op) or {}).get("priority") or 0
+        if pr_me == pr_op:
+            try:
+                est.observe_speed(moves[0][0] == opp_role,
+                                  effective_speed(my_view, my_field),
+                                  opp_state, rain=rain)
+            except Exception:
+                pass
+
+    # --- 被ダメージ (自分の攻撃技 → 相手の直接ダメージ) ---
+    my_move, before, after = None, None, None
+    for ev in events:
+        if len(ev) >= 4 and ev[1] == "move" and str(ev[2]).startswith(role):
+            my_move, before, after = _squash(ev[3]), None, None
+            continue
+        if my_move and len(ev) >= 4 and ev[1] == "-damage" \
+                and str(ev[2]).startswith(opp_role):
+            if any(str(x).startswith("[from]") for x in ev[4:]):
+                continue
+            after = _parse_hp(ev[3])
+            break
+    if my_move and after is not None:
+        mv = dex.move(my_move)
+        prev = getattr(est, "_opp_hp_before", None)
+        if mv and str(mv.get("category") or "").lower() != "status" \
+                and prev is not None and prev > after:
+            try:
+                est.observe_damage(my_view, True, my_move,
+                                   (prev - after) * 100.0, opp_state, opp_field)
+            except Exception:
+                pass
+    est._opp_hp_before = float(opp_view.hp_frac or 0.0)
+
+    # --- 持ち物 ---
+    if opp_view.item:
+        try:
+            est.observe_item(opp_view.item)
+        except Exception:
+            pass
+
+
+def _belief_views(opp_view, species: str, k: int, battle=None,
+                  updates: bool = False, my_view=None, my_field=None,
+                  opp_field=None) -> list:
+    """相手型の仮説分布の上位k仮説で [(重み, MonView)] を作る。
+
+    updates=False: 事前分布 (使用率由来) のみ (P7 の測定条件)。
+    updates=True (P7'): 対戦ごとの推定器を直前ターンの観測で更新してから使う。
+    k=1 は最尤仮説 (MAP) 1つ、k=0 は従来の攻撃系252振り単一仮定 (呼び出し側で分岐)。
+    持ち物は未判明のときだけ仮説の値を使う。
+    """
+    if k <= 0 or opp_view is None or not species:
+        return []
+    from advisor.ev_infer import SpreadEstimator, _nature_mult
+    if updates and battle is not None:
+        key = (getattr(battle, "battle_tag", ""), species)
+        est = _battle_est.get(key)
+        if est is None:
+            est = SpreadEstimator(species)
+            _battle_est[key] = est
+        update_estimator_from_events(est, battle, my_view, opp_view,
+                                     my_field, opp_field)
+    else:
+        est = _est_cache.get(species)
+        if est is None:
+            est = SpreadEstimator(species)
+            _est_cache[species] = est
+    hyps = est.top_k(k)
+    import copy as _copy
+    worlds = []
+    for h in hyps:
+        v = _copy.copy(opp_view)
+        v.ev = dict(h["evs"])
+        v.nature = _nature_mult(h["nature"])
+        if not opp_view.item and h["item"]:
+            v.item = h["item"]
+        worlds.append((h["weight"], v))
+    return worlds
+
+
+_shown_hp: dict = {}     # battle_tag -> (rng, 表示HP)  (P8 ノイズ注入)
+
+
+def _opp_moves_in_turns(battle, turns) -> list:
+    """指定ターン群で相手が使った技ID列 (poke-env の観測イベントから)"""
+    role = getattr(battle, "player_role", None) or "p1"
+    opp_role = "p2" if role == "p1" else "p1"
+    out = []
+    obs = getattr(battle, "observations", None) or {}
+    for t in turns:
+        o = obs.get(t)
+        for ev in (getattr(o, "events", None) or []):
+            if len(ev) >= 4 and ev[1] == "move" and str(ev[2]).startswith(opp_role):
+                out.append(_squash(ev[3]))
+    return out
+
+
+def displayed_hp(battle, true_hp: float, noise: float,
+                 estimate: bool = False, my_view=None, opp_view=None,
+                 opp_field=None) -> float:
+    """自分アクティブの「表示HP」を返す (P8 センサ雑音の注入)。
+
+    noise>0 のとき、各決定で確率 noise で前回の表示のまま固着させる
+    (画面の更新取り逃しを模す)。乱数は対戦タグで決定的に種付けし、
+    同じ相手列の別腕で近い雑音系列になるようにする。0 なら真値。
+    estimate=True (P10): 固着中は、最後の実読み以降に相手が使った攻撃技の
+    期待ダメージ (ダメージ計算の平均×命中率) を表示から引く
+    (vision/events._apply_expected_damage と同じ機構をシムで再現)。
+    """
+    if noise <= 0:
+        return true_hp
+    import random as _random
+    tag = getattr(battle, "battle_tag", "") or ""
+    turn = getattr(battle, "turn", 0) or 0
+    ent = _shown_hp.get(tag)
+    if ent is None:
+        ent = [_random.Random(sum(map(ord, tag)) & 0xFFFF), true_hp, turn]
+        _shown_hp[tag] = ent
+    rng, shown, fresh_turn = ent[0], ent[1], ent[2]
+    if rng.random() < noise and shown is not None:
+        if not estimate or my_view is None or opp_view is None:
+            return shown        # 固着: 前回表示のまま
+        # 推定: 実読み以降の相手の攻撃技ぶんを引く
+        from advisor.damage import calc_damage
+        from advisor.dex import get_dex
+        dex = get_dex()
+        total = 0.0
+        for mid in _opp_moves_in_turns(battle, range(fresh_turn, turn)):
+            mv = dex.move(mid)
+            if not mv or str(mv.get("category") or "").lower() == "status":
+                continue
+            try:
+                d = calc_damage(opp_view, my_view, mid, opp_field)
+            except Exception:
+                continue
+            acc = mv.get("accuracy")
+            acc_f = float(acc) / 100.0 if isinstance(acc, (int, float)) \
+                and not isinstance(acc, bool) and 0 < acc < 100 else 1.0
+            total += max(0.0, float(d.get("avg") or 0.0)) * acc_f / 100.0
+        return max(0.01, shown - total)
+    ent[1], ent[2] = true_hp, turn
+    return true_hp
+
+
 def decide(battle, depth: int = 1, by: str = "recommended",
-           use_value: bool = False) -> Optional[dict]:
+           use_value: bool = False, belief_k: int = 0,
+           opp_prior_mix: float = 0.0, sensor_noise: float = 0.0,
+           sensor_q: float = 0.0, sensor_delta: float = 0.25,
+           search_workers: int = 1, sensor_estimate: bool = False,
+           belief_updates: bool = False) -> Optional[dict]:
     """探索で最善行動を選ぶ。
 
     返り値: {"kind": "move"|"switch", "move": Move|None, "mega": bool,
@@ -245,6 +451,15 @@ def decide(battle, depth: int = 1, by: str = "recommended",
         効果が参照する _best に依存し不安定なため既定はOFF
         (2026-07-26は0.41→0.64と改善、2026-07-27は0.44→0.34と劣化)。
         有効化する場合は check_search_expert --no-value との比較必須
+    belief_k: 相手型の仮説数 (P7)。0=従来の単一仮定、1=最尤仮説、
+        2以上=多世界探索 (仮説重みで統合)。学習の相手としては既定0
+        (訓練分布を変えない)。診断 (check_search_expert --belief) で使う
+    opp_prior_mix: 相手行動の事前分布の混合率 λ (P6-b)。0 で使用率のみ。
+        自己対戦方策 (rl_bridge.policy_of_sim) を相手の立場で評価し、
+        根の相手行動分布に (1-λ)·使用率 + λ·方策 で混ぜる
+    sensor_noise / sensor_q / sensor_delta (P8): 自分アクティブの表示HPを
+        確率 sensor_noise で固着させる雑音を注入し、探索は確率 sensor_q で
+        「表示より sensor_delta 低い」世界も持って統合する。
     """
     active = battle.active_pokemon
     opp_active = battle.opponent_active_pokemon
@@ -256,7 +471,15 @@ def decide(battle, depth: int = 1, by: str = "recommended",
 
     my_bench, my_bench_mons = _bench(battle.team.values(), active, own=True)
     opp_bench, _ = _bench(battle.opponent_team.values(), opp_active)
-    me = SimSide(active=my_view, active_hp=my_view.hp_frac, bench=my_bench,
+    # P8: 表示HPの固着ノイズ (探索が見る自分HPを真値から乖離させる)。
+    # P10: sensor_estimate で固着中の技イベント推定を再現する
+    shown = displayed_hp(battle, my_view.hp_frac, sensor_noise,
+                         estimate=sensor_estimate, my_view=my_view,
+                         opp_view=opp_view,
+                         opp_field=_field_view(battle,
+                                               battle.opponent_side_conditions))
+    my_view.hp_frac = shown
+    me = SimSide(active=my_view, active_hp=shown, bench=my_bench,
                  stealth_rock="STEALTH_ROCK" in _names(battle.side_conditions))
     opp = SimSide(active=opp_view, active_hp=opp_view.hp_frac, bench=opp_bench,
                   stealth_rock="STEALTH_ROCK" in
@@ -266,24 +489,59 @@ def decide(battle, depth: int = 1, by: str = "recommended",
     my_moves = list(available.keys())[:4]
     my_field = _field_view(battle, battle.side_conditions)
 
-    # RL価値関数の葉評価ブレンド (アドバイザーの_run_searchと同じ構成)
-    leaf_fn = None
+    # RL価値関数の葉評価ブレンド (アドバイザーの_run_searchと同じ構成)。
+    # 並列実行のため文脈 (leaf_ctx) も持つ
+    leaf_fn, leaf_ctx = None, None
     if use_value and depth >= 2:
+        from advisor.search import make_rl_leaf_fn
+        leaf_ctx = {"my_moves": my_moves, "field": my_field,
+                    "turn": getattr(battle, "turn", None) or 5}
+        leaf_fn = make_rl_leaf_fn(leaf_ctx)
+        if leaf_fn is None:
+            leaf_ctx = None
+
+    opp_field = _field_view(battle, battle.opponent_side_conditions)
+    pool = _opp_move_pool(opp_active)
+    # P6-b: 相手行動の事前分布 (相手を me に置いた自己対戦方策の行動分布)
+    opp_prior = None
+    if opp_prior_mix > 0:
         try:
-            from advisor.rl_bridge import _load_model, value_of_sim
-            if _load_model() is not None:
-                turn = getattr(battle, "turn", None) or 5
-
-                def leaf_fn(m2, o2):
-                    return value_of_sim(m2, o2, my_moves, my_field, turn=turn)
+            from advisor.rl_bridge import policy_of_sim
+            opp_prior = policy_of_sim(opp, me, [m for m, _ in pool][:4],
+                                      opp_field,
+                                      turn=getattr(battle, "turn", None) or 5)
         except Exception:
-            leaf_fn = None
-
-    result = search(me, opp, my_moves, _opp_move_pool(opp_active),
-                    my_field=my_field,
-                    opp_field=_field_view(battle,
-                                          battle.opponent_side_conditions),
-                    depth=depth, leaf_value_fn=leaf_fn)
+            opp_prior = None
+    # 世界の積: 相手型の仮説 (P7) × 自分HPのセンサ世界 (P8)
+    from advisor.search import aggregate_worlds, sensor_worlds
+    opp_worlds = _belief_views(opp_view, opp_active.species, belief_k,
+                               battle=battle, updates=belief_updates,
+                               my_view=my_view, my_field=my_field,
+                               opp_field=opp_field) \
+        or [(1.0, opp_view)]
+    me_worlds = sensor_worlds(me, sensor_q, sensor_delta)
+    combos = [(w_m * w_o, me_m, view_o)
+              for w_m, me_m in me_worlds for w_o, view_o in opp_worlds]
+    result = None
+    if len(combos) > 1:
+        from advisor.search import run_world_searches
+        jobs, ws = [], []
+        for w_c, me_c, view_o in combos:
+            opp_k = SimSide(active=view_o, active_hp=opp.active_hp,
+                            bench=opp.bench, stealth_rock=opp.stealth_rock)
+            jobs.append(dict(me=me_c, opp=opp_k, my_moves=my_moves,
+                             opp_move_pool=pool, my_field=my_field,
+                             opp_field=opp_field, depth=depth,
+                             leaf_ctx=leaf_ctx, opp_prior=opp_prior,
+                             prior_mix=opp_prior_mix))
+            ws.append(w_c)
+        outs = run_world_searches(jobs, workers=search_workers)
+        result = aggregate_worlds(outs, ws, coverage=sum(ws))
+    if result is None:
+        result = search(me, opp, my_moves, pool,
+                        my_field=my_field, opp_field=opp_field,
+                        depth=depth, leaf_value_fn=leaf_fn,
+                        opp_prior=opp_prior, prior_mix=opp_prior_mix)
 
     switchable = {p.species for p in (battle.available_switches or [])}
     team_order = list(battle.team.values())[:6]

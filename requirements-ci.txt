@@ -1,0 +1,7 @@
+# CI (Linux) 用の最小依存。フルの実行環境は requirements.txt を参照。
+# CIサブセット (scripts/ci_tests.sh) は OCRバックエンド・RLモデル・実データ
+# 非依存のテストのみを回すため、画像処理の土台だけで足りる
+numpy>=1.24,<2
+opencv-python-headless>=4.8
+requests>=2.31
+

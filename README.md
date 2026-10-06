@@ -7,7 +7,27 @@
 - 残タスク・レギュレーション変更時の対応・拡張方針: [ROADMAP.md](ROADMAP.md)
 - 状態抽出: `vision/` (シーン分類 / OCR / イベント辞書 / BattleStateV2)
 - アドバイス: `advisor/` (SV準拠ダメージ計算 + 使用率DBによる型予測 + 期待値評価)
-- 強化学習基盤 (実験用): `champions_agent/` (poke-env + Stable-Baselines3)
+- 強化学習: `champions_agent/` (poke-env + Stable-Baselines3。助言へ融合済み、下記参照)
+
+## 設計判断 (なぜこの構成か)
+
+技術選定は「先行事例の調査 → 事前登録した実測 → 採用/棄却」で決めており、
+棄却した判断も記録している。主要な判断:
+
+1. **助言の核は探索/期待値ベース。** 2025年のPokéAgent Challenge (NeurIPS) で
+   探索ベース (ダメージ計算+MCTS) の foul-play が強化学習 (Metamon) やLLMを
+   上回った知見を踏まえ、ダメージ計算+相手型予測+択のミニマックス評価を核にした
+   ([ARCHITECTURE.md](ARCHITECTURE.md) §2)。
+2. **強化学習は「対抗馬」ではなく「融合」。** 24時間の自己対戦で鍛えた方策の
+   行動確率を助言スコアにブレンドする。配布方策の切替は事前登録実験で判定し、
+   EMA平均方策を採用した (P5: current/EMAを同一ラウンドで対に測る2回×計18,000戦、
+   差+0.027・z=5.3。学習中方策の過渡振動に配布が引きずられない性質が決め手)。
+3. **効かなかった介入は棄却して記録する。** 相手プールへの歴史的アンカー常駐 (P1) は
+   7日間の事前登録測定で +0.092 とゲート (+0.10) に届かず、撤回した。
+   判断履歴は `champions_agent/train/training_changes.json` に全件残している。
+4. **画面認識は「認識精度」でなく「提案への影響」で評価する。** 決定再生ハーネス
+   (`scripts/advice_replay.sh`) で認識誤りごとの推奨反転率を実測し、
+   認識改善の優先順位をその感度表で決める (docs/KNOWN_ISSUES.md)。
 
 ---
 
@@ -34,6 +54,9 @@ bash champions_agent/scripts/update_usage_db.sh
 > **ポート構成**: アドバイザーサーバー=8000 / フロントエンド=3000 /
 > 学習用Showdown=**8100** (環境変数 `SHOWDOWN_PORT` で変更可)。
 > ポートを分けているため**実運用 (ライブアドバイス) と学習は同時に実行できます**。
+> 8000 / 3000 は `config/ports.env` の既定で、別のプロセスが使っていれば起動スクリプト
+> (`scripts/start_all_nohup.sh` 等) が次の空きポートへ自動でずらし、表示した URL を開けばよい
+> (フロントは `config/ports.local.js` からアドバイザーのポートを読む。手動指定は URL の `?api=<port>`)。
 
 ---
 

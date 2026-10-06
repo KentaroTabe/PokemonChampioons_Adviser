@@ -25,6 +25,7 @@ poke-env (0.10系) の SinglesEnv を利用した、シングルバトル専用�
 """
 from __future__ import annotations
 
+import logging
 import os
 import random
 
@@ -45,9 +46,13 @@ from champions_agent.agent import encoders
 from champions_agent.agent.spaces import BATTLE_OBS_DIM
 from champions_agent.config import (
     DEFAULT_PLAY_STYLE, PLAY_STYLES, SHOWDOWN_PORT,
+    TRAIN_BATTLE_PRUNE_EVERY, TRAIN_BATTLE_PRUNE_KEEP,
     TRAINING_BATTLE_FORMAT, TRAINING_TEAM_SIZE,
 )
 from champions_agent.env.reward import get_reward_config
+# 純粋な関数 (poke-env を使わない) は showdown_env_pure に分けた (CI の最小依存でテストするため。2026-10-06)。
+# 従来どおりこのモジュールからも同じ名前で参照できる
+from champions_agent.env.showdown_env_pure import is_ignorable_unknown_effect_warning, prune_finished_battles
 from champions_agent.env.team_builder import ChampionsTeambuilder
 
 # アドバイザーのバックエンド (8000) と併用するため、学習用Showdownは別ポートで動かす
@@ -59,6 +64,17 @@ TrainingServerConfiguration = ServerConfiguration(
 # poke-envの静的データへチャンピオンズの新フォーム/リバランス技を注入する
 from champions_agent.env import champions_dex_patch
 champions_dex_patch.apply()
+
+
+class _IgnoreKnownUnknownEffects(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            return not is_ignorable_unknown_effect_warning(record.getMessage())
+        except Exception:
+            return True
+
+
+logging.getLogger("poke-env").addFilter(_IgnoreKnownUnknownEffects())
 
 
 def compute_action_mask(battle) -> np.ndarray:
@@ -202,17 +218,16 @@ def apply_model_teampreview(player, path=None) -> None:
     モデルが読めないときは相性ベースに落ちる (無選出で壊れないように)。
     """
     import types
-    from champions_agent.agent.selection_model import (
-        GENERAL_MODEL_PATH, predict_best,
-    )
-    model_path = path or GENERAL_MODEL_PATH
+    from champions_agent.agent import selection_dispatch as SD
+    # 版 (v1 / v3 = メガシンカ込み) は config SELECTION_FEATURES。path 指定は候補専用モデル等 (その版で作ったもの)
+    model_path = path or SD.general_model_path()
 
     def _teampreview(self, battle):
         try:
             mons = list(battle.team.values())
             mine = [p.species for p in mons]
             opp = [p.species for p in battle.opponent_team.values()]
-            best = predict_best(mine, opp, model_path)
+            best = SD.predict_best(mine, opp, model_path)
             if best is not None:
                 perm = best[0]
                 # Showdown は1始まりの並びで6体すべてを並べる (先頭3体が選出)
@@ -248,11 +263,31 @@ def apply_train_teampreview(player) -> None:
 
 
 class MaskedSingleAgentWrapper(SingleAgentWrapper):
-    """SingleAgentWrapper + MaskablePPO用の action_masks() 提供"""
+    """SingleAgentWrapper + MaskablePPO用の action_masks() 提供。
+
+    あわせて poke-env が保持し続ける終了済みバトルを一定エピソードごとに
+    破棄する (プレイヤー3体: agent1 / agent2 / 相手プレイヤー)。
+    """
+
+    def __init__(self, env, opponent):
+        super().__init__(env, opponent)
+        self._resets_since_prune = 0
 
     def action_masks(self) -> np.ndarray:
         battle = getattr(self.env, "battle1", None)
         return compute_action_mask(battle)
+
+    def reset(self, *args, **kwargs):
+        out = super().reset(*args, **kwargs)
+        self._resets_since_prune += 1
+        if self._resets_since_prune >= TRAIN_BATTLE_PRUNE_EVERY:
+            self._resets_since_prune = 0
+            prune_finished_battles(
+                (getattr(self.env, "agent1", None),
+                 getattr(self.env, "agent2", None),
+                 self.opponent),
+                keep=TRAIN_BATTLE_PRUNE_KEEP)
+        return out
 
 
 class ChampionsSinglesEnv(SinglesEnv):
@@ -271,8 +306,11 @@ class ChampionsSinglesEnv(SinglesEnv):
         # v7ブロックは末尾追記なので、切り詰めれば正確にv6になる。
         # ⚠ 既定をv7にしてはいけない: 本番の388チェックポイントのresumeが
         # 観測空間不一致で「非互換→退避→新規学習」になり方策が消える
-        self._obs_dim = (BATTLE_OBS_DIM
-                         if os.environ.get("TRAIN_OBS", "v6") == "v7"
+        # v8 (メガシンカの推定、436) も末尾追記。v7 は 420 (BATTLE_OBS_DIM_V7)
+        from champions_agent.agent.spaces import BATTLE_OBS_DIM_V7
+        obs_ver = os.environ.get("TRAIN_OBS", "v6")
+        self._obs_dim = (BATTLE_OBS_DIM if obs_ver == "v8"
+                         else BATTLE_OBS_DIM_V7 if obs_ver == "v7"
                          else 388)
         obs_space = Box(low=-np.inf, high=np.inf, shape=(self._obs_dim,),
                         dtype=np.float32)
@@ -377,7 +415,8 @@ def make_training_env(battle_format: str = TRAINING_BATTLE_FORMAT,
                        opp_play_style_pool: list[str] | None = None,
                        team_size: int = TRAINING_TEAM_SIZE,
                        opponent_mode: str = "auto",
-                       seed: int | None = None):
+                       seed: int | None = None,
+                       own_team_text: str | None = None):
     """自己対戦(1体のRLエージェント vs ランダム/メタチームプレイヤー)用の環境を構築する。
 
     own_play_style: 学習対象エージェントの性格('offense'/'cycle'/'stall'/'balance')。
@@ -417,6 +456,10 @@ def make_training_env(battle_format: str = TRAINING_BATTLE_FORMAT,
                 size=team_size, play_style=own_play_style, rng=rng)
         except Exception as e:
             print(f"[showdown_env] 自分側の上位構築チームは無効 (メタ生成のみ): {e}")
+    if own_team_text:
+        # 構築システムの行動方策 adapter: 候補チームを固定して微調整する (メタ生成/上位構築の混合は使わない)
+        from poke_env.teambuilder import ConstantTeambuilder
+        own_teambuilder = ConstantTeambuilder(own_team_text)
     opp_teambuilder = ChampionsTeambuilder(size=team_size,
                                             style_pool=opp_play_style_pool,
                                             rng=rng) if use_meta_team else None
@@ -476,6 +519,30 @@ def make_training_env(battle_format: str = TRAINING_BATTLE_FORMAT,
     except Exception as e:
         print(f"[showdown_env] 上位構築チームは無効 (メタ生成のみ): {e}")
 
+    # 実戦の相手バンク (2026-09-09): 実際に当たった構成を TRAIN_REAL_OPP_MIX の確率で相手にし、
+    # その構成で観測した選出・先発の分布から相手に選ばせる (机上の相性ヒューリスティクス選出の補正)。
+    # バンクが無い/少ないときは従来どおり。変更は training_changes.json に記録済み
+    real_tb, real_bank = None, None
+    try:
+        from champions_agent.config import TRAIN_REAL_OPP_MIX
+        from champions_agent.env.real_opponents import RealBankTeambuilder, load_bank
+        real_bank = load_bank()
+        _real = RealBankTeambuilder(real_bank, rng=rng)
+        if _real.enabled and TRAIN_REAL_OPP_MIX > 0 and opp_team is not None:
+            from poke_env.teambuilder import Teambuilder as _TB
+            real_tb = _real
+            _base_opp_team = opp_team
+
+            class _RealMixedTeambuilder(_TB):
+                def yield_team(self_inner) -> str:
+                    if rng.random() < TRAIN_REAL_OPP_MIX:
+                        return real_tb.yield_team()
+                    return _base_opp_team.yield_team()
+
+            opp_team = _RealMixedTeambuilder()
+    except Exception as e:
+        print(f"[showdown_env] 実戦バンクは無効 (従来の相手のみ): {e}")
+
     pool = OpponentPool()
     opponent = make_pool_opponent(
         pool,
@@ -484,8 +551,12 @@ def make_training_env(battle_format: str = TRAINING_BATTLE_FORMAT,
         server_configuration=TrainingServerConfiguration,
         team=opp_team,
     )
+    if real_tb is not None:
+        from champions_agent.env.real_opponents import apply_real_pick_teampreview
+        apply_real_pick_teampreview(opponent, real_bank, rng)
     print(f"[showdown_env] 対戦相手: selfplayプール{len(pool.entries())}件 + "
-          f"ヒューリスティクス強敵 + ランダム (混合)")
+          f"ヒューリスティクス強敵 + ランダム (混合)"
+          + (f" + 実戦バンク {len(real_tb.teams)} 構成 (確率 {TRAIN_REAL_OPP_MIX})" if real_tb is not None else ""))
 
     return MaskedSingleAgentWrapper(env, opponent)
 

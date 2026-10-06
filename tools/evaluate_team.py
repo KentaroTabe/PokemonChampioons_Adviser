@@ -20,6 +20,8 @@ from __future__ import annotations
 import asyncio
 import re
 import sys
+from pathlib import Path
+from typing import Optional
 
 from champions_agent.data import database as db
 from champions_agent.env.team_builder import (
@@ -65,31 +67,66 @@ def build_team_text(species_list: list) -> str:
         r = resolver.resolve_species(name, cutoff=0.8)
         wanted.append(_to_id(r[1] if r else name))
 
+    from champions_agent.data.build_meta import choose_coherent_spread
+
+    def _clause_alternative(conn, snapshot_id, name, used):
+        """使用率順で未使用の持ち物を返す (無ければNone)"""
+        for r in conn.execute(
+                "SELECT item_name FROM item_usage "
+                "WHERE snapshot_id=? AND pokemon_name=? "
+                "ORDER BY usage_percent DESC", (snapshot_id, name)):
+            alt = _sanitize_item(r["item_name"])
+            if alt and alt not in used:
+                return alt
+        return None
+
+    def _rederive_spread(conn, snapshot_id, name, moves, item):
+        """持ち物が変わった枠の (性格, 配分) を整合再導出する"""
+        natures = [(r["nature"], r["usage_percent"]) for r in conn.execute(
+            "SELECT nature, usage_percent FROM spread_usage "
+            "WHERE snapshot_id=? AND pokemon_name=? AND nature IS NOT NULL "
+            "ORDER BY usage_percent DESC", (snapshot_id, name))]
+        spreads = [(r["evs"], r["usage_percent"]) for r in conn.execute(
+            "SELECT evs, usage_percent FROM spread_usage "
+            "WHERE snapshot_id=? AND pokemon_name=? AND evs IS NOT NULL "
+            "ORDER BY usage_percent DESC", (snapshot_id, name))]
+        from champions_agent.data.build_meta import move_categories
+        return choose_coherent_spread(
+            natures, spreads, move_categories(moves), item)
+
+    sets, used_items, missing = [], set(), []
     with db.get_connection() as conn:
         snapshot_id = db.latest_snapshot_id(conn, fmt=USAGE_TARGET_FORMAT)
         pool = _fetch_meta_pool(conn, snapshot_id)
-    by_id = {}
-    for row in pool:
-        by_id.setdefault(_to_id(row["pokemon_name"]), row)
+        by_id = {}
+        for row in pool:
+            by_id.setdefault(_to_id(row["pokemon_name"]), row)
 
-    sets, used_items, missing = [], set(), []
-    for sid in wanted:
-        row = by_id.get(sid)
-        if row is None:
-            missing.append(sid)
-            continue
-        item = _sanitize_item(row["item_name"])
-        if item in used_items:   # アイテムクローズ
-            item = None
-        if item:
-            used_items.add(item)
-        sets.append(PokemonSet(
-            species=to_showdown_name(_sanitize_species(row["pokemon_name"])),
-            ability=row["ability_name"], item=item,
-            tera_type=row["tera_type"], nature=row["nature"],
-            evs=row["evs"],
-            moves=[row["move1"], row["move2"], row["move3"], row["move4"]],
-        ))
+        for sid in wanted:
+            row = by_id.get(sid)
+            if row is None:
+                missing.append(sid)
+                continue
+            moves = [row["move1"], row["move2"], row["move3"], row["move4"]]
+            item = _sanitize_item(row["item_name"])
+            nature, evs = row["nature"], row["evs"]
+            if item in used_items:   # アイテムクローズ: 未使用の実測上位へ
+                item = _clause_alternative(
+                    conn, snapshot_id, row["pokemon_name"], used_items)
+                if item:
+                    # 持ち物の系統が変わると型が縫い合わせになるため、
+                    # 性格/配分を新しい持ち物に整合させて選び直す
+                    nature, evs = _rederive_spread(
+                        conn, snapshot_id, row["pokemon_name"], moves, item)
+            if item:
+                used_items.add(item)
+            sets.append(PokemonSet(
+                species=to_showdown_name(_sanitize_species(row["pokemon_name"])),
+                ability=row["ability_name"], item=item,
+                tera_type=row["tera_type"], nature=nature,
+                evs=evs,
+                moves=moves,
+            ))
     if missing:
         raise RuntimeError(f"meta_setsに型がない種族: {missing}")
     return "\n\n".join(s.to_showdown_text() for s in sets)
@@ -179,19 +216,68 @@ def team_text_to_ja(team_text: str) -> str:
     return "\n\n".join(out_blocks)
 
 
-def current_team_entries() -> dict:
+def _latest_selection_roster(log_dir=None) -> list:
+    """直近の対戦ログの選出画面レコードから自分の6体 (日本語名) を返す。
+
+    パーティ変更直後は「選出履歴」や「技登録の有無」による推定が旧構成に
+    引きずられる (2026-08-22実測: マスカーニャの登録が空のため、推定6体に
+    旧メンバーのキラフロルが選ばれ、選出データ収集が旧構成で走った)。
+    選出画面のロスターは実際に使っている6体そのものなので最優先する。
+    """
+    import glob as _glob
+    import json as _json
+    base = Path(log_dir) if log_dir else \
+        Path(__file__).resolve().parent.parent / "logs" / "battles"
+    files = sorted(_glob.glob(str(base / "battle_*.jsonl")), reverse=True)
+    for path in files[:5]:
+        try:
+            with open(path, encoding="utf-8") as f:
+                roster = None
+                for line in f:
+                    r = _json.loads(line)
+                    if r.get("type") != "scene" or \
+                            r.get("scene") != "selection":
+                        continue
+                    party = ((r.get("state") or {}).get("player") or {}) \
+                        .get("party") or []
+                    names = [p.get("ja") for p in party if p.get("ja")]
+                    if len(names) == 6:
+                        roster = names   # 同一対戦内の最後の選出画面を採用
+                if roster:
+                    return roster
+        except (OSError, _json.JSONDecodeError):
+            continue
+    return []
+
+
+def current_team_entries(roster=None) -> dict:
     """my_team.json から「現在のパーティ6体」ぶんのエントリを選ぶ。
 
-    もっと見る自動登録の蓄積で7体以上残ることがある (旧チームは型ライブラリ
-    として保持する仕様)。7体以上のままチーム化するとShowdownに拒否され、
-    開始しない対戦を待ち続けてハングする (2026-07-26実測: 9体で発生)。
-    直近の対戦ログの自選出に登場した種族→技登録済み→登録順、の優先で絞る。
+    直近の対戦ログの選出画面で読んだ 6 体 (roster、省略時は _latest_selection_roster) が実際に使っている
+    パーティそのもの。未登録の種は空エントリで入れる (build_myteam_text が使用率で補完する)。
+    2026-09-16: 登録に無い種を落として「登録順」で埋めていたため、チーム変更後 (ミミロップ/イダイトウ/イエッサン/
+    サーフゴー未登録) の改善案の測定が旧チームで走った。
+
+    ロスターが取れないときの従来手順: もっと見る自動登録の蓄積で7体以上残ることがある (旧チームは型ライブラリ
+    として保持する仕様)。7体以上のままチーム化するとShowdownに拒否され、開始しない対戦を待ち続けてハングする
+    (2026-07-26実測: 9体で発生)。自選出に登場した種族→技登録済み→登録順、の優先で絞る。
     """
     from advisor.my_team import _load
+    from champions_agent.config import PARTY_SIZE
     team = _load()
-    if len(team) <= 6:
+    if roster is None:
+        roster = _latest_selection_roster()
+    if roster and len(roster) == PARTY_SIZE:
+        missing = [ja for ja in roster if ja not in team]
+        print(f"[my_team] 直近の選出ロスターを現在の{PARTY_SIZE}体にする: {' / '.join(roster)}"
+              + (f" (未登録: {' / '.join(missing)} → 使用率で補完)" if missing else ""))
+        return {ja: dict(team.get(ja) or {}) for ja in roster}
+    if len(team) <= PARTY_SIZE:
         return dict(team)
     order = []
+    for ja in (roster or []):
+        if ja in team and ja not in order:
+            order.append(ja)
     try:
         from tools.analyze_battles import load_battles
         for b in reversed(load_battles(last=20)):
@@ -206,10 +292,27 @@ def current_team_entries() -> dict:
     for ja in team:
         if ja not in order:
             order.append(ja)
-    picked = order[:6]
-    print(f"[my_team] 登録{len(team)}体から現在の6体を推定: "
+    picked = order[:PARTY_SIZE]
+    print(f"[my_team] 登録{len(team)}体から現在の{PARTY_SIZE}体を推定: "
           f"{' / '.join(picked)}")
     return {ja: team[ja] for ja in picked}
+
+
+def nature_en_of(value) -> Optional[str]:
+    """登録の性格 (日本語 25 種 or 英語 id) → Showdown の表記 (Naive 等)。解決できなければ None。
+    名前表 (jp_names.json の natures) を唯一の源にする (2026-10-02: 手書きの 12 種の表に むじゃき が無く、登録ガブリアスの
+    性格行が落ちて参照チームが無補正で測られていた。9/22 の登録以降の run の参照に影響)"""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    from vision.normalize import NameResolver
+    r = NameResolver().resolve(text, "natures", cutoff=0.9)
+    if r:
+        return str(r[1]).capitalize()
+    en = _to_id(text)
+    if en and NameResolver().ja_of("natures", en):
+        return en.capitalize()
+    return None
 
 
 def build_myteam_text() -> str:
@@ -224,30 +327,51 @@ def build_myteam_text() -> str:
     ev_keys = {"h": "HP", "a": "Atk", "b": "Def", "c": "SpA", "d": "SpD",
                "s": "Spe", "hp": "HP", "atk": "Atk", "def": "Def",
                "spa": "SpA", "spd": "SpD", "spe": "Spe"}
-    nature_en = {"いじっぱり": "Adamant", "ようき": "Jolly", "ひかえめ": "Modest",
-                 "おくびょう": "Timid", "ずぶとい": "Bold", "わんぱく": "Impish",
-                 "おだやか": "Calm", "しんちょう": "Careful", "のんき": "Relaxed",
-                 "なまいき": "Sassy", "ゆうかん": "Brave", "れいせい": "Quiet"}
     blocks, used_items = [], set()
+    from advisor.my_team import registered_species_id
     for ja, entry in team.items():
         r = resolver.resolve_species(ja, cutoff=0.85)
         if not r:
             continue
-        species = to_showdown_name(_sanitize_species(r[1]))
+        # 手入力の「種族ID」(フォルム: ロトム→rotomwash 等) があればそれを使う
+        sid = registered_species_id(ja) or r[1]
+        species = to_showdown_name(_sanitize_species(sid))
+        try:
+            from advisor.sets import get_predictor
+            usage = get_predictor().predict(_to_id(sid))
+        except Exception:
+            usage = {"moves": [], "items": [], "abilities": []}
         item = None
         if entry.get("持ち物"):
             ri = resolver.resolve(entry["持ち物"], "items", cutoff=0.8)
             item = _sanitize_item(ri[1]) if ri else None
             if item in used_items:
                 item = None
-            if item:
-                used_items.add(item)
+        if not item:
+            # 持ち物未登録 (またはアイテムクローズ衝突) は使用率上位の
+            # 未使用品で補完する。持ち物なしは実戦で常に不利で、提案出力にも
+            # そのまま出てしまう (2026-08-25 第9回: 持ち物なしマスカーニャ)
+            for cand, _pct in usage.get("items") or []:
+                cand = _sanitize_item(cand)
+                if cand and cand not in used_items:
+                    item = cand
+                    print(f"  ! {ja}: 持ち物未登録のため使用率上位で補完 ({item})")
+                    break
+        if item:
+            used_items.add(item)
         ability = None
         if entry.get("特性"):
             ra = resolver.resolve(entry["特性"], "abilities", cutoff=0.8)
             ability = ra[1] if ra else None
         if not ability:
-            # 特性未登録は種族の代表特性で補完 (poke-envはability=None不可)
+            # 特性未登録は使用率最頻で補完する (poke-envはability=None不可)。
+            # 従来の「合法特性の五十音順先頭」はマスカーニャで しんりょく を
+            # 選び、一般的な へんげんじざい にならなかった (2026-08-25 第9回)
+            ab = next(iter(usage.get("abilities") or []), None)
+            if ab:
+                ability = ab[0]
+                print(f"  ! {ja}: 特性未登録のため使用率最頻で補完 ({ability})")
+        if not ability:
             from vision.abilities import _load_forms
             legal = _load_forms().get(_to_id(r[1]))
             ability = next(iter(sorted(legal))) if legal else "noability"
@@ -258,22 +382,48 @@ def build_myteam_text() -> str:
                 moves.append(rm[1])
         if not moves:
             # 技未登録は使用率上位4つで補完 (tackle代替はバリデーション不通過)
-            try:
-                from advisor.sets import get_predictor
-                moves = [m for m, _ in
-                         get_predictor().predict(_to_id(r[1]))["moves"][:4]]
-            except Exception as e:
-                print(f"  ! {ja}: 技補完失敗 ({e})")
+            moves = [m for m, _ in (usage.get("moves") or [])[:4]]
+            if not moves:
+                print(f"  ! {ja}: 技補完失敗 (使用率データなし)")
         pts = entry.get("能力ポイント") or {}
         evs = " / ".join(f"{v} {ev_keys[str(k).lower()]}"
                          for k, v in pts.items()
                          if str(k).lower() in ev_keys)
+        nat = nature_en_of(entry.get("性格"))
+        if entry.get("性格") and not nat:
+            print(f"  ! {ja}: 性格 {entry.get('性格')!r} を解決できないため性格行なし (無補正で評価される)")
+        if not evs:
+            # 能力ポイント未登録 (種族のみの最小エントリ等) は使用率の
+            # 最頻配分・性格で補完する。0ポイントのままだとShowdownの
+            # バリデーションでチームごと拒否される (2026-08-22実測:
+            # "Meowscarada has exactly 0 Stat Points" で収集が全滅した)
+            try:
+                from tools.evolve_teams import _evs_line, _usage_alternatives
+                spreads = (_usage_alternatives().get(_to_id(r[1])) or {}) \
+                    .get("spreads") or []
+                # championsスナップショットは「性格のみ (evs=None)」の行と
+                # 「配分のみ (nature=None)」の行が混在する。EVを持つ行と
+                # 性格を持つ行を、それぞれ使用率最頻で別々に選ぶ
+                # (単純なmaxだと性格のみの行を掴みEV補完に失敗した実測あり)
+                for s_nat, s_evs, _w in sorted(
+                        spreads, key=lambda x: -(x[2] or 0)):
+                    if not evs and s_evs:
+                        line = _evs_line(s_evs)
+                        if line:
+                            evs = line[len("EVs: "):]
+                    if not nat and s_nat:
+                        nat = str(s_nat).capitalize()
+                    if evs and nat:
+                        break
+                print(f"  ! {ja}: 能力ポイント未登録のため使用率最頻の"
+                      f"配分で補完 ({evs or '補完失敗'} / {nat or '性格なし'})")
+            except Exception as e:
+                print(f"  ! {ja}: 配分補完失敗 ({e})")
         lines = [f"{species} @ {item}" if item else species, "Level: 50"]
         if ability:
             lines.append(f"Ability: {ability}")
         if evs:
             lines.append(f"EVs: {evs}")
-        nat = nature_en.get(entry.get("性格") or "")
         if nat:
             lines.append(f"{nat} Nature")
         if not moves:

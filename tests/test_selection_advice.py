@@ -38,6 +38,31 @@ def make_state(picked=0):
     }
 
 
+def test_own_view_uses_registered_build():
+    """規則の自分側の評価は登録の型 (配分・性格・持ち物) で作る (2026-10-06 S2)。登録が無ければ攻撃全振りの仮定のまま"""
+    import advisor.my_team as MT
+    from advisor.engine import OFFENSIVE_EV
+    from advisor.selection import _own_view
+    p = {"species_id": "duraludon", "species_ja": "ブリジュラス", "item_id": None}
+    orig = MT.get_my_build
+    MT.get_my_build = lambda ja: ({"ev": {"hp": 252, "def": 252, "spd": 4}, "nature": {"def": 1.1, "atk": 0.9},
+                                   "item_ja": "たべのこし", "ability_ja": None} if ja == "ブリジュラス" else None)
+    try:
+        v = _own_view(p, "duraludon", True, ability="stalwart")
+        assert v.ev == {"hp": 252, "def": 252, "spd": 4} and v.nature == {"def": 1.1, "atk": 0.9} and v.ability == "stalwart"
+        assert v.item == "leftovers", v.item
+        # 画面で読めた持ち物 id があればそれを使う。登録を見ない指定なら従来の仮定
+        assert _own_view(dict(p, item_id="choicespecs"), "duraludon", True).item == "choicespecs"
+        plain = _own_view(p, "duraludon", False)
+        assert plain.ev == dict(OFFENSIVE_EV) and plain.nature == {} and plain.item is None
+        # 登録の無い種は従来の仮定
+        assert _own_view({"species_id": "pelipper", "species_ja": "ペリッパー"}, "pelipper", True).ev == dict(OFFENSIVE_EV)
+        assert _own_view(p, None, True) is None
+    finally:
+        MT.get_my_build = orig
+    print("test_own_view_uses_registered_build OK")
+
+
 def test_hazard_setter_becomes_lead():
     """設置技持ちは同等マッチアップなら先発に置かれる (欠陥#4)。
 
@@ -255,6 +280,7 @@ def test_partial_reads_do_not_crash():
 
 
 if __name__ == "__main__":
+    test_own_view_uses_registered_build()
     test_hazard_setter_becomes_lead()
     test_advice_hysteresis()
     test_advice_stability_gate()

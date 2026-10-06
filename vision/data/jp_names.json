@@ -4197,14 +4197,26 @@
    "num": 354
   },
   "メガアブソル": {
+   "id": "absolmega",
+   "num": 359
+  },
+  "メガアブソルZ": {
    "id": "absolmegaz",
    "num": 359
   },
   "メガガブリアス": {
+   "id": "garchompmega",
+   "num": 445
+  },
+  "メガガブリアスZ": {
    "id": "garchompmegaz",
    "num": 445
   },
   "メガルカリオ": {
+   "id": "lucariomega",
+   "num": 448
+  },
+  "メガルカリオZ": {
    "id": "lucariomegaz",
    "num": 448
   },
@@ -5674,7 +5686,8 @@
   "かんつうドリル": "piercingdrill",
   "ドラゴンスキン": "dragonize",
   "メガソーラー": "megasol",
-  "とびだすハバネロ": "spicyspray"
+  "とびだすハバネロ": "spicyspray",
+  "はどうのぼうご": "auraguard"
  },
  "items": {
   "マスターボール": "masterball",
@@ -7779,9 +7792,9 @@
   "ピクシーナイト": "clefablite",
   "ケケンカニナイト": "crabominite",
   "ダークライナイト": "darkranite",
-  "マフォクシーナイト": "delphoxite",
+  "マフォクシナイト": "delphoxite",
   "ドラミドロナイト": "dragalgite",
-  "カイリューナイト": "dragoninite",
+  "カイリュナイト": "dragoninite",
   "ジジーロンナイト": "drampanite",
   "シビルドンナイト": "eelektrossite",
   "エンブオーナイト": "emboarite",
@@ -7846,5 +7859,32 @@
   "あく": "Dark",
   "フェアリー": "Fairy",
   "ステラ": "Stellar"
+ },
+ "natures": {
+  "がんばりや": "hardy",
+  "さみしがり": "lonely",
+  "ゆうかん": "brave",
+  "いじっぱり": "adamant",
+  "やんちゃ": "naughty",
+  "ずぶとい": "bold",
+  "すなお": "docile",
+  "のんき": "relaxed",
+  "わんぱく": "impish",
+  "のうてんき": "lax",
+  "おくびょう": "timid",
+  "せっかち": "hasty",
+  "まじめ": "serious",
+  "ようき": "jolly",
+  "むじゃき": "naive",
+  "ひかえめ": "modest",
+  "おっとり": "mild",
+  "れいせい": "quiet",
+  "てれや": "bashful",
+  "うっかりや": "rash",
+  "おだやか": "calm",
+  "おとなしい": "gentle",
+  "なまいき": "sassy",
+  "しんちょう": "careful",
+  "きまぐれ": "quirky"
  }
 }

@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import re
 import time
 
 import cv2
@@ -27,6 +28,25 @@ _fc_cache = {"ts": 0.0, "result": False, "sig": None}
 # 「対戦準備中」(選出確認) 画面のアンカー文言 (タイマー右)
 _PREP_ANCHOR_ZONE = {"x0": 0.495, "y0": 0.090, "x1": 0.625, "y1": 0.140}
 _prep_cache = {"ts": 0.0, "result": False, "sig": None}
+
+# リザルト (ランク結果) 画面のアンカー (順位/レート行)
+_result_cache = {"ts": 0.0, "result": False, "sig": None}
+
+
+def _looks_like_result(img) -> bool:
+    """順位/レート行の文言でリザルト画面を確認する (スロットリング付き)"""
+    now = time.time()
+    sig = int(img[::64, ::64].mean() * 10)
+    if now - _result_cache["ts"] < 1.0 and sig == _result_cache["sig"]:
+        return _result_cache["result"]
+    _result_cache["ts"] = now
+    _result_cache["sig"] = sig
+    from vision import ocr
+    text = ocr.read_zone_text(img, zones.RESULT["rate_row"]) or ""
+    result = ("レート" in text or "順位" in text
+              or bool(re.search(r"\d{3,6}位", text)))
+    _result_cache["result"] = result
+    return result
 
 
 def _looks_like_battle_prep(img) -> bool:
@@ -168,6 +188,7 @@ SCENE_WATCH = "watch"
 SCENE_BATTLE_HUD = "battle_hud"
 SCENE_FIELD = "field"
 SCENE_FIELD_CHECK = "field_check"
+SCENE_RESULT = "result"
 
 
 def classify(img) -> dict:
@@ -201,6 +222,18 @@ def classify(img) -> dict:
     scores["watch_tab"] = round(tab, 3)
     if center > 0.45 and tab > 0.04:
         return {"scene": "watch", "scores": scores}
+
+    # --- リザルト (ランク結果) 画面: 右の大パネル群+下段ボタン帯 (紫) +
+    #     順位/レート行の文言アンカー。連戦では約10秒しか映らない。
+    #     炎背景と紫パネル・ボタンがHUD条件 (バナー色+HPバー色画素) を
+    #     偶発的に満たし command/field に化けていた (2026-08-25 第9回監査:
+    #     乖離13件中4件がこの画面)。HUD判定より先に確定する ---
+    res_panel = _purple_ratio(crop(img, zones.RESULT["panel"]))
+    res_buttons = _purple_ratio(crop(img, zones.RESULT["button_row"]))
+    scores["result_panel"] = round(res_panel, 3)
+    scores["result_buttons"] = round(res_buttons, 3)
+    if res_panel > 0.25 and res_buttons > 0.20 and _looks_like_result(img):
+        return {"scene": SCENE_RESULT, "scores": scores}
 
     # --- 対戦準備中 (選出確認) 画面: 左に自分ロスター+右に相手ロスター ---
     # 選出画面より行が内側に配置されるため selection 判定に掛からず、背景の

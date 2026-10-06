@@ -20,11 +20,16 @@ from champions_agent.train.opponent_pool import (
 
 
 def test_draw_boundaries():
-    """抽選の境界: heuristic / search / random / anchor / pool の順に並ぶ"""
+    """抽選の境界: heuristic / search / random / anchor / pool の順に並ぶ。
+
+    アンカー帯の境界ロジックは epsilon_anchor を明示して検証する
+    (既定値は P1 棄却で 0 になったが、機構自体は再導入に備えて残す)
+    """
     t1 = EPSILON_HEURISTIC
     t2 = t1 + EPSILON_SEARCH
     t3 = t2 + EPSILON_RANDOM
-    t4 = t3 + EPSILON_ANCHOR
+    ea = 0.25
+    t4 = t3 + ea
     eps = 1e-9
     cases = [
         (t1 - eps, "heuristic"), (t1 + eps, "search"),
@@ -34,7 +39,8 @@ def test_draw_boundaries():
         (0.999, "pool"),
     ]
     for r, want in cases:
-        got = draw_opponent_kind(r, has_pool=True, has_anchor=True)
+        got = draw_opponent_kind(r, has_pool=True, has_anchor=True,
+                                 epsilon_anchor=ea)
         assert got == want, (r, got, want)
     print("test_draw_boundaries OK")
 
@@ -42,19 +48,30 @@ def test_draw_boundaries():
 def test_draw_fallbacks():
     """アンカー無し→プールへ、プールも無し→random へ落ちる"""
     t3 = EPSILON_HEURISTIC + EPSILON_SEARCH + EPSILON_RANDOM
-    r = t3 + 1e-6   # アンカー帯の乱数
-    assert draw_opponent_kind(r, has_pool=True, has_anchor=False) == "pool"
-    assert draw_opponent_kind(r, has_pool=False, has_anchor=False) == "random"
+    r = t3 + 1e-6   # アンカー帯の乱数 (帯の検証のため明示指定)
+    assert draw_opponent_kind(r, has_pool=True, has_anchor=False,
+                              epsilon_anchor=0.25) == "pool"
+    assert draw_opponent_kind(r, has_pool=False, has_anchor=False,
+                              epsilon_anchor=0.25) == "random"
     assert draw_opponent_kind(0.999, has_pool=False, has_anchor=True) == "random"
     print("test_draw_fallbacks OK")
 
 
-def test_anchor_share_is_material():
-    """アンカー枠が意図した規模 (25%) で確保されている (設定退行の防止)"""
+def test_anchor_share_matches_registered_verdict():
+    """アンカー枠の既定値が判定記録と一致している (設定退行の防止)。
+
+    2026-08-25 のP1事前登録判定で棄却 (+0.092 < ゲート+0.10) しアンカーを
+    0 に戻した。次候補P4 (探索ε 0.20→0.30) も 2026-09-02 の事前登録判定で
+    棄却 (18,000戦 0.5662、基準比 -0.040、軸補正後も +0.009 で効果なし) し、
+    探索εは 0.20、selfplayプール枠は 0.45 に復帰した。
+    値を変えるときは training_changes.json に事前登録した上で
+    このテストを新しい意図値に更新すること (無断の値変更をここで検知する)
+    """
     total = EPSILON_HEURISTIC + EPSILON_SEARCH + EPSILON_RANDOM + EPSILON_ANCHOR
-    assert abs(EPSILON_ANCHOR - 0.25) < 1e-9, EPSILON_ANCHOR
-    assert total < 1.0, f"selfplayプール枠が消滅している (合計{total})"
-    print("test_anchor_share_is_material OK")
+    assert abs(EPSILON_ANCHOR - 0.0) < 1e-9, EPSILON_ANCHOR
+    assert abs(EPSILON_SEARCH - 0.20) < 1e-9, EPSILON_SEARCH
+    assert abs(total - 0.55) < 1e-9, f"selfplayプール枠が0.45でない (合計{total})"
+    print("test_anchor_share_matches_registered_verdict OK")
 
 
 def _make_models_dir() -> Path:
@@ -95,7 +112,7 @@ def test_weekly_save_interval_and_retention():
 if __name__ == "__main__":
     test_draw_boundaries()
     test_draw_fallbacks()
-    test_anchor_share_is_material()
+    test_anchor_share_matches_registered_verdict()
     test_anchor_paths_lists_best_and_snapshots()
     test_weekly_save_interval_and_retention()
     print("\nALL OK")

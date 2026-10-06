@@ -23,32 +23,78 @@ OUT = REPO / "logs" / "progress_tracking.jsonl"
 OPP_SEED = "20260730"
 
 
+def deviation_sigma(prev_rate: float, cur_rate: float,
+                    n_prev: int, n_cur: int) -> float:
+    """2つの独立な勝率測定の差を、二項標準誤差の合成で正規化した値。
+
+    凍結参照 (_best) の定点がこれを超えて動くのは方策ではなく測定軸側の
+    変化のサイン (2026-08-19: meta_sets回転で11SEの段差を5日見逃した)。
+    """
+    var = (prev_rate * (1 - prev_rate) / n_prev
+           + cur_rate * (1 - cur_rate) / n_cur)
+    if var <= 0:
+        return 0.0
+    return abs(cur_rate - prev_rate) / var ** 0.5
+
+
+def eval_timeout_s(battles: int) -> int:
+    """評価 1 回の打ち切り秒数 (戦数に比例、config の TRACK_PROGRESS_EVAL_TIMEOUT_PER_1K)。
+
+    2026-09-18: agents 軸の 3,000 戦が Showdown との通信待ちで 5 日間止まり、日次定点が
+    9/18〜9/23 欠測した (docs/incidents/reports/2026-09-18-track-progress-hang-no-timeout.md)。
+    evaluate の --timeout (SIGALRM で自己終了) と subprocess の timeout (猶予つき、強制終了) の二段。
+    """
+    from champions_agent.config import TRACK_PROGRESS_EVAL_TIMEOUT_PER_1K
+    # 1,000 戦未満でも 1,000 戦ぶんは待つ (起動・モデル読み込みの固定費があり、0 秒で打ち切らない)
+    return int(TRACK_PROGRESS_EVAL_TIMEOUT_PER_1K * max(1000, int(battles)) / 1000)
+
+
+# この実行で打ち切った評価のラベル。行の eval_timeouts に残し、日次ログにも出す
+TIMEOUTS: list[str] = []
+
+
 def _run_eval(battles: int, checkpoint: str, selection: str,
               models_dir: str | None = None,
               opponent: str = "benchmark",
               agents_style: str | None = None,
               own_teams: str | None = None) -> dict | None:
     import os
+    from champions_agent.config import TRACK_PROGRESS_TIMEOUT_GRACE_S
     env = dict(os.environ)
     if models_dir:
         env["CHAMPIONS_MODELS_DIR"] = models_dir
+    timeout = eval_timeout_s(battles)
     cmd = [sys.executable, "-m", "champions_agent.train.evaluate",
            "--play-style", "balance", "--battles", str(battles),
            "--opponent", opponent, "--checkpoint", checkpoint,
-           "--selection", selection, "--opp-seed", OPP_SEED, "--no-save"]
+           "--selection", selection, "--opp-seed", OPP_SEED, "--no-save",
+           "--timeout", str(timeout)]
     if agents_style:
         cmd += ["--agents-style", agents_style]
     if own_teams:
         cmd += ["--own-teams", own_teams]
-    r = subprocess.run(
-        cmd,
-        cwd=REPO, env=env, capture_output=True, text=True)
+    label = "/".join(str(x) for x in (checkpoint, selection, opponent, agents_style, own_teams) if x)
+    try:
+        r = subprocess.run(
+            cmd,
+            cwd=REPO, env=env, capture_output=True, text=True,
+            timeout=timeout + TRACK_PROGRESS_TIMEOUT_GRACE_S)
+    except subprocess.TimeoutExpired:
+        TIMEOUTS.append(label)
+        print(f"[track_progress] TIMEOUT {timeout}s: {label} ({battles}戦) を強制終了", flush=True)
+        return None
     for line in r.stdout.splitlines():
+        if line.startswith("[evaluate] TIMEOUT"):
+            TIMEOUTS.append(label)
+            print(f"[track_progress] TIMEOUT {timeout}s: {label} ({battles}戦) が自己終了 ({line})", flush=True)
+            return None
         if line.startswith("[evaluate] "):
             try:
                 return ast.literal_eval(line[len("[evaluate] "):])
             except (ValueError, SyntaxError):
                 pass
+    print(f"[track_progress] 評価の結果行なし rc={r.returncode}: {label} ({battles}戦) "
+          f"stderr末尾: {(r.stderr or '')[-300:]!r}", flush=True)
     return None
 
 
@@ -56,6 +102,10 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="日次の進捗トラッキング")
     ap.add_argument("--battles", type=int, default=3000)
     args = ap.parse_args()
+    # launchd 経由ではファイルへの書き出しがブロックバッファになり、評価が途中で止まると
+    # 日次ログに見出し以外何も残らない (9/18 のハングは 6 日間その状態だった)。行ごとに書く
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
 
     row = {"date": time.strftime("%Y-%m-%d %H:%M"),
            "battles": args.battles, "opp_seed": int(OPP_SEED)}
@@ -118,6 +168,26 @@ def main() -> None:
                           models_dir=str(arch_dir))
             row[key] = round(r["win_rate"], 4) if r else None
             print(f"{key}: {row[key]}")
+
+    # 凍結参照の逸脱検知: _best は重みが変わらない限り同一シードの定点が
+    # 統計誤差内に収まるはず。大きく動いたら評価軸 (チーム中身) の変化を疑う
+    from champions_agent.config import FROZEN_REF_WARN_SIGMA
+    if OUT.exists() and row.get("best_model") is not None:
+        prev_rows = [json.loads(l) for l
+                     in OUT.read_text(encoding="utf-8").splitlines() if l.strip()]
+        if prev_rows and prev_rows[-1].get("best_model") is not None:
+            prev = prev_rows[-1]
+            sigma = deviation_sigma(prev["best_model"], row["best_model"],
+                                    prev.get("battles", 3000), args.battles)
+            if sigma >= FROZEN_REF_WARN_SIGMA:
+                print(f"⚠ 凍結参照 (_best) の定点が前回から {sigma:.1f}SE 動きました "
+                      f"({prev['best_model']} → {row['best_model']})。_best昇格が"
+                      "無いのに動いた場合、meta_setsのセット回転など評価軸側の"
+                      "変化を疑うこと (この日を跨ぐベンチ絶対値の比較は不可)")
+
+    if TIMEOUTS:
+        row["eval_timeouts"] = list(TIMEOUTS)
+        print(f"⚠ 打ち切った評価 {len(TIMEOUTS)} 件: {TIMEOUTS} (この日の該当値は None)")
 
     OUT.parent.mkdir(parents=True, exist_ok=True)
     with OUT.open("a", encoding="utf-8") as f:

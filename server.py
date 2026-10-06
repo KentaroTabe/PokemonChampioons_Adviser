@@ -15,6 +15,7 @@ import base64
 import json
 import os
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -26,6 +27,10 @@ from fastapi import FastAPI
 from vision import ocr
 from vision.pipeline import VisionPipeline
 from vision.scenes import SCENE_SELECTION, SCENE_STANDBY
+from vision.end_notice import battle_end_notice, outcome_revision_notice
+from vision.stale_notice import advice_target, stale_advice_notice
+from vision.state import apply_manual_species
+from champions_agent.config import MANUAL_SPECIES_RESOLVE_CUTOFF
 
 
 def should_advise_selection(state: dict) -> bool:
@@ -97,6 +102,24 @@ _last_advice_key = ""
 _last_dump_time = 0.0
 _last_scene_log = 0.0
 _last_scene = "unknown"
+# 処理時間の実測 (2026-09-29 第16回: 処理率が 9% に落ちた原因を後から切り分けられなかった → 5 秒ごとの統計行に
+# フレーム処理 (pipeline.process) と助言計算 (advisor.advise) の所要 ms を残す)
+_proc_ms: deque = deque(maxlen=200)
+_advise_ms: deque = deque(maxlen=50)
+# 直近の対戦助言の対象 (自分の場の枠と第一推奨。vision.stale_notice.advice_target) と、交代後の通知を出したか
+_last_advice_target = None
+_stale_notified = False
+BATTLE_SCENES_FOR_STALE = ("field", "battle_hud", "command", "move_select", "watch", "field_check")
+
+
+def _pct(values, q: float) -> float:
+    """所要時間の分位点 (ms)。空なら 0"""
+    if not values:
+        return 0.0
+    xs = sorted(values)
+    return xs[min(len(xs) - 1, int(round((len(xs) - 1) * q / 100.0)))]
+
+
 _last_frame_ts = 0.0
 
 # デバッグフレームの保存は1枚あたり約46ms (1920x1080 PNG) かかり、
@@ -137,6 +160,24 @@ def _advice_key(state: dict) -> str:
 async def connect(sid, environ):
     print(f"[server] フロントエンドが接続しました: {sid}")
     await sio.emit('state_update', pipeline.state.to_dict(), room=sid)
+    # 構築提案の実行中にページを開き直しても「作成中」表示が復元されるように
+    # (2026-08-25 第9回: 実行中である旨の表示が無いという指摘。進捗配信は
+    # 発行元のsid宛てだったため、リロード後の画面には何も出なかった)
+    if _proposal_running():
+        await sio.emit('team_proposal_progress',
+                       {"msg": "構築提案を実行中です (数十分かかることがあります)…",
+                        "running": True}, room=sid)
+
+
+@sio.on('advice_shown')
+async def advice_shown(sid, data):
+    """ブラウザが助言を描画した時刻 (2026-10-05 ②: 生成時刻と表示時刻を分けて記録する)。
+    data = {advice_id, kind, t_shown (秒), hidden (タブが隠れていて描画されずに送った: 2026-10-06)}"""
+    try:
+        d = data or {}
+        battle_log.on_display(d.get("advice_id"), d.get("t_shown"), d.get("kind"), hidden=d.get("hidden"))
+    except Exception as e:
+        print(f"[server] 表示の記録に失敗: {e}")
 
 
 @sio.on('send_frame')
@@ -157,6 +198,12 @@ async def handle_frame(sid, data):
     if _busy:
         if _pending_frame is not None:
             dropped_counter += 1   # 保持中の1枚を上書き = 実質の破棄
+            # 破棄する1枚からメッセージ域だけ救出する (2026-08-31 設計変更:
+            # 処理落ちで消えるフレームの瞬間表示メッセージが取り逃しの
+            # 主因だった。軽量判定+退避で、OCRは後からパイプラインが消化)
+            _, dropped = _pending_frame
+            asyncio.get_event_loop().run_in_executor(
+                None, _rescue_dropped_frame, dropped)
         _pending_frame = (sid, data)
         return
     _busy = True
@@ -170,10 +217,22 @@ async def handle_frame(sid, data):
         _busy = False
 
 
+def _rescue_dropped_frame(data) -> None:
+    """破棄フレームのデコード+メッセージ域退避 (executorスレッドで実行)"""
+    try:
+        encoded = data.split(',')[1]
+        nparr = np.frombuffer(base64.b64decode(encoded), np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        pipeline.rescue_scan(img)
+    except Exception:
+        pass
+
+
 async def _handle_one_frame(sid, data):
     global processed_counter
     global _last_state_json, _last_advice_time, _last_advice_key
     global _last_dump_time, _last_scene_log
+    global _last_advice_target, _stale_notified, _end_notice_seq
     try:
         encoded_data = data.split(',')[1]
         nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
@@ -187,10 +246,17 @@ async def _handle_one_frame(sid, data):
 
         # CPU重処理はexecutorで実行し、イベントループ (受信/送信) を塞がない
         loop = asyncio.get_event_loop()
+        _t_proc = time.time()
         state, fired = await loop.run_in_executor(None, pipeline.process, img)
+        _proc_ms.append((time.time() - _t_proc) * 1000.0)
         processed_counter += 1
         battle_log.on_frame(state, fired)
         spread_tracker.on_frame(state, fired)   # 相手の型推定 (先後/ダメージ観測)
+        # 勝敗を推定・不明で記録した後にレートが読めて推定が変わったら、助言欄に出す (2026-10-06 第18回)
+        _rev = outcome_revision_notice(battle_log.pop_revision())
+        if _rev:
+            await sio.emit('advice_update', _rev, room=sid)
+            print(f"[server] {_rev['reason']}")
 
         # 場の状況/選出画面は貴重な検証データなので、2秒間隔で保存する
         # (選出は自選出ハイライトの検証用: 選出操作の短い時間を捉える)
@@ -208,12 +274,28 @@ async def _handle_one_frame(sid, data):
             _last_scene = state["scene"]
         if time.time() - _last_scene_log > 5:
             _last_scene_log = time.time()
+            rs = pipeline.rescue_stats
             print(f"[server] scene={state['scene']} 受信={frame_counter} "
-                  f"処理={processed_counter} 破棄={dropped_counter} events={len(state['events'])}")
+                  f"処理={processed_counter} 破棄={dropped_counter} "
+                  f"救出={rs['stashed']}/OCR{rs['ocr']}/発火{rs['events']} "
+                  f"events={len(state['events'])} "
+                  f"処理時間 p50={_pct(_proc_ms, 50):.0f}ms p95={_pct(_proc_ms, 95):.0f}ms "
+                  f"助言 p50={_pct(_advise_ms, 50):.0f}ms max={max(_advise_ms) if _advise_ms else 0:.0f}ms")
 
         if fired:
             for f in fired:
                 print(f"[server] イベント検知: {f}")
+            # 対戦終了 (とその見込み) を検知した瞬間に助言欄へ出す (終了の確定は 1 対戦 1 回)
+            # 勝敗が確定していなければ、対戦ログに記録した推定の結果と根拠を出す (battle_log.on_frame が先に記録済み)
+            notice = battle_end_notice(state, fired, battle_log.outcome_info())
+            if notice and notice.get("battle_end"):
+                if _end_notice_seq == state.get("battle_seq"):
+                    notice = None
+                else:
+                    _end_notice_seq = state.get("battle_seq")
+            if notice:
+                await sio.emit('advice_update', notice, room=sid)
+                print(f"[server] {notice['reason']}")
 
         # 対戦状態スナップショット (5秒毎。再起動時の対戦中リカバリ用)
         global _last_snapshot_time
@@ -273,21 +355,27 @@ async def _handle_one_frame(sid, data):
                 _last_advice_key = sel_key
                 _last_advice_time = now
                 advice = await loop.run_in_executor(None, advisor.advise_selection, state)
-                battle_log.on_advice(advice, "selection")
+                battle_log.on_advice(advice, "selection", state)
                 await sio.emit('advice_update', advice, room=sid)
                 print("--- 選出アドバイス ---")
                 print(advice["text"])
 
-        # コマンド選択中のみアドバイスを計算 (状態が変わった時だけ)
-        if state["scene"] in ("command", "move_select", "watch"):
+        # コマンド選択中のみアドバイスを計算 (状態が変わった時だけ)。終了後 (勝敗文言 / ランク画面 / リザルト画面 /
+        # 3体目のひんしの確定) は出さない: リザルト画面が move_select に誤分類され、終わった対戦に助言が出ていた (第15回)
+        if state["scene"] in ("command", "move_select", "watch") \
+                and not state.get("battle_ended") and not state.get("outcome"):
             key = _advice_key(state)
             now = time.time()
             if key and (key != _last_advice_key or now - _last_advice_time > 10.0):
                 _last_advice_key = key
                 _last_advice_time = now
+                _t_adv = time.time()
                 advice = await loop.run_in_executor(None, advisor.advise, state)
+                _advise_ms.append((time.time() - _t_adv) * 1000.0)
+                _last_advice_target = advice_target(state, advice)
+                _stale_notified = False
                 advice["text"] = advisor.format_advice(advice)
-                battle_log.on_advice(advice, "battle")
+                battle_log.on_advice(advice, "battle", state)
                 await sio.emit('advice_update', advice, room=sid)
                 if advice.get("provisional"):
                     # 確定前: 次フレームで即再計算して安定を確認する
@@ -299,8 +387,23 @@ async def _handle_one_frame(sid, data):
                 else:
                     print(f"[server] アドバイス保留: {advice.get('reason')}")
 
+        # 場のポケモンが助言の対象と変わったのに新しい決定画面を取れていない間 (処理落ちで command を取りこぼす等)、
+        # 前の個体向けの助言が表示に残る (2026-09-29 第16回: こだわりスカーフのサザンドラに交代したあと、アシレーヌ向けの
+        # 技の推奨が出たままだった)。一度だけ通知を出す (次の決定画面で通常の助言に戻る。対戦ログには残さない)。
+        # 第一推奨どおりの交代は「助言どおり」と伝え、メガシンカは交代に数えない (vision.stale_notice。2026-10-06 第18回)
+        if state["scene"] in BATTLE_SCENES_FOR_STALE and state.get("battle_active") and not state.get("outcome") \
+                and not _stale_notified:
+            notice = stale_advice_notice(_last_advice_target, state)
+            if notice:
+                _stale_notified = True
+                await sio.emit('advice_update', notice, room=sid)
+                print(f"[server] 助言の対象が交代: {notice['reason']}")
+
     except Exception as e:
         print(f"[server] 画像処理エラー: {e}")
+
+
+_end_notice_seq = None   # 対戦終了の通知 (vision.end_notice.battle_end_notice) を出した battle_seq (1 対戦 1 回)
 
 
 def _attach_candidates(state: dict) -> None:
@@ -310,11 +413,18 @@ def _attach_candidates(state: dict) -> None:
     相手ポケモンへ添付する (フロント表示 + RLの素早さ比較用)
     """
     try:
-        from advisor.infer import get_inference
+        from advisor.infer import get_inference, guess_view
         for i, p in enumerate(state["opponent"]["party"]):
-            if p.get("species_ja") or not p.get("types"):
+            # 未確定枠と、選出画面の推定 (species_guess) の枠に候補を付ける (推定は手動で直せるように)
+            if (p.get("species_ja") and not p.get("species_guess")) or not p.get("types"):
                 continue
             cands = get_inference().candidates(p["types"], top_k=8)
+            if p.get("species_guess"):
+                # ほぼ確定の推定 (タイプからの候補が実質 1 体) には候補を出さず、これまで通りその種として扱う。
+                # それ以外の推定には候補を出す (画面は「違う場合は選択」と出す。2026-10-06 第18回)
+                view = guess_view(cands, p.get("species_id"))
+                p["guess_sure"] = view["sure"]
+                cands = view["candidates"]
             if cands:
                 p["candidates"] = [
                     {"id": sid_, "ja": ja, "pct": round(prob * 100, 1)}
@@ -396,66 +506,32 @@ async def get_my_team(sid, data=None):
         print(f"[server] get_my_teamエラー: {e}")
 
 
-_generating = False
-
-
-@sio.on('generate_team')
-async def generate_team(sid, data):
-    """コア軸から1からの構築を生成 (バックグラウンド、進捗を逐次配信)。
-
-    重い処理 (共起探索+実対戦評価で数分) のため、進捗を team_gen_progress で
-    流し、完了時に team_gen_result を配信する。多重起動は防止。
-    """
-    global _generating
-    if _generating:
-        await sio.emit('team_gen_progress',
-                       {"msg": "別の生成が実行中です"}, room=sid)
-        return
-    core = (data or {}).get("core", "").strip()
-    evaluate = bool((data or {}).get("evaluate", True))
-    if not core:
-        await sio.emit('team_gen_result',
-                       {"ok": False, "reason": "軸ポケモンを入力してください"},
-                       room=sid)
-        return
-    _generating = True
-    loop = asyncio.get_event_loop()
-
-    def _progress(msg):
-        # executorスレッドからemitするためcall_soon_threadsafeで戻す
-        loop.call_soon_threadsafe(
-            lambda: asyncio.ensure_future(
-                sio.emit('team_gen_progress', {"msg": msg}, room=sid)))
-
-    try:
-        from tools.generate_teams import generate_report
-        print(f"[server] 構築生成開始: {core} (evaluate={evaluate})")
-        result = await loop.run_in_executor(
-            None, lambda: generate_report(core, evaluate=evaluate,
-                                          progress=_progress))
-        await sio.emit('team_gen_result', result, room=sid)
-        print(f"[server] 構築生成完了: {core}")
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        await sio.emit('team_gen_result',
-                       {"ok": False, "reason": f"生成エラー: {e}"}, room=sid)
-    finally:
-        _generating = False
+# (旧「1からのパーティ提案」(generate_team) は 2026-08-20 に削除。
+#  後継はゲート付きの構築提案 run_team_proposal / tools/team_proposal.py)
 
 
 # ------------------------------------------------------------------
 # 分析・コーチング (敗因分析 / 環境 / レビュー / プレイブック / 改善)
 # ------------------------------------------------------------------
 _analysis_busy = False
-_ANALYSIS_GUARD_SCENES = ("selection", "standby", "command", "move_select",
-                          "watch", "field_check", "battle_hud", "field")
 
 
 def _battle_in_progress() -> bool:
-    """対戦中は重い分析ジョブを実行しない (フレーム解析と競合するため)"""
-    return (time.time() - _last_frame_ts < 60 and
-            pipeline.state.scene in _ANALYSIS_GUARD_SCENES)
+    """対戦中は重い分析ジョブ (構築提案/改善/プレイブック) を実行しない。
+
+    旧判定「フレーム受信中 + シーンが対戦系」は誤検知が多く、メニュー画面が
+    field 等に分類されてキャプチャ中は常に対戦中扱いになり、構築提案が
+    一度も実行できなかった (2026-08-21 第6回接続テスト)。
+    対戦ログの記録内容 (events/hp や command 等の対戦シグナルのみ。
+    メニュー誤分類で出続ける advice は含まない) で判定する。
+    直近60秒に対戦シグナルが無ければ対戦中ではない
+    """
+    try:
+        from tools.check_battle_active import battle_active
+        return battle_active(1.0)
+    except Exception:
+        # フォールバック: フレーム受信そのものが無ければ対戦中ではない
+        return time.time() - _last_frame_ts < 60
 
 
 @sio.on('run_analysis')
@@ -486,25 +562,31 @@ async def run_analysis(sid, data):
     await sio.emit('analysis_result', {"kind": kind, "text": text}, room=sid)
 
 
-def _analysis_progress_cb(sid):
+def _analysis_progress_cb(sid, event: str = 'analysis_progress'):
     loop = asyncio.get_event_loop()
 
     def _progress(msg):
         loop.call_soon_threadsafe(
             lambda: asyncio.ensure_future(
-                sio.emit('analysis_progress', {"msg": str(msg)}, room=sid)))
+                sio.emit(event, {"msg": str(msg)}, room=sid)))
     return _progress
 
 
-async def _run_heavy_analysis(sid, kind, coro_factory):
-    """実対戦を伴う重いジョブ (プレイブック/改善) の共通ランナー"""
+async def _run_heavy_analysis(sid, kind, coro_factory,
+                              progress_event: str = 'analysis_progress',
+                              result_event: str = 'analysis_result'):
+    """実対戦を伴う重いジョブ (プレイブック/改善/構築提案) の共通ランナー。
+
+    実対戦ジョブどうしの同時実行は Showdown と CPU を奪い合うため、
+    _analysis_busy を全ジョブで共有する。
+    """
     global _analysis_busy
-    if _analysis_busy:
-        await sio.emit('analysis_progress',
-                       {"msg": "別の分析ジョブが実行中です"}, room=sid)
+    if _analysis_busy or _proposal_running():
+        await sio.emit(progress_event,
+                       {"msg": "別の実対戦ジョブが実行中です"}, room=sid)
         return
     if _battle_in_progress():
-        await sio.emit('analysis_result',
+        await sio.emit(result_event,
                        {"kind": kind, "text": "対戦中のため実行できません "
                         "(フレーム解析と競合します)。対戦後に再実行してください"},
                        room=sid)
@@ -513,12 +595,12 @@ async def _run_heavy_analysis(sid, kind, coro_factory):
     try:
         text = await asyncio.get_event_loop().run_in_executor(
             None, lambda: asyncio.run(coro_factory()))
-        await sio.emit('analysis_result', {"kind": kind, "text": text},
+        await sio.emit(result_event, {"kind": kind, "text": text},
                        room=sid)
     except Exception as e:
         import traceback
         traceback.print_exc()
-        await sio.emit('analysis_result',
+        await sio.emit(result_event,
                        {"kind": kind, "text": f"実行エラー: {e}"}, room=sid)
     finally:
         _analysis_busy = False
@@ -540,6 +622,288 @@ async def run_playbook(sid, data):
         return result["md"]
 
     await _run_heavy_analysis(sid, "playbook", _job)
+
+
+def _my_team_edit_options(entries: dict) -> dict:
+    """詳細パネルの編集用 (2026-09-16 ユーザー要望: 詳細を開いて直接変更、性格・特性はプルダウン):
+    性格の一覧、種族ごとの合法特性と覚える技 (learnset)、持ち物の一覧、今の対戦のロスター (未登録の種もパネルから登録)"""
+    from advisor.ja_names import ability_ja, move_ja
+    from advisor.my_team import _NATURES, registered_species_id
+    from vision.abilities import legal_abilities
+    roster = []
+    try:
+        roster = [p.species_ja for p in pipeline.state.player.party if p.species_ja]
+    except Exception:
+        pass
+    try:
+        from tools.team_build.learnsets import learnset_of
+    except Exception:
+        learnset_of = None
+    abilities, moves, species_id = {}, {}, {}
+    for ja in list(dict.fromkeys(list(entries.keys()) + roster)):
+        r = pipeline.resolver.resolve_species(ja, cutoff=0.85)
+        sid = registered_species_id(ja) or (r[1] if r else None)
+        if not sid:
+            continue
+        species_id[ja] = sid
+        abilities[ja] = sorted({ability_ja(a) for a in (legal_abilities(sid) or [])})
+        try:
+            moves[ja] = sorted({move_ja(m) for m in (learnset_of(sid) if learnset_of else [])})
+        except Exception:
+            moves[ja] = []
+    return {"roster": roster,
+            "options": {"natures": [n for n in _NATURES if not n.isascii()],
+                        "abilities": abilities, "moves": moves, "species_id": species_id},
+            "items": sorted(j for j, *_ in pipeline.resolver._entries.get("items", []))}
+
+
+@sio.on('get_my_team_detail')
+async def get_my_team_detail(sid, data):
+    """自分のポケモンの登録詳細と欠落項目を返す (2026-08-25 第9回後:
+    「もっと見る」で取り込んだ内容が登録済みか画面で確認したい、への対応)。編集用の選択肢も添える"""
+    def _work():
+        import advisor.my_team as mt
+        from tools.team_proposal import registration_gaps
+        entries = mt._load() or {}
+        return {"entries": entries, "gaps": registration_gaps(entries), **_my_team_edit_options(entries)}
+
+    try:
+        payload = await asyncio.get_event_loop().run_in_executor(None, _work)
+    except Exception as e:
+        payload = {"error": str(e)}
+    await sio.emit('my_team_detail', payload, room=sid)
+
+
+@sio.on('check_team_proposal')
+async def check_team_proposal(sid, data):
+    """構築提案の運用条件チェック (軽量。提案は走らせない)"""
+    stage = int((data or {}).get("stage") or 1)
+
+    def _work():
+        from tools.team_proposal import (
+            evaluate_conditions, measure_inputs, render_report,
+        )
+        conds = evaluate_conditions(measure_inputs(stage, 40, 120), stage)
+        return render_report(conds, stage)
+
+    try:
+        text = await asyncio.get_event_loop().run_in_executor(None, _work)
+    except Exception as e:
+        text = f"条件チェックに失敗: {e}"
+    await sio.emit('team_proposal_result', {"kind": "check", "text": text},
+                   room=sid)
+
+
+_proposal_proc = None
+
+
+def _proposal_running() -> bool:
+    return _proposal_proc is not None and _proposal_proc.poll() is None
+
+
+@sio.on('run_team_proposal')
+async def run_team_proposal(sid, data):
+    """構築提案 (段階ゲート付き)。ボタン押下時のみ実行する。
+
+    段階1=現パーティから最大2枠入替 / 段階2=メタ全体からの一般提案。
+    ⚠ 別プロセス (nohup相当) で実行する: サーバー内で実対戦評価を回すと
+    GILとCPUをフレーム解析と奪い合い、処理率が半減して対戦画面の認識が
+    崩れた (2026-08-21 第8回: 取りこぼし率54%→76%、決定の助言あり33%)。
+    進捗はログファイルのtailを team_proposal_progress で逐次配信する。
+    サーバーが再起動してもジョブは走り続ける (結果は logs/team_proposal/)。
+    """
+    global _proposal_proc
+    stage = int((data or {}).get("stage") or 1)
+    if _proposal_running() or _analysis_busy:
+        await sio.emit('team_proposal_progress',
+                       {"msg": "別の実対戦ジョブが実行中です"}, room=sid)
+        return
+    if _battle_in_progress():
+        await sio.emit('team_proposal_result',
+                       {"kind": "refused",
+                        "text": "対戦中のため実行できません。リザルト画面 "
+                                "(ランク表示) まで進めば数秒後に実行できます"},
+                       room=sid)
+        return
+
+    import subprocess
+    import sys as _sys
+    log_dir = Path("logs") / "team_proposal"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"run_{time.strftime('%Y%m%d_%H%M%S')}.log"
+    # -u: サブプロセスの標準出力をバッファさせない。バッファありだと世代
+    # 完了 (数分間隔) までログが書かれず、tail配信の「作成中」表示が
+    # 長時間沈黙する (2026-08-25 第9回)
+    cmd = [_sys.executable, "-u", "-m", "tools.team_proposal", "--propose",
+           "--stage", str(stage),
+           "--population", str(int((data or {}).get("population") or 8)),
+           "--generations", str(int((data or {}).get("generations") or 2)),
+           "--battles", str(int((data or {}).get("battles") or 40)),
+           "--accept-battles",
+           str(int((data or {}).get("accept_battles") or 120)),
+           "--max-changes", str(int((data or {}).get("max_changes") or 2))]
+    locked = (data or {}).get("locked")
+    if locked:
+        cmd += ["--locked", locked]
+    # 強行 (必須ゲート未達でも実行)。対戦中ガードは対象外:
+    # あれは提案の質ではなく画面認識と測定の保護のため
+    if (data or {}).get("force"):
+        cmd += ["--force"]
+    with log_path.open("w") as lf:
+        _proposal_proc = subprocess.Popen(
+            cmd, stdout=lf, stderr=subprocess.STDOUT,
+            start_new_session=True)
+    print(f"[server] 構築提案を別プロセスで開始: pid={_proposal_proc.pid} "
+          f"log={log_path}")
+    asyncio.ensure_future(_watch_proposal(sid, _proposal_proc, log_path))
+
+
+async def _watch_proposal(sid, proc, log_path):
+    """提案サブプロセスのログをtailして進捗/結果を配信する。
+
+    配信は全クライアント宛て (roomなし): 発行元sid宛てだとリロードや
+    別画面からは実行中であることが見えない (2026-08-25 第9回指摘)。
+    リロード直後の復元は connect ハンドラが行う。
+    """
+    sent = 0
+    try:
+        while proc.poll() is None:
+            await asyncio.sleep(2.0)
+            try:
+                text = log_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if len(text) > sent:
+                new = text[sent:]
+                sent = len(text)
+                tail = [l for l in new.splitlines() if l.strip()][-3:]
+                for line in tail:
+                    await sio.emit('team_proposal_progress',
+                                   {"msg": line[:200], "running": True})
+        try:
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = "(ログを読めませんでした)"
+        # 結果表示: 最終サマリーブロック (「===== 構築提案 =====」以降) を
+        # 丸ごと送る。末尾60行の固定切りだと6体分の一覧 (約72行) の先頭 =
+        # 1匹目の名前と持ち物が切り落とされた (2026-08-30 第10回指摘)。
+        # マーカーが無い場合 (ゲート不通過等) のみ末尾80行にフォールバック
+        lines = [l for l in text.splitlines() if l.strip()]
+        marker = next((i for i, l in enumerate(lines)
+                       if "===== 構築提案 =====" in l), None)
+        shown = lines[marker:] if marker is not None else lines[-80:]
+        await sio.emit('team_proposal_result',
+                       {"kind": "done", "text": "\n".join(shown)})
+        print(f"[server] 構築提案プロセス終了: exit={proc.returncode}")
+    except Exception as e:
+        await sio.emit('team_proposal_result',
+                       {"kind": "error", "text": f"進捗監視エラー: {e} "
+                        f"(ジョブ自体は継続。結果: {log_path})"})
+
+
+_team_build_proc = None
+
+
+def _team_build_running() -> bool:
+    return _team_build_proc is not None and _team_build_proc.poll() is None
+
+
+@sio.on('run_team_build')
+async def run_team_build(sid, data):
+    """構築システム (docs/TEAM_BUILDING_IMPLEMENTATION.md) の一発依頼。フォームの構造入力を BuildSpec に渡し、
+    別プロセスで S0〜S13 (--stages all) を回す。進捗は run.log の tail、結果は evaluation/summary.json。"""
+    global _team_build_proc
+    if _team_build_running() or _proposal_running() or _analysis_busy:
+        await sio.emit('team_build_progress', {"msg": "別の実対戦ジョブが実行中です"}, room=sid)
+        return
+    if _battle_in_progress():
+        await sio.emit('team_build_result', {"kind": "refused", "text": "対戦中のため実行できません"}, room=sid)
+        return
+    import subprocess
+    import sys as _sys
+    d = data or {}
+    run_id = f"ui_{time.strftime('%Y%m%d_%H%M%S')}"
+    run_dir = Path("logs") / "build_search" / "runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    cmd = [_sys.executable, "-u", "-m", "tools.team_build.run", "--run-id", run_id,
+           "--favorites", str(d.get("favorites") or ""), "--banned", str(d.get("banned") or ""),
+           "--style", str(d.get("style") or "any"), "--objective", str(d.get("objective") or "max_wr"),
+           "--profile", str(d.get("profile") or "fast"), "--stages", str(d.get("stages") or "search"),
+           "--llm", "headless" if d.get("llm") else "none"]
+    log_path = run_dir / "nohup.log"
+    with log_path.open("w") as lf:
+        _team_build_proc = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT, start_new_session=True)
+    print(f"[server] 構築システムを別プロセスで開始: pid={_team_build_proc.pid} run={run_id}")
+    await sio.emit('team_build_progress', {"msg": f"run {run_id} を開始 ({cmd[-6]} / {cmd[-4]} / {cmd[-2]})", "running": True})
+    asyncio.ensure_future(_watch_team_build(_team_build_proc, run_dir))
+
+
+async def _watch_team_build(proc, run_dir: Path):
+    """run.log を tail して進捗を全クライアントへ配信し、終了時に summary を送る"""
+    log_path = run_dir / "run.log"
+    sent = 0
+    try:
+        while proc.poll() is None:
+            await asyncio.sleep(3.0)
+            try:
+                text = log_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if len(text) > sent:
+                new = text[sent:]
+                sent = len(text)
+                for line in [l for l in new.splitlines() if l.strip()][-3:]:
+                    await sio.emit('team_build_progress', {"msg": line[:200], "running": True})
+        result = _team_build_summary(run_dir)
+        result["exit"] = proc.returncode
+        await sio.emit('team_build_result', result)
+        print(f"[server] 構築システム終了: exit={proc.returncode} run={run_dir.name}")
+    except Exception as e:
+        await sio.emit('team_build_result', {"kind": "error", "text": f"進捗監視エラー: {e} (ジョブは継続。{run_dir})"})
+
+
+def _team_build_summary(run_dir: Path) -> dict:
+    """run の結果要約 (探索のみなら候補一覧、測定まで回したら holdout の verdict と Package)"""
+    import json as _json
+    out = {"kind": "done", "run_id": run_dir.name, "text": ""}
+    lines = []
+    try:
+        sets = _json.loads((run_dir / "s06_sets.json").read_text(encoding="utf-8"))
+        lines.append(f"候補 {sum(1 for r in sets if r.get('ok'))}/{len(sets)} 並びが合法")
+        for r in sets[:6]:
+            lines.append(f"  {r.get('candidate_id')}: " + " / ".join(
+                f"{st['species']}@{st['item']}" for st in r.get('sets') or []))
+    except Exception:
+        pass
+    try:
+        summ = _json.loads((run_dir / "evaluation" / "summary.json").read_text(encoding="utf-8"))
+        h = summ.get("holdout") or {}
+        lines.append(f"結果: {summ.get('result')} / 勝者 {summ.get('winner')} / holdout ΔWR={h.get('delta')} CI={h.get('ci')} n={h.get('n')}")
+        lines.append(f"ablation: {summ.get('ablation')} / STRESS 最悪感度: {summ.get('robustness_worst')}")
+        lines.append(f"Package: {(summ.get('package') or {}).get('artifact_id')} (status=candidate。採用は promote コマンドで)")
+        out["status"] = "validated" if summ.get("result") in ("PASS", "PASS_EQUIVALENT") else (summ.get("result") or "draft")
+    except Exception:
+        out["status"] = "draft (探索のみ、暫定)"
+    try:
+        rep = run_dir / "final" / "build_report.md"
+        if rep.exists():
+            lines.append("")
+            lines.append(rep.read_text(encoding="utf-8")[:3000])
+    except Exception:
+        pass
+    out["text"] = "\n".join(lines) or f"(結果なし: {run_dir}/run.log を確認)"
+    return out
+
+
+@sio.on('team_build_status')
+async def team_build_status(sid, data):
+    runs = sorted((Path("logs") / "build_search" / "runs").glob("*/run.log"), key=lambda p: p.stat().st_mtime)[-5:]
+    text = []
+    for p in runs:
+        tail = [l for l in p.read_text(encoding="utf-8", errors="replace").splitlines() if l.strip()][-1:]
+        text.append(f"{p.parent.name}: {tail[0][:120] if tail else ''}")
+    await sio.emit('team_build_result', {"kind": "status", "text": "\n".join(text) or "run なし",
+                                         "running": _team_build_running()}, room=sid)
 
 
 @sio.on('improve_team')
@@ -565,6 +929,39 @@ async def improve_team(sid, data):
     await _run_heavy_analysis(sid, "improve", _job)
 
 
+async def _emit_team_advice(sid) -> None:
+    """登録の変更直後にパーティ診断を実行して表示する (登録の即時フィードバック)"""
+    try:
+        from advisor.team_advice import team_advice, format_team_advice
+        loop = asyncio.get_event_loop()
+        data = await loop.run_in_executor(None, team_advice, pipeline.resolver)
+        await sio.emit('team_advice', {"text": format_team_advice(data), "data": data}, room=sid)
+        print("--- パーティ診断 (登録時) ---")
+    except Exception as e:
+        print(f"[server] 登録時診断エラー: {e}")
+
+
+@sio.on('save_my_build')
+async def save_my_build(sid, data):
+    """詳細パネルからの 1 体ぶんの型登録 / 更新 (2026-09-16)。送られたキーだけ置き換え (空値は削除)、種族ID 等は残す"""
+    try:
+        ja = ((data or {}).get("species") or "").strip()
+        patch = (data or {}).get("entry") or {}
+        if not ja or not pipeline.resolver.resolve_species(ja, cutoff=0.85):
+            await sio.emit('my_build_saved', {"ok": False, "reason": f"種族を解決できません: {ja}"}, room=sid)
+            return
+        import advisor.my_team as mt
+        entry = mt.merge_build_patch((mt._load() or {}).get(ja), patch)
+        ok = mt.set_build(ja, entry)
+        await sio.emit('my_build_saved', {"ok": ok, "species": ja, "reason": None if ok else "保存に失敗しました"},
+                       room=sid)
+        if ok:
+            await _emit_team_advice(sid)
+    except Exception as e:
+        print(f"[server] save_my_buildエラー: {e}")
+        await sio.emit('my_build_saved', {"ok": False, "reason": str(e)}, room=sid)
+
+
 @sio.on('save_my_team')
 async def save_my_team(sid, data):
     """フロントエンドのパーティ編集フォームから config/my_team.json を保存"""
@@ -583,17 +980,7 @@ async def save_my_team(sid, data):
         print(f"[server] my_team.json 保存: {len(cleaned)}体 ({list(cleaned)})")
         await sio.emit('my_team_saved', {"ok": True, "count": len(cleaned)},
                        room=sid)
-        # 保存直後にパーティ診断を実行して表示する (登録の即時フィードバック)
-        try:
-            from advisor.team_advice import team_advice, format_team_advice
-            loop = asyncio.get_event_loop()
-            data = await loop.run_in_executor(None, team_advice, pipeline.resolver)
-            await sio.emit('team_advice',
-                           {"text": format_team_advice(data), "data": data},
-                           room=sid)
-            print("--- パーティ診断 (登録時) ---")
-        except Exception as e:
-            print(f"[server] 登録時診断エラー: {e}")
+        await _emit_team_advice(sid)
     except Exception as e:
         print(f"[server] save_my_teamエラー: {e}")
         await sio.emit('my_team_saved', {"ok": False, "reason": str(e)}, room=sid)
@@ -689,14 +1076,37 @@ async def set_state(sid, data):
 
 @sio.on('set_species')
 async def set_species(sid, data):
-    """フロントエンドのプルダウンから相手ポケモンの種族を確定する"""
+    """フロントエンドから相手ポケモンの種族を確定する (候補のプルダウン、または ✏️ の手入力 = species_id なしの日本語名)。
+    どの枠に入れるか・入れないかは vision.state.apply_manual_species が決める (選出画面の推定の枠は上書きできる)"""
     try:
         idx = int(data["index"])
-        species_id = data["species_id"]
+        species_id = data.get("species_id")
         species_ja = data.get("species_ja") or species_id
         party = pipeline.state.opponent.party
+
+        async def _skip(reason: str) -> None:
+            # 入れなかった理由をイベント欄とサーバーのログに出す
+            pipeline.state.log_event("manual", f"手動確定を無視: {species_ja} ({reason})",
+                                     event_id="species_manual_skip")
+            print(f"[server] 手動確定を無視: {species_ja} ({reason})")
+            st = pipeline.state.to_dict()
+            _attach_candidates(st)
+            await sio.emit('state_update', st, room=sid)
+
+        if not species_id:
+            r = pipeline.resolver.resolve_species(str(species_ja or ""), cutoff=MANUAL_SPECIES_RESOLVE_CUTOFF)
+            if not r:
+                await _skip("種族名を解決できない")
+                return
+            species_ja, species_id = r[0], r[1]
+        res = apply_manual_species(party, idx, species_ja, species_id)
+        if res["index"] is None:
+            await _skip(res["reason"])
+            return
+        if res["moved"]:
+            print(f"[server] 手動確定: slot{idx} は確定済みのため slot{res['index']} へ付け替え")
+        idx = res["index"]
         if 0 <= idx < len(party):
-            party[idx].merge_species(species_ja, species_id)
             # 直近の「HUD名不一致」で観測された別名をこの個体に紐づける
             # (試合中の個体名キャッシュ: 以後その名前のイベントが正しく帰属する)
             import re as _re

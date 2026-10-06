@@ -17,8 +17,10 @@ import numpy as np
 
 from vision import zones, ocr
 from vision.zones import crop
-from vision.state import BattleStateV2, MoveSlot, PokemonState
+from vision.state import BattleStateV2, MoveSlot, PokemonState, adopt_selection_guess
 from vision.typeicons import classify_type_icon
+from champions_agent.config import (MY_EXACT_RESOLVE_CUTOFF, MY_REGISTERED_MATCH_RATIO,
+                                    MY_ROSTER_MATCH_RATIO, PARTY_SIZE)
 
 # 相性ヒント表記 -> 内部表現
 EFFECTIVENESS_MAP = [
@@ -34,29 +36,88 @@ EFFECTIVENESS_MAP = [
 ]
 
 
-def resolve_my_species(resolver, name_text: str, cutoff: float = 0.72):
-    """自分側の種族名解決: 登録済みmy_teamの名前を優先する。
+def _with_registered_form_id(r):
+    """登録エントリがフォルムの showdown id を持つならそれを使う (HUD はフォルム名を省くため「ロトム」→ rotom に
+    丸まる。手入力の「種族ID」: rotomwash で種族値・タイプを正しく引く)"""
+    try:
+        from advisor.my_team import registered_species_id
+        sid = registered_species_id(r[0])
+        if sid:
+            return (r[0], sid) + tuple(r[2:])
+    except Exception:
+        pass
+    return r
 
-    汎用のファジー解決は全種族が母集団のため、OCRの揺れで近縁の別種へ
-    飛ぶことがある (2026-08-05接続テスト: ゲッコウガ→ケイコウオ。
-    「ケイコウガ」のような誤読はケイコウオとの類似度の方が高くなる)。
-    自分側の画面に出るのは登録済みパーティだけなので、まず登録名と照合し、
-    十分近ければそれを採用する。登録が無い/遠い場合は従来の解決に落ちる。
+
+def _closest_name(name_text: str, names) -> tuple:
+    names = [n for n in (names or []) if n]
+    if not names:
+        return None, 0.0
+    best = max(names, key=lambda n: difflib.SequenceMatcher(None, name_text, n).ratio())
+    return best, difflib.SequenceMatcher(None, name_text, best).ratio()
+
+
+def resolve_my_species(resolver, name_text: str, cutoff: float = 0.72, roster=None):
+    """自分側の種族名解決。優先順:
+    (1) 表記どおりの種族がある (汎用解決の高閾値 MY_EXACT_RESOLVE_CUTOFF)。登録に無い種でもチーム変更直後は出る。
+        ロスター外の表記どおりの名前は、当てはめ側 (adopt_my_hud_species) がロスター満枠なら誤読として無視する
+    (2) 今の対戦のロスター (選出画面で読んだ名前 roster) への一致 (MY_ROSTER_MATCH_RATIO)。OCR 揺れの救済
+    (3) 登録済み my_team の名前への吸着 (MY_REGISTERED_MATCH_RATIO)
+    (4) 従来の汎用解決 (cutoff)
+
+    汎用のファジー解決は全種族が母集団のため、OCRの揺れで近縁の別種へ飛ぶことがある (2026-08-05 接続テスト:
+    ゲッコウガ→ケイコウオ)。登録名を先に見ていた頃は逆に、未登録の種が登録済みの似た名前に化けた (2026-09-16 第15回:
+    ミミロップ→ミミッキュ (類似度 0.6)、場のメタグロス枠を上書きして 7 体目が生えた)。表記どおり → ロスター → 登録の順にする
     """
+    exact = resolver.resolve_species(name_text, cutoff=MY_EXACT_RESOLVE_CUTOFF)
+    if exact:
+        return _with_registered_form_id(exact)
+    best, ratio = _closest_name(name_text, roster)
+    if best and ratio >= MY_ROSTER_MATCH_RATIO:
+        r = resolver.resolve_species(best, cutoff=0.9)
+        if r:
+            return _with_registered_form_id(r)
     try:
         from advisor.my_team import registered_species_ja
-        names = registered_species_ja()
-        if names:
-            best = max(names, key=lambda n: difflib.SequenceMatcher(
-                None, name_text, n).ratio())
-            if difflib.SequenceMatcher(
-                    None, name_text, best).ratio() >= 0.55:
-                r = resolver.resolve_species(best, cutoff=0.9)
-                if r:
-                    return r
+        best, ratio = _closest_name(name_text, registered_species_ja())
+        if best and ratio >= MY_REGISTERED_MATCH_RATIO:
+            r = resolver.resolve_species(best, cutoff=0.9)
+            if r:
+                return _with_registered_form_id(r)
     except Exception:
         pass
     return resolver.resolve_species(name_text, cutoff=cutoff)
+
+
+def adopt_my_hud_species(state: BattleStateV2, sp) -> Optional[PokemonState]:
+    """HUD で読んだ自分の種族 sp=(日本語名, id, ...) をロスターに当てはめる。
+
+    ロスター内の別枠なら交代の見逃しとして付け替える。ロスター (PARTY_SIZE 体) が判明済みで一致する枠が無く、場の個体も
+    別の種族なら誤読とみなして無視する (2026-09-16 第15回: ミミッキュへの誤解決が場のメタグロス枠を上書きした)。
+    戻り値: 当てはめた個体 (無視なら None)
+    """
+    me = state.player.ensure_active()
+    idx = state.player.find_by_species(sp[0], sp[1] if len(sp) > 1 else None)
+    if idx is None:
+        known = [p for p in state.player.party if p.species_ja]
+        if me.species_ja and me.species_ja != sp[0] and len(known) >= PARTY_SIZE:
+            state.log_event("system", f"HUD名 {sp[0]} はロスター外のため無視 (場は {me.species_ja})",
+                            event_id="hud_name_ignored")
+            return None
+    if idx is not None and idx != state.player.active_index:
+        # 交代イベントを見ていないのにHUD名で付け替わった = 交代 (と、その前のひんしの可能性) を取り逃した。
+        # 前のactiveの状態は「不明」として印を付け、交代候補の推奨を抑える (2026-08-18 第2回: 取り逃した
+        # サザンドラのひんしが100%のまま残り、交代候補として推奨され続けた)
+        prev = state.player.active()
+        if prev is not None and prev.status != "fainted" \
+                and prev.species_ja and prev.species_ja != sp[0]:
+            prev.hp_uncertain = True
+            state.log_event("system", f"交代見逃し: {prev.species_ja}の状態を不明扱い",
+                            event_id="missed_switch")
+        state.player.switch_to(idx)
+        me = state.player.party[idx]
+    me.merge_species(sp[0], sp[1])
+    return me
 
 
 def _normalize_hint(text: str) -> Optional[str]:
@@ -117,6 +178,378 @@ def _is_picked_panel(img, panel_zone):
     if cv2.countNonZero(lime) / lime.size > 0.30:
         return None   # カーソル行: リボンの有無を判定できない
     return False
+
+
+_TM_STAT_LABELS = [("hp", "HP"), ("a", "こうげき"), ("b", "ぼうぎょ"),
+                   ("c", "とくこう"), ("d", "とくぼう"), ("s", "すばやさ")]
+
+
+def parse_team_menu_lines(lines: list) -> Optional[dict]:
+    """パーティ管理画面の右パネル行OCR結果を構造化する (純粋計算)。
+
+    lines: apple_ocr_lines の [(text, (x0,y0,x1,y1))] (パネル領域内の相対座標)。
+    行位置は画面バリアントで動くため、ラベル行とのy帯重なりで数値を対応付ける。
+    戻り値: {"name_texts", "stats": {key: (value|None, points)},
+             "move_texts", "ability_text"} / パネルでなければ None。
+    数値の欠落: 点数の「0」はOCRが拾わないことがあるため、ラベル行に点数が
+    無い場合は 0 とみなす (実数値との整合検証は呼び出し側が行う)
+    """
+    from vision.normalize import similarity
+
+    def band_overlap(a, b) -> bool:
+        return min(a[3], b[3]) - max(a[1], b[1]) > 0.5 * min(
+            a[3] - a[1], b[3] - b[1])
+
+    numeric = [(int(t), bb) for t, bb in lines
+               if t.strip().isdigit() and len(t.strip()) <= 3]
+
+    # ラベル照合は2パス: まず厳密包含、残りをファジー (既に割り当てた行は
+    # 除外)。とくこう/とくぼうは1字違いで、ファジーを先に走らせると先に
+    # 現れる方の行が両ラベルを取ってしまう (実フレームで c と d が同一行に
+    # 束ねられた)
+    label_rows: dict = {}
+    claimed: set = set()
+    for key, label in _TM_STAT_LABELS:
+        for idx, (t, bb) in enumerate(lines):
+            if idx not in claimed and label in t:
+                label_rows[key] = bb
+                claimed.add(idx)
+                break
+    for key, label in _TM_STAT_LABELS:
+        if key in label_rows:
+            continue
+        for idx, (t, bb) in enumerate(lines):
+            if idx in claimed:
+                continue
+            if similarity(t[-len(label):], label) >= 0.7:
+                label_rows[key] = bb
+                claimed.add(idx)
+                break
+
+    stats: dict = {}
+    stat_bands = []
+    for key, bb in label_rows.items():
+        val = pts = None
+        for n, nb in numeric:
+            if not band_overlap(bb, nb):
+                continue
+            cx = (nb[0] + nb[2]) / 2
+            if cx < 0.72:
+                val = n
+            elif cx > 0.78:
+                pts = n
+        stats[key] = (val, pts if pts is not None else 0)
+        stat_bands.append(bb)
+    if len(stats) < 4 or "hp" not in stats:
+        return None   # このパネルではない
+
+    stat_bottom = max(b[3] for b in stat_bands)
+    ability_texts = []
+    ability_band = None
+    for t, bb in lines:
+        if bb[1] <= stat_bottom:
+            continue
+        if similarity(t[:3], "特性") >= 0.5 and (bb[0] + bb[2]) / 2 < 0.5:
+            ability_band = bb
+            break
+    if ability_band:
+        for t, bb in lines:
+            if band_overlap(ability_band, bb) and bb[0] > ability_band[2] \
+                    and t not in ability_texts:
+                ability_texts.append(t)
+
+    # 技は行帯ごとにまとめる。複数スケールのOCRを統合すると同じ行が別の
+    # 崩れ方で複数回現れるため、帯グループ化して候補列にする
+    move_slots: list = []   # [(band, [候補テキスト])]
+    for t, bb in lines:
+        if bb[1] <= stat_bottom or (ability_band and bb[1] >= ability_band[1]):
+            continue
+        if t.strip().isdigit() or (bb[0] + bb[2]) / 2 > 0.7:
+            continue
+        for slot in move_slots:
+            if band_overlap(slot[0], bb):
+                if t not in slot[1]:
+                    slot[1].append(t)
+                break
+        else:
+            move_slots.append((bb, [t]))
+    move_slots.sort(key=lambda s: s[0][1])
+
+    name_texts = []
+    for t, bb in lines:
+        if bb[3] < min(b[1] for b in stat_bands) and bb[0] < 0.5 \
+                and not t.strip().isdigit() and t not in name_texts:
+            name_texts.append(t)
+    return {"name_texts": name_texts, "stats": stats,
+            "move_slots": [texts for _, texts in move_slots[:4]],
+            "ability_texts": ability_texts}
+
+
+def _validate_menu_stats(species_id, stats: dict):
+    """実数値と点数の整合を種族値から検証し、(能力ポイント, 性格) を返す。
+
+    各実数値は 中立計算値×{0.9, 1.0, 1.1} のいずれか±2% に一致するはず
+    (1点=8EV換算)。1つでも外れたら点数の読み落とし・誤読とみなし
+    (None, None) を返す — 誤った配分を登録するより登録しない方を選ぶ。
+    実数値が6つ全て読めていない場合も登録しない (値の無い行は点数の
+    読み落とし=0扱いを検証できないため。別フレームの完全な読みを待つ)。
+    性格は+と−がちょうど1つずつ検出できた場合のみ確定する
+    """
+    if any((stats.get(k) or (None, 0))[0] is None
+           for k in ("hp", "a", "b", "c", "d", "s")):
+        return None, None
+    try:
+        from advisor.dex import calc_hp, calc_stat, get_dex
+        base = ((get_dex().species(species_id) or {}).get("baseStats")) or {}
+    except Exception:
+        return None, None
+    if not base:
+        return None, None
+    plus, minus = [], []
+    for key, stat_key in (("a", "atk"), ("b", "def"), ("c", "spa"),
+                          ("d", "spd"), ("s", "spe")):
+        val, pts = stats.get(key) or (None, None)
+        if val is None:
+            continue
+        neutral = calc_stat(int(base[stat_key]), ev=(pts or 0) * 8)
+        r = val / neutral if neutral else 0
+        if 0.98 <= r <= 1.02:
+            continue
+        if 1.08 <= r <= 1.12:
+            plus.append(stat_key)
+        elif 0.88 <= r <= 0.92:
+            minus.append(stat_key)
+        else:
+            return None, None   # 帯の外 = 点数か実数値の誤読
+    hp_val, hp_pts = stats.get("hp") or (None, None)
+    if hp_val is not None:
+        expect = calc_hp(int(base["hp"]), ev=(hp_pts or 0) * 8)
+        if abs(hp_val - expect) > max(2, expect * 0.02):
+            return None, None
+    points = {k: (stats.get(k) or (None, 0))[1]
+              for k in ("hp", "a", "b", "c", "d", "s") if k in stats}
+    points = {("h" if k == "hp" else k): v for k, v in points.items() if v}
+    nature = None
+    if len(plus) == 1 and len(minus) == 1:
+        from advisor.my_team import _NATURES
+        for name, pair in _NATURES.items():
+            if pair == (plus[0], minus[0]) and not name.isascii():
+                nature = name
+                break
+    return points, nature
+
+
+def parse_ability_tab_lines(lines: list) -> Optional[dict]:
+    """詳細オーバーレイ「能力」タブの行OCRを構造化する (純粋計算)。
+
+    技 (右にPP数字を伴う行)・特性・持ち物のピル行を取り出す。
+    特性/持ち物のラベルが両方無ければ None (このタブではない)。
+    """
+    from vision.normalize import similarity
+
+    def band_overlap(a, b) -> bool:
+        return min(a[3], b[3]) - max(a[1], b[1]) > 0.5 * min(
+            a[3] - a[1], b[3] - b[1])
+
+    ability_band = item_band = None
+    for t, bb in lines:
+        cx = (bb[0] + bb[2]) / 2
+        if cx >= 0.5 or len(t) > 5:
+            continue
+        if ability_band is None and similarity(t[:3], "特性") >= 0.5:
+            ability_band = bb
+        elif item_band is None and similarity(t[:4], "持ち物") >= 0.5:
+            item_band = bb
+    if ability_band is None or item_band is None:
+        return None
+
+    def band_value(band):
+        cands = []
+        for t, bb in lines:
+            if band_overlap(band, bb) and bb[0] > band[2] and t not in cands:
+                cands.append(t)
+        return cands
+
+    numeric = [(int(t), bb) for t, bb in lines
+               if t.strip().isdigit() and len(t.strip()) <= 2]
+    move_slots: list = []
+    top_limit = min(ability_band[1], item_band[1])
+    for t, bb in lines:
+        if bb[1] >= top_limit or t.strip().isdigit():
+            continue
+        if (bb[0] + bb[2]) / 2 > 0.6:
+            continue
+        # 同じ帯に PP らしき数字 (1〜48) を伴う行だけを技とみなす
+        # (タイプピルやタブ見出しを除外する)
+        if not any(band_overlap(bb, nb) and 1 <= n <= 48
+                   for n, nb in numeric):
+            continue
+        for slot in move_slots:
+            if band_overlap(slot[0], bb):
+                if t not in slot[1]:
+                    slot[1].append(t)
+                break
+        else:
+            move_slots.append((bb, [t]))
+    move_slots.sort(key=lambda s: s[0][1])
+    return {"move_slots": [texts for _, texts in move_slots[:4]],
+            "ability_texts": band_value(ability_band),
+            "item_texts": band_value(item_band)}
+
+
+def _selection_focused_row(img) -> Optional[int]:
+    """選出画面でカーソル (ライム色ハイライト) が乗っている自分側の行番号"""
+    best, best_ratio = None, 0.0
+    for i, z in enumerate(zones.SELECTION_MY):
+        c = crop(img, z["panel"])
+        if c is None or c.size == 0:
+            continue
+        hsv = cv2.cvtColor(c, cv2.COLOR_BGR2HSV)
+        lime = cv2.inRange(hsv, _LIME_LOW, _LIME_HIGH)
+        ratio = cv2.countNonZero(lime) / lime.size
+        if ratio > best_ratio:
+            best, best_ratio = i, ratio
+    return best if best_ratio > 0.30 else None
+
+
+def extract_selection_detail(img, state: BattleStateV2, resolver) -> None:
+    """選出画面の詳細オーバーレイ (つよさの表示) から型登録を取り込む
+    (2026-08-31 第11回: 選出中の詳細閲覧が battle_active ゲートで全停止し、
+    「対戦中と誤認して登録されない」と指摘された)。
+
+    対象は選出リストでライム色ハイライトされている自分のポケモン。
+    書き込み先は my_team のみで対戦状態には触れない (watch取込と同じ
+    2フレーム裏付け)。能力タブ=技/特性/持ち物、ステータスタブ=配分/性格
+    (実数値整合の検証つき) の両方に対応する
+    """
+    idx = _selection_focused_row(img)
+    if idx is None or idx >= len(state.player.party):
+        return
+    mon = state.player.party[idx]
+    if not mon.species_ja:
+        return
+    panel = crop(img, zones.SELECTION_DETAIL["panel"])
+    if panel is None or panel.size == 0:
+        return
+    lines = ocr.apple_ocr_lines(panel, scale=2.0) + \
+        ocr.apple_ocr_lines(panel, scale=2.5)
+
+    patch: dict = {}
+    stats_parsed = parse_team_menu_lines(lines)
+    if stats_parsed and mon.species_id:
+        points, nature = _validate_menu_stats(mon.species_id,
+                                              stats_parsed["stats"])
+        if points:
+            patch["能力ポイント"] = points
+        if nature:
+            patch["性格"] = nature
+    ab_tab = parse_ability_tab_lines(lines)
+    if ab_tab:
+        moves = []
+        for cands in ab_tab["move_slots"]:
+            for t in cands:
+                r = resolver.resolve(t, "moves", cutoff=0.72)
+                if r and r[0] not in moves:
+                    moves.append(r[0])
+                    break
+        if len(moves) == 4:
+            patch["技"] = moves
+        for t in ab_tab["ability_texts"]:
+            ra = resolver.resolve(t, "abilities", cutoff=0.7)
+            if ra:
+                from vision.abilities import legal_abilities
+                legal = legal_abilities(mon.species_id)
+                if legal is None or ra[1] in legal:
+                    patch["特性"] = ra[0]
+                    break
+        for t in ab_tab["item_texts"]:
+            ri = resolver.resolve(t, "items", cutoff=0.75)
+            if ri:
+                patch["持ち物"] = ri[0]
+                break
+    if not patch:
+        return
+    patch_key = (mon.species_ja, tuple(sorted(
+        (k, str(v)) for k, v in patch.items())))
+    if patch_key == getattr(state, "_last_seldetail_patch", None):
+        from advisor.my_team import update_build
+        if update_build(mon.species_ja, patch):
+            state.log_event("system",
+                            f"my_team更新: {mon.species_ja} (選出画面の詳細)",
+                            event_id=None)
+    state._last_seldetail_patch = patch_key
+
+
+def extract_team_menu(img, state: BattleStateV2, resolver) -> None:
+    """パーティ管理画面 (牧場/ボックス/チーム編成、対戦外) の右詳細パネル
+    から型登録 (my_team) を取り込む (2026-08-30 第10回後の要望)。
+
+    ⚠ 対戦中のつよさ表示 (watchファミリー) との分離:
+    - 呼び出し側 (pipeline) が battle_active=False のときのみ呼ぶ
+    - 書き込み先は my_team のみ。対戦状態 (party/HP等) には一切触れない
+    - ステータスラベル群が揃わないパネルは即返す (誤画面での空振り)
+    - 同一内容が2フレーム連続で読めたときだけ保存 (watch取込と同じ裏付け)
+    - 能力ポイントは実数値×種族値の整合検証を通った場合のみ登録
+    """
+    panel = crop(img, zones.TEAM_MENU["panel"])
+    if panel is None or panel.size == 0:
+        return
+    # OCRスケールで得手不得手が分かれる (2.0=小さな数字・特性名 / 2.5=技名。
+    # 実フレーム校正) ため、2スケールの行を統合してからパースする
+    lines = ocr.apple_ocr_lines(panel, scale=2.0) + \
+        ocr.apple_ocr_lines(panel, scale=2.5)
+    parsed = parse_team_menu_lines(lines)
+    if not parsed:
+        return
+    sp = None
+    for t in parsed["name_texts"]:
+        sp = resolver.resolve_species(t, cutoff=0.8)
+        if sp:
+            break
+    if not sp:
+        return
+
+    moves = []
+    for cands in parsed["move_slots"]:
+        for t in cands:
+            r = resolver.resolve(t, "moves", cutoff=0.72)
+            if r and r[0] not in moves:
+                moves.append(r[0])
+                break
+
+    ability_ja = None
+    for t in parsed["ability_texts"]:
+        ra = resolver.resolve(t, "abilities", cutoff=0.7)
+        if ra:
+            from vision.abilities import legal_abilities
+            legal = legal_abilities(sp[1])
+            if legal is None or ra[1] in legal:
+                ability_ja = ra[0]
+                break
+
+    points, nature = _validate_menu_stats(sp[1], parsed["stats"])
+
+    patch: dict = {}
+    if len(moves) == 4:
+        patch["技"] = moves
+    if points:
+        patch["能力ポイント"] = points
+    if nature:
+        patch["性格"] = nature
+    if ability_ja:
+        patch["特性"] = ability_ja
+    if not patch:
+        return
+
+    patch_key = (sp[0], tuple(sorted(
+        (k, str(v)) for k, v in patch.items())))
+    if patch_key == getattr(state, "_last_menu_patch", None):
+        from advisor.my_team import update_build
+        if update_build(sp[0], patch):
+            state.log_event("system",
+                            f"my_team更新: {sp[0]} (パーティ管理画面)",
+                            event_id=None)
+    state._last_menu_patch = patch_key
 
 
 def extract_selection(img, state: BattleStateV2, resolver) -> None:
@@ -190,6 +623,33 @@ def extract_selection(img, state: BattleStateV2, resolver) -> None:
         if mon.species_ja or mon.display_name:
             state.player.party[i] = mon
 
+    # 選出画面の持ち物表示から my_team を更新する (2026-08-30 第10回後の要望:
+    # 対戦中に「もっと見る」を開かなくても持ち物が登録される)。名前は解決済み
+    # ロスターを使い、同一の一覧が2フレーム連続で読めたときのみ書き込む。
+    # 書き込み先は my_team のみで、対戦状態はここでは触らない (バックフィルが
+    # 登録から反映する)
+    pairs = []
+    for i, z in enumerate(zones.SELECTION_MY):
+        mon = state.player.party[i] if i < len(state.player.party) else None
+        if mon is None or not mon.species_ja:
+            continue
+        item_text = ocr.read_zone_text(img, z["item"], mode="panel",
+                                       val_min=150)
+        if not item_text:
+            continue
+        item = resolver.resolve(item_text, "items", cutoff=0.75)
+        if item:
+            pairs.append((mon.species_ja, item[0]))
+    sel_key = tuple(pairs)
+    if pairs and sel_key == getattr(state, "_last_selection_items", None):
+        from advisor.my_team import update_build
+        for ja, item_ja in pairs:
+            if update_build(ja, {"持ち物": item_ja}):
+                state.log_event("system",
+                                f"my_team更新: {ja} 持ち物={item_ja} (選出画面)",
+                                event_id=None)
+    state._last_selection_items = sel_key
+
     # 相手側: タイプアイコン (1〜2個) -> 使用率候補 -> スプライト照合で種族特定
     for i, z in enumerate(zones.SELECTION_OPP):
         while len(state.opponent.party) <= i:
@@ -203,7 +663,9 @@ def extract_selection(img, state: BattleStateV2, resolver) -> None:
             if types:
                 slot.types = types
 
-        # 種族特定: タイプから候補を絞り、パネルのアイコンで視覚照合
+        # 種族の推定: タイプから候補を絞り、パネルのアイコンで視覚照合。結果は「推定」(species_guess) であり、
+        # 場に出て名前が読めた時点で確定に置き換わる。同じ種が別枠に既にあれば入れない/スコアの低い方を取り消す
+        # (adopt_selection_guess。2026-09-29 第17回: 推定の カイリュー が 2 枠、実体は セグレイブ)
         if slot.types and not slot.species_ja:
             try:
                 from advisor.infer import get_inference
@@ -211,9 +673,17 @@ def extract_selection(img, state: BattleStateV2, resolver) -> None:
                 cands = get_inference().candidates(slot.types)
                 hit = identify_species(crop(img, z["icon"]), cands)
                 if hit:
-                    slot.merge_species(hit[1], hit[0])
-                    state.log_event("selection", f"相手枠{i + 1}を{hit[1]}と特定 "
-                                    f"(視覚照合{hit[2]})", event_id="species_identified")
+                    verdict = adopt_selection_guess(state.opponent.party, i, hit[0], hit[1], float(hit[2]))
+                    note = (verdict, hit[0])
+                    if getattr(slot, "_guess_note", None) != note:   # 同じ結論を毎フレーム書かない
+                        slot._guess_note = note
+                        if verdict == "skip":
+                            state.log_event("selection", f"相手枠{i + 1}の{hit[1]}推定は保留 (別枠に同種の推定あり、"
+                                            f"視覚照合{hit[2]})", event_id="species_guess_dup")
+                        else:
+                            extra = "、同種の別枠の推定を取り消し" if verdict == "replaced" else ""
+                            state.log_event("selection", f"相手枠{i + 1}を{hit[1]}と推定 (視覚照合{hit[2]}{extra})",
+                                            event_id="species_identified")
             except Exception:
                 pass
 
@@ -228,6 +698,13 @@ ZERO_READ_FAINT_COUNT = 2
 # 選出済みの解除を確定するのに必要な連続False回数。1フレームの読み損ね
 # (カーソルの光沢・演出) で選出済みが巻き戻らないように (欠陥#8)
 UNPICK_CONFIRM_FRAMES = 2
+# 自分の最大HPについて「登録から計算した理論値と食い違うが、HPバー割合とは
+# 一致する読み」が連続した場合に、実測側を採用するまでの回数。
+# 登録 (能力ポイント) が古いと理論値検証が全読取を棄却し続け、HPが
+# 100%のまま固着して交代助言の前提が崩れる (2026-08-20 第5回接続テスト:
+# ムクホーク 登録161 vs 実測181)。バー照合を課すことで、桁落ち誤読
+# ("135/178"→"35/78" は割合が大きくズレる) の再定着は防ぐ
+MY_MAX_ADOPT_READS = 3
 # 相手HUD名の「ロスター事前分布つき再解決」の閾値。通常の0.85で解決できない
 # OCR揺れ (実測: オーロンゲ→「オーロング」= 類似度0.8) でも、判明済みの
 # 相手6体のいずれかに一致する場合のみ低い閾値で受け入れる。
@@ -288,7 +765,10 @@ def _expected_my_max(mon):
         from advisor.my_team import get_my_build
         from advisor.dex import get_dex, calc_hp
         build = get_my_build(mon.species_ja)
-        if not build:
+        # 能力ポイント未登録 (空エントリ含む) は理論値を出さない。EV0で
+        # 計算すると実際の最大HPと食い違い、全読取が棄却される
+        # (2026-08-21 第8回: 追加直後のマスカーニャで発生)
+        if not build or not build.get("ev"):
             return None
         sp = get_dex().species(mon.species_id)
         if not sp:
@@ -337,18 +817,25 @@ def _set_hp(state: BattleStateV2, side_name: str, mon,
         # 未登録種族 (チーム変更後にmy_team.json未更新) まで集合検証すると
         # 全読取が棄却されHPが取れなくなる (2026-07-23 監査で発見)
         if side_name == "player":
-            expected = _expected_my_max(mon)
+            # 実測採用済み (_my_max_adopted) の個体は登録理論値より実測を優先
+            expected = getattr(mon, "_my_max_adopted", None) or \
+                _expected_my_max(mon)
             if expected and mx != expected:
                 return
             if expected is None:
-                legal = _my_legal_maxes()
-                try:
-                    from advisor.my_team import has_build
-                    registered = has_build(mon.species_ja)
-                except Exception:
-                    registered = False
-                if registered and legal and mx not in legal:
-                    return
+                # 理論値なし (能力ポイント未登録) の個体。従来は「登録済み
+                # (has_build) ならチーム全体の理論最大HP集合で検証」していたが、
+                # 技のみ自動登録された個体は本人の理論値が集合に無く、正しい
+                # 読みまで全棄却された (2026-08-25: watch取込後のマスカーニャで
+                # 153/153が棄却され続けた)。種族が判明していれば図鑑の物理
+                # 可能域で、未特定ならチーム集合で検証する
+                if mon.species_id is not None:
+                    if not _plausible_max_hp(mon.species_id, mx):
+                        return
+                else:
+                    legal = _my_legal_maxes()
+                    if legal and mx not in legal:
+                        return
         # 最大HPは種族ごとの多数決で確定する (「28/167」→「28/67」のような
         # 桁落ち誤読が50以上のガードを通過して定着するのを防ぐ)
         votes = state.hp_max_votes.setdefault((side_name, mon.species_ja), {})
@@ -369,12 +856,22 @@ def _set_hp(state: BattleStateV2, side_name: str, mon,
     def commit():
         mon.hp_percent = new
         mon.hp_uncertain = False   # 新しい読みで「不明」印を解除
+        mon.hp_estimated = False   # 技イベント由来の推定値を実読みで上書き
+        mon.hp_read_ts = time.time()
         if raw:
             mon.hp_current, mon.hp_max = raw
 
     last_read = getattr(mon, "_hp_last_read", None)
     mon._hp_last_read = new
     if old is None:
+        # 0-3%の初回読みは演出中の空バーの疑いが強く、即反映しない
+        # (2026-08-21 第6回: 登場直後のガブリアスに0%が即コミットされ、
+        #  以後21%との往復が続いた)。本物のひんしは faint イベント/
+        #  HUDのゼロ読み裏付け経路 (_accept_zero_hp_read) が確定させる
+        if new <= 3.0:
+            mon._hp_stable_count = 1
+            mon._hp_stable_since = time.time()
+            return
         # 初回は即反映 (アドバイスが値なしで止まらないように)
         commit()
         mon._hp_event_base = new
@@ -430,6 +927,12 @@ def extract_field_hp(img, state: BattleStateV2) -> None:
     HPを読み続けることで、技イベントとHP変化イベントを時系列で対応付ける。
     """
     from vision.scenes import _crimson_ratio, _hp_bar_pixels
+    # 対戦終了後 (battle_end_rank済み) は読まない: リザルト画面の数値が
+    # fieldに誤分類されたフレームからHP変動として誤読された
+    # (2026-08-21 第8回opus監査: ランク画面表示中に「ライチュウ100%→87%」)。
+    # 次の対戦はbattle_hud抽出がbattle_activeを立て直すので自己復帰する
+    if not state.battle_active:
+        return
     # HUDが表示されているかの軽量ゲート
     if _crimson_ratio(crop(img, zones.BATTLE["opp_banner"])) < 0.15:
         return
@@ -445,7 +948,26 @@ def extract_field_hp(img, state: BattleStateV2) -> None:
         elif pct is None and bar is not None:
             pct = round(bar * 100, 1)
         if pct is not None:
-            _set_hp(state, "opponent", opp, pct=pct)
+            # HUD経路と同じ帰属ガード (2026-08-21 第6回: 演出中の空バーが
+            # このパスから安定3回条件を満たし、21%のガブリアスへ0%を
+            # 再コミットし続けた)。名前が読めて不一致なら書かない。
+            # 名前が読めないフレームは大きな変化 (>15pt) を書かない
+            from vision.normalize import similarity
+            name_text = ocr.read_zone_text(
+                img, zones.BATTLE["opp_name"], mode="panel",
+                allowlist=ocr.KATAKANA_ALLOWLIST)
+            known_names = [n for n in (
+                [opp.species_ja, opp.display_name] +
+                list(getattr(opp, "aliases", []) or [])) if n]
+            if name_text and known_names and \
+                    max(similarity(name_text, n) for n in known_names) < 0.5:
+                pass    # 明確な名前不一致: 演出中の別表示とみなす
+            elif not name_text and (
+                    opp.hp_percent is None or
+                    abs(pct - opp.hp_percent) > 15):
+                pass    # 名前未読 + 大変化/HP未知: 誤帰属の疑いで見送る
+            else:
+                _set_hp(state, "opponent", opp, pct=pct)
 
     me = state.player.active()
     if me is not None and _hp_bar_pixels(crop(img, zones.BATTLE["my_hp_bar"])) > 30:
@@ -506,19 +1028,22 @@ def backfill_player_static(state: BattleStateV2, resolver) -> None:
       アイコン由来のタイプを図鑑で正す処理が無かった)
     - 持ち物/特性 (自分側のみ): 画面から読めていなければ my_team 登録から補完
     """
+    # type_changed (へんげんじざい/みずびたし等の観測) 中は図鑑訂正を抑止。
+    # タイプ変化は交代で戻り、reset_on_switch_out がフラグを解除するので
+    # 以後のフレームで図鑑タイプに正される (2026-08-21 マスカーニャで実測)
     for p in state.opponent.party:
-        if not p.species_id:
+        if not p.species_id or p.type_changed:
             continue
         t = _species_types_ja(p.species_id)
         if t and set(p.types or []) != set(t):
             p.types = t
     for p in state.player.party:
-        if not p.species_id:
+        if not p.species_id or p.type_changed:
             continue
         t = _species_types_ja(p.species_id)
         if t and set(p.types or []) != set(t):
             p.types = t
-        if p.item_id and p.ability_id:
+        if p.item_id and p.ability_id and getattr(p, "_registered_stone_checked", None) == p.item_id:
             continue
         try:
             from advisor.my_team import get_my_build
@@ -527,10 +1052,22 @@ def backfill_player_static(state: BattleStateV2, resolver) -> None:
             build = None
         if not build:
             continue
-        if not p.item_id and build.get("item_ja"):
-            it = resolver.resolve(build["item_ja"], "items", cutoff=0.9)
-            if it:
-                p.item_ja, p.item_id = it[0], it[1]
+        reg = None
+        if build.get("item_ja") and not p.item_removed:
+            # item_removed (はたきおとす被弾) 中は登録から復活させない
+            reg = resolver.resolve(build["item_ja"], "items", cutoff=0.9)
+        if reg and not p.item_id:
+            p.item_ja, p.item_id = reg[0], reg[1]
+        elif reg and p.item_id and reg[1] != p.item_id:
+            # 画面の読み (選出画面の持ち物欄) と登録が「同じ種のメガ石のフォルム違い」なら登録を採る。OCR は石名の末尾
+            # X/Y/Z を落とす (2026-09-29 第17回: 「ガブリアスナイトZ」が ガブリアスナイト と読まれ、手入力の登録より
+            # 画面の読みが優先されて通常のメガガブリアスとして助言された)。登録は手入力なので石の種類は登録が正
+            from advisor.gimmick import same_species_stones
+            if same_species_stones(p.item_id, reg[1]):
+                state.log_event("system", f"{p.species_ja} の持ち物: 画面の {p.item_ja} ではなく登録の {reg[0]} を採用 "
+                                f"(同じ種の石のフォルム違い)", event_id="item_registered_override")
+                p.item_ja, p.item_id = reg[0], reg[1]
+        p._registered_stone_checked = p.item_id
         if not p.ability_id and build.get("ability_ja"):
             ab = resolver.resolve(build["ability_ja"], "abilities", cutoff=0.9)
             if ab:
@@ -632,9 +1169,29 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
         elif sp:
             state.opponent._pending_new_species = None
         if sp:
-            # 種族名がそのまま表示されている場合: 種族で枠を確定
-            opp = state.opponent.switch_to_species(sp[0], sp[1])
-            opp_name_verified = True
+            cur = state.opponent.active()
+            if cur is not None and cur.species_id and \
+                    cur.species_id != sp[1] and \
+                    cur.species_id.startswith(sp[1]):
+                # フォーム違い同名種 (ロトム系等): HUD表示は基本形名のため、
+                # 場のフォーム個体 (rotomwash等) を基本形スロットへ誤って
+                # 切り替えない (2026-08-20 第5回持ち越し: ひんし/HPが
+                # 別フォームの枠へ付いた)
+                opp = cur
+                opp_name_verified = True
+            elif cur is not None and cur.species_id and \
+                    sp[1] != cur.species_id and \
+                    sp[1].startswith(cur.species_id) and "mega" in sp[1]:
+                # HUD名がメガ形 (メガハッサム等): メガシンカ文言を取り逃して
+                # いても名前からメガ済みを検出する (第6-7回持ち越しの
+                # メガ表記ファミリー)。スロットは基本形のまま維持
+                cur.is_mega = True
+                opp = cur
+                opp_name_verified = True
+            else:
+                # 種族名がそのまま表示されている場合: 種族で枠を確定
+                opp = state.opponent.switch_to_species(sp[0], sp[1])
+                opp_name_verified = True
         elif opp is None or (opp.display_name and
                              opp.display_name != name_text and not opp.species_ja):
             # ニックネーム表示: 表示名で追跡
@@ -747,11 +1304,13 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
             # 正当な回復は名前が照合できたフレームで反映される
             pass
         elif eff_pct <= 1.0 and opp.status != "fainted" \
-                and (opp.hp_percent or 0) > 5.0:
+                and (opp.hp_percent is None or opp.hp_percent > 5.0):
             # 生存個体の突然の0-1%読みはひんしの裏付け (faintイベント or
             # 連続ゼロ読み) が揃うまで書かない。演出中の空バー誤読で
             # 偽ひんし化し、タスキで1%残った個体も0%扱いになっていた
-            # (2026-08-19 opus監査: ドリュウズ/サザンドラ)
+            # (2026-08-19 opus監査: ドリュウズ/サザンドラ)。
+            # HP未知の個体も対象にする: 登場直後の演出中1フレームの空バーが
+            # 素通りし、満タンのロトムに0%が書かれた (2026-08-20 第5回)
             if _accept_zero_hp_read(state, opp, side_name="opponent"):
                 # 裏付け済み: _set_hp の2回安定待ちを経ずに反映
                 opp.hp_percent = eff_pct
@@ -763,79 +1322,8 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
                 opp._zero_read_count = 0
             _set_hp(state, "opponent", opp, pct=eff_pct)
 
-    # --- 自分: 表示名 + HP実数 ---
-    me = state.player.ensure_active()
-    my_name = ocr.read_zone_text(img, zones.BATTLE["my_name"], mode="panel",
-                                 allowlist=ocr.KATAKANA_ALLOWLIST)
-    if my_name:
-        me.display_name = my_name
-        sp = resolve_my_species(resolver, my_name, cutoff=0.8)
-        if sp:
-            # 表示名=種族名のケース (ニックネーム未設定)
-            idx = state.player.find_by_species(sp[0])
-            if idx is not None and idx != state.player.active_index:
-                # 交代イベントを見ていないのにHUD名で付け替わった =
-                # 交代 (と、その前のひんしの可能性) を取り逃した。
-                # 前のactiveの状態は「不明」として印を付け、交代候補の
-                # 推奨を抑える (2026-08-18 第2回: 取り逃したサザンドラの
-                # ひんしが100%のまま残り、交代候補として推奨され続けた)
-                prev = state.player.active()
-                if prev is not None and prev.status != "fainted" \
-                        and prev.species_ja and prev.species_ja != sp[0]:
-                    prev.hp_uncertain = True
-                    state.log_event(
-                        "system",
-                        f"交代見逃し: {prev.species_ja}の状態を不明扱い",
-                        event_id="missed_switch")
-                state.player.switch_to(idx)
-                me = state.player.party[idx]
-            me.merge_species(sp[0], sp[1])
-            link_active_to_party(state, "player")
-            me = state.player.ensure_active()
-
-    my_hp = ocr.read_zone_text(img, zones.BATTLE["my_hp_text"], mode="panel",
-                               allowlist="0123456789/")
-    frac = ocr.parse_fraction(my_hp)
-    # 最大HPが50未満の読みは誤読とみなす (Lv50の最大HPは実質50以上。
-    # 選出画面の「0/3」進捗がこのゾーンに重なって読まれる事故も弾く)
-    if frac and frac[1] and frac[1] >= 50:
-        cur, mx = frac
-        # 最大HPは対戦中に変化しない (メガシンカでも不変)。基準値は
-        # 型登録 (config/my_team.json) から計算した理論値を最優先し、
-        # なければ過去の読取値を使う。基準と食い違う読みは誤OCRとみなし、
-        # 桁補正できれば現在値だけ更新、できなければ読み捨てる
-        # (「135/178」→「35/78」のような一貫した桁落ちは多数決でも防げない)
-        known = _expected_my_max(me) or \
-            (me.hp_max if me.hp_max and me.hp_max >= 50 else None)
-        legal = _my_legal_maxes()
-        ok = True
-        if known and mx != known:
-            digits = re.sub(r"\D", "", my_hp)
-            ks = str(known)
-            if digits.endswith(ks) and digits[:-len(ks)].isdigit() \
-                    and int(digits[:-len(ks)]) <= known:
-                cur = int(digits[:-len(ks)])
-            else:
-                # 桁落ちは現在値側も壊れていることが多い ("135/167"→"35/78")。
-                # 補正できない読みは捨て、基準と一致する読みだけを採用する
-                ok = False
-            mx = known
-        elif known is None and legal and mx not in legal:
-            # 種族特定前でも、チーム全員の理論最大HP集合に無い読みは誤読
-            # (「16/67」が特定前に素通りして定着する事故の防止)
-            ok = False
-        # OCR分数とHPバーの塗り割合を照合する。イタリック数字の桁化けは
-        # 基準最大HPとの突き合わせをすり抜ける ("111/162"→"16/162"=10%、
-        # "162/162"→100% を実戦で観測)。バーとの乖離が大きい読みは棄却する
-        if ok and cur <= mx:
-            bar = ocr.hp_bar_ratio(crop(img, zones.BATTLE["my_hp_bar"]))
-            if bar is not None and abs(cur / mx - bar) > 0.15:
-                ok = False
-        if ok and cur <= mx:
-            _set_hp(state, "player", me, cur=cur, mx=mx)
-        # 過去に定着した誤った最大HPの掃除 (理論値と食い違えば読み直しに戻す)
-        if known and me.hp_max and me.hp_max != known:
-            me.hp_current, me.hp_max, me.hp_percent = None, None, None
+    # --- 自分: 表示名 + HP実数 (毎フレーム版 extract_my_hud に分離) ---
+    extract_my_hud(img, state, resolver)
 
     # --- 特性が一意な種族 (単一特性/メガ) は確定値として自動設定 ---
     # メガシンカ後は特性が変わるため、メガ前に判明していた特性
@@ -854,12 +1342,25 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
             mon.ability_ja = resolver.ja_of("abilities", fa) or fa
 
     # --- 残数ボール (緑=残り。単調減少で更新しノイズに耐える) ---
-    for side_obj, zone_key in ((state.opponent, "opp_balls"),
-                                (state.player, "my_balls")):
+    for side_name2, zone_key in (("opponent", "opp_balls"),
+                                 ("player", "my_balls")):
+        side_obj = state.side(side_name2)
         count = ocr.count_pokeballs(crop(img, zones.BATTLE[zone_key]))
         if count is not None and 1 <= count <= 3:
             if side_obj.remaining is None or count <= side_obj.remaining:
-                side_obj.remaining = count
+                # 減少は2回連続で同じ値を読めたときのみ確定する (単発の
+                # 数え落としが単調減少ルールで固着し、ひんし照合まで
+                # 誤爆するのを防ぐ)
+                prev = getattr(side_obj, "_ball_pending", None)
+                if side_obj.remaining is None or count == side_obj.remaining \
+                        or prev == count:
+                    side_obj.remaining = count
+                    side_obj._ball_pending = None
+                    _reconcile_remaining_faints(state, side_name2)
+                else:
+                    side_obj._ball_pending = count
+            else:
+                side_obj._ball_pending = None
 
     # --- COMMAND 残り秒数 ---
     cmd = ocr.read_zone_text(img, zones.BATTLE["command_no"], mode="panel",
@@ -870,6 +1371,141 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
             state.command_no = val
 
     state.battle_active = True
+
+
+def _reconcile_remaining_faints(state: BattleStateV2, side_name: str) -> None:
+    """ボール残数と既知のひんし数を突き合わせ、取り逃したひんしを補完する。
+
+    ひんしメッセージは演出中の短時間表示で系統的に取り逃す (第11回: 相手
+    カバルドンが54%固着、自分ムクホークが100%固着のまま敗北)。残数は
+    HUDに常時表示され信頼できるため、残数+既知ひんし < 選出3 のとき、
+    非アクティブでHPが低い順に不足分をひんし確定する。該当候補が無い
+    (どの個体か特定できない) 場合は無理に確定せず、ログにだけ残す
+    """
+    side = state.side(side_name)
+    if side.remaining is None:
+        return
+    fainted = sum(1 for p in side.party if p.status == "fainted")
+    deficit = 3 - side.remaining - fainted
+    if deficit <= 0:
+        return
+    active = side.active()
+    cands = sorted(
+        (p for p in side.party
+         if p is not active and p.status != "fainted"
+         and p.hp_percent is not None and p.hp_percent <= 15.0),
+        key=lambda p: p.hp_percent)
+    for p in cands[:deficit]:
+        p.status = "fainted"
+        p.hp_percent = 0.0
+        p.hp_current = 0
+        state.log_event(
+            "system",
+            f"残数ボールとの照合で{p.species_ja or '?'}をひんし確定 "
+            f"({side_name} 残{side.remaining})",
+            event_id=f"faint_reconcile_{side_name}")
+    if len(cands) < deficit:
+        state.log_event(
+            "system",
+            f"{side_name}の残数{side.remaining}に対しひんし{fainted}体のみ "
+            "(取り逃し疑い。個体は特定できず)",
+            event_id=f"faint_deficit_{side_name}")
+
+
+def extract_my_hud(img, state: BattleStateV2, resolver) -> None:
+    """自分側HUD (表示名 + HP実数) の読取。
+
+    HUDは battle_hud だけでなく command / move_select でも常時表示される。
+    heavy間隔のみの読取だと2回安定の確定まで実測60秒超かかり、古いHPの
+    まま交代助言が計算された (2026-08-20 第5回: 実際62%のライチュウを
+    100%として被ダメ前提を計算) ため、pipelineが毎フレーム呼べる形に分離。
+    """
+    me = state.player.ensure_active()
+    my_name = ocr.read_zone_text(img, zones.BATTLE["my_name"], mode="panel",
+                                 allowlist=ocr.KATAKANA_ALLOWLIST)
+    if my_name:
+        me.display_name = my_name
+        # 表示名=種族名のケース (ニックネーム未設定)。今の対戦のロスター (選出画面で読んだ 6 体) を最優先に解決し、
+        # ロスター外の名前は誤読として無視する (adopt_my_hud_species)
+        roster = [p.species_ja for p in state.player.party if p.species_ja]
+        sp = resolve_my_species(resolver, my_name, cutoff=0.8, roster=roster)
+        if sp and adopt_my_hud_species(state, sp) is not None:
+            link_active_to_party(state, "player")
+            me = state.player.ensure_active()
+
+    my_hp = ocr.read_zone_text(img, zones.BATTLE["my_hp_text"], mode="panel",
+                               allowlist="0123456789/")
+    frac = ocr.parse_fraction(my_hp)
+    # 最大HPが50未満の読みは誤読とみなす (Lv50の最大HPは実質50以上。
+    # 選出画面の「0/3」進捗がこのゾーンに重なって読まれる事故も弾く)
+    if frac and frac[1] and frac[1] >= 50:
+        cur, mx = frac
+        # 最大HPは対戦中に変化しない (メガシンカでも不変)。基準値は
+        # 型登録 (config/my_team.json) から計算した理論値を最優先し、
+        # なければ過去の読取値を使う。基準と食い違う読みは誤OCRとみなし、
+        # 桁補正できれば現在値だけ更新、できなければ読み捨てる
+        # (「135/178」→「35/78」のような一貫した桁落ちは多数決でも防げない)
+        known = getattr(me, "_my_max_adopted", None) or _expected_my_max(me) \
+            or (me.hp_max if me.hp_max and me.hp_max >= 50 else None)
+        legal = _my_legal_maxes()
+        ok = True
+        if known and mx != known:
+            digits = re.sub(r"\D", "", my_hp)
+            ks = str(known)
+            if digits.endswith(ks) and digits[:-len(ks)].isdigit() \
+                    and int(digits[:-len(ks)]) <= known:
+                cur = int(digits[:-len(ks)])
+                mx = known
+            else:
+                # 桁落ちは現在値側も壊れていることが多い ("135/167"→"35/78")
+                # ため原則は読み捨てる。ただしHPバー割合と一致する同じ最大HP
+                # の読みが続く場合は登録側が古い (最大HPは対戦中不変) と
+                # みなして実測を採用する (2026-08-20 第5回: ムクホーク
+                # 登録161 vs 実測181で全読取が棄却されHPが100%固着した)
+                bar_now = ocr.hp_bar_ratio(crop(img, zones.BATTLE["my_hp_bar"]))
+                counts = getattr(me, "_max_adopt_counts", None) or {}
+                if bar_now is not None and cur <= mx and \
+                        abs(cur / mx - bar_now) <= 0.15:
+                    counts[mx] = counts.get(mx, 0) + 1
+                else:
+                    counts[mx] = 0
+                me._max_adopt_counts = counts
+                if counts[mx] >= MY_MAX_ADOPT_READS:
+                    state.log_event(
+                        "system",
+                        f"{me.species_ja or me.display_name or '?'}: 登録から"
+                        f"計算した最大HP{known}と実測{mx}が不一致のため実測を"
+                        "採用します (能力ポイントの再登録を確認)",
+                        event_id=f"max_hp_mismatch_{me.species_id}")
+                    me._my_max_adopted = mx
+                    me.hp_current, me.hp_max, me.hp_percent = None, None, None
+                    known = mx
+                else:
+                    ok = False
+                    mx = known
+        elif known is None:
+            if me.species_id is not None:
+                # 種族判明済み・理論値なし (能力ポイント未登録): 図鑑の物理
+                # 可能域で検証する。チーム理論値集合だと本人の値が含まれず
+                # 全読取が棄却される (2026-08-25: 技のみ自動登録のマスカーニャ)
+                if not _plausible_max_hp(me.species_id, mx):
+                    ok = False
+            elif legal and mx not in legal:
+                # 種族特定前は、チーム全員の理論最大HP集合に無い読みは誤読
+                # (「16/67」が特定前に素通りして定着する事故の防止)
+                ok = False
+        # OCR分数とHPバーの塗り割合を照合する。イタリック数字の桁化けは
+        # 基準最大HPとの突き合わせをすり抜ける ("111/162"→"16/162"=10%、
+        # "162/162"→100% を実戦で観測)。バーとの乖離が大きい読みは棄却する
+        if ok and cur <= mx:
+            bar = ocr.hp_bar_ratio(crop(img, zones.BATTLE["my_hp_bar"]))
+            if bar is not None and abs(cur / mx - bar) > 0.15:
+                ok = False
+        if ok and cur <= mx:
+            _set_hp(state, "player", me, cur=cur, mx=mx)
+        # 過去に定着した誤った最大HPの掃除 (理論値と食い違えば読み直しに戻す)
+        if known and me.hp_max and me.hp_max != known:
+            me.hp_current, me.hp_max, me.hp_percent = None, None, None
 
 
 # ==============================================================================
@@ -1143,6 +1779,11 @@ def extract_field_check(img, state: BattleStateV2, resolver) -> None:
     side = state.side(side_name)
 
     # --- 種族名 (左上、x<0.45 y<0.30 の日本語行) ---
+    # 解決できた既存パーティメンバーのみを対象にする。
+    # ⚠ ensure_active へのフォールバックや新規メンバー作成はしない:
+    # 手持ち一覧など想定外の画面がこの抽出へ流れ込んだとき、無関係な個体へ
+    # HP/ランクを書き込む (2026-08-20 第5回: 不参加のムクホークが party に
+    # 生成され161/161が混入。自分側HPの入れ替わり汚染の一因)
     mon = None
     for t, (x0, y0, x1, y1) in lines:
         if x0 < 0.45 and y0 < 0.30 and len(t) >= 3:
@@ -1151,13 +1792,9 @@ def extract_field_check(img, state: BattleStateV2, resolver) -> None:
                 idx = side.find_by_species(sp[0])
                 if idx is not None:
                     mon = side.party[idx]
-                else:
-                    mon = side.switch_to_species(sp[0], sp[1])
-                    link_active_to_party(state, side_name)
-                    mon = side.ensure_active()
                 break
     if mon is None:
-        mon = side.ensure_active()
+        return
 
     # --- HP ---
     # 斜体数字は日本語モードで崩れるため、行の領域をen-USで再OCRする。
@@ -1255,7 +1892,10 @@ def extract_field_check(img, state: BattleStateV2, resolver) -> None:
     turn_re = _re.compile(r"([0-9])\s*/\s*([0-9])")
     for t, (x0, y0, x1, y1) in effect_lines:
         lk = loose_key(t)
-        if "状態" not in t and "状感" not in t and not turn_re.search(t):
+        # 「状態」の末尾はOCRで化けやすい (実測: 状感/状要)。「状」1文字で
+        # ゲートする (2026-08-21 第6回: 「ステルスロック状要」が弾かれ
+        # 自陣ステロが取得されず、自分HPの被ダメ予測が1/8ずれた)
+        if "状" not in t and not turn_re.search(t):
             continue
         # 同じ行 or 近い行のターン表記 n/m
         turns_left = None
@@ -1626,16 +2266,24 @@ def _extract_watch_ability(img, state: BattleStateV2, resolver) -> None:
                 slot.effectiveness = prev.effectiveness
         me.moves = new_moves
 
-    # 自パーティ登録 (my_team) の自動更新: 技4つが読めた場合のみ技を保存
+    # 自パーティ登録 (my_team) の自動更新: 技4つが読めた場合のみ技を保存。
+    # ⚠ 同一内容が2フレーム連続で読めたときだけ書き込む: watchファミリーの
+    # 画面 (パーティ一覧等) の単発誤読・誤帰属が設定ファイルを汚染しうる
+    # (2026-08-21: 分類器でのつよさ/一覧の分離は特徴が共通で困難と判断し、
+    #  書き込み側の裏付けで守る方針にした)
     if build_species:
         from advisor.my_team import update_build
         patch = {"特性": ability_ja, "持ち物": item_ja}
         if len(new_moves) == 4:
             patch["技"] = [m.name_ja for m in new_moves]
-        if update_build(build_species, patch):
-            state.log_event("system",
-                            f"my_team更新: {build_species} (能力タブ)",
-                            event_id=None)
+        patch_key = (build_species, ability_ja, item_ja,
+                     tuple(patch.get("技") or ()))
+        if patch_key == getattr(state, "_last_watch_patch", None):
+            if update_build(build_species, patch):
+                state.log_event("system",
+                                f"my_team更新: {build_species} (能力タブ)",
+                                event_id=None)
+        state._last_watch_patch = patch_key
 
 
 def extract_watch_side_columns(img, state: BattleStateV2, resolver) -> None:
@@ -1665,6 +2313,28 @@ def _accept_zero_hp_read(state, mon, side_name: str = "player") -> bool:
     return zero_n >= ZERO_READ_FAINT_COUNT
 
 
+def _plausible_max_hp(species_id, mx) -> bool:
+    """最大HPの読みが種族として物理的にあり得る範囲かを図鑑から判定する。
+
+    Lv50・個体値31で努力値0〜252 (ゲームの物理上限) のHP範囲に、champions側の
+    種族値改変・丸め差への余裕±8を加えた域。つよさ表示の誤分類フレームで
+    max=353 (実153の桁誤読) が初回観測として素通りし、マスカーニャに
+    153/353=43% が付いた (2026-08-25 第9回監査・高確度乖離) 対策。
+    種族未特定・図鑑不明なら判定せず True (既存の他ガードに委ねる)
+    """
+    if not species_id or not mx:
+        return True
+    try:
+        from advisor.dex import calc_hp, get_dex
+        sp = get_dex().species(species_id)
+        base = ((sp or {}).get("baseStats") or {}).get("hp")
+    except Exception:
+        return True
+    if not base:
+        return True
+    return calc_hp(int(base), 0) - 8 <= mx <= calc_hp(int(base), 252) + 8
+
+
 def _extract_watch_side_columns(img, state: BattleStateV2, resolver) -> None:
     # 左列: 自分の選出パーティのHP実数値
     for i, z in enumerate(zones.WATCH_MY[:3]):
@@ -1675,7 +2345,8 @@ def _extract_watch_side_columns(img, state: BattleStateV2, resolver) -> None:
         frac = ocr.parse_fraction(hp_text)
         if not name_text or not frac or not frac[1] or frac[1] < 50:
             continue
-        sp = resolver.resolve_species(name_text, cutoff=0.72)
+        known = [p.species_ja for p in state.player.party if p.species_ja]
+        sp = resolve_my_species(resolver, name_text, cutoff=0.72, roster=known)
         idx = None
         if sp:
             idx = state.player.find_by_species(sp[0])
@@ -1684,12 +2355,35 @@ def _extract_watch_side_columns(img, state: BattleStateV2, resolver) -> None:
         if idx is None:
             if not sp:
                 continue
+            if len(known) >= PARTY_SIZE:
+                # ロスターが判明済みなら、そこに無い名前は誤読 (2026-09-29 第17回 15:53: ひんしのブリジュラスの行が
+                # フレフワンに解決されて 7 体目 (HP 0) が生え、3 体目のひんしに数えられて勝った対戦が負けで終了扱い)
+                if not any(e.get("event") == "watch_name_ignored" and e.get("target") == name_text
+                           for e in state.events[-100:]):
+                    state.log_event("system", f"様子見画面の名前 {name_text} ({sp[0]}) はロスター外のため無視",
+                                    event_id="watch_name_ignored", target=name_text)
+                continue
             # 選出画面を経ずに起動した場合でもパーティに登録する
             mon = PokemonState(species_ja=sp[0], species_id=sp[1],
                                display_name=name_text)
             state.player.party.append(mon)
             idx = len(state.player.party) - 1
         mon = state.player.party[idx]
+        # 交代メニューの左列に並ぶのは選出3体そのもの。名前が解決できた行を
+        # 選出確定として扱い、3体そろったら他の選出フラグを下ろす
+        # (2026-08-31 第11回: やり直した選出画面の白リボンで立った古い
+        #  is_picked が残留し、未参加のミミッキュへの交代を推奨し続けた)
+        mon.is_picked = True
+        roster = getattr(state, "_watch_roster_idx", None) or set()
+        roster.add(idx)
+        state._watch_roster_idx = roster
+        if len(roster) >= 3:
+            for j, q in enumerate(state.player.party):
+                if j not in roster and q.is_picked:
+                    q.is_picked = False
+                    q.pick_order = None
+        if not _plausible_max_hp(mon.species_id, frac[1]):
+            continue
         if frac[0] == 0 and mon.status != "fainted":
             if not _accept_zero_hp_read(state, mon):
                 continue
@@ -1715,6 +2409,8 @@ def _extract_watch_side_columns(img, state: BattleStateV2, resolver) -> None:
     from vision.spriteid import identify_species_color
     cands = [(p.species_id, 0.5, p.species_ja)
              for p in state.opponent.party if p.species_id and p.species_ja]
+    seen_idx: set = set()   # 1個体は1行のみ (誤同定の重複行でゼロ読み裏付けが
+    #                         1フレーム内で複数回進むのを防ぐ)
     for i, z in enumerate(zones.WATCH_OPP):
         hp_text = ocr.read_zone_text(img, z["hp_text"], mode="panel",
                                      allowlist="0123456789%")
@@ -1729,4 +2425,21 @@ def _extract_watch_side_columns(img, state: BattleStateV2, resolver) -> None:
             continue
         idx2 = state.opponent.find_by_species(hit[1])
         if idx2 is not None:
-            state.opponent.party[idx2].hp_percent = float(pct)
+            if idx2 in seen_idx:
+                continue
+            seen_idx.add(idx2)
+            mon2 = state.opponent.party[idx2]
+            if pct <= 3.0 and mon2.status != "fainted":
+                # 生存個体への突然の0-3%読みは裏付け必須 (HUD経路と同じ。
+                # 2026-08-21 第6回: 相手一覧の誤読0%への防御を追加)
+                if not _accept_zero_hp_read(state, mon2,
+                                            side_name="opponent"):
+                    continue
+                mon2.hp_percent = float(pct)
+                mon2.hp_uncertain = False
+                if pct <= 0.5:
+                    mon2.status = "fainted"
+                continue
+            if pct > 3.0:
+                mon2._zero_read_count = 0
+            mon2.hp_percent = float(pct)

@@ -19,14 +19,17 @@ from advisor.damage import MonView, calc_damage
 from advisor.search import _speed
 
 
-def _best_dmg(attacker: MonView, defender: MonView, moves: list) -> float:
-    """最大打点 (平均乱数×命中率, 防御側最大HP%) を返す"""
+def _best_dmg(attacker: MonView, defender: MonView, moves: list, fieldv=None) -> float:
+    """最大打点 (平均乱数×命中率, 防御側最大HP%) を返す。fieldv (天候/フィールド) は省略時なし"""
     from advisor.dex import get_dex as _gd
     best = 0.0
     for mid in moves:
         try:
-            d = calc_damage(attacker, defender, mid, None)
+            d = calc_damage(attacker, defender, mid, fieldv)
         except Exception:
+            continue
+        if "expected" in d:          # 命中 (天候・特性・連続技の 1 発ごとの判定込み) まで掛けた期待値 (advisor.damage)
+            best = max(best, d["expected"])
             continue
         mv = _gd().move(mid)
         acc = ((mv.get("accuracy") or 100) / 100.0) if mv else 1.0
@@ -56,24 +59,25 @@ def _setup_boosted(view: MonView, moves: list) -> Optional[MonView]:
 
 
 def _race_turns(view: MonView, hp: float, moves: list,
-                opp: MonView, opp_hp: float, opp_moves: list) -> tuple:
+                opp: MonView, opp_hp: float, opp_moves: list, fieldv=None) -> tuple:
     """(撃破に必要なターン数, その系列での実効ビュー)。
 
     積み技を持ち、かつ相手の打点に3ターン以上の猶予がある場合は
     「1ターン積んでから殴る」系列も評価し、速い方を採る
     (積みエース評価の底上げ: 積んだ後の性能込みで対面を測る)。
+    fieldv (天候/フィールド) は両者のダメージに掛かる。省略時なし
     """
-    dmg = _best_dmg(view, opp, moves)
+    dmg = _best_dmg(view, opp, moves, fieldv)
     if dmg <= 0:
         return None, view
     turns = math.ceil((opp_hp * 100) / dmg)
     su = _setup_boosted(view, moves)
     if su is not None:
-        dmg_opp = _best_dmg(opp, view, opp_moves)
+        dmg_opp = _best_dmg(opp, view, opp_moves, fieldv)
         survive = math.inf if dmg_opp <= 0 else \
             math.ceil((hp * 100) / dmg_opp)
         if survive >= 3:
-            dmg_su = _best_dmg(su, opp, moves)
+            dmg_su = _best_dmg(su, opp, moves, fieldv)
             if dmg_su > 0:
                 t_su = 1 + math.ceil((opp_hp * 100) / dmg_su)
                 if t_su < turns:

@@ -21,7 +21,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from vision import zones, ocr, scenes, extractors
+from vision import zones, ocr, scenes, extractors, win_lose
 from vision.events import EventParser
 from vision.normalize import NameResolver
 from vision.state import BattleStateV2
@@ -91,6 +91,13 @@ class VisionPipeline:
         self._last_masks: dict = {}     # source -> 前回OCR時のマスク
         self._last_ocr_ts: dict = {}    # source -> 前回OCR時刻
         self._last_heavy = {}       # scene -> last heavy extraction time
+        # 破棄フレームからのメッセージ救出バッファ (2026-08-31 設計変更:
+        # 「キャプチャと処理の分離」。処理が追いつかず破棄されるフレームの
+        # メッセージ域だけを退避し、後から非同期にOCRして取り逃しを防ぐ)
+        from collections import deque
+        self._rescue_buf: deque = deque(maxlen=24)
+        self._rescue_last: dict = {}    # source -> (署名, 退避時刻)
+        self.rescue_stats = {"stashed": 0, "ocr": 0, "events": 0}
         self._selection_streak = 0  # 選出画面が連続何フレーム続いているか
         self._pending_scene = None  # シーン遷移の確定待ち (2フレーム連続で確定)
         self._pending_count = 0
@@ -107,6 +114,7 @@ class VisionPipeline:
             "field_check": 1.5,
             "battle_hud": 2.5,
             "field_hp": 1.0,   # フィールドシーン中の軽量HP追跡 (疑似シーンキー)
+            "team_menu": 2.0,  # 対戦外のパーティ管理画面の型取込 (疑似シーンキー)
         }
 
     # ------------------------------------------------------------------
@@ -149,6 +157,64 @@ class VisionPipeline:
                 f.trick_room, f.trick_room_turns = False, None
 
     # ------------------------------------------------------------------
+    def rescue_scan(self, img) -> None:
+        """破棄予定フレームからメッセージ域を退避する (受信側の軽量トリガー)。
+
+        1フレームあたり数msの文字有無判定 (outlined_text_mask はテキストが
+        無ければ None) のみを行い、文字があれば生クロップをリングバッファへ。
+        OCRは process() 側が非同期に消化する。処理落ちで破棄されるフレームに
+        しか呼ばれないため、平常時のコストはゼロ。対戦文脈外 (メニュー等) は
+        退避しない (誤分類メッセージの汚染防止と同じゲート)
+        """
+        if img is None or getattr(img, "size", 0) == 0:
+            return
+        if not (self.state.battle_active or
+                time.time() - getattr(self, "_last_selection_ts", 0.0) < 180.0):
+            return
+        for source, zone in (("message", zones.MESSAGE["text"]),
+                             ("left_popup", zones.MESSAGE["left_popup"]),
+                             ("right_popup", zones.MESSAGE["right_popup"])):
+            c = zones.crop(img, zone)
+            if c is None or c.size == 0:
+                continue
+            mask = ocr.outlined_text_mask(c)
+            if mask is None:
+                continue   # 縁取り文字なし
+            sig = round(float(mask.mean()), 1)
+            last = self._rescue_last.get(source)
+            now = time.time()
+            if last and last[0] == sig and now - last[1] < 0.4:
+                continue   # 同一表示の連続退避を抑制 (0.4秒ごとに1枚は許す)
+            self._rescue_last[source] = (sig, now)
+            self._rescue_buf.append((source, c.copy()))
+            self.rescue_stats["stashed"] += 1
+
+    def _drain_rescue(self, fired: list) -> None:
+        """退避済みクロップを少量ずつOCRしてイベント解析へ流す。
+
+        1回の process あたり最大3枚 (処理予算の保護)。バッファは
+        maxlen=24 で古い順に自然消滅する。テキスト単位・イベント単位の
+        dedup はパーサ側が持つため、同一メッセージの重複退避は無害
+        """
+        for _ in range(3):
+            try:
+                source, c = self._rescue_buf.popleft()
+            except IndexError:
+                return
+            self.rescue_stats["ocr"] += 1
+            try:
+                text = ocr.read_crop_direct(c)
+            except Exception:
+                continue
+            if not text:
+                continue
+            evs = self.parser.parse(text, source=source)
+            if evs:
+                self.rescue_stats["events"] += len(evs)
+                for e in evs:
+                    if e not in fired:
+                        fired.append(e)
+
     def _should_run_heavy(self, scene: str, force: bool) -> bool:
         if force:
             return True
@@ -260,12 +326,14 @@ class VisionPipeline:
         # 連結され続けた (2026-08-11の実測: 1ファイルに約3試合)。
         # turn>0 を「前の対戦が載っている」証拠として併用する。turn は選出
         # 画面滞在中には増えないため、訪問エッジ判定 (_sel_visit) と合わせて
-        # 同一選出内での再リセット (抽出済みロスターの消去) は起きない
+        # 同一選出内での再リセット (抽出済みロスターの消去) は起きない。
+        # outcome / battle_ended も根拠に入れる (2026-09-29 第16回: 処理率 9% で command 画面を一度も取れず turn=0 の
+        # まま終局 → 選出でリセットされず outcome が残って次戦の助言が止まり、ログも 2 戦連結。判定は state 側)
         if scene == "selection":
             self._sel_leave = 0
             if selection_confirmed and not self._sel_visit:
                 self._sel_visit = True
-                if self.state.turn > 0 or self.state.battle_active:
+                if self.state.needs_reset_for_new_battle():
                     self.reset()
                     self._selection_streak = 3
                     self.state.scene = scene
@@ -283,16 +351,34 @@ class VisionPipeline:
         elif scene == "command" and self._resolution_seen:
             self._resolution_seen = False
             self.state.turn += 1
+            # 新ターンの行動選択に到達 = とんぼ交代の保留は解消済み
+            # (無効化されて交代が発生しなかったケースのフラグ滞留を防ぐ)
+            self.state.pending_pivot_switch = False
             self._tick_field_effects()
 
         heavy = self._should_run_heavy(scene, force=single_shot)
 
         if scene == "selection" and heavy and selection_confirmed:
             extractors.extract_selection(img, self.state, self.resolver)
-        elif scene in ("command", "move_select", "battle_hud") and heavy:
-            extractors.extract_battle_hud(img, self.state, self.resolver)
-            if scene == "move_select":
-                extractors.extract_move_select(img, self.state, self.resolver)
+            # 選出中の詳細オーバーレイ (つよさの表示) からの型登録取り込み。
+            # battle_active中だがmy_teamへの書き込み専用で対戦状態には触れない
+            # (2026-08-31 第11回: 選出中の閲覧が登録されない指摘への対応)
+            try:
+                extractors.extract_selection_detail(img, self.state,
+                                                    self.resolver)
+            except Exception:
+                pass
+        elif scene in ("command", "move_select", "battle_hud"):
+            if heavy:
+                extractors.extract_battle_hud(img, self.state, self.resolver)
+                if scene == "move_select":
+                    extractors.extract_move_select(img, self.state,
+                                                   self.resolver)
+            else:
+                # 自分HPの実数はHUDに常時表示される。heavy間隔待ちだと
+                # 2回安定の確定まで実測60秒超かかり、古い自分HPのまま
+                # 交代助言が計算された (2026-08-20 第5回) ため毎フレーム読む
+                extractors.extract_my_hud(img, self.state, self.resolver)
         elif scene == "watch":
             if heavy:
                 extractors.extract_watch(img, self.state, self.resolver)
@@ -304,6 +390,28 @@ class VisionPipeline:
                     img, self.state, self.resolver)
         elif scene == "field_check" and heavy:
             extractors.extract_field_check(img, self.state, self.resolver)
+        elif scene == scenes.SCENE_RESULT:
+            # リザルト画面は順位/レート行を直接OCRして終了検出に流す。
+            # 従来は field 誤分類時のメッセージ枠OCRに依存し、検出が決着から
+            # 約10秒遅れ (連戦の表示窓ぎりぎり) だった (2026-08-25 第9回)
+            fired += self._process_text_regions(img, [
+                ("message", zones.RESULT["rate_row"]),
+            ], single_shot)
+            # シーン分類自体 (順位/レート行のアンカーつき) を終了のキーにする。文言 OCR の取り逃しに依存しない
+            end = self.parser.end_by_result_scene()
+            if end:
+                fired.append(end)
+
+        # パーティ管理画面 (対戦外) からの型登録取り込み (2026-08-30 要望)。
+        # ⚠ battle_active 中は一切走らせない: 対戦中のつよさ表示 (watch
+        # ファミリー) と混同して対戦状態を汚さないための分離。抽出自体も
+        # my_team への書き込み専用で、対戦状態には触れない
+        if not self.state.battle_active and \
+                self._should_run_heavy("team_menu", force=single_shot):
+            try:
+                extractors.extract_team_menu(img, self.state, self.resolver)
+            except Exception:
+                pass
 
         if heavy:
             # 自分側の静的情報 (タイプ=図鑑 / 持ち物・特性=登録) を補完する。
@@ -315,7 +423,16 @@ class VisionPipeline:
 
         # --- メッセージ / ポップアップ (HUDが消えるフィールドシーンのみ。
         #     HUD表示中はタイマー等の誤OCRを防ぐため読まない) ---
-        if scene == "field":
+        # 対戦文脈ゲート: field 誤分類したメニュー画面 (お知らせ/ボックス/
+        # バトルメニュー等) のテキストをイベント解析に流さない (2026-08-31
+        # 体系対応: 誤イベント汚染の主経路だった)。対戦文脈 = battle_active
+        # または直近に選出画面を見た (開幕の繰り出しメッセージは
+        # battle_active が立つ前に流れるため選出からの猶予で拾う)
+        in_battle_context = self.state.battle_active or (
+            time.time() - getattr(self, "_last_selection_ts", 0.0) < 180.0)
+        if scene == "selection":
+            self._last_selection_ts = time.time()
+        if scene == "field" and in_battle_context:
             # 技アニメーション中のHP変化を追い、直前の技イベントとダメージを
             # 対応付けられるようにする (HUDバナー表示中のみ内部でOCRする)
             if self._should_run_heavy("field_hp", force=single_shot):
@@ -328,6 +445,25 @@ class VisionPipeline:
                 ("left_popup", zones.MESSAGE["left_popup"]),
                 ("right_popup", zones.MESSAGE["right_popup"]),
             ], single_shot)
+
+        # 破棄フレームから救出したメッセージ域の消化 (rescue_scan 参照)
+        self._drain_rescue(fired)
+
+        # WIN / LOSE の画面 (勝負の文言のあと、ランク画面の前に数秒) から勝敗を確定する。色の割合だけなので毎フレーム見る。
+        # 対戦文脈 (対戦中か終了直後) に限り、選出・待機画面では見ない (2026-10-06 第18回: 文言の読み落としが 15 戦中 6 戦)
+        if (in_battle_context or self.state.battle_ended) and scene not in (
+                scenes.SCENE_SELECTION, scenes.SCENE_STANDBY) and not self.state.win_lose_screen:
+            try:
+                got = self.parser.end_by_win_lose_screen(win_lose.read_win_lose(img))
+            except Exception:
+                got = None
+            if got:
+                fired.append(got)
+
+        # 3体目のひんしの終了見込みを、猶予後に確定 (その陣営の交代を観測したら取り消し)
+        conf = self.parser.confirm_end_hint()
+        if conf:
+            fired.append(conf)
 
         return self.state.to_dict(), fired
 

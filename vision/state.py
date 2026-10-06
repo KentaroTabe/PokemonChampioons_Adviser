@@ -14,6 +14,8 @@ import time
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
+from champions_agent.config import BSS_PICK_COUNT, PARTY_SIZE, SELECTION_GUESS_REPLACE_MARGIN
+
 STAT_KEYS = ("atk", "def", "spa", "spd", "spe", "acc", "eva")
 
 MAJOR_STATUSES = ("poison", "toxic", "burn", "paralysis", "sleep", "freeze", "drowsy")
@@ -66,6 +68,10 @@ class PokemonState:
     # 交代の取り逃し等でHPが古い可能性がある印 (新しい読みで解除される)。
     # 2026-08-18: ひんしを取り逃した個体が100%のまま交代候補に推奨された
     hp_uncertain: bool = False
+    # HPの鮮度 (2026-09-05): 最後に実読みで確定した時刻と、技イベントからの
+    # 期待ダメージで推定した値かどうか (実読みが来れば False に戻る)
+    hp_read_ts: Optional[float] = None
+    hp_estimated: bool = False
 
     # 状態
     status: Optional[str] = None        # MAJOR_STATUSES のいずれか / 'fainted' / None
@@ -90,11 +96,34 @@ class PokemonState:
     is_picked: bool = False          # 選出画面で選出済み (左端の白リボン)
     pick_order: Optional[int] = None  # 選出順 (1=先発。リボン出現順で推定)
     last_seen_ts: float = 0.0
+    # 対戦中のタイプ変化 (へんげんじざい/みずびたし等) を観測済みか。
+    # True の間は図鑑タイプによる自動訂正 (backfill) を抑止する
+    # (2026-08-21: マスカーニャの変幻自在が数秒で図鑑タイプに戻されていた)。
+    # タイプ変化は交代で戻るため、交代アウトでフラグを解除し以後は図鑑で正す
+    type_changed: bool = False
+    # はたきおとす等で持ち物を失った (対戦中は復活しない)。True の間は
+    # 登録バックフィル・使用率予測による持ち物の再設定を抑止する
+    # (2026-08-21 第7回: はたき後も持ち物を保持したまま計算していた)
+    item_removed: bool = False
+    # 選出画面の推定 (タイプアイコン + スプライト照合) で入れた種族か。True の間は「相手の 6 体」として数えず
+    # (分析・実戦バンク)、場に出た種が来たら置き換えてよい。名前が読めた/場に出た時点で確定 (False) に上書きされる
+    # (2026-09-29 第17回: 推定の カイリュー が 2 枠に入り、実体は セグレイブ。表示と集計に他の対戦の顔ぶれが混ざって見えた)
+    species_guess: bool = False
+    guess_score: Optional[float] = None   # 推定時の視覚照合スコア (同種の重複でどちらを残すか)
 
-    def merge_species(self, species_ja: str, species_id: Optional[str]):
+    def merge_species(self, species_ja: str, species_id: Optional[str], guess: bool = False,
+                      score: Optional[float] = None):
+        """種族を設定する。guess=True は選出画面の推定 (確定ではない)。既定 (確定) は推定の印を消す"""
         self.species_ja = species_ja
         if species_id:
             self.species_id = species_id
+        self.species_guess = bool(guess)
+        self.guess_score = float(score) if (guess and score is not None) else None
+
+    def clear_species_guess(self):
+        """推定の種族を取り消す (タイプアイコン由来のタイプは残す)"""
+        self.species_ja, self.species_id = None, None
+        self.species_guess, self.guess_score = False, None
 
     def set_boost(self, stat: str, delta: int):
         if stat in self.boosts:
@@ -106,12 +135,76 @@ class PokemonState:
         keep = {"leechseed"}  # やどりぎも交代で消えるが表記簡略化のため消す
         self.volatiles = []
         self.is_active = False
+        # タイプ変化は交代で元に戻る。フラグを解除すると次のbackfillが
+        # 図鑑タイプへ正してくれる (typesをここで直接触ると図鑑参照が要る)
+        self.type_changed = False
 
     def to_dict(self):
         d = asdict(self)
         d["moves"] = [m if isinstance(m, dict) else asdict(m) for m in
                       (self.moves or [])]
         return d
+
+
+def adopt_selection_guess(party: list, idx: int, species_id: str, species_ja: str, score: float,
+                          margin: float = SELECTION_GUESS_REPLACE_MARGIN) -> str:
+    """選出画面の推定 (タイプアイコン + スプライト照合) を枠 idx に入れる (純粋)。
+    同じ種が別枠に既にあるとき (同種 2 体はルール上あり得ない): 別枠が推定でスコアが margin 以上低ければそちらを
+    取り消して入れる ("replaced")、そうでなければ入れない ("skip")。戻り値: "adopt" / "replaced" / "skip"
+    (2026-09-29 第17回: 3 戦でセグレイブがカイリューと推定され、実物のカイリューと 2 枠になった)"""
+    slot = party[idx]
+    dup = next((j for j, q in enumerate(party) if j != idx and q.species_id == species_id), None)
+    if dup is not None:
+        q = party[dup]
+        if q.species_guess and (q.guess_score or 0.0) + margin < score:
+            q.clear_species_guess()
+            slot.merge_species(species_ja, species_id, guess=True, score=score)
+            return "replaced"
+        return "skip"
+    slot.merge_species(species_ja, species_id, guess=True, score=score)
+    return "adopt"
+
+
+def apply_manual_species(party: list, idx: int, species_ja: str, species_id: Optional[str]) -> dict:
+    """手動確定 (候補のプルダウン / 手入力) を相手の枠に入れる (純粋)。
+    戻り値 {"index": 入れた枠 (入れなければ None), "moved": 別の枠へ付け替えたか, "cleared": 取り消した別枠の推定の index,
+    "reason": 入れなかった理由 (入れたら None)}
+
+    - 対象枠が未確定、または選出画面の推定 (species_guess) → その枠に入れる。推定は確定ではないので手入力で上書きできる
+      (2026-10-06 第18回接続テスト: 推定の枠が「確定済み」と扱われ、6 枠とも推定で埋まっていて付け替え先も無く、推定の
+      カイリュー / スターミー を直そうとした手入力が 9 回続けて無視された)
+    - 対象枠が同じ種で確定済み → そのまま (入れ直しても同じ)
+    - 対象枠が別の種で確定済み → 未確定の枠へ付け替える (プルダウンの描画から選択までの間に、対象枠が別フレームで自動確定
+      されることがある。2026-08-20)。未確定の枠が無ければ入れない
+    - 入れる種が別の枠にもあるとき (同種 2 体はルール上あり得ない): 別の枠が確定済みなら入れない、推定ならそちらを取り消す
+    """
+    out = {"index": None, "moved": False, "cleared": [], "reason": None}
+    if not (0 <= idx < len(party)):
+        out["reason"] = "枠の番号が範囲外"
+        return out
+    slot = party[idx]
+    target = idx
+    if slot.species_ja and not slot.species_guess and slot.species_ja != species_ja:
+        target = next((j for j, p in enumerate(party) if not p.species_ja), None)
+        if target is None:
+            out["reason"] = f"slot{idx} は {slot.species_ja} で確定済み (未確定の枠なし)"
+            return out
+        out["moved"] = True
+
+    def _same(q) -> bool:
+        return q.species_ja == species_ja or bool(species_id and q.species_id == species_id)
+
+    others = [(j, q) for j, q in enumerate(party) if j != target and q.species_ja and _same(q)]
+    fixed = next((j for j, q in others if not q.species_guess), None)
+    if fixed is not None:
+        out["reason"] = f"{species_ja} は slot{fixed} で確定済み"
+        return out
+    for j, q in others:
+        q.clear_species_guess()
+        out["cleared"].append(j)
+    party[target].merge_species(species_ja, species_id)
+    out["index"] = target
+    return out
 
 
 @dataclass
@@ -139,6 +232,18 @@ class SideState:
             return self.party[self.active_index]
         return None
 
+    def fainted_count(self, picked_only: bool = False) -> int:
+        """ひんし数 (純粋)。ロスターの枠 (PARTY_SIZE) だけを数え、余剰の枠 (誤読で生えた 7 体目等) は数えない。
+        picked_only=True で選出 (is_picked) が BSS_PICK_COUNT 体分かっていればその中だけを数える。
+        (2026-09-29 第17回 15:53: 様子見画面の名前の誤読で生えた 7 体目 (HP 0) が 3 体目のひんしに数えられ、
+        自分のガブリアスが残っているのに負けで終了扱い → 助言が止まり、勝った対戦が負けで記録された)"""
+        roster = self.party[:PARTY_SIZE]
+        if picked_only:
+            picked = [p for p in roster if p.is_picked]
+            if len(picked) >= BSS_PICK_COUNT:
+                roster = picked
+        return sum(1 for p in roster if p.status == "fainted")
+
     def ensure_active(self) -> PokemonState:
         """場に出ているポケモンを返す。未確定ならプレースホルダを作る。
 
@@ -157,7 +262,8 @@ class SideState:
                 return self._limbo
         return mon
 
-    def find_by_species(self, species_ja: str) -> Optional[int]:
+    def find_by_species(self, species_ja: str,
+                        species_id: Optional[str] = None) -> Optional[int]:
         for i, p in enumerate(self.party):
             if p.species_ja == species_ja:
                 return i
@@ -174,6 +280,23 @@ class SideState:
         if want:
             for i, p in enumerate(self.party):
                 if base(p.species_ja) == want:
+                    return i
+        # 同名フォーム族フォールバック: ゲームのHUD表示はフォーム名を省く
+        # (ウォッシュロトムも「ロトム」と表示される) ため、素の名前の読みが
+        # 既存のフォーム個体の隣に別枠として生えないよう、名前の末尾一致
+        # + 図鑑IDの前方一致の両方を満たす枠へ寄せる (2026-08-25 第9回:
+        # rotomwash の隣に rotom が生え、タイプがゴースト/でんきで表示された)。
+        # ID前方一致を必須にするのは、コイル/レアコイルのような
+        # 「名前は末尾一致するが別種」の誤併合を防ぐため
+        if want and species_id and len(want) >= 3:
+            for i, p in enumerate(self.party):
+                pj = base(p.species_ja) or ""
+                pid = p.species_id or ""
+                if not pj or not pid or pj == want:
+                    continue
+                if not (pj.endswith(want) or want.endswith(pj)):
+                    continue
+                if pid.startswith(species_id) or species_id.startswith(pid):
                     return i
         return None
 
@@ -192,35 +315,55 @@ class SideState:
         self.active_index = index
         self.party[index].is_active = True
 
+    def replacement_slot(self, new_types: Optional[set]) -> Optional[int]:
+        """満枠で初登場の種が来たとき置き換える枠を選ぶ (純粋)。候補は非アクティブ・技未判明・非ひんし。優先順:
+        1) 選出画面の推定 (species_guess) で同じ種が 2 枠以上ある重複のうちスコアが低い枠 (同種 2 体はルール上あり得ない。
+           2026-09-29 第17回: セグレイブ が カイリュー と推定され、実物の カイリュー と 2 枠になった)
+        2) 図鑑タイプが一致する推定枠 / 未特定枠、次いでタイプが一致する枠
+        3) 推定枠のうち視覚照合スコアが最も低いもの
+        4) 未特定枠
+        5) それ以外の候補の先頭"""
+        elig = [(i, p) for i, p in enumerate(self.party)
+                if i != self.active_index and not p.revealed_moves and p.status != "fainted"]
+        if not elig:
+            return None
+        counts: dict = {}
+        for p in self.party:
+            if p.species_id:
+                counts[p.species_id] = counts.get(p.species_id, 0) + 1
+        dups = [((p.guess_score or 0.0), i) for i, p in elig
+                if p.species_guess and counts.get(p.species_id, 0) >= 2]
+        if dups:
+            return min(dups)[1]
+        if new_types:
+            for only_unconfirmed in (True, False):
+                for i, p in elig:
+                    if p.types and set(p.types) == new_types and \
+                            (not only_unconfirmed or p.species_guess or not p.species_ja):
+                        return i
+        guesses = [((p.guess_score or 0.0), i) for i, p in elig if p.species_guess]
+        if guesses:
+            return min(guesses)[1]
+        for i, p in elig:
+            if not p.species_ja:
+                return i
+        return elig[0][0]
+
     def switch_to_species(self, species_ja: str, species_id: Optional[str]) -> PokemonState:
-        idx = self.find_by_species(species_ja)
+        idx = self.find_by_species(species_ja, species_id)
         if idx is None and len(self.party) >= 6:
             # 満枠での「初登場」= 既存枠の視覚同定ミスが濃厚 (実測:
             # ラフレシアと誤同定した枠の実体がフシギバナで、appendにより
-            # ルール上あり得ない7匹構成になった)。図鑑タイプが一致し
-            # 技未判明の非アクティブ枠を新種で置き換える。ロスターは
-            # 対戦中に6を超えない
+            # ルール上あり得ない7匹構成になった)。置き換える枠は
+            # replacement_slot (推定の重複 → タイプ一致 → 推定 → 未特定)。
+            # ロスターは対戦中に6を超えない
             new_types = _dex_types_ja_of(species_id)
-            cand = None
-            for i, p in enumerate(self.party):
-                if i == self.active_index or p.revealed_moves or \
-                        p.status == "fainted":
-                    continue
-                if new_types and p.types and set(p.types) == new_types:
-                    cand = i
-                    break
-                if cand is None and not p.species_ja:
-                    cand = i
-            if cand is None:
-                for i, p in enumerate(self.party):
-                    if i != self.active_index and not p.revealed_moves and \
-                            p.status != "fainted":
-                        cand = i
-                        break
+            cand = self.replacement_slot(new_types)
             if cand is not None:
                 p = self.party[cand]
                 p.species_ja, p.species_id = species_ja, species_id
                 p.types = list(new_types) if new_types else []
+                p.species_guess, p.guess_score = False, None   # 場に出た = 確定
                 idx = cand
         if idx is None:
             if len(self.party) >= 6:
@@ -235,7 +378,13 @@ class SideState:
             idx = len(self.party) - 1
         self.switch_to(idx)
         mon = self.party[idx]
-        mon.merge_species(species_ja, species_id)
+        # 同族フォーム一致 (素の名前読みが具体フォーム枠へ寄せられた場合) は、
+        # 確定済みの具体フォーム (rotomwash等) を素形 (rotom) へ格下げしない
+        downgrade = (mon.species_id and species_id
+                     and mon.species_id != species_id
+                     and mon.species_id.startswith(species_id))
+        if not downgrade:
+            mon.merge_species(species_ja, species_id)
         return mon
 
     def prune_placeholders(self):
@@ -310,6 +459,17 @@ class BattleStateV2:
         self.mega_used = {"player": False, "opponent": False}
         self.battle_active: bool = False
         self.outcome: Optional[str] = None    # win / loss (勝敗メッセージから)
+        # 終了シグナル (勝敗文言 / ランク画面 / リザルト画面 / 3体目のひんしの確定) のいずれかを見た。
+        # battle_active は開始前も False なので、終了後の助言抑止にはこちらを使う
+        self.battle_ended: bool = False
+        # 3体目のひんし等の終了の兆候 {"side", "ts", "fainted"}。猶予内に交代が無ければ確定 (events.confirm_end_hint)
+        self.end_hint: Optional[dict] = None
+        # WIN / LOSE の画面から読んだ勝敗 (vision/win_lose。1 対戦 1 回だけ発火させるための印。reset_battle で消える)
+        self.win_lose_screen: Optional[str] = None
+        # とんぼがえり系を自分が使用し、交代先の選択が保留中 (2026-08-21
+        # 第8回: この場面で技トップの助言が出ていた)。events が技使用で
+        # 立て、switch_player / 次ターン到達で下ろす。engineは交代限定で助言
+        self.pending_pivot_switch: bool = False
         self.events: list = []          # [{ts, source, text, event, target}]
         self.hp_max_votes: dict = {}    # (side, species) -> {最大HP読取値: 票数}
         self.last_texts = {"message": "", "left_popup": "", "right_popup": ""}
@@ -345,6 +505,15 @@ class BattleStateV2:
     def side(self, name: str) -> SideState:
         return self.player if name == "player" else self.opponent
 
+    def needs_reset_for_new_battle(self) -> bool:
+        """確定選出画面に入ったとき、前の対戦の内容が載っているか (= reset_battle が要るか)。純粋。
+
+        turn > 0 と battle_active は従来の根拠 (2026-08-11)。outcome / battle_ended は「対戦は終わった (勝敗文言や
+        ランク画面は取れた) が command 画面を一度も取れず turn が 0 のまま」の根拠: 2026-09-29 第16回で熱圧迫により
+        処理率 9% に落ち、この状態から次戦の選出でリセットされず、outcome が残って助言が止まり、ログも 2 戦連結した
+        """
+        return bool(self.turn > 0 or self.battle_active or self.outcome or self.battle_ended)
+
     def reset_battle(self):
         """新しい対戦の開始 (選出画面検知時など) に呼ぶ"""
         keep_rate = self.last_rate   # レートは対戦を跨ぐ情報なので保持
@@ -352,6 +521,10 @@ class BattleStateV2:
         self.__init__()
         self.last_rate = keep_rate
         self.battle_seq = next_seq
+        # __init__ の再実行では宣言外の臨時属性が消えない。位置ベースの
+        # ものは前の対戦の値が誤適用されるため明示的に破棄する
+        # (交代メニュー由来の選出確定 index 集合など)
+        self._watch_roster_idx = set()
 
     def restore_from_dict(self, d: dict) -> None:
         """スナップショットからの復元 (サーバー再起動の対戦中リカバリ用)。
@@ -363,11 +536,11 @@ class BattleStateV2:
             mon = PokemonState()
             for k in ("species_ja", "species_id", "display_name", "gender",
                       "types", "hp_percent", "hp_current", "hp_max",
-                      "hp_uncertain",
+                      "hp_uncertain", "hp_read_ts", "hp_estimated",
                       "status", "volatiles", "boosts", "ability_ja",
                       "ability_id", "item_ja", "item_id", "item_consumed",
                       "revealed_moves", "aliases", "is_mega", "is_active",
-                      "is_picked", "pick_order"):
+                      "is_picked", "pick_order", "species_guess", "guess_score"):
                 if k in md and md[k] is not None:
                     setattr(mon, k, md[k])
             mon.moves = [MoveSlot(**{kk: m.get(kk) for kk in
@@ -403,6 +576,7 @@ class BattleStateV2:
         self.protect_streak = dict(d.get("protect_streak") or
                                    {"player": 0, "opponent": 0})
         self.battle_active = bool(d.get("battle_active"))
+        self.battle_ended = bool(d.get("battle_ended"))
         self.selection_picked = d.get("selection_picked")
         self.battle_seq = int(d.get("battle_seq") or 0)
         self.last_move = dict(d.get("last_move") or {})
@@ -414,7 +588,10 @@ class BattleStateV2:
             "turn": self.turn,
             "command_no": self.command_no,
             "battle_active": self.battle_active,
+            "battle_ended": self.battle_ended,
+            "end_hint": self.end_hint,
             "outcome": self.outcome,
+            "pending_pivot_switch": self.pending_pivot_switch,
             "field": self.field.to_dict(),
             "player": self.player.to_dict(),
             "opponent": self.opponent.to_dict(),

@@ -19,6 +19,8 @@ import json
 import time
 from pathlib import Path
 
+from tools.battle_outcome import outcome_from_records
+
 REPO = Path(__file__).resolve().parent.parent
 BATTLE_DIR = REPO / "logs" / "battles"
 
@@ -74,8 +76,7 @@ def review_text(path: str, show_all: bool = False) -> str:
     from vision.normalize import NameResolver
     resolver = NameResolver()
     records = _load(path)
-    outcome = next((d.get("outcome") for d in records
-                    if d.get("type") == "outcome"), "unknown")
+    outcome = outcome_from_records(records)[0] or "unknown"   # 最後の outcome 行 + 勝負文言優先
     pending_advice = None
     decisions = []   # (t, actual_label, best_label, agree, best)
     for i, d in enumerate(records):

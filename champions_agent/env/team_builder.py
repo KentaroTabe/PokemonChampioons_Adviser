@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
+from pathlib import Path
 
 from champions_agent.config import (
     USAGE_TARGET_FORMAT, DEFAULT_REGULATION, PLAY_STYLES, DEFAULT_PLAY_STYLE,
 )
 from champions_agent.data import database as db
+from champions_agent.data.sim_cache import load_checked
 from champions_agent.data.sources.name_mapping import to_showdown_name
 
 
@@ -78,6 +80,22 @@ def _fetch_meta_pool(conn, snapshot_id: int) -> list[dict]:
         (snapshot_id,),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def _fetch_move_pool(conn, snapshot_id: int, limit: int = 12) -> dict:
+    """{species_id: [技 (使用率順)]}: learnset で落ちた技の埋め合わせ用"""
+    out: dict = {}
+    try:
+        rows = conn.execute(
+            "SELECT pokemon_name, move_name, usage_percent FROM move_usage WHERE snapshot_id = ? "
+            "ORDER BY pokemon_name, usage_percent DESC", (snapshot_id,)).fetchall()
+    except Exception:
+        return out
+    for r in rows:
+        lst = out.setdefault(r[0], [])
+        if len(lst) < limit:
+            lst.append(r[1])
+    return out
 
 
 def _fetch_fallback_items(conn, snapshot_id: int) -> list[str]:
@@ -155,6 +173,21 @@ def build_random_party(size: int = 6, fmt: str = USAGE_TARGET_FORMAT,
         pool = _fetch_meta_pool(conn, snapshot_id)
         role_scores = _fetch_role_scores(conn, snapshot_id)
         fallback_items = _fetch_fallback_items(conn, snapshot_id)
+        move_pool = _fetch_move_pool(conn, snapshot_id)
+    # 技は champions mod の learnset で検査し、覚えない技は使用率上位の合法な技で埋める (2026-09-13 障害:
+    # cbd の M-C データにある「メテオアサルト」を mod が拒否し、学習が毎サイクル止まった)。合法な技が無い型は候補から外す
+    from champions_agent.env.legality import fill_moves
+    legal_pool = []
+    for r in pool:
+        r = dict(r)
+        moves = fill_moves(r["pokemon_name"], [r["move1"], r["move2"], r["move3"], r["move4"]],
+                           move_pool.get(r["pokemon_name"], []))
+        if not moves:
+            continue
+        for i in range(4):
+            r[f"move{i + 1}"] = moves[i] if i < len(moves) else None
+        legal_pool.append(r)
+    pool = legal_pool
 
     if len(pool) < size:
         raise RuntimeError(
@@ -195,7 +228,7 @@ def build_random_party(size: int = 6, fmt: str = USAGE_TARGET_FORMAT,
             tera_type=r["tera_type"],
             nature=r["nature"],
             evs=r["evs"],
-            moves=[r["move1"], r["move2"], r["move3"], r["move4"]],
+            moves=[m for m in (r["move1"], r["move2"], r["move3"], r["move4"]) if m],
         )
         for r in result
     ]
@@ -237,8 +270,69 @@ def _legal_item_ids() -> set:
     return _LEGAL_ITEM_IDS
 
 
+_AVAILABLE_ITEM_IDS = None
+# Champions で使える持ち物の元は Showdown の items.ts (pokemon-showdown/ はリポジトリに含めない)。読むのはコミット済みのキャッシュで、
+# Showdown があれば一致を検査する (2026-10-06: CI に Showdown が無く、こだわりハチマキ等を「使えない」とする判定が効かなかった)
+SHOWDOWN_DIR = Path(__file__).resolve().parents[2] / "pokemon-showdown"
+AVAILABLE_ITEMS_SOURCES = ("data/items.ts", "data/mods/champions/items.ts")   # Showdown の中のパス (本体 → mod。parse_available_items の引数の順)
+AVAILABLE_ITEMS_CACHE_PATH = Path(__file__).resolve().parents[1] / "data" / "champions_available_items.json"
+AVAILABLE_ITEMS_CACHE_KEY = "available_items"
+
+
+def parse_item_status(text: str) -> dict:
+    """items.ts の本文 → {item_id: isNonstandard の値 (None = 標準)}。1 タブの `id: {` ブロックごとに isNonstandard を読む (純粋)"""
+    import re as _re
+    out: dict = {}
+    cur = None
+    for line in text.splitlines():
+        m = _re.match(r"^\t(\w+): \{", line)
+        if m:
+            cur = m.group(1)
+            out[cur] = None
+            continue
+        if cur is None or not line.startswith("\t\t"):
+            continue
+        m = _re.match(r'^\t\tisNonstandard: (?:"([A-Za-z]+)"|null)', line)
+        if m:
+            out[cur] = m.group(1)
+    return out
+
+
+def available_items(base: dict, mod: dict) -> set:
+    """Champions で使える持ち物: 本体で標準 (isNonstandard 無し) のものに mod の指定を重ねる (mod の null = 使える、
+    "Past" 等 = 使えない)。本体に無く mod にだけある id はその mod の指定で決める (純粋)"""
+    out: set = set()
+    for item, status in base.items():
+        st = mod[item] if item in mod else status
+        if st is None:
+            out.add(item)
+    for item, status in mod.items():
+        if item not in base and status is None:
+            out.add(item)
+    return out
+
+
+def parse_available_items(base_text: str, mod_text: str) -> set:
+    """本体と champions mod の items.ts の本文 → Champions で使える持ち物 id (純粋)"""
+    return available_items(parse_item_status(base_text), parse_item_status(mod_text))
+
+
+def _available_item_ids() -> set:
+    """Champions で実際に使える持ち物 id (champions mod で isNonstandard: "Past" のこだわりハチマキ / メガネ / じゃくてんほけん /
+    とつげきチョッキ等を除く。2026-10-02: 生成型のこだわりハチマキが validate-team で落ちた)。
+    値はコミット済みのキャッシュ (champions_agent/data/champions_available_items.json) から読み、Showdown の items.ts があれば
+    一致を検査する (違えば警告してキャッシュの値を使う。champions_agent/data/sim_cache.load_checked)。
+    キャッシュも Showdown のデータも読めなければ _legal_item_ids"""
+    global _AVAILABLE_ITEM_IDS
+    if _AVAILABLE_ITEM_IDS is None:
+        ids = load_checked(AVAILABLE_ITEMS_CACHE_PATH, AVAILABLE_ITEMS_CACHE_KEY, set,
+                           [SHOWDOWN_DIR / s for s in AVAILABLE_ITEMS_SOURCES], parse_available_items)
+        _AVAILABLE_ITEM_IDS = ids if ids else set(_legal_item_ids())
+    return _AVAILABLE_ITEM_IDS
+
+
 def _sanitize_species(name: str) -> str:
-    for suf in ("megax", "megay", "mega"):
+    for suf in ("megax", "megay", "megaz", "mega"):
         if name.endswith(suf) and len(name) > len(suf) + 2:
             return name[: -len(suf)]
     return name
@@ -276,13 +370,54 @@ def _sanitize_item(item: str | None) -> str | None:
     return item
 
 
+_SPECIES_ITEMS_CACHE: dict | None = None
+
+
+def _species_item_alternatives() -> dict:
+    """species_id -> [使用率降順のitem_id] (最新スナップショット、遅延ロード)"""
+    global _SPECIES_ITEMS_CACHE
+    if _SPECIES_ITEMS_CACHE is None:
+        out: dict = {}
+        try:
+            with db.get_connection() as conn:
+                snap = db.latest_snapshot_id(conn)
+                if snap:
+                    for r in conn.execute(
+                            """SELECT pokemon_name, item_name, usage_percent
+                               FROM item_usage WHERE snapshot_id = ?
+                               ORDER BY usage_percent DESC""", (snap,)):
+                        it = _sanitize_item(r["item_name"])
+                        if it:
+                            out.setdefault(str(r["pokemon_name"]), []).append(it)
+        except Exception:
+            pass
+        _SPECIES_ITEMS_CACHE = out
+    return _SPECIES_ITEMS_CACHE
+
+
+def _species_usage_key(species: str) -> str:
+    """PokemonSet.species (Showdown表示名) -> item_usage の pokemon_name キー"""
+    import re as _re
+    return _re.sub(r"[^a-z0-9]", "", (species or "").lower())
+
+
 def _enforce_item_clause(sets: list[PokemonSet], fallback_items: list[str] | None = None) -> None:
-    """Flat Rules (Item Clause = 1) のためチーム内のアイテム重複を解消する"""
+    """Flat Rules (Item Clause = 1) のためチーム内のアイテム重複を解消する。
+
+    衝突時はまず**その種族自身の使用率次点**から未使用品を選ぶ (実戦で
+    使われる型の範囲に収める)。種族の候補が尽きたときだけ全体人気の
+    フォールバックへ落とす (2026-08-30 第10回: 全体人気リストが先行して
+    いたため、オボンが衝突したカバルドンに種族の使用実績が無い
+    こだわりスカーフが充当された。種族次点は たべのこし 28.8% だった)
+    """
     candidates = (fallback_items or []) + _FALLBACK_ITEMS
+    per_species = _species_item_alternatives()
     used: set = set()
     for s in sets:
         if s.item and s.item in used:
-            s.item = next((f for f in candidates if f not in used), None)
+            own = per_species.get(_species_usage_key(s.species)) or []
+            s.item = next((f for f in own if f not in used),
+                          next((f for f in candidates if f not in used), None))
         if s.item:
             used.add(s.item)
 

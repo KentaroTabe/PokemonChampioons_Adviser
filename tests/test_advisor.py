@@ -4,6 +4,16 @@
 """
 from __future__ import annotations
 
+import os
+
+# エンジン規則 (交代技の複合価値・割引・ゲート等) の検証を、学習で日々変わる
+# RL方策のブレンドから切り離す。2026-09-04: EMA方策の変動で
+# test_pivot_over_plain_switch が「バレットパンチ60.7 vs 交代59.1」の僅差で
+# 落ちた (K=0/8 どちらでも同一、RL_BLEND_WEIGHT=0 で全緑)。RLの読み込みや
+# 行動分布の提示 (policy_hint) は引き続き検証される (ブレンド重みのみ0)
+os.environ.setdefault("RL_BLEND_WEIGHT", "0")
+
+
 from advisor.dex import get_dex, calc_hp, calc_stat
 from advisor.damage import MonView, FieldView, calc_damage
 from advisor.engine import evaluate
@@ -11,6 +21,23 @@ from advisor.engine import evaluate
 
 def approx(a, b, tol):
     assert abs(a - b) <= tol, f"{a} != {b} (+-{tol})"
+
+
+def test_rl_policy_source_order():
+    """RL方策の読み込み優先順 (P5: 既定emaの採用と復帰経路の保証)"""
+    from advisor.rl_bridge import _policy_candidates
+    assert _policy_candidates("balance", "ema") == [
+        "battle_policy_balance_ema.zip",
+        "battle_policy_balance_best.zip",
+        "battle_policy_balance.zip"]
+    assert _policy_candidates("balance", "best")[0] == \
+        "battle_policy_balance_best.zip"
+    assert _policy_candidates("cycle", "current") == \
+        ["battle_policy_cycle.zip"]
+    # 誤設定は best 扱い (読み込みが止まらない安全側)
+    assert _policy_candidates("balance", "typo") == \
+        _policy_candidates("balance", "best")
+    print("test_rl_policy_source_order OK")
 
 
 def test_stats():
@@ -65,8 +92,19 @@ def test_weather_and_screens():
     base = calc_damage(atk, dfn, "flamethrower")
     sun = calc_damage(atk, dfn, "flamethrower", FieldView(weather="sun"))
     approx(sun["avg"], base["avg"] * 1.5, 2.0)
+    # 天候の補正は理由に残す (2026-09-29 第17回: 晴れ下で いまひとつ のフェアリー技が 等倍 の水技を上回った理由が見えなかった)
+    assert any("晴れ" in n and "ほのお" in n and "1.5" in n for n in sun["notes"]), sun["notes"]
+    assert not any("晴れ" in n for n in base["notes"]), base["notes"]
+    sun_water = calc_damage(atk, dfn, "hydropump", FieldView(weather="sun"))
+    assert any("晴れ" in n and "みず" in n and "0.5" in n for n in sun_water["notes"]), sun_water["notes"]
     wall = calc_damage(atk, dfn, "flamethrower", FieldView(light_screen=True))
     approx(wall["avg"], base["avg"] * 0.5, 2.0)
+    # メガメガニウムの Mega Sol: 天候が無くても自分の攻撃は晴れ扱い (ほのお 1.5 倍、みず 0.5 倍)
+    sol = MonView(species_id="charizard", base=dex.species("charizard")["baseStats"],
+                  types=dex.species("charizard")["types"], ev={"spa": 252}, ability="megasol")
+    approx(calc_damage(sol, dfn, "flamethrower")["avg"], base["avg"] * 1.5, 2.0)
+    water_base = calc_damage(atk, dfn, "hydropump")["avg"]
+    approx(calc_damage(sol, dfn, "hydropump")["avg"], water_base * 0.5, 2.0)
     print("test_weather_and_screens OK")
 
 
@@ -158,11 +196,10 @@ def test_evaluate_end_to_end():
     print(Advisor().format_advice(advice))
 
 
-def test_pivot_over_plain_switch():
-    """素の交代が最善のとき、無効化されない交代技が交代より上に来る"""
-    import copy
-    from advisor.engine import evaluate as _eval
-    state = {
+def _pivot_state():
+    """ハッサム (とんぼがえり / バレットパンチ) + ガブリアス vs リザードン (フレアドライブ判明): 相性最悪で素の交代が最善になる局面。
+    ハッサムは素早さ負けで、エンジンは「行動前に倒される見込み」と判定する"""
+    return {
         "field": {"weather": None, "terrain": None, "trick_room": False},
         "mega_used": {"player": False, "opponent": False},
         "player": {
@@ -172,7 +209,6 @@ def test_pivot_over_plain_switch():
             "screens": {"reflect": False, "light_screen": False,
                         "aurora_veil": False},
             "party": [
-                # ハッサム vs リザードン: 相性最悪で交代が最善になる状況
                 {"species_id": "scizor", "species_ja": "ハッサム",
                  "types": ["むし", "はがね"], "hp_percent": 100.0,
                  "hp_current": 145, "hp_max": 145, "status": None,
@@ -205,19 +241,95 @@ def test_pivot_over_plain_switch():
             ],
         },
     }
+
+
+def _dump(actions):
+    return [f"{a['kind']}:{a.get('id') or a['name']}={a['score']}" for a in actions]
+
+
+def test_pivot_over_plain_switch():
+    """交代技の複合価値: 素の交代が最善で、自分が先に動ける (倒される前に技が出る) なら、無効化されない交代技が交代より上に来る。
+    ここではハッサムに素早さ +2 を与えて先手にする"""
+    import copy
+    from advisor.engine import evaluate as _eval
+    state = _pivot_state()
+    state["player"]["party"][0]["boosts"] = {"spe": 2}
     advice = _eval(state)
     assert advice["ok"], advice
     actions = advice["actions"]
     idx = {a["id"]: i for i, a in enumerate(actions) if a.get("id")}
-    switch_idx = next(i for i, a in enumerate(actions)
-                      if a["kind"] == "switch")
-    # 交代が交代技より上に来ているなら、交代技の複合価値が働いていない
-    dump = [f"{a['kind']}:{a.get('id') or a['name']}={a['score']}"
-            for a in actions]
+    switch_idx = next(i for i, a in enumerate(actions) if a["kind"] == "switch")
+    dump = _dump(actions)
     assert idx["uturn"] < switch_idx, dump
     top = actions[idx["uturn"]]
     assert "交代するならまずこの技" in top["reason"], dump
+    assert "行動前に倒される見込み" not in top["reason"], dump
     print("test_pivot_over_plain_switch OK")
+
+
+def test_plain_switch_over_pivot_when_ko_first():
+    """行動前に倒される見込みなら、交代技の複合価値は働かず素の交代が上 (2026-10-05: 補正が割引を上書きし、先に倒される
+    とんぼがえり 53 点 > 交代 51 点 になっていた矛盾の修正)。交代技は自分の行動順にしか発動せず、素の交代は相手の攻撃より先に成立する"""
+    from advisor.engine import evaluate as _eval
+    advice = _eval(_pivot_state())
+    assert advice["ok"], advice
+    actions = advice["actions"]
+    idx = {a["id"]: i for i, a in enumerate(actions) if a.get("id")}
+    switch = next(a for a in actions if a["kind"] == "switch")
+    switch_idx = actions.index(switch)
+    dump = _dump(actions)
+    uturn = actions[idx["uturn"]]
+    assert "行動前に倒される見込み" in uturn["reason"], dump
+    assert switch_idx < idx["uturn"], dump
+    assert uturn["score"] < switch["score"], dump
+    assert "交代するならまずこの技" not in uturn["reason"], dump
+    assert "交代技は発動しない" in uturn["reason"], dump
+    # 先制技 (バレットパンチ) は先に動けるので割引されず、割引された交代技より上に残る
+    assert idx["bulletpunch"] < idx["uturn"], dump
+    print("test_plain_switch_over_pivot_when_ko_first OK")
+
+
+def test_pivot_bonus_consistent_with_priority_and_immunity():
+    """交代技の複合価値は既存の判定と整合する:
+    (a) 相手が KO 圏の先制技持ちなら、自分が素早さで勝っていても交代技 (優先度 0) は先に動けない → 上乗せしない、素の交代が上。
+        先制技 (バレットパンチ、同じ優先度で自分が速い) は先に動けるので割引されない
+    (b) 無効相性の交代技 (ボルトチェンジ → じめん) は交代自体が起きない → 上乗せしない"""
+    import copy
+    from advisor.engine import evaluate as _eval
+    from vision.normalize import NameResolver
+    res = NameResolver()
+    # (a) ハッサム HP 15%・素早さ +2 (先手) vs ドドゲザン (ふいうち判明)
+    s = _pivot_state()
+    s["player"]["party"][0].update({"hp_percent": 15.0, "hp_current": 22, "boosts": {"spe": 2}})
+    s["opponent"]["party"][0].update({"species_id": "kingambit", "species_ja": "ドドゲザン", "types": ["あく", "はがね"],
+                                      "revealed_moves": ["ふいうち"]})
+    adv = _eval(s, res)
+    assert adv["ok"] and "先制技持ち" in adv["speed_note"], adv["speed_note"]
+    actions = adv["actions"]
+    idx = {a["id"]: i for i, a in enumerate(actions) if a.get("id")}
+    switch_idx = next(i for i, a in enumerate(actions) if a["kind"] == "switch")
+    dump = _dump(actions)
+    assert switch_idx < idx["bulletpunch"] < idx["uturn"], dump
+    assert "交代技は発動しない" in actions[idx["uturn"]]["reason"], dump
+    assert "行動前に倒される見込み" not in actions[idx["bulletpunch"]]["reason"], dump
+    # (b) ウォッシュロトム (ボルトチェンジだけ) + アーマーガア vs ガブリアス
+    s2 = _pivot_state()
+    s2["player"]["party"][0] = {"species_id": "rotomwash", "species_ja": "ウォッシュロトム", "types": ["でんき", "みず"],
+                                "hp_percent": 100.0, "hp_current": 125, "hp_max": 125, "status": None, "boosts": {"spe": 2},
+                                "ability_id": None, "item_id": None,
+                                "moves": [{"name_ja": "ボルトチェンジ", "move_id": "voltswitch", "pp": 20, "max_pp": 20,
+                                           "effectiveness": "immune"}], "revealed_moves": []}
+    s2["player"]["party"][1] = {"species_id": "corviknight", "species_ja": "アーマーガア", "types": ["ひこう", "はがね"],
+                                "hp_percent": 100.0, "hp_current": 205, "hp_max": 205, "status": None, "boosts": {},
+                                "ability_id": None, "item_id": None, "moves": [], "revealed_moves": []}
+    s2["opponent"]["party"][0].update({"species_id": "garchomp", "species_ja": "ガブリアス", "types": ["ドラゴン", "じめん"],
+                                       "revealed_moves": ["じしん"]})
+    actions2 = _eval(s2, res)["actions"]
+    dump2 = _dump(actions2)
+    assert actions2[0]["kind"] == "switch", dump2
+    vs = next(a for a in actions2 if a.get("id") == "voltswitch")
+    assert vs["score"] <= 0 and "交代するならまずこの技" not in vs["reason"], dump2
+    print("test_pivot_bonus_consistent_with_priority_and_immunity OK")
 
 
 def _mini_state(my_mon, opp_mon):
@@ -283,6 +395,66 @@ def test_priority_evaluation():
     db = next(a for a in adv2["actions"] if a["id"] == "destinybond")
     assert "先制技で倒される危険" in db["reason"], db
     print("test_priority_evaluation OK")
+
+
+def test_psychic_terrain_priority():
+    """サイコフィールド中: 接地した相手への自分の先制技は不発 (低評価)、接地した自分への相手の先制技は脅威に数えない"""
+    from vision.normalize import NameResolver
+    resolver = NameResolver()
+    my = {"species_id": "mimikyu", "species_ja": "ミミッキュ",
+          "types": ["ゴースト", "フェアリー"], "hp_percent": 100.0,
+          "hp_current": 131, "hp_max": 131, "status": None, "boosts": {},
+          "ability_id": "disguise", "item_id": None,
+          "moves": [
+              {"name_ja": "かげうち", "move_id": "shadowsneak",
+               "pp": 20, "max_pp": 20, "effectiveness": "super"},
+              {"name_ja": "じゃれつく", "move_id": "playrough",
+               "pp": 10, "max_pp": 10, "effectiveness": "neutral"},
+          ], "revealed_moves": []}
+    opp = {"species_id": "gengar", "species_ja": "ゲンガー",
+           "types": ["ゴースト", "どく"], "hp_percent": 15.0,
+           "hp_current": None, "hp_max": None, "status": None, "boosts": {},
+           "ability_id": None, "item_id": None, "moves": [],
+           "revealed_moves": ["シャドーボール"]}
+    st = _mini_state(my, opp)
+    st["field"]["terrain"] = "psychic"
+    adv = evaluate(st, resolver)
+    sneak = next(a for a in adv["actions"] if a["id"] == "shadowsneak")
+    rough = next(a for a in adv["actions"] if a["id"] == "playrough")
+    assert "先制技が不発" in sneak["reason"], sneak
+    assert sneak["score"] < rough["score"], (sneak["score"], rough["score"])
+    # 相手 (浮いている: ふうせん) には当たる → 不発の注記は付かない
+    opp_air = dict(opp, item_id="airballoon")
+    adv_air = evaluate(_mini_state_terrain(my, opp_air), resolver)
+    sneak_air = next(a for a in adv_air["actions"] if a["id"] == "shadowsneak")
+    assert "先制技が不発" not in sneak_air["reason"], sneak_air
+    # 相手のKO圏の先制技 (ふいうち判明) も、接地した自分にはフィールド中は来ない
+    my2 = {"species_id": "gengar", "species_ja": "ゲンガー",
+           "types": ["ゴースト", "どく"], "hp_percent": 30.0,
+           "hp_current": 40, "hp_max": 135, "status": None, "boosts": {},
+           "ability_id": None, "item_id": None,
+           "moves": [
+               {"name_ja": "みちづれ", "move_id": "destinybond",
+                "pp": 8, "max_pp": 8, "effectiveness": None},
+               {"name_ja": "シャドーボール", "move_id": "shadowball",
+                "pp": 16, "max_pp": 16, "effectiveness": "resist"},
+           ], "revealed_moves": []}
+    opp2 = {"species_id": "grimmsnarl", "species_ja": "オーロンゲ",
+            "types": ["あく", "フェアリー"], "hp_percent": 100.0,
+            "hp_current": None, "hp_max": None, "status": None, "boosts": {},
+            "ability_id": None, "item_id": None, "moves": [],
+            "revealed_moves": ["ふいうち"]}
+    adv2 = evaluate(_mini_state_terrain(my2, opp2), resolver)
+    assert "先制技は不発" in adv2["speed_note"], adv2["speed_note"]
+    db = next(a for a in adv2["actions"] if a["id"] == "destinybond")
+    assert "先制技で倒される危険" not in db["reason"], db
+    print("test_psychic_terrain_priority OK")
+
+
+def _mini_state_terrain(my_mon, opp_mon, terrain="psychic"):
+    st = _mini_state(my_mon, opp_mon)
+    st["field"]["terrain"] = terrain
+    return st
 
 
 def test_fainted_active_switch_only():
@@ -354,6 +526,210 @@ def test_act_before_ko_discount():
     assert "行動前に倒される見込み" in rough["reason"], rough
     assert sneak["score"] > rough["score"], (sneak, rough)
     print("test_act_before_ko_discount OK")
+
+
+def test_ko_margin_prefers_overkill():
+    """同じKO圏の技どうしでは突破余裕 (余剰ダメージ) の大きい技を上位にする。
+
+    2026-08-20 第5回接続テスト: 残24%のライボルト (でんき単) に対し、
+    実効ダメージが残HPで頭打ちになり、RLブレンドの揺らぎで
+    等倍エナジーボール(53〜63%)が抜群だいちのちから(106〜125%)を上回った。
+    RLの寄与を除いた素点で、抜群側が必ず上に来ることを確認する。
+    """
+    import os
+    from vision.normalize import NameResolver
+    resolver = NameResolver()
+    my = {"species_id": "glimmora", "species_ja": "キラフロル",
+          "types": ["いわ", "どく"], "hp_percent": 100.0,
+          "hp_current": 159, "hp_max": 159, "status": None, "boosts": {},
+          "ability_id": None, "item_id": None,
+          "moves": [
+              {"name_ja": "エナジーボール", "move_id": "energyball",
+               "pp": 10, "max_pp": 10, "effectiveness": "neutral"},
+              {"name_ja": "だいちのちから", "move_id": "earthpower",
+               "pp": 10, "max_pp": 10, "effectiveness": "super"},
+          ], "revealed_moves": []}
+    opp = {"species_id": "manectric", "species_ja": "ライボルト",
+           "types": ["でんき"], "hp_percent": 24.0,
+           "hp_current": None, "hp_max": None, "status": None, "boosts": {},
+           "ability_id": None, "item_id": None, "moves": [],
+           "revealed_moves": []}
+    prev = os.environ.get("RL_BLEND_WEIGHT")
+    os.environ["RL_BLEND_WEIGHT"] = "0"
+    try:
+        adv = evaluate(_mini_state(my, opp), resolver)
+    finally:
+        if prev is None:
+            os.environ.pop("RL_BLEND_WEIGHT", None)
+        else:
+            os.environ["RL_BLEND_WEIGHT"] = prev
+    ep = next(a for a in adv["actions"] if a["id"] == "earthpower")
+    eb = next(a for a in adv["actions"] if a["id"] == "energyball")
+    assert "抜群" in ep["reason"], ep
+    assert ep["score"] > eb["score"], (ep, eb)
+    print("test_ko_margin_prefers_overkill OK")
+
+
+def test_pivot_pending_switch_only():
+    """とんぼ交代の保留中は交代先のみを助言する (2026-08-21 第8回)"""
+    from vision.normalize import NameResolver
+    resolver = NameResolver()
+    my = {"species_id": "hydreigon", "species_ja": "サザンドラ",
+          "types": ["あく", "ドラゴン"], "hp_percent": 80.0,
+          "hp_current": None, "hp_max": None, "status": None, "boosts": {},
+          "ability_id": None, "item_id": None,
+          "moves": [{"name_ja": "あくのはどう", "move_id": "darkpulse",
+                     "pp": 15, "max_pp": 15, "effectiveness": "neutral"}],
+          "revealed_moves": []}
+    opp = {"species_id": "garchomp", "species_ja": "ガブリアス",
+           "types": ["ドラゴン", "じめん"], "hp_percent": 100.0,
+           "hp_current": None, "hp_max": None, "status": None, "boosts": {},
+           "ability_id": None, "item_id": None, "moves": [],
+           "revealed_moves": []}
+    bench = {"species_id": "raichu", "species_ja": "ライチュウ",
+             "types": ["でんき"], "hp_percent": 100.0,
+             "hp_current": None, "hp_max": None, "status": None,
+             "boosts": {}, "ability_id": None, "item_id": None,
+             "moves": [], "revealed_moves": []}
+    state = _mini_state(my, opp)
+    state["player"]["party"].append(bench)
+    state["pending_pivot_switch"] = True
+    adv = evaluate(state, resolver)
+    kinds = {a["kind"] for a in adv["actions"] if a["score"] > -90}
+    assert kinds == {"switch"}, adv["actions"]
+    assert "とんぼがえり系の交代先" in adv["speed_note"], adv["speed_note"]
+    print("test_pivot_pending_switch_only OK")
+
+
+def test_noguard_makes_low_accuracy_moves_reliable():
+    """ノーガード (自分側) では低命中技を必中として評価する (第8回:
+    チャンピオンズのライチュウ=ノーガード+でんじほう構成)"""
+    from vision.normalize import NameResolver
+    resolver = NameResolver()
+
+    def _raichu(ability):
+        return {"species_id": "raichu", "species_ja": "ライチュウ",
+                "types": ["でんき"], "hp_percent": 100.0,
+                "hp_current": 137, "hp_max": 137, "status": None,
+                "boosts": {}, "ability_id": ability, "item_id": None,
+                "moves": [{"name_ja": "でんじほう", "move_id": "zapcannon",
+                           "pp": 5, "max_pp": 5, "effectiveness": "neutral"}],
+                "revealed_moves": []}
+    opp = {"species_id": "gyarados", "species_ja": "ギャラドス",
+           "types": ["みず", "ひこう"], "hp_percent": 100.0,
+           "hp_current": None, "hp_max": None, "status": None, "boosts": {},
+           "ability_id": None, "item_id": None, "moves": [],
+           "revealed_moves": []}
+    import os
+    prev = os.environ.get("RL_BLEND_WEIGHT")
+    os.environ["RL_BLEND_WEIGHT"] = "0"
+    try:
+        adv_ng = evaluate(_mini_state(_raichu("noguard"), dict(opp)), resolver)
+        adv_lr = evaluate(_mini_state(_raichu("lightningrod"), dict(opp)),
+                          resolver)
+    finally:
+        if prev is None:
+            os.environ.pop("RL_BLEND_WEIGHT", None)
+        else:
+            os.environ["RL_BLEND_WEIGHT"] = prev
+    zc_ng = next(a for a in adv_ng["actions"] if a["id"] == "zapcannon")
+    zc_lr = next(a for a in adv_lr["actions"] if a["id"] == "zapcannon")
+    assert "命中50" not in zc_ng["reason"], zc_ng
+    assert "命中50" in zc_lr["reason"], zc_lr
+    assert zc_ng["score"] > zc_lr["score"], (zc_ng, zc_lr)
+    print("test_noguard_makes_low_accuracy_moves_reliable OK")
+
+
+def test_taunt_context_bonus():
+    """挑発は相手の変化技傾向に比例して加点される (2026-08-21 第6回:
+    受けのブラッキー相手でも素点15固定のため攻撃技に埋もれていた)。
+    攻撃技主体の相手には従来どおり低いまま。"""
+    import os
+    from vision.normalize import NameResolver
+    resolver = NameResolver()
+    my = {"species_id": "hydreigon", "species_ja": "サザンドラ",
+          "types": ["あく", "ドラゴン"], "hp_percent": 100.0,
+          "hp_current": 169, "hp_max": 169, "status": None, "boosts": {},
+          "ability_id": None, "item_id": None,
+          "moves": [
+              {"name_ja": "ちょうはつ", "move_id": "taunt",
+               "pp": 20, "max_pp": 20, "effectiveness": None},
+              {"name_ja": "あくのはどう", "move_id": "darkpulse",
+               "pp": 15, "max_pp": 15, "effectiveness": "neutral"},
+          ], "revealed_moves": []}
+    # 受け型 (判明技が変化技3/4): 挑発に文脈加点が乗る
+    wall = {"species_id": "umbreon", "species_ja": "ブラッキー",
+            "types": ["あく"], "hp_percent": 100.0,
+            "hp_current": None, "hp_max": None, "status": None, "boosts": {},
+            "ability_id": None, "item_id": None, "moves": [],
+            "revealed_moves": ["つきのひかり", "どくどく", "まもる"]}
+    prev = os.environ.get("RL_BLEND_WEIGHT")
+    os.environ["RL_BLEND_WEIGHT"] = "0"
+    try:
+        adv = evaluate(_mini_state(my, wall), resolver)
+        tnt = next(a for a in adv["actions"] if a["id"] == "taunt")
+        assert "変化技主体" in tnt["reason"], tnt
+        assert tnt["score"] >= 30, tnt
+
+        # 攻撃主体 (判明技が攻撃3): 加点なし
+        sweeper = {"species_id": "garchomp", "species_ja": "ガブリアス",
+                   "types": ["ドラゴン", "じめん"], "hp_percent": 100.0,
+                   "hp_current": None, "hp_max": None, "status": None,
+                   "boosts": {}, "ability_id": None, "item_id": None,
+                   "moves": [], "revealed_moves":
+                       ["じしん", "げきりん", "ストーンエッジ"]}
+        adv2 = evaluate(_mini_state(dict(my), sweeper), resolver)
+        tnt2 = next(a for a in adv2["actions"] if a["id"] == "taunt")
+        assert "変化技主体" not in tnt2["reason"], tnt2
+        assert tnt2["score"] < 30, tnt2
+    finally:
+        if prev is None:
+            os.environ.pop("RL_BLEND_WEIGHT", None)
+        else:
+            os.environ["RL_BLEND_WEIGHT"] = prev
+    print("test_taunt_context_bonus OK")
+
+
+def test_redundant_setup_discount():
+    """重ねられない設置技・場効果は既設置なら推奨しない (2026-08-31 第11回:
+    ねばねばネット設置済みのまま再設置を推奨し続けた)"""
+    import os
+    from vision.normalize import NameResolver
+    resolver = NameResolver()
+    my = {"species_id": "slurpuff", "species_ja": "ペロリーム",
+          "types": ["フェアリー"], "hp_percent": 100.0,
+          "hp_current": 160, "hp_max": 160, "status": None, "boosts": {},
+          "ability_id": None, "item_id": None,
+          "moves": [
+              {"name_ja": "ねばねばネット", "move_id": "stickyweb",
+               "pp": 20, "max_pp": 20, "effectiveness": None},
+              {"name_ja": "マジカルシャイン", "move_id": "dazzlinggleam",
+               "pp": 10, "max_pp": 10, "effectiveness": "neutral"},
+          ], "revealed_moves": []}
+    opp = {"species_id": "hippowdon", "species_ja": "カバルドン",
+           "types": ["じめん"], "hp_percent": 100.0,
+           "hp_current": None, "hp_max": None, "status": None, "boosts": {},
+           "ability_id": None, "item_id": None, "moves": [],
+           "revealed_moves": []}
+    prev = os.environ.get("RL_BLEND_WEIGHT")
+    os.environ["RL_BLEND_WEIGHT"] = "0"
+    try:
+        st = _mini_state(my, opp)
+        st["opponent"]["hazards"]["sticky_web"] = True
+        adv = evaluate(st, resolver)
+        web = next(a for a in adv["actions"] if a["id"] == "stickyweb")
+        assert web["score"] <= 5.0 and "設置済み" in web["reason"], web
+        # 未設置なら通常評価 (設置技ボーナスが付く)
+        st2 = _mini_state(dict(my), dict(opp))
+        adv2 = evaluate(st2, resolver)
+        web2 = next(a for a in adv2["actions"] if a["id"] == "stickyweb")
+        assert web2["score"] > 5.0, web2
+    finally:
+        if prev is None:
+            os.environ.pop("RL_BLEND_WEIGHT", None)
+        else:
+            os.environ["RL_BLEND_WEIGHT"] = prev
+    print("test_redundant_setup_discount OK")
 
 
 def test_choice_lock():
@@ -492,15 +868,24 @@ def test_uncertain_bench_switch_penalty():
 
 
 if __name__ == "__main__":
+    test_rl_policy_source_order()
     test_stats()
     test_type_chart()
     test_damage_sanity()
     test_weather_and_screens()
     test_evaluate_end_to_end()
     test_pivot_over_plain_switch()
+    test_plain_switch_over_pivot_when_ko_first()
+    test_pivot_bonus_consistent_with_priority_and_immunity()
     test_priority_evaluation()
+    test_psychic_terrain_priority()
     test_fainted_active_switch_only()
     test_act_before_ko_discount()
+    test_ko_margin_prefers_overkill()
+    test_taunt_context_bonus()
+    test_pivot_pending_switch_only()
+    test_noguard_makes_low_accuracy_moves_reliable()
+    test_redundant_setup_discount()
     test_choice_lock()
     test_registered_moves_fallback()
     test_rl_sees_registered_move_fallback()

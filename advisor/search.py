@@ -18,8 +18,9 @@ import math
 from dataclasses import dataclass, field, replace
 from typing import Optional
 
-from advisor.damage import MonView, FieldView, calc_damage
+from advisor.damage import MonView, FieldView, _is_grounded, calc_damage
 from advisor.dex import get_dex
+from champions_agent.config import SEARCH_OPP_MEGA_MIN_PROB
 
 ROLL_GROUPS = ((0.25, "min"), (0.5, "avg"), (0.25, "max"))
 RISK_WEIGHT = 0.4   # 推奨値 = (1-w)*期待値 + w*保証値 (中立局面での基準)
@@ -90,6 +91,10 @@ class SimSide:
     active_hp: float                  # 0..1
     bench: list = field(default_factory=list)   # [(MonView, hp_frac)]
     stealth_rock: bool = False
+    # 1 試合 1 回の資源 (メガシンカ): 場のポケモンがこの先メガシンカする姿の確率 {mega_sid: p} (advisor.gimmick)。
+    # 権利を消費済みなら mega_used。交代すると新しい場のポケモンの分は不明 (空) にする
+    mega_forms: dict = field(default_factory=dict)
+    mega_used: bool = False
 
     def alive_count(self) -> int:
         return (1 if self.active_hp > 0 else 0) + \
@@ -103,6 +108,7 @@ class Action:
     bench_index: Optional[int] = None
     label: str = ""
     prob: float = 1.0         # 相手側: 行動分布の重み
+    mega: bool = False        # 技と同時にメガシンカする (相手側: 事前分布で分岐)
 
 
 def _hazard_frac(mon: MonView, side: SimSide) -> float:
@@ -112,8 +118,11 @@ def _hazard_frac(mon: MonView, side: SimSide) -> float:
     return 0.125 * mult
 
 
-def _priority(move_id: Optional[str], view: Optional[MonView] = None) -> int:
-    """技の優先度 (特性補正込み: いたずらごころ=変化技+1 等)"""
+def _priority(move_id: Optional[str], view: Optional[MonView] = None,
+              fieldv: Optional[FieldView] = None) -> int:
+    """技の優先度 (特性補正込み: いたずらごころ=変化技+1 等。フィールド込み: グラススライダーはグラスフィールドで
+    接地した使用者なら +1。表は advisor/data/field_effects.json の priority)"""
+    from advisor.dex import field_effects
     mv = get_dex().move(move_id) if move_id else None
     if not mv:
         return 0
@@ -124,6 +133,12 @@ def _priority(move_id: Optional[str], view: Optional[MonView] = None) -> int:
     elif ab == "galewings" and (mv.get("type") or "") == "Flying" \
             and view is not None and view.hp_frac >= 0.999:
         pri += 1
+    spec = (field_effects().get("priority") or {}).get(move_id or "")
+    if spec and fieldv is not None:
+        cur = fieldv.terrain if spec.get("kind") == "terrain" else fieldv.weather
+        if cur and (spec.get("cond") == "any" or spec.get("cond") == cur):
+            if spec.get("grounded") != "user" or view is None or _is_grounded(view):
+                pri += int(spec.get("delta", 0))
     return pri
 
 
@@ -179,7 +194,34 @@ def _apply_switch(side: SimSide, idx: int) -> SimSide:
     hp = max(0.0, hp - _hazard_frac(view, side))
     new_bench = list(side.bench)
     new_bench[idx] = (side.active, side.active_hp)
-    return replace(side, active=view, active_hp=hp, bench=new_bench)
+    return replace(side, active=view, active_hp=hp, bench=new_bench, mega_forms={})
+
+
+def _mega_evolve(side: SimSide) -> SimSide:
+    """場のポケモンを最も確からしいメガ後の姿にし、権利を消費する (HP 割合・ランク・状態異常は保つ)"""
+    from advisor.gimmick import mega_view
+    if not side.mega_forms or side.mega_used:
+        return side
+    form = max(side.mega_forms, key=lambda k: (side.mega_forms[k], k))
+    return replace(side, active=mega_view(side.active, form), mega_forms={}, mega_used=True)
+
+
+def opp_mega_split(acts: list, side: SimSide, min_prob: float = SEARCH_OPP_MEGA_MIN_PROB) -> list:
+    """相手の技の候補を「メガシンカあり / なし」に分岐する。確率 p = メガ石を持つ事前分布の合計 (判明情報込み)。
+    p < min_prob か、権利消費済み・姿が不明なら分岐しない。純粋"""
+    if not side.mega_forms or side.mega_used:
+        return acts
+    p = min(1.0, sum(side.mega_forms.values()))
+    if p < min_prob:
+        return acts
+    out = []
+    for a in acts:
+        if a.kind != "move":
+            out.append(a)
+            continue
+        out.append(replace(a, prob=a.prob * (1.0 - p)))
+        out.append(replace(a, prob=a.prob * p, mega=True, label=f"{a.label}+メガ"))
+    return out
 
 
 def simulate_turn(me: SimSide, opp: SimSide, my_act: Action, opp_act: Action,
@@ -194,21 +236,28 @@ def simulate_turn(me: SimSide, opp: SimSide, my_act: Action, opp_act: Action,
         me = _apply_switch(me, my_act.bench_index)
     if opp_act.kind == "switch":
         opp = _apply_switch(opp, opp_act.bench_index)
+    # メガシンカ (1 試合 1 回) は技の解決前に姿を変える
+    if opp_act.kind == "move" and opp_act.mega:
+        opp = _mega_evolve(opp)
+    if my_act.kind == "move" and my_act.mega:
+        me = _mega_evolve(me)
 
     movers = []
     if my_act.kind == "move" and me.active_hp > 0:
         movers.append(("me", my_act.move_id,
-                       _priority(my_act.move_id, me.active),
+                       _priority(my_act.move_id, me.active, my_field or opp_field),
                        _speed(me.active, my_field)))
     if opp_act.kind == "move" and opp.active_hp > 0:
         movers.append(("opp", opp_act.move_id,
-                       _priority(opp_act.move_id, opp.active),
+                       _priority(opp_act.move_id, opp.active, my_field or opp_field),
                        _speed(opp.active, my_field)))
     trick_room = bool(my_field and my_field.trick_room)
     movers.sort(key=lambda m: (-m[2], m[3] if trick_room else -m[3]))
 
     protected = {"me": False, "opp": False}
     moved: set = set()
+    fieldv = my_field or opp_field
+    psychic_terrain = bool(fieldv and fieldv.terrain == "psychic")
     for who, move_id, _pri, _spe in movers:
         atk_side, def_side = ("me", "opp") if who == "me" else ("opp", "me")
         atk = me if who == "me" else opp
@@ -216,6 +265,11 @@ def simulate_turn(me: SimSide, opp: SimSide, my_act: Action, opp_act: Action,
         if atk.active_hp <= 0:
             continue
         moved.add(who)
+
+        # サイコフィールド: 接地している相手を対象にした優先度 > 0 の技は不発 (自分対象の積み/回復/まもるは通る)
+        if psychic_terrain and _pri > 0 and move_id not in PROTECT_MOVES and move_id not in HEAL_MOVES \
+                and move_id not in SETUP_MOVES and _is_grounded(dfn.active):
+            continue
 
         # ふいうち系: 相手が攻撃技を選んでいて未行動の場合のみ成功する
         if move_id in SUCKER_MOVES:
@@ -266,8 +320,16 @@ def _my_actions(me: SimSide, my_moves: list) -> list:
     return acts
 
 
-def _opp_actions(opp: SimSide, opp_move_pool: list) -> list:
-    """相手の行動候補。技は予測プール、交代はベンチ全員 (重みは控えめ)"""
+def _opp_actions(opp: SimSide, opp_move_pool: list,
+                 opp_prior: Optional[dict] = None,
+                 prior_mix: float = 0.0) -> list:
+    """相手の行動候補。技は予測プール、交代はベンチ全員 (重みは控えめ)。
+
+    opp_prior (P6-b): {"move:<id>": p, "switch:<bench_index>": p} の事前分布
+    (自己対戦方策が相手の立場で出す確率)。prior_mix=λ で
+    p = (1-λ)·使用率由来 + λ·事前分布 に混ぜ、合計1に正規化する。
+    事前分布に無い候補は λ 側が 0 (使用率側だけが残る)。
+    """
     total = sum(w for _, w in opp_move_pool) or 1.0
     acts = [Action("move", move_id=m, label=m, prob=0.85 * w / total)
             for m, w in opp_move_pool]
@@ -281,6 +343,15 @@ def _opp_actions(opp: SimSide, opp_move_pool: list) -> list:
         s = sum(a.prob for a in acts) or 1.0
         for a in acts:
             a.prob /= s
+    if opp_prior and prior_mix > 0:
+        lam = max(0.0, min(1.0, prior_mix))
+        for a in acts:
+            key = (f"move:{a.move_id}" if a.kind == "move"
+                   else f"switch:{a.bench_index}")
+            a.prob = (1 - lam) * a.prob + lam * float(opp_prior.get(key, 0.0))
+        s = sum(a.prob for a in acts) or 1.0
+        for a in acts:
+            a.prob /= s
     return acts
 
 
@@ -291,7 +362,7 @@ def _position_value(me: SimSide, opp: SimSide, my_moves: list,
         return -1.0
     if opp.alive_count() == 0:
         return 1.0
-    opp_acts = _opp_actions(opp, opp_move_pool)
+    opp_acts = opp_mega_split(_opp_actions(opp, opp_move_pool), opp)
     best = -9.9
     for ma in _my_actions(me, my_moves):
         v = 0.0
@@ -320,18 +391,22 @@ def search(me: SimSide, opp: SimSide, my_moves: list, opp_move_pool: list,
            opp_field: Optional[FieldView] = None,
            depth: int = 2,
            leaf_value_fn=None,
-           wincon_sid: Optional[str] = None) -> dict:
+           wincon_sid: Optional[str] = None,
+           opp_prior: Optional[dict] = None,
+           prior_mix: float = 0.0) -> dict:
     """利得行列を構築し、行動ごとの期待値/保証値/択リスクを返す。
 
     my_moves: 自分の技ID列。opp_move_pool: [(move_id, weight)]。
     wincon_sid: 勝ち筋 (endgame検出) の種族ID。指定すると葉評価に
         その個体のHP残存ボーナスを加え、勝ち筋を消耗させる行動を
         相対的に下げる (定説「勝ち筋は大切に扱う」)。
+    opp_prior / prior_mix (P6-b): 根の相手行動分布に混ぜる事前分布と混合率。
+        1手読み (_position_value) の相手分布は使用率のみ (コスト優先)。
     戻り値 {"actions": [{label, kind, expected, worst, worst_reply,
                           recommended, risky}], "matrix": {...}}
     """
     my_acts = _my_actions(me, my_moves)
-    opp_acts = _opp_actions(opp, opp_move_pool)
+    opp_acts = opp_mega_split(_opp_actions(opp, opp_move_pool, opp_prior, prior_mix), opp)
     if not my_acts or not opp_acts:
         return {"actions": [], "matrix": None}
 
@@ -375,8 +450,16 @@ def search(me: SimSide, opp: SimSide, my_moves: list, opp_move_pool: list,
             "risky": (expected - worst) > 0.35,
         })
 
-    # 状況依存のリスク調整: 局面評価 (=最善手の期待値) で保証値の重みを
-    # 変えてから推奨順を決める。優勢なら択を避け、劣勢なら賭ける
+    return _finalize(results, matrix)
+
+
+def _finalize(results: list, matrix) -> dict:
+    """行動ごとの期待値/保証値から推奨値・順位・起点警告を決める。
+
+    search() と aggregate_worlds() (多世界統合) が同じ規則を使うために分離。
+    状況依存のリスク調整: 局面評価 (=最善手の期待値) で保証値の重みを
+    変えてから推奨順を決める。優勢なら択を避け、劣勢なら賭ける
+    """
     position = max(r["expected"] for r in results)
     w = dynamic_risk_weight(position)
     for r in results:
@@ -391,3 +474,146 @@ def search(me: SimSide, opp: SimSide, my_moves: list, opp_move_pool: list,
     return {"actions": results, "matrix": matrix,
             "risk_weight": round(w, 3), "position": round(position, 3),
             "setup_bait": setup_bait}
+
+
+_POOL = None
+SEARCH_WORKERS = 1   # 世界の並列実行数 (1=逐次)。engine / search_expert が上書きする
+
+
+def make_rl_leaf_fn(leaf_ctx: Optional[dict]):
+    """leaf_ctx {"my_moves","field","turn"} から RL価値の葉評価関数を作る。
+    モデルが無ければ None (ワーカー側でも呼べるようモジュール関数にしてある)"""
+    if not leaf_ctx:
+        return None
+    try:
+        from advisor.rl_bridge import value_of_sim, _load_model
+        if _load_model() is None:
+            return None
+    except Exception:
+        return None
+    my_moves = leaf_ctx.get("my_moves") or []
+    fieldv = leaf_ctx.get("field")
+    turn = leaf_ctx.get("turn") or 5
+
+    def leaf_fn(m2, o2):
+        return value_of_sim(m2, o2, my_moves, fieldv, turn=turn)
+
+    return leaf_fn
+
+
+def _search_job(kwargs: dict) -> dict:
+    """プロセスプール用のジョブ。葉評価は関数でなく leaf_ctx で受け取り、
+    ワーカー側でモデルを読んで再構成する (各ワーカーは初回に一度だけ読む)"""
+    kwargs = dict(kwargs)
+    leaf_ctx = kwargs.pop("leaf_ctx", None)
+    kwargs["leaf_value_fn"] = make_rl_leaf_fn(leaf_ctx)
+    return search(**kwargs)
+
+
+def run_world_searches(jobs: list, workers: int = 1) -> list:
+    """世界ごとの search(**kwargs) をまとめて実行する (P7 レイテンシ条項)。
+
+    ジョブは search の引数辞書。葉評価は "leaf_value_fn" (関数、逐次のみ) か
+    "leaf_ctx" ({"my_moves","field","turn"}、並列可) のどちらかで渡す。
+    workers>1 かつ全ジョブが leaf_value_fn を持たなければプロセスプールで
+    並列実行し、それ以外は逐次。並列化は各世界の結果を変えない (決定的)。
+    プールは初回に生成して使い回す (spawn の起動コストを毎回払わない)。
+    """
+    def _seq(j):
+        j = dict(j)
+        ctx = j.pop("leaf_ctx", None)
+        if j.get("leaf_value_fn") is None and ctx:
+            j["leaf_value_fn"] = make_rl_leaf_fn(ctx)
+        return search(**j)
+
+    if workers <= 1 or len(jobs) <= 1 or any(j.get("leaf_value_fn") for j in jobs):
+        return [_seq(j) for j in jobs]
+    global _POOL
+    from concurrent.futures import ProcessPoolExecutor
+    if _POOL is None:
+        _POOL = ProcessPoolExecutor(max_workers=workers)
+    try:
+        return list(_POOL.map(_search_job, jobs))
+    except Exception:
+        # プールが壊れた場合 (子プロセス死亡等) は逐次に戻す
+        _POOL = None
+        return [_seq(j) for j in jobs]
+
+
+def sensor_worlds(me: SimSide, q: float, delta: float) -> list:
+    """自分の表示HPが固着している可能性を世界に分ける (P8)。
+
+    [(1-q, そのまま), (q, 自分アクティブのHPを delta だけ低く見た世界)]。
+    表示が古い (実際はもっと削られている) 側だけを持つ: 決定再生の感度表で
+    最大の反転要因 (自分HP固着 52.9%) は「表示より実HPが低い」向きのため。
+    q<=0 なら [(1.0, me)] (無効)。
+    """
+    if q <= 0 or me.active_hp <= 0:
+        return [(1.0, me)]
+    import copy as _copy
+    low = max(0.02, me.active_hp - delta)
+    view = _copy.copy(me.active)
+    view.hp_frac = low
+    hedged = replace(me, active=view, active_hp=low)
+    return [(1.0 - q, me), (q, hedged)]
+
+
+def aggregate_worlds(world_results: list, weights: list,
+                     coverage: Optional[float] = None) -> Optional[dict]:
+    """相手型の仮説 (世界) ごとの search() 結果を仮説重みで統合する (P7)。
+
+    - 期待値/保証値: 各世界の値の重み平均 (その行動が現れた世界で正規化)
+    - 推奨値・順位: 統合後の値に _finalize と同じ規則を適用
+    - support: その行動が世界内で最善 (recommended 首位) だった重みの和
+    - expected_var: 期待値の重み付き分散 (仮説間のばらつき = 型依存の度合い)
+    - belief.stability: 統合後の最善が各世界でも最善だった重みの和
+    - matrix/最悪応手: 最も重い世界のもの / 全世界で最も低い応手
+    coverage は呼び出し側が渡す「採用した仮説の重みの総和」(刈り込み前の
+    分布に対する被覆率)。None なら重みの和。
+    """
+    pairs = [(r, w) for r, w in zip(world_results, weights)
+             if r and r.get("actions")]
+    if not pairs:
+        return None
+    total = sum(w for _, w in pairs) or 1.0
+    pairs = [(r, w / total) for r, w in pairs]
+    merged: dict = {}
+    for r, w in pairs:
+        top_label = r["actions"][0]["label"]
+        for a in r["actions"]:
+            m = merged.setdefault(a["label"], {
+                "label": a["label"], "kind": a["kind"],
+                "move_id": a.get("move_id"),
+                "bench_index": a.get("bench_index"),
+                "_exp": 0.0, "_wor": 0.0, "_sq": 0.0, "_w": 0.0,
+                "support": 0.0, "worst_reply": None, "_worst_val": 9.9})
+            m["_exp"] += w * a["expected"]
+            m["_wor"] += w * a["worst"]
+            m["_sq"] += w * a["expected"] ** 2
+            m["_w"] += w
+            if a["label"] == top_label:
+                m["support"] += w
+            if a["worst"] < m["_worst_val"]:
+                m["_worst_val"] = a["worst"]
+                m["worst_reply"] = a.get("worst_reply")
+    results = []
+    for m in merged.values():
+        wsum = m.pop("_w") or 1.0
+        exp = m.pop("_exp") / wsum
+        wor = m.pop("_wor") / wsum
+        var = max(0.0, m.pop("_sq") / wsum - exp ** 2)
+        m.pop("_worst_val")
+        m.update({"expected": round(exp, 3), "worst": round(wor, 3),
+                  "expected_var": round(var, 4),
+                  "support": round(m["support"], 3),
+                  "risky": (exp - wor) > 0.35})
+        results.append(m)
+    heaviest = max(pairs, key=lambda pr: pr[1])[0]
+    out = _finalize(results, heaviest.get("matrix"))
+    best_label = out["actions"][0]["label"]
+    out["belief"] = {
+        "k": len(pairs),
+        "coverage": round(coverage if coverage is not None else total, 3),
+        "stability": round(merged[best_label]["support"], 3),
+    }
+    return out

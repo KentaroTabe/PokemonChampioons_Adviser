@@ -27,8 +27,13 @@ import numpy as np
 
 from advisor.dex import get_dex
 
-CKPT_DIR = (Path(__file__).resolve().parent.parent
-            / "champions_agent" / "train" / "checkpoints")
+# 学習側 (champions_agent.config.MODELS_DIR) と同じく CHAMPIONS_MODELS_DIR で
+# 差し替えられる。測定で腕ごとに違う EMA を読まないようピン止めするため
+# (2026-09-05 P9': 起動時刻差で基準腕が 0.587→0.634 と動いた)。未設定なら本番の
+# チェックポイント
+CKPT_DIR = Path(os.environ.get("CHAMPIONS_MODELS_DIR")
+                or (Path(__file__).resolve().parent.parent
+                    / "champions_agent" / "train" / "checkpoints"))
 
 ALL_TYPES = ["normal", "fire", "water", "electric", "grass", "ice", "fighting",
              "poison", "ground", "flying", "psychic", "bug", "rock", "ghost",
@@ -39,7 +44,7 @@ STATUS_MAP = {"burn": "brn", "paralysis": "par", "sleep": "slp",
               "freeze": "frz", "poison": "psn", "toxic": "tox"}
 BOOST_KEYS = ["atk", "def", "spa", "spd", "spe", "acc", "eva"]
 BASE_KEYS = ["hp", "atk", "def", "spa", "spd", "spe"]
-N_MOVE_SLOTS, MOVE_FEAT_DIM, OBS_DIM = 4, 9, 420  # v7拡張 (v1=227の末尾追記)
+N_MOVE_SLOTS, MOVE_FEAT_DIM, OBS_DIM = 4, 9, 436  # v8拡張 (v1=227の末尾追記。v7=420 + メガシンカの推定16)
 MOVE_EFFECT_DIM = 8
 VOLATILE_EFFECTS = ["confusion", "leech_seed", "substitute", "taunt",
                     "encore", "yawn"]
@@ -57,16 +62,39 @@ _model = None
 _model_tried = False
 
 
+def _policy_candidates(style: str, source: str) -> list:
+    """RL方策ファイルの読み込み優先順 (存在しないものは次候補へ落ちる)。
+
+    ema: EMA平均方策を優先 (P5判定で配布に採用、2026-08-26)。
+    best: 最良スナップショット優先 (従来)。current: 学習中の最新のみ。
+    不明な指定は best 扱い (誤設定でも読み込みが止まらない安全側)
+    """
+    orders = {
+        "ema": [f"battle_policy_{style}_ema.zip",
+                f"battle_policy_{style}_best.zip",
+                f"battle_policy_{style}.zip"],
+        "best": [f"battle_policy_{style}_best.zip",
+                 f"battle_policy_{style}.zip"],
+        "current": [f"battle_policy_{style}.zip"],
+    }
+    return orders.get(source) or orders["best"]
+
+
 def _load_model():
     global _model, _model_tried
     if _model_tried:
         return _model
     _model_tried = True
     style = os.environ.get("RL_ADVICE_STYLE", "balance")
-    # 最良スナップショット (_best) を優先 (best_checkpoint.py が管理。
-    # 最新チェックポイントは学習の振動で過去最良より弱いことがある)
-    best = CKPT_DIR / f"battle_policy_{style}_best.zip"
-    path = best if best.exists() else CKPT_DIR / f"battle_policy_{style}.zip"
+    # 読み込み元の優先順は RL_POLICY_SOURCE で選ぶ。既定は "ema":
+    # 2026-08-26 のP5事前登録判定で採用 (current/EMAを対に測る2ラウンド
+    # 18,000戦: EMA 0.628 vs current 0.601、差+0.027はゲート2SE=0.010の
+    # 5.3σ。P4分布変更の過渡でcurrentが揺れる間もEMAは安定 — 配布向きの
+    # 性質そのもの)。"best"=従来の最良スナップショット優先に戻せる
+    source = os.environ.get("RL_POLICY_SOURCE", "ema")
+    order = _policy_candidates(style, source)
+    path = next((CKPT_DIR / n for n in order if (CKPT_DIR / n).exists()),
+                CKPT_DIR / order[-1])
     try:
         from sb3_contrib import MaskablePPO
         _model = MaskablePPO.load(str(path), device="cpu")
@@ -802,6 +830,86 @@ def _legal_actions(state: dict) -> list:
             if mega_ok:
                 out.append((10 + i, f"{name}+メガ", "mega"))
     return out
+
+
+def _sim_state(me, opp, my_moves: list, fieldv=None, turn: int = 5) -> dict:
+    """SimSide対 -> encode_state が読める最小限の状態辞書。
+
+    party の並びは [active] + bench (bench_index = party index - 1)。
+    value_of_sim (葉評価) と policy_of_sim (行動分布) が共用する。
+    """
+    def party_of(side, active_moves=None):
+        entries = [{
+            "species_id": side.active.species_id,
+            "hp_percent": max(0.0, side.active_hp) * 100.0,
+            "status": side.active.status,
+            "boosts": side.active.boosts or {},
+            "moves": [{"move_id": m} for m in (active_moves or [])],
+        }]
+        for v, hp in side.bench:
+            entries.append({"species_id": v.species_id,
+                            "hp_percent": max(0.0, hp) * 100.0,
+                            "status": "fainted" if hp <= 0 else None})
+        return entries
+
+    return {
+        "turn": turn,
+        "field": {"weather": getattr(fieldv, "weather", None),
+                  "terrain": getattr(fieldv, "terrain", None),
+                  "trick_room": bool(getattr(fieldv, "trick_room", False))},
+        "mega_used": {},
+        "player": {"active_index": 0,
+                   "remaining": me.alive_count(),
+                   "hazards": {"stealth_rock": me.stealth_rock},
+                   "screens": {},
+                   "party": party_of(me, my_moves)},
+        "opponent": {"active_index": 0,
+                     "remaining": opp.alive_count(),
+                     "hazards": {"stealth_rock": opp.stealth_rock},
+                     "screens": {},
+                     "party": party_of(opp)},
+    }
+
+
+def policy_of_sim(me, opp, my_moves: list, fieldv=None,
+                  turn: int = 5) -> Optional[dict]:
+    """SimSide対から、me 側の行動分布を {"move:<id>": p, "switch:<bench_index>": p}
+    で返す (合法手で正規化、メガ技は同じ技に合算)。
+
+    P6-b: 探索の相手行動候補の事前分布に使う。相手を me に置いて呼ぶと
+    「自己対戦方策が相手の立場で選ぶ確率」になる (相手の未判明技は
+    予測プールの技を渡す)。モデルが無ければ None。
+    """
+    model = _load_model()
+    if model is None:
+        return None
+    state = _sim_state(me, opp, my_moves, fieldv, turn)
+    from advisor.damage import effective_speed
+    obs = encode_state(state, my_spe_actual=effective_speed(me.active, fieldv))
+    if obs is None:
+        return None
+    obs = _adapt_obs(model, obs)
+    legal = _legal_actions(state)
+    if not legal:
+        return None
+    import torch
+    obs_t, _ = model.policy.obs_to_tensor(obs[None, :])
+    with torch.no_grad():
+        dist = model.policy.get_distribution(obs_t)
+        probs = dist.distribution.probs.detach().cpu().numpy()[0]
+    out: dict = {}
+    for idx, _label, _kind in legal:
+        p = float(probs[idx])
+        if idx < 6:
+            key = f"switch:{idx - 1}"
+        else:
+            mi = (idx - 6) % 4
+            if mi >= len(my_moves):
+                continue
+            key = f"move:{my_moves[mi]}"
+        out[key] = out.get(key, 0.0) + p
+    total = sum(out.values()) or 1.0
+    return {k: round(v / total, 4) for k, v in out.items()}
 
 
 def value_of_sim(me, opp, my_moves: list, fieldv=None,

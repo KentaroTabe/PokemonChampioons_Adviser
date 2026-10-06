@@ -287,6 +287,19 @@ def _apply_synergy_bias(team_text: str, idx: int, cands: list,
     return [w * (1.0 + s / hi) for w, s in zip(weights, scores)]
 
 
+def _alt_item(species_id: str, used_items: set) -> str | None:
+    """アイテムクローズで衝突したとき、その種族の使用率次点で未使用の
+    持ち物を返す (2026-08-21 第8回: 衝突時にNoneとし持ち物なしの
+    マスカーニャが提案された)。代替が無ければ None。"""
+    used = {_to_id(i) for i in used_items if i}
+    alts = (_usage_alternatives().get(species_id) or {}).get("items") or []
+    for name, _pct in sorted(alts, key=lambda x: -(x[1] or 0)):
+        cand = _sanitize_item(name)
+        if cand and _to_id(cand) not in used:
+            return cand
+    return None
+
+
 def mutate(team_text: str, pool_rows: list, rng: random.Random,
            constraint: "Constraint | None" = None) -> str:
     """1枠を使用率重み付きの別種族 (meta_setsの型) に入れ替える。
@@ -316,7 +329,8 @@ def mutate(team_text: str, pool_rows: list, rng: random.Random,
     used_items = {b.split(" @ ", 1)[1].split("\n")[0].strip()
                   for b in blocks[:idx] + blocks[idx + 1:] if " @ " in b}
     if item and _to_id(item) in {_to_id(i) for i in used_items}:
-        item = None   # アイテムクローズ
+        # アイテムクローズ: Noneではなく使用率次点の未使用品へ差し替える
+        item = _alt_item(_to_id(row["pokemon_name"]), used_items)
     new_set = PokemonSet(
         species=to_showdown_name(_sanitize_species(row["pokemon_name"])),
         ability=row["ability_name"], item=item,
@@ -424,25 +438,29 @@ def mutate_set(team_text: str, rng: random.Random,
 
     候補は使用率DBから使用率重みで引く (実際に使われている型の範囲)。
     種族が変わらないため Constraint の変更数 (種チームからの距離) は
-    増えない。固定枠は型もいじらない (ユーザーが実機で使うセットを
-    勝手に変えない) ため mutable_slots に従う。
+    増えない。技・配分は固定枠/変更上限に従う (ユーザーが実機で使う
+    セットを勝手に変えない) が、**持ち物だけは全6枠を変更可**とする:
+    実機での持ち物変更は付け替えるだけで再構築コストが無く、ユーザーも
+    全枠の変更を許可している (2026-08-25 第9回指摘)。
     """
     blocks = [b.strip() for b in team_text.strip().split("\n\n")]
     slots = (constraint.mutable_slots(team_text) if constraint
              else list(range(len(blocks))))
-    if not slots:
+    item_slots = list(range(len(blocks)))
+    if not slots and not item_slots:
         return team_text
     # 不発 (その種族の使用率データが無い等) のときは別の操作/別のスロットを
     # 試す。不発をそのまま返すとGAが同一個体を再評価して対戦数を無駄にする
     kinds = ["item", "move", "spread"]
     rng.shuffle(kinds)
     rng.shuffle(slots)
-    for idx in slots:
-        sid = _to_id(blocks[idx].split("\n")[0].split(" @ ")[0])
-        alt = _usage_alternatives().get(sid)
-        if not alt:
-            continue
-        for kind in kinds:
+    rng.shuffle(item_slots)
+    for kind in kinds:
+        for idx in (item_slots if kind == "item" else slots):
+            sid = _to_id(blocks[idx].split("\n")[0].split(" @ ")[0])
+            alt = _usage_alternatives().get(sid)
+            if not alt:
+                continue
             if kind == "item":
                 used = _team_items(blocks, idx)
                 cur = _to_id(_block_item(blocks[idx]) or "")

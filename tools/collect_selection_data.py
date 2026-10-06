@@ -39,6 +39,23 @@ def _to_id(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(name).lower())
 
 
+def _item_id(pokemon) -> str:
+    """自分の個体の持ち物 id (不明なら空)"""
+    item = getattr(pokemon, "item", None)
+    if not item or str(item).lower() in ("unknown_item", "unknownitem"):
+        return ""
+    return _to_id(str(item))
+
+
+def _mega_used(team_values) -> str:
+    """対戦中にメガシンカした個体の基本種 id (無ければ空)。1 試合 1 回なので高々 1 体"""
+    for p in team_values:
+        sid = str(getattr(p, "species", "") or "")
+        if "mega" in sid:
+            return re.sub(r"mega[a-z]?$", "", sid)
+    return ""
+
+
 def _opp_selected(battle) -> list:
     """相手が実際に選出した3体 (対戦後に判明した範囲。長さ3にパディング)。
 
@@ -135,6 +152,8 @@ async def collect_paired(n_groups: int, group_size: int, style: str,
                     _emb_of([p.species for p in opp_mons])]),
                 "action": SELECTION_PERMUTATIONS.index(perm),
                 "team": [p.species for p in mons],
+                # 自分の持ち物 (メガ石 = 1 試合 1 回の資源の所在。選出モデル v3 が使う。2026-09-11)
+                "own_items": [_item_id(p) for p in mons],
                 "opp_team": ([p.species for p in opp_mons] + [""] * 6)[:6],
                 "group": state["group"],
             }
@@ -169,6 +188,7 @@ async def collect_paired(n_groups: int, group_size: int, style: str,
 
     obs, emb, act, rew, team, opp_team, group, opp_sel = \
         [], [], [], [], [], [], [], []
+    own_items, own_mega, opp_mega = [], [], []
     for tag, battle in me.battles.items():
         rec = records.get(tag)
         if rec is None or battle.won is None:
@@ -181,6 +201,9 @@ async def collect_paired(n_groups: int, group_size: int, style: str,
         opp_team.append(rec["opp_team"])
         group.append(rec["group"])
         opp_sel.append(_opp_selected(battle))
+        own_items.append(rec.get("own_items") or [""] * 6)
+        own_mega.append(_mega_used(battle.team.values()))
+        opp_mega.append(_mega_used(battle.opponent_team.values()))
     return {"obs": np.asarray(obs, dtype=np.float32),
             "emb": np.asarray(emb, dtype=np.float32),
             "action": np.asarray(act, dtype=np.int64),
@@ -188,13 +211,28 @@ async def collect_paired(n_groups: int, group_size: int, style: str,
             "team": np.asarray(team, dtype="<U24"),
             "opp_team": np.asarray(opp_team, dtype="<U24"),
             "group": np.asarray(group, dtype=np.int64),
-            "opp_sel": np.asarray(opp_sel, dtype="<U24")}
+            "opp_sel": np.asarray(opp_sel, dtype="<U24"),
+            "own_items": np.asarray(own_items, dtype="<U24"),
+            "own_mega": np.asarray(own_mega, dtype="<U24"),
+            "opp_mega": np.asarray(opp_mega, dtype="<U24")}
 
 
 async def collect(n_battles: int, explore: float, style: str,
-                  teams: str = "myteam") -> dict:
+                  teams: str = "myteam", team_text: str | None = None,
+                  opp_split: str | None = None, opp_seed: int = 0,
+                  selection_plan: str | None = None) -> dict:
+    """team_text: 自チームを Showdown 本文で固定 (構築システムの候補適応)。
+    opp_split: FILE:TIER[:FOLD] — 相手を系統分割の階層から決定的に引く (cross-fitting 用)
+    selection_plan: 構築の選出計画 (plan.json)。探索枠のうち BUILD_PLAN_EXPLORE_SHARE の割合で計画の 3 体を選出する
+    (計画を選出モデルの初期値にする: tools.team_build.plan_prior)"""
     import random
     import types
+    from champions_agent.config import BUILD_PLAN_EXPLORE_SHARE
+    from tools.team_build.plan_prior import load_plan, plan_for_family, plan_indices, plan_perm
+    plan = load_plan(selection_plan) if selection_plan else {}
+    family_of: dict = {}
+    opp_tb_ref: dict = {}
+    plan_stats = {"plan": 0, "random": 0}
     from poke_env import AccountConfiguration
     from poke_env.teambuilder import ConstantTeambuilder
     from champions_agent.agent.policy_selection import build_selection_observation
@@ -208,7 +246,9 @@ async def collect(n_battles: int, explore: float, style: str,
     from tools.evaluate_team import build_myteam_text
 
     records: dict = {}      # battle_tag -> {obs, emb, action}
-    if teams == "ranked":
+    if team_text:
+        own_teambuilder = ConstantTeambuilder(team_text)
+    elif teams == "ranked":
         # 他プレイヤーの実構築 (ラダー上位) を毎バトル引き直す。
         # 単一チームのデータだとモデルがそのチーム専用になるため、
         # 「チーム一般の選出判断」を学ぶには多数の構築が要る
@@ -221,9 +261,18 @@ async def collect(n_battles: int, explore: float, style: str,
     def _teampreview(self, battle):
         mons = list(battle.team.values())
         opp_mons = list(battle.opponent_team.values())
-        # 探索: 一定確率でランダム選出にして未経験の組み合わせを踏む
+        # 探索: 一定確率でランダム選出にして未経験の組み合わせを踏む。計画があれば探索枠の一部は計画の 3 体を踏む
         if random.random() < explore or len(mons) < 6:
-            perm = random.choice(SELECTION_PERMUTATIONS)
+            perm = None
+            if plan and len(mons) >= 6 and random.random() < BUILD_PLAN_EXPLORE_SHARE:
+                fam = family_of.get(getattr(opp_tb_ref.get("tb"), "last_id", None))
+                idx = plan_indices(plan_for_family(plan, fam), [p.species for p in mons])
+                perm = plan_perm(idx, random)
+            if perm is None:
+                perm = random.choice(SELECTION_PERMUTATIONS)
+                plan_stats["random"] += 1
+            else:
+                plan_stats["plan"] += 1
         else:
             from champions_agent.env.search_expert import teampreview_order
             order = teampreview_order(battle)          # "/team 123456"
@@ -241,6 +290,7 @@ async def collect(n_battles: int, explore: float, style: str,
                 "action": SELECTION_PERMUTATIONS.index(perm),
                 # 行動インデックスを後から3体の名前へ戻せるよう並び順も保存する
                 "team": [p.species for p in mons],
+                "own_items": [_item_id(p) for p in mons],
                 # 相手6体も選出画面では見えている (battle.opponent_team は
                 # 対戦前は teampreview の6体を返す)。これを保存しないと
                 # 「相手に応じた選出」が学習できない
@@ -263,15 +313,29 @@ async def collect(n_battles: int, explore: float, style: str,
     # 「相手構築の種類」は汎化の主因なので、収集時はここだけ広げる
     # (実戦では毎回違う相手に当たる。60種の相手しか見ないと条件付けを学べない)
     from champions_agent.env.ranked_teams import RankedTeambuilder
+    if opp_split:
+        from tools.team_build.opponents import SequenceTeambuilder, load_split, opponent_sequence, tier_ids
+        parts = opp_split.split(":")
+        doc = load_split(parts[0])
+        tier = parts[1] if len(parts) > 1 else "search"
+        fold = int(parts[2]) if len(parts) > 2 else None
+        opp_tb = SequenceTeambuilder(opponent_sequence(tier_ids(doc, tier, fold), n_battles, opp_seed), doc["texts"])
+        family_of.update({tid: f["family_id"] for f in doc["families"] for tid in f["teams"]})
+    else:
+        opp_tb = RankedTeambuilder()
+    opp_tb_ref["tb"] = opp_tb
     opp = make_benchmark_player(
         battle_format=TRAINING_BATTLE_FORMAT,
-        team=RankedTeambuilder(),
+        team=opp_tb,
         account_configuration=AccountConfiguration(f"SelE{uid}", None))
     apply_matchup_teampreview(opp)
 
     await me.battle_against(opp, n_battles=n_battles)
+    if plan:
+        print(f"[collect_selection] 探索枠の選出: 計画 {plan_stats['plan']} / 乱択 {plan_stats['random']}")
 
     obs, emb, act, rew, team, opp_team, opp_sel = [], [], [], [], [], [], []
+    own_items, own_mega, opp_mega = [], [], []
     for tag, battle in me.battles.items():
         rec = records.get(tag)
         if rec is None or battle.won is None:
@@ -283,6 +347,9 @@ async def collect(n_battles: int, explore: float, style: str,
         team.append(rec["team"])
         opp_team.append(rec["opp_team"])
         opp_sel.append(_opp_selected(battle))
+        own_items.append(rec.get("own_items") or [""] * 6)
+        own_mega.append(_mega_used(battle.team.values()))
+        opp_mega.append(_mega_used(battle.opponent_team.values()))
     return {"obs": np.asarray(obs, dtype=np.float32),
             "emb": np.asarray(emb, dtype=np.float32),
             "action": np.asarray(act, dtype=np.int64),
@@ -291,7 +358,11 @@ async def collect(n_battles: int, explore: float, style: str,
             "opp_team": np.asarray(opp_team, dtype="<U24"),
             # -1 = 対応なし (毎戦チームを引き直しているので比較相手がいない)
             "group": np.full(len(rew), -1, dtype=np.int64),
-            "opp_sel": np.asarray(opp_sel, dtype="<U24")}
+            "opp_sel": np.asarray(opp_sel, dtype="<U24"),
+            # 1 試合 1 回の資源: 自分の持ち物 (石の所在) と、実際にメガシンカした個体 (自分/相手)。2026-09-11
+            "own_items": np.asarray(own_items, dtype="<U24"),
+            "own_mega": np.asarray(own_mega, dtype="<U24"),
+            "opp_mega": np.asarray(opp_mega, dtype="<U24")}
 
 
 def _default_column(sample: np.ndarray, n: int) -> np.ndarray:
@@ -312,8 +383,12 @@ def _migrate(old, new: dict) -> dict:
     return out
 
 
-def _merge_save(new: dict) -> dict:
-    """既存データへ追記して保存する (収集を分割して積み増せる)"""
+def _merge_save(new: dict, out_path: Path | None = None) -> dict:
+    """既存データへ追記して保存する (収集を分割して積み増せる)。out_path で保存先を変えられる
+    (構築システムの候補ごとの適応データは production の selection_data.npz に混ぜない)"""
+    global OUT
+    if out_path is not None:
+        OUT = Path(out_path)
     OUT.parent.mkdir(parents=True, exist_ok=True)
     if OUT.exists():
         try:
@@ -407,6 +482,11 @@ def main() -> None:
     ap.add_argument("--teams", default="myteam", choices=["myteam", "ranked"],
                     help="myteam=自分の登録チーム固定 / ranked=他プレイヤーの実構築を毎回引き直す")
     ap.add_argument("--show", action="store_true", help="集計表示のみ")
+    ap.add_argument("--team-file", default=None, help="自チームを Showdown 本文で固定 (候補適応)")
+    ap.add_argument("--opp-split", default=None, help="相手: opponent_families.json のパス:階層[:fold]")
+    ap.add_argument("--opp-seed", type=int, default=0)
+    ap.add_argument("--selection-plan", default=None, help="構築の選出計画 (plan.json)。探索枠の一部で計画の 3 体を選出する")
+    ap.add_argument("--out", default=None, help="保存先 npz (既定: production の selection_data.npz)")
     ap.add_argument("--paired", action="store_true",
                     help="対応のある収集: 同じ(自チーム,相手チーム)の組に対して"
                          "複数の選出を試す。選出間の差が相手の引き運に"
@@ -426,11 +506,14 @@ def main() -> None:
         data = asyncio.run(collect_paired(groups, args.group_size,
                                           args.style, args.teams))
     else:
+        team_text = Path(args.team_file).read_text(encoding="utf-8") if args.team_file else None
         data = asyncio.run(collect(args.battles, args.explore, args.style,
-                                   args.teams))
+                                   args.teams, team_text=team_text,
+                                   opp_split=args.opp_split, opp_seed=args.opp_seed,
+                                   selection_plan=args.selection_plan))
     if not len(data["action"]):
         raise SystemExit("記録できたエピソードがありません")
-    merged = _merge_save(data)
+    merged = _merge_save(data, out_path=Path(args.out) if args.out else None)
     print(f"[collect_selection] 今回{len(data['action'])}件 / "
           f"累計{len(merged['action'])}件 ({time.time() - t0:.0f}s) → {OUT}")
     show()

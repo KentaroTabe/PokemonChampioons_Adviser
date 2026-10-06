@@ -78,9 +78,19 @@ _EXTRA_DIM_V6 = 4
 # 相手控え2 x 種族値6/255 (視認済みのみ) = 12
 _EXTRA_DIM_V7 = 6 + 2 * 7 + 2 * 6  # = 32
 
-BATTLE_OBS_DIM = (_OBS_DIM_V1 + _EXTRA_DIM_V2 + _EXTRA_DIM_V3
-                  + _EXTRA_DIM_V4 + _EXTRA_DIM_V5 + _EXTRA_DIM_V6
-                  + _EXTRA_DIM_V7)  # = 420
+BATTLE_OBS_DIM_V7 = (_OBS_DIM_V1 + _EXTRA_DIM_V2 + _EXTRA_DIM_V3
+                     + _EXTRA_DIM_V4 + _EXTRA_DIM_V5 + _EXTRA_DIM_V6
+                     + _EXTRA_DIM_V7)  # = 420
+
+# --- v8拡張: 1 試合 1 回の資源 (メガシンカ) の推定 (docs/GIMMICK_INFERENCE_DESIGN.md、2026-09-11) ---
+# 相手の場: この先メガシンカする確率 1 + 期待種族値の差 (メガ後 − 素、確率加重、/255) 6 = 7
+# 相手控え 2 体: メガシンカする確率 = 2
+# 自分: 場の個体が石を持ちメガ可能 1 + 控え 2 体の石フラグ 2 = 3
+# 権利の消費: 自分 1 + 相手 1 = 2 (相手は「既にメガ後の個体がいる」= 消費)
+# 陣営の残りメガ脅威: 相手 (見えている個体の確率の最大) 1 + 自分 (石持ちの残り) 1 = 2
+_EXTRA_DIM_V8 = 7 + 2 + 3 + 2 + 2  # = 16
+
+BATTLE_OBS_DIM = BATTLE_OBS_DIM_V7 + _EXTRA_DIM_V8  # = 436
 
 # ==============================================================================
 # 観測ブロックのオフセット表 (set encoder用)
@@ -115,6 +125,8 @@ OBS_PARTS = [
     ("race", 6),
     ("own_bench0_v7", 7), ("own_bench1_v7", 7),
     ("opp_bench0_v7", 6), ("opp_bench1_v7", 6),
+    # --- v8 ---
+    ("gimmick", _EXTRA_DIM_V8),
 ]
 
 # エンティティ (ポケモン) ごとのブロック割当。混在ブロック (bench_tactics等の

@@ -34,9 +34,17 @@ def _champions_filter(db) -> str:
     SmogonのSV (gen9ou) データはフォールバック用で、チャンピオンズに
     存在しないポケモンを含むため、診断/推定では混ぜない。
     チャンピオンズのスナップショットが無い場合のみ全データを使う。
+
+    集計母数 (number_of_battles = pokedbの構築数) が足切り未満の
+    スナップショットも除外する。3構築だけのスナップショット (2026-08-05
+    インシデントの残置) が MAX(usage_percent) 経由で「使用率66.7%の脅威」を
+    診断に混入させていたため (2026-09-02 フォルム修復時に発覚)。
     """
+    from champions_agent.config import USAGE_MIN_RANKED_TEAMS
     ids = [str(r[0]) for r in db.execute(
-        "SELECT id FROM usage_snapshot WHERE format LIKE 'champions%'")]
+        "SELECT id FROM usage_snapshot WHERE format LIKE 'champions%' "
+        "AND (number_of_battles IS NULL OR number_of_battles >= ?)",
+        (USAGE_MIN_RANKED_TEAMS,))]
     if not ids:
         return "1=1"
     return f"snapshot_id IN ({','.join(ids)})"
@@ -134,7 +142,9 @@ def _my_views(resolver, party_ja: list | None = None) -> list:
         r = resolver.resolve_species(ja, cutoff=0.9)
         if not r:
             continue
-        base_sid = r[1]
+        # 手入力の「種族ID」(フォルム) があればそれを使う (ロトム → rotomwash)
+        from advisor.my_team import registered_species_id
+        base_sid = registered_species_id(ja) or r[1]
         sid, sp = base_sid, get_dex().species(base_sid)
         b = get_my_build(ja)
         if not (sp and b):
@@ -143,16 +153,15 @@ def _my_views(resolver, party_ja: list | None = None) -> list:
         # あるが、1v1対面の実力はメガ前提が実態に近い。ライチュウ等の
         # メガ進化前の種族値で過小評価される問題の対策)
         item_ja = b.get("item_ja") or ""
-        if item_ja.endswith(("ナイト", "ナイトX", "ナイトY")):
-            suffix = "x" if item_ja.endswith("X") else \
-                ("y" if item_ja.endswith("Y") else "")
-            cands = [base_sid + "mega" + suffix] if suffix else \
-                [base_sid + "mega", base_sid + "megax", base_sid + "megay"]
-            for cand in cands:   # 表記ゆれ (X/Y未記載の登録) はX優先で補完
-                msp = get_dex().species(cand)
-                if msp:
-                    sid, sp = cand, msp
-                    break
+        if item_ja.endswith(("ナイト", "ナイトX", "ナイトY", "ナイトZ")):
+            # 石 → メガ後のフォルムは requiredItem の表で引く (Z 石は表引きでないと通常メガに倒れる)。
+            # 表記ゆれ (X/Y 未記載の登録) は stone_form_of が無印 → X の順で補完する
+            from advisor.gimmick import stone_form_of
+            r_item = resolver.resolve(item_ja, "items", cutoff=0.9)
+            cand = stone_form_of(base_sid, r_item[1] if r_item else None, item_ja)
+            msp = get_dex().species(cand) if cand else None
+            if msp:
+                sid, sp = cand, msp
         view = MonView(species_id=sid, name_ja=ja, types=sp["types"],
                        base=sp["baseStats"], ev=b["ev"], nature=b["nature"])
         moves = []

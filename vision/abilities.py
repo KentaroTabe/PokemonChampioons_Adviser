@@ -65,6 +65,40 @@ def _load_forms() -> dict:
     return _FORMS
 
 
+# メガフォルムIDの末尾 (…mega / …megax / …megay / …megaz)。ヤンマ→yanmega のような
+# 自然名は candidates 探索が空になるため誤爆しない
+_MEGA_TAIL = re.compile(r"mega[xyz]?$")
+
+
+def mega_form_id(species_id: Optional[str],
+                 item_id: Optional[str] = None) -> Optional[str]:
+    """基本形の種族IDからメガフォルムのIDを導出する (一意に決まる場合のみ)。
+
+    複数フォルム (X/Y、無印/Z) がある種はメガストーンで判別する: まず石 → フォルムの表 (advisor.gimmick.stone_table、
+    requiredItem 由来)、無ければ石 id の末尾 (x/y/z)。判別できなければ None (誤確定より未確定を選ぶ)。
+    メガ名がOCRで読めないときのフォールバック (2026-08-25 第9回: 「メガスコィラン」等の崩れでメガ種族値が反映されなかった)。
+    2026-09-29: 末尾 z (M-C の Z 石) を見ておらず、ガブリアスナイトZ の個体が無印/Z の 2 候補で判別不能になっていた
+    """
+    forms = _load_forms()
+    key = _to_id(species_id or "")
+    if not key or _MEGA_TAIL.search(key):
+        return None
+    cands = [k for k in forms if k.startswith(key) and "mega" in k[len(key):]]
+    if len(cands) > 1 and item_id:
+        form = None
+        try:
+            from advisor.gimmick import stone_table
+            form = stone_table().get(_to_id(item_id))
+        except Exception:
+            form = None
+        if form in cands:
+            return form
+        suffix = item_id[-1] if item_id[-1] in ("x", "y", "z") else None
+        narrowed = [c for c in cands if suffix and c.endswith("mega" + suffix)]
+        cands = narrowed or cands
+    return cands[0] if len(cands) == 1 else None
+
+
 def fixed_ability(species_id: Optional[str], is_mega: bool = False,
                   item_id: Optional[str] = None) -> Optional[str]:
     """特性が一意に確定する場合はそのIDを返す。
@@ -77,16 +111,14 @@ def fixed_ability(species_id: Optional[str], is_mega: bool = False,
     key = _to_id(species_id or "")
     if not key:
         return None
-    if is_mega and not key.endswith("mega"):
-        cands = [k for k in forms
-                 if k.startswith(key) and "mega" in k[len(key):]]
-        if len(cands) > 1 and item_id:
-            suffix = item_id[-1] if item_id[-1] in ("x", "y") else None
-            narrowed = [c for c in cands if suffix and c.endswith("mega" + suffix)]
-            cands = narrowed or cands
-        if len(cands) != 1:
+    if is_mega and not _MEGA_TAIL.search(key):
+        # まだ基本形のIDならメガフォルムを導出する。従来の endswith("mega")
+        # 判定は …megax/…megay を「基本形」と誤判し、X/Y形態の特性を
+        # 確定できていなかった (2026-08-25修正)
+        mega = mega_form_id(key, item_id)
+        if mega is None:
             return None
-        abset = forms.get(cands[0])
+        abset = forms.get(mega)
     else:
         abset = forms.get(key)
     if abset and len(abset) == 1:

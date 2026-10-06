@@ -71,6 +71,9 @@ def main() -> None:
     tmp = Path(tempfile.mkdtemp()) / "my_team.json"
     my_team.CONFIG_PATH = tmp
     my_team._CACHE, my_team._CACHE_MTIME = None, -1.0
+    # 2026-09-06 ユーザー決定で画面からの自動登録は既定無効 (手入力ベース)。
+    # ここは読み取り経路そのものの回帰テストなので明示的に有効化する
+    my_team.AUTO_REGISTER_FROM_SCREEN = True
 
     from vision.pipeline import VisionPipeline
     pipe = VisionPipeline()
@@ -81,7 +84,11 @@ def main() -> None:
         img = cv2.imread(str(p))
         if img is None:
             continue
-        state, _ = pipe.process(img, single_shot=True)
+        # 能力タブ (技/特性/持ち物) の登録は「同じ内容が 2 フレーム連続で読めたとき」だけ書く
+        # (extractors._extract_watch_ability の登録保護、2026-08-21: 一覧画面の単発誤読で設定を汚さない)。
+        # 実運用では同じ画面が数秒続くので、静止画も 2 回続けて流す (2026-09-24: 1 回ずつでは書かれず落ちていた)
+        for _ in range(2):
+            state, _ = pipe.process(img, single_shot=True)
         scenes.append((p.name, state["scene"]))
 
     for name, scene in scenes:
@@ -104,9 +111,17 @@ def main() -> None:
                 print(f"  {sp}.{key} OK")
     assert ok, f"保存内容が正解と不一致: {json.dumps(saved, ensure_ascii=False)}"
 
-    # 登録済みデータからのShowdownチーム書き出し (human_battle用)
+    # 登録済みデータからのShowdownチーム書き出し (human_battle用)。
+    # 現在の 6 体は直近の対戦ログの選出ロスターが優先される (2026-09-16) ので、実ログに引きずられないよう空にして
+    # ここで登録した 3 体だけを書き出す
+    import tools.evaluate_team as et
     from tools.export_my_team_showdown import export_team
-    text = export_team()
+    orig_roster = et._latest_selection_roster
+    et._latest_selection_roster = lambda log_dir=None: []
+    try:
+        text = export_team()
+    finally:
+        et._latest_selection_roster = orig_roster
     assert "pelipper @ damprock" in text, text
     assert "Ability: drizzle" in text, text
     assert "EVs: 252 HP / 16 Def / 252 SpD" in text, text
@@ -120,4 +135,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        from advisor import my_team as _mt
+        _mt.AUTO_REGISTER_FROM_SCREEN = False

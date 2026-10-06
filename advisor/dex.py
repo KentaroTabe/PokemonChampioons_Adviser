@@ -22,6 +22,10 @@ class Dex:
         self._moves = raw["moves"]
         self._chart = raw["typechart"]
 
+    def species_ids(self) -> list:
+        """収録している種族 id の一覧 (構築システムの合法種集合などに使う)"""
+        return list(self._species.keys())
+
     def species(self, species_id: Optional[str]) -> Optional[dict]:
         if not species_id:
             return None
@@ -46,6 +50,82 @@ def get_dex() -> Dex:
     if _dex is None:
         _dex = Dex()
     return _dex
+
+
+FIELD_EFFECTS_PATH = Path(__file__).resolve().parent / "data" / "field_effects.json"
+
+
+@lru_cache(maxsize=1)
+def field_effects() -> dict:
+    """フィールド/天候の補正表 (advisor/data/field_effects.json: 場を張る特性/技、タイプ別倍率、技固有の効果、優先度)。
+    ダメージ計算と型生成の唯一の源。読めなければ空"""
+    try:
+        return json.loads(FIELD_EFFECTS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+BOOST_MOVES_PATH = Path(__file__).resolve().parent / "data" / "boost_moves.json"
+
+
+@lru_cache(maxsize=1)
+def _boost_moves() -> dict:
+    try:
+        return json.loads(BOOST_MOVES_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def move_boost_effects(move_id: Optional[str]) -> Optional[dict]:
+    """技の確定的な能力ランク変化 (100%発動のみ)。
+
+    戻り値: {"self": {stat: delta}, "target": {stat: delta}} (該当なしはNone)。
+    データは advisor/data/boost_moves.json (確率発動の追加効果は含まない)。
+    """
+    if not move_id:
+        return None
+    data = _boost_moves()
+    self_eff = (data.get("self") or {}).get(move_id)
+    target_eff = (data.get("target") or {}).get(move_id)
+    if not self_eff and not target_eff:
+        return None
+    return {"self": self_eff or {}, "target": target_eff or {}}
+
+
+def switch_in_ability_effects(ability_id: Optional[str]) -> Optional[dict]:
+    """着地時に確定発動する特性の相手能力変化 (いかく等)。"""
+    if not ability_id:
+        return None
+    return (_boost_moves().get("ability_on_switch") or {}).get(ability_id)
+
+
+ITEM_EFFECTS_PATH = Path(__file__).resolve().parent / "data" / "item_effects.json"
+
+
+@lru_cache(maxsize=1)
+def _item_effects() -> dict:
+    try:
+        return json.loads(ITEM_EFFECTS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def item_activation_effects(item_id: Optional[str]) -> Optional[dict]:
+    """発動型の持ち物の効果 (発動観測時に適用する内容)。
+
+    戻り値: {"consume", "heal_fraction", "boosts", ...} (該当なしはNone)。
+    データは advisor/data/item_effects.json。
+    """
+    if not item_id:
+        return None
+    return (_item_effects().get("activation") or {}).get(item_id)
+
+
+def item_damaging_move_effects(item_id: Optional[str]) -> Optional[dict]:
+    """ダメージ技の使用時に確定発動する持ち物の効果 (いのちのたま反動等)。"""
+    if not item_id:
+        return None
+    return (_item_effects().get("on_damaging_move") or {}).get(item_id)
 
 
 # ==============================================================================

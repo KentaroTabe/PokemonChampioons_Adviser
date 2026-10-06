@@ -152,6 +152,142 @@ def test_type_change():
     print("test_type_change OK")
 
 
+def test_type_change_survives_backfill():
+    """観測したタイプ変化は図鑑タイプの自動訂正 (backfill) に潰されない。
+
+    2026-08-21 第6回: マスカーニャの変幻自在で変わったタイプが、毎heavy
+    フレームの backfill_player_static により数秒で図鑑タイプへ戻されていた。
+    交代で元に戻るため、交代アウト後は従来どおり図鑑で正す。
+    """
+    from vision import extractors
+    from vision.normalize import NameResolver
+
+    state, p = new_parser()
+    p.parse("相手は マスカーニャを 繰り出した!")
+    om = state.opponent.active()
+    assert om.species_ja == "マスカーニャ", om.species_ja
+    fired = p.parse("相手の マスカーニャは みずタイプに なった!")
+    assert "type_change_opponent_water" in fired, fired
+    assert om.types == ["みず"] and om.type_changed is True
+
+    r = NameResolver()
+    extractors.backfill_player_static(state, r)
+    assert om.types == ["みず"], f"backfillが観測タイプを潰した: {om.types}"
+
+    # 交代アウトでフラグ解除 → 次のbackfillで図鑑タイプに戻る
+    om.reset_on_switch_out()
+    assert om.type_changed is False
+    extractors.backfill_player_static(state, r)
+    assert set(om.types) == {"くさ", "あく"}, om.types
+    print("test_type_change_survives_backfill OK")
+
+
+def test_popup_item_containing_no():
+    """「の」を含む持ち物名のポップアップは最高スコアの分割で解決する。
+
+    2026-08-21 第7回: 「ミミッキュのいのちのたま」が最後の「の」分割
+    (「たま」) で ビーだま(marble) に誤解決していた。完全一致の
+    いのちのたま が選ばれること。
+    """
+    state, p = new_parser()
+    state.player.active_index = 2   # 既定パーティのミミッキュ
+    fired = p.parse("ミミッキュの いのちのたま", source="left_popup")
+    assert "item_player_lifeorb" in fired, fired
+    me = state.player.party[2]
+    assert me.item_id == "lifeorb", me.item_id
+    print("test_popup_item_containing_no OK")
+
+
+def test_knockoff_removes_item():
+    """はたきおとすで持ち物を失い、以後バックフィルで復活しない (第7回)"""
+    from vision import extractors
+    from vision.normalize import NameResolver
+    import advisor.my_team as my_team_mod
+
+    state, p = new_parser()
+    me = state.player.party[2]          # ミミッキュ
+    me.item_ja, me.item_id = "いのちのたま", "lifeorb"
+    fired = p.parse("相手の サーフゴーは ミミッキュの いのちのたまを はたきおとした!")
+    assert "knockoff_player_lifeorb" in fired, fired
+    assert me.item_id is None and me.item_ja is None
+    assert me.item_removed is True
+
+    # 登録バックフィルでも復活しない
+    orig = my_team_mod.get_my_build
+    my_team_mod.get_my_build = lambda ja: {"item_ja": "いのちのたま"} \
+        if ja == "ミミッキュ" else None
+    try:
+        extractors.backfill_player_static(state, NameResolver())
+        assert me.item_id is None, "item_removed中に登録から復活した"
+    finally:
+        my_team_mod.get_my_build = orig
+
+    # 相手側: 自分がはたきおとした場合
+    p.parse("相手は ハラバリーを 繰り出した!")
+    om = state.opponent.active()
+    om.item_ja, om.item_id = "ラムのみ", "lumberry"
+    fired = p.parse("ムクホークは 相手の ハラバリーの ラムのみを はたきおとした!")
+    assert "knockoff_opponent_lumberry" in fired, fired
+    assert om.item_id is None and om.item_removed is True
+    print("test_knockoff_removes_item OK")
+
+
+def test_rotom_form_faint_prefers_active():
+    """同名フォーム (ロトム/ウォッシュロトム) の帰属は場の個体を優先する。
+
+    2026-08-20 第5回持ち越し: 「相手のロトムはたおれた」が基本形スロットへ
+    誤帰属し、実際に倒れたウォッシュロトムが健在のまま残った。
+    """
+    state, p = new_parser()
+    base = state.opponent.party  # 既定の相手枠は流用せず追加する
+    from vision.state import PokemonState
+    rotom = PokemonState(species_ja="ロトム", species_id="rotom")
+    rotom.hp_percent = 100.0
+    wash = PokemonState(species_ja="ウォッシュロトム", species_id="rotomwash")
+    wash.hp_percent = 40.0
+    base.clear()
+    base.extend([rotom, wash])
+    state.opponent.active_index = 1   # 場に出ているのはウォッシュ
+
+    fired = p.parse("相手の ロトムは たおれた!")
+    assert "faint" in fired, fired
+    assert wash.status == "fainted", (wash.status, rotom.status)
+    assert rotom.status != "fainted", "基本形スロットへ誤帰属した"
+    print("test_rotom_form_faint_prefers_active OK")
+
+
+def test_pivot_switch_context_flag():
+    """とんぼがえり系の使用で交代先選択フラグが立ち、交代完了で下りる (第8回)"""
+    state, p = new_parser()
+    assert state.pending_pivot_switch is False
+    fired = p.parse("ブリジュラスの とんぼがえり!")
+    assert "move_player_uturn" in fired, fired
+    assert state.pending_pivot_switch is True
+    fired = p.parse("ゆけっ! ライチュウ!")
+    assert "switch_player" in fired, fired
+    assert state.pending_pivot_switch is False
+
+    # 相手のとんぼがえりでは立たない
+    p.parse("相手は リザードンを 繰り出した!")
+    p.parse("相手の リザードンの とんぼがえり!")
+    assert state.pending_pivot_switch is False
+    print("test_pivot_switch_context_flag OK")
+
+
+def test_rank_screen_ends_battle():
+    """ランク画面 (レート表示) を対戦終了のキーにする (第7回ユーザー提案)"""
+    state, p = new_parser()
+    state.battle_active = True
+    fired = p.parse("ランクIV レート1602")
+    assert fired == ["battle_end_rank"], fired
+    assert state.battle_active is False
+    assert state.last_rate and state.last_rate["value"] == 1602
+    # 同一対戦内では再発火しない
+    fired2 = p.parse("ランクIV レート1602 ボール級")
+    assert fired2 == [], fired2
+    print("test_rank_screen_ends_battle OK")
+
+
 def test_hazards_and_screens():
     state, p = new_parser()
     fired = p.parse("相手の 鋁鋼maxの ステルスロック!")
@@ -454,10 +590,13 @@ def test_boost_survives_active_relink():
     p.parse("相手は ルカリオを 繰り出した!")
     fired = p.parse("相手の ルカリオの つるぎのまい!")
     assert any(f.startswith("move_opponent") for f in fired), fired
-    fired = p.parse("相手の ルカリオの こうげきが ぐーんとあがった!")
-    assert any(f.startswith("boost_opponent_atk") for f in fired), fired
     mon = state.opponent.active()
-    assert mon.boosts.get("atk", 0) >= 2, mon.boosts
+    # 2026-08-25 第9回以降: 確定ブーストは技イベント時点で即適用され、
+    # 直後のメッセージはdedupで二重適用されない (メッセージ取り逃し対策)
+    assert mon.boosts.get("atk", 0) == 2, mon.boosts
+    p.parse("相手の ルカリオの こうげきが ぐーんとあがった!")
+    assert mon.boosts.get("atk", 0) == 2, \
+        f"技+メッセージで二重適用された: {mon.boosts}"
 
     # HUD再読で生えた同種族のプレースホルダ (ブースト情報なし) をマージ
     ph = PokemonState()
@@ -472,6 +611,322 @@ def test_boost_survives_active_relink():
     print("test_boost_survives_active_relink OK")
 
 
+def test_boost_from_move_event():
+    """能力変化メッセージは技演出中の短時間表示で系統的に取り逃す
+    (2026-08-25 第9回: 8対戦で捕捉0件、つるぎのまい・いかく含む)。
+    技の使用イベントから確定分 (100%発動のみ) を即時反映する"""
+    state, p = new_parser()
+    state.player.active_index = 0
+    fired = p.parse("ブリジュラスの つるぎのまい!")
+    assert any(f.startswith("move_player") for f in fired), fired
+    mon = state.player.party[0]
+    assert mon.boosts["atk"] == 2, mon.boosts
+    # 対象側への確定デバフ (こごえるかぜ=相手の素早さ-1)
+    p.parse("相手は ルカリオを 繰り出した!")
+    opp = state.opponent.active()
+    p.parse("ブリジュラスの こごえるかぜ!")
+    assert opp.boosts["spe"] == -1, opp.boosts
+    # 確率発動の追加効果は適用しない (10まんボルトの麻痺等はランク変化なし)
+    p.parse("ブリジュラスの 10まんボルト!")
+    assert opp.boosts["spe"] == -1 and opp.boosts.get("atk", 0) == 0, opp.boosts
+    print("test_boost_from_move_event OK")
+
+
+def test_intimidate_applies_on_switch_event():
+    """いかくの着地効果を交代イベントで確定適用する (メッセージ非依存)。
+    特性が確定している個体のみ (推定特性では適用しない)"""
+    from vision.state import PokemonState
+    state, p = new_parser()
+    state.player.active_index = 0
+    state.opponent.party.append(PokemonState(
+        species_ja="ギャラドス", species_id="gyarados",
+        ability_id="intimidate", ability_ja="いかく"))
+    fired = p.parse("相手は ギャラドスを 繰り出した!")
+    assert any(f.startswith("switch_opponent") for f in fired), fired
+    assert state.player.party[0].boosts["atk"] == -1, \
+        state.player.party[0].boosts
+    # 特性未確定の交代では適用されない
+    state2, p2 = new_parser()
+    state2.player.active_index = 0
+    p2.parse("相手は ルカリオを 繰り出した!")
+    assert state2.player.party[0].boosts["atk"] == 0
+    print("test_intimidate_applies_on_switch_event OK")
+
+
+def test_mega_fallback_without_readable_name():
+    """メガ名がOCR崩れで読めない場合、対象個体の種族からメガフォルムを導出
+    (2026-08-25 第9回: 「メガスコィラン」でメガ種族値が反映されなかった)"""
+    state, p = new_parser()
+    p.parse("相手は バシャーモを 繰り出した!")
+    fired = p.parse("相手の バシャーモは メガシンカした!")
+    assert "mega_evolve" in fired, fired
+    mon = state.opponent.active()
+    assert mon.is_mega
+    assert mon.species_id == "blazikenmega", mon.species_id
+    assert "メガバシャーモ" in (mon.aliases or []), mon.aliases
+    print("test_mega_fallback_without_readable_name OK")
+
+
+def test_mega_form_id_derivation():
+    """基本形→メガフォルムIDの導出 (X/Yはストーンで判別、曖昧なら未確定)"""
+    from vision.abilities import fixed_ability, mega_form_id
+    assert mega_form_id("blaziken") == "blazikenmega"
+    assert mega_form_id("raichu") is None            # X/Y曖昧
+    assert mega_form_id("raichu", "raichunitey") == "raichumegay"
+    assert mega_form_id("raichu", "raichunitex") == "raichumegax"
+    assert mega_form_id("blazikenmega") is None      # 既にメガ
+    assert mega_form_id("yanmega") is None           # 自然名の誤爆なし
+    assert mega_form_id("pikachu") is None           # メガ形態なし
+    # X/Y形態IDでも特性が確定する (従来は endswith("mega") 判定が
+    # …megay を基本形と誤判し None を返していた)
+    assert fixed_ability("raichumegay", is_mega=True) == "noguard"
+    print("test_mega_form_id_derivation OK")
+
+
+def test_mega_survives_reswitch():
+    """メガ後に交代で下げて再登場しても species_id がメガのまま維持される
+    (従来は switch_to_species の merge が基本形IDへ戻していた)"""
+    state, p = new_parser()
+    p.parse("相手は バシャーモを 繰り出した!")
+    p.parse("相手の バシャーモは メガバシャーモに メガシンカした!")
+    mon = state.opponent.active()
+    assert mon.species_id == "blazikenmega", mon.species_id
+    p.parse("相手は ルカリオを 繰り出した!")
+    mon2 = state.opponent.switch_to_species("バシャーモ", "blaziken")
+    assert mon2 is mon
+    assert mon2.species_id == "blazikenmega", \
+        f"再登場でメガが基本形に戻った: {mon2.species_id}"
+    print("test_mega_survives_reswitch OK")
+
+
+def test_bare_form_read_merges_into_family_slot():
+    """素の「ロトム」読みが既存のウォッシュロトム枠へ併合され、別枠が
+    生えない (2026-08-25 第9回: rotomの別枠が生えタイプがゴースト/でんきで
+    表示された)。別種 (コイル/レアコイル) は併合しない"""
+    from vision.state import BattleStateV2, PokemonState
+    state = BattleStateV2()
+    state.opponent.party = [
+        PokemonState(species_ja="ウォッシュロトム", species_id="rotomwash",
+                     types=["でんき", "みず"]),
+        PokemonState(species_ja="ミミッキュ", species_id="mimikyu"),
+    ]
+    mon = state.opponent.switch_to_species("ロトム", "rotom")
+    assert mon is state.opponent.party[0], "別枠が生えた"
+    assert mon.species_id == "rotomwash", "具体フォームが素形へ格下げされた"
+    assert mon.species_ja == "ウォッシュロトム"
+    assert len(state.opponent.party) == 2
+    # 逆方向: 具体フォームの読みは素形枠を昇格させる
+    state2 = BattleStateV2()
+    state2.opponent.party = [
+        PokemonState(species_ja="ロトム", species_id="rotom")]
+    mon2 = state2.opponent.switch_to_species("ウォッシュロトム", "rotomwash")
+    assert mon2 is state2.opponent.party[0]
+    assert mon2.species_id == "rotomwash"
+    # 名前は末尾一致するが別種 → 併合しない
+    state3 = BattleStateV2()
+    state3.opponent.party = [
+        PokemonState(species_ja="レアコイル", species_id="magneton")]
+    mon3 = state3.opponent.switch_to_species("コイル", "magnemite")
+    assert mon3 is not state3.opponent.party[0]
+    print("test_bare_form_read_merges_into_family_slot OK")
+
+
+def test_white_herb_activation():
+    """しろいハーブ: (1)ポップアップ観測で低下復元+消費 (2)持ち物が確定
+    していれば低下適用の直後に推定発動 (発動ポップアップは演出中で取り逃し
+    やすく全対戦で発火2件のみ — 2026-08-25 第9回指摘。従来は持ち物名の
+    記録のみで復元も消費もされなかった) (3)非所持者は復元されない"""
+    # (1) ポップアップ経由
+    state, p = new_parser()
+    state.player.active_index = 0
+    mon = state.player.party[0]
+    mon.set_boost("atk", -2)
+    p.parse("ブリジュラスのしろいハーブ", source="left_popup")
+    assert mon.boosts["atk"] == 0, mon.boosts
+    assert mon.item_consumed
+    # (2) 確定持ち物からの推定発動: からをやぶる → 上昇は残し低下のみ復元
+    state2, p2 = new_parser()
+    state2.player.active_index = 0
+    mon2 = state2.player.party[0]
+    mon2.item_id, mon2.item_ja = "whiteherb", "しろいハーブ"
+    p2.parse("ブリジュラスの からをやぶる!")
+    assert mon2.boosts["atk"] == 2 and mon2.boosts["spe"] == 2, mon2.boosts
+    assert mon2.boosts["def"] == 0 and mon2.boosts["spd"] == 0, mon2.boosts
+    assert mon2.item_consumed
+    # 消費後は再発動しない (dedupの3秒窓はテスト用にクリア)
+    p2._recent_fired.clear()
+    p2.parse("ブリジュラスの ばかぢから!")
+    assert mon2.boosts["def"] == -1, mon2.boosts
+    # (3) 非所持者は低下がそのまま残る
+    state3, p3 = new_parser()
+    state3.player.active_index = 0
+    p3.parse("ブリジュラスの からをやぶる!")
+    assert state3.player.party[0].boosts["def"] == -1, \
+        state3.player.party[0].boosts
+    print("test_white_herb_activation OK")
+
+
+def test_item_activation_effects():
+    """発動型の持ち物の効果表 (item_effects.json) の適用 (2026-08-25:
+    しろいハーブ以外の発動型も網羅する — ユーザー指示)。
+    発動観測で消費フラグと効果 (回復/状態回復/ランク変化) を反映する"""
+    # オボンのみ: 最大HP比25%回復+消費
+    state, p = new_parser()
+    state.player.active_index = 0
+    mon = state.player.party[0]
+    mon.hp_percent, mon.hp_current, mon.hp_max = 40.0, 60, 150
+    p.parse("ブリジュラスのオボンのみ", source="left_popup")
+    assert mon.hp_percent == 65.0 and mon.hp_current == 98, \
+        (mon.hp_percent, mon.hp_current)
+    assert mon.item_consumed
+    # ラムのみ: 状態異常の回復+消費
+    state2, p2 = new_parser()
+    state2.player.active_index = 0
+    mon2 = state2.player.party[0]
+    mon2.status = "par"
+    p2.parse("ブリジュラスのラムのみ", source="left_popup")
+    assert mon2.status is None and mon2.item_consumed, mon2.status
+    # じゃくてんほけん: 攻撃・特攻+2
+    state3, p3 = new_parser()
+    p3.parse("相手は ルカリオを 繰り出した!")
+    opp = state3.opponent.active()
+    p3.parse("相手のルカリオのじゃくてんほけん", source="right_popup")
+    assert opp.boosts["atk"] == 2 and opp.boosts["spa"] == 2, opp.boosts
+    assert opp.item_consumed
+    # メンタルハーブ: ちょうはつ解除+消費 (みがわり等は残す)
+    state4, p4 = new_parser()
+    state4.player.active_index = 0
+    mon4 = state4.player.party[0]
+    mon4.volatiles = ["taunt", "substitute"]
+    p4.parse("ブリジュラスのメンタルハーブ", source="left_popup")
+    assert mon4.volatiles == ["substitute"] and mon4.item_consumed, \
+        mon4.volatiles
+    # パッシブな持ち物 (たべのこし) は記録のみで消費しない
+    state5, p5 = new_parser()
+    state5.player.active_index = 0
+    mon5 = state5.player.party[0]
+    p5.parse("ブリジュラスのたべのこし", source="left_popup")
+    assert mon5.item_id == "leftovers" and not mon5.item_consumed
+    print("test_item_activation_effects OK")
+
+
+def test_air_balloon_float_and_pop():
+    """ふうせん: 登場時の浮遊表示で持ち物を確定し、割れたら消費扱いにする"""
+    state, p = new_parser()
+    p.parse("相手は ルカリオを 繰り出した!")
+    opp = state.opponent.active()
+    fired = p.parse("相手の ルカリオは ふうせんで うかんでいる!")
+    assert "balloon_float" in fired, fired
+    assert opp.item_id == "airballoon" and not opp.item_consumed, \
+        (opp.item_id, opp.item_consumed)
+    fired = p.parse("相手の ルカリオの ふうせんが 割れた!")
+    assert "balloon_pop" in fired, fired
+    assert opp.item_consumed
+    print("test_air_balloon_float_and_pop OK")
+
+
+def test_life_orb_recoil_from_move_event():
+    """いのちのたま反動を技イベントから決定的に反映する (2026-08-30 第10回
+    監査: 反動メッセージの取り逃しでHPが10%過大のまま助言された)。
+    変化技・マジックガード・消費済みでは引かない"""
+    state, p = new_parser()
+    state.player.active_index = 0
+    mon = state.player.party[0]
+    mon.item_id, mon.item_ja = "lifeorb", "いのちのたま"
+    mon.hp_percent, mon.hp_current, mon.hp_max = 100.0, 162, 162
+    p.parse("ブリジュラスの りゅうのはどう!")   # ダメージ技 → -10%
+    assert mon.hp_percent == 90.0 and mon.hp_current == 146, \
+        (mon.hp_percent, mon.hp_current)
+    p.parse("ブリジュラスの つるぎのまい!")     # 変化技 → 反動なし
+    assert mon.hp_percent == 90.0, mon.hp_percent
+    # マジックガードは無反動
+    state2, p2 = new_parser()
+    state2.player.active_index = 0
+    mon2 = state2.player.party[0]
+    mon2.item_id, mon2.ability_id = "lifeorb", "magicguard"
+    mon2.hp_percent = 100.0
+    p2.parse("ブリジュラスの りゅうのはどう!")
+    assert mon2.hp_percent == 100.0, mon2.hp_percent
+    print("test_life_orb_recoil_from_move_event OK")
+
+
+def test_web_caught_is_not_a_move_use():
+    """「〜はねばねばネットにひっかかった!」は技使用ではない (2026-08-31
+    第11回: 相手が網にかかるたび move_opponent_stickyweb が誤発火し、
+    判明技汚染と陣営誤りの設置適用が起きた)。被弾側の陣営のネット存在
+    確認として扱う"""
+    state, p = new_parser()
+    p.parse("相手は ルカリオを 繰り出した!")
+    opp = state.opponent.active()
+    fired = p.parse("相手の ルカリオは ねばねばネットに ひっかかった!")
+    assert not any(f.startswith("move_") for f in fired), fired
+    assert "web_caught" in fired, fired
+    assert state.opponent.sticky_web is True     # 被弾側=相手陣営に確認
+    assert state.player.sticky_web is False      # 自陣に誤適用しない
+    assert "ねばねばネット" not in (opp.revealed_moves or []), \
+        opp.revealed_moves
+    print("test_web_caught_is_not_a_move_use OK")
+
+
+def test_form_correction_by_exclusive_move():
+    """排他技の観測で形態を訂正する (2026-08-30 第10回: ヒスイダイケンキが
+    素のダイケンキのまま評価された)。共有技では訂正しない。
+    メガ訂正と同様に species_ja は変えず id/タイプのみ更新。
+
+    使用率DBは未コミットでCIには無いため、判定は純粋部分
+    (_exclusive_form_from_users) を実測値由来のfixtureで検証し、
+    パーサ経路はDB参照側をfixtureに差し替えて検証する
+    (2026-09-02: 実DB直参照だったのがCIで失敗した)。
+    """
+    import advisor.sets as sets_mod
+    from vision.state import PokemonState
+
+    # アクアカッターはヒスイダイケンキの排他技 (fixtureはsnap24の実測構図)
+    assert sets_mod._exclusive_form_from_users(
+        "samurott", {"samurotthisui": 32.5}) == "samurotthisui"
+    # 共有技 (自形態にも実績がある) では訂正しない
+    assert sets_mod._exclusive_form_from_users(
+        "rotom", {"rotom": 53.5, "rotomwash": 30.0}) is None
+    # 同族の複数形態が使う技も証拠にしない
+    assert sets_mod._exclusive_form_from_users(
+        "rotom", {"rotomwash": 30.0, "rotomheat": 20.0}) is None
+
+    _FIXTURE = {("samurott", "aquacutter"): "samurotthisui"}
+    orig = sets_mod.exclusive_form_for_move
+    sets_mod.exclusive_form_for_move = \
+        lambda sid, mid, min_pct=1.0: _FIXTURE.get((sid, mid))
+    try:
+        state, p = new_parser()
+        state.opponent.party.append(PokemonState(
+            species_ja="ダイケンキ", species_id="samurott", types=["みず"]))
+        state.opponent.active_index = len(state.opponent.party) - 1
+        fired = p.parse("相手の ダイケンキの アクアカッター!")
+        assert any("aquacutter" in f for f in fired), fired
+        mon = state.opponent.active()
+        assert mon.species_id == "samurotthisui", mon.species_id
+        assert "あく" in (mon.types or []), mon.types   # みず/あく へ更新
+        assert mon.species_ja == "ダイケンキ", mon.species_ja  # HUD表示名は維持
+    finally:
+        sets_mod.exclusive_form_for_move = orig
+    print("test_form_correction_by_exclusive_move OK")
+
+
+def test_rate_extraction_decimal_format():
+    """ランク画面の実表示「レート1626.580」(小数3桁) を抽出する (2026-08-25
+    第9回: 正規化が小数点を落とし 1626580→先頭5桁が範囲外で全戦棄却され、
+    レート観測0件・勝敗不明3戦の主因になった)"""
+    state, p = new_parser()
+    p.parse("マスターボール級 ランクIV レート1626.580")
+    assert state.last_rate and abs(state.last_rate["value"] - 1626.58) < 1e-6, \
+        state.last_rate
+    # 小数点がOCRで落ちて連結された場合も整数部を救済する
+    state2, p2 = new_parser()
+    p2.parse("ランクIV レート1626580")
+    assert state2.last_rate and int(state2.last_rate["value"]) == 1626, \
+        state2.last_rate
+    print("test_rate_extraction_decimal_format OK")
+
+
 if __name__ == "__main__":
     test_weather_and_terrain()
     test_switch_and_mega()
@@ -480,6 +935,12 @@ if __name__ == "__main__":
     test_mirror_match_switch_side()
     test_disguise_bust_damage()
     test_type_change()
+    test_type_change_survives_backfill()
+    test_popup_item_containing_no()
+    test_knockoff_removes_item()
+    test_rotom_form_faint_prefers_active()
+    test_pivot_switch_context_flag()
+    test_rank_screen_ends_battle()
     test_hazards_and_screens()
     test_status_and_volatile()
     test_move_seal_states()
@@ -496,4 +957,203 @@ if __name__ == "__main__":
     test_move_attribution_requires_name()
     test_mega_keeps_base_name_no_duplicate()
     test_forfeit_win()
+    test_boost_from_move_event()
+    test_intimidate_applies_on_switch_event()
+    test_mega_fallback_without_readable_name()
+    test_mega_form_id_derivation()
+    test_mega_survives_reswitch()
+    test_bare_form_read_merges_into_family_slot()
+    test_white_herb_activation()
+    test_web_caught_is_not_a_move_use()
+    test_form_correction_by_exclusive_move()
+    test_item_activation_effects()
+    test_air_balloon_float_and_pop()
+    test_life_orb_recoil_from_move_event()
+    test_rate_extraction_decimal_format()
     print("\nALL OK")
+
+
+def test_expected_damage_applied_on_move_event():
+    """攻撃技イベントで防御側アクティブのHPを期待ダメージぶん決定的に減らす
+    (表示の無い時間帯の被弾でHPが固着する問題への対策、2026-09-05)。
+    実読みが来れば上書きされ推定印が消える。変化技では減らない"""
+    from vision.state import PokemonState
+    from vision.extractors import _set_hp
+    import vision.events as ev_mod
+    orig_flag = ev_mod.ESTIMATE_DAMAGE_ON_MOVE
+    ev_mod.ESTIMATE_DAMAGE_ON_MOVE = True   # 機構の検証 (既定は P10 棄却で False)
+    state, p = new_parser()
+    state.player.active_index = 0
+    me = state.player.party[0]
+    me.hp_percent = 100.0
+    state.opponent.party.append(PokemonState(
+        species_ja="ガブリアス", species_id="garchomp",
+        types=["ドラゴン", "じめん"], hp_percent=100.0))
+    state.opponent.active_index = len(state.opponent.party) - 1
+    opp = state.opponent.active()
+
+    fired = p.parse("相手の ガブリアスの じしん!")
+    assert any("earthquake" in f for f in fired), fired
+    assert me.hp_percent < 100.0 and me.hp_estimated is True, \
+        (me.hp_percent, me.hp_estimated)
+    assert opp.hp_percent == 100.0            # 攻撃側は不変
+
+    # 自分の攻撃技で相手側も減る
+    fired = p.parse("ブリジュラスの りゅうのはどう!")
+    assert any("dragonpulse" in f for f in fired), fired
+    assert opp.hp_percent < 100.0 and opp.hp_estimated is True, opp.hp_percent
+
+    # 実読みで上書きされ、推定印が消えて鮮度時刻が入る
+    # (確定条件は「同値2回かつ0.6秒以上安定」なので安定開始時刻を進める)
+    _set_hp(state, "player", me, pct=71.0)
+    me._hp_stable_since -= 1.0
+    _set_hp(state, "player", me, pct=71.0)
+    assert me.hp_percent == 71.0 and me.hp_estimated is False, \
+        (me.hp_percent, me.hp_estimated)
+    assert me.hp_read_ts is not None
+
+    # 変化技では減らない
+    p.parse("相手の ガブリアスの つるぎのまい!")
+    assert me.hp_percent == 71.0 and me.hp_estimated is False
+    # 既定 (False) では減らない
+    ev_mod.ESTIMATE_DAMAGE_ON_MOVE = False
+    p.parse("相手の ガブリアスの げきりん!")
+    assert me.hp_percent == 71.0 and me.hp_estimated is False
+    ev_mod.ESTIMATE_DAMAGE_ON_MOVE = orig_flag
+    print("test_expected_damage_applied_on_move_event OK")
+
+
+def _age_recent(p, seconds: float) -> None:
+    """dedup の記録時刻を seconds 秒だけ過去にずらす (再読までの時間経過を模擬)"""
+    for k in list(p._recent_fired):
+        p._recent_fired[k] -= seconds
+
+
+def test_rank_change_reread_after_window_not_doubled():
+    """同じランク変化メッセージの遅い再読 (OCR揺れで別テキスト) を二重適用しない。
+
+    2026-09-06 第12回: 「防御が上がった」→ 3.1 秒後「防御が上かった」、
+    「素早さが下かった」→ 5.9 秒後「素早さが下がった」が旧 3 秒窓を抜けて
+    +2 / -2 と記録された。窓内の再読は抑止し、1 ターン以上あと (窓外) の
+    正当な再発火は適用する。
+    """
+    from vision import events as ev_mod
+    state, p = new_parser()
+    p.parse("아나이뚜は リザードンを 繰り出した!")
+    om = state.opponent.active()
+    fired = p.parse("相手の リザードンの 防御が 上がった!")
+    assert "boost_opponent_def_+1" in fired, fired
+    assert om.boosts["def"] == 1, om.boosts
+    _age_recent(p, 5.9)
+    fired = p.parse("相手の リザードンの うき防御が 上かった!")
+    assert "boost_opponent_def_+1" not in fired, fired
+    assert om.boosts["def"] == 1, om.boosts
+    # 次ターン (窓外) の再使用は適用する
+    _age_recent(p, ev_mod.BOOST_DEDUP_SEC)
+    fired = p.parse("相手の リザードンの 防御が 上がった!")
+    assert "boost_opponent_def_+1" in fired, fired
+    assert om.boosts["def"] == 2, om.boosts
+
+    # 自分側の低下も同様 (素早さ -1 の再読)
+    fired = p.parse("ブリジュラスの 素早さが 下かった!")
+    assert "boost_player_spe_-1" in fired, fired
+    _age_recent(p, 5.9)
+    fired = p.parse("ブリジュラスの 素早さが 下がった!")
+    assert "boost_player_spe_-1" not in fired, fired
+    assert state.player.party[0].boosts["spe"] == -1, state.player.party[0].boosts
+    print("test_rank_change_reread_after_window_not_doubled OK")
+
+
+def test_move_boost_then_late_message_not_doubled():
+    """技使用イベントで反映した能力変化を、遅れて読めたメッセージで二重適用しない。
+
+    2026-09-06 第12回: めいそう使用の 6.8〜7.1 秒後に「特攻特防が上がった」が
+    読めて旧 3 秒窓を抜け、+2/+2 になった。
+    """
+    state, p = new_parser()
+    p.parse("아나이뚜は リザードンを 繰り出した!")
+    om = state.opponent.active()
+    fired = p.parse("相手の リザードンの めいそう!")
+    assert "move_opponent_calmmind" in fired, fired
+    assert om.boosts["spa"] == 1 and om.boosts["spd"] == 1, om.boosts
+    _age_recent(p, 7.1)
+    fired = p.parse("相手の リザードンの 特攻 特防が 上がった!")
+    assert not any(f.startswith("boost_") for f in fired), fired
+    assert om.boosts["spa"] == 1 and om.boosts["spd"] == 1, om.boosts
+    print("test_move_boost_then_late_message_not_doubled OK")
+
+
+def test_move_reread_after_window_not_refired():
+    """技使用メッセージの遅い再読 (実測 3〜7 秒後) を再発火させない。
+
+    2026-09-06 第12回: 「10まんボルト」が 4.8 秒後に「10まんポルト」と再読され
+    move_player_thunderbolt が二重発火した (期待ダメージの二重適用)。
+    """
+    state, p = new_parser()
+    p.parse("아나이뚜は リザードンを 繰り出した!")
+    fired = p.parse("ブリジュラスの 10まんボルト!")
+    assert "move_player_thunderbolt" in fired, fired
+    _age_recent(p, 4.8)
+    fired = p.parse("プリジュラスの 10まんポルト!")
+    assert "move_player_thunderbolt" not in fired, fired
+    print("test_move_reread_after_window_not_refired OK")
+
+
+def test_subjectless_boost_echo_not_misattributed():
+    """主語を落としたランク変化文を、直前に相手側へ反映済みの変化の残像として自陣に付けない。
+
+    2026-09-07 第14回 (高負荷で OCR が荒れた): 相手のからをやぶる使用の 10 秒後に
+    「攻撃 特攻 素早さがぐーんと上がった」が「相手のカメックスの」を落として読まれ、
+    自分のアシレーヌに +2/+2/+2 が付いた。
+    """
+    state, p = new_parser()
+    p.parse("아나이뚜は リザードンを 繰り出した!")
+    om, me = state.opponent.active(), state.player.party[0]
+    fired = p.parse("相手の リザードンの からをやぶる!")
+    assert "move_opponent_shellsmash" in fired, fired
+    assert om.boosts["atk"] == 2 and om.boosts["spa"] == 2 and om.boosts["spe"] == 2, om.boosts
+    assert om.boosts["def"] == -1 and om.boosts["spd"] == -1, om.boosts
+    _age_recent(p, 10.0)
+    fired = p.parse("こうげき とくこう すばやさが ぐーんと上がった!")
+    assert not any(f.startswith("boost_player") for f in fired), fired
+    assert me.boosts["atk"] == 0 and me.boosts["spa"] == 0 and me.boosts["spe"] == 0, me.boosts
+    assert om.boosts["atk"] == 2 and om.boosts["spe"] == 2, om.boosts
+    # 主語つきの自陣の変化は、相手側に同じ変化があっても適用する
+    fired = p.parse("ブリジュラスの 素早さが ぐーんと上がった!")
+    assert "boost_player_spe_+2" in fired, fired
+    assert me.boosts["spe"] == 2, me.boosts
+    print("test_subjectless_boost_echo_not_misattributed OK")
+
+
+def test_message_conflicting_with_move_data_is_ignored():
+    """技使用イベントで反映済みの能力に対し、窓内のメッセージが段数・向きを変える読みなら無視する。
+
+    2026-09-07 第14回: インファイト (防御・特防 -1 を技データで反映) の 3 秒後に
+    「特防が下がった」を「上がった」と誤読し、特防に +1 が重なった。
+    """
+    state, p = new_parser()
+    p.parse("아나이뚜は リザードンを 繰り出した!")
+    om = state.opponent.active()
+    fired = p.parse("相手の リザードンの インファイト!")
+    assert "move_opponent_closecombat" in fired, fired
+    assert om.boosts["def"] == -1 and om.boosts["spd"] == -1, om.boosts
+    _age_recent(p, 3.0)
+    fired = p.parse("相手の リザードンの 特防が 上がった!")
+    assert "boost_opponent_spd_+1" not in fired, fired
+    assert om.boosts["spd"] == -1, om.boosts
+    # 窓外 (次ターン以降) の正当な変化は適用する (間に別メッセージが挟まる = 直前テキストの重複除外を通過)
+    _age_recent(p, 20.0)
+    p.parse("相手の リザードンの りゅうのはどう!")
+    fired = p.parse("相手の リザードンの 特防が 上がった!")
+    assert "boost_opponent_spd_+1" in fired, fired
+    assert om.boosts["spd"] == 0, om.boosts
+    print("test_message_conflicting_with_move_data_is_ignored OK")
+
+
+if __name__ == "__main__":
+    test_expected_damage_applied_on_move_event()
+    test_rank_change_reread_after_window_not_doubled()
+    test_move_boost_then_late_message_not_doubled()
+    test_move_reread_after_window_not_refired()
+    test_subjectless_boost_echo_not_misattributed()
+    test_message_conflicting_with_move_data_is_ignored()

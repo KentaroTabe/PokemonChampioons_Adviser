@@ -19,12 +19,22 @@ debug_frames_720_old/
 # --- データベース / 生成データ ---
 *.sqlite3
 champions_agent/data/db/*.sqlite3
+# 空の champions.db など (DB は追跡しない。schema.sql だけ追跡する)
+champions_agent/data/db/*.db
 # 使用率データの生アーカイブとログ (日次更新で生成)
 champions_agent/data/archive/
 
 # --- 学習成果物 ---
 champions_agent/train/checkpoints/
 champions_agent/train/logs/
+# auto_tune (champions_agent/train/auto_tune.py) が書く学習設定と状態 (train_nightly.sh が source する。マシン固有の生成物)
+champions_agent/train/auto_env.sh
+champions_agent/train/auto_tune_state.json
+
+# --- 個人の登録データ (実データ) ---
+# 登録チームは個人のもの。例ファイル (config/my_team.example.json) だけ追跡し、本体と控え (.bak.日付) は除外する
+config/my_team.json
+config/my_team.json.bak.*
 
 # --- AIコーディングエージェント向けの指示・記録 (コミットしない) ---
 .clinerules
@@ -32,6 +42,8 @@ CLAUDE.md
 .claude/
 
 # --- その他 ---
+config/ports.local.js
+.venv*
 
 # 対戦ログ (自動記録)
 logs/
