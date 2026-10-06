@@ -42,6 +42,7 @@ bash scripts/control_panel_install.sh uninstall   # 解除
   終了処理の出力 (サマリー・決定監査・試用中 Package の実戦サマリー) はページの出力欄に残る
   (`logs/control_panel/<時刻>__<操作>.log`)。ラベルは終了処理で自動では外れない (OFF ボタン)
 - 前景で試す: `bash scripts/control_panel.sh --port 8011 --bind 127.0.0.1`
+- 入れ直し: パネルの常駐は起動時に `tools.analyze_battles` (対戦ログの勝敗の数え方) と `champions_agent.config` を読み込み、再起動まで古いまま動く (ボタンが実行するスクリプトは毎回その時点の作業ツリーを読むので、「接続テスト開始」で起動するアドバイザーは常に今のコード)。読み手や設定を変えたら、ジョブが走っていないときに `bash scripts/control_panel_install.sh install` で入れ直す (パネルから起こした常駐や測定 run は巻き添えにならない: AbandonProcessGroup + 別セッション)。2026-10-07 01:12 に入れ直し済み (9/27 起動の常駐は 9/29・10/6 の読み手の修正を読んでいなかった)
 - experiment ラベルが ON で、その Package に同梱の選出モデル (`logs/registry/package/<id>/advisor_policy/selection_model.pt`)
   があれば、助言サーバーの選出の推し (model_pick) はそのモデルを使う (登録パーティが Package の 6 体に含まれるときだけ。
   2026-09-25、測定と同じモデルで試すため)。OFF で配布版に戻る。評価・日次定点はこの経路を通らない
