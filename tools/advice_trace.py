@@ -1,6 +1,7 @@
 """助言の追跡 (2026-10-05 ②): 対戦ログから「どの版が、どの状態を見て、何を推奨し、いつ表示されたか」を 1 本で追う。
 
     python -m tools.advice_trace [--last N | --battle <log>] [--json] [--late-sec 10] [--package <id>]
+    python -m tools.advice_trace --variants [--last N] [--json]   # 影の計算 (advice_variant) の集計
 
 受入条件との対応:
   1. 版: version の行 (指定 Package / 実際に読んだ選出モデルの sha / 退避理由) と、Package の manifest の selection_model_sha256 を
@@ -284,6 +285,114 @@ def format_chain(name: str, records: list, package_sha: Optional[str] = None) ->
     return "\n".join(lines)
 
 
+# ------------------------------------------------------------------ 4. 影の計算 (advice_variant、2026-10-07)
+def variant_phase(context: Optional[dict]) -> str:
+    """advice_variant の局面の分類 (純粋): 交代先選択 (ひんし・とんぼ後で交代しか選べない) / 受け (相手の KO 圏の攻撃が
+    先に来る = threat_faces_me) / 攻め (それ以外) / 不明 (context が無い)"""
+    c = context or {}
+    if not c:
+        return "不明"
+    if c.get("switch_only"):
+        return "交代先選択"
+    if c.get("threat_faces_me"):
+        return "受け"
+    return "攻め"
+
+
+def variant_layer(context: Optional[dict]) -> str:
+    """残り体数の層 (純粋): "自分の残り v 相手の残り" (読めなければ ?)"""
+    c = context or {}
+    my_r, opp_r = c.get("my_remaining"), c.get("opp_remaining")
+    return f"{my_r if my_r is not None else '?'}v{opp_r if opp_r is not None else '?'}"
+
+
+def _variant_best(v: dict) -> Optional[str]:
+    top = v.get("top") or []
+    return f"{top[0].get('kind')}:{top[0].get('id')}" if top else None
+
+
+def variant_rows(records: list) -> list:
+    """advice_variant の行ごとに要約 (純粋)。{advice_id, turn, skipped, skip_reason, base_weight, best (重み → 第一候補),
+    changed (基準の重みから第一候補が変わった重みの一覧), phase, layer, base_kind (基準の第一候補の種類), gap (基準の 1-2 位の点差)}"""
+    rows = []
+    for d in records:
+        if d.get("type") != "advice_variant":
+            continue
+        ctx = d.get("context") or {}
+        row = {"advice_id": d.get("advice_id"), "turn": d.get("turn"), "skipped": d.get("skipped"),
+               "skip_reason": d.get("skip_reason"), "base_weight": d.get("base_weight"), "best": {}, "changed": [],
+               "phase": variant_phase(ctx), "layer": variant_layer(ctx), "base_kind": None, "gap": None}
+        if not d.get("skipped"):
+            best = {float(v["rl_blend"]): _variant_best(v) for v in (d.get("variants") or []) if "rl_blend" in v}
+            row["best"] = best
+            base_w = d.get("base_weight")
+            base = best.get(float(base_w)) if base_w is not None else None
+            row["changed"] = [w for w, k in best.items() if base is not None and k != base]
+            bv = next((v for v in (d.get("variants") or []) if base_w is not None and float(v.get("rl_blend", -1)) == float(base_w)), None)
+            if bv and bv.get("top"):
+                row["base_kind"] = bv["top"][0].get("kind")
+                row["gap"] = (bv.get("gaps") or [None])[0]
+        rows.append(row)
+    return rows
+
+
+def summarize_variants(records: list) -> dict:
+    """影の計算の集計 (純粋): 計算できた件数、第一候補が重みで変わった回数 (重み別・局面別・残り体数別・第一候補の種類別)、
+    スキップの内訳 (dropped_pending / aborted_running × 理由)"""
+    rows = variant_rows(records)
+    done = [r for r in rows if not r["skipped"]]
+    out = {"n_rows": len(rows), "n_computed": len(done), "n_changed": sum(1 for r in done if r["changed"]),
+           "changed_by_weight": {}, "by_phase": {}, "by_layer": {}, "by_base_kind": {},
+           "skipped": {"dropped_pending": {}, "aborted_running": {}}, "examples": []}
+    for r in done:
+        for w in r["best"]:
+            if w == (float(r["base_weight"]) if r["base_weight"] is not None else None):
+                continue
+            k = f"{w:g}"
+            cw = out["changed_by_weight"].setdefault(k, {"n": 0, "changed": 0})
+            cw["n"] += 1
+            cw["changed"] += int(w in r["changed"])
+        for key, val in (("by_phase", r["phase"]), ("by_layer", r["layer"]), ("by_base_kind", r["base_kind"] or "?")):
+            b = out[key].setdefault(val, {"n": 0, "changed": 0})
+            b["n"] += 1
+            b["changed"] += int(bool(r["changed"]))
+        if r["changed"] and len(out["examples"]) < 10:
+            out["examples"].append({"advice_id": r["advice_id"], "turn": r["turn"], "phase": r["phase"], "layer": r["layer"],
+                                    "best": {f"{w:g}": k for w, k in r["best"].items()}})
+    for r in rows:
+        if r["skipped"]:
+            d = out["skipped"].setdefault(r["skipped"], {})
+            d[r["skip_reason"] or "?"] = d.get(r["skip_reason"] or "?", 0) + 1
+    for k, cw in out["changed_by_weight"].items():
+        cw["rate"] = _ratio(cw["changed"], cw["n"])
+    return out
+
+
+def summarize_variants_paths(paths: list) -> dict:
+    """複数の対戦ログの advice_variant を合わせて集計する"""
+    recs = []
+    for p in paths:
+        recs += [d for d in load_records(p) if d.get("type") == "advice_variant"]
+    s = summarize_variants(recs)
+    s["n_battles"] = len(paths)
+    return s
+
+
+def format_variants(s: dict) -> str:
+    lines = [f"影の計算 (advice_variant): 行 {s['n_rows']} / 計算 {s['n_computed']} / 第一候補が重みで変わった {s['n_changed']}"]
+    for w, cw in sorted(s["changed_by_weight"].items(), key=lambda kv: float(kv[0])):
+        lines.append(f"  重み {w}: 第一候補が基準と違う {cw['changed']} / {cw['n']} ({cw['rate']})")
+    for key, title in (("by_phase", "局面"), ("by_layer", "残り体数"), ("by_base_kind", "基準の第一候補の種類")):
+        parts = " / ".join(f"{k} {v['changed']}/{v['n']}" for k, v in sorted(s[key].items()))
+        lines.append(f"  {title}: {parts or '-'}")
+    sk = s["skipped"]
+    lines.append("  スキップ: 待機中の破棄 " + (", ".join(f"{k} {v}" for k, v in sorted(sk.get('dropped_pending', {}).items())) or "0")
+                 + " / 実行中の中止 " + (", ".join(f"{k} {v}" for k, v in sorted(sk.get('aborted_running', {}).items())) or "0"))
+    for ex in s["examples"]:
+        lines.append(f"  例 {ex['advice_id']} T{ex['turn']} {ex['phase']} {ex['layer']}: {ex['best']}")
+    return "\n".join(lines)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="助言の追跡: 版 / 状態 / 推奨 / 表示を 1 本で")
     ap.add_argument("--battle", default=None)
@@ -291,8 +400,14 @@ def main() -> None:
     ap.add_argument("--package", default=None, help="突き合わせる Package id (既定: version の行の指定 Package)")
     ap.add_argument("--late-sec", type=float, default=LATE_SEC)
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--variants", action="store_true",
+                    help="影の計算 (advice_variant 行) の集計だけを出す (対象の対戦ログを合わせて)")
     args = ap.parse_args()
     files = [args.battle] if args.battle else sorted(glob.glob(str(BATTLE_DIR / "battle_*.jsonl")))[-args.last:]
+    if args.variants:
+        s = summarize_variants_paths(files)
+        print(json.dumps(s, ensure_ascii=False, indent=1) if args.json else format_variants(s))
+        return
     out = []
     for f in files:
         recs = load_records(f)

@@ -276,6 +276,23 @@ MY_ROSTER_MATCH_RATIO = 0.6
 MY_EXACT_RESOLVE_CUTOFF = 0.92
 MY_REGISTERED_MATCH_RATIO = 0.55
 
+# --- 行動助言の RL 加点と影の計算 (docs/USEFULNESS_VERIFICATION_PLAN_1007.md §2 advice_variant・§4、2026-10-07) ---
+# RL の行動確率の加点の重み (advisor.engine: score += 重み × 確率) の既定値。evaluate(rl_blend_weight=...) で渡さないときに使う。
+# 環境変数 RL_BLEND_WEIGHT があれば起動時に 1 回だけそれを既定値として読む (後方互換。評価のたびには読まない)
+RL_BLEND_WEIGHT_DEFAULT = 25.0
+# 影の計算 (advisor.shadow): 表示した助言と同じ共通部分から、RL 加点の重みだけ変えて加点以降を再計算し、
+# advice_variant 行に残す。判断 3 (2026-10-07): 隔離条件と受入確認 (前面 10 fps の遅延) が通るまで既定 OFF。
+# OFF のときはワーカーを作らず、共通部分も保持しない (追加処理なし)
+SHADOW_VARIANTS_ENABLED = False
+SHADOW_RL_BLEND_WEIGHTS = (0.0, 5.0, 25.0)   # 比較する重み (0 / ×5 / ×25 = 既定)
+SHADOW_TOP_N = 3                    # 行に残す上位の数 (点差は 1 位との差)
+SHADOW_QUEUE_MAX = 2                # 待ち行列の上限 (超えたら古い待機分を捨てる)
+# 期限 (秒): 助言の生成からこの時間を過ぎた仕事は、待機中なら捨て (dropped_pending)、実行中なら計算の区切りで止める
+# (aborted_running)。「次のフレームが来たら破棄」にはしない (10 fps では同じ状態でも捨ててしまう)
+SHADOW_DEADLINE_SEC = 3.0
+# 負荷確認 (tools/shadow_load_check) でフレームを流す間隔 (秒)。前面のページの通常の送信 (10 fps)
+SHADOW_LOAD_FRAME_INTERVAL_SEC = 0.1
+
 # --- パーティ構築システム (docs/TEAM_BUILDING_IMPLEMENTATION.md §9 の決定値、2026-09-06) ---
 # 対応差 (候補 − 参照) の判定: 実用差 ε の帯に CI が収まれば「実用上同等」
 BUILD_EQUIV_EPS = 0.02

@@ -307,6 +307,7 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
                         pick_noise: float = 0.0, action_noise: float = 0.0,
                         rng=None, recorder=None,
                         opp_source=None, selection_plan: Optional[dict] = None, family_of: Optional[dict] = None,
+                        rl_blend_weight: Optional[float] = None,
                         **player_kwargs):
     """助言エンジンで戦う poke-env Player を作る (操縦はアドバイザー: 選出も行動も実戦の助言と同じ経路)。
 
@@ -318,6 +319,7 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
     recorder: tools.team_build.battle_log.BattleRecorder (対戦記録)。opp_source.last_id を相手 id に使う
     selection_plan / family_of: 構築の選出計画 (plan.json の dict) と 相手 team_id → 系統 id。pick_policy advisor のとき
         計画を選出モデルの初期値にする (plan_prior)。相手の系統は opp_source.last_id から引く
+    rl_blend_weight: 助言の RL 加点の重み (evaluate の引数で渡す。None = 既定値。2026-10-07: 環境変数で渡さない)
 
     team_source: last_text 属性を持つ Teambuilder (自分側の型登録に使う)。
     stats / latencies: 診断用の集計先 (省略可)。
@@ -339,7 +341,7 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
                 self._register_team()
                 state = battle_to_state(battle, resolver)
                 if state:
-                    advice = evaluate(state, resolver)
+                    advice = evaluate(state, resolver, rl_blend_weight=rl_blend_weight)
                     adv2, followed = apply_action_noise(advice, action_noise, rng)
                     d = choose_from_advice(battle, adv2)
                     if not followed:

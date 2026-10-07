@@ -2,7 +2,8 @@
 
     python -m tools.check_advisor_player --battles 100 --opp-seed 20260904 --json out.json
     オプション: --belief-k K (engine.BELIEF_K) / --sensor-q q / --workers N /
-                --no-rl-blend (RL_BLEND_WEIGHT=0) / --skip-random
+                --rl-blend W (RL 加点の重み。既定 = engine.RL_BLEND_DEFAULT) / --no-rl-blend (= --rl-blend 0) / --skip-random
+重みは evaluate の引数で渡す (2026-10-07: 環境変数 RL_BLEND_WEIGHT は書かない。起動時の既定値の供給源としてだけ読まれる)。
 探索プレイヤー (check_search_expert) と同じ固定軸 (META_PIN) と相手列で測る。
 """
 from __future__ import annotations
@@ -52,6 +53,16 @@ def _remembering_teambuilder(inner):
     return _Remembering()
 
 
+def resolve_rl_blend(rl_blend: float | None, no_rl_blend: bool, default: float) -> float:
+    """測定で使う RL 加点の重み (純粋)。--no-rl-blend は 0 の別名、どちらも無ければ既定値。
+    両方を矛盾する値で指定したらエラー (どちらを測ったか manifest と食い違わないように)"""
+    if no_rl_blend:
+        if rl_blend is not None and float(rl_blend) != 0.0:
+            raise SystemExit(f"--no-rl-blend と --rl-blend {rl_blend} は同時に指定できない")
+        return 0.0
+    return float(default) if rl_blend is None else float(rl_blend)
+
+
 async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
               skip_random: bool, belief_k: int | None, sensor_q: float | None,
               workers: int | None, no_rl_blend: bool,
@@ -62,7 +73,8 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
               pick_noise: float = 0.0, action_noise: float = 0.0,
               candidate_id: str | None = None,
               opp_offset: int = 0, selection_plan: str | None = None,
-              opp_pilot: str | None = None, opp_pick_policy: str | None = None) -> None:
+              opp_pilot: str | None = None, opp_pick_policy: str | None = None,
+              rl_blend: float | None = None) -> None:
     from poke_env import AccountConfiguration
     from poke_env.player import RandomPlayer
     import advisor.engine as eng
@@ -81,8 +93,7 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
         eng.SENSOR_Q_DEFAULT = sensor_q
     if workers is not None:
         eng.SEARCH_WORKERS = workers
-    if no_rl_blend:
-        os.environ["RL_BLEND_WEIGHT"] = "0"
+    rl_blend_weight = resolve_rl_blend(rl_blend, no_rl_blend, eng.RL_BLEND_DEFAULT)
     if search_blend is not None:
         eng.SEARCH_BLEND = search_blend
     meta_pin = pinned_meta_snapshot_id()
@@ -141,7 +152,7 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
         pick_policy=pick_policy, selection_model_path=selection_model,
         pick_noise=pick_noise, action_noise=action_noise,
         rng=random.Random((opp_seed or 0) + 7), recorder=recorder, opp_source=opp_team,
-        selection_plan=plan, family_of=family_of,
+        selection_plan=plan, family_of=family_of, rl_blend_weight=rl_blend_weight,
         account_configuration=AccountConfiguration(f"ADv{uid}", None),
         battle_format=TRAINING_BATTLE_FORMAT,
         server_configuration=TrainingServerConfiguration,
@@ -159,7 +170,7 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
     n_dec = stats.get("decide", 0) + stats.get("fallback", 0)
     print(f"=== 助言エンジン (belief_k={eng.BELIEF_K} sensor_q={eng.SENSOR_Q_DEFAULT} "
           f"search_blend={eng.SEARCH_BLEND} "
-          f"workers={eng.SEARCH_WORKERS} rl_blend={os.environ.get('RL_BLEND_WEIGHT', '25')} "
+          f"workers={eng.SEARCH_WORKERS} rl_blend={rl_blend_weight:g} "
           f"meta={meta_pin or 'latest'}) vs ベンチマーク {n_battles}戦 ({dt:.0f}s) ===")
     print(f"勝率: {player.n_won_battles / n_battles:.2f}")
     print(f"助言レイテンシ: p50 {p50:.0f}ms / p95 {p95:.0f}ms ({len(lat)}決定)")
@@ -180,7 +191,7 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
             "pick_noise": pick_noise, "action_noise": action_noise,
             "opp_pilot": opp_pilot, "opp_pick_policy": opp_pick_policy,
             "models_dir": os.environ.get("CHAMPIONS_MODELS_DIR"),
-            "rl_blend": os.environ.get("RL_BLEND_WEIGHT", "25"),
+            "rl_blend": rl_blend_weight,
             "opp_seed": opp_seed, "meta_snapshot": meta_pin,
             "latency_p50_ms": round(p50, 1), "latency_p95_ms": round(p95, 1),
             "stats": {k: v for k, v in stats.items()
@@ -211,7 +222,9 @@ def main() -> None:
     ap.add_argument("--belief-k", type=int, default=None)
     ap.add_argument("--sensor-q", type=float, default=None)
     ap.add_argument("--workers", type=int, default=None)
-    ap.add_argument("--no-rl-blend", action="store_true")
+    ap.add_argument("--no-rl-blend", action="store_true", help="RL 加点を切る (--rl-blend 0 の別名)")
+    ap.add_argument("--rl-blend", type=float, default=None,
+                    help="RL の行動確率の加点の重み (既定 = config RL_BLEND_WEIGHT_DEFAULT、起動時の環境変数 RL_BLEND_WEIGHT があればその値)")
     ap.add_argument("--search-blend", type=float, default=None,
                     help="探索の推奨値をスコアへ統合する重み (P9)。0=無効")
     ap.add_argument("--pick-policy", choices=["advisor", "rule", "teampreview"], default="advisor",
@@ -247,7 +260,8 @@ def main() -> None:
                     pick_noise=args.pick_noise, action_noise=args.action_noise,
                     candidate_id=args.candidate_id,
                     opp_offset=args.opp_offset, selection_plan=args.selection_plan,
-                    opp_pilot=args.opp_pilot, opp_pick_policy=args.opp_pick_policy))
+                    opp_pilot=args.opp_pilot, opp_pick_policy=args.opp_pick_policy,
+                    rl_blend=args.rl_blend))
 
 
 if __name__ == "__main__":

@@ -554,15 +554,8 @@ def test_ko_margin_prefers_overkill():
            "hp_current": None, "hp_max": None, "status": None, "boosts": {},
            "ability_id": None, "item_id": None, "moves": [],
            "revealed_moves": []}
-    prev = os.environ.get("RL_BLEND_WEIGHT")
-    os.environ["RL_BLEND_WEIGHT"] = "0"
-    try:
-        adv = evaluate(_mini_state(my, opp), resolver)
-    finally:
-        if prev is None:
-            os.environ.pop("RL_BLEND_WEIGHT", None)
-        else:
-            os.environ["RL_BLEND_WEIGHT"] = prev
+    # RL 加点 0 は引数で渡す (2026-10-07: 環境変数は起動時の既定値にしか効かなくなった。以前の書き換えと同じ意図)
+    adv = evaluate(_mini_state(my, opp), resolver, rl_blend_weight=0)
     ep = next(a for a in adv["actions"] if a["id"] == "earthpower")
     eb = next(a for a in adv["actions"] if a["id"] == "energyball")
     assert "抜群" in ep["reason"], ep
@@ -620,18 +613,11 @@ def test_noguard_makes_low_accuracy_moves_reliable():
            "hp_current": None, "hp_max": None, "status": None, "boosts": {},
            "ability_id": None, "item_id": None, "moves": [],
            "revealed_moves": []}
-    import os
-    prev = os.environ.get("RL_BLEND_WEIGHT")
-    os.environ["RL_BLEND_WEIGHT"] = "0"
-    try:
-        adv_ng = evaluate(_mini_state(_raichu("noguard"), dict(opp)), resolver)
-        adv_lr = evaluate(_mini_state(_raichu("lightningrod"), dict(opp)),
-                          resolver)
-    finally:
-        if prev is None:
-            os.environ.pop("RL_BLEND_WEIGHT", None)
-        else:
-            os.environ["RL_BLEND_WEIGHT"] = prev
+    # RL 加点 0 は引数で渡す (2026-10-07: 以前の環境変数の書き換えと同じ意図)
+    adv_ng = evaluate(_mini_state(_raichu("noguard"), dict(opp)), resolver,
+                      rl_blend_weight=0)
+    adv_lr = evaluate(_mini_state(_raichu("lightningrod"), dict(opp)),
+                      resolver, rl_blend_weight=0)
     zc_ng = next(a for a in adv_ng["actions"] if a["id"] == "zapcannon")
     zc_lr = next(a for a in adv_lr["actions"] if a["id"] == "zapcannon")
     assert "命中50" not in zc_ng["reason"], zc_ng
@@ -663,30 +649,23 @@ def test_taunt_context_bonus():
             "hp_current": None, "hp_max": None, "status": None, "boosts": {},
             "ability_id": None, "item_id": None, "moves": [],
             "revealed_moves": ["つきのひかり", "どくどく", "まもる"]}
-    prev = os.environ.get("RL_BLEND_WEIGHT")
-    os.environ["RL_BLEND_WEIGHT"] = "0"
-    try:
-        adv = evaluate(_mini_state(my, wall), resolver)
-        tnt = next(a for a in adv["actions"] if a["id"] == "taunt")
-        assert "変化技主体" in tnt["reason"], tnt
-        assert tnt["score"] >= 30, tnt
+    # RL 加点 0 は引数で渡す (2026-10-07: 以前の環境変数の書き換えと同じ意図)
+    adv = evaluate(_mini_state(my, wall), resolver, rl_blend_weight=0)
+    tnt = next(a for a in adv["actions"] if a["id"] == "taunt")
+    assert "変化技主体" in tnt["reason"], tnt
+    assert tnt["score"] >= 30, tnt
 
-        # 攻撃主体 (判明技が攻撃3): 加点なし
-        sweeper = {"species_id": "garchomp", "species_ja": "ガブリアス",
-                   "types": ["ドラゴン", "じめん"], "hp_percent": 100.0,
-                   "hp_current": None, "hp_max": None, "status": None,
-                   "boosts": {}, "ability_id": None, "item_id": None,
-                   "moves": [], "revealed_moves":
-                       ["じしん", "げきりん", "ストーンエッジ"]}
-        adv2 = evaluate(_mini_state(dict(my), sweeper), resolver)
-        tnt2 = next(a for a in adv2["actions"] if a["id"] == "taunt")
-        assert "変化技主体" not in tnt2["reason"], tnt2
-        assert tnt2["score"] < 30, tnt2
-    finally:
-        if prev is None:
-            os.environ.pop("RL_BLEND_WEIGHT", None)
-        else:
-            os.environ["RL_BLEND_WEIGHT"] = prev
+    # 攻撃主体 (判明技が攻撃3): 加点なし
+    sweeper = {"species_id": "garchomp", "species_ja": "ガブリアス",
+               "types": ["ドラゴン", "じめん"], "hp_percent": 100.0,
+               "hp_current": None, "hp_max": None, "status": None,
+               "boosts": {}, "ability_id": None, "item_id": None,
+               "moves": [], "revealed_moves":
+                   ["じしん", "げきりん", "ストーンエッジ"]}
+    adv2 = evaluate(_mini_state(dict(my), sweeper), resolver, rl_blend_weight=0)
+    tnt2 = next(a for a in adv2["actions"] if a["id"] == "taunt")
+    assert "変化技主体" not in tnt2["reason"], tnt2
+    assert tnt2["score"] < 30, tnt2
     print("test_taunt_context_bonus OK")
 
 
@@ -711,24 +690,17 @@ def test_redundant_setup_discount():
            "hp_current": None, "hp_max": None, "status": None, "boosts": {},
            "ability_id": None, "item_id": None, "moves": [],
            "revealed_moves": []}
-    prev = os.environ.get("RL_BLEND_WEIGHT")
-    os.environ["RL_BLEND_WEIGHT"] = "0"
-    try:
-        st = _mini_state(my, opp)
-        st["opponent"]["hazards"]["sticky_web"] = True
-        adv = evaluate(st, resolver)
-        web = next(a for a in adv["actions"] if a["id"] == "stickyweb")
-        assert web["score"] <= 5.0 and "設置済み" in web["reason"], web
-        # 未設置なら通常評価 (設置技ボーナスが付く)
-        st2 = _mini_state(dict(my), dict(opp))
-        adv2 = evaluate(st2, resolver)
-        web2 = next(a for a in adv2["actions"] if a["id"] == "stickyweb")
-        assert web2["score"] > 5.0, web2
-    finally:
-        if prev is None:
-            os.environ.pop("RL_BLEND_WEIGHT", None)
-        else:
-            os.environ["RL_BLEND_WEIGHT"] = prev
+    # RL 加点 0 は引数で渡す (2026-10-07: 以前の環境変数の書き換えと同じ意図)
+    st = _mini_state(my, opp)
+    st["opponent"]["hazards"]["sticky_web"] = True
+    adv = evaluate(st, resolver, rl_blend_weight=0)
+    web = next(a for a in adv["actions"] if a["id"] == "stickyweb")
+    assert web["score"] <= 5.0 and "設置済み" in web["reason"], web
+    # 未設置なら通常評価 (設置技ボーナスが付く)
+    st2 = _mini_state(dict(my), dict(opp))
+    adv2 = evaluate(st2, resolver, rl_blend_weight=0)
+    web2 = next(a for a in adv2["actions"] if a["id"] == "stickyweb")
+    assert web2["score"] > 5.0, web2
     print("test_redundant_setup_discount OK")
 
 

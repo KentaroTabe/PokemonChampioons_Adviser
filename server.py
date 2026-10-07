@@ -30,7 +30,7 @@ from vision.scenes import SCENE_SELECTION, SCENE_STANDBY
 from vision.end_notice import battle_end_notice, outcome_revision_notice
 from vision.stale_notice import advice_target, stale_advice_notice
 from vision.state import apply_manual_species
-from champions_agent.config import MANUAL_SPECIES_RESOLVE_CUTOFF
+from champions_agent.config import MANUAL_SPECIES_RESOLVE_CUTOFF, SHADOW_VARIANTS_ENABLED
 
 
 def should_advise_selection(state: dict) -> bool:
@@ -56,6 +56,35 @@ advisor = Advisor(resolver=pipeline.resolver)
 battle_log = BattleLogger()
 from advisor.ev_infer import get_tracker as _get_spread_tracker
 spread_tracker = _get_spread_tracker()
+
+# 影の計算 (advisor.shadow、advice_variant 行。計画 §2、判断 3 2026-10-07): config SHADOW_VARIANTS_ENABLED で ON のときだけ
+# ワーカー (スレッド 1 本) を作る。既定 OFF (OFF のときは共通部分の保持も仕事の投入もしない)。行の書き込みは
+# イベントループのスレッドへ回す (他の対戦ログの行の書き込みと同じスレッドにして競合させない)
+_shadow = None
+_shadow_loop = None
+if SHADOW_VARIANTS_ENABLED:
+    from advisor.shadow import ShadowWorker
+
+    def _shadow_sink(rec: dict) -> None:
+        if _shadow_loop is not None:
+            _shadow_loop.call_soon_threadsafe(battle_log.on_advice_variant, rec)
+
+    _shadow = ShadowWorker(sink=_shadow_sink)
+    print("[server] 影の計算 (advice_variant) を有効化しました")
+
+
+def _submit_shadow(loop, state: dict, advice: dict) -> None:
+    """表示した助言と同じ共通部分で影の計算を投入する (ON のときだけ呼ぶ。失敗しても助言は止めない)"""
+    global _shadow_loop
+    try:
+        from advisor.shadow import make_job
+        from battle_logger import _compact_state, state_digest
+        _shadow_loop = loop
+        job = make_job(advisor.last_common, advice.get("advice_id"), state_digest(_compact_state(state)),
+                       shown_best=advice.get("best"))
+        _shadow.submit(job)
+    except Exception as e:
+        print(f"[server] 影の計算の投入に失敗: {e}")
 
 # 起動 (更新反映) のタイミングで不要ログを掃除する
 # (断片対戦ログ / 古いデバッグフレーム。失敗してもサーバーは起動する)
@@ -370,13 +399,20 @@ async def _handle_one_frame(sid, data):
                 _last_advice_key = key
                 _last_advice_time = now
                 _t_adv = time.time()
-                advice = await loop.run_in_executor(None, advisor.advise, state)
+                if _shadow is None:
+                    advice = await loop.run_in_executor(None, advisor.advise, state)
+                else:
+                    advice = await loop.run_in_executor(
+                        None, lambda: advisor.advise(state, keep_common=True))
                 _advise_ms.append((time.time() - _t_adv) * 1000.0)
                 _last_advice_target = advice_target(state, advice)
                 _stale_notified = False
                 advice["text"] = advisor.format_advice(advice)
                 battle_log.on_advice(advice, "battle", state)
                 await sio.emit('advice_update', advice, room=sid)
+                if _shadow is not None:
+                    # 表示の後に投入する (表示を待たせない)。計算はワーカーのスレッドで行う
+                    _submit_shadow(loop, state, advice)
                 if advice.get("provisional"):
                     # 確定前: 次フレームで即再計算して安定を確認する
                     # (キーを消さないと状態が動くまで10秒待ちになる)
