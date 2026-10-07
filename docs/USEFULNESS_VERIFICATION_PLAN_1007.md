@@ -305,7 +305,7 @@ feat/stage0-verify (5bb65354、マージ fbc35f0b) も受け取り済み: ダメ
 探索だけの不具合は `SEARCH_BLEND=0` (engine.py で確認済み) なので P1 の経路に入らない。選出方策の比較は助言の採点を通らないので並行可、
 (c) 実機の短い試験運転 (表示・連続保存・終了処理・影の計算の隔離)。それまで影の計算は既定 OFF。
 test_role_sets は統合コミット ac4edf9c で pokemon-showdown/ を揃えて再実行し OK (worktree の失敗は依存の欠落が原因と確認)。
-push と下書き PR はレビューも賛成。実行はユーザー判断。実機 (サーバー + ブラウザ) での page_visibility / shutdown / 連続保存 / 影の計算 ON は未確認
+push と下書き PR は 2026-10-07 16 時台に実施 (レビューの賛成をユーザーが転送、push は権限確認を経由): origin/feature/team-build 9489fbe1、下書き PR https://github.com/KentaroTabe/PokemonChampioons_Adviser/pull/20。main へのマージの判断は PR の作成と分ける。判断 7・9 に伴う既存テストの期待値の変更 2 箇所は承認済み (回帰テストで「古い助言があるだけでは成功にしない / 有効性と期限内表示を確認できた再利用は利用可能 / 表示記録に未対応のログは判定不能」を区別する)。エンジン修正の受入では、同じ局面の修正前後の比較・原因別の再現テスト・照合対象数と判定不能数の併記を条件にする。実機試験の完了までは「実装完了・受入は一部未完了」の記録を維持する。実機 (サーバー + ブラウザ) での page_visibility / shutdown / 連続保存 / 影の計算 ON は未確認
 → 次の接続テストの前に短い試験運転で確かめる。
 **判断 2 の実施 (2026-10-07 14 時台、ユーザー実行)**: `launchctl bootout gui/501/com.championsadviser.evolve` で定期起動を解除。`launchctl print` で
 サービスが無いことを確認 (plist `~/Library/LaunchAgents/com.championsadviser.evolve.plist` は残してあり、再開は `launchctl bootstrap gui/$(id -u) <plist>`)。
