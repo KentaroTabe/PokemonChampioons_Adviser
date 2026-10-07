@@ -124,6 +124,8 @@ TESTS=(
   test_cheap_drift
   test_register_selection
   test_sim_caches
+  test_dmg_compare
+  test_scene_samples
 )
 
 fail=0

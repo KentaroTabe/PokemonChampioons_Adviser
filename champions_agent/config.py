@@ -1013,3 +1013,35 @@ BUILD_CONSUMABLE_ITEMS = ("whiteherb", "focussash", "sitrusberry", "lumberry", "
                           "shucaberry", "cobaberry", "payapaberry", "tangaberry", "chartiberry", "kasibberry",
                           "habanberry", "colburberry", "babiriberry", "roseliberry", "chilanberry")
 BUILD_PROTOCOL_VERSION = "1"
+
+# --- 段 0 の正しさの確認 (docs/USEFULNESS_VERIFICATION_PLAN_1007.md §10・§2、2026-10-07) ---
+# 決定監査 (tools/decision_audit): display の行の「サーバーの受信時刻 t − ブラウザの表示時刻 t_shown」の絶対値がこれを超えたら、
+# ブラウザとサーバーの時計がずれている (時計差) として、ブラウザの時計で測った表示までの遅れを判定不能にする。
+# 10/6〜10/7 の実測は −0.004〜+0.10 秒 (送信の遅れ込み)
+DECISION_AUDIT_CLOCK_SKEW_SEC = 1.0
+# ダメージ照合 (tools/dmg_compare): ローカル Showdown の simulate-battle (乱数の seed 固定) で回す手数 (|move| の行の数)、
+# 実ダメージを乱数幅に入っているとみなす許容 (HP の整数への丸め。助言側は % を 0.1 刻みで返す)、
+# 乱数で選ぶ行動の確率 (自発の交代・メガシンカ)、両者のチームを取る層 (封印した holdout は使わない)
+DMG_COMPARE_MOVES = 200
+DMG_COMPARE_SEED = 20261007
+DMG_COMPARE_TOL_HP = 1
+DMG_COMPARE_ROUNDING_HP = 3               # 報告用: 幅の外がこれ以内の不一致は「整数の切り捨ての差の疑い」として件数を分けて出す (判定は変えない)
+DMG_COMPARE_SWITCH_PROB = 0.1
+DMG_COMPARE_MEGA_PROB = 0.5
+DMG_COMPARE_TEAM_TIER = "search"
+DMG_COMPARE_FORMAT = TRAINING_BATTLE_FORMAT
+DMG_COMPARE_BATTLE_TIMEOUT_SEC = 120      # simulate-battle の 1 回の応答待ちの上限 (超えたらその戦を打ち切る)
+DMG_COMPARE_MAX_TURNS = 60                # 1 戦の上限ターン (無限に続く対戦の打ち切り)
+DMG_COMPARE_ENGINE_WORKERS = 1            # 合法手の確認で助言エンジンを回すときの探索の並列数 (advisor.engine.SEARCH_WORKERS)
+# 局面の標本 (tools/scene_samples、§2 の 3 種): 1 回の接続テストから取る件数、時刻抽出の間隔、
+# 保存フレームと時刻の対応の許容 (保存は約 10 秒おき)、助言を「その時刻の画面の助言」とみなす最大の経過秒、
+# シーン判定に依存しない保存フレームの接頭辞 (server.py の frame_。sel_ / fc_ はシーン判定で保存される)
+SCENE_SAMPLES_SEED = 20261007
+SCENE_SAMPLES_N_FIXED_FAILURE = 3
+SCENE_SAMPLES_N_ADVICE_RANDOM = 10
+SCENE_SAMPLES_N_FRAME_RANDOM = 10
+SCENE_SAMPLES_FRAME_INTERVAL_SEC = 60.0
+SCENE_SAMPLES_FRAME_TOL_SEC = 6.0
+SCENE_SAMPLES_ADVICE_MAX_AGE_SEC = 60.0
+SCENE_SAMPLES_TIME_FRAME_PREFIXES = ("frame_",)
+SCENE_SAMPLES_ANY_FRAME_PREFIXES = ("frame_", "sel_", "fc_")
