@@ -464,7 +464,35 @@ PARTY_IMPROVE_LOSS_WEIGHT = 1.0
 # セッションの相手は脅威重みに 1 + BOOST × (正規化した難易度) を掛けて近傍の選び方に反映する
 PARTY_IMPROVE_MEASURE_NEIGHBORS = 3
 PARTY_IMPROVE_MEASURE_PROFILE = "medium"
+# 接続テストの終了処理 (--measure) が測定 run を自動で起動するか (2026-10-07 判断 1: 確認制にする)。
+# False (既定): 起動せず、終了レポートに測定の目的・概算所要時間 (過去の改善 run の実測)・起動コマンドを出し、人が起動する。
+# True: 旧動作 (終了処理が起動する。「run が実行中なら起動しない」判定はどちらでも効く)。
+# 改善 run は 7 本連続で採用 0、二重起動 (10/7) と版の混在 (10/6) の事故があった (docs/USEFULNESS_VERIFICATION_PLAN_1007.md §9)
+PARTY_IMPROVE_AUTO_LAUNCH = False
+# 概算所要時間に使う過去の改善 run (logs/build_search/runs/improve_*、summary.json のある完了 run) の新しい方からの本数
+PARTY_IMPROVE_DURATION_SAMPLE = 5
 BUILD_SESSION_THREAT_BOOST = 2.0
+
+# --- 接続テストで残すログ (段 0、2026-10-07。docs/USEFULNESS_VERIFICATION_PLAN_1007.md §2) ---
+# どれも「表示する助言」を変えない (記録だけ)。
+# decision 行: 決定画面 (command / move_select) から解決側の場面 (battle_hud / field) へ移ってから、この数のフレーム続いたら
+# 「決定が画面で確認できた」とする (1 フレームの誤分類で決定扱いにしない)。時刻は移った最初のフレーム
+DECISION_CONFIRM_FRAMES = 2
+# decision 行: 決定のあと、プレイヤーの行動イベント (move_player_* / switch_player) を待つ上限 (秒)。過ぎたら行動不明で書く
+DECISION_ACTION_WAIT_SEC = 30.0
+# guess_confirm 行: 選出画面の推定の「確定」の閾値 (タイプからの候補の事前確率)。値は推定側の閾値をそのまま参照する
+# (SELECTION_PRIOR_AUTO_ACCEPT = 視覚照合なしで採る / SELECTION_GUESS_SURE_PROB = 画面で「ほぼ確定」と出す)
+# 連続フレームの保存 (DEBUG_DUMP_FRAMES=1 のときだけ): 約 10 秒おきの保存フレームとは別に、1 回の起動 (接続テスト) につき
+# FRAME_BURST_COUNT 回、FRAME_BURST_SECONDS 秒間の受信フレームを全部 (受信した JPEG のまま、再圧縮なし) 保存する。
+# 開始は FRAME_BURST_BATTLE_EVERY 戦ごとの、対戦の最初の決定画面 (command) (1 戦目, 1+EVERY 戦目, …)。
+# 容量の見積もり (2026-10-07): 1 回 30 秒 × 受信 10 fps = 300 枚。保存フレーム 40 枚を JPEG 品質 80 にした実測で 1 枚 0.20〜0.22 MB
+# (中央値 0.21) → 1 回 約 62 MB、1 テスト 3 回で約 190 MB、残す 9 回で約 560 MB。隠れたページ (1〜2 fps) ならその 1/5〜1/10
+FRAME_BURST_ENABLED = True
+FRAME_BURST_COUNT = 3
+FRAME_BURST_SECONDS = 30.0
+FRAME_BURST_BATTLE_EVERY = 2
+FRAME_BURST_DIR = "debug_frames/burst"     # 保存先 (保存フレームの debug_frames/ の下。burst_<開始時刻>/<ミリ秒>.jpg)
+FRAME_BURST_KEEP_DIRS = 9                  # サーバー起動時の掃除 (tools/cleanup_logs) で残す連続保存の回数 (新しい方から。3 テスト分)
 # 環境スナップショット (S1、tools/team_build/meta_snapshot.py): 上位種と脅威リスト。
 # 脅威は「pokedb 上位ランカー構築の使用率% 上位 BUILD_META_TOP_N」と「ゲーム内バトルデータの使用率順位
 # (championsbattledata の列位置 = DB の pokemon_usage.rank) 上位 BUILD_META_INGAME_N」の和集合から、重み

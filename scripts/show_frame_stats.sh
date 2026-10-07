@@ -24,7 +24,7 @@ echo "$LINE"
 if [ "$RECV" -gt 0 ]; then
   awk -v r="$RECV" -v p="$PROC" -v d="$DROP" 'BEGIN {
     printf "取りこぼし率: %.0f%% (処理率 %.0f%%)\n", d * 100 / r, p * 100 / r
-    printf "実効処理レート: 約%.1f fps (送信は10fps)\n", p / (r / 10.0)
+    printf "実効処理レート: 約%.1f fps (送信 10fps を仮定した概算。対戦ごとの実測は改善案レポートの「接続テストの記録」)\n", p / (r / 10.0)
   }'
   echo "※ 2026-07-27の改善前は62%破棄・3.8fps。これを下回れば改善している"
 fi

@@ -124,6 +124,10 @@ TESTS=(
   test_cheap_drift
   test_register_selection
   test_sim_caches
+  test_stage0_logger
+  test_selection_record
+  test_pick_labels
+  test_frame_burst
 )
 
 fail=0

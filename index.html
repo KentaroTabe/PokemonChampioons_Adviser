@@ -146,10 +146,15 @@
         const ADVISOR_PORT = new URLSearchParams(location.search).get('api') || window.ADVISOR_PORT || 8000;
         const socket = io('http://' + location.hostname + ':' + ADVISOR_PORT);
         const connLabel = document.getElementById('conn-label');
+        // ページが隠れているか (2026-10-07 段 0): 受信フレームのうち隠れたページから届いた割合を対戦ログの frames 行に残すため、
+        // 表示状態が変わるたびと接続時にサーバーへ知らせる (隠れたページでは送信が 1〜2 fps に落ちる)。表示は何も変えない
+        const emitVisibility = () => socket.emit('page_visibility', {hidden: document.hidden});
+        document.addEventListener('visibilitychange', emitVisibility);
         socket.on('connect', () => {
             console.log('バックエンドに接続しました');
             connLabel.textContent = 'バックエンド: 接続中';
             connLabel.style.background = '#284';
+            emitVisibility();
         });
         socket.on('disconnect', () => {
             connLabel.textContent = 'バックエンド: 切断';

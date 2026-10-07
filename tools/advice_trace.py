@@ -1,4 +1,6 @@
 """助言の追跡 (2026-10-05 ②): 対戦ログから「どの版が、どの状態を見て、何を推奨し、いつ表示されたか」を 1 本で追う。
+2026-10-07 段 0: decision 行 (表示から決定まで・第一候補との一致)、advice 行の hp_stale 欄、選出の advice 行と advice_id で結んだ
+selection_record 行 (候補・相手の選出の予測) の要約を足した (無い古いログは 0 件)。
 
     python -m tools.advice_trace [--last N | --battle <log>] [--json] [--late-sec 10] [--package <id>]
 
@@ -189,6 +191,88 @@ def feasibility_rows(records: list) -> list:
     return rows
 
 
+# ------------------------------------------------------------------ 4. 表示から決定まで・HP の古さ (2026-10-07 段 0)
+def decision_rows(records: list) -> list:
+    """decision 行 (battle_logger、助言のあと決定が画面で確認できた時刻と第一候補との一致) を助言の表示と結ぶ (純粋)。
+    shown_to_decided = 決定 − 表示 (秒。表示はブラウザの時計、決定はサーバーの時計)。decision 行の無い古いログは空"""
+    shown = {}
+    for d in records:
+        if d.get("type") == "display" and d.get("advice_id") and d.get("t_shown") is not None and not d.get("hidden"):
+            shown.setdefault(d["advice_id"], float(d["t_shown"]))
+    rows = []
+    for d in records:
+        if d.get("type") != "decision":
+            continue
+        t_shown = d.get("t_shown") if d.get("t_shown") is not None else shown.get(d.get("advice_id"))
+        t_dec = d.get("t_decided")
+        rows.append({"advice_id": d.get("advice_id"), "turn": d.get("turn"), "t_shown": t_shown, "t_decided": t_dec,
+                     "shown_to_decided": (round(float(t_dec) - float(t_shown), 3)
+                                          if (t_dec is not None and t_shown is not None) else None),
+                     "match": d.get("match"), "action": d.get("action"), "best": d.get("best")})
+    return rows
+
+
+def hp_stale_rows(records: list) -> list:
+    """battle の助言 (provisional を除く) の hp_stale 欄 [{advice_id, player, opponent}] (純粋)。欄の無い古いログは空"""
+    out = []
+    for d in records:
+        if d.get("type") != "advice" or d.get("kind") != "battle" or "hp_stale" not in d:
+            continue
+        if (d.get("advice") or {}).get("provisional"):
+            continue
+        hs = d.get("hp_stale") or {}
+        out.append({"advice_id": d.get("advice_id"), "player": hs.get("player"), "opponent": hs.get("opponent")})
+    return out
+
+
+def selection_rows(records: list) -> list:
+    """選出の助言 (ok) ごとに、advice_id で結んだ selection_record 行 (候補・相手の選出の予測) の有無と中身の要約 (純粋)。
+    selection_record 行の無い古いログは has_record=False"""
+    from tools.pick_labels import selection_records_by_advice
+    recs = selection_records_by_advice(records)
+    rows = []
+    for d in records:
+        if d.get("type") != "advice" or d.get("kind") != "selection" or not (d.get("advice") or {}).get("ok"):
+            continue
+        r = recs.get(str(d.get("advice_id"))) or {}
+        pred = r.get("opp_pick_pred") if isinstance(r.get("opp_pick_pred"), dict) else {}
+        cands = r.get("candidates") if isinstance(r.get("candidates"), dict) else {}
+        rows.append({"advice_id": d.get("advice_id"), "has_record": bool(r),
+                     "n_combos": len(pred.get("combos") or []), "incomplete": pred.get("incomplete"),
+                     "methods": sorted(m for m, e in cands.items() if m not in ("reasons", "primary", "used") and e)})
+    return rows
+
+
+def selection_summary(rows: list) -> dict:
+    """selection_rows の要約 (純粋): 選出の助言の数、記録の行と結べた数、6 枠判明の全分布 (incomplete=False) の数"""
+    return {"n_advice": len(rows), "n_record": sum(1 for r in rows if r["has_record"]),
+            "n_full_distribution": sum(1 for r in rows if r["has_record"] and r["incomplete"] is False)}
+
+
+def _median(xs: list) -> Optional[float]:
+    xs = sorted(x for x in xs if x is not None)
+    return xs[len(xs) // 2] if xs else None
+
+
+def decision_summary(rows: list) -> dict:
+    """decision_rows の要約 (純粋): 件数、第一候補と一致 / 不一致 / 不明、表示から決定までの中央値"""
+    return {"n": len(rows), "n_match": sum(1 for r in rows if r["match"] is True),
+            "n_mismatch": sum(1 for r in rows if r["match"] is False),
+            "n_unknown": sum(1 for r in rows if r["match"] is None),
+            "shown_to_decided_p50": _median([r["shown_to_decided"] for r in rows])}
+
+
+def hp_stale_summary(rows: list) -> dict:
+    """hp_stale_rows の要約 (純粋): 件数、HP が一度も読めていない (null) 件数、古さの中央値と最大 (側ごと)"""
+    out = {"n": len(rows)}
+    for side in ("player", "opponent"):
+        vals = [r[side] for r in rows if r[side] is not None]
+        out[f"{side}_unread"] = sum(1 for r in rows if r[side] is None)
+        out[f"{side}_p50"] = _median(vals)
+        out[f"{side}_max"] = max(vals) if vals else None
+    return out
+
+
 # ------------------------------------------------------------------ まとめ
 def _ratio(a: int, b: int) -> Optional[float]:
     return round(a / b, 3) if b else None
@@ -213,6 +297,9 @@ def summarize(records: list, package_sha: Optional[str] = None, late_sec: float 
                         "n_unknown_system": sum(1 for r in feas if r["feasible_system"] is None),
                         "infeasible_rate_system": _ratio(sum(1 for r in feas if r["feasible_system"] is False),
                                                          sum(1 for r in feas if r["feasible_system"] is not None))},
+        "decision": decision_summary(decision_rows(records)),
+        "hp_stale": hp_stale_summary(hp_stale_rows(records)),
+        "selection": selection_summary(selection_rows(records)),
     }
 
 
@@ -221,10 +308,14 @@ def summarize_paths(paths: list, package_sha: Optional[str] = None, late_sec: fl
     agg = {"n_battles": 0, "version": {"n_match": 0, "n_mismatch": 0, "n_unknown": 0, "version_ids": {}, "fallback_reasons": {}},
            "display": {"n_advice": 0, "n_displayed": 0, "n_late": 0, "n_stale": 0, "n_stale_unknown": 0, "n_hidden": 0, "latencies": []},
            "feasibility": {"n": 0, "n_infeasible_system": 0, "n_unknown_system": 0}}
+    dec_rows, hp_rows, sel_rows = [], [], []
     for p in paths:
         recs = load_records(p)
         if not recs:
             continue
+        dec_rows += decision_rows(recs)
+        hp_rows += hp_stale_rows(recs)
+        sel_rows += selection_rows(recs)
         agg["n_battles"] += 1
         s = summarize(recs, package_sha, late_sec)
         v = s["version"]
@@ -245,6 +336,9 @@ def summarize_paths(paths: list, package_sha: Optional[str] = None, late_sec: fl
     agg["display"]["latency_p90"] = lat[int(len(lat) * 0.9)] if lat else None
     agg["feasibility"]["infeasible_rate_system"] = _ratio(agg["feasibility"]["n_infeasible_system"],
                                                           agg["feasibility"]["n"] - agg["feasibility"]["n_unknown_system"])
+    agg["decision"] = decision_summary(dec_rows)
+    agg["hp_stale"] = hp_stale_summary(hp_rows)
+    agg["selection"] = selection_summary(sel_rows)
     return agg
 
 
@@ -276,6 +370,16 @@ def format_chain(name: str, records: list, package_sha: Optional[str] = None) ->
              f"  表示: 助言 {s['display']['n_advice']} / 表示 {s['display']['n_displayed']} / 遅延の中央値 {s['display']['latency_p50']} 秒 "
              f"/ 遅い {s['display']['n_late']} / 古い状態への表示 {s['display']['n_stale']} (判定不能 {s['display']['n_stale_unknown']})",
              f"  実行不能 (システムの状態): {s['feasibility']['n_infeasible_system']} / {s['feasibility']['n']} (判定不能 {s['feasibility']['n_unknown_system']})"]
+    dc, hs, sl = s["decision"], s["hp_stale"], s["selection"]
+    if sl["n_record"]:
+        lines.append(f"  選出の記録: 選出の助言 {sl['n_advice']} / selection_record と結べた {sl['n_record']} "
+                     f"(相手 6 枠判明の全分布 {sl['n_full_distribution']})")
+    if dc["n"]:
+        lines.append(f"  決定: {dc['n']} (第一候補と一致 {dc['n_match']} / 不一致 {dc['n_mismatch']} / 不明 {dc['n_unknown']}) "
+                     f"表示から決定までの中央値 {dc['shown_to_decided_p50']} 秒")
+    if hs["n"]:
+        lines.append(f"  HP の古さ (助言時点): 自分 中央値 {hs['player_p50']} 秒 / 未読 {hs['player_unread']}、"
+                     f"相手 中央値 {hs['opponent_p50']} 秒 / 未読 {hs['opponent_unread']} (助言 {hs['n']})")
     for r in chain_rows(records):
         if r["provisional"]:
             continue

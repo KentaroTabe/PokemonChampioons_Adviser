@@ -25,6 +25,7 @@ from pathlib import Path
 
 from champions_agent.config import RATE_CHAIN_GAP_SEC, RATE_INFER_MIN_DELTA, RATE_MAX_DELTA_PER_BATTLE
 from tools.battle_outcome import OutcomeTracker, apply_rate_chain
+from tools.pick_labels import complete_subset, split_status, status_by_ja
 
 REPO = Path(__file__).resolve().parent.parent
 BATTLE_DIR = REPO / "logs" / "battles"
@@ -46,6 +47,7 @@ def _parse_battle(path: str) -> dict:
     n_battle_scenes = 0
     t0 = None
     t1 = None
+    picks_row = None              # 選出ラベル 3 値 (opp_picks 行、2026-10-07 段 0)。無い古いログは従来の推定
     for line in open(path):
         try:
             d = json.loads(line)
@@ -55,7 +57,9 @@ def _parse_battle(path: str) -> dict:
         t1 = d.get("t") or t1
         typ = d.get("type")
         ot.feed(d)
-        if typ == "rate":
+        if typ == "opp_picks":
+            picks_row = d
+        elif typ == "rate":
             if d.get("value") is not None and (not rates or rates[-1] != float(d["value"])):
                 rates.append(float(d["value"]))
         elif typ == "scene":
@@ -87,13 +91,26 @@ def _parse_battle(path: str) -> dict:
     opp_species = {ja for ja in opp_species if ja in final or ja in opp_fielded}
     # 勝負の文言は最も強い根拠 (2026-09-29 第17回 15:53: 3 体目のひんしからの誤った「負け」の後に「勝負に勝った」)
     outcome, inferred, corrected = ot.result()
+    # 相手の「選出されなかった」: 選出ラベル 3 値があれば非選出確定だけ (選出されたが場に出なかった個体を選出外にしない)、
+    # 無ければ従来の推定 (ロースター − 場に出た)
+    status = status_by_ja(picks_row)
+    if status is not None:
+        _picked, unpicked, unknown = split_status(status)
+        benched = sorted(set(unpicked) & opp_species)
+        pick_unknown = sorted(set(unknown) & opp_species)
+        complete = bool(picks_row.get("complete"))
+    else:
+        benched, pick_unknown, complete = sorted(opp_species - opp_fielded), None, None
     return {"file": Path(path).name, "t0": t0 or 0.0, "t1": t1 or t0 or 0.0,
             "outcome": outcome, "inferred": inferred, "corrected": corrected,
             "rate": rates[-1] if rates else None,
             "reads": rates,     # 読めたレート (値が変わるたびに 1 つ)。対戦をまたいだ並びの解決に使う (load_battles)
             "opp_species": sorted(opp_species),
             "opp_fielded": sorted(opp_fielded),
-            "opp_benched": sorted(opp_species - opp_fielded),
+            "opp_benched": benched,
+            "opp_pick_status": status,           # {和名: pick_status} (ラベルの無い古いログは None)
+            "opp_pick_unknown": pick_unknown,    # 選出が分からない個体 (ラベルの無い古いログは None)
+            "opp_picks_complete": complete,      # 選出 3 体がすべて判明 (ラベルの無い古いログは None → picks_complete が推定)
             "my_picked": sorted(my_picked),
             "n_battle_scenes": n_battle_scenes}
 
@@ -192,6 +209,9 @@ def summarize(battles: list) -> dict:
             "opp_stats": opp_stats,
             "opp_fielded_stats": opp_fielded_stats,
             "opp_benched_stats": opp_benched_stats,
+            # 相手の選出 3 体がすべて判明した対戦だけの「選出された 3 匹」ベースの成績と、その部分集合の件数 (2026-10-07 段 0)
+            "opp_complete": complete_subset(battles, "opp_fielded"),
+            "n_pick_labels": sum(1 for b in battles if b.get("opp_pick_status") is not None),
             "pick_stats": pick_stats, "trio_stats": trio_stats,
             "encounters": encounters}
 
@@ -240,9 +260,17 @@ def report(s: dict) -> str:
                      "(実際に場に出てきた相手):")
         lines += _stat_lines(s["opp_fielded_stats"], sort="loss")
 
+    oc = s.get("opp_complete") or {}
+    if oc.get("n_complete"):
+        lines.append(f"\n🧩 相手の選出 3 匹がすべて判明した対戦だけの「選出された3匹」ベースの成績 "
+                     f"(部分集合 {oc['n_complete']}/{oc['n_battles']}戦、勝敗確定 {oc['n_decided']}戦):")
+        lines += _stat_lines(oc["stats"], sort="loss")
+
     if s["opp_benched_stats"]:
         lines.append("\n🪑 相手の「選出されなかった3匹」ベースの成績 "
-                     "(居るだけで選出を歪められた相手の検出用):")
+                     "(居るだけで選出を歪められた相手の検出用"
+                     + (f"。選出ラベルのある {s.get('n_pick_labels')}戦は非選出確定だけ、無い対戦は場に出なかった個体"
+                        if s.get("n_pick_labels") else "") + "):")
         lines += _stat_lines(s["opp_benched_stats"], sort="loss")
 
     if s["trio_stats"]:
