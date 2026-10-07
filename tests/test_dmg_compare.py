@@ -272,6 +272,20 @@ def test_judge_damage():
     print("test_judge_damage OK")
 
 
+def test_judge_damage_passes_fainted_allies():
+    """照合は攻撃側の味方のひんしの数を calc_damage の文脈 (ctx) に渡す (2026-10-07: そうりょうのつかさ・おはかまいり の手が
+    幅の外になっていた)。0 のときは ctx を渡さない"""
+    seen = []
+
+    def calc(_a, _d, _m, _f, ctx=None):
+        seen.append(ctx)
+        return {"min": 20.0, "max": 25.0, "hits": 1.0, "notes": []}
+    DC.judge_damage(_dmg_obs(45, attacker=_snap("kingambit", fainted_allies=2)), calc=calc)
+    DC.judge_damage(_dmg_obs(45), calc=calc)
+    assert seen == [{"fainted_allies": 2}, None], seen
+    print("test_judge_damage_passes_fainted_allies OK")
+
+
 def test_order_prediction():
     fast, slow = _snap("garchomp"), _snap("snorlax")
     assert DC.predict_first(fast, slow, "earthquake", "bodyslam", {})[0] == "p1"
@@ -388,6 +402,7 @@ def main() -> None:
     test_tracker_formes_and_requests()
     test_mega_turn_ability_and_illusion()
     test_judge_damage()
+    test_judge_damage_passes_fainted_allies()
     test_order_prediction()
     test_incapacitation_forme_activation_legal()
     test_confirm_table_and_report()

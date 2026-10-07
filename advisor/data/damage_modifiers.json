@@ -1,0 +1,35 @@
+{
+ "_comment": "ダメージ計算 (advisor.damage) の Showdown の補正値 (2026-10-07 fix/engine-correctness)。type_items / type_effectiveness_overrides は小数・整数の両方の計算で使い、それ以外は整数の計算 (DAMAGE_INTEGER_ROUNDING) だけで使う。倍率は 4096 分率 (Showdown の modify / chainModify と同じ整数。例 6144 = 1.5 倍)。乱数は 85〜100 の整数 (randomizer: floor(floor(x × r) / 100))。急所は倍率ではなく floor(x × crit) (tools と同じ 1.5 倍、スナイパーは効果表)。items の stage: atk = 攻撃の実数値 (ModifyAtk / ModifySpA)、def = 防御側の持ち物で防御の実数値 (ModifySpD)、final = 最終ダメージ (ModifyDamage)",
+ "source": [
+  "pokemon-showdown/sim/battle-actions.ts (getDamage / modifyDamage)",
+  "pokemon-showdown/sim/battle.ts (modify / chainModify / randomizer)",
+  "pokemon-showdown/data/items.ts (choiceband / choicespecs / lifeorb / expertbelt / assaultvest / タイプ強化の持ち物 18 種)",
+  "pokemon-showdown/data/moves.ts (freezedry の onEffectiveness)",
+  "pokemon-showdown/data/moves.ts (reflect / lightscreen / auroraveil: シングルは chainModify(0.5))"
+ ],
+ "random_min": 85,
+ "random_max": 100,
+ "stab": 6144,
+ "burn": 2048,
+ "screen": 2048,
+ "crit": 1.5,
+ "type_item_mod": 4915,
+ "type_items": {
+  "_comment": "タイプ強化の持ち物 (Showdown の onBasePower: 技のタイプが一致すれば chainModify([4915, 4096]))。2026-10-07 ダメージ照合 1000 手で とけないこおり・くろいメガネ の手が乱数幅の外 (実ダメージが約 1.2 倍)",
+  "silkscarf": "Normal", "blackbelt": "Fighting", "sharpbeak": "Flying", "poisonbarb": "Poison", "softsand": "Ground",
+  "hardstone": "Rock", "silverpowder": "Bug", "spelltag": "Ghost", "metalcoat": "Steel", "charcoal": "Fire",
+  "mysticwater": "Water", "miracleseed": "Grass", "magnet": "Electric", "twistedspoon": "Psychic", "nevermeltice": "Ice",
+  "dragonfang": "Dragon", "blackglasses": "Dark", "fairyfeather": "Fairy"
+ },
+ "type_effectiveness_overrides": {
+  "_comment": "相性の例外 (Showdown の技の onEffectiveness)。技 → {防御側のタイプ: そのタイプに対する倍率}。フリーズドライはみずに抜群",
+  "freezedry": {"Water": 2.0}
+ },
+ "items": {
+  "choiceband": {"stage": "atk", "mod": 6144, "category": "Physical"},
+  "choicespecs": {"stage": "atk", "mod": 6144, "category": "Special"},
+  "lifeorb": {"stage": "final", "mod": 5324},
+  "expertbelt": {"stage": "final", "mod": 4915, "super_effective": true},
+  "assaultvest": {"stage": "def", "mod": 6144, "category": "Special", "holder": "defender"}
+ }
+}

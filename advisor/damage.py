@@ -12,10 +12,82 @@ advisor.effects が評価) を一次情報にし、表に無い特性 (参戦外
 """
 from __future__ import annotations
 
+import json
+import math
 from dataclasses import dataclass, field
+from functools import lru_cache
+from pathlib import Path
 from typing import Optional
 
 from advisor.dex import get_dex, calc_hp, calc_stat, BOOST_MULT
+
+DAMAGE_MODIFIERS_PATH = Path(__file__).resolve().parent / "data" / "damage_modifiers.json"
+
+
+@lru_cache(maxsize=1)
+def damage_modifiers() -> dict:
+    """整数の計算で使う Showdown の補正値 (advisor/data/damage_modifiers.json)"""
+    try:
+        return json.loads(DAMAGE_MODIFIERS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _integer_rounding_enabled() -> bool:
+    from champions_agent import config as _cfg
+    return bool(getattr(_cfg, "DAMAGE_INTEGER_ROUNDING", False))
+
+
+# ------------------------------------------------------------------ Showdown の整数の計算 (純粋)
+def _mod4096(mult: float) -> int:
+    """倍率 → 4096 分率の整数 (表の 1.3333 / 0.6667 のような近似値も最も近い分率に寄せる)"""
+    return int(round(float(mult) * 4096))
+
+
+def chain_mod(mults) -> int:
+    """倍率の列を Showdown の chainModify と同じ規則でつなぐ → 4096 分率 (M'' = (M × M' + 0x800) >> 12)"""
+    m = 4096
+    for x in mults:
+        m = (m * _mod4096(x) + 2048) >> 12
+    return m
+
+
+def poke_round_mod(value: int, mod: int) -> int:
+    """Showdown の modify: 4096 分率の倍率を掛けて五捨五超入 (tr((tr(value × mod) + 2048 − 1) / 4096))"""
+    return (int(value) * int(mod) + 2047) // 4096
+
+
+def showdown_rolls(base_damage: int, weather_mod: int, crit_mult: Optional[float], stab_mod: int, type_mult: float,
+                   burn: bool, final_mod: int, rnd=(85, 100)) -> list:
+    """Showdown の modifyDamage と同じ順序 (+2 の後の値 base_damage から: 天候 → 急所 → 乱数 → タイプ一致 → 相性 → やけど
+    → 最終補正 → 最小 1) で、乱数 rnd[0]〜rnd[1] の各値のダメージ (整数の列) を返す。相性が 2 のべき乗なら 2 倍 / 切り捨ての半分を
+    繰り返し、それ以外 (画面のヒントの上書き等) は掛けて切り捨てる"""
+    d0 = int(base_damage)
+    if weather_mod != 4096:
+        d0 = poke_round_mod(d0, weather_mod)
+    if crit_mult:
+        d0 = int(d0 * crit_mult)
+    lg = math.log2(type_mult) if type_mult > 0 else None
+    pow2 = lg is not None and abs(lg - round(lg)) < 1e-9
+    out = []
+    for r in range(int(rnd[0]), int(rnd[1]) + 1):
+        d = d0 * r // 100
+        if stab_mod != 4096:
+            d = poke_round_mod(d, stab_mod)
+        if pow2:
+            k = int(round(lg))
+            for _ in range(max(0, k)):
+                d *= 2
+            for _ in range(max(0, -k)):
+                d //= 2
+        else:
+            d = int(d * type_mult)
+        if burn:
+            d = poke_round_mod(d, int(damage_modifiers().get("burn", 2048)))
+        if final_mod != 4096:
+            d = poke_round_mod(d, final_mod)
+        out.append(max(1, d))
+    return out
 
 
 @dataclass
@@ -190,6 +262,27 @@ LEGACY_MOLD_BREAKERS = ("moldbreaker", "teravolt", "turboblaze")
 CRIT_APPLY_MIN_CHANCE = 0.5
 
 
+def _effectiveness(dex, move_id: str, mtype: str, def_types) -> float:
+    """タイプ相性。技ごとの例外 (フリーズドライはみずに抜群。advisor/data/damage_modifiers.json の type_effectiveness_overrides)
+    があれば、そのタイプの分だけ表の倍率に置き換える"""
+    ov = (damage_modifiers().get("type_effectiveness_overrides") or {}).get(move_id or "")
+    if not ov:
+        return dex.effectiveness(mtype, def_types)
+    m = 1.0
+    for t in def_types:
+        m *= float(ov[t]) if t in ov else dex.effectiveness(mtype, [t])
+    return m
+
+
+def type_item_mult(item: Optional[str], move_type: Optional[str]) -> float:
+    """タイプ強化の持ち物 (とけないこおり等) の威力倍率 (技のタイプが一致すれば 4915/4096、それ以外 1)"""
+    dm = damage_modifiers()
+    t = (dm.get("type_items") or {}).get(item or "")
+    if not t or str(item).startswith("_") or t != move_type:
+        return 1.0
+    return int(dm.get("type_item_mod", 4915)) / 4096.0
+
+
 def _zero(category: str, notes: list) -> dict:
     return {"min": 0.0, "max": 0.0, "avg": 0.0, "expected": 0.0, "type_mult": 0.0, "category": category,
             "hits": 1.0, "accuracy": None, "notes": notes}
@@ -237,8 +330,14 @@ def calc_damage(attacker: MonView, defender: MonView, move_id: str,
         return _zero(move["category"], [])
 
     mtype = override_move_type or move["type"]
-    power = float(move["power"] or 0)
+    # 威力は効果表 (move_effects.json、Showdown の mod champions から生成) を優先する。図鑑 (dex.json) は SV の値のままの技がある
+    # (2026-10-07 ダメージ照合 1000 手: であいがしら 図鑑 90 / チャンピオンズ 100。食い違いは威力だけで 25 技ほど)
+    base_power = float(entry.get("power") or move["power"] or 0)
+    power = base_power
     category = move["category"]
+    # 整数の計算 (DAMAGE_INTEGER_ROUNDING) 用に、倍率を Showdown の段階ごとに集める (小数の計算の値は変えない)。
+    # bp = 威力、atk / def = 実数値、stab = タイプ一致、final = 最終補正、hits = 回数の追加 (小数のまま最後に掛ける)
+    stages: dict = {"bp": [], "atk": [], "def": [], "stab": [], "final": [], "hits": []}
     flags = tuple(entry.get("flags") or ())
     atypes = attacker.types or (dex.species(attacker.species_id) or {}).get("types", [])
     dtypes = defender.types or (dex.species(defender.species_id) or {}).get("types", [])
@@ -265,6 +364,7 @@ def calc_damage(attacker: MonView, defender: MonView, move_id: str,
         if new_type:
             mtype = new_type
             power *= t_mult
+            stages["bp"].append(t_mult)
             notes.append(f"特性{a_ab}で{new_type}タイプ")
 
     # --- 技固有のフィールド/天候の効果 (威力倍率・タイプ変化。表は advisor/data/field_effects.json) ---
@@ -276,20 +376,25 @@ def calc_damage(attacker: MonView, defender: MonView, move_id: str,
         notes.append(f"{fv.terrain or fv.weather}で{f_type}タイプ")
     if f_mult != 1.0:
         power *= f_mult
+        stages["bp"].append(f_mult)
         notes.append(f"フィールド/天候で威力×{f_mult:g}")
 
     # --- 可変威力 (計算できる種類だけ) ---
+    # 整数の計算の威力の元 (Showdown は威力の式 (basePowerCallback) の後に威力の補正を掛ける)
+    power_raw = base_power
     if entry.get("variable_power"):
         a_sp = dex.species(attacker.species_id) or {}
         d_sp = dex.species(defender.species_id) or {}
-        power = E.variable_power(entry, power, {
+        vp_ctx = {
             "user_weight": a_sp.get("weightkg"), "target_weight": d_sp.get("weightkg"),
             "user_speed": effective_speed(attacker, fv), "target_speed": effective_speed(defender, fv),
             "user_hp_frac": attacker.hp_frac, "target_hp_frac": defender.hp_frac,
             "target_status": defender.status, "user_status": attacker.status,
             "user_item": attacker.item, "target_item": cx.get("target_item", defender.item or True),
             "user_boost_total": sum(max(0, int(v)) for v in (attacker.boosts or {}).values()),
-            "fainted_allies": cx.get("fainted_allies", 0), "times_hit": cx.get("times_hit", 0)})
+            "fainted_allies": cx.get("fainted_allies", 0), "times_hit": cx.get("times_hit", 0)}
+        power = E.variable_power(entry, power, vp_ctx)
+        power_raw = E.variable_power(entry, power_raw, vp_ctx)
         if power <= 0:
             return _zero(category, notes)
 
@@ -307,7 +412,7 @@ def calc_damage(attacker: MonView, defender: MonView, move_id: str,
         if "Ghost" in eff_types and mtype in ("Normal", "Fighting") and E.has_effect(a_ab, "hit_ghost_with_normal_fighting"):
             eff_types = [t for t in eff_types if t != "Ghost"]
             notes.append("きもったまでゴーストに当たる")
-        type_mult = dex.effectiveness(mtype, eff_types)
+        type_mult = _effectiveness(dex, move_id, mtype, eff_types)
         if mtype == "Ground" and not d_grounded:
             type_mult = 0.0
     if type_mult == 0.0:
@@ -349,9 +454,12 @@ def calc_damage(attacker: MonView, defender: MonView, move_id: str,
 
     # --- 攻撃側の補正 (効果表。表に無い特性は従来の分岐) ---
     a_mult = 1.0
+    power_before_legacy = power
     if a_known:
         a_mult, a_notes = E.offense_multiplier(a_ab, off_ctx)
         notes.extend(a_notes)
+        for st, m, _n in E.offense_modifiers(a_ab, off_ctx):
+            stages[st].append(m)
     else:
         if a_ab in ("hugepower", "purepower") and atk_key == "atk":
             atk *= 2
@@ -383,11 +491,15 @@ def calc_damage(attacker: MonView, defender: MonView, move_id: str,
             power *= 1.5
         if a_ab == "toxicboost" and attacker.status in ("poison", "toxic") and category == "Physical":
             power *= 1.5
+    if power != power_before_legacy and power_before_legacy:
+        stages["bp"].append(power / power_before_legacy)
 
     # --- 防御側の実数補正 (天候: 砂嵐はいわの特防 1.5 倍、ゆきはこおりの防御 1.5 倍。表から) ---
+    weather_def = []
     for w_type, stat_mults in ((fe.get("weather_defense") or {}).get(fv.weather or "") or {}).items():
         if w_type in dtypes and def_key in stat_mults:
             dfn = int(dfn * float(stat_mults[def_key]))
+            weather_def.append(float(stat_mults[def_key]))
     if not d_known:
         if d_ab == "furcoat" and def_key == "def":
             dfn *= 2
@@ -399,9 +511,20 @@ def calc_damage(attacker: MonView, defender: MonView, move_id: str,
     # フィールドのタイプ別補正 (接地した使用者だけ) と、接地した相手への減衰 (ミストフィールドのドラゴン技)。表から
     type_boost = fe.get("type_boost") or {}
     if fv.terrain and a_grounded:
-        power *= float((type_boost.get("terrain") or {}).get(fv.terrain, {}).get(mtype, 1.0))
+        t_boost = float((type_boost.get("terrain") or {}).get(fv.terrain, {}).get(mtype, 1.0))
+        power *= t_boost
+        if t_boost != 1.0:
+            stages["bp"].append(t_boost)
     if fv.terrain and d_grounded:
-        power *= float((fe.get("terrain_target_nerf") or {}).get(fv.terrain, {}).get(mtype, 1.0))
+        t_nerf = float((fe.get("terrain_target_nerf") or {}).get(fv.terrain, {}).get(mtype, 1.0))
+        power *= t_nerf
+        if t_nerf != 1.0:
+            stages["bp"].append(t_nerf)
+    # タイプ強化の持ち物 (威力の補正。2026-10-07 ダメージ照合 1000 手で とけないこおり・くろいメガネ の手が幅の外)
+    ti_mult = type_item_mult(attacker.item, mtype)
+    if ti_mult != 1.0:
+        power *= ti_mult
+        stages["bp"].append(ti_mult)
 
     # --- 基本ダメージ ---
     base = (2 * attacker.level // 5 + 2) * power * atk / max(1, dfn)
@@ -411,18 +534,23 @@ def calc_damage(attacker: MonView, defender: MonView, move_id: str,
     # 天候のタイプ別補正 (晴れ/雨。表から)。メガメガニウムの特性 Mega Sol は自分の攻撃を常に晴れ扱いにする
     self_weather = E.misc_value(a_ab, "self_weather", "weather") if a_known else ("sun" if a_ab == "megasol" else None)
     weather = self_weather or fv.weather
+    weather_int = 1.0
     if weather:
         w_mult = float((type_boost.get("weather") or {}).get(weather, {}).get(mtype, 1.0))
         if w_mult != 1.0:
             mult *= w_mult
+            weather_int = w_mult
             # 理由に残す: 晴れ下で「いまひとつのフェアリー技」が「等倍の水技」を上回るのは正しいが、補正を書かないと
             # 相性だけ見た読み手には誤りに見える (2026-09-29 第17回: 晴れ下のアシレーヌ vs ハッサム でムーンフォース推奨)
             from advisor.ja_names import type_ja
             notes.append(f"{_WEATHER_JA.get(weather, weather)}で{type_ja(mtype)}技×{w_mult:g}")
 
     # STAB (てきおうりょくは効果表の offense_mult (stab) で 2 倍になる。表に無ければ従来の 2.0)
+    dm = damage_modifiers()
+    stab_int = 4096
     if stab:
         mult *= 1.5 if (a_known or a_ab != "adaptability") else 2.0
+        stab_int = int(dm.get("stab", 6144)) if (a_known or a_ab != "adaptability") else 8192
         if E.stab_any(a_ab) and mtype not in atypes:
             notes.append(f"特性{a_ab}でタイプ一致")
 
@@ -431,16 +559,21 @@ def calc_damage(attacker: MonView, defender: MonView, move_id: str,
 
     # やけど
     no_burn_drop = E.has_effect(a_ab, "no_burn_attack_drop") if a_known else (a_ab == "guts")
+    burn_int = False
     if attacker.status == "burn" and category == "Physical" and not no_burn_drop:
         mult *= 0.5
+        burn_int = True
         notes.append("やけどで半減")
 
     # 壁
+    screen_mult = int(dm.get("screen", 2048)) / 4096.0
     if category == "Physical" and (fv.reflect or fv.aurora_veil):
         mult *= 0.5
+        stages["final"].append(screen_mult)
         notes.append("リフレクターで半減")
     if category == "Special" and (fv.light_screen or fv.aurora_veil):
         mult *= 0.5
+        stages["final"].append(screen_mult)
         notes.append("ひかりのかべで半減")
 
     # 持ち物
@@ -454,6 +587,15 @@ def calc_damage(attacker: MonView, defender: MonView, move_id: str,
         mult *= 1.2
     if defender.item == "assaultvest" and category == "Special":
         mult *= 1 / 1.5
+    for item_id, spec in ((dm.get("items") or {}).items()):
+        holder = defender if spec.get("holder") == "defender" else attacker
+        if holder.item != item_id:
+            continue
+        if spec.get("category") and spec["category"] != category:
+            continue
+        if spec.get("super_effective") and not type_mult > 1.0:
+            continue
+        stages[spec.get("stage", "final")].append(int(spec["mod"]) / 4096.0)
 
     # 防御側の軽減 (効果表。表に無い特性は従来の分岐)
     def_ctx = dict(off_ctx, type_mult=type_mult)
@@ -461,7 +603,11 @@ def calc_damage(attacker: MonView, defender: MonView, move_id: str,
         d_mult, d_notes = E.defense_multiplier(d_ab, def_ctx)
         mult *= d_mult
         notes.extend(d_notes)
-    else:
+        for st, m, _n in E.defense_modifiers(d_ab, def_ctx):
+            # 防御の実数値に掛ける特性 (ファーコート等) は被ダメ倍率の逆数を防御に掛ける
+            stages[st].append((1.0 / m) if (st == "def" and m) else m)
+    mult_before_legacy = mult
+    if not d_known:
         if d_ab == "thickfat" and mtype in ("Fire", "Ice"):
             mult *= 0.5
         if d_ab in ("multiscale", "shadowshield") and defender.hp_frac >= 0.999:
@@ -484,12 +630,19 @@ def calc_damage(attacker: MonView, defender: MonView, move_id: str,
             mult *= 2.0
         if a_ab == "neuroforce" and type_mult > 1.0:
             mult *= 1.25
+    if mult != mult_before_legacy and mult_before_legacy:
+        stages["final"].append(mult / mult_before_legacy)
 
     # 急所 (確定急所と 1/2 以上の急所率だけ期待値に入れる)
     crit_p = E.crit_chance(a_ab, d_ab, entry, off_ctx)
+    crit_int, crit_float = None, 1.0
     if crit_p >= CRIT_APPLY_MIN_CHANCE:
         cm = E.crit_multiplier(a_ab)
         mult *= 1.0 + crit_p * (cm - 1.0)
+        if crit_p >= 1.0:
+            crit_int = cm
+        else:
+            crit_float = 1.0 + crit_p * (cm - 1.0)
         notes.append("急所" if crit_p >= 1.0 else f"急所{crit_p:.0%}")
 
     # 連続技: min/max/avg は期待回数分、expected は命中 (天候・特性込み) まで掛ける
@@ -501,9 +654,35 @@ def calc_damage(attacker: MonView, defender: MonView, move_id: str,
     if hits_noacc != 1.0:
         notes.append(f"連続技 期待{hits_noacc:g}回")
 
-    dmg_max = base * mult * hits_noacc
-    dmg_min = dmg_max * 0.85
-    avg = (dmg_min + dmg_max) / 2
+    if _integer_rounding_enabled():
+        # Showdown と同じ整数の計算 (2026-10-07 ダメージ照合: 小数の計算は各段階の切り捨てを無視するため、実ダメージが
+        # 乱数幅の下に 1〜3 HP はみ出していた)。乱数 85〜100 の 16 通りの最小・最大・平均
+        atk_i, dfn_i = atk, dfn
+        if crit_int and a_known and d_known:
+            # 急所: 攻撃側の下がったランクと防御側の上がったランクを無視する (Showdown の getDamage)
+            if int((atk_src.boosts or {}).get(atk_key, 0) or 0) < 0 and not d_unaware:
+                atk_i = atk_src.stat(atk_key, ignore_boost=True)
+            if int((defender.boosts or {}).get(def_key, 0) or 0) > 0 and not a_unaware:
+                dfn_i = defender.stat(def_key, ignore_boost=True)
+                for m in weather_def:
+                    dfn_i = int(dfn_i * m)
+        p_i = max(1, poke_round_mod(max(1, int(power_raw)), chain_mod(stages["bp"])))
+        a_i = max(1, poke_round_mod(int(atk_i), chain_mod(stages["atk"])))
+        d_i = max(1, poke_round_mod(int(dfn_i), chain_mod(stages["def"])))
+        base_i = ((2 * attacker.level // 5 + 2) * p_i * a_i // d_i) // 50 + 2
+        rolls = showdown_rolls(base_i, _mod4096(weather_int), crit_int, chain_mod([stab_int / 4096.0] + stages["stab"]),
+                               type_mult, burn_int, chain_mod(stages["final"]),
+                               (dm.get("random_min", 85), dm.get("random_max", 100)))
+        extra = crit_float
+        for m in stages["hits"]:
+            extra *= m
+        dmg_min = rolls[0] * extra * hits_noacc
+        dmg_max = rolls[-1] * extra * hits_noacc
+        avg = sum(rolls) / len(rolls) * extra * hits_noacc
+    else:
+        dmg_max = base * mult * hits_noacc
+        dmg_min = dmg_max * 0.85
+        avg = (dmg_min + dmg_max) / 2
     eff_acc = None if (acc is None or no_miss) else round(min(100.0, float(acc) * acc_mult), 1)
 
     return {

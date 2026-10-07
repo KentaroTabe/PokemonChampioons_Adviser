@@ -220,7 +220,7 @@ class SimTracker:
         s["side"] = side
         s["tailwind"] = "tailwind" in self.side_cond[side]
         s["screens"] = sorted(self.side_cond[side] - {"tailwind"})
-        # 照合の内訳用 (助言エンジンは calc_damage にこの文脈を渡していない。そうりょうのつかさ・おはかまいり の差の説明に使う)
+        # 照合の文脈 (calc_damage の fainted_allies。そうりょうのつかさ・おはかまいり)。助言エンジンも 2026-10-07 から同じ数を渡す
         s["fainted_allies"] = sum(1 for k, x in self.mons[side].items() if k != m["key"] and x.get("hp") == 0)
         return s
 
@@ -593,7 +593,10 @@ def judge_damage(o: dict, tol_hp: float = DMG_COMPARE_TOL_HP, calc=None) -> dict
         row["reason"] = "助言側の図鑑に無い種族 (未確認)"
         return row
     try:
-        res = calc(a, d, o["move"], _field_view(o.get("field"), o["defender"].get("screens")))
+        # 盤面の文脈: 攻撃側の味方のひんしの数 (そうりょうのつかさ・おはかまいり。助言エンジンも 2026-10-07 から渡す)
+        fa = int(o["attacker"].get("fainted_allies") or 0)
+        kw = {"ctx": {"fainted_allies": fa}} if fa else {}
+        res = calc(a, d, o["move"], _field_view(o.get("field"), o["defender"].get("screens")), **kw)
     except Exception as e:      # 助言側の計算が落ちる手は未確認 (理由を残す)
         row["reason"] = f"助言側の計算が例外: {e!r}"
         return row
