@@ -740,6 +740,87 @@ def test_choice_lock():
     print("test_choice_lock OK")
 
 
+def test_first_turn_only_moves():
+    """であいがしら・ねこだまし は場に出た最初の行動でしか選べない (2026-10-07 ダメージ照合: 合法手 122/124 で
+    2 ターン目以降も であいがしら を第一候補にしていた)。場に出てから技を使った (last_move が今の個体の技) ときだけ
+    選べなくし、分からないとき (last_move なし / 今の個体の技でない) は制限しない"""
+    from advisor import effects as E
+    from advisor.engine import has_acted_since_entry
+    from vision.normalize import NameResolver
+    assert E.first_turn_only(E.move_entry("firstimpression")) and E.first_turn_only(E.move_entry("fakeout"))
+    assert not E.first_turn_only(E.move_entry("suckerpunch"))
+    assert has_acted_since_entry("ironhead", ["firstimpression", "ironhead"])
+    assert not has_acted_since_entry(None, ["firstimpression", "ironhead"])
+    assert not has_acted_since_entry("bravebird", ["firstimpression", "ironhead"])   # 前の個体の技 = 分からない
+    resolver = NameResolver()
+    my = {"species_id": "golisopod", "species_ja": "グソクムシャ",
+          "types": ["むし", "みず"], "hp_percent": 100.0,
+          "hp_current": 182, "hp_max": 182, "status": None, "boosts": {},
+          "ability_id": None, "item_id": None,
+          "moves": [
+              {"name_ja": "であいがしら", "move_id": "firstimpression",
+               "pp": 10, "max_pp": 10, "effectiveness": "super"},
+              {"name_ja": "アイアンヘッド", "move_id": "ironhead",
+               "pp": 15, "max_pp": 15, "effectiveness": "neutral"},
+          ], "revealed_moves": []}
+    opp = {"species_id": "meowscarada", "species_ja": "マスカーニャ",
+           "types": ["くさ", "あく"], "hp_percent": 100.0,
+           "hp_current": None, "hp_max": None, "status": None, "boosts": {},
+           "ability_id": None, "item_id": None, "moves": [],
+           "revealed_moves": []}
+    # 場に出た最初のターン (last_move なし): であいがしら を選べる
+    adv0 = evaluate(_mini_state(dict(my), dict(opp)), resolver, rl_blend_weight=0)
+    fi0 = next(a for a in adv0["actions"] if a["id"] == "firstimpression")
+    assert fi0["score"] > -90, fi0
+    # 場に出てから アイアンヘッド を使った後: であいがしら は選べない
+    st = _mini_state(dict(my), dict(opp))
+    st["last_move"] = {"player": "ironhead", "opponent": None}
+    adv = evaluate(st, resolver, rl_blend_weight=0)
+    fi = next(a for a in adv["actions"] if a["id"] == "firstimpression")
+    assert fi["score"] == -99.0 and "最初のターン" in fi["reason"], fi
+    assert adv["best"]["id"] != "firstimpression", adv["best"]
+    # last_move が今の個体の技でない (交代の取り逃し等で分からない) なら制限しない
+    st2 = _mini_state(dict(my), dict(opp))
+    st2["last_move"] = {"player": "bravebird", "opponent": None}
+    fi2 = next(a for a in evaluate(st2, resolver, rl_blend_weight=0)["actions"] if a["id"] == "firstimpression")
+    assert fi2["score"] > -90, fi2
+    print("test_first_turn_only_moves OK")
+
+
+def test_fainted_allies_context():
+    """エンジンは味方のひんしの数を calc_damage に渡す (2026-10-07 ダメージ照合: 渡していなかったため そうりょうのつかさ・
+    おはかまいり が過小)。自分の場の個体を除いた、その側の party の status == fainted を数える"""
+    from advisor.engine import fainted_allies_of
+    from vision.normalize import NameResolver
+    side = {"party": [{"status": "fainted"}, {"status": None}, {"status": "fainted"}, {}]}
+    assert fainted_allies_of(side, 1) == 2 and fainted_allies_of(side, 0) == 1 and fainted_allies_of({}, 0) == 0
+    resolver = NameResolver()
+    king = {"species_id": "kingambit", "species_ja": "ドドゲザン",
+            "types": ["あく", "はがね"], "hp_percent": 100.0,
+            "hp_current": 175, "hp_max": 175, "status": None, "boosts": {},
+            "ability_id": "supremeoverlord", "item_id": None,
+            "moves": [{"name_ja": "ドゲザン", "move_id": "kowtowcleave",
+                       "pp": 10, "max_pp": 10, "effectiveness": "neutral"}],
+            "revealed_moves": []}
+    opp = {"species_id": "garchomp", "species_ja": "ガブリアス",
+           "types": ["ドラゴン", "じめん"], "hp_percent": 100.0,
+           "hp_current": None, "hp_max": None, "status": None, "boosts": {},
+           "ability_id": None, "item_id": None, "moves": [],
+           "revealed_moves": []}
+    down = {"species_id": "corviknight", "species_ja": "アーマーガア", "types": ["ひこう", "はがね"],
+            "hp_percent": 0.0, "status": "fainted", "boosts": {}, "moves": [], "revealed_moves": []}
+
+    def cleave(n_fainted):
+        st = _mini_state(dict(king), dict(opp))
+        st["player"]["party"] = [dict(king)] + [dict(down) for _ in range(n_fainted)]
+        return next(a for a in evaluate(st, resolver, rl_blend_weight=0)["actions"] if a["id"] == "kowtowcleave")
+
+    c0, c2 = cleave(0), cleave(2)
+    assert "supremeoverlord" not in c0["reason"], c0
+    assert "supremeoverlord×1.2" in c2["reason"] and c2["score"] > c0["score"], (c0, c2)
+    print("test_fainted_allies_context OK")
+
+
 def test_registered_moves_fallback():
     """画面から技が未読取でも、my_team登録の技で行動評価する (第2回#A)"""
     from vision.normalize import NameResolver
@@ -859,6 +940,8 @@ if __name__ == "__main__":
     test_noguard_makes_low_accuracy_moves_reliable()
     test_redundant_setup_discount()
     test_choice_lock()
+    test_first_turn_only_moves()
+    test_fainted_allies_context()
     test_registered_moves_fallback()
     test_rl_sees_registered_move_fallback()
     test_uncertain_bench_switch_penalty()

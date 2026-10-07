@@ -97,6 +97,26 @@ def _eff_accuracy(mv: dict, atk_ability, def_ability) -> float:
     return (mv["accuracy"] or 100) / 100.0
 
 
+def fainted_allies_of(side_state: dict, self_index: Optional[int]) -> int:
+    """その側のひんしの数 (自分 self_index を除く。純粋)。calc_damage の文脈 fainted_allies (そうりょうのつかさ・
+    おはかまいり) に渡す。2026-10-07 のダメージ照合で、エンジンが渡していなかったため過小になっていた"""
+    return sum(1 for i, p in enumerate((side_state or {}).get("party") or [])
+               if i != self_index and (p or {}).get("status") == "fainted")
+
+
+def has_acted_since_entry(last_move_player: Optional[str], move_ids) -> bool:
+    """自分の場のポケモンが場に出てから技を使ったか (純粋)。
+
+    state["last_move"]["player"] は自分側が技を使うと入り、交代・ひんしで消える (vision.events)。
+    入っていて、それが今の場のポケモンの技 (move_ids) のどれかなら「使った」とする。技の欄に無い技名
+    (交代の取り逃しで前の個体の技が残っている等) や未記録は「分からない」として False を返す
+    (推測で選べなくしない)。であいがしら・ねこだまし の初手制限に使う (2026-10-07 ダメージ照合の合法手 122/124)
+    """
+    if not last_move_player:
+        return False
+    return last_move_player in {m for m in (move_ids or []) if m}
+
+
 def type_ja2en() -> dict:
     global _TYPE_JA2EN
     if _TYPE_JA2EN is None:
@@ -385,6 +405,9 @@ def evaluate_common(state: dict, resolver=None) -> dict:
     actions = []
     threats = []
     speed_note = ""
+    # ダメージ計算の盤面の文脈: 味方のひんしの数 (そうりょうのつかさ・おはかまいり)
+    my_ctx = {"fainted_allies": fainted_allies_of(my_state, my_active_idx)}
+    opp_ctx = {"fainted_allies": fainted_allies_of(opp_state, opp_active_idx)}
     opp_status_ratio = 0.0   # 相手の技プールに占める変化技の重み比率
     opp_taunted = False      # 相手が挑発中 (重ねる価値なし)
 
@@ -408,7 +431,7 @@ def evaluate_common(state: dict, resolver=None) -> dict:
             mv = dex.move(mid)
             if not mv:
                 continue
-            d = calc_damage(opp_view, my_view, mid, opp_field)
+            d = calc_damage(opp_view, my_view, mid, opp_field, ctx=opp_ctx)
             acc = _eff_accuracy(mv, opp_view.ability, my_view.ability)
             exp = d["avg"] * acc
             if d["avg"] > 0:
@@ -525,6 +548,11 @@ def evaluate_common(state: dict, resolver=None) -> dict:
                         {"name_ja": mv_r[0], "move_id": mv_r[1], "pp": None})
         except Exception:
             pass
+    # であいがしら・ねこだまし (場に出た最初の行動でしか選べない) の制限: 場に出てから技を使ったか
+    acted_since_entry = has_acted_since_entry(
+        (state.get("last_move") or {}).get("player"),
+        [s.get("move_id") for s in my_move_slots])
+    from advisor import effects as _E
     for slot in ([] if switch_only else my_move_slots):
         mid = slot.get("move_id")
         mv = dex.move(mid)
@@ -532,6 +560,11 @@ def evaluate_common(state: dict, resolver=None) -> dict:
         if mv is None:
             continue
         if slot.get("pp") == 0:
+            continue
+        if acted_since_entry and _E.first_turn_only(_E.move_entry(mid)):
+            actions.append({"kind": "move", "id": mid, "name": name,
+                            "score": -99.0,
+                            "reason": "場に出た最初のターンしか選べない"})
             continue
         if mid in disabled_ids:
             actions.append({"kind": "move", "id": mid, "name": name,
@@ -619,14 +652,14 @@ def evaluate_common(state: dict, resolver=None) -> dict:
                 override = HINT_MULT.get(slot.get("effectiveness")) \
                     if slot.get("effectiveness") else 1.0
             if opp_view is not None:
-                d = calc_damage(my_view, opp_view, mid, my_field)
+                d = calc_damage(my_view, opp_view, mid, my_field, ctx=my_ctx)
             else:
                 dummy = MonView(species_id="", types=["Normal"],
                                 base={"hp": 80, "atk": 80, "def": 80,
                                       "spa": 80, "spd": 80, "spe": 80},
                                 ev=dict(OFFENSIVE_EV))
                 d = calc_damage(my_view, dummy, mid, my_field,
-                                override_type_mult=override)
+                                override_type_mult=override, ctx=my_ctx)
             exp = d["avg"] * acc
             move_type_mult[mid] = d["type_mult"]
 
@@ -717,7 +750,7 @@ def evaluate_common(state: dict, resolver=None) -> dict:
 
         incoming = 0.0
         if opp_best_move:
-            d_in = calc_damage(opp_view, cand, opp_best_move, opp_field)
+            d_in = calc_damage(opp_view, cand, opp_best_move, opp_field, ctx=opp_ctx)
             incoming = d_in["avg"]
 
         hazard_dmg = 0.0
@@ -739,7 +772,8 @@ def evaluate_common(state: dict, resolver=None) -> dict:
                        "Steel": "ironhead", "Fairy": "moonblast", "Normal": "doubleedge"}
             g = generic.get(t)
             if g:
-                d_out = calc_damage(cand, opp_view, g, my_field)
+                d_out = calc_damage(cand, opp_view, g, my_field,
+                                    ctx={"fainted_allies": fainted_allies_of(my_state, i)})
                 counter = max(counter, d_out["avg"])
 
         cand_hp_pct = cand.hp_frac * 100.0

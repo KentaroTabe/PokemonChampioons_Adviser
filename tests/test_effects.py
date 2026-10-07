@@ -169,6 +169,73 @@ def test_damage_integration():
     print("test_damage_integration OK")
 
 
+def test_integer_rounding_matches_showdown():
+    """切り捨ての順序の再現 (2026-10-07 ダメージ照合 seed 20261007 の 200 手で、実ダメージが助言側の乱数幅の下に 1〜3 HP
+    はみ出した 10 件のうち 2 件をそのまま固定する)。Showdown は威力・実数値・各補正の後に切り捨てるので、小数の計算の
+    最小 (最大 × 0.85) より小さい値が出る。整数の計算 (DAMAGE_INTEGER_ROUNDING) では実ダメージが 16 通りのどれかに一致する"""
+    from champions_agent import config
+    import advisor.damage as dmg
+    # 純粋な部品: chainModify の規則 (1.5 × 4/3 = 2.0 ちょうど)、modify の五捨五超入、乱数の各値
+    assert dmg.chain_mod([1.5, 1.3333]) == 8192 and dmg.chain_mod([]) == 4096
+    assert dmg.poke_round_mod(33, 6144) == 49 and dmg.poke_round_mod(39, 6144) == 58      # 49.5 → 49 / 58.5 → 58
+    assert dmg.showdown_rolls(39, 4096, None, 6144, 1.0, False, 4096)[0] == 49
+    assert dmg.showdown_rolls(39, 4096, None, 6144, 0.5, False, 4096)[-1] == 29           # 相性 1/2 は切り捨て
+    # カバルドン (B 16 ずぶとい) の じしん → カバルドン (H252 B16 ずぶとい): Showdown の実ダメージ 49 HP (最大 HP 215)
+    hippo = _view("hippowdon", {"hp": 252, "def": 16, "spd": 252}, {"def": 1.1, "spa": 0.9}, ability="sandstream", item="sitrusberry")
+    # バスラオ (A252 S252 おくびょう 寄せ、てきおうりょく) の アクアジェット → アーマーガア (H252 B252 ずぶとい): 実ダメージ 30 HP
+    bascu = _view("basculegion", {"hp": 16, "atk": 252, "spe": 252}, {"spe": 1.1, "spa": 0.9}, ability="adaptability", item="choicescarf")
+    corv = _view("corviknight", {"hp": 252, "def": 252, "spd": 16}, {"def": 1.1, "spa": 0.9}, ability="pressure", item="rockyhelmet")
+    cases = ((hippo, hippo, "earthquake", 49), (bascu, corv, "aquajet", 30))
+    saved = getattr(config, "DAMAGE_INTEGER_ROUNDING", False)
+    try:
+        config.DAMAGE_INTEGER_ROUNDING = False
+        for a, d, mv, actual in cases:
+            r = calc_damage(a, d, mv)
+            assert r["min"] * d.max_hp() / 100.0 > actual + 1, (mv, r)     # 小数の計算では幅の外 (許容 1 HP を超えて小さい)
+        config.DAMAGE_INTEGER_ROUNDING = True
+        for a, d, mv, actual in cases:
+            r = calc_damage(a, d, mv)
+            lo, hi = r["min"] * d.max_hp() / 100.0, r["max"] * d.max_hp() / 100.0
+            assert lo - 0.15 <= actual <= hi + 0.15, (mv, actual, lo, hi, r)
+        r = calc_damage(hippo, hippo, "earthquake")
+        assert (round(r["min"] * 215 / 100), round(r["max"] * 215 / 100)) == (49, 58), r
+    finally:
+        config.DAMAGE_INTEGER_ROUNDING = saved
+    print("test_integer_rounding_matches_showdown OK")
+
+
+def test_type_item_and_freezedry():
+    """補正の漏れ 2 件 (2026-10-07 ダメージ照合 1000 手): タイプ強化の持ち物 (とけないこおり・くろいメガネ 等、威力 4915/4096 倍) と、
+    フリーズドライのみずへの抜群 (Showdown の onEffectiveness)"""
+    garchomp = _view("garchomp", {"hp": 252})
+    vani = _view("vanilluxe", {"spa": 252})
+    plain = calc_damage(vani, garchomp, "icebeam")["avg"]
+    ice = calc_damage(_view("vanilluxe", {"spa": 252}, item="nevermeltice"), garchomp, "icebeam")["avg"]
+    assert abs(ice / plain - 1.2) < 0.02, (plain, ice)
+    # タイプが違う技には効かない
+    assert calc_damage(_view("vanilluxe", {"spa": 252}, item="charcoal"), garchomp, "icebeam")["avg"] == plain
+    prima = _view("primarina", {"hp": 252})                         # みず / フェアリー
+    assert calc_damage(vani, prima, "icebeam")["type_mult"] == 0.5
+    assert calc_damage(vani, prima, "freezedry")["type_mult"] == 2.0
+    assert calc_damage(vani, _view("gyarados", {"hp": 252}), "freezedry")["type_mult"] == 4.0   # みず / ひこう
+    assert calc_damage(vani, garchomp, "freezedry")["type_mult"] == calc_damage(vani, garchomp, "icebeam")["type_mult"] == 4.0
+    print("test_type_item_and_freezedry OK")
+
+
+def test_power_from_champions_table():
+    """威力は効果表 (Showdown の mod champions) を優先する (2026-10-07 ダメージ照合 1000 手: であいがしら の実ダメージ 30 HP が
+    図鑑の威力 90 の幅 24〜29 HP の外 (チャンピオンズは 100))"""
+    assert E.move_entry("firstimpression")["power"] == 100 and get_dex().move("firstimpression")["power"] == 90
+    gol = _view("golisopod", {"atk": 252}, ability="emergencyexit")
+    target = _view("garchomp", {"hp": 252})
+    ratio = calc_damage(gol, target, "firstimpression")["avg"] / calc_damage(gol, target, "xscissor")["avg"]   # 同じむし・物理 (80)
+    assert abs(ratio - 100 / 80) < 0.03, ratio
+    print("test_power_from_champions_table OK")
+
+
 if __name__ == "__main__":
     test_pure_evaluators()
     test_damage_integration()
+    test_integer_rounding_matches_showdown()
+    test_type_item_and_freezedry()
+    test_power_from_champions_table()
