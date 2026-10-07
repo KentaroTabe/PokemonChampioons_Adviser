@@ -308,6 +308,13 @@ feat/stage0-verify (5bb65354、マージ fbc35f0b) も受け取り済み: ダメ
 判断 10 の集計: 似た組 12 組はいずれも共通の種 4 体で、その種の技 16/16・特性 4/4 が完全に一致 (持ち物は 2〜4)。合成プールが種ごとに代表型を使うためと推測 (未確認)。評価上の重みは 1 構築あたり 1/層の構築数 (search 0.010 / selection 0.017 / holdout 0.025)。fold をまたぐ別メガ軸の似た組は 3。固定は変えない。
 訂正: §13-9 の「第17回のログで全助言が advice_stop になる」は scene_eval の extract の経路では再現しなかった (第17回は advice 行に advice_id と state が無い形式で候補 0 件)。どの経路の観察だったかは未確認。選出方策の比較は助言の採点を通らないので並行可、
 (c) 実機の短い試験運転 (表示・連続保存・終了処理・影の計算の隔離)。それまで影の計算は既定 OFF。
+**(c) の結果 (2026-10-07 18:16〜18:31、新版 33ff1d2a、3 戦 3 勝)**: 確認できたのは**サーバー版** (version 行の git_commit = 33ff1d2a、段 0 の行 frames / selection_record / decision / roster_change / guess_confirm / opp_picks / frame_burst が全戦にある) と**終了処理の自動起動抑止** (測定 run を起動せず、pgrep でも無し)。
+**表示は未達**: display 43 行すべて hidden=true (各通知時点で document.hidden が true だったことまでが確定。「終始非表示だった」は未確認)、受信 1.0〜1.15 fps (Chrome の背面タイマー制限と整合するが原因は一意に確定しない)。frames 行は hidden=0 だが、server の `_page_hidden` が False で始まり通知が無ければ 0 になる実装なので「前面を確認した」ことを意味しない。
+`logs/frontend_nohup.log` に index.html の GET が無く config/ports.local.js だけ取得 → 配信 (`python3 -m http.server`、Cache-Control なし) のキャッシュで段 0 より前のページ (page_visibility 未送信) が動いた**疑い** (確定には実行中の HTML 自身の版の記録が要る)。
+**連続保存は一部確認**: 1 戦目で 30 秒 30 枚 (debug_frames/burst/burst_1791364787)。保存経路の動作確認にはなるが 10 fps での保存・負荷確認にはなっていない。3 戦目 (every=2 の対象) は `command` の場面が 1 度も認識されず (開始条件が command のみ) 保存が始まらなかった。**影の計算は未実施** (既定 OFF のまま)。
+対応 (レビュー賛成、10/7 18 時台に委託、feat/stage0-acceptance): 配信に Cache-Control: no-store + ページが接続時に自分の版と対応機能を送り server が配信ファイルの版と照合して client 行に記録 (http.server の文字列判定 5 箇所も揃える) / 可視状態は接続 ID ごとに保持し未通知は unknown、frames 行に visible・unknown を追加 (hidden は表示通知で上書きしない)、通知ごとに visibility 行、表示通知の hidden が続いたら警告 / 連続保存の開始場面に move_select を追加 + 一定時間で開始する経路 + 発火しなかった理由の記録。
+一括監査 (opus、134 秒) の HP 誤読 3 件 (ボーマンダ 10% と記録・実際 100% ほか) は、画像と状態ログの時刻対応を確認してから KNOWN_ISSUES と固定失敗集に入れる (調査中)。
+次回の試験運転の前: 助言ページを強制再読み込み (Cmd+Shift+R)、ブラウザの窓をゲーム画面に完全には覆われない位置に置く (macOS の Chrome は完全に覆われた窓を hidden 扱い)。確認は「接続ラベルが見える」ではなく、可視状態の通知 (visibility 行) と実際の受信 fps で行う。
 test_role_sets は統合コミット ac4edf9c で pokemon-showdown/ を揃えて再実行し OK (worktree の失敗は依存の欠落が原因と確認)。
 push と下書き PR は 2026-10-07 16 時台に実施 (レビューの賛成をユーザーが転送、push は権限確認を経由): origin/feature/team-build 9489fbe1、下書き PR https://github.com/KentaroTabe/PokemonChampioons_Adviser/pull/20。main へのマージの判断は PR の作成と分ける。判断 7・9 に伴う既存テストの期待値の変更 2 箇所は承認済み (回帰テストで「古い助言があるだけでは成功にしない / 有効性と期限内表示を確認できた再利用は利用可能 / 表示記録に未対応のログは判定不能」を区別する)。エンジン修正の受入では、同じ局面の修正前後の比較・原因別の再現テスト・照合対象数と判定不能数の併記を条件にする。実機試験の完了までは「実装完了・受入は一部未完了」の記録を維持する。実機 (サーバー + ブラウザ) での page_visibility / shutdown / 連続保存 / 影の計算 ON は未確認
 → 次の接続テストの前に短い試験運転で確かめる。
