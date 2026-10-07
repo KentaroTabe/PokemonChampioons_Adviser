@@ -1004,6 +1004,20 @@ class BattleLogger:
             return
         self._write(rec)
 
+    def on_advice_variant(self, record: dict) -> None:
+        """影の計算 (advisor.shadow) の結果を advice_variant 行として書く (2026-10-07、計画 §2)。
+        record は advisor.shadow が作る行 (type / advice_id を含む)。行は**助言を書いた対戦のファイル**に書く (on_display と同じ帰属)。
+        助言の行が見つからない (ファイルの回転で古い助言の対応が消えた等) ときは書かない。
+        サーバーはイベントループのスレッドからだけ呼ぶ (ワーカーのスレッドから直接書かない: 他の行の書き込みと競合させない)"""
+        aid = str(record.get("advice_id") or "")
+        target = self._advice_files.get(aid)
+        if not aid or target is None:
+            return
+        rec = dict(record, type="advice_variant")
+        rec["t"] = round(time.time(), 2)
+        with target.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
     def on_display(self, advice_id: str, t_shown: Optional[float], kind: Optional[str] = None, hidden: Optional[bool] = None) -> None:
         """ブラウザが助言を表示した時刻 (ブラウザの時計、秒)。生成時刻 (advice の t_gen) と分けて残す (受入条件 2)。
         表示の行は**助言を書いた対戦のファイル**に書く (2026-10-06: タブが隠れていると表示の確認が止まり、見えた時にまとめて届くので、

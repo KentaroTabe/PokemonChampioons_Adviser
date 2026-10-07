@@ -90,6 +90,7 @@ TESTS=(
   test_articles_fetch
   test_env_match
   test_advice_trace
+  test_advice_variant
   test_team_build_experiments
   test_team_build_archetypes
   test_team_build_banned
