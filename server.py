@@ -30,7 +30,8 @@ from vision.scenes import SCENE_SELECTION, SCENE_STANDBY
 from vision.end_notice import battle_end_notice, outcome_revision_notice
 from vision.stale_notice import advice_target, stale_advice_notice
 from vision.state import apply_manual_species
-from champions_agent.config import MANUAL_SPECIES_RESOLVE_CUTOFF
+from vision.frame_burst import BurstPlanner
+from champions_agent.config import FRAME_BURST_DIR, MANUAL_SPECIES_RESOLVE_CUTOFF
 
 
 def should_advise_selection(state: dict) -> bool:
@@ -94,6 +95,10 @@ except Exception as e:
 frame_counter = 0
 processed_counter = 0
 dropped_counter = 0
+# ページが隠れている間に受信したフレームの数 (フロントの page_visibility で切り替え。2026-10-07 段 0: 対戦ログの frames 行の
+# hidden 比率。隠れたページでは送信が 1〜2 fps に落ちる)
+hidden_counter = 0
+_page_hidden = False
 _busy = False
 _pending_frame = None      # 処理中に届いた最新フレーム (sid, data)
 _last_state_json = ""
@@ -122,6 +127,19 @@ def _pct(values, q: float) -> float:
 
 _last_frame_ts = 0.0
 
+
+def _frame_counts() -> dict:
+    """フレームの累積件数 (対戦ログの frames 行が対戦ごとの差を取る)"""
+    return {"received": frame_counter, "processed": processed_counter, "dropped": dropped_counter,
+            "hidden": hidden_counter, "last_recv_ts": _last_frame_ts}
+
+
+battle_log.frame_source = _frame_counts
+
+# 連続フレームの保存 (DEBUG_DUMP_FRAMES=1 のときだけ。vision/frame_burst、2026-10-07 段 0)
+_burst = BurstPlanner()
+BURST_DIR = Path(FRAME_BURST_DIR)
+
 # デバッグフレームの保存は1枚あたり約46ms (1920x1080 PNG) かかり、
 # フレーム処理と同じ経路に置くとその間に届くフレームが捨てられる。
 # 専用スレッド1本に投げて処理を止めない (順序は保たれ、取りこぼし時も
@@ -138,6 +156,18 @@ def _dump_frame_async(img, prefix: str) -> None:
             print(f"[server] フレーム保存に失敗: {e}")
 
     _dump_pool.submit(_write, img.copy(), f"{prefix}_{int(time.time())}.png")
+
+
+def _dump_raw_async(data: str, burst_id: str, ts: float) -> None:
+    """連続保存: 受信した JPEG (data URL) をデコードせずそのまま書く (再圧縮なし。保存のスレッドで base64 を戻す)"""
+    def _write(d, path):
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(base64.b64decode(d.split(',', 1)[1]))
+        except Exception as e:
+            print(f"[server] 連続保存に失敗: {e}")
+
+    _dump_pool.submit(_write, data, BURST_DIR / burst_id / f"{int(ts * 1000)}.jpg")
 
 
 def _advice_key(state: dict) -> str:
@@ -180,6 +210,13 @@ async def advice_shown(sid, data):
         print(f"[server] 表示の記録に失敗: {e}")
 
 
+@sio.on('page_visibility')
+async def page_visibility(sid, data):
+    """フロントのページが隠れたか (document.hidden)。受信フレームを隠れたページからのものとして数える (表示は変えない)"""
+    global _page_hidden
+    _page_hidden = bool((data or {}).get("hidden"))
+
+
 @sio.on('send_frame')
 async def handle_frame(sid, data):
     """受信フレームの受け口。処理中なら最新1枚だけ保持し、続けて処理する。
@@ -191,9 +228,16 @@ async def handle_frame(sid, data):
     確実に拾う (メッセージの見落とし削減)。
     """
     global frame_counter, dropped_counter, _busy, _pending_frame
-    global _last_frame_ts
+    global _last_frame_ts, hidden_counter
     frame_counter += 1
     _last_frame_ts = time.time()
+    if _page_hidden:
+        hidden_counter += 1
+    # 連続保存中は破棄されるフレームも含めて受信したものを全部保存する
+    if DUMP_FRAMES:
+        _bid = _burst.active(_last_frame_ts)
+        if _bid and isinstance(data, str):
+            _dump_raw_async(data, _bid, _last_frame_ts)
 
     if _busy:
         if _pending_frame is not None:
@@ -252,6 +296,12 @@ async def _handle_one_frame(sid, data):
         processed_counter += 1
         battle_log.on_frame(state, fired)
         spread_tracker.on_frame(state, fired)   # 相手の型推定 (先後/ダメージ観測)
+        if DUMP_FRAMES:
+            _b = _burst.on_processed(state.get("scene"), state.get("battle_seq"), time.time())
+            if _b:
+                print(f"[server] 連続保存を開始: {BURST_DIR / _b['id']} ({_burst.seconds:.0f} 秒、{_burst.started}/{_burst.count} 回目)")
+                battle_log.on_frame_burst({"dir": str(BURST_DIR / _b["id"]), "t_start": _b["t_start"],
+                                           "seconds": _burst.seconds, "n": _burst.started})
         # 勝敗を推定・不明で記録した後にレートが読めて推定が変わったら、助言欄に出す (2026-10-06 第18回)
         _rev = outcome_revision_notice(battle_log.pop_revision())
         if _rev:
@@ -355,8 +405,11 @@ async def _handle_one_frame(sid, data):
                 _last_advice_key = sel_key
                 _last_advice_time = now
                 advice = await loop.run_in_executor(None, advisor.advise_selection, state)
-                battle_log.on_advice(advice, "selection", state)
+                aid = battle_log.on_advice(advice, "selection", state)
                 await sio.emit('advice_update', advice, room=sid)
+                # 記録だけの欄 (方式ごとの候補・相手の選出の予測の全分布、2026-10-07 段 0): 助言を送った後に別に計算して
+                # selection_record 行に書く (表示を遅らせない。フレーム処理も待たせない)
+                asyncio.ensure_future(_write_selection_record(aid, advice, state))
                 print("--- 選出アドバイス ---")
                 print(advice["text"])
 
@@ -404,6 +457,42 @@ async def _handle_one_frame(sid, data):
 
 
 _end_notice_seq = None   # 対戦終了の通知 (vision.end_notice.battle_end_notice) を出した battle_seq (1 対戦 1 回)
+
+
+async def _write_selection_record(advice_id: str, advice: dict, state: dict) -> None:
+    """選出の助言を送った後に、記録用の欄を executor で計算して selection_record 行に書く (失敗しても助言は止めない)"""
+    try:
+        rec = await asyncio.get_event_loop().run_in_executor(None, _selection_record_extra, advice, state)
+        battle_log.on_selection_record(advice_id, rec)
+    except Exception as e:
+        print(f"[server] 選出の記録に失敗: {e}")
+
+
+def _selection_record_extra(advice: dict, state: dict) -> dict:
+    """選出の selection_record 行の欄 {"candidates", "opp_pick_pred"} (advisor.selection_record)。失敗しても助言は止めない"""
+    out = {}
+    my_party = state.get("player", {}).get("party", [])
+    opp_party = state.get("opponent", {}).get("party", [])
+    try:
+        from advisor.selection_record import selection_candidates
+        out["candidates"] = selection_candidates(advice, my_party, opp_party)
+    except Exception as e:
+        out["candidates"] = {"error": repr(e)[:200]}
+    try:
+        from advisor.selection_record import opp_pick_pred_live
+        out["opp_pick_pred"] = opp_pick_pred_live(opp_party)
+    except Exception as e:
+        out["opp_pick_pred"] = {"error": repr(e)[:200]}
+    return out
+
+
+@app.on_event("shutdown")
+async def _on_shutdown():
+    """サーバー停止時に、開いている対戦の終わりの行 (frames / opp_picks / guess_confirm) を書く (2026-10-07 段 0)"""
+    try:
+        battle_log.close()
+    except Exception as e:
+        print(f"[server] 停止時の記録に失敗: {e}")
 
 
 def _attach_candidates(state: dict) -> None:
@@ -1061,11 +1150,14 @@ async def set_state(sid, data):
                 side.spikes = max(0, min(3, int(value)))
             elif field_name == "toxic_spikes":
                 side.toxic_spikes = max(0, min(2, int(value)))
+        # side / index (2026-10-07 段 0): 訂正が後の推定で上書きされたかを対戦ログが追う (manual_fix_overwritten)
         pipeline.state.log_event(
             "manual", f"手動修正 {label}: {before} -> {value}",
             event_id="manual_fix",
             detail={"target": target, "field": field_name,
-                    "label": label, "before": before, "after": value})
+                    "label": label, "before": before, "after": value,
+                    "side": data.get("side") if target in ("mon", "hazards") else None,
+                    "index": int(data["index"]) if target == "mon" else None})
         print(f"[server] 手動修正: {label} {before} -> {value}")
         st = pipeline.state.to_dict()
         _attach_candidates(st)

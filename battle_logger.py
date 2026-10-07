@@ -20,22 +20,306 @@
 
 プレイヤーが実際に選んだ行動は events の move_player_* / switch_player として
 記録される (アドバイスとの突き合わせで採用率・成績を後段で分析できる)。
+
+2026-10-07 段 0 (docs/USEFULNESS_VERIFICATION_PLAN_1007.md §2。欄・行を足すだけで、既存の行の意味は変えない。表示する助言も変えない):
+  advice 行に "hp_stale": {"player": 秒|null, "opponent": 秒|null} (助言時点で場の HP が最後に実際に読めてからの秒数)。
+  {"type": "selection_record", "advice_id", "candidates", "opp_pick_pred"} 選出の助言ごとの記録用の欄 (advisor.selection_record)。
+    server が助言を送った後に計算して書く (表示を遅らせない)。読み手は advice_id で選出の advice 行に結ぶ
+  {"type": "frames", "received", "processed", "dropped", "hidden", "hidden_ratio", "span_sec", "recv_fps", "proc_fps", "final"}
+    この対戦のファイルを開いてからのフレームの件数。fps は対戦の時間の幅 (ファイルを開いた時刻 → 最後に受信した時刻) で割る
+  {"type": "roster_change", "slot", "from", "from_ja", "from_guess", "from_prob", "from_score", "to", "to_ja", "to_guess", "basis"}
+    相手の枠の種の置き換え・消失 (basis: manual / field / cleared / selection_guess / name_read)
+  {"type": "guess_confirm", "slot", "species", "ja", "prob", "score", "t_guess", "auto_accept", "sure", "revealed", "verdict"}
+    選出画面の推定 (species_guess) ごとに、推定した時点の確率 (タイプからの候補の事前確率) と、後に場で判明した種
+    (verdict: match / mismatch / unrevealed)。終了時に書く (読み手は (slot, species, t_guess) の最後の行を採る)
+  {"type": "opp_picks", "slots": [{"slot", "species", "ja", "guess", "appeared", "pick_status"}], "n_appeared", "complete", ...}
+    相手の選出ラベル 3 値 (picked_confirmed / unpicked_confirmed / unknown) と場に出たか。終了時に書く (読み手は最後の行を採る)
+  manual_fix 行に "fix_id"、{"type": "manual_fix_overwritten", "fix_id", "label", ..., "manual_value", "new_value", "overwritten_at"}
+    手入力の訂正が後の推定で別の値に変わった時刻 (最初の 1 回)
+  {"type": "decision", "advice_id", "turn", "t_gen", "t_shown", "t_decided", "scene_from", "scene_to", "action", "match", "best"}
+    助言のあと、決定画面 (command / move_select) から解決側の場面 (battle_hud / field) へ移った時刻と、その後の行動が第一候補と
+    一致したか (行動が読めなければ null)
+  {"type": "frame_burst", "dir", "t_start", "seconds"} 連続フレームの保存を始めた (server、DEBUG_DUMP_FRAMES=1 のときだけ)
 """
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
-from champions_agent.config import (BSS_PICK_COUNT, OUTCOME_LAST_ZERO_MAX_SEC, OUTCOME_ZERO_HP_PCT,
-                                    RATE_INFER_MAX_DELTA, RATE_INFER_MIN_DELTA)
+from champions_agent.config import (BSS_PICK_COUNT, DECISION_ACTION_WAIT_SEC, DECISION_CONFIRM_FRAMES,
+                                    OUTCOME_LAST_ZERO_MAX_SEC, OUTCOME_ZERO_HP_PCT, PARTY_SIZE, RATE_INFER_MAX_DELTA,
+                                    RATE_INFER_MIN_DELTA, SELECTION_GUESS_SURE_PROB, SELECTION_PRIOR_AUTO_ACCEPT)
 from tools.battle_outcome import rate_inference, text_outcome_basis, text_outcome_of
+from vision.scenes import (SCENE_BATTLE_HUD, SCENE_COMMAND, SCENE_FIELD, SCENE_FIELD_CHECK, SCENE_MOVE_SELECT,
+                           SCENE_STANDBY, SCENE_WATCH)
 
 LOG_DIR = Path(__file__).resolve().parent / "logs" / "battles"
 # 対戦終了を確定させるイベント (どれか 1 つで勝敗レコードを書く): ランク画面の文言 / リザルト画面のシーン分類 /
 # 3体目のひんしの確定 (2026-09-16: 勝負文言・ランク文言の取り逃しでも終了を取れるように)
 BATTLE_END_EVENTS = ("battle_end_rank", "battle_end_result", "battle_end_faint_confirmed")
+
+# decision 行の場面の区分 (tools/decision_audit の区分と同じ): 決定画面 / 決定中の情報確認 (決定は開いたまま) / 解決側の場面
+DECISION_SCENES = (SCENE_COMMAND, SCENE_MOVE_SELECT)
+DECISION_INFO_SCENES = (SCENE_WATCH, SCENE_FIELD_CHECK, SCENE_STANDBY)
+DECISION_RESOLVE_SCENES = (SCENE_BATTLE_HUD, SCENE_FIELD)
+# 相手が場に出たとみなす場面 (tools/analyze_battles・party_improvements の _BATTLE_SCENES と同じ)
+OPP_APPEAR_SCENES = (SCENE_COMMAND, SCENE_MOVE_SELECT, SCENE_WATCH, SCENE_FIELD_CHECK, SCENE_BATTLE_HUD, SCENE_FIELD)
+# 選出ラベル 3 値
+PICK_CONFIRMED = "picked_confirmed"
+PICK_UNPICKED = "unpicked_confirmed"
+PICK_UNKNOWN = "unknown"
+
+
+# ------------------------------------------------------------------ 段 0 の行の純粋関数 (2026-10-07)
+def _base_sid(sid: Optional[str]) -> Optional[str]:
+    """メガ形態の id を基本種に丸める (tools.real_opponents.base_species と同じ規則)"""
+    if not sid:
+        return None
+    for suf in ("megax", "megay", "mega"):
+        if sid.endswith(suf) and len(sid) > len(suf):
+            return sid[: -len(suf)]
+    return sid
+
+
+def hp_stale_of(state: Optional[dict], now: float) -> dict:
+    """助言時点で、自分 / 相手の場の個体の HP が最後に実際に読めてから (hp_read_ts) の秒数。読めていなければ None (純粋)"""
+    out = {}
+    for side in ("player", "opponent"):
+        sd = (state or {}).get(side) or {}
+        idx, party = sd.get("active_index"), sd.get("party") or []
+        ts = party[idx].get("hp_read_ts") if isinstance(idx, int) and 0 <= idx < len(party) else None
+        out[side] = round(max(0.0, float(now) - float(ts)), 2) if ts else None
+    return out
+
+
+FRAME_COUNT_KEYS = ("received", "processed", "dropped", "hidden")
+
+
+def frames_row(start: dict, end: dict, t_start: Optional[float]) -> dict:
+    """フレームの累積件数 (server の受信 / 処理 / 破棄 / 隠れたページから受信) の差から frames 行の中身を作る (純粋)。
+    受信 fps は対戦の時間の幅 (t_start → 最後に受信した時刻 end["last_recv_ts"]) で割る (送信 10 fps の仮定は使わない)"""
+    d = {k: max(0, int((end or {}).get(k) or 0) - int((start or {}).get(k) or 0)) for k in FRAME_COUNT_KEYS}
+    t_end = (end or {}).get("last_recv_ts")
+    span = float(t_end) - float(t_start) if (t_end and t_start and float(t_end) > float(t_start)) else None
+    d["hidden_ratio"] = round(d["hidden"] / d["received"], 3) if d["received"] else None
+    d["span_sec"] = round(span, 2) if span else None
+    d["recv_fps"] = round(d["received"] / span, 2) if span else None
+    d["proc_fps"] = round(d["processed"] / span, 2) if span else None
+    return d
+
+
+def opp_slots_of(state: Optional[dict]) -> dict:
+    """相手の枠 {slot: {"species", "ja", "guess", "score", "types"}} (PARTY_SIZE 枠まで、純粋)"""
+    party = (((state or {}).get("opponent") or {}).get("party") or [])[:PARTY_SIZE]
+    return {i: {"species": p.get("species_id"), "ja": p.get("species_ja"), "guess": bool(p.get("species_guess")),
+                "score": p.get("guess_score"), "types": list(p.get("types") or [])}
+            for i, p in enumerate(party)}
+
+
+def _slot_identity(s: Optional[dict]):
+    return (s or {}).get("species") or (s or {}).get("ja")
+
+
+def opp_appeared_now(state: Optional[dict], scene: Optional[str]) -> list:
+    """このフレームで場に出ていた (= 選出された) と分かる相手 [(slot, species_id)] (純粋)。
+    従来の読み手 (analyze_battles) と同じ規則: 対戦の場面で、場の枠か HP が読めている枠。選出画面の推定 (guess) は数えない"""
+    if scene not in OPP_APPEAR_SCENES:
+        return []
+    opp = (state or {}).get("opponent") or {}
+    act = opp.get("active_index")
+    out = []
+    for i, p in enumerate((opp.get("party") or [])[:PARTY_SIZE]):
+        if not p.get("species_id") or p.get("species_guess"):
+            continue
+        if i == act or p.get("hp_percent") is not None:
+            out.append((i, p["species_id"]))
+    return out
+
+
+def label_opp_picks(slots: list, appeared, pick_count: int = BSS_PICK_COUNT) -> dict:
+    """相手の選出ラベル 3 値 (純粋)。slots = 最終の枠 [{"slot", "species", "ja", "guess"}]、appeared = 場に出た種 id の集合。
+    場に出た = picked_confirmed。場に出た種がちょうど pick_count 体なら、残りは unpicked_confirmed。それ未満 (または誤読で
+    pick_count を超えた) なら残りは unknown。場に出たのに枠に無い種 (枠の置き換え) は slot=None の行で足す。
+    (従来の「6 体 − 場に出た = 選出外」は、選出されたが場に出なかった個体を選出外にしてしまう)"""
+    app = {_base_sid(s) for s in (appeared or []) if s}
+    rows, seen = [], set()
+    for s in slots or []:
+        b = _base_sid(s.get("species"))
+        if b:
+            seen.add(b)
+        rows.append({"slot": s.get("slot"), "species": s.get("species"), "ja": s.get("ja"), "guess": bool(s.get("guess")),
+                     "appeared": bool(b and b in app)})
+    for b in sorted(app - seen):
+        rows.append({"slot": None, "species": b, "ja": None, "guess": False, "appeared": True})
+    n_app = sum(1 for r in rows if r["appeared"])
+    complete = n_app == pick_count
+    for r in rows:
+        r["pick_status"] = PICK_CONFIRMED if r["appeared"] else (PICK_UNPICKED if complete else PICK_UNKNOWN)
+    return {"slots": rows, "n_appeared": n_app, "complete": complete, "inconsistent": n_app > pick_count,
+            "pick_count": pick_count}
+
+
+def roster_changes(prev: dict, cur: dict) -> list:
+    """前のフレームから種が変わった (置き換わった / 消えた) 相手の枠 [(slot, 前, 後)] (純粋)。前に種が無かった枠は数えない"""
+    out = []
+    for i, before in sorted((prev or {}).items()):
+        after = (cur or {}).get(i)
+        if _slot_identity(before) and _slot_identity(after) != _slot_identity(before):
+            out.append((i, before, after))
+    return out
+
+
+def roster_change_basis(after: Optional[dict], slot: int, active_index, scene: Optional[str], manual: bool) -> str:
+    """枠の置き換えの根拠 (純粋): manual (手入力) / cleared (消えた) / field (場に出た) / selection_guess (別の推定) / name_read"""
+    if manual:
+        return "manual"
+    if not _slot_identity(after):
+        return "cleared"
+    if after.get("guess"):
+        return "selection_guess"
+    if slot == active_index and scene in OPP_APPEAR_SCENES:
+        return "field"
+    return "name_read"
+
+
+def guess_verdict(guessed: Optional[str], revealed_in_slot: Optional[str], appeared) -> tuple:
+    """推定した種と、後に場で判明した種の突き合わせ (純粋) → (判明した種, "match" / "mismatch" / "unrevealed")。
+    推定した種が (どの枠でも) 場に出たら一致。出ておらず、その枠に別の種が場で判明したら不一致。どちらでもなければ未判明"""
+    g = _base_sid(guessed)
+    app = {_base_sid(s) for s in (appeared or []) if s}
+    if g and g in app:
+        return guessed, "match"
+    if revealed_in_slot and _base_sid(revealed_in_slot) != g:
+        return revealed_in_slot, "mismatch"
+    return None, "unrevealed"
+
+
+def player_action_of(fired: list) -> Optional[dict]:
+    """発火 id からプレイヤーの行動 {"kind": move|switch, "id"} (純粋。tools/decision_audit._player_action と同じ規則)"""
+    for f in fired or []:
+        if f.startswith("move_player_"):
+            return {"kind": "move", "id": f[len("move_player_"):]}
+        if f == "switch_player":
+            return {"kind": "switch", "id": None}
+    return None
+
+
+def decision_match(best: Optional[dict], action: Optional[dict]) -> Optional[bool]:
+    """決定が第一候補と一致したか (純粋)。行動・第一候補が分からなければ None。交代先が読めない交代は、第一候補が交代なら None"""
+    if not best or not action:
+        return None
+    if action.get("kind") == "move":
+        return best.get("kind") == "move" and best.get("id") == action.get("id")
+    if action.get("kind") == "switch":
+        if best.get("kind") != "switch":
+            return False
+        if action.get("id") is None:
+            return None
+        return best.get("id") == action.get("id")
+    return None
+
+
+_MANUAL_SPECIES_RE = re.compile(r"相手の(.+?)を手動確定")
+_MANUAL_MON_FIELDS = {"hp_percent": "hp_percent", "status": "status", "item": "item_ja", "ability": "ability_ja",
+                      "is_mega": "is_mega", "types": "types", "hp_current": "hp_current"}
+
+
+def _find_slot(state: Optional[dict], side: str, ja: Optional[str]) -> Optional[int]:
+    party = (((state or {}).get(side) or {}).get("party") or [])
+    return next((i for i, p in enumerate(party) if ja and p.get("species_ja") == ja), None)
+
+
+def manual_fix_key(event: dict, state: Optional[dict]) -> Optional[dict]:
+    """手入力の訂正 (state の events の source=manual) が直した対象 (純粋)。追えなければ None。
+    {"target": mon|species|field|hazards, "side", "index", "field"}"""
+    det = event.get("detail") or {}
+    if event.get("event") == "species_manual":
+        m = _MANUAL_SPECIES_RE.search(event.get("text") or "")
+        idx = _find_slot(state, "opponent", m.group(1)) if m else None
+        return {"target": "species", "side": "opponent", "index": idx, "field": "species"} if idx is not None else None
+    tgt, fld = det.get("target"), str(det.get("field") or "")
+    label = str(det.get("label") or "")
+    if tgt == "mon":
+        parts = label.split(":")
+        side = det.get("side") or (parts[0] if parts else None)
+        idx = det.get("index")
+        if idx is None and len(parts) >= 2:
+            idx = _find_slot(state, side, parts[1])
+        if side not in ("player", "opponent") or idx is None:
+            return None
+        return {"target": "mon", "side": side, "index": int(idx), "field": fld}
+    if tgt == "field" and fld:
+        return {"target": "field", "side": None, "index": None, "field": fld}
+    if tgt == "hazards" and fld:
+        side = det.get("side") or (label.split(":")[0] if label else None)
+        return {"target": "hazards", "side": side, "index": None, "field": fld}
+    return None
+
+
+def manual_current_value(state: Optional[dict], key: dict):
+    """訂正の対象のいまの値 (純粋)。読めなければ None"""
+    st = state or {}
+    tgt = key.get("target")
+    if tgt in ("mon", "species"):
+        party = ((st.get(key.get("side")) or {}).get("party") or [])
+        idx = key.get("index")
+        if not isinstance(idx, int) or not (0 <= idx < len(party)):
+            return None
+        p = party[idx]
+        if tgt == "species":
+            return p.get("species_id") or p.get("species_ja")
+        fld = key.get("field") or ""
+        if fld.startswith("boost:"):
+            return (p.get("boosts") or {}).get(fld.split(":", 1)[1])
+        return p.get(_MANUAL_MON_FIELDS.get(fld, fld))
+    if tgt == "field":
+        return (st.get("field") or {}).get(key.get("field"))
+    if tgt == "hazards":
+        return ((st.get(key.get("side")) or {}).get("hazards") or {}).get(key.get("field"))
+    return None
+
+
+def manual_value_from_detail(key: dict, detail: Optional[dict]) -> tuple:
+    """訂正で入れた値を detail["after"] から server (set_state) と同じ規則で求める (純粋) → (求まったか, 値)。
+    入れた直後のフレームで推定が既に上書きしていても、入れた値と比べられるように。名前の解決が要る持ち物・特性・タイプ・種は求めない"""
+    det = detail or {}
+    if "after" not in det:
+        return False, None
+    v, fld = det.get("after"), str(key.get("field") or "")
+    try:
+        if key.get("target") == "mon":
+            if fld == "hp_percent":
+                return True, float(v)
+            if fld == "status":
+                return True, (v or None)
+            if fld.startswith("boost:"):
+                return True, max(-6, min(6, int(v)))
+            if fld == "is_mega":
+                return True, bool(v)
+        elif key.get("target") == "field":
+            if fld in ("weather", "terrain"):
+                return True, (v or None)
+            if fld == "trick_room":
+                return True, bool(v)
+        elif key.get("target") == "hazards":
+            if fld == "stealth_rock":
+                return True, bool(v)
+            if fld == "spikes":
+                return True, max(0, min(3, int(v)))
+            if fld == "toxic_spikes":
+                return True, max(0, min(2, int(v)))
+    except (TypeError, ValueError):
+        return False, None
+    return False, None
+
+
+def _same_value(a, b) -> bool:
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)) and not isinstance(a, bool) and not isinstance(b, bool):
+        return abs(float(a) - float(b)) < 1e-6
+    return a == b
 
 
 def _compact_state(state: dict) -> dict:
@@ -128,9 +412,30 @@ def battle_source_labels() -> dict:
     return labels
 
 
+def default_guess_prob(types: list, species_id: Optional[str]) -> Optional[float]:
+    """選出画面の推定の確率: タイプからの候補 (advisor.infer) の中でその種の事前確率。分からなければ None (副作用: 推論器の読み込み)"""
+    if not types or not species_id:
+        return None
+    try:
+        from advisor.infer import get_inference
+        base = _base_sid(species_id)
+        cands = get_inference().candidates(types)
+        return next((round(float(p), 4) for sid, p, _ja in cands if sid == base), 0.0)
+    except Exception:
+        return None
+
+
 class BattleLogger:
-    def __init__(self, log_dir: Path = LOG_DIR):
+    def __init__(self, log_dir: Path = LOG_DIR, guess_prob_fn: Optional[Callable] = default_guess_prob,
+                 frame_source: Optional[Callable] = None):
         self.log_dir = log_dir
+        # 段 0 (2026-10-07): 推定の確率の求め方 (テストで差し替える) と、server のフレームの累積件数
+        # ({"received", "processed", "dropped", "hidden", "last_recv_ts"} を返す呼び出し。無ければ frames 行を書かない)
+        self.guess_prob_fn = guess_prob_fn
+        self.frame_source = frame_source
+        self._frames_start: Optional[dict] = None
+        self._fix_seq = 0
+        self._reset_tracking()
         self._file: Optional[Path] = None
         self._prev_scene: Optional[str] = None
         self._prev_pick_key = None
@@ -157,6 +462,23 @@ class BattleLogger:
         self._version = None        # この対戦の version 行 (advisor.versions.runtime_versions)
         self._advice_seq = 0        # 助言 ID の連番 (ファイル内で一意)
         self._advice_files: dict = {}   # 助言 ID → その助言を書いた対戦ログ (表示の行を助言の対戦に帰属させる。2026-10-06)
+        self._shown: dict = {}          # 助言 ID → 表示時刻 (ブラウザの時計。hidden でないもの)。decision 行に添える
+
+    def _reset_tracking(self) -> None:
+        """段 0 の追跡 (1 対戦ぶん) を初期化する"""
+        self._opp_slots: dict = {}       # 前のフレームの相手の枠 (opp_slots_of)
+        self._appeared: set = set()      # 場に出た相手の種 id
+        self._slot_revealed: dict = {}   # 枠 → 場で判明した種 (確定、場に出た)
+        self._guesses: list = []         # 選出画面の推定 [{"slot", "species", "ja", "prob", "score", "t_guess"}]
+        self._guess_keys: set = set()
+        self._guess_prob_of: dict = {}   # (slot, species) → 推定時の確率 (roster_change の from_prob)
+        self._fixes: list = []           # 追跡中の手入力の訂正 [{"fix_id", "key", "manual_value", ...}]
+        self._dec: Optional[dict] = None   # 決定の追跡 {"advice_id", "best", "t_gen", "turn", "n_advice", "t_decided", ...}
+        self._dec_open = False           # 決定画面を見てから、まだ解決側の場面に移っていない
+        self._dec_resolve = None         # 解決側の場面に移った最初のフレーム (時刻, 場面, 決定画面の場面) と連続数
+        self._dec_last_scene = None
+        self._frames_sig = None          # 最後に書いた frames 行の内容 (同じなら書き直さない)
+        self._picks_sig = None           # 最後に書いた opp_picks / guess_confirm の内容
 
     # ------------------------------------------------------------------
     def _open_new(self) -> None:
@@ -178,6 +500,9 @@ class BattleLogger:
         self._rate_open_fresh, self._rate_open_post, self._prev_outcome = self._next_rate_ctx
         self._next_rate_ctx = (False, False, None)
         self._rate_reads = []
+        self._frames_start = self._frame_counts()
+        self._frames_sig = None
+        self._picks_sig = None
         print(f"[battle_log] 新しい対戦ログ: {self._file.name}")
         # 由来ラベル (2026-09-06 構築システムの安全装置): 実戦ログは dataset_kind=real。
         # source は production Package の構築を使っていれば recommended、候補の試用なら
@@ -259,6 +584,8 @@ class BattleLogger:
         self._outcome_value = rec["outcome"]
         self._outcome_strong = bool(outcome)
         self._outcome_info = info
+        # 段 0: 対戦の終わりの行 (frames / opp_picks / guess_confirm)。次の対戦への切り替え (_finalize) でも書き直す
+        self._write_end_rows(final=False)
 
     def _revise_by_rate(self) -> None:
         """勝敗を推定・不明で記録した後にレートが読めたら推定し直し、変わったら更新の行を足す (読み手は最後の outcome 行を採る)。
@@ -289,6 +616,9 @@ class BattleLogger:
     def _finalize(self, outcome: Optional[str]) -> None:
         if self._file is not None and not self._outcome_logged:
             self._log_outcome(outcome)
+        if self._file is not None:
+            self._write_end_rows(final=True)
+        self._reset_tracking()
         # 次の対戦に渡すレートの文脈: この対戦でレートが読めたか、最後の読みが対戦後の値だと分かっているか (2 つ以上読めた /
         # 増減をこの対戦に帰属できた)、この対戦の勝敗が確定しているか
         had_reads = bool(self._rate_reads)
@@ -306,6 +636,170 @@ class BattleLogger:
         self._last_zero = None
         self._last_switch = {}
         self._fainted_last = (0, 0)
+
+    # ------------------------------------------------------------------ 段 0 の追跡 (2026-10-07)
+    def _frame_counts(self) -> Optional[dict]:
+        if self.frame_source is None:
+            return None
+        try:
+            return dict(self.frame_source() or {})
+        except Exception:
+            return None
+
+    def _write_end_rows(self, final: bool) -> None:
+        """対戦の終わりの行: 決めた後に行動を待っている decision、frames、opp_picks、guess_confirm。
+        勝敗を記録した時と次の対戦への切り替え (close を含む) で呼ぶ。内容が前に書いたものと同じなら書き直さない"""
+        if self._file is None:
+            return
+        try:
+            if self._dec and self._dec.get("t_decided") is not None:
+                self._flush_decision()
+            end = self._frame_counts()
+            if end is not None and self._frames_start is not None:
+                fr = frames_row(self._frames_start, end, self._opened_ts)
+                sig = json.dumps(fr, sort_keys=True)
+                if sig != self._frames_sig:
+                    self._frames_sig = sig
+                    self._write({"type": "frames", **fr, "final": bool(final)})
+            slots = [{"slot": i, **s} for i, s in sorted(self._opp_slots.items())]
+            if not slots and not self._appeared:
+                return
+            lab = label_opp_picks([s for s in slots if _slot_identity(s) or s.get("types")], self._appeared)
+            guesses = []
+            for g in self._guesses:
+                revealed, verdict = guess_verdict(g["species"], self._slot_revealed.get(g["slot"]), self._appeared)
+                prob = g.get("prob")
+                guesses.append({**g, "revealed": revealed, "verdict": verdict,
+                                "auto_accept": (prob >= SELECTION_PRIOR_AUTO_ACCEPT) if prob is not None else None,
+                                "sure": (prob >= SELECTION_GUESS_SURE_PROB) if prob is not None else None,
+                                "threshold_auto_accept": SELECTION_PRIOR_AUTO_ACCEPT,
+                                "threshold_sure": SELECTION_GUESS_SURE_PROB})
+            sig = json.dumps([lab, guesses], sort_keys=True, ensure_ascii=False, default=str)
+            if sig == self._picks_sig:
+                return
+            self._picks_sig = sig
+            self._write({"type": "opp_picks", **lab, "final": bool(final)})
+            for g in guesses:
+                self._write({"type": "guess_confirm", **g, "final": bool(final)})
+        except Exception as e:      # 記録の失敗で対戦ログを止めない
+            print(f"[battle_log] 終了時の行の記録に失敗: {e}")
+
+    def close(self) -> None:
+        """サーバー停止時: 開いている対戦の終わりの行を書く (勝敗は書かない。次の起動で別ファイルになる)"""
+        if self._file is not None:
+            self._write_end_rows(final=True)
+
+    def _track_opponent(self, state: dict, scene: Optional[str], manual_species: bool) -> None:
+        """相手の枠の置き換え (roster_change)、選出画面の推定 (guess_confirm の材料)、場に出た種 (opp_picks の材料) を追う"""
+        cur = opp_slots_of(state)
+        act = (state.get("opponent") or {}).get("active_index")
+        for i, before, after in roster_changes(self._opp_slots, cur):
+            self._write({"type": "roster_change", "slot": i, "scene": scene, "turn": state.get("turn"),
+                         "from": before.get("species"), "from_ja": before.get("ja"), "from_guess": before.get("guess"),
+                         "from_prob": self._guess_prob_of.get((i, _slot_identity(before))),
+                         "from_score": before.get("score"),
+                         "to": (after or {}).get("species"), "to_ja": (after or {}).get("ja"),
+                         "to_guess": bool((after or {}).get("guess")),
+                         "basis": roster_change_basis(after, i, act, scene, manual_species)})
+        now = time.time()
+        for i, s in cur.items():
+            if s.get("guess") and s.get("species") and (i, s["species"]) not in self._guess_keys:
+                self._guess_keys.add((i, s["species"]))
+                prob = None
+                if self.guess_prob_fn is not None:
+                    try:
+                        prob = self.guess_prob_fn(s.get("types") or [], s["species"])
+                    except Exception:
+                        prob = None
+                self._guess_prob_of[(i, s["species"])] = prob
+                self._guesses.append({"slot": i, "species": s["species"], "ja": s.get("ja"), "prob": prob,
+                                      "score": s.get("score"), "t_guess": round(now, 2)})
+        for i, sid in opp_appeared_now(state, scene):
+            self._appeared.add(sid)
+            self._slot_revealed[i] = sid
+        self._opp_slots = cur
+
+    def _register_fix(self, event: dict, state: dict, fix_id: str, t: float) -> None:
+        key = manual_fix_key(event, state)
+        if key is None:
+            return
+        # 同じ対象への前の訂正は追わない (新しい訂正で置き換え)
+        self._fixes = [f for f in self._fixes if f["key"] != key]
+        ok, value = manual_value_from_detail(key, event.get("detail"))
+        self._fixes.append({"fix_id": fix_id, "key": key, "manual_value": value if ok else manual_current_value(state, key),
+                            "label": (event.get("detail") or {}).get("label") or event.get("text"),
+                            "fix_t": t, "fix_turn": state.get("turn")})
+
+    def _track_fixes(self, state: dict, scene: Optional[str]) -> None:
+        """手入力の訂正が後の推定で別の値に変わったら (最初の 1 回) manual_fix_overwritten の行を書く"""
+        keep = []
+        for f in self._fixes:
+            now_v = manual_current_value(state, f["key"])
+            if _same_value(now_v, f["manual_value"]):
+                keep.append(f)
+                continue
+            t = round(time.time(), 2)
+            self._write({"type": "manual_fix_overwritten", "fix_id": f["fix_id"], "label": f["label"],
+                         **{k: f["key"].get(k) for k in ("target", "side", "index", "field")},
+                         "manual_value": f["manual_value"], "new_value": now_v, "fix_t": f["fix_t"],
+                         "fix_turn": f["fix_turn"], "overwritten_at": t, "turn": state.get("turn"), "scene": scene})
+        self._fixes = keep
+
+    def _flush_decision(self, action: Optional[dict] = None) -> None:
+        d, self._dec = self._dec, None
+        if not d or d.get("t_decided") is None:
+            return
+        best = d.get("best")
+        self._write({"type": "decision", "advice_id": d["advice_id"], "turn": d.get("turn"), "t_gen": d.get("t_gen"),
+                     "t_shown": self._shown.get(d["advice_id"]), "t_decided": d["t_decided"],
+                     "scene_from": d.get("scene_from"), "scene_to": d.get("scene_to"), "n_advice": d.get("n_advice"),
+                     "best": best, "action": action, "match": decision_match(best, action)})
+
+    def _track_decision(self, state: dict, scene: Optional[str], fired: list) -> None:
+        """助言のあと、決定画面 → 解決側の場面への移り (DECISION_CONFIRM_FRAMES フレーム続く) を決定とし、その後の行動を突き合わせる"""
+        now = time.time()
+        d = self._dec
+        act = player_action_of(fired)
+        if act is not None and act["kind"] == "switch":
+            pl = state.get("player") or {}
+            idx, party = pl.get("active_index"), pl.get("party") or []
+            if isinstance(idx, int) and 0 <= idx < len(party):
+                act["id"] = party[idx].get("species_id")
+        if d is not None and d.get("t_decided") is not None:
+            if act is not None:
+                self._flush_decision(act)
+            elif now - d["t_decided"] > DECISION_ACTION_WAIT_SEC:
+                self._flush_decision(None)
+            return
+        if scene in DECISION_SCENES:
+            self._dec_open = True
+            self._dec_resolve = None
+            self._dec_last_scene = scene
+        elif scene in DECISION_INFO_SCENES:
+            pass                                  # 決定中の情報確認。決定は開いたまま
+        elif scene in DECISION_RESOLVE_SCENES and self._dec_open:
+            if self._dec_resolve is None:
+                self._dec_resolve = {"t": round(now, 2), "scene": scene, "from": self._dec_last_scene, "n": 0,
+                                     "action": None}
+            self._dec_resolve["n"] += 1
+            if act is not None and self._dec_resolve["action"] is None:
+                self._dec_resolve["action"] = act       # 決定の確認より先に行動が読めた (低 fps のとき)
+            if self._dec_resolve["n"] >= DECISION_CONFIRM_FRAMES:
+                r = self._dec_resolve
+                self._dec_open, self._dec_resolve = False, None
+                if d is not None:
+                    d.update(t_decided=r["t"], scene_from=r["from"], scene_to=r["scene"])
+                    if r["action"] is not None:
+                        self._flush_decision(r["action"])
+        else:
+            self._dec_resolve = None
+
+    def on_frame_burst(self, info: dict) -> None:
+        """連続フレームの保存を始めた (server)。保存先と開始時刻を対戦ログに残し、保存フレームと対戦を結ぶ"""
+        try:
+            self._write({"type": "frame_burst", **(info or {})})
+        except Exception as e:
+            print(f"[battle_log] 連続保存の記録に失敗: {e}")
 
     # ------------------------------------------------------------------
     def on_frame(self, state: dict, fired: list) -> None:
@@ -372,6 +866,7 @@ class BattleLogger:
         # HP変化 (extractorsの_set_hpがsource="hp"でstate.eventsに積む) を
         # 専用レコードで記録し、技イベントとのダメージ対応付けを可能にする。
         # 手動修正 (source="manual") も誤認識分析用に専用レコードで残す
+        manual_species = False
         for e in state.get("events", []):
             if e.get("ts", 0) <= self._hp_seen_ts:
                 continue
@@ -386,9 +881,26 @@ class BattleLogger:
                     self._last_zero = (det["side"], e["ts"])
             elif e.get("source") == "manual":
                 self._hp_seen_ts = e["ts"]
+                # fix_id (2026-10-07 段 0): 後の推定で上書きされたら manual_fix_overwritten の行がこの id で結ぶ
+                self._fix_seq += 1
+                fix_id = f"m{self._fix_seq:04d}"
                 self._write({"type": "manual_fix", "turn": state.get("turn"),
                              "scene": scene,
-                             "text": e["text"], "detail": e.get("detail")})
+                             "text": e["text"], "detail": e.get("detail"), "fix_id": fix_id})
+                if e.get("event") == "species_manual":
+                    manual_species = True
+                try:
+                    self._register_fix(e, state, fix_id, float(e.get("ts") or time.time()))
+                except Exception:
+                    pass
+
+        # 段 0 (2026-10-07): 相手の枠の置き換え・推定・場に出た種、手入力の訂正の上書き、決定の確認 (記録だけ。失敗で止めない)
+        try:
+            self._track_opponent(state, scene, manual_species)
+            self._track_fixes(state, scene)
+            self._track_decision(state, scene, fired)
+        except Exception as e:
+            print(f"[battle_log] 段 0 の追跡に失敗: {e}")
 
         # 選出中は進捗/選出セットの変化でも記録する (シーン遷移だけだと
         # 選出済み状態がログに残らず、選出認識の検証ができない)
@@ -451,8 +963,46 @@ class BattleLogger:
                              "rl_loaded": rl_loaded_now() if kind == "battle" else None}
         except Exception:
             pass
+        # 段 0 (2026-10-07): 助言時点の HP の古さ
+        if state is not None:
+            try:
+                rec["hp_stale"] = hp_stale_of(state, time.time())
+            except Exception:
+                pass
         self._write(rec)
+        # decision 行の追跡: 表示する対戦の助言 (確定前 provisional を除く) を、次の決定に結ぶ助言にする
+        try:
+            if kind == "battle" and not advice.get("provisional") and advice.get("ok", True):
+                if self._dec is not None and self._dec.get("t_decided") is not None:
+                    self._flush_decision(None)        # 前の決定の行動が読めないまま次の助言が来た
+                best = advice.get("best") or ((advice.get("actions") or [None])[0])
+                prev_n = (self._dec or {}).get("n_advice", 0)
+                self._dec = {"advice_id": aid, "turn": rec.get("turn"), "t_gen": advice.get("t_gen"), "t_decided": None,
+                             "n_advice": prev_n + 1,
+                             "best": ({"kind": best.get("kind"), "id": best.get("id"), "name": best.get("name")}
+                                      if best else None)}
+        except Exception:
+            pass
         return aid
+
+    def on_selection_record(self, advice_id: str, record: Optional[dict]) -> None:
+        """選出の助言の記録用の欄 (2026-10-07 段 0、advisor.selection_record の candidates / opp_pick_pred) を、助言とは別の
+        selection_record 行に書く。server は助言を送った**後**に計算して呼ぶ (表示を遅らせない)。行は display と同じく
+        **助言を書いた対戦のファイル**に書き、advice_id で advice 行に結ぶ"""
+        if not advice_id:
+            return
+        target = self._advice_files.get(str(advice_id))
+        if target is None and self._file is None:
+            return
+        rec = {"type": "selection_record", "advice_id": str(advice_id), **{k: v for k, v in (record or {}).items()
+                                                                           if k not in ("type", "advice_id", "t")}}
+        if target is not None and target != self._file:
+            rec["attributed"] = "advice_battle"
+            rec["t"] = round(time.time(), 2)
+            with target.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            return
+        self._write(rec)
 
     def on_display(self, advice_id: str, t_shown: Optional[float], kind: Optional[str] = None, hidden: Optional[bool] = None) -> None:
         """ブラウザが助言を表示した時刻 (ブラウザの時計、秒)。生成時刻 (advice の t_gen) と分けて残す (受入条件 2)。
@@ -464,6 +1014,10 @@ class BattleLogger:
         if target is None and self._file is None:
             return
         rec = {"type": "display", "advice_id": str(advice_id), "t_shown": (round(float(t_shown), 3) if t_shown is not None else None)}
+        if t_shown is not None and not hidden:
+            self._shown.setdefault(str(advice_id), rec["t_shown"])
+            if len(self._shown) > 2000:
+                self._shown.pop(next(iter(self._shown)))
         if kind:
             rec["kind"] = kind
         if hidden is not None:

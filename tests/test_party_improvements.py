@@ -159,10 +159,119 @@ def test_active_measurement_detection():
     print("test_active_measurement_detection OK")
 
 
-if __name__ == "__main__":
+def test_measure_is_confirmation_based_by_default():
+    """2026-10-07 判断 1: 終了処理 (--session --measure) は測定 run を起動せず、目的・概算所要時間・起動コマンドを出す。
+    config PARTY_IMPROVE_AUTO_LAUNCH=True か --launch で旧動作 (起動)"""
+    import champions_agent.config as C
+    calls = []
+    saved = (PI.build_report, PI.load_battles, PI.propose_measurement, PI.launch_measurement)
+    try:
+        PI.build_report = lambda battles, hypothetical=None: {"threat_weights": {"a": 1.0}}
+        PI.load_battles = lambda **kw: []
+        PI.propose_measurement = lambda rep, n, prof, par: calls.append("propose") or {"proposed": True}
+        PI.launch_measurement = lambda rep, n, prof, par: calls.append("launch") or {"launched": True}
+        assert C.PARTY_IMPROVE_AUTO_LAUNCH is False
+        PI.main(["--session", "--measure", "--json", "--no-save"])
+        assert calls == ["propose"]
+        PI.main(["--session", "--measure", "--launch", "--json", "--no-save"])
+        assert calls == ["propose", "launch"]
+        C.PARTY_IMPROVE_AUTO_LAUNCH = True
+        PI.main(["--session", "--measure", "--json", "--no-save"])
+        assert calls == ["propose", "launch", "launch"]
+    finally:
+        C.PARTY_IMPROVE_AUTO_LAUNCH = False
+        PI.build_report, PI.load_battles, PI.propose_measurement, PI.launch_measurement = saved
+    print("test_measure_is_confirmation_based_by_default OK")
+
+
+def test_duration_estimate_and_proposal_text():
+    import os
+    import tempfile
+    from pathlib import Path
+    assert PI.duration_estimate([]) is None
+    assert PI.duration_estimate([10.0, 2.0, 6.0]) == {"n": 3, "median_h": 6.0, "min_h": 2.0, "max_h": 10.0}
+    assert PI.duration_estimate([4.0, 8.0])["median_h"] == 6.0
+    with tempfile.TemporaryDirectory() as td:
+        for name, start, end, done in (("improve_a", 1000.0, 1000.0 + 3600 * 5, True),
+                                       ("improve_b", 2000.0, 2000.0 + 3600 * 11, True),
+                                       ("improve_c", 3000.0, 3000.0 + 3600, False),    # 未完了 (summary なし) は使わない
+                                       ("arch_x", 0.0, 3600.0, True)):                 # 改善 run 以外は使わない
+            d = Path(td) / name
+            (d / "evaluation").mkdir(parents=True)
+            (d / "request.json").write_text("{}")
+            os.utime(d / "request.json", (start, start))
+            (d / "run.log").write_text("x")
+            os.utime(d / "run.log", (end, end))
+            if done:
+                (d / "evaluation" / "summary.json").write_text("{}")
+                os.utime(d / "evaluation" / "summary.json", (end - 60, end - 60))
+        runs = PI.past_run_hours(Path(td), last=10)
+        assert runs == [("improve_a", 5.0), ("improve_b", 11.0)], runs
+        assert PI.past_run_hours(Path(td), last=1) == [("improve_b", 11.0)]
+    cmd = PI.launch_command(Path("logs/build_search/session_threats_x.json"), 3, "medium", 5)
+    assert cmd.startswith("python -m tools.party_improvements --launch-weights logs/build_search/session_threats_x.json")
+    m = {"proposed": True, "purpose": PI.MEASURE_PURPOSE.format(n=3), "estimate": PI.duration_estimate([5.0, 11.0]),
+         "command": cmd, "team_problem": None, "active": "123 python -m tools.team_build.run --run-id y"}
+    rep = {"generated_at": "t", "current_ja": [], "n_battles": 0, "parties": [], "structural": {}, "ja": {}, "measure": m}
+    md = PI.render(rep)
+    assert "自動では起動していません" in md and "概算所要時間: 中央値 約 8.0 時間" in md and cmd in md
+    assert "構築 run が実行中" in md and "目的:" in md
+    print("test_duration_estimate_and_proposal_text OK")
+
+
+def test_session_record_in_end_report():
+    """終了レポートに fps と隠れたページの比率 (frames 行)、勝敗と根拠、選出候補と実際の選出を出す。古いログは fps を埋めない"""
+    new = {"file": "battle_1.jsonl", "outcome": "win", "inferred": True, "corrected": False, "by_rate": False,
+           "outcome_basis": {"inferred": True, "basis": "rate", "basis_text": "レート 1500.0 → 1512.0"},
+           "frames": {"received": 600, "hidden": 60, "span_sec": 100.0, "recv_fps": 6.0, "proc_fps": 4.0, "hidden_ratio": 0.1},
+           "selection": {"recommend": ["A", "B", "C"], "candidates": {"rule": ["A", "D", "E"], "registered": None}},
+           "my_picked": ["A", "B", "C"]}
+    old = {"file": "battle_0.jsonl", "outcome": "loss", "inferred": False, "frames": None, "selection": None, "my_picked": []}
+    sr = PI.session_record([old, new])
+    assert sr["n_frames_rows"] == 1 and sr["recv_fps"] == 6.0 and sr["hidden_ratio"] == 0.1
+    assert sr["battles"][0]["recv_fps"] is None
+    lines = "\n".join(PI.render_session_record(sr))
+    assert "受信 6.0 fps" in lines and "隠れたページからの受信 10%" in lines
+    assert "推定: レート 1500.0 → 1512.0" in lines and "◎ A/B/C" in lines and "規則 A/D/E" in lines
+    assert "実際の自分の選出: A/B/C" in lines and "(読めず)" in lines
+    assert PI.session_record([old])["recv_fps"] is None
+    assert "frames 行のある対戦なし" in "\n".join(PI.render_session_record(PI.session_record([old])))
+    # 選出の候補: candidates 欄が無い古い advice 行は advice の中から作る
+    row = {"advice": {"ok": True, "primary": "model", "recommend": [{"name": "A"}], "rule_recommend": [{"name": "D"}],
+                      "model_pick": {"names": ["A", "B", "C"]}}}
+    ss = PI.selection_summary(row)
+    assert ss["candidates"] == {"rule": ["D"], "model_pick": ["A", "B", "C"], "model_pick_real": None}
+    # selection_record 行 (advice_id で結ぶ) があればその candidates を使う。計算に失敗した記録 (error) は古いログと同じ扱い
+    record = {"type": "selection_record", "advice_id": "x-0001",
+              "candidates": {"rule": {"names": ["D", "E", "F"]}, "registered": None, "reasons": {}, "primary": "model"}}
+    assert PI.selection_summary(row, record)["candidates"] == {"rule": ["D", "E", "F"], "registered": None}
+    assert PI.selection_summary(row, {"candidates": {"error": "x"}})["candidates"] == ss["candidates"]
+    import json as _json
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "b.jsonl"
+        lines = [{"type": "advice", "kind": "selection", "advice_id": "x-0001", **row},
+                 {"type": "selection_record", "advice_id": "x-0000", "candidates": {"rule": {"names": ["Z"]}}},
+                 record]
+        p.write_text("\n".join(_json.dumps(r, ensure_ascii=False) for r in lines) + "\n", encoding="utf-8")
+        assert PI.parse_battle(str(p))["selection"]["candidates"]["rule"] == ["D", "E", "F"]
+    assert PI.outcome_basis_of({"outcome": "win", "basis": "fainted", "inferred": True})["basis"] == "fainted"
+    assert PI.outcome_basis_of(None) is None
+    print("test_session_record_in_end_report OK")
+
+
+def main():
     test_parse_showdown_sets()
     test_pressure_and_difficulty()
     test_team_concepts_psychic_terrain()
     test_priority_dependence_and_proposals_with_dex()
     test_measure_command_and_measured_report()
     test_active_measurement_detection()
+    test_measure_is_confirmation_based_by_default()
+    test_duration_estimate_and_proposal_text()
+    test_session_record_in_end_report()
+
+
+if __name__ == "__main__":
+    main()
