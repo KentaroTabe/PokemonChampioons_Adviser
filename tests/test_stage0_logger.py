@@ -127,7 +127,71 @@ def test_decision_and_manual_pure():
     print("test_decision_and_manual_pure OK")
 
 
+def test_frames_row_visibility():
+    """2026-10-07 実機確認: visible / unknown を足し、hidden_ratio は既知 (hidden + visible) に対する比。古い server の件数でも落ちない"""
+    start = {"received": 10, "processed": 8, "dropped": 2, "hidden": 0, "visible": 4, "unknown": 6}
+    end = {"received": 110, "processed": 78, "dropped": 32, "hidden": 25, "visible": 54, "unknown": 31, "last_recv_ts": 1020.0}
+    r = BL.frames_row(start, end, 1000.0)
+    assert (r["hidden"], r["visible"], r["unknown"]) == (25, 50, 25)
+    assert r["hidden_ratio"] == round(25 / 75, 3)                               # 受信 100 ではなく既知 75 に対する比
+    for k in ("received", "processed", "dropped", "hidden", "hidden_ratio", "span_sec", "recv_fps", "proc_fps"):
+        assert k in r, k                                                        # 既存の欄は残す
+    # 通知が 1 度も無い (全部 unknown) → 既知 0 → hidden_ratio は None (0% = 前面とはしない)
+    allu = BL.frames_row({"received": 0, "hidden": 0, "visible": 0, "unknown": 0},
+                         {"received": 50, "hidden": 0, "visible": 0, "unknown": 50, "last_recv_ts": 1010.0}, 1000.0)
+    assert allu["unknown"] == 50 and allu["visible"] == 0 and allu["hidden_ratio"] is None
+    # 古い server (visible / unknown の欄が無い): visible / unknown は None、hidden_ratio は従来どおり受信に対する比
+    old = BL.frames_row({"received": 0, "hidden": 0}, {"received": 40, "hidden": 8, "last_recv_ts": 1004.0}, 1000.0)
+    assert old["visible"] is None and old["unknown"] is None and old["hidden_ratio"] == 0.2
+    # 開いた時点の件数が古い形 (欄なし) で終わりが新しい形でも落ちない (開いた時点を 0 とみなす)
+    mix = BL.frames_row({"received": 0, "hidden": 0}, {"received": 10, "hidden": 2, "visible": 3, "unknown": 5}, None)
+    assert (mix["visible"], mix["unknown"], mix["hidden_ratio"]) == (3, 5, 0.4) and mix["recv_fps"] is None
+    assert BL.frames_row(None, None, None)["received"] == 0
+    print("test_frames_row_visibility OK")
+
+
 # ------------------------------------------------------------------ ロガーが書く行
+def test_logger_client_and_visibility_rows():
+    """対戦ファイルを開いたとき version 行の直後に open_rows_source の行 (client / visibility) を書く。
+    on_client_row は開いているファイルにだけ書く (ファイルを開かない)。frames 行に visible / unknown が載る"""
+    from client_state import ClientRegistry
+    tmp = Path(tempfile.mkdtemp())
+    counts = {"received": 0, "processed": 0, "dropped": 0, "hidden": 0, "visible": 0, "unknown": 0, "last_recv_ts": 0.0}
+    reg = ClientRegistry()
+    try:
+        lg = BattleLogger(log_dir=tmp, guess_prob_fn=None, frame_source=lambda: dict(counts))
+        lg.open_rows_source = lambda: reg.open_rows("v2")
+        assert not lg.file_open
+        reg.on_connect("sid-old-page-1", 1.0)
+        reg.on_hello("sid-new-page-2", {"html_version": "v1", "features": ["client_hello"], "visibility": "visible"}, 2.0)
+        lg.on_client_row(reg.client_row("sid-new-page-2", "v2"))              # ファイルが無ければ書かない (開かない)
+        lg.on_client_row(reg.on_visibility("sid-new-page-2", True, 3.0))
+        assert not lg.file_open and not list(tmp.glob("*.jsonl"))
+        lg.on_frame(_state("selection", seq=1), [])
+        first = lg._file
+        recs = _records(first)
+        types = [r["type"] for r in recs]
+        iv = types.index("version") if "version" in types else types.index("session")
+        assert types[iv + 1: iv + 4] == ["client", "client", "visibility"], types
+        cl = {r["sid"]: r for r in recs if r["type"] == "client"}
+        assert cl["sid-old-"]["hello"] is False and cl["sid-old-"]["stale"] is None
+        assert cl["sid-new-"]["stale"] is True and cl["sid-new-"]["served_version"] == "v2"
+        vis = [r for r in recs if r["type"] == "visibility"]
+        assert vis[0]["hidden"] is True and vis[0]["source"] == "page_visibility" and "t" in vis[0]   # 最新の状態を 1 行
+        # 対戦中の通知はその場で書く
+        lg.on_client_row(reg.on_visibility("sid-new-page-2", False, 5.0))
+        lg.on_client_row(None)
+        assert _records(first)[-1]["type"] == "visibility" and _records(first)[-1]["hidden"] is False
+        counts.update(received=30, hidden=5, visible=20, unknown=5, last_recv_ts=time.time() + 3.0)
+        lg._finalize(None)
+        fr = [r for r in _records(first) if r["type"] == "frames"][-1]
+        assert (fr["visible"], fr["unknown"], fr["hidden_ratio"]) == (20, 5, 0.2)
+        assert not lg.file_open
+    finally:
+        shutil.rmtree(tmp)
+    print("test_logger_client_and_visibility_rows OK")
+
+
 def test_logger_frames_picks_and_guess_rows():
     tmp = Path(tempfile.mkdtemp())
     counts = {"received": 0, "processed": 0, "dropped": 0, "hidden": 0, "last_recv_ts": 0.0}
@@ -287,6 +351,7 @@ def test_selection_record_goes_to_advice_battle():
 def main():
     test_hp_stale_of()
     test_frames_row()
+    test_frames_row_visibility()
     test_label_opp_picks()
     test_roster_change_and_guess_verdict()
     test_decision_and_manual_pure()
@@ -294,6 +359,7 @@ def main():
     test_logger_advice_fields_and_decision()
     test_decision_without_action_and_switch()
     test_selection_record_goes_to_advice_battle()
+    test_logger_client_and_visibility_rows()
     print("ALL OK")
 
 

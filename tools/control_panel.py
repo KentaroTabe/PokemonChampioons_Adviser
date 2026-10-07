@@ -44,7 +44,30 @@ FRAME_STAT_RE = re.compile(r"受信=(\d+) 処理=(\d+) 破棄=(\d+)")
 POST_HEADER = "X-Control-Panel"        # fetch だけが付けられるヘッダ。別サイトのフォーム送信からの実行を弾く
 LOG_NAME_SEP = "__"                    # logs/control_panel/<時刻><SEP><操作>.log
 ADVISOR_PATTERN = "uvicorn server:app_asgi"      # scripts/lib/ports.sh と同じ「自分たち」の判定
-FRONTEND_PATTERN = "http.server"
+PORTS_LIB = REPO / "scripts" / "lib" / "ports.sh"
+_SHELL_ASSIGN_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)="([^"]*)"\s*(?:#.*)?$')
+_SHELL_VAR_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
+
+
+def shell_assignments(text: str) -> dict:
+    """bash の行頭の `NAME="値"` を上から読む (純粋)。値の中の $NAME / ${NAME} は先に読んだ値で置き換える (無ければ空)"""
+    out: dict = {}
+    for line in text.splitlines():
+        m = _SHELL_ASSIGN_RE.match(line)
+        if m:
+            out[m.group(1)] = _SHELL_VAR_RE.sub(lambda v: out.get(v.group(1), ""), m.group(2))
+    return out
+
+
+def ports_lib_value(name: str, path: Path = PORTS_LIB) -> str:
+    """scripts/lib/ports.sh の変数の値 (フロントの判定のパターンはそこだけで定義する。2026-10-07)"""
+    v = shell_assignments(Path(path).read_text(encoding="utf-8")).get(name)
+    if not v:
+        raise RuntimeError(f"{path} に {name} の定義が無い")
+    return v
+
+
+FRONTEND_PATTERN = ports_lib_value("FRONTEND_PATTERN")   # tools.frontend_server (2026-10-07 までは http.server)
 SHOWDOWN_PATTERN = "pokemon-showdown"
 TRAINING_PATTERN = "train_forever"
 MEASURING_PATTERN = "tools.team_build.run|check_advisor_player"   # 構築の測定。接続テストとの同時実行は不可 (第14回)

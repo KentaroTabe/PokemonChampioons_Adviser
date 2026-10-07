@@ -60,7 +60,7 @@ plist本体は `scripts/com.championsadviser.train.plist` (repo管理)。編集�
 #   /bin/bash -lc 'cd <repo> && source .venv/bin/activate && \
 #     PYTHONUNBUFFERED=1 uvicorn server:app_asgi --host 0.0.0.0 --port 8000'
 # 例: フロントエンド(3000)
-#   /bin/bash -lc 'cd <repo> && python3 -m http.server 3000'
+#   /bin/bash -lc 'cd <repo> && python3 -m tools.frontend_server 3000'
 # 例: Showdown(8100)
 #   /bin/bash -lc 'cd <repo> && node pokemon-showdown/pokemon-showdown start 8100 --no-security'
 # ラベル(Label)とログ出力先(Standard*Path)は plist ごとに一意にすること。

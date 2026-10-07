@@ -49,7 +49,7 @@ for _ in $(seq 1 30); do
     set -- $(choose_port "$FRONTEND_PORT_DEFAULT" "$FRONTEND_PORT" "$FRONTEND_PATTERN")
     FRONTEND_PORT="$1"; FRONT_STATE="$2"
     if [ "$FRONT_STATE" = "start" ]; then
-      nohup python3 -m http.server "$FRONTEND_PORT" > logs/frontend_nohup.log 2>&1 & disown
+      nohup python3 -m "$FRONTEND_MODULE" "$FRONTEND_PORT" > logs/frontend_nohup.log 2>&1 & disown
       echo "フロントエンド($FRONTEND_PORT) も起動しました"
     elif [ "$FRONT_STATE" = "none" ]; then
       echo "⚠ フロントエンドの空きポートが無い ($FRONTEND_PORT_DEFAULT 〜 +$PORT_SEARCH_RANGE)"

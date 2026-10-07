@@ -129,6 +129,7 @@ TESTS=(
   test_selection_record
   test_pick_labels
   test_frame_burst
+  test_client_state
   test_dmg_compare
   test_scene_samples
 )

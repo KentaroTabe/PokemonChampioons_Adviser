@@ -31,7 +31,10 @@ from vision.end_notice import battle_end_notice, outcome_revision_notice
 from vision.stale_notice import advice_target, stale_advice_notice
 from vision.state import apply_manual_species
 from vision.frame_burst import BurstPlanner
-from champions_agent.config import FRAME_BURST_DIR, MANUAL_SPECIES_RESOLVE_CUTOFF, SHADOW_VARIANTS_ENABLED
+from champions_agent.config import (CLIENT_HELLO_WAIT_SEC, DISPLAY_HIDDEN_WARN_COUNT, FRAME_BURST_DIR,
+                                    MANUAL_SPECIES_RESOLVE_CUTOFF, SHADOW_VARIANTS_ENABLED)
+from client_state import (VIS_HIDDEN, VIS_VISIBLE, ClientRegistry, HiddenDisplayWatch, served_html_version, short_sid,
+                          stale_of)
 
 
 def should_advise_selection(state: dict) -> bool:
@@ -124,10 +127,17 @@ except Exception as e:
 frame_counter = 0
 processed_counter = 0
 dropped_counter = 0
-# ページが隠れている間に受信したフレームの数 (フロントの page_visibility で切り替え。2026-10-07 段 0: 対戦ログの frames 行の
-# hidden 比率。隠れたページでは送信が 1〜2 fps に落ちる)
+# 受信フレームを送信元の接続の可視状態で数える (2026-10-07 段 0: 対戦ログの frames 行。隠れたページでは送信が 1〜2 fps に落ちる)。
+# 可視状態は接続 (sid) ごとに client_state.ClientRegistry が持つ (page_visibility / client_hello の通知)。通知の無い接続からの
+# フレームは unknown (以前は単一の bool が False で始まり、通知が無いと「隠れていない」に数えていた。2026-10-07 実機確認)
 hidden_counter = 0
-_page_hidden = False
+visible_counter = 0
+unknown_counter = 0
+_clients = ClientRegistry()
+_display_watch = HiddenDisplayWatch(DISPLAY_HIDDEN_WARN_COUNT)
+# 配信する index.html (tools/frontend_server がリポジトリのルートを配信する)。ページの CLIENT_HTML_VERSION と照合する
+INDEX_HTML = Path(__file__).resolve().parent / "index.html"
+print(f"[server] 配信する index.html の版: {served_html_version(INDEX_HTML)}")
 _busy = False
 _pending_frame = None      # 処理中に届いた最新フレーム (sid, data)
 _last_state_json = ""
@@ -160,10 +170,13 @@ _last_frame_ts = 0.0
 def _frame_counts() -> dict:
     """フレームの累積件数 (対戦ログの frames 行が対戦ごとの差を取る)"""
     return {"received": frame_counter, "processed": processed_counter, "dropped": dropped_counter,
-            "hidden": hidden_counter, "last_recv_ts": _last_frame_ts}
+            "hidden": hidden_counter, "visible": visible_counter, "unknown": unknown_counter,
+            "last_recv_ts": _last_frame_ts}
 
 
 battle_log.frame_source = _frame_counts
+# 対戦ファイルを開いたとき、接続中の全クライアントの client 行と最新の visibility 行を書く (served_version はそのときのディスクの値)
+battle_log.open_rows_source = lambda: _clients.open_rows(served_html_version(INDEX_HTML))
 
 # 連続フレームの保存 (DEBUG_DUMP_FRAMES=1 のときだけ。vision/frame_burst、2026-10-07 段 0)
 _burst = BurstPlanner()
@@ -218,6 +231,8 @@ def _advice_key(state: dict) -> str:
 @sio.on('connect')
 async def connect(sid, environ):
     print(f"[server] フロントエンドが接続しました: {sid}")
+    _clients.on_connect(sid, time.time())
+    asyncio.get_event_loop().create_task(_check_hello(sid))
     await sio.emit('state_update', pipeline.state.to_dict(), room=sid)
     # 構築提案の実行中にページを開き直しても「作成中」表示が復元されるように
     # (2026-08-25 第9回: 実行中である旨の表示が無いという指摘。進捗配信は
@@ -228,22 +243,70 @@ async def connect(sid, environ):
                         "running": True}, room=sid)
 
 
+async def _check_hello(sid) -> None:
+    """接続から CLIENT_HELLO_WAIT_SEC 待っても client_hello が来なければ、古い版のページの疑いとして警告し、対戦ログに
+    hello=false の client 行を書く (client_hello は 2026-10-07 に足した。それより前の index.html は送らない)"""
+    await asyncio.sleep(CLIENT_HELLO_WAIT_SEC)
+    if sid not in _clients.clients or _clients.has_hello(sid):
+        return
+    print(f"[server] ⚠ 接続 {short_sid(sid)} から client_hello が {CLIENT_HELLO_WAIT_SEC:.0f} 秒届かない: "
+          "ブラウザがキャッシュの古い index.html を使っている疑い (助言ページを Cmd+Shift+R で再読み込み)")
+    battle_log.on_client_row(_clients.client_row(sid, served_html_version(INDEX_HTML)))
+
+
+@sio.on('disconnect')
+async def disconnect(sid):
+    _clients.on_disconnect(sid)
+
+
+@sio.on('client_hello')
+async def client_hello(sid, data):
+    """ページの版と対応機能 {html_version, features, visibility, user_agent, href, served_commit} (2026-10-07)。
+    ディスクの index.html の版と照合し、対戦中ならその対戦ログに client 行 (と hello が持つ可視状態の visibility 行) を書く"""
+    try:
+        now = time.time()
+        vis_row = _clients.on_hello(sid, data, now)
+        served = served_html_version(INDEX_HTML)
+        row = _clients.client_row(sid, served)
+        print(f"[server] client_hello {row['sid']}: 版 {row['html_version']} (ディスク {served}) 機能 {row['features']} "
+              f"可視 {row['visibility']} commit {row['served_commit']}")
+        if stale_of(row["html_version"], served):
+            print(f"[server] ⚠ ページの版 {row['html_version']} がディスクの index.html の版 {served} と違う: "
+                  "ブラウザがキャッシュの古いページを使っている疑い (助言ページを Cmd+Shift+R で再読み込み)")
+        battle_log.on_client_row(row)
+        battle_log.on_client_row(vis_row)
+    except Exception as e:
+        print(f"[server] client_hello の記録に失敗: {e}")
+
+
 @sio.on('advice_shown')
 async def advice_shown(sid, data):
     """ブラウザが助言を描画した時刻 (2026-10-05 ②: 生成時刻と表示時刻を分けて記録する)。
-    data = {advice_id, kind, t_shown (秒), hidden (タブが隠れていて描画されずに送った: 2026-10-06)}"""
+    data = {advice_id, kind, t_shown (秒), hidden (タブが隠れていて描画されずに送った: 2026-10-06)}。
+    hidden はフレームの可視状態の数字には使わない。同じ対戦で DISPLAY_HIDDEN_WARN_COUNT 件続いたら警告する (2026-10-07)"""
     try:
         d = data or {}
         battle_log.on_display(d.get("advice_id"), d.get("t_shown"), d.get("kind"), hidden=d.get("hidden"))
     except Exception as e:
         print(f"[server] 表示の記録に失敗: {e}")
+    try:
+        if _display_watch.on_display((data or {}).get("hidden"), pipeline.state.battle_seq):
+            text = _display_watch.warning_text()
+            print(f"[server] ⚠ {text}")
+            await sio.emit('server_warning', {"kind": "display_hidden", "text": text, "count": _display_watch.streak})
+    except Exception as e:
+        print(f"[server] 表示の警告に失敗: {e}")
 
 
 @sio.on('page_visibility')
 async def page_visibility(sid, data):
-    """フロントのページが隠れたか (document.hidden)。受信フレームを隠れたページからのものとして数える (表示は変えない)"""
-    global _page_hidden
-    _page_hidden = bool((data or {}).get("hidden"))
+    """フロントのページが隠れたか (document.hidden)。送信元の接続 (sid) の可視状態にして、その接続から届くフレームを数える
+    (表示は変えない)。可視状態の通知ごとに対戦ログへ visibility 行を書く (開いていなければ次に開いたファイルの先頭に最新を書く)"""
+    try:
+        row = _clients.on_visibility(sid, bool((data or {}).get("hidden")), time.time())
+        battle_log.on_client_row(row)
+    except Exception as e:
+        print(f"[server] 可視状態の記録に失敗: {e}")
 
 
 @sio.on('send_frame')
@@ -257,11 +320,16 @@ async def handle_frame(sid, data):
     確実に拾う (メッセージの見落とし削減)。
     """
     global frame_counter, dropped_counter, _busy, _pending_frame
-    global _last_frame_ts, hidden_counter
+    global _last_frame_ts, hidden_counter, visible_counter, unknown_counter
     frame_counter += 1
     _last_frame_ts = time.time()
-    if _page_hidden:
+    _vis = _clients.frame_state(sid)
+    if _vis == VIS_HIDDEN:
         hidden_counter += 1
+    elif _vis == VIS_VISIBLE:
+        visible_counter += 1
+    else:
+        unknown_counter += 1
     # 連続保存中は破棄されるフレームも含めて受信したものを全部保存する
     if DUMP_FRAMES:
         _bid = _burst.active(_last_frame_ts)
@@ -323,14 +391,19 @@ async def _handle_one_frame(sid, data):
         state, fired = await loop.run_in_executor(None, pipeline.process, img)
         _proc_ms.append((time.time() - _t_proc) * 1000.0)
         processed_counter += 1
+        # 連続保存を始めなかった対戦は、対戦ファイルを閉じる前 (battle_log.on_frame が次の対戦へ切り替える前) に理由を書く
+        if DUMP_FRAMES and _burst.is_new_battle(state.get("battle_seq")):
+            _write_burst_skipped(time.time())
         battle_log.on_frame(state, fired)
         spread_tracker.on_frame(state, fired)   # 相手の型推定 (先後/ダメージ観測)
         if DUMP_FRAMES:
             _b = _burst.on_processed(state.get("scene"), state.get("battle_seq"), time.time())
             if _b:
-                print(f"[server] 連続保存を開始: {BURST_DIR / _b['id']} ({_burst.seconds:.0f} 秒、{_burst.started}/{_burst.count} 回目)")
+                print(f"[server] 連続保存を開始: {BURST_DIR / _b['id']} ({_burst.seconds:.0f} 秒、{_burst.started}/{_burst.count} 回目、"
+                      f"{_b['reason']})")
                 battle_log.on_frame_burst({"dir": str(BURST_DIR / _b["id"]), "t_start": _b["t_start"],
-                                           "seconds": _burst.seconds, "n": _burst.started})
+                                           "seconds": _burst.seconds, "n": _burst.started, "reason": _b["reason"],
+                                           "battle_seq": _b["battle_seq"], "battle_index": _b["battle_index"]})
         # 勝敗を推定・不明で記録した後にレートが読めて推定が変わったら、助言欄に出す (2026-10-06 第18回)
         _rev = outcome_revision_notice(battle_log.pop_revision())
         if _rev:
@@ -359,7 +432,8 @@ async def _handle_one_frame(sid, data):
                   f"救出={rs['stashed']}/OCR{rs['ocr']}/発火{rs['events']} "
                   f"events={len(state['events'])} "
                   f"処理時間 p50={_pct(_proc_ms, 50):.0f}ms p95={_pct(_proc_ms, 95):.0f}ms "
-                  f"助言 p50={_pct(_advise_ms, 50):.0f}ms max={max(_advise_ms) if _advise_ms else 0:.0f}ms")
+                  f"助言 p50={_pct(_advise_ms, 50):.0f}ms max={max(_advise_ms) if _advise_ms else 0:.0f}ms "
+                  f"可視状態 隠れ={hidden_counter} 可視={visible_counter} 不明={unknown_counter}")
 
         if fired:
             for f in fired:
@@ -495,6 +569,16 @@ async def _handle_one_frame(sid, data):
 _end_notice_seq = None   # 対戦終了の通知 (vision.end_notice.battle_end_notice) を出した battle_seq (1 対戦 1 回)
 
 
+def _write_burst_skipped(now: float) -> None:
+    """いまの対戦で連続保存を始めなかったなら、理由つきの frame_burst 行 (skipped) を書く (DEBUG_DUMP_FRAMES=1 のときだけ呼ぶ)"""
+    try:
+        sk = _burst.on_battle_end(now)
+        if sk:
+            battle_log.on_frame_burst(sk)
+    except Exception as e:
+        print(f"[server] 連続保存の記録に失敗: {e}")
+
+
 async def _write_selection_record(advice_id: str, advice: dict, state: dict) -> None:
     """選出の助言を送った後に、記録用の欄を executor で計算して selection_record 行に書く (失敗しても助言は止めない)"""
     try:
@@ -524,7 +608,9 @@ def _selection_record_extra(advice: dict, state: dict) -> dict:
 
 @app.on_event("shutdown")
 async def _on_shutdown():
-    """サーバー停止時に、開いている対戦の終わりの行 (frames / opp_picks / guess_confirm) を書く (2026-10-07 段 0)"""
+    """サーバー停止時に、開いている対戦の終わりの行 (frames / opp_picks / guess_confirm、連続保存の skipped) を書く (2026-10-07 段 0)"""
+    if DUMP_FRAMES and battle_log.file_open:
+        _write_burst_skipped(time.time())
     try:
         battle_log.close()
     except Exception as e:
