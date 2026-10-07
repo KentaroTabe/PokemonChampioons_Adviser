@@ -1105,8 +1105,8 @@ DMG_COMPARE_MAX_TURNS = 60                # 1 戦の上限ターン (無限に�
 DMG_COMPARE_ENGINE_WORKERS = 1            # 合法手の確認で助言エンジンを回すときの探索の並列数 (advisor.engine.SEARCH_WORKERS)
 # ダメージ計算 (advisor.damage.calc_damage) を Showdown と同じ整数の計算 (威力・実数値・最終補正の 4096 分率の倍率、各段階の切り捨て、
 # 乱数 85〜100 の 16 通り) にするか (2026-10-07 fix/engine-correctness、計画 §10 の F)。False は従来の小数の計算 (乱数幅 0.85〜1.00 を
-# 連続とみなし、切り捨てなし)。True で既存テストのダメージの数値の期待値が変わるため、承認されるまで False (補正値は advisor/data/damage_modifiers.json)
-DAMAGE_INTEGER_ROUNDING = False
+# 連続とみなし、切り捨てなし)。2026-10-07 判断 11 (ユーザー承認) で既定 True。test_effects の期待値は Showdown の計算順を再現した参照値に変更 (補正値は advisor/data/damage_modifiers.json)
+DAMAGE_INTEGER_ROUNDING = True     # 2026-10-07 判断 11: 既定 ON (照合 200 手で 91/91。連続技の 1 発ごとの威力変化などは期待値による近似が残る)
 # 局面の標本 (tools/scene_samples、§2 の 3 種): 1 回の接続テストから取る件数、時刻抽出の間隔、
 # 保存フレームと時刻の対応の許容 (保存は約 10 秒おき)、助言を「その時刻の画面の助言」とみなす最大の経過秒、
 # シーン判定に依存しない保存フレームの接頭辞 (server.py の frame_。sel_ / fc_ はシーン判定で保存される)

@@ -74,10 +74,30 @@ def test_pure_evaluators():
 
 def test_damage_integration():
     garchomp = _view("garchomp", {"hp": 252})
-    # 従来と同じ値 (ミミッキュ A252 いじっぱり 珠 じゃれつく → ガブリアス H252): min 85.9 / max 101.1、expected は命中 90% 込み
+    # ミミッキュ A252 いじっぱり 珠 じゃれつく → ガブリアス H252。期待値は Showdown の計算順をここで独立に再現した参照値
+    # (2026-10-07 判断 11: 従来は小数の計算の保存値 min 85.9 / max 101.1 / avg 93.5 だった。整数の計算 (DAMAGE_INTEGER_ROUNDING) を
+    # 既定にしたので、段ごとの切り捨てで max が 100% を切る (「最大で 1 発」の判定が消える)。照合 200 手で整数の側が実ダメージと一致)
     mimi = _view("mimikyu", {"atk": 252}, {"atk": 1.1}, item="lifeorb", ability="disguise")
     d = calc_damage(mimi, garchomp, "playrough")
-    assert (d["min"], d["max"], d["avg"]) == (85.9, 101.1, 93.5) and abs(d["expected"] - 93.5 * 0.9) < 0.15 and d["accuracy"] == 90.0
+    atk = int(((2 * 90 + 31 + 63) * 50 // 100 + 5) * 1.1)            # 156 (いじっぱり)
+    dfn = (2 * 95 + 31) * 50 // 100 + 5                                # 115 (D 無振り、補正なし)
+    hp_max = (2 * 108 + 31 + 63) * 50 // 100 + 60                      # 215
+    base = (2 * 50 // 5 + 2) * 90 * atk // dfn // 50 + 2               # 55
+    def _mod(x, num, den=4096):                                       # Showdown の modify (五捨五超入)
+        v = x * num / den
+        return int(v) if v - int(v) <= 0.5 else int(v) + 1
+    rolls = []
+    for r in range(85, 101):
+        v = base * r // 100
+        v = _mod(v, 6144)                                              # タイプ一致 1.5
+        v = v * 2                                                      # フェアリー → ドラゴン ×2 (じめん ×1)
+        v = _mod(v, 5324)                                              # いのちのたま 5324/4096
+        rolls.append(v)
+    ref_min, ref_max, ref_avg = rolls[0] / hp_max * 100, rolls[-1] / hp_max * 100, sum(rolls) / 16 / hp_max * 100
+    assert hp_max == garchomp.max_hp(), (hp_max, garchomp.max_hp())
+    assert (rolls[0], rolls[-1]) == (179, 213), rolls                   # 83.3% / 99.1%
+    assert abs(d["min"] - ref_min) < 0.06 and abs(d["max"] - ref_max) < 0.06 and abs(d["avg"] - ref_avg) < 0.06, (d, rolls)
+    assert d["max"] < 100.0 and abs(d["expected"] - d["avg"] * 0.9) < 0.15 and d["accuracy"] == 90.0, d
     # 条件つき技: アイアンローラーはフィールドが無いと 0、あれば通る
     exca = _view("excadrill", {"atk": 252})
     assert calc_damage(exca, garchomp, "steelroller")["avg"] == 0.0
