@@ -150,6 +150,37 @@ def test_split_independence_pure():
     print("test_split_independence_pure OK")
 
 
+def test_similar_pair_details():
+    """判断 10: 別メガ軸の似た組の 1 組ごとの集計 (構築 id・重み・型の共通性)。種・型の名前は出さない"""
+    doc = _split_doc()
+    h0 = doc["tiers"]["holdout"][0]
+    doc["teams"]["tx"] = dict(doc["teams"][h0], mega="s0")
+    doc["tiers"]["search"].append("tx")
+    doc["search_folds"][0].append("tx")
+    doc["families"].append({"family_id": "FX", "tier": "search", "teams": ["tx"]})
+    sp = doc["teams"][h0]["species"]
+    text_h = "\n\n".join(f"{s} @ Leftovers\nAbility: Pressure\n- Protect\n- Tackle\n- Growl\n- Ember" for s in sp)
+    text_x = "\n\n".join(f"{s} @ {'Leftovers' if i < 2 else 'Life Orb'}\nAbility: Pressure\n- Protect\n- Tackle\n- Surf\n- Ember"
+                         for i, s in enumerate(sp))
+    doc["texts"] = {h0: text_h, "tx": text_x}
+    pairs = SP.similar_pair_details(doc, scope="tier")
+    p = next(x for x in pairs if {x["a"]["team_id"], x["b"]["team_id"]} == {h0, "tx"})
+    assert p["jaccard"] == 1.0 and p["same_mega"] is False, p
+    assert p["type"] == {"common_species": 6, "common_moves": 18, "moves_compared": 24, "same_item": 2, "same_ability": 6}, p["type"]
+    side = p["a"] if p["a"]["team_id"] == "tx" else p["b"]
+    n_search = len(doc["tiers"]["search"])
+    assert side["group"] == "search" and side["family_id"] == "FX" and side["family_size"] == 1, side
+    assert abs(side["measure_share"] - round(1 / n_search, 5)) < 1e-9 and side["family_share"] == side["measure_share"], side
+    # 中身 (種の名前) は行に入らない
+    assert not any(s in json.dumps(p) for s in sp), p
+    # 同じメガ軸の組は既定で外す。fold をまたぐ組は fold の群で数える
+    assert all(x["same_mega"] is False for x in pairs)
+    assert all(x["a"]["group"].startswith("fold") for x in SP.similar_pair_details(doc, scope="fold"))
+    txt = SP.format_similar_pairs(pairs, "層をまたぐ別メガ軸の似た組")
+    assert "tx" in txt and f"{len(pairs)} 組" in txt, txt
+    print("test_similar_pair_details OK")
+
+
 def test_cross_run_and_selection():
     a, b = _split_doc(), _split_doc()
     b["run_id"] = "r2"
@@ -204,6 +235,7 @@ def main() -> None:
     test_file_roundtrip_and_repin()
     test_freshness_with_db()
     test_split_independence_pure()
+    test_similar_pair_details()
     test_cross_run_and_selection()
     test_check_splits_files()
     print("ALL OK")

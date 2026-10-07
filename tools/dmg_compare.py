@@ -12,12 +12,18 @@ simulate-battle (乱数の seed を固定) で対戦を回し、Showdown の対�
                   Showdown の値をそのまま使う (助言側の型の推定はここでは確かめない)
   order           優先度と素早さ順: 両者が技を選んだターンの先に動いた側と、助言側の予測 (advisor.search._priority の優先度 →
                   advisor.engine.effective_speed の素早さ (おいかぜ込み) → トリックルームで反転) が一致するか。同速・せんせいのツメ等は未確認
-  incapacitation  行動不能 (まひ・ねむり・こおり・ひるみ): Showdown で起きた行動不能について、助言側の探索 (advisor.search.simulate_turn)
-                  がその状態の行動不能を扱っているか (同じ状況で行動できなくなるか) を一致とする
+  incapacitation  行動不能 (まひ・ねむり・こおり・ひるみ): **局面ごとの一致ではなく「未対応の行動不能に遭遇した件数」**。
+                  Showdown で起きた行動不能 1 件ごとに、その種類 (まひ / ねむり / こおり / ひるみ) を助言側の探索
+                  (advisor.search.simulate_turn) が扱っているか (incapacitation_model: 同じ 1 ターンを状態だけ変えて与ダメージが減るか)
+                  を見る。判定は種類ごとに 1 つなので、件数は「その種類の行動不能に何回遭遇したか」を表し、助言がその局面で正しかったかは表さない。
+                  表の欄: unhandled_encounters (未対応の種類に遭遇した件数 = 旧 mismatch) / handled_encounters (= 旧 match) /
+                  encounters (= 旧 checked)
   forme           形態遷移 (メガシンカ・フォルムチェンジ): 変化の後の実数値 (Showdown の request の stats) と特性が、助言側の図鑑
                   (advisor.dex の種族値 + 型の能力ポイント・性格) と vision.abilities.fixed_ability の特性に一致するか
-  activation      特性と持ち物の発動: 発動ログ ([from] ability / item、-activate、-enditem 等) の特性・持ち物が助言側の表
-                  (advisor/data/ability_effects.json の式、item_effects.json、damage.py / engine.py が扱う持ち物) にあるか
+  activation      特性と持ち物の発動: **発動の前提が一致したかではなく「対応記述の有無」**。発動ログ ([from] ability / item、
+                  -activate、-enditem 等) に出た特性・持ち物の種類ごとに、助言側の表 (advisor/data/ability_effects.json の式、
+                  item_effects.json、damage.py / engine.py が名前で扱う持ち物) に記述があるかを見る (効果の量や発動条件が正しいかは見ない)。
+                  表の欄: described (記述あり = 旧 match) / not_described (記述なし = 旧 mismatch) / kinds (発動した種類 = 旧 checked)
   legal           合法手: p1 の決定ごとに助言エンジン (advisor.engine.evaluate) を回し、第一候補が Showdown の request で選べる行動か
 
 両者の行動は seed を固定した乱数で選ぶ (自発の交代・メガシンカは DMG_COMPARE_SWITCH_PROB / DMG_COMPARE_MEGA_PROB)。チームは
@@ -51,6 +57,11 @@ RUNS_DIR = REPO / "logs" / "build_search" / "runs"
 CATEGORIES = ("damage", "order", "incapacitation", "forme", "activation", "legal")
 CATEGORY_JA = {"damage": "ダメージ", "order": "優先度と素早さ順", "incapacitation": "行動不能 (まひ・ねむり・こおり・ひるみ)",
                "forme": "形態遷移 (メガ・フォルム)", "activation": "特性と持ち物の発動", "legal": "合法手"}
+# 局面ごとの一致ではない欄 (2026-10-07 レビュー): 表示の見出しと --json の別名のキー
+CATEGORY_MEASURE_JA = {"incapacitation": "未対応の行動不能に遭遇した件数", "activation": "対応記述の有無"}
+# confirm_table の別名 (新しいキー → 旧キー)。旧キーも残す
+TABLE_ALIASES = {"incapacitation": {"unhandled_encounters": "mismatch", "handled_encounters": "match", "encounters": "checked"},
+                 "activation": {"described": "match", "not_described": "mismatch", "kinds": "checked"}}
 SIDES = ("p1", "p2")
 STAT_KEYS = ("atk", "def", "spa", "spd", "spe")
 _EV_KEYS = {"HP": "hp", "Atk": "atk", "Def": "def", "SpA": "spa", "SpD": "spd", "Spe": "spe"}
@@ -707,6 +718,8 @@ def incapacitation_model() -> dict:
 
 
 def judge_incapacitation(o: dict, model: dict) -> dict:
+    """Showdown で起きた行動不能 1 件 (o) について、その種類を助言側の探索が扱うか (model、種類ごとに 1 つの判定)。
+    match=False は「未対応の行動不能に遭遇した」1 件で、その局面の助言が誤っていたことは意味しない (局面ごとの照合ではない)"""
     ok = bool(model.get(o["reason"]))
     return {"turn": o["turn"], "side": o["side"], "species": o["species"], "reason": o["reason"], "match": ok,
             "note": "" if ok else "助言側の探索はこの行動不能を扱わない (同じ状況で行動できる前提)"}
@@ -768,7 +781,8 @@ def _source_text(rel: str) -> str:
 
 
 def advisor_knows(kind: str, ident: str) -> bool:
-    """助言側の表にその特性・持ち物の効果があるか。特性: ability_effects.json の式 (formula) か damage.py の従来の辞書。
+    """助言側の表にその特性・持ち物の対応記述があるか (有無だけ。効果の中身の正しさは見ない)。
+    特性: ability_effects.json の式 (formula) か damage.py の従来の辞書。
     持ち物: item_effects.json (activation / on_damaging_move) か、damage.py / engine.py が名前で扱っているもの"""
     from advisor import effects as E
     from advisor.dex import _item_effects
@@ -782,6 +796,8 @@ def advisor_knows(kind: str, ident: str) -> bool:
 
 
 def judge_activation(o: dict) -> dict:
+    """発動した特性・持ち物 1 件 (o) について、助言側の表に対応記述があるか (advisor_knows)。
+    match は「対応記述の有無」で、発動の前提 (効果の量・条件) が Showdown と一致したかは見ない"""
     ok = advisor_knows(o["kind"], o["id"])
     return {"turn": o["turn"], "kind": o["kind"], "id": o["id"], "species": o["species"], "match": ok,
             "note": "" if ok else "助言側の表に効果が無い"}
@@ -818,7 +834,10 @@ def judge_all(obs: dict, model: Optional[dict] = None, tol_hp: float = DMG_COMPA
 
 def confirm_table(rows: dict) -> dict:
     """対象別の確認表 (純粋): {category: {"match", "checked", "unconfirmed", "mismatch"}}。checked = 一致 + 不一致、
-    unconfirmed = 対象外・判定できなかった行。観測が 0 の欄は unconfirmed も 0 で、表示側で「未観測」とする"""
+    unconfirmed = 対象外・判定できなかった行。観測が 0 の欄は unconfirmed も 0 で、表示側で「未観測」とする。
+    行動不能と発動は局面ごとの一致ではないので、意味に合う別名のキー (TABLE_ALIASES) も足す (旧キーも残す。計算は同じ):
+      incapacitation: unhandled_encounters (未対応の行動不能に遭遇した件数) / handled_encounters / encounters
+      activation    : described (対応記述あり) / not_described (記述なし) / kinds (発動した種類)"""
     out = {}
     for cat in CATEGORIES:
         rs = rows.get(cat) or []
@@ -828,17 +847,31 @@ def confirm_table(rows: dict) -> dict:
         m = sum(1 for r in rs if r.get("match") is True)
         mm = sum(1 for r in rs if r.get("match") is False)
         out[cat] = {"match": m, "checked": m + mm, "mismatch": mm, "unconfirmed": sum(1 for r in rs if r.get("match") is None)}
+        for new_key, old_key in (TABLE_ALIASES.get(cat) or {}).items():
+            out[cat][new_key] = out[cat][old_key]
     return out
+
+
+def _table_line(cat: str, r: dict) -> str:
+    """確認表の 1 行。行動不能・発動は一致数 / 確認数ではなく、その欄の意味の言い方で出す"""
+    note = " (この実行では観測なし)" if r["checked"] + r["unconfirmed"] == 0 else ""
+    if cat == "incapacitation":
+        return (f"  {CATEGORY_JA[cat]} — {CATEGORY_MEASURE_JA[cat]}: {r['mismatch']} / 遭遇 {r['checked']}"
+                f" (助言側が扱う種類 {r['match']}) / 未確認 {r['unconfirmed']}{note}")
+    if cat == "activation":
+        return (f"  {CATEGORY_JA[cat]} — {CATEGORY_MEASURE_JA[cat]}: 記述あり {r['match']} / 発動した種類 {r['checked']}"
+                f" (記述なし {r['mismatch']}) / 未確認 {r['unconfirmed']}{note}")
+    rate = f" ({r['match'] / r['checked']:.0%})" if r["checked"] else ""
+    return f"  {CATEGORY_JA[cat]:<28s} {r['match']} / {r['checked']}{rate} / 未確認 {r['unconfirmed']}{note}"
 
 
 def format_report(res: dict, n_moves: int, n_battles: int, para: Optional[dict] = None, limit: int = 20) -> str:
     t = res["table"]
-    lines = [f"ダメージ照合: Showdown simulate-battle {n_battles} 戦 / {n_moves} 手", "", "対象別の確認表 (一致数 / 確認数 / 未確認):"]
+    lines = [f"ダメージ照合: Showdown simulate-battle {n_battles} 戦 / {n_moves} 手", "",
+             "対象別の確認表 (一致数 / 確認数 / 未確認。行動不能は「未対応の行動不能に遭遇した件数」、発動は「対応記述の有無」で、"
+             "局面ごとの一致ではない):"]
     for cat in CATEGORIES:
-        r = t[cat]
-        note = " (この実行では観測なし)" if r["checked"] + r["unconfirmed"] == 0 else ""
-        rate = f" ({r['match'] / r['checked']:.0%})" if r["checked"] else ""
-        lines.append(f"  {CATEGORY_JA[cat]:<28s} {r['match']} / {r['checked']}{rate} / 未確認 {r['unconfirmed']}{note}")
+        lines.append(_table_line(cat, t[cat]))
     st = res.get("stats") or []
     sm = sum(1 for r in st if r.get("match") is True)
     sc = sum(1 for r in st if r.get("match") is not None)
@@ -863,7 +896,8 @@ def format_report(res: dict, n_moves: int, n_battles: int, para: Optional[dict] 
         if cat in ("activation", "incapacitation"):
             keyf = (lambda r: f"{r['kind']}:{r['id']}") if cat == "activation" else (lambda r: r["reason"])
             cnt = Counter(keyf(r) for r in bad)
-            lines += ["", f"不一致の一覧: {CATEGORY_JA[cat]} ({len(bad)} 行): " + ", ".join(f"{k} {v} 回" for k, v in cnt.most_common())
+            head = "未対応の行動不能に遭遇した一覧" if cat == "incapacitation" else "対応記述の無い発動の一覧"
+            lines += ["", f"{head}: {CATEGORY_JA[cat]} ({len(bad)} 行): " + ", ".join(f"{k} {v} 回" for k, v in cnt.most_common())
                       + f" / {bad[0].get('note', '')}"]
             continue
         lines += ["", f"不一致の一覧: {CATEGORY_JA[cat]} ({len(bad)} 件、先頭 {min(limit, len(bad))} 件)"]
@@ -1214,7 +1248,8 @@ def main() -> None:
     print(f"\n所要 {time.time() - t0:.0f} 秒 / チームの元 {split} (層 {DMG_COMPARE_TEAM_TIER}) / seed {args.seed}")
     if args.json:
         Path(args.json).parent.mkdir(parents=True, exist_ok=True)
-        Path(args.json).write_text(json.dumps({"table": res["table"], "rows": res["rows"], "stats": res["stats"], "model": res["model"],
+        Path(args.json).write_text(json.dumps({"table": res["table"], "table_measures": CATEGORY_MEASURE_JA,
+                                               "rows": res["rows"], "stats": res["stats"], "model": res["model"],
                                                "battles": out["battles"], "para": out["para"], "n_moves": out["n_moves"],
                                                "seed": args.seed, "teams_from": str(split)},
                                               ensure_ascii=False, indent=1, default=list), encoding="utf-8")

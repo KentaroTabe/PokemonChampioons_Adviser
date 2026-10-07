@@ -1064,6 +1064,31 @@ BUILD_PROTOCOL_VERSION = "1"
 # ブラウザとサーバーの時計がずれている (時計差) として、ブラウザの時計で測った表示までの遅れを判定不能にする。
 # 10/6〜10/7 の実測は −0.004〜+0.10 秒 (送信の遅れ込み)
 DECISION_AUDIT_CLOCK_SKEW_SEC = 1.0
+# 決定監査の閾値 (2026-10-07 判断 7・8 で tools/decision_audit のモジュール定数から移した。値は従来どおり):
+#   LATE_SEC     … 決定画面が開いてから助言が出るまでの許容秒数 = 「期限」。生成の遅延の判定と、有効な助言が期限内に表示されたかの両方に使う
+#   HEAVY_SWING  … 「大きな失点」として監査対象に挙げる HP 差分スイングの閾値 (%)
+#   PAIR_WINDOW_SEC … 助言と行動の紐付け上限秒 (review_battle と同じ値)。前の決定の助言を「流用」とみなす上限にも使う
+DECISION_AUDIT_LATE_SEC = 10.0
+DECISION_AUDIT_HEAVY_SWING = -25.0
+DECISION_AUDIT_PAIR_WINDOW_SEC = 60.0
+# 判断 7 (2026-10-07): 助言が「決定時の状態に有効」か (助言の state と、決定画面の最後の観測 (scene 行・助言の行) の state の比較)。
+#   USE_STATE_ID … 助言の state_id (battle_logger.state_digest) と観測の digest が同じなら有効
+#   POSITION_KEYS … state_id が違うときに比べる局面の項目。どれか 1 つでも両方読めていて食い違えば「無効」
+#                   (turn は行の turn、*_active は場の種 id、*_remaining は残り体数、*_active_hp は場の HP %)
+#   POSITION_REQUIRED … 食い違いが無く、これらが両方読めていれば「有効」。読めなければ判定不能
+#   POSITION_HP_TOL … 場の HP % の差がこれ以内なら同じ局面とみなす (読み取りの揺れ)
+DECISION_AUDIT_STATE_MATCH_USE_STATE_ID = True
+DECISION_AUDIT_POSITION_KEYS = ("turn", "player_active", "opponent_active", "player_remaining", "opponent_remaining",
+                                "player_active_hp", "opponent_active_hp")
+DECISION_AUDIT_POSITION_REQUIRED = ("player_active", "opponent_active")
+DECISION_AUDIT_POSITION_HP_TOL = 5.0
+# 判断 8・9 (2026-10-07): display の行が無い助言を「表示経路の欠陥」(画面に出なかった) と確認する条件。
+# その助言より後に生成された別の助言が、その助言の生成からこの秒数以内に、隠れていないページで表示された (サーバーの受信時刻) とき。
+# ページが見えていて通知も届いていたので、描画待ち (隠れたタブで requestAnimationFrame が止まる) では説明できない。
+# 確認できなければ「表示未確認」(display_unconfirmed) とし、欠陥にも成功にも数えない (decision_audit / scene_eval で共通)
+DISPLAY_DEFECT_CONFIRM_SEC = 30.0
+# 局面集 (tools/scene_eval.classify): 助言の前後この秒数に手動修正 (manual_fix) があれば hp_stuck (従来の値。モジュール内の定数から移した)
+SCENE_EVAL_MANUAL_FIX_WINDOW_SEC = 30.0
 # ダメージ照合 (tools/dmg_compare): ローカル Showdown の simulate-battle (乱数の seed 固定) で回す手数 (|move| の行の数)、
 # 実ダメージを乱数幅に入っているとみなす許容 (HP の整数への丸め。助言側は % を 0.1 刻みで返す)、
 # 乱数で選ぶ行動の確率 (自発の交代・メガシンカ)、両者のチームを取る層 (封印した holdout は使わない)

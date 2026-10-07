@@ -23,9 +23,12 @@ import json
 from pathlib import Path
 from typing import Optional
 
+from champions_agent.config import DECISION_AUDIT_LATE_SEC
+
 REPO = Path(__file__).resolve().parent.parent
 BATTLE_DIR = REPO / "logs" / "battles"
-LATE_SEC = 10.0
+# 表示が遅いとみなす秒数。決定監査の期限 (DECISION_AUDIT_LATE_SEC、既定 10.0) と同じ値を共有する
+LATE_SEC = DECISION_AUDIT_LATE_SEC
 
 
 # ------------------------------------------------------------------ 読み込み

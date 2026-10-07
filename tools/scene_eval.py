@@ -5,7 +5,8 @@
     python -m tools.scene_eval evaluate --set logs/scenes/set1.jsonl [--json]
 
 局面集の 1 行 (JSONL):
-  {"scene_id": "s001", "category": "consistent"|"hp_stuck"|"advice_stop"|"late"|"stale"|"other",
+  {"scene_id": "s001", "category": "consistent"|"hp_stuck"|"advice_stop"|"late"|"stale"|"display_unconfirmed"|"display_hidden"
+                                   |"display_unknown"|"other",   (display_* は表示の判定不能。classify を参照)
    "source": {"file": 対戦ログ, "advice_id": ..., "t": 生成時刻, "turn": ...},
    "system_state": {助言が見た簡約状態 (battle_logger._compact_state)},
    "system_advice": {"kind", "id", "name"},                     # 当時の推奨 (ログの記録)
@@ -32,13 +33,28 @@ import os
 from pathlib import Path
 from typing import Optional
 
+from champions_agent.config import DISPLAY_DEFECT_CONFIRM_SEC, SCENE_EVAL_MANUAL_FIX_WINDOW_SEC
 from tools.advice_trace import LATE_SEC, display_rows, feasible_in_state, load_records
+from tools.decision_audit import (
+    DISPLAY_DEFECT, DISPLAY_HIDDEN, DISPLAY_SHOWN, DISPLAY_UNCONFIRMED, _display_index, advice_display_state)
+from vision.scenes import SCENE_COMMAND, SCENE_FIELD_CHECK, SCENE_MOVE_SELECT, SCENE_STANDBY, SCENE_WATCH
 
 REPO = Path(__file__).resolve().parent.parent
 BATTLE_DIR = REPO / "logs" / "battles"
 SCENES_DIR = REPO / "logs" / "scenes"
-CATEGORIES = ("consistent", "hp_stuck", "advice_stop", "late", "stale", "other")
+# 表示の判定不能の分類 (判断 9、2026-10-07): 失敗 (FAILURE_CATEGORIES) にも整合にも数えない
+#   display_unknown     … ログに display の行が 1 つも無い (表示記録に未対応のログ) か advice_id が無い
+#   display_unconfirmed … display の行はあるがこの助言の行が無く、表示経路の欠陥とも確認できない (decision_audit.advice_display_state)
+#   display_hidden      … 隠れたタブで受け取っただけ (描画されていない)
+# advice_stop は「表示経路の欠陥と確認できた」(display_defect) 助言だけ
+CATEGORY_DISPLAY_UNKNOWN = "display_unknown"
+CATEGORY_DISPLAY_UNCONFIRMED = "display_unconfirmed"
+CATEGORY_DISPLAY_HIDDEN = "display_hidden"
+CATEGORIES = ("consistent", "hp_stuck", "advice_stop", "late", "stale", CATEGORY_DISPLAY_UNCONFIRMED, CATEGORY_DISPLAY_HIDDEN,
+              CATEGORY_DISPLAY_UNKNOWN, "other")
 FAILURE_CATEGORIES = ("hp_stuck", "advice_stop", "late", "stale")
+DECISION_SCENES = (SCENE_COMMAND, SCENE_MOVE_SELECT)
+INFO_SCENES = (SCENE_WATCH, SCENE_FIELD_CHECK, SCENE_STANDBY)
 
 
 # ------------------------------------------------------------------ 切り出し (純粋)
@@ -50,29 +66,50 @@ def decision_windows(records: list) -> list:
         if d.get("type") != "scene":
             continue
         sc = d.get("scene")
-        if sc in ("command", "move_select"):
+        if sc in DECISION_SCENES:
             if open_ is None:
                 open_ = {"t_open": d.get("t"), "turn": d.get("turn")}
                 out.append(open_)
-        elif sc in ("watch", "field_check", "standby"):
+        elif sc in INFO_SCENES:
             continue
         else:
             open_ = None
     return out
 
 
-def classify(advice_rec: dict, records: list, disp_row: Optional[dict], late_sec: float = LATE_SEC) -> str:
-    """助言の行 1 つの分類 (純粋): 手動修正が ±30 秒にあれば hp_stuck、表示が無ければ advice_stop、表示が遅ければ late、
-    古い状態への表示なら stale、それ以外は consistent"""
+def _t_gen_of(records: list) -> dict:
+    return {d["advice_id"]: ((d.get("advice") or {}).get("t_gen") or d.get("t"))
+            for d in records if d.get("type") == "advice" and d.get("advice_id")}
+
+
+def _near_manual_fix(advice_rec: dict, records: list, window_sec: float) -> bool:
     t = float(advice_rec.get("t") or 0)
-    for d in records:
-        if d.get("type") == "manual_fix" and abs(float(d.get("t") or 0) - t) <= 30.0:
-            return "hp_stuck"
-    if disp_row is None or not disp_row.get("displayed"):
-        return "advice_stop"
-    if disp_row.get("stale") is True:
+    return any(d.get("type") == "manual_fix" and abs(float(d.get("t") or 0) - t) <= window_sec for d in records)
+
+
+def classify(advice_rec: dict, records: list, disp_row: Optional[dict], late_sec: float = LATE_SEC,
+             display_index: Optional[dict] = None, t_gen_of: Optional[dict] = None,
+             confirm_sec: float = DISPLAY_DEFECT_CONFIRM_SEC,
+             manual_fix_window_sec: float = SCENE_EVAL_MANUAL_FIX_WINDOW_SEC) -> str:
+    """助言の行 1 つの分類 (純粋)。判断 9 (2026-10-07) で表示の判定を decision_audit と共通にした:
+      1. 手動修正が ±manual_fix_window_sec 秒にあれば hp_stuck
+      2. 表示の状態 (decision_audit.advice_display_state): display の行が 1 つも無いログ → display_unknown /
+         隠れたタブ → display_hidden / 行が無く欠陥と確認できない → display_unconfirmed /
+         表示経路の欠陥と確認 (後に生成された助言が confirm_sec 以内に見えるページで表示された) → advice_stop
+      3. 表示された助言: 古い状態への表示なら stale、表示が遅ければ late、それ以外は consistent
+    display_index / t_gen_of は同じログで何度も呼ぶときの使い回し用 (省略時は records から作る)"""
+    if _near_manual_fix(advice_rec, records, manual_fix_window_sec):
+        return "hp_stuck"
+    idx = display_index if display_index is not None else _display_index(records)
+    tg = t_gen_of if t_gen_of is not None else _t_gen_of(records)
+    aid = advice_rec.get("advice_id") or (advice_rec.get("advice") or {}).get("advice_id")
+    state = advice_display_state(aid, tg, idx, confirm_sec)
+    if state != DISPLAY_SHOWN:
+        return {DISPLAY_HIDDEN: CATEGORY_DISPLAY_HIDDEN, DISPLAY_UNCONFIRMED: CATEGORY_DISPLAY_UNCONFIRMED,
+                DISPLAY_DEFECT: "advice_stop"}.get(state, CATEGORY_DISPLAY_UNKNOWN)
+    if disp_row is not None and disp_row.get("stale") is True:
         return "stale"
-    if disp_row.get("latency") is not None and disp_row["latency"] > late_sec:
+    if disp_row is not None and disp_row.get("latency") is not None and disp_row["latency"] > late_sec:
         return "late"
     return "consistent"
 
@@ -96,9 +133,15 @@ def pick_scenes(candidates: list, n_consistent: int, n_failure: int, seed: int =
     return chosen + fails
 
 
-def extract_candidates(path, records: list, late_sec: float = LATE_SEC) -> list:
-    """1 対戦ログ → 局面の候補 (battle の助言、provisional を除く) に category を付ける"""
+def extract_candidates(path, records: list, late_sec: float = LATE_SEC, classifier=None) -> list:
+    """1 対戦ログ → 局面の候補 (battle の助言、provisional を除く) に category を付ける。
+    classifier: 分類の関数 (省略時は classify。表示の索引をログごとに 1 回だけ作って渡す)"""
     disp = {r["advice_id"]: r for r in display_rows(records)}
+    if classifier is None:
+        idx, tg = _display_index(records), _t_gen_of(records)
+
+        def classifier(d, recs, row, ls):   # noqa: E306
+            return classify(d, recs, row, ls, display_index=idx, t_gen_of=tg)
     out = []
     for d in records:
         if d.get("type") != "advice" or d.get("kind") != "battle" or not d.get("advice_id") or not d.get("state"):
@@ -107,7 +150,7 @@ def extract_candidates(path, records: list, late_sec: float = LATE_SEC) -> list:
         if adv.get("provisional"):
             continue
         best = adv.get("best") or ((adv.get("actions") or [None])[0])
-        out.append({"category": classify(d, records, disp.get(d["advice_id"]), late_sec),
+        out.append({"category": classifier(d, records, disp.get(d["advice_id"]), late_sec),
                     "source": {"file": Path(path).name, "advice_id": d["advice_id"], "t": adv.get("t_gen") or d.get("t"), "turn": d.get("turn"),
                                "version_id": d.get("version_id"), "state_id": d.get("state_id")},
                     "system_state": d.get("state"),
