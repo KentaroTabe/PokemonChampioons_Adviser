@@ -102,6 +102,8 @@ def test_frame_row_no_advice_label():
     row2 = SS.frame_row("battle_a.jsonl", recs, "frame_1012.png", 1012.0, SS.KIND_FRAME_SCENE,
                         {"A2": {"advice_id": "A2", "displayed": True, "latency": 0.1, "stale": False}})
     assert row2["category"] == "consistent" and row2["source"]["advice_id"] == "A2" and row2["system_advice"]["id"] == "earthquake", row2
+    # 判断 9 (2026-10-07) の規則でも advice_stop のまま: A1 (選出、1001 生成) の display の行は無く、後に生成された A2 が
+    # 30 秒以内 (1011.15) に隠れていないページで表示されているので、表示経路の欠陥と確認できる
     row3 = SS.frame_row("battle_a.jsonl", recs, "sel_1002.png", 1002.0, SS.KIND_FRAME_SCENE, {})
     assert row3["system_advice"] == {"kind": "selection", "recommend": ["ガブリアス"]} and row3["category"] == "advice_stop", row3
     print("test_frame_row_no_advice_label OK")
@@ -133,15 +135,16 @@ def test_build_samples_counts_and_determinism():
 
 
 def test_logs_without_display_rows():
-    """display の行が無いログ (表示の記録の前) では advice_stop は「表示されなかった」の意味にならないので固定失敗の候補から外す"""
+    """display の行が無いログ (表示の記録の前) の助言は表示の判定不能 (display_unknown) で、固定失敗の候補に入らない"""
     recs = [r for r in _battle(3000.0) if r.get("type") != "display"]
     res = SS.build_samples([("battle_c.jsonl", recs)], [], seed=1, n_fixed=3, n_advice=10, n_frame=0)
     fixed = [r for r in res["rows"] if r["source"]["kind"] == SS.KIND_FIXED_FAILURE]
     assert fixed and all(r["category"] == "hp_stuck" for r in fixed), [r["category"] for r in fixed]
     assert all(r["source"]["display_logged"] is False for r in res["rows"])
-    # 無作為抽出 (2a) は成否に関係なく全部から取る (advice_stop も残る)
+    # 無作為抽出 (2a) は成否に関係なく全部から取る (表示の判定不能も残る)。display の行が無いログの助言は display_unknown
+    # (判断 9、2026-10-07: 表示記録に未対応のログでは判定不能とする。旧: advice_stop)
     adv = [r["category"] for r in res["rows"] if r["source"]["kind"] == SS.KIND_ADVICE_RANDOM]
-    assert "advice_stop" in adv and len(adv) == 4, adv
+    assert "display_unknown" in adv and len(adv) == 4, adv
     print("test_logs_without_display_rows OK")
 
 

@@ -17,9 +17,10 @@
 
 出力の 1 行は logs/scenes/newteam_1006.jsonl と同じ形 (scene_id / category / source / system_state / system_advice / display / truth /
 labels_status) に、source.kind (上の 4 種) と、映像側は source.frame (保存フレームのファイル名) / source.scene_logged (その時刻のシーン判定)
-を足したもの。category は tools.scene_eval の分類 (consistent / hp_stuck / advice_stop / late / stale / other) に no_advice を足したもの。
-source.display_logged はそのログに display の行があるか (無いログでは advice_stop は「表示されなかった」の意味にならない。
-そのような advice_stop は (1) の候補から外す)。
+を足したもの。category は tools.scene_eval の分類 (consistent / hp_stuck / advice_stop / late / stale / display_unconfirmed /
+display_hidden / display_unknown / other) に no_advice を足したもの。表示の判定 (判断 9、2026-10-07) は scene_eval.classify と同じ:
+display の行が無いログは display_unknown、通知が欠けただけの助言は display_unconfirmed で、advice_stop は表示経路の欠陥と確認できたときだけ。
+display_* は判定不能なので (1) の候補に入らない。source.display_logged はそのログに display の行があるか。
 seed で決定的。既存のファイルには書かない (出力先が既にあれば止まる)。
 """
 from __future__ import annotations
@@ -37,7 +38,9 @@ from champions_agent.config import (
     SCENE_SAMPLES_FRAME_TOL_SEC, SCENE_SAMPLES_N_ADVICE_RANDOM, SCENE_SAMPLES_N_FIXED_FAILURE, SCENE_SAMPLES_N_FRAME_RANDOM,
     SCENE_SAMPLES_SEED, SCENE_SAMPLES_TIME_FRAME_PREFIXES)
 from tools.advice_trace import display_rows, load_records
-from tools.scene_eval import classify, extract_candidates, pick_scenes, write_scene_set
+from tools.scene_eval import (
+    CATEGORY_DISPLAY_HIDDEN, CATEGORY_DISPLAY_UNCONFIRMED, CATEGORY_DISPLAY_UNKNOWN, classify, extract_candidates, pick_scenes,
+    write_scene_set)
 from vision.scenes import SCENE_COMMAND, SCENE_MOVE_SELECT, SCENE_SELECTION
 
 REPO = Path(__file__).resolve().parent.parent
@@ -190,9 +193,10 @@ def build_samples(battles: list, frames: list, seed: int = SCENE_SAMPLES_SEED, n
         for c in extract_candidates(f, recs):
             c["source"]["display_logged"] = logged
             cands.append(c)
-    # display の行が 1 つも無いログ (表示の記録が始まる前) では、scene_eval.classify が全部の助言を advice_stop (表示なし) にする。
-    # 表示されなかったかは分からないので、固定失敗集の候補からは外す (category はそのまま残し、source.display_logged で区別する)
-    fixed_pool = [c for c in cands if c["source"]["display_logged"] or c["category"] != "advice_stop"]
+    # 表示の判定不能 (display_unknown / display_unconfirmed / display_hidden、判断 9) は失敗ではないので固定失敗集の候補から外す
+    # (display の行が無いログの助言は display_unknown になり、ここで外れる)
+    undecided = (CATEGORY_DISPLAY_UNKNOWN, CATEGORY_DISPLAY_UNCONFIRMED, CATEGORY_DISPLAY_HIDDEN)
+    fixed_pool = [c for c in cands if c["category"] not in undecided]
     fixed = pick_scenes(fixed_pool, 0, n_fixed, seed)
     for c in fixed:
         rows.append(dict(c, source=dict(c["source"], kind=KIND_FIXED_FAILURE)))

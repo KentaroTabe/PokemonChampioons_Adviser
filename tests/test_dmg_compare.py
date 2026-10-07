@@ -347,6 +347,24 @@ def test_confirm_table_and_report():
     print("test_confirm_table_and_report OK")
 
 
+def test_table_measures_for_incapacitation_and_activation():
+    """行動不能は「未対応の行動不能に遭遇した件数」、発動は「対応記述の有無」として出す (2026-10-07 レビュー。計算は同じ、旧キーも残す)"""
+    rows = {"damage": [], "order": [], "forme": [], "legal": [],
+            "incapacitation": [{"reason": "slp", "match": False, "note": "扱わない"}] * 3 + [{"reason": "par", "match": True}],
+            "activation": [{"kind": "item", "id": "leftovers", "match": False}] * 2 + [{"kind": "item", "id": "lifeorb", "match": True}]}
+    t = DC.confirm_table(rows)
+    inc, act = t["incapacitation"], t["activation"]
+    assert inc["unhandled_encounters"] == inc["mismatch"] == 3 and inc["encounters"] == inc["checked"] == 4, inc
+    assert inc["handled_encounters"] == inc["match"] == 1, inc
+    assert act["described"] == act["match"] == 1 and act["not_described"] == act["mismatch"] == 1 and act["kinds"] == 2, act
+    assert "unhandled_encounters" not in t["damage"] and "described" not in t["order"]
+    txt = DC.format_report({"rows": rows, "stats": [], "table": t, "model": {}}, n_moves=1, n_battles=1)
+    assert "未対応の行動不能に遭遇した件数: 3 / 遭遇 4" in txt, txt
+    assert "対応記述の有無: 記述あり 1 / 発動した種類 2" in txt, txt
+    assert "未対応の行動不能に遭遇した一覧" in txt and "対応記述の無い発動の一覧" in txt, txt
+    print("test_table_measures_for_incapacitation_and_activation OK")
+
+
 def test_engine_state_legal_sets_and_choose():
     tr = _tracker()
     _feed(tr, "|switch|p1a: M1|Garchomp, L50, M|185/185\n|switch|p2a: M1|Snorlax, L50, M|245/245\n|turn|1")
@@ -391,6 +409,7 @@ def main() -> None:
     test_order_prediction()
     test_incapacitation_forme_activation_legal()
     test_confirm_table_and_report()
+    test_table_measures_for_incapacitation_and_activation()
     test_engine_state_legal_sets_and_choose()
     print("ALL OK")
 
