@@ -26,6 +26,8 @@
     </style>
 </head>
 <body>
+    <!-- サーバーからの警告 (server_warning。2026-10-07: 表示通知が hidden のまま続いた等)。次に見える状態で助言を表示したら消す -->
+    <div id="server-warning" style="display:none;background:#c60;color:#fff;font-weight:bold;font-size:15px;padding:10px 14px;border-radius:6px;margin-bottom:8px"></div>
     <div>
         <button id="start-btn">カメラ映像取得開始</button>
         <button id="reset-btn">状態リセット</button>
@@ -146,6 +148,15 @@
         const ADVISOR_PORT = new URLSearchParams(location.search).get('api') || window.ADVISOR_PORT || 8000;
         const socket = io('http://' + location.hostname + ':' + ADVISOR_PORT);
         const connLabel = document.getElementById('conn-label');
+        // ページの版と、この HTML が実装している機能 (2026-10-07: ブラウザがキャッシュの古い index.html を使った疑いを確かめる)。
+        // 接続時に client_hello で送り、サーバーはディスクの index.html の CLIENT_HTML_VERSION と照合して対戦ログの client 行に残す。
+        // ⚠ この HTML を変えたら CLIENT_HTML_VERSION を更新する (サーバーは正規表現でこの行を読む。形式を変えない)
+        const CLIENT_HTML_VERSION = "2026-10-07a";
+        const CLIENT_FEATURES = ['client_hello', 'page_visibility', 'advice_shown_hidden', 'server_warning'];
+        const emitHello = () => socket.emit('client_hello', {
+            html_version: CLIENT_HTML_VERSION, features: CLIENT_FEATURES, visibility: document.visibilityState,
+            user_agent: navigator.userAgent, href: location.href,
+            served_commit: window.FRONTEND_GIT_COMMIT || null});   // config/ports.local.js (起動スクリプトが書く)
         // ページが隠れているか (2026-10-07 段 0): 受信フレームのうち隠れたページから届いた割合を対戦ログの frames 行に残すため、
         // 表示状態が変わるたびと接続時にサーバーへ知らせる (隠れたページでは送信が 1〜2 fps に落ちる)。表示は何も変えない
         const emitVisibility = () => socket.emit('page_visibility', {hidden: document.hidden});
@@ -154,7 +165,14 @@
             console.log('バックエンドに接続しました');
             connLabel.textContent = 'バックエンド: 接続中';
             connLabel.style.background = '#284';
+            emitHello();          // 順序: client_hello → page_visibility
             emitVisibility();
+        });
+        // サーバーからの警告 (例: 表示通知が hidden のまま続いた = 窓がゲーム画面に覆われている)。画面上部の帯に出す
+        const warnBand = document.getElementById('server-warning');
+        socket.on('server_warning', (w) => {
+            warnBand.textContent = '⚠ ' + ((w && w.text) || 'サーバーからの警告');
+            warnBand.style.display = 'block';
         });
         socket.on('disconnect', () => {
             connLabel.textContent = 'バックエンド: 切断';
@@ -752,8 +770,10 @@
                 if (document.hidden) {
                     socket.emit('advice_shown', Object.assign(payload, {t_shown: Date.now() / 1000, hidden: true}));
                 } else {
-                    requestAnimationFrame(() => socket.emit('advice_shown',
-                        Object.assign(payload, {t_shown: Date.now() / 1000, hidden: false})));
+                    requestAnimationFrame(() => {
+                        socket.emit('advice_shown', Object.assign(payload, {t_shown: Date.now() / 1000, hidden: false}));
+                        warnBand.style.display = 'none';   // 見える状態で表示できたので server_warning の帯を消す
+                    });
                 }
             }
         });

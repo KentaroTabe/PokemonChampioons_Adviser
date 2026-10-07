@@ -120,6 +120,9 @@ def parse_battle(path: str) -> dict:
     # 段 0 (2026-10-07) の行: 選出ラベル 3 値 / フレームの件数 / 勝敗の根拠 / 選出の候補 (どれも最後の行を採る。無い古いログは None)
     picks_row, frames, outcome_row, sel_row = None, None, None, None
     sel_records: dict = {}     # selection_record 行 (advice_id → 行)。選出の advice 行と advice_id で結ぶ
+    # 表示通知 (display 行) の件数と hidden=true の件数、ページの版 (client 行の stale)。2026-10-07 実機確認
+    display = {"n": 0, "hidden": 0}
+    clients: list = []
     for line in open(path, encoding="utf-8"):
         try:
             d = json.loads(line)
@@ -139,6 +142,11 @@ def parse_battle(path: str) -> dict:
             sel_row = d
         elif typ == "selection_record" and d.get("advice_id"):
             sel_records[str(d["advice_id"])] = d
+        elif typ == "display":
+            display["n"] += 1
+            display["hidden"] += 1 if d.get("hidden") else 0
+        elif typ == "client":
+            clients.append(d)
         if typ == "rate" and d.get("value") is not None and (not reads or reads[-1] != float(d["value"])):
             reads.append(float(d["value"]))
         elif typ == "scene":
@@ -200,6 +208,7 @@ def parse_battle(path: str) -> dict:
             # 段 0 (2026-10-07)。読み手 (real_opponents.build_bank) は opp_pick_status があれば 3 値を使う
             "opp_pick_status": status, "opp_picks_complete": (bool(picks_row.get("complete")) if picks_row else None),
             "frames": frames, "outcome_basis": outcome_basis_of(outcome_row),
+            "display": display, "client_stale": client_stale_of(clients),
             "selection": selection_summary(sel_row, sel_records.get(str((sel_row or {}).get("advice_id"))))}
 
 
@@ -234,11 +243,39 @@ def selection_summary(row: Optional[dict], record: Optional[dict] = None) -> Opt
     return {"recommend": rec, "primary": adv.get("primary"), "candidates": cands}
 
 
+def client_stale_of(clients: list) -> Optional[bool]:
+    """対戦の client 行 → ページの版が古いか (純粋)。どれかが stale=true / hello=false なら True、全部 stale=false なら False、
+    client 行が無い (古いログ) か判定できなければ None"""
+    if not clients:
+        return None
+    if any(c.get("stale") is True or c.get("hello") is False for c in clients):
+        return True
+    if all(c.get("stale") is False for c in clients):
+        return False
+    return None
+
+
+def visibility_ratios(fr: Optional[dict]) -> dict:
+    """frames 行 → {"hidden_ratio", "visible_ratio", "unknown_ratio"} (純粋)。隠れ・可視は可視状態の通知のあった受信 (既知) に
+    対する比、不明は受信全体に対する比。visible 欄の無い古い frames 行は可視・不明を None にする (隠れは行の hidden_ratio)"""
+    fr = fr or {}
+    if fr.get("visible") is None:
+        return {"hidden_ratio": fr.get("hidden_ratio"), "visible_ratio": None, "unknown_ratio": None}
+    hid, vis, unk = (int(fr.get(k) or 0) for k in ("hidden", "visible", "unknown"))
+    known, recv = hid + vis, int(fr.get("received") or 0)
+    return {"hidden_ratio": round(hid / known, 3) if known else None,
+            "visible_ratio": round(vis / known, 3) if known else None,
+            "unknown_ratio": round(unk / recv, 3) if recv else None}
+
+
 def session_record(battles: list) -> dict:
-    """終了レポートの「接続テストの記録」(純粋): 対戦ごとの 受信 fps と隠れたページの比率 (frames 行)、勝敗と根拠、
-    選出候補と実際の自分の選出。frames 行の無い古いログは fps を None にする (送信 10 fps の仮定では埋めない)"""
+    """終了レポートの「接続テストの記録」(純粋): 対戦ごとの 受信 fps と可視状態の比率 (frames 行)、表示通知の hidden 件数
+    (display 行)、ページの版 (client 行)、勝敗と根拠、選出候補と実際の自分の選出。frames 行の無い古いログは fps を None にする
+    (送信 10 fps の仮定では埋めない)。隠れ・可視の比は可視状態の通知のあった受信 (既知) に対する比 (visible 欄の無い古い行は
+    受信を既知とみなす = 従来の比)、不明は受信全体に対する比 (visible 欄のある行だけで数える)"""
     rows = []
-    tot = {"received": 0, "hidden": 0, "span": 0.0, "n_frames_rows": 0}
+    tot = {"received": 0, "hidden": 0, "known": 0, "visible": 0, "unknown": 0, "recv_vis": 0, "hidden_vis": 0, "span": 0.0,
+           "n_frames_rows": 0, "n_display": 0, "n_display_hidden": 0}
     for b in battles:
         fr = b.get("frames") or {}
         if fr:
@@ -246,15 +283,35 @@ def session_record(battles: list) -> dict:
             tot["received"] += int(fr.get("received") or 0)
             tot["hidden"] += int(fr.get("hidden") or 0)
             tot["span"] += float(fr.get("span_sec") or 0.0)
+            if fr.get("visible") is None:
+                tot["known"] += int(fr.get("received") or 0)
+            else:
+                tot["visible"] += int(fr.get("visible") or 0)
+                tot["unknown"] += int(fr.get("unknown") or 0)
+                tot["recv_vis"] += int(fr.get("received") or 0)
+                tot["hidden_vis"] += int(fr.get("hidden") or 0)
+                tot["known"] += int(fr.get("hidden") or 0) + int(fr.get("visible") or 0)
+        disp = b.get("display") or {}
+        tot["n_display"] += int(disp.get("n") or 0)
+        tot["n_display_hidden"] += int(disp.get("hidden") or 0)
         sel = b.get("selection") or {}
         rows.append({"file": b.get("file"), "outcome": b.get("outcome"), "inferred": b.get("inferred"),
                      "corrected": b.get("corrected"), "by_rate": b.get("by_rate"),
                      "basis": b.get("outcome_basis"), "recv_fps": fr.get("recv_fps"), "proc_fps": fr.get("proc_fps"),
-                     "hidden_ratio": fr.get("hidden_ratio"), "recommend": sel.get("recommend"),
+                     **visibility_ratios(fr),
+                     "n_display": disp.get("n"), "n_display_hidden": disp.get("hidden"),
+                     "client_stale": b.get("client_stale"), "recommend": sel.get("recommend"),
                      "candidates": sel.get("candidates"), "my_picked": b.get("my_picked") or []})
+    stale = [r["client_stale"] for r in rows]
     return {"battles": rows, "n_frames_rows": tot["n_frames_rows"],
             "recv_fps": (round(tot["received"] / tot["span"], 2) if tot["span"] > 0 else None),
-            "hidden_ratio": (round(tot["hidden"] / tot["received"], 3) if tot["received"] else None)}
+            "hidden_ratio": (round(tot["hidden"] / tot["known"], 3) if tot["known"] else None),
+            "visible_ratio": (round(tot["visible"] / (tot["hidden_vis"] + tot["visible"]), 3)
+                              if tot["hidden_vis"] + tot["visible"] else None),
+            "unknown_ratio": (round(tot["unknown"] / tot["recv_vis"], 3) if tot["recv_vis"] else None),
+            "n_display": tot["n_display"], "n_display_hidden": tot["n_display_hidden"],
+            "n_client_stale": sum(1 for x in stale if x is True), "n_client_ok": sum(1 for x in stale if x is False),
+            "n_client_unknown": sum(1 for x in stale if x is None)}
 
 
 def session_start_ts() -> Optional[float]:
@@ -673,6 +730,10 @@ _METHOD_JA = {"rule": "規則", "deployed": "配布版", "general": "汎用", "r
               "model_pick_real": "実戦傾向つき", "model_pick": "学習モデル"}
 
 
+def _pct_text(x: Optional[float]) -> str:
+    return str(int(round(x * 100))) if x is not None else "?"
+
+
 def render_session_record(sr: Optional[dict]) -> list:
     """終了レポートの「接続テストの記録」の行 (純粋)"""
     if not sr or not sr.get("battles"):
@@ -680,9 +741,17 @@ def render_session_record(sr: Optional[dict]) -> list:
     fps = sr.get("recv_fps")
     hid = sr.get("hidden_ratio")
     L = ["", "### 接続テストの記録",
-         (f"- 受信 {fps} fps / 隠れたページからの受信 {int(round(hid * 100)) if hid is not None else '?'}% "
-          f"(frames 行のある {sr['n_frames_rows']}/{len(sr['battles'])} 戦。fps は対戦の時間の幅で割った実測)"
+         (f"- 受信 {fps} fps / 隠れたページからの受信 {_pct_text(hid)}% / 可視 {_pct_text(sr.get('visible_ratio'))}% "
+          f"/ 不明 {_pct_text(sr.get('unknown_ratio'))}% "
+          f"(frames 行のある {sr['n_frames_rows']}/{len(sr['battles'])} 戦。fps は対戦の時間の幅で割った実測。"
+          "隠れ・可視は可視状態の通知のあった受信に対する比、不明は受信全体に対する比)"
           if sr.get("n_frames_rows") else "- 受信 fps: frames 行のある対戦なし (古いログ。送信 10 fps の仮定では埋めない)")]
+    if sr.get("unknown_ratio") == 1.0:
+        L.append("  - ⚠ 可視状態の通知なし (ページの版が古い可能性。助言ページを Cmd+Shift+R で再読み込み)")
+    L.append(f"- 表示通知の hidden: {sr.get('n_display_hidden', 0)}/{sr.get('n_display', 0)} 件")
+    if sr.get("n_client_stale") or sr.get("n_client_ok"):
+        L.append(f"- ページの版 (client 行): 古い {sr.get('n_client_stale', 0)} 戦 / 一致 {sr.get('n_client_ok', 0)} 戦 / "
+                 f"判定なし {sr.get('n_client_unknown', 0)} 戦")
     for r in sr["battles"]:
         oc = _OUTCOME_JA.get(r.get("outcome"), "不明")
         basis = r.get("basis") or {}
@@ -696,7 +765,15 @@ def render_session_record(sr: Optional[dict]) -> list:
             why = "確定 (" + (basis.get("basis") or "勝負の文言 / 終了画面") + ")"
         head = f"- {r['file']}: {oc} ({why})"
         if r.get("recv_fps") is not None:
-            head += f" / 受信 {r['recv_fps']} fps・隠れ {int(round((r.get('hidden_ratio') or 0) * 100))}%"
+            head += f" / 受信 {r['recv_fps']} fps・隠れ {_pct_text(r.get('hidden_ratio'))}%"
+            if r.get("unknown_ratio") is not None:
+                head += f"・可視 {_pct_text(r.get('visible_ratio'))}%・不明 {_pct_text(r.get('unknown_ratio'))}%"
+                if r.get("unknown_ratio") == 1.0:
+                    head += " ⚠ 可視状態の通知なし (ページの版が古い可能性)"
+        if r.get("n_display"):
+            head += f" / 表示通知の hidden {r.get('n_display_hidden') or 0}/{r['n_display']}"
+        if r.get("client_stale") is True:
+            head += " / ⚠ ページの版が古い"
         L.append(head)
         cands = r.get("candidates") or {}
         if cands or r.get("recommend"):

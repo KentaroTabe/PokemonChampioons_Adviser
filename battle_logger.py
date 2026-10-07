@@ -40,6 +40,18 @@
     助言のあと、決定画面 (command / move_select) から解決側の場面 (battle_hud / field) へ移った時刻と、その後の行動が第一候補と
     一致したか (行動が読めなければ null)
   {"type": "frame_burst", "dir", "t_start", "seconds"} 連続フレームの保存を始めた (server、DEBUG_DUMP_FRAMES=1 のときだけ)
+
+2026-10-07 段 0 の実機確認で足した欄・行 (既存の欄の意味は変えない。hidden_ratio だけ下記のとおり分母を変えた):
+  frames 行に "visible" / "unknown" (可視状態を通知した接続から見える状態で受信 / 通知の無い接続から受信)。
+    hidden_ratio は既知 (hidden + visible) に対する比 (既知が 0 なら null)。visible の無い古い server から来たときは
+    visible / unknown を null にし、hidden_ratio は従来どおり受信に対する比 (読み手は visible が null かで区別する)
+  {"type": "client", "sid", "hello", "html_version", "features", "served_version", "stale", "visibility", "user_agent",
+   "served_commit"} 助言ページの版と対応機能 (client_hello、client_state.py)。対戦ファイルを開いたとき (version 行の直後、
+    接続中の全クライアント) と、対戦中に hello が来た (または待っても来なかった: hello=false) とき
+  {"type": "visibility", "sid", "hidden", "source": "page_visibility"|"client_hello", "t_notified"} 可視状態の通知ごと。
+    ファイルを開いたときは、可視状態の分かっている接続の最新の状態を 1 行ずつ書く
+  frame_burst 行に "reason" ("scene:<場面>" / "timeout")・"battle_seq"・"battle_index"。保存を始めなかった対戦は終わりに
+    {"type": "frame_burst", "skipped": true, "reason": no_start_scene|count_exhausted|not_every|disabled, "battle_seq", "battle_index"}
 """
 from __future__ import annotations
 
@@ -96,15 +108,30 @@ def hp_stale_of(state: Optional[dict], now: float) -> dict:
 
 
 FRAME_COUNT_KEYS = ("received", "processed", "dropped", "hidden")
+# 可視状態の累積件数 (2026-10-07 実機確認: 接続ごとの可視状態。通知の無い接続からのフレームは unknown)。古い server には無い
+FRAME_VISIBILITY_KEYS = ("visible", "unknown")
+
+
+def _count_delta(start: Optional[dict], end: Optional[dict], k: str) -> int:
+    return max(0, int((end or {}).get(k) or 0) - int((start or {}).get(k) or 0))
 
 
 def frames_row(start: dict, end: dict, t_start: Optional[float]) -> dict:
-    """フレームの累積件数 (server の受信 / 処理 / 破棄 / 隠れたページから受信) の差から frames 行の中身を作る (純粋)。
-    受信 fps は対戦の時間の幅 (t_start → 最後に受信した時刻 end["last_recv_ts"]) で割る (送信 10 fps の仮定は使わない)"""
-    d = {k: max(0, int((end or {}).get(k) or 0) - int((start or {}).get(k) or 0)) for k in FRAME_COUNT_KEYS}
+    """フレームの累積件数 (server の受信 / 処理 / 破棄 / 隠れたページから受信 / 見えるページから受信 / 可視状態の通知なし) の差から
+    frames 行の中身を作る (純粋)。受信 fps は対戦の時間の幅 (t_start → 最後に受信した時刻 end["last_recv_ts"]) で割る
+    (送信 10 fps の仮定は使わない)。hidden_ratio は既知 (hidden + visible) に対する比 (既知が 0 なら None)。
+    visible を持たない古い server の件数なら visible / unknown は None、hidden_ratio は従来どおり受信に対する比"""
+    d = {k: _count_delta(start, end, k) for k in FRAME_COUNT_KEYS}
     t_end = (end or {}).get("last_recv_ts")
     span = float(t_end) - float(t_start) if (t_end and t_start and float(t_end) > float(t_start)) else None
-    d["hidden_ratio"] = round(d["hidden"] / d["received"], 3) if d["received"] else None
+    if all(k in (end or {}) for k in FRAME_VISIBILITY_KEYS):
+        for k in FRAME_VISIBILITY_KEYS:
+            d[k] = _count_delta(start, end, k)
+        known = d["hidden"] + d["visible"]
+        d["hidden_ratio"] = round(d["hidden"] / known, 3) if known else None
+    else:
+        d["visible"] = d["unknown"] = None
+        d["hidden_ratio"] = round(d["hidden"] / d["received"], 3) if d["received"] else None
     d["span_sec"] = round(span, 2) if span else None
     d["recv_fps"] = round(d["received"] / span, 2) if span else None
     d["proc_fps"] = round(d["processed"] / span, 2) if span else None
@@ -433,6 +460,9 @@ class BattleLogger:
         # ({"received", "processed", "dropped", "hidden", "last_recv_ts"} を返す呼び出し。無ければ frames 行を書かない)
         self.guess_prob_fn = guess_prob_fn
         self.frame_source = frame_source
+        # 対戦ファイルを開いたときに version 行の直後に書く行 (client / visibility。server が client_state.ClientRegistry.open_rows を
+        # 渡す。2026-10-07 実機確認)。type 付きの dict の list を返す呼び出し。無ければ書かない
+        self.open_rows_source: Optional[Callable] = None
         self._frames_start: Optional[dict] = None
         self._fix_seq = 0
         self._reset_tracking()
@@ -519,6 +549,13 @@ class BattleLogger:
         except Exception as e:
             print(f"[battle_log] 版の記録に失敗: {e}")
             self._version = None
+        # 助言ページの版と可視状態 (接続中の全クライアント。2026-10-07)
+        if self.open_rows_source is not None:
+            try:
+                for r in self.open_rows_source() or []:
+                    self._write(dict(r))
+            except Exception as e:
+                print(f"[battle_log] 接続の記録に失敗: {e}")
 
     def _write(self, record: dict) -> None:
         if self._file is None:
@@ -793,6 +830,21 @@ class BattleLogger:
                         self._flush_decision(r["action"])
         else:
             self._dec_resolve = None
+
+    @property
+    def file_open(self) -> bool:
+        """対戦ファイルが開いているか (開いていなければ、次に何か書いたときに新しいファイルを開く)"""
+        return self._file is not None
+
+    def on_client_row(self, row: dict) -> None:
+        """client 行 / visibility 行 (client_state.ClientRegistry が作る、type 付き) を、対戦ファイルが開いていれば書く。
+        開いていなければ書かない (ファイルを開くだけの行にしない。次に開いたとき open_rows_source が最新の状態を書く)"""
+        if self._file is None or not row:
+            return
+        try:
+            self._write(dict(row))
+        except Exception as e:
+            print(f"[battle_log] 接続の記録に失敗: {e}")
 
     def on_frame_burst(self, info: dict) -> None:
         """連続フレームの保存を始めた (server)。保存先と開始時刻を対戦ログに残し、保存フレームと対戦を結ぶ"""

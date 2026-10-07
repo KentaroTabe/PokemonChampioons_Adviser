@@ -31,7 +31,7 @@ case "$FRONT_STATE" in
     if [ "$FRONTEND_PORT" != "$FRONTEND_PORT_DEFAULT" ]; then
       echo "フロントエンド: $FRONTEND_PORT_DEFAULT は別のプロセスが使用中 [$(port_owner "$FRONTEND_PORT_DEFAULT")] → $FRONTEND_PORT を使う"
     fi
-    nohup python3 -m http.server "$FRONTEND_PORT" > logs/frontend_nohup.log 2>&1 & disown
+    nohup python3 -m "$FRONTEND_MODULE" "$FRONTEND_PORT" > logs/frontend_nohup.log 2>&1 & disown
     echo "フロントエンド($FRONTEND_PORT): 起動";;
 esac
 # フロントは config/ports.local.js からアドバイザーのポートを読む (稼働中でも書き直して整合させる)

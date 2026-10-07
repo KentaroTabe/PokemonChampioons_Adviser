@@ -261,6 +261,46 @@ def test_session_record_in_end_report():
     print("test_session_record_in_end_report OK")
 
 
+def test_session_record_visibility_and_display():
+    """2026-10-07 実機確認: 隠れ % に加えて 可視 % / 不明 % と表示通知の hidden 件数 / 全件、ページの版 (client 行)。
+    unknown が 100% なら「可視状態の通知なし (ページの版が古い可能性)」と添える"""
+    import json as _json
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "b.jsonl"
+        lines = [{"type": "client", "sid": "a", "hello": True, "stale": False},
+                 {"type": "display", "advice_id": "x-1", "hidden": True}, {"type": "display", "advice_id": "x-2", "hidden": False},
+                 {"type": "display", "advice_id": "x-3"},
+                 {"type": "frames", "received": 100, "hidden": 10, "visible": 30, "unknown": 60, "hidden_ratio": 0.25,
+                  "span_sec": 20.0, "recv_fps": 5.0, "proc_fps": 4.0}]
+        p.write_text("\n".join(_json.dumps(r) for r in lines) + "\n", encoding="utf-8")
+        b = PI.parse_battle(str(p))
+    assert b["display"] == {"n": 3, "hidden": 1} and b["client_stale"] is False
+    assert PI.client_stale_of([]) is None and PI.client_stale_of([{"hello": False, "stale": None}]) is True
+    assert PI.client_stale_of([{"stale": False}, {"stale": True}]) is True and PI.client_stale_of([{"stale": None}]) is None
+    assert PI.visibility_ratios(b["frames"]) == {"hidden_ratio": 0.25, "visible_ratio": 0.75, "unknown_ratio": 0.6}
+    assert PI.visibility_ratios({"received": 40, "hidden": 4, "hidden_ratio": 0.1}) == \
+        {"hidden_ratio": 0.1, "visible_ratio": None, "unknown_ratio": None}                     # 古い frames 行
+    allu = {"file": "battle_2.jsonl", "outcome": "loss", "client_stale": True, "display": {"n": 43, "hidden": 43},
+            "frames": {"received": 50, "hidden": 0, "visible": 0, "unknown": 50, "hidden_ratio": None,
+                       "span_sec": 10.0, "recv_fps": 5.0}}
+    sr = PI.session_record([dict(b, file="battle_1.jsonl", outcome="win"), allu])
+    assert sr["hidden_ratio"] == 0.25 and sr["visible_ratio"] == 0.75 and sr["unknown_ratio"] == round(110 / 150, 3)
+    assert sr["n_display"] == 46 and sr["n_display_hidden"] == 44
+    assert (sr["n_client_stale"], sr["n_client_ok"], sr["n_client_unknown"]) == (1, 1, 0)
+    lines = "\n".join(PI.render_session_record(sr))
+    assert "隠れたページからの受信 25%" in lines and "可視 75%" in lines and "不明 73%" in lines
+    assert "表示通知の hidden: 44/46 件" in lines and "古い 1 戦 / 一致 1 戦" in lines
+    assert "可視状態の通知なし (ページの版が古い可能性)" in lines                          # 2 戦目は全部 unknown
+    assert "表示通知の hidden 43/43" in lines and "⚠ ページの版が古い" in lines
+    only = PI.session_record([allu])
+    assert only["unknown_ratio"] == 1.0 and only["hidden_ratio"] is None and only["visible_ratio"] is None
+    text = "\n".join(PI.render_session_record(only))
+    assert "⚠ 可視状態の通知なし (ページの版が古い可能性" in text and "隠れたページからの受信 ?%" in text
+    print("test_session_record_visibility_and_display OK")
+
+
 def main():
     test_parse_showdown_sets()
     test_pressure_and_difficulty()
@@ -271,6 +311,7 @@ def main():
     test_measure_is_confirmation_based_by_default()
     test_duration_estimate_and_proposal_text()
     test_session_record_in_end_report()
+    test_session_record_visibility_and_display()
 
 
 if __name__ == "__main__":

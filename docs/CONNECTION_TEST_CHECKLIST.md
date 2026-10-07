@@ -660,6 +660,13 @@ churn 6→1-2件、選出picked一致、ヒステリシス動作。
       ※ ターミナルを使わない場合は操作パネル http://localhost:8010/ の「接続テスト開始」
       (2026-09-23 追加。登録は `bash scripts/control_panel_install.sh install`、docs/OPERATIONS.md)
 - [ ] ブラウザで表示されたURL (既定 3000。別プロセスが使っていれば起動スクリプトが次の空きポートへずらす) を開き「バックエンド: 接続中」表示
+- [ ] **対戦前に助言ページを強制再読み込みする (Cmd+Shift+R)** (2026-10-07 追加)。10/7 の試験運転ではブラウザがキャッシュの古い
+      index.html を使った疑いがあった。配信は `tools.frontend_server` (Cache-Control: no-store) に替えたが、替える前に
+      キャッシュされたページはそのまま残り得る。サーバーログに `client_hello ...: 版 <ページの版> (ディスク <同じ版>)` が出て、
+      `⚠ ページの版` / `⚠ ... client_hello が ... 届かない` の警告が出ていないことを確かめる
+- [ ] **ブラウザの窓をゲーム画面に完全には覆われない位置に置く** (2026-10-07 追加)。macOS の Chrome は完全に覆われた窓を
+      hidden 扱いにし、送信が 1〜2 fps に落ちる (10/7 の試験運転は表示の報告が全部 hidden)。表示の報告が 3 件続けて hidden に
+      なると、助言ページの上部に警告の帯が出る (見える状態で助言を表示すると消える)
 
 ## 1. 追従テスト (今回のメイン): 全操作をアドバイス通りに行う
 
@@ -758,6 +765,17 @@ churn 6→1-2件、選出picked一致、ヒステリシス動作。
       (`bash scripts/experiment_label.sh off` かパネルの OFF)
 - [ ] フレーム統計の取りこぼし率を確認する (改善前の基準は62%・3.8fps。
       これを下回っていれば取りこぼし対策が効いている)
+- [ ] **ページの版と可視状態の記録を確認する** (2026-10-07 追加。対戦ログ `logs/battles/*.jsonl` と改善案レポートの
+      「接続テストの記録」):
+      - client 行の `stale` が `false` (true = キャッシュの古いページ。`hello: false` = client_hello を送らない古い版のページ)
+      - visibility 行がある (無ければページが可視状態を知らせていない)
+      - frames 行の `unknown` が 0 (可視状態の通知の無い接続から受信したフレーム。レポートでは「不明 %」。100% なら
+        「可視状態の通知なし (ページの版が古い可能性)」と出る)
+      - frames 行の `recv_fps` が 5 以上 (隠れた窓では 1〜2 fps に落ちる)
+      - 表示通知の hidden の件数 (レポートの「表示通知の hidden: n/全件」) が 0 に近い
+      - (DEBUG_DUMP_FRAMES=1 のとき) frame_burst 行: 対象の対戦で保存が始まったか (`reason` = `scene:command` /
+        `scene:move_select` / `timeout`)、始まらなかった対戦は `skipped: true` と理由 (`no_start_scene` / `count_exhausted` /
+        `not_every` / `disabled`)
 - [ ] 表示されたサマリーに今回の対戦が反映されている
 - [ ] **実戦の相手バンク** (`tools.real_opponents --build`、2026-09-09 追加、終了処理で自動更新) が更新されている:
       相手の構成・実際の選出・先発・判明した型を `logs/real_opponents/bank.json` に集める。学習環境の相手

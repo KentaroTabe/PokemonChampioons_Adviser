@@ -31,7 +31,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-python3 -m http.server "$FRONTEND_PORT" >/dev/null 2>&1 &
+python3 -m "$FRONTEND_MODULE" "$FRONTEND_PORT" >/dev/null 2>&1 &
 echo "[start] フロントエンド: http://localhost:$FRONTEND_PORT"
 echo "[start] バックエンドを起動します (ポート $ADVISOR_PORT。準備完了の表示までお待ちください)"
 uvicorn server:app_asgi --host 0.0.0.0 --port "$ADVISOR_PORT"
