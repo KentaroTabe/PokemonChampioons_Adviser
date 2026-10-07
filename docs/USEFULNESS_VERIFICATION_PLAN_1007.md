@@ -289,6 +289,9 @@ SEARCH_BLEND (評価方式の変更)、BELIEF_K (単一推定の誤りが実戦�
 運用側はこの方針で**段 0 の実装に着手**した (判断 1 の確認制はブランチ内の実装で、本番への反映はマージ時。判断 2 の launchd の停止は常駐の操作なので
 ユーザーが実行する: `launchctl bootout gui/$(id -u)/com.championsadviser.evolve` 相当。判断 3 は受入確認が通るまで既定 OFF)。
 段 0 の合格後に P1 と選出方策の測定 (各 1 夜 1 実験) へ進む。
+**判断 2 の実施 (2026-10-07 14 時台、ユーザー実行)**: `launchctl bootout gui/501/com.championsadviser.evolve` で定期起動を解除。`launchctl print` で
+サービスが無いことを確認 (plist `~/Library/LaunchAgents/com.championsadviser.evolve.plist` は残してあり、再開は `launchctl bootstrap gui/$(id -u) <plist>`)。
+停止前の最後の実行は同日 13:00 (species_embedding.json の更新時刻 13:00:13)。相手アーカイブ・埋め込みデータ・それらを読む機能は変更なし。
 
 ## 14. レビュー (2026-10-07) への対応の一覧
 
