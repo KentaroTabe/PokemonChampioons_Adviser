@@ -129,6 +129,8 @@ TESTS=(
   test_selection_record
   test_pick_labels
   test_frame_burst
+  test_dmg_compare
+  test_scene_samples
 )
 
 fail=0

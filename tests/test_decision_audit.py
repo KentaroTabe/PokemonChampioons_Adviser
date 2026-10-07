@@ -316,7 +316,103 @@ def test_render_and_file_e2e():
     print("test_render_and_file_e2e OK")
 
 
+def _advice_id(t, aid, **kw):
+    rec = _advice(t, **kw)
+    rec["advice_id"] = aid
+    rec["advice"]["advice_id"] = aid
+    rec["advice"]["t_gen"] = t
+    return rec
+
+
+def _display(aid, t_shown, t_recv, hidden=False):
+    return {"type": "display", "advice_id": aid, "t_shown": t_shown, "t": t_recv, "kind": "battle", "hidden": hidden}
+
+
+def test_unknown_latency_is_not_timely():
+    """決定画面の開始を捉えられない決定 (遅延が測れない) は「時間内」にも分母にも入れず、判定不能として別に数える。
+    欠陥なしの表示でも「成功に含めていないもの」として出す (2026-10-07 §10 の確認)"""
+    recs = [
+        _advice(101.0),                 # 決定画面 (command) の行が無い
+        _scene(102.0, SCENE_FIELD),
+        _action_move(103.0, 1),
+    ]
+    a = audit_battle(recs)
+    d = a["decisions"][0]
+    assert d["latency"] is None and d["latency_basis"] is None and d["flags"] == [], d
+    assert a["n_latency_known"] == 0 and a["n_timely"] == 0 and a["n_latency_unknown"] == 1, a
+    text = render_text("x", a, late_sec=10.0)
+    assert "判定不能 1 件" in text and "成功に含めていないもの" in text and "遅延の判定不能 1" in text, text
+    print("test_unknown_latency_is_not_timely OK")
+
+
+def test_carried_latency_is_counted_separately():
+    """前の決定の助言が残っていて遅延 0 とした決定は、時間内に含めたまま件数を別に出す"""
+    recs = [
+        _advice(95.0),
+        _scene(100.0, SCENE_COMMAND),
+        _scene(101.0, SCENE_FIELD),
+        _action_move(102.0, 1),
+    ]
+    a = audit_battle(recs)
+    assert a["decisions"][0]["latency_basis"] == "carried", a["decisions"][0]
+    assert a["n_latency_carried"] == 1 and a["n_timely"] == 1, a
+    # 決定画面の後に出た助言は measured
+    b = audit_battle([_scene(100.0, SCENE_COMMAND), _advice(101.5), _scene(103.0, SCENE_FIELD), _action_move(104.0, 1)])
+    assert b["decisions"][0]["latency_basis"] == "measured" and b["n_latency_carried"] == 0, b
+    print("test_carried_latency_is_counted_separately OK")
+
+
+def test_display_status_kinds():
+    """表示 / 隠れたタブ / 表示なし / 判定不能 (display の行が無いログ) を分けて数える"""
+    def battle(disp_rows):
+        recs = []
+        t = 100.0
+        for i in range(4):
+            aid = f"A{i}"
+            recs += [_scene(t, SCENE_COMMAND), _advice_id(t + 1.0, aid), _scene(t + 2.0, SCENE_FIELD),
+                     _action_move(t + 3.0, i + 1)]
+            t += 10.0
+        return recs + disp_rows
+
+    a = audit_battle(battle([_display("A0", 101.2, 101.25), _display("A1", 111.3, 111.32, hidden=True),
+                             _display("A3", 131.1, 131.2)]))
+    ds = [d["display"] for d in a["decisions"]]
+    assert ds == ["shown", "hidden", "not_shown", "shown"], ds
+    assert (a["n_display_shown"], a["n_display_hidden"], a["n_display_not_shown"], a["n_display_unknown"]) == (2, 1, 1, 0), a
+    assert abs(a["decisions"][0]["display_latency"] - 0.2) < 1e-6 and a["n_clock_skew"] == 0, a["decisions"][0]
+    # 欠陥の件数は従来どおり (表示なしは flags に入れない)、欠陥なしの行に表示されなかった助言を出す
+    assert a["defects"] == [] and a["has_display_rows"] is True
+    text = render_text("x", a, late_sec=10.0)
+    assert "表示なし 1" in text and "表示されなかった助言 2" in text, text
+    # display の行が 1 つも無いログ → 全部判定不能
+    b = audit_battle(battle([]))
+    assert b["n_display_unknown"] == 4 and b["has_display_rows"] is False, b
+    assert "display の行が無いログ" in render_text("x", b, late_sec=10.0)
+    print("test_display_status_kinds OK")
+
+
+def test_clock_skew_makes_display_latency_unknown():
+    """ブラウザの時計 (t_shown) とサーバーの受信時刻 (t) の差が閾値を超えたら時計差: 表示までの遅れは判定不能"""
+    from tools.decision_audit import _display_index, display_status
+    recs = [_scene(100.0, SCENE_COMMAND), _advice_id(101.0, "A0"), _display("A0", 106.0, 101.1),
+            _scene(103.0, SCENE_FIELD), _action_move(104.0, 1)]
+    a = audit_battle(recs)
+    d = a["decisions"][0]
+    assert d["display"] == "shown" and d["clock_skew"] is True and d["display_latency"] is None, d
+    assert abs(d["clock_offset"] - 4.9) < 1e-6 and a["n_clock_skew"] == 1, d
+    # 純粋関数: 閾値の境界と、advice_id が無い助言は判定不能
+    idx = _display_index([_display("B", 10.5, 10.0)])
+    assert display_status(["B"], {"B": 10.0}, idx, clock_skew_sec=1.0)["clock_skew"] is False
+    assert display_status(["B"], {"B": 10.0}, idx, clock_skew_sec=0.4)["clock_skew"] is True
+    assert display_status([None], {}, idx)["display"] == "unknown"
+    print("test_clock_skew_makes_display_latency_unknown OK")
+
+
 if __name__ == "__main__":
+    test_unknown_latency_is_not_timely()
+    test_carried_latency_is_counted_separately()
+    test_display_status_kinds()
+    test_clock_skew_makes_display_latency_unknown()
     test_clean_decision()
     test_move_select_does_not_reset_open_time()
     test_late_and_mismatch_and_no_advice()
