@@ -131,6 +131,8 @@ TESTS=(
   test_frame_burst
   test_client_state
   test_hp_intake
+  test_roster_retention
+  test_roster_cap
   test_dmg_compare
   test_scene_samples
   test_usefulness_p1
