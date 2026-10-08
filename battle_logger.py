@@ -4,7 +4,8 @@
 1対戦 = 1ファイル (logs/battles/battle_YYYYmmdd_HHMMSS.jsonl) に、
 以下のレコードを時系列で追記する:
 
-  {"t": ..., "type": "scene",   "scene": ..., "state": {...簡約状態...}}
+  {"t": ..., "type": "scene",   "scene": ..., "state": {...簡約状態..., "hp_reject": {"player": ..., "opponent": ...}}}
+    (hp_reject は 2026-10-09 に足した欄: 側ごとの最後に捨てた HP の読み。vision.state の HP_REJECT_REASONS の注記)
   {"t": ..., "type": "events",  "fired": [...], "scene": ...}
   {"t": ..., "type": "advice",  "kind": "battle"|"selection", "advice": {...}, "advice_id": ..., "version_id": ...,
    "state_id": ..., "state": {...助言が見た簡約状態...}, "policy": {"selection": ..., "rl_loaded": ...}}
@@ -394,6 +395,15 @@ def _compact_state(state: dict) -> dict:
         },
         "mega_used": state.get("mega_used"),
     }
+
+
+def scene_row_state(state: dict) -> dict:
+    """scene 行の state (純粋): 簡約状態 + 側ごとの「最後に捨てた HP の読み」(hp_reject、2026-10-09 に追加した欄)。
+
+    hp_reject は scene 行にだけ載せる (助言の行の state と state_id の digest は _compact_state のままで変えない)"""
+    d = _compact_state(state)
+    d["hp_reject"] = state.get("hp_reject") or {"player": None, "opponent": None}
+    return d
 
 
 EXPERIMENT_MARK = Path("logs") / ".experiment_package"   # 候補 Package の試用中はここに package_id
@@ -964,7 +974,7 @@ class BattleLogger:
         if scene != self._prev_scene or \
                 (pick_key is not None and pick_key != self._prev_pick_key):
             self._write({"type": "scene", "scene": scene, "turn": state.get("turn"),
-                         "state": _compact_state(state)})
+                         "state": scene_row_state(state)})
             self._prev_scene = scene
             self._prev_pick_key = pick_key
 

@@ -276,6 +276,18 @@ MY_ROSTER_MATCH_RATIO = 0.6
 MY_EXACT_RESOLVE_CUTOFF = 0.92
 MY_REGISTERED_MATCH_RATIO = 0.55
 
+# --- HP の読みの採否 (vision/extractors。2026-10-09 まで直書きだった値を移しただけで、値は変えていない) ---
+# 自分の HP: OCR の分数 (現在 / 最大) とバーの塗りの割合 (vision.zones の my_hp_bar_track) の差がこれを超える読みは捨てる
+# (イタリック数字の桁化け "111/162"→"16/162" 等の防御)
+HP_BAR_MATCH_TOL = 0.15
+# 相手の HP (field 経路): HUD の名前の OCR と、場の個体の既知の名前 (種族名・表示名・別名) の類似度の最大がこれ未満なら
+# 「別の表示の名前」とみなして HP を書かない (別個体への誤帰属の防御)
+OPP_HUD_NAME_MATCH_MIN = 0.5
+# 相手の HP (field 経路): 名前が読めないフレームでは、前の値からの変化がこれ (ポイント) を超える読みを書かない
+OPP_HP_UNVERIFIED_MAX_CHANGE = 15.0
+# 捨てた読みの名前が「別の種族名と読めた」かを調べるときの、図鑑の種族名への解決の閾値 (記録の分類にだけ使う。採否は変えない)
+HP_REJECT_SPECIES_CUTOFF = 0.8
+
 # --- 行動助言の RL 加点と影の計算 (docs/USEFULNESS_VERIFICATION_PLAN_1007.md §2 advice_variant・§4、2026-10-07) ---
 # RL の行動確率の加点の重み (advisor.engine: score += 重み × 確率) の既定値。evaluate(rl_blend_weight=...) で渡さないときに使う。
 # 環境変数 RL_BLEND_WEIGHT があれば起動時に 1 回だけそれを既定値として読む (後方互換。評価のたびには読まない)

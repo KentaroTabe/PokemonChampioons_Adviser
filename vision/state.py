@@ -20,6 +20,50 @@ STAT_KEYS = ("atk", "def", "spa", "spd", "spe", "acc", "eva")
 
 MAJOR_STATUSES = ("poison", "toxic", "burn", "paralysis", "sleep", "freeze", "drowsy")
 
+# --- HP の読みの棄却の記録 (2026-10-09、KNOWN_ISSUES A1 の 10/8 の行) ---
+# 抽出 (vision/extractors) が HP の読みを捨てたとき、その理由と観測を残す。理由の名前は既存の分岐に 1 つずつ付けた:
+#   name_mismatch               相手: HUD の名前が読めたが、場の個体の既知の名前と類似度が閾値未満
+#                               (name_kind: other_member = 相手の別の枠の名前と読めた / other_species = 図鑑の別の種族名と読めた /
+#                                unreadable = どれとも合わない (判読不能、または未知の名前))
+#   name_unreadable_big_change  相手: 名前が読めず、前の値からの変化が大きい (または HP 未知)
+#   fraction_unparsable         自分: HP の文字が分数として読めない (最大 HP が 50 未満の読みを含む)
+#   max_hp_mismatch             自分: 最大 HP が基準 (型登録の理論値 / 実測採用値 / 過去の読み) と合わない
+#   max_hp_implausible          自分: 基準なし・種族判明済みで、図鑑の物理可能域に無い最大 HP
+#   max_hp_not_in_team          自分: 基準なし・種族未特定 (または登録済み) で、チームの理論最大 HP の集合に無い
+#   cur_over_max                自分: 現在値が最大値を超える
+#   bar_mismatch                自分: 分数の割合とバーの塗りの割合の差が許容 (HP_BAR_MATCH_TOL) を超える
+# 状態には側ごとに「最後に捨てた読み」1 件だけを持つ (同じ理由・同じ候補値・同じ枠の連続は 1 件にまとめ、n と t_first で残す)。
+# 件数は起動からの累計をモジュールに持つ (reset_battle で消えない。server の 5 秒統計の行に出す)
+HP_REJECT_REASONS = ("name_mismatch", "name_unreadable_big_change", "fraction_unparsable", "max_hp_mismatch",
+                     "max_hp_implausible", "max_hp_not_in_team", "cur_over_max", "bar_mismatch")
+HP_REJECT_COUNTS: dict = {}   # {(side, reason): 件数}
+
+
+def merge_hp_reject(prev: Optional[dict], rec: dict) -> dict:
+    """直前の棄却の記録 prev に新しい記録 rec を重ねる (純粋)。
+
+    理由・候補値・枠が prev と同じなら 1 件にまとめ (n を数え、t_first は最初の時刻のまま、他の欄は最新)、違えば rec で置き換える"""
+    out = dict(rec)
+    if prev and all(prev.get(k) == rec.get(k) for k in ("reason", "hp_candidate", "slot")):
+        out["n"] = int(prev.get("n") or 1) + 1
+        out["t_first"] = prev.get("t_first", prev.get("t"))
+    else:
+        out["n"] = 1
+        out["t_first"] = rec.get("t")
+    return out
+
+
+def format_hp_reject_counts(counts: dict) -> str:
+    """棄却の件数 {(side, reason): n} → server の統計の行の短い文言 (純粋)。例: 「HP棄却 相手[name_mismatch=3] 自分[bar_mismatch=12]」"""
+    if not counts:
+        return "HP棄却=0"
+    parts = []
+    for side, label in (("player", "自分"), ("opponent", "相手")):
+        items = sorted(((r, n) for (sd, r), n in counts.items() if sd == side and n), key=lambda kv: (-kv[1], kv[0]))
+        if items:
+            parts.append(f"{label}[" + " ".join(f"{r}={n}" for r, n in items) + "]")
+    return "HP棄却 " + " ".join(parts) if parts else "HP棄却=0"
+
 
 def _dex_types_ja_of(species_id: Optional[str]) -> Optional[set]:
     """種族IDの図鑑タイプ (日本語集合)。図鑑が引けない場合は None"""
@@ -485,6 +529,8 @@ class BattleStateV2:
         # 各側のアクティブが直前に使った技 {side: move_id}。
         # アンコールの技固定の解決に使う。交代・ひんしでその側をクリア
         self.last_move: dict = {}
+        # 側ごとの「最後に捨てた HP の読み」(record_hp_reject。理由の一覧は HP_REJECT_REASONS の注記)
+        self.hp_reject: dict = {"player": None, "opponent": None}
 
     # --- イベントログ ---
     def log_event(self, source: str, text: str, event_id: Optional[str] = None,
@@ -501,6 +547,17 @@ class BattleStateV2:
         if len(self.events) > 300:
             self.events = self.events[-300:]
         return entry
+
+    def record_hp_reject(self, side: str, rec: dict) -> dict:
+        """HP の読みを捨てた記録を残す。rec: {reason, name_text, name_similarity, hp_candidate, bar_ratio, slot, ...}。
+        t を付け、側の「最後に捨てた読み」に重ね (merge_hp_reject)、起動からの件数 (HP_REJECT_COUNTS) を 1 増やす"""
+        rec = dict(rec)
+        rec.setdefault("t", round(time.time(), 2))
+        merged = merge_hp_reject(self.hp_reject.get(side), rec)
+        self.hp_reject[side] = merged
+        key = (side, rec.get("reason"))
+        HP_REJECT_COUNTS[key] = HP_REJECT_COUNTS.get(key, 0) + 1
+        return merged
 
     def side(self, name: str) -> SideState:
         return self.player if name == "player" else self.opponent
@@ -601,4 +658,5 @@ class BattleStateV2:
             "protect_streak": dict(self.protect_streak),
             "battle_seq": self.battle_seq,
             "last_move": dict(self.last_move),
+            "hp_reject": {k: (dict(v) if v else None) for k, v in self.hp_reject.items()},
         }

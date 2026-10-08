@@ -19,8 +19,10 @@ from vision import zones, ocr
 from vision.zones import crop
 from vision.state import BattleStateV2, MoveSlot, PokemonState, adopt_selection_guess
 from vision.typeicons import classify_type_icon
-from champions_agent.config import (MY_EXACT_RESOLVE_CUTOFF, MY_REGISTERED_MATCH_RATIO,
-                                    MY_ROSTER_MATCH_RATIO, PARTY_SIZE)
+from champions_agent.config import (HP_BAR_MATCH_TOL, HP_REJECT_SPECIES_CUTOFF,
+                                    MY_EXACT_RESOLVE_CUTOFF, MY_REGISTERED_MATCH_RATIO,
+                                    MY_ROSTER_MATCH_RATIO, OPP_HP_UNVERIFIED_MAX_CHANGE,
+                                    OPP_HUD_NAME_MATCH_MIN, PARTY_SIZE)
 
 # 相性ヒント表記 -> 内部表現
 EFFECTIVENESS_MAP = [
@@ -919,6 +921,70 @@ def _set_hp(state: BattleStateV2, side_name: str, mon,
         detail={"side": side_name, "from": base, "to": new})
 
 
+def my_bar_agrees(cur: int, mx: int, bar: Optional[float], tol: float = HP_BAR_MATCH_TOL) -> bool:
+    """自分の HP の分数 cur/mx とバーの塗りの割合 bar が許容内で一致するか (純粋)。bar が None なら照合しない (True)。
+
+    bar は vision.zones の my_hp_bar_track (バーの実範囲) で測った値を渡す。my_hp_bar (HUD の有無の判定用) で測ると
+    実際の 0.7〜0.9 倍に出て、高い HP の正しい読みが落ちる (2026-10-08 試験、KNOWN_ISSUES A1)"""
+    if bar is None or not mx:
+        return True
+    return abs(cur / mx - bar) <= tol
+
+
+def opp_field_hp_verdict(name_text: str, known_names: list, pct: float, prev_pct: Optional[float],
+                         other_names: Optional[list] = None, species_lookup=None) -> Optional[dict]:
+    """相手の HP (field 経路) の読みを場の個体に書いてよいか (純粋。species_lookup が純粋なら)。
+
+    None = 書いてよい。捨てるときは {"reason", "name_similarity", ("name_kind", "name_match")} を返す。
+    判定は従来の 2 分岐のまま (閾値は config へ移しただけ):
+    - 名前が読めて、既知の名前 (種族名・表示名・別名) との類似度の最大が OPP_HUD_NAME_MATCH_MIN 未満 → name_mismatch。
+      記録用に、読めた名前が何に近いかを分ける (採否は変えない): 相手の別の枠の名前 (other_names) と閾値以上 → other_member、
+      図鑑の種族名に解決できる (species_lookup) → other_species、どちらでもない → unreadable (判読不能、または未知の名前)
+    - 名前が読めず、HP 未知か前の値からの変化が OPP_HP_UNVERIFIED_MAX_CHANGE を超える → name_unreadable_big_change
+    """
+    from vision.normalize import similarity
+    if name_text and known_names:
+        sim = max(similarity(name_text, n) for n in known_names)
+        if sim < OPP_HUD_NAME_MATCH_MIN:
+            kind, match = "unreadable", None
+            best = max(((similarity(name_text, n), n) for n in (other_names or []) if n),
+                       default=(0.0, None))
+            if best[1] is not None and best[0] >= OPP_HUD_NAME_MATCH_MIN:
+                kind, match = "other_member", best[1]
+            elif species_lookup is not None:
+                ja = species_lookup(name_text)
+                if ja and ja not in known_names:
+                    kind, match = "other_species", ja
+            return {"reason": "name_mismatch", "name_similarity": round(sim, 3),
+                    "name_kind": kind, "name_match": match}
+        return None
+    if not name_text and (prev_pct is None or abs(pct - prev_pct) > OPP_HP_UNVERIFIED_MAX_CHANGE):
+        return {"reason": "name_unreadable_big_change", "name_similarity": None}
+    return None
+
+
+def _species_name_lookup(text: str) -> Optional[str]:
+    """読めた名前を図鑑の種族名に解決する (棄却の記録の分類用。失敗は None)"""
+    try:
+        r = _resolver_singleton().resolve_species(text, cutoff=HP_REJECT_SPECIES_CUTOFF)
+    except Exception:
+        return None
+    return r[0] if r else None
+
+
+def _reject_my_hp(state: BattleStateV2, reason: str, source: str, hp_text: str,
+                  frac=None, bar: Optional[float] = None) -> None:
+    """自分の HP の読みを捨てた記録 (state.record_hp_reject)。記録の失敗で抽出を止めない"""
+    try:
+        state.record_hp_reject("player", {
+            "reason": reason, "source": source, "name_text": None, "name_similarity": None,
+            "hp_candidate": [int(frac[0]), int(frac[1])] if frac else None,
+            "hp_text": hp_text, "bar_ratio": None if bar is None else round(float(bar), 3),
+            "slot": state.player.active_index})
+    except Exception:
+        pass
+
+
 def extract_field_hp(img, state: BattleStateV2) -> None:
     """フィールドシーン (技アニメーション/メッセージ中) の軽量HP読取。
 
@@ -943,31 +1009,43 @@ def extract_field_hp(img, state: BattleStateV2) -> None:
                                      allowlist="0123456789%")
         pct = ocr.parse_percent(hp_text)
         bar = ocr.hp_bar_ratio(crop(img, zones.BATTLE["opp_hp_bar"]))
+        pct_from_bar = False   # 記録用: % の文字ではなくバーの割合で代用した読みか
         if pct is not None and bar is not None and abs(pct - bar * 100) > 15:
             pct = round(bar * 100, 1)
+            pct_from_bar = True
         elif pct is None and bar is not None:
             pct = round(bar * 100, 1)
+            pct_from_bar = True
         if pct is not None:
             # HUD経路と同じ帰属ガード (2026-08-21 第6回: 演出中の空バーが
             # このパスから安定3回条件を満たし、21%のガブリアスへ0%を
             # 再コミットし続けた)。名前が読めて不一致なら書かない。
-            # 名前が読めないフレームは大きな変化 (>15pt) を書かない
-            from vision.normalize import similarity
+            # 名前が読めないフレームは大きな変化 (>15pt) を書かない。
+            # 捨てた読みは理由と観測を状態に残す (2026-10-09: 10/8 のニョロトノ 42% が名前の OCR '/BEニ' で
+            # 4 秒間捨てられ続けたが、記録が無く後から理由を追えなかった)
             name_text = ocr.read_zone_text(
                 img, zones.BATTLE["opp_name"], mode="panel",
                 allowlist=ocr.KATAKANA_ALLOWLIST)
             known_names = [n for n in (
                 [opp.species_ja, opp.display_name] +
                 list(getattr(opp, "aliases", []) or [])) if n]
-            if name_text and known_names and \
-                    max(similarity(name_text, n) for n in known_names) < 0.5:
-                pass    # 明確な名前不一致: 演出中の別表示とみなす
-            elif not name_text and (
-                    opp.hp_percent is None or
-                    abs(pct - opp.hp_percent) > 15):
-                pass    # 名前未読 + 大変化/HP未知: 誤帰属の疑いで見送る
-            else:
+            other_names = [n for p in state.opponent.party if p is not opp
+                           for n in ([p.species_ja, p.display_name] +
+                                     list(getattr(p, "aliases", []) or [])) if n]
+            verdict = opp_field_hp_verdict(name_text, known_names, pct, opp.hp_percent,
+                                           other_names, _species_name_lookup)
+            if verdict is None:
                 _set_hp(state, "opponent", opp, pct=pct)
+            else:
+                try:
+                    state.record_hp_reject("opponent", {
+                        **verdict, "source": "field", "name_text": name_text,
+                        "hp_candidate": float(pct), "hp_text": hp_text,
+                        "pct_from_bar": pct_from_bar,
+                        "bar_ratio": None if bar is None else round(float(bar), 3),
+                        "slot": state.opponent.active_index})
+                except Exception:
+                    pass
 
     me = state.player.active()
     if me is not None and _hp_bar_pixels(crop(img, zones.BATTLE["my_hp_bar"])) > 30:
@@ -985,11 +1063,17 @@ def extract_field_hp(img, state: BattleStateV2) -> None:
             except Exception:
                 registered = False
             if known and mx != known:
-                pass   # 基準と食い違う読みは捨てる (桁落ちは現在値も壊れている)
+                # 基準と食い違う読みは捨てる (桁落ちは現在値も壊れている)
+                _reject_my_hp(state, "max_hp_mismatch", "field", my_hp, frac)
             elif known is None and registered and legal and mx not in legal:
-                pass   # 登録済み種族なのに理論最大集合に無い読みは捨てる
+                # 登録済み種族なのに理論最大集合に無い読みは捨てる
+                _reject_my_hp(state, "max_hp_not_in_team", "field", my_hp, frac)
             elif cur <= mx:
                 _set_hp(state, "player", me, cur=cur, mx=mx)
+            else:
+                _reject_my_hp(state, "cur_over_max", "field", my_hp, frac)
+        elif my_hp:
+            _reject_my_hp(state, "fraction_unparsable", "field", my_hp, frac)
 
 
 _TYPE_EN2JA = None
@@ -1412,7 +1496,7 @@ def _reconcile_remaining_faints(state: BattleStateV2, side_name: str) -> None:
             event_id=f"faint_deficit_{side_name}")
 
 
-def extract_my_hud(img, state: BattleStateV2, resolver) -> None:
+def extract_my_hud(img, state: BattleStateV2, resolver, bar_zone: Optional[dict] = None) -> None:
     """自分側HUD (表示名 + HP実数) の読取。
 
     HUDは battle_hud だけでなく command / move_select でも常時表示される。
@@ -1436,9 +1520,15 @@ def extract_my_hud(img, state: BattleStateV2, resolver) -> None:
     my_hp = ocr.read_zone_text(img, zones.BATTLE["my_hp_text"], mode="panel",
                                allowlist="0123456789/")
     frac = ocr.parse_fraction(my_hp)
+    # バーの割合はバーの実範囲 (my_hp_bar_track) で測る。bar_zone は検証用 (修正前のゾーン my_hp_bar の挙動の再現)
+    if bar_zone is None:
+        bar_zone = zones.BATTLE["my_hp_bar_track"]
     # 最大HPが50未満の読みは誤読とみなす (Lv50の最大HPは実質50以上。
     # 選出画面の「0/3」進捗がこのゾーンに重なって読まれる事故も弾く)
-    if frac and frac[1] and frac[1] >= 50:
+    if not (frac and frac[1] and frac[1] >= 50):
+        if my_hp:
+            _reject_my_hp(state, "fraction_unparsable", "hud", my_hp, frac)
+    else:
         cur, mx = frac
         # 最大HPは対戦中に変化しない (メガシンカでも不変)。基準値は
         # 型登録 (config/my_team.json) から計算した理論値を最優先し、
@@ -1449,6 +1539,9 @@ def extract_my_hud(img, state: BattleStateV2, resolver) -> None:
             or (me.hp_max if me.hp_max and me.hp_max >= 50 else None)
         legal = _my_legal_maxes()
         ok = True
+        reject = None   # 捨てたときの理由 (記録用。HP_REJECT_REASONS)
+        cand = (cur, mx)   # 捨てた候補 (記録用。桁補正後の値を照合で捨てたときは補正後)
+        bar = None
         if known and mx != known:
             digits = re.sub(r"\D", "", my_hp)
             ks = str(known)
@@ -1462,10 +1555,11 @@ def extract_my_hud(img, state: BattleStateV2, resolver) -> None:
                 # の読みが続く場合は登録側が古い (最大HPは対戦中不変) と
                 # みなして実測を採用する (2026-08-20 第5回: ムクホーク
                 # 登録161 vs 実測181で全読取が棄却されHPが100%固着した)
-                bar_now = ocr.hp_bar_ratio(crop(img, zones.BATTLE["my_hp_bar"]))
+                bar_now = ocr.hp_bar_ratio(crop(img, bar_zone))
+                bar = bar_now
                 counts = getattr(me, "_max_adopt_counts", None) or {}
                 if bar_now is not None and cur <= mx and \
-                        abs(cur / mx - bar_now) <= 0.15:
+                        my_bar_agrees(cur, mx, bar_now):
                     counts[mx] = counts.get(mx, 0) + 1
                 else:
                     counts[mx] = 0
@@ -1482,6 +1576,7 @@ def extract_my_hud(img, state: BattleStateV2, resolver) -> None:
                     known = mx
                 else:
                     ok = False
+                    reject = "max_hp_mismatch"
                     mx = known
         elif known is None:
             if me.species_id is not None:
@@ -1490,19 +1585,28 @@ def extract_my_hud(img, state: BattleStateV2, resolver) -> None:
                 # 全読取が棄却される (2026-08-25: 技のみ自動登録のマスカーニャ)
                 if not _plausible_max_hp(me.species_id, mx):
                     ok = False
+                    reject = "max_hp_implausible"
             elif legal and mx not in legal:
                 # 種族特定前は、チーム全員の理論最大HP集合に無い読みは誤読
                 # (「16/67」が特定前に素通りして定着する事故の防止)
                 ok = False
+                reject = "max_hp_not_in_team"
         # OCR分数とHPバーの塗り割合を照合する。イタリック数字の桁化けは
         # 基準最大HPとの突き合わせをすり抜ける ("111/162"→"16/162"=10%、
         # "162/162"→100% を実戦で観測)。バーとの乖離が大きい読みは棄却する
         if ok and cur <= mx:
-            bar = ocr.hp_bar_ratio(crop(img, zones.BATTLE["my_hp_bar"]))
-            if bar is not None and abs(cur / mx - bar) > 0.15:
+            bar = ocr.hp_bar_ratio(crop(img, bar_zone))
+            if not my_bar_agrees(cur, mx, bar):
                 ok = False
+                reject = "bar_mismatch"
+                cand = (cur, mx)
         if ok and cur <= mx:
             _set_hp(state, "player", me, cur=cur, mx=mx)
+        elif ok:
+            reject = "cur_over_max"
+            cand = (cur, mx)
+        if reject:
+            _reject_my_hp(state, reject, "hud", my_hp, cand, bar)
         # 過去に定着した誤った最大HPの掃除 (理論値と食い違えば読み直しに戻す)
         if known and me.hp_max and me.hp_max != known:
             me.hp_current, me.hp_max, me.hp_percent = None, None, None
