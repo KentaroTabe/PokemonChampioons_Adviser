@@ -130,6 +130,7 @@ TESTS=(
   test_pick_labels
   test_frame_burst
   test_client_state
+  test_hp_intake
   test_dmg_compare
   test_scene_samples
   test_usefulness_p1

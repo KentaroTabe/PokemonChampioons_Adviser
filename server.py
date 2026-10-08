@@ -29,7 +29,7 @@ from vision.pipeline import VisionPipeline
 from vision.scenes import SCENE_SELECTION, SCENE_STANDBY
 from vision.end_notice import battle_end_notice, outcome_revision_notice
 from vision.stale_notice import advice_target, stale_advice_notice
-from vision.state import apply_manual_species
+from vision.state import HP_REJECT_COUNTS, apply_manual_species, format_hp_reject_counts
 from vision.frame_burst import BurstPlanner
 from champions_agent.config import (CLIENT_HELLO_WAIT_SEC, DISPLAY_HIDDEN_WARN_COUNT, FRAME_BURST_DIR,
                                     MANUAL_SPECIES_RESOLVE_CUTOFF, SHADOW_VARIANTS_ENABLED)
@@ -433,7 +433,8 @@ async def _handle_one_frame(sid, data):
                   f"events={len(state['events'])} "
                   f"処理時間 p50={_pct(_proc_ms, 50):.0f}ms p95={_pct(_proc_ms, 95):.0f}ms "
                   f"助言 p50={_pct(_advise_ms, 50):.0f}ms max={max(_advise_ms) if _advise_ms else 0:.0f}ms "
-                  f"可視状態 隠れ={hidden_counter} 可視={visible_counter} 不明={unknown_counter}")
+                  f"可視状態 隠れ={hidden_counter} 可視={visible_counter} 不明={unknown_counter} "
+                  f"{format_hp_reject_counts(HP_REJECT_COUNTS)}")
 
         if fired:
             for f in fired:
