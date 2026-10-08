@@ -292,9 +292,12 @@ def test_evaluate_split_matches_reference_on_fixtures():
             d0 = evaluate(copy.deepcopy(st), res)
             d1 = evaluate(copy.deepcopy(st), res, rl_blend_weight=engine.RL_BLEND_DEFAULT)
             assert d0["actions"] == d1["actions"], name
-            # 返す辞書の鍵は改修前と同じ (共通部分の内部の欄を漏らさない)
+            # 返す辞書の鍵は改修前と同じ (共通部分の内部の欄を漏らさない)。
+            # opp_pending / opp_pending_note は 2026-10-09 ④ (ユーザー承認) で足した「相手の場の個体が対応待ちのため
+            # 終盤評価と探索を保留した」印 (advice 行に残す)。鍵の追加だけで、採点の値は変えていない
             assert set(d0) == {"ok", "actions", "threats", "speed_note", "mega_note", "opp_inference", "opp_moves_note",
-                               "opp_spread_note", "gtheory", "endgame_note", "sacrifice_note", "rl_hint", "best"}, set(d0)
+                               "opp_spread_note", "gtheory", "endgame_note", "sacrifice_note", "rl_hint", "best",
+                               "opp_pending", "opp_pending_note"}, set(d0)
     print("test_evaluate_split_matches_reference_on_fixtures OK")
 
 
