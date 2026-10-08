@@ -132,6 +132,8 @@ TESTS=(
   test_client_state
   test_dmg_compare
   test_scene_samples
+  test_usefulness_p1
+  test_usefulness_verdict
 )
 
 fail=0

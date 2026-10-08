@@ -293,6 +293,33 @@ SHADOW_DEADLINE_SEC = 3.0
 # 負荷確認 (tools/shadow_load_check) でフレームを流す間隔 (秒)。前面のページの通常の送信 (10 fps)
 SHADOW_LOAD_FRAME_INTERVAL_SEC = 0.1
 
+# --- 有用性検証 P1: RL 加点 0 / ×5 / ×25 の対応比較 (docs/USEFULNESS_VERIFICATION_PLAN_1007.md §0.5・§4、2026-10-09) ---
+# 起動は tools/usefulness_p1.py、採否の集計は tools/usefulness_verdict.py。シミュレータの状態から直接助言を計算する (OCR を通らない) ので、
+# 分かるのはシミュレーション条件下での RL 加点の効果 (実戦の有用性とは分けて評価する)
+P1_WEIGHTS = (0.0, 5.0, 25.0)       # 比べる重み (条件)
+P1_BASELINE_WEIGHT = 25.0           # 基準条件 (既定の ×25)。比較数 k = 重みの数 − 1
+P1_MDE = 0.05                       # 実用上意味のある最小差 (§0.5)
+P1_ALPHA = 0.05                     # 全体の水準。区間の水準は 1 − α / k (両側)
+P1_FINAL_BATTLES = 600              # 最終対戦数 / 条件 (事前に固定。採否はこの n で 1 回だけ)
+P1_INTERIM_BATTLES = 300            # 中間確認 (採否を出さない。費用と異常の確認だけ)
+P1_PRELIM_BATTLES = 50              # 予備測定 (秒/戦の見積もり)
+P1_TIME_LIMIT_SEC = 7200            # 1 実験の費用上限 (超えたら止めて未完了。採否は出さない)
+P1_ABORT_SEC_PER_BATTLE = 12.0      # 予備測定の秒/戦がこれを超えたら本番を始めない目安 (600 戦で 2 時間を超える)
+P1_PROGRESS_SEC = 60                # 進捗の表示間隔 (秒)
+P1_TERMINATE_GRACE_SEC = 15         # 時間上限で terminate してから kill するまでの猶予 (秒)
+P1_SEED = 20261009                  # 相手列の seed (10/7 の参照の腕 302410 とは別)
+P1_OPP_OFFSET = 0
+P1_SPLIT_FILE = "logs/build_search/runs/improve_20261007_1807/opponent_families.json"   # 0100 と同一の分割
+P1_SPLIT_SEALED_ID = "e80afbea9a925dc8"   # 上の分割の封印 id (違えば警告)
+P1_SPLIT_TIER = "search"            # fold は BUILD_FOLD_EVAL (= B、方式の比較用。§0.4)
+P1_OPP_PILOT = "rl"
+P1_OPP_PICK_POLICY = "rule"
+P1_PICK_POLICY = "advisor"
+P1_BELIEF_K = 0
+P1_SELECTION_MODEL = "champions_agent/train/checkpoints/selection_model.pt"   # 実機と同じ配備版を明示 (3 条件で共通)
+P1_TEAM_SHA16 = "9a02fe6e61788a5a"  # 登録チームの本文 (advisor.versions と同じ計算) の sha16。違えば起動しない
+P1_OUT_ROOT = "logs/usefulness"
+
 # --- パーティ構築システム (docs/TEAM_BUILDING_IMPLEMENTATION.md §9 の決定値、2026-09-06) ---
 # 対応差 (候補 − 参照) の判定: 実用差 ε の帯に CI が収まれば「実用上同等」
 BUILD_EQUIV_EPS = 0.02
