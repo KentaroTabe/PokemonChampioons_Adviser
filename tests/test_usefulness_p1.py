@@ -141,11 +141,23 @@ def test_progress_finalize_prelim():
     bad = P.finalize(c, {"rl0": 600, "rl5": 12, "rl25": 600}, 900.0, False, {"rl0": 0, "rl5": 1, "rl25": 0}, 600)
     assert bad["incomplete"] is True and any("異常終了" in r for r in bad["incomplete_reasons"])
     assert c["incomplete"] is None          # 元の条件表は変えない
-    a = P.prelim_advice(300.0, {"rl0": 50, "rl5": 50, "rl25": 40})
-    assert abs(a["worst_sec_per_battle"] - 7.5) < 1e-12 and a["start_final"] is True and a["projected_final_sec"] == 7.5 * 600
-    slow = P.prelim_advice(50 * (P1_ABORT_SEC_PER_BATTLE + 1), {"rl0": 50, "rl5": 50, "rl25": 50})
-    assert slow["start_final"] is False
-    assert P.prelim_advice(100.0, {"rl0": 0})["start_final"] is False      # 測れなければ始めない目安
+    # 本番開始可 (2026-10-09 レビュー指摘 2): 全 3 条件が規定数に到達・正常終了 (rc 0)・未完了でない・最遅が上限内
+    ok0 = {"rl0": 0, "rl5": 0, "rl25": 0}
+    a = P.prelim_advice(300.0, {"rl0": 50, "rl5": 50, "rl25": 50}, ok0, False, 50)
+    assert a["start_final"] is True and a["reasons"] == [] and abs(a["worst_sec_per_battle"] - 6.0) < 1e-12, a
+    assert a["projected_final_sec"] == 6.0 * 600
+    # 到達数 0 / 50 / 50 は開始不可 (以前は 0 を速度の計算から除いて True になった)
+    z = P.prelim_advice(300.0, {"rl0": 0, "rl5": 50, "rl25": 50}, ok0, False, 50)
+    assert z["start_final"] is False and z["worst_sec_per_battle"] is None and any("未到達" in r for r in z["reasons"]), z
+    # 1 条件が 40 戦で止まった / 異常終了 / 未完了 / 条件が欠ける → 開始不可
+    assert P.prelim_advice(300.0, {"rl0": 50, "rl5": 50, "rl25": 40}, ok0, False, 50)["start_final"] is False
+    assert P.prelim_advice(300.0, {"rl0": 50, "rl5": 50, "rl25": 50}, {"rl0": 0, "rl5": 1, "rl25": 0}, False, 50)["start_final"] is False
+    assert P.prelim_advice(300.0, {"rl0": 50, "rl5": 50, "rl25": 50}, {"rl0": 0, "rl5": None, "rl25": 0}, False, 50)["start_final"] is False
+    assert P.prelim_advice(300.0, {"rl0": 50, "rl5": 50, "rl25": 50}, ok0, True, 50)["start_final"] is False
+    assert P.prelim_advice(300.0, {"rl0": 50, "rl5": 50}, {"rl0": 0, "rl5": 0}, False, 50)["start_final"] is False
+    # 最遅の条件が上限を超える → 開始不可
+    slow = P.prelim_advice(50 * (P1_ABORT_SEC_PER_BATTLE + 1), {"rl0": 50, "rl5": 50, "rl25": 50}, ok0, False, 50)
+    assert slow["start_final"] is False and any("上限" in r for r in slow["reasons"]), slow
     assert P.dirty_files(" M champions_agent/config.py\nM  a.py\n") == ["champions_agent/config.py", "a.py"]
     assert P.dirty_files(None) is None and P.dirty_files("") == []
     print("test_progress_finalize_prelim OK")

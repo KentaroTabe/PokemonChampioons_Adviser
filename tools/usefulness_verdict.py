@@ -10,6 +10,7 @@ rl<W>.json が無い (時間上限で止めた等) 条件は rl<W>.battles.jsonl
   - 実用的改善を支持しない (not_supported): 補正区間の上限 < MDE
   - 判定不能 (inconclusive): それ以外 (現状維持)
 n が最終対戦数に満たない、または条件表が incomplete: true なら採否を出さない (中間確認: 推定値・区間・費用の更新だけ)。
+全条件の対象 n 戦ぶんの相手 id (battles.jsonl の opponent_team_id) が揃い条件間で一致することを確かめられなければ、比較条件の不成立 (mode invalid) として採否を出さない (統計的な判定不能とは別。2026-10-09 レビュー指摘 1)。
 各条件の勝率と Wilson 区間は参考値 (対応比較の代わりにはならない)。
 
 純粋な部分 (corrected_z / decide / compare / wilson / align / build_verdict / render) は tests/test_usefulness_verdict.py で確かめる。
@@ -32,6 +33,8 @@ INCONCLUSIVE = "inconclusive"
 DECISION_LABELS = {ADOPT: "採用候補", NOT_SUPPORTED: "実用的改善を支持しない", INCONCLUSIVE: "判定不能 (現状維持)"}
 MODE_FINAL = "final"
 MODE_INTERIM = "interim"
+# 比較条件の不成立 (対応の確認ができない: 相手 id の不一致・欠落・不足。統計的な「判定不能」とは別。2026-10-09 レビュー指摘 1)
+MODE_INVALID = "invalid"
 
 
 # ------------------------------------------------------------------ 純粋
@@ -100,6 +103,25 @@ def opponent_mismatches(opp_ids_by_cond: dict, n: int) -> Optional[int]:
     return sum(1 for i in range(m) if len({s[i] for s in seqs}) > 1)
 
 
+def correspondence_check(opp_ids_by_cond: Optional[dict], conds: Sequence[str], n: int) -> list:
+    """対応比較が成り立つかの検査 (純粋)。全条件について相手 id の列が n 戦ぶん揃い、対戦 i の相手 id が条件間で一致する
+    ことを確かめる。成り立たない理由の list (空なら成立)。統計的な判定不能とは別の「比較条件の不成立」で、最終判定を出さない"""
+    reasons = []
+    ids = opp_ids_by_cond or {}
+    missing = [c for c in conds if not ids.get(c)]
+    if missing:
+        reasons.append(f"相手 id の列が無い条件: {', '.join(missing)} (battles.jsonl の opponent_team_id)")
+    short = {c: len(ids[c]) for c in conds if ids.get(c) and len(ids[c]) < n}
+    if short:
+        reasons.append(f"相手 id の列が {n} 戦に足りない: {short}")
+    if not missing and not short:
+        present = {c: ids[c] for c in conds}
+        mism = opponent_mismatches(present, n)
+        if mism:
+            reasons.append(f"相手 id が条件間で食い違う対戦が {mism} 件 (条件の取り違えか相手列の不一致)")
+    return reasons
+
+
 def build_verdict(conditions: dict, outcomes_by_cond: dict, weights: Sequence[float] = P1_WEIGHTS,
                   baseline_weight: float = P1_BASELINE_WEIGHT, final_battles: int = P1_FINAL_BATTLES,
                   mde: float = P1_MDE, alpha: float = P1_ALPHA, sources: Optional[dict] = None,
@@ -125,6 +147,10 @@ def build_verdict(conditions: dict, outcomes_by_cond: dict, weights: Sequence[fl
     if missing:
         reasons.append("条件が揃っていない")
     mode = MODE_INTERIM if reasons else MODE_FINAL
+    # 対応の確認 (全条件の対象 n 戦ぶんの相手 id が揃い、条件間で一致する)。できなければ比較条件の不成立 → 採否を出さない
+    invalid_reasons = correspondence_check(opp_ids_by_cond, [base] + others, n) if not missing else []
+    if invalid_reasons:
+        mode = MODE_INVALID
     comparisons = []
     for c in others:
         if c in aligned and base in aligned:
@@ -148,7 +174,7 @@ def build_verdict(conditions: dict, outcomes_by_cond: dict, weights: Sequence[fl
     mism = opponent_mismatches(opp_ids_by_cond or {}, n)
     if mism:
         notes.append(f"相手 id が条件間で食い違う対戦が {mism} 件 (条件の取り違えか相手列の不一致。対応比較が成り立たない)")
-    return {"mode": mode, "interim_reasons": reasons, "k": k, "alpha": alpha, "level": 1.0 - alpha / max(1, k), "z": z,
+    return {"mode": mode, "interim_reasons": reasons, "invalid_reasons": invalid_reasons, "k": k, "alpha": alpha, "level": 1.0 - alpha / max(1, k), "z": z,
             "mde": mde, "final_battles": final_battles, "n_used": n, "baseline": base, "comparisons": comparisons,
             "per_condition": per_cond, "cost": cost, "opponent_mismatches": mism, "notes": notes}
 
@@ -190,14 +216,19 @@ def render(verdict: dict, conditions: Optional[dict] = None) -> str:
         lines += ["## 条件表の要約", "", "| 項目 | 値 |", "|---|---|"]
         lines += [f"| {k} | {val} |" for k, val in condition_summary(conditions)]
         lines.append("")
-    if v["mode"] == MODE_INTERIM:
+    if v["mode"] == MODE_INVALID:
+        lines += ["## 比較条件の不成立 (採否は出さない)", "", "理由: " + " / ".join(v["invalid_reasons"]), ""]
+        if v["interim_reasons"]:
+            lines += ["(統計的な中間確認の理由も併記: " + " / ".join(v["interim_reasons"]) + ")", ""]
+    elif v["mode"] == MODE_INTERIM:
         lines += ["## 中間確認 (採否は出さない)", "", "理由: " + " / ".join(v["interim_reasons"]), ""]
     else:
         lines += ["## 採否 (§0.5、最終対戦数で 1 回だけ)", ""]
     lines += [f"比較 k = {v['k']}、区間の水準 {v['level']:.4f} (両側 z = {v['z']:.4f})、MDE = {v['mde']}、使った n = {v['n_used']}", "",
               "| 比較 | n | 平均差 | SE | 補正区間 | 判定 |", "|---|---|---|---|---|---|"]
     for r in v["comparisons"]:
-        dec = DECISION_LABELS.get(r["decision"], "-") if r["decision"] else ("中間確認" if v["mode"] == MODE_INTERIM else "-")
+        dec = DECISION_LABELS.get(r["decision"], "-") if r["decision"] else (
+            "中間確認" if v["mode"] == MODE_INTERIM else ("不成立" if v["mode"] == MODE_INVALID else "-"))
         lines.append(f"| {r['cond']} − {r['baseline']} | {r['n']} | {_f(r['mean_diff'], signed=True)} | {_f(r['se'])} | "
                      f"[{_f(r['ci_low'], signed=True)}, {_f(r['ci_high'], signed=True)}] | {dec} |")
     lines += ["", "### 各条件の勝率 (参考値、Wilson 95%)", "", "| 条件 | n | 勝 | 勝率 | Wilson 区間 | 出所 |", "|---|---|---|---|---|---|"]

@@ -234,15 +234,37 @@ def finalize(cond: dict, reached: dict, elapsed: float, timed_out: bool, returnc
     return out
 
 
-def prelim_advice(elapsed: float, reached: dict, threshold: float = P1_ABORT_SEC_PER_BATTLE,
-                  final_battles: int = P1_FINAL_BATTLES) -> dict:
-    """予備測定の秒/戦と本番の目安 (純粋)。秒/戦は並列の各プロセスの経過 / 到達数の最大"""
-    spb = {c: (elapsed / n if n else None) for c, n in reached.items()}
+def prelim_advice(elapsed: float, reached: dict, returncodes: Optional[dict] = None, incomplete: bool = False,
+                  battles: int = P1_PRELIM_BATTLES, threshold: float = P1_ABORT_SEC_PER_BATTLE,
+                  final_battles: int = P1_FINAL_BATTLES, conds: Sequence[str] = ()) -> dict:
+    """予備測定の秒/戦と本番の目安 (純粋)。秒/戦は並列の各プロセスの経過 / 到達数。
+    本番開始可 (start_final) の条件 (2026-10-09 レビュー指摘 2): 全条件 (conds、既定は P1_WEIGHTS の 3 条件) が揃い、
+    どの条件も battles 戦に到達し、全部が正常終了 (rc 0) で、条件表が未完了でなく、最も遅い条件の秒/戦が threshold 以内。
+    到達 0 戦の条件は秒/戦が無いので、それだけで開始不可 (以前は速度の計算から除いていて 0 / 50 / 50 でも開始可になった)"""
+    conds = list(conds) or [cond_name(w) for w in P1_WEIGHTS]
+    spb = {c: (elapsed / reached[c] if reached.get(c) else None) for c in conds}
+    reasons = []
+    missing = [c for c in conds if c not in reached]
+    if missing:
+        reasons.append(f"結果の無い条件: {missing}")
+    short = {c: reached.get(c, 0) for c in conds if (reached.get(c) or 0) < battles}
+    if short:
+        reasons.append(f"{battles} 戦に未到達: {short}")
+    rcs = returncodes or {}
+    bad = {c: rcs.get(c) for c in conds if rcs.get(c) != 0}
+    if bad:
+        reasons.append(f"正常終了でない (rc): {bad}")
+    if incomplete:
+        reasons.append("条件表が未完了 (incomplete)")
     vals = [v for v in spb.values() if v is not None]
-    worst = max(vals) if vals else None
-    ok = worst is not None and worst <= threshold
+    worst = max(vals) if vals and len(vals) == len(conds) else None
+    if worst is None:
+        reasons.append("秒/戦を全条件で測れていない")
+    elif worst > threshold:
+        reasons.append(f"最も遅い条件の秒/戦 {worst:.1f} が上限 {threshold} を超える (600 戦で 2 時間を超える見込み)")
     return {"sec_per_battle": spb, "worst_sec_per_battle": worst, "threshold": threshold,
-            "projected_final_sec": (worst * final_battles if worst is not None else None), "start_final": ok}
+            "projected_final_sec": (worst * final_battles if worst is not None else None),
+            "start_final": not reasons, "reasons": reasons}
 
 
 # ------------------------------------------------------------------ 取得 (副作用: ファイル・git・ソケットの読み取り)
@@ -624,7 +646,9 @@ def main(argv: Optional[list] = None) -> int:
     env = child_environment(str(pin_dir))
     final = launch(cond, out_dir, env, battles, args.time_limit_sec)
     if args.prelim:
-        final["prelim_advice"] = prelim_advice(final["elapsed_sec"], final["reached"])
+        final["prelim_advice"] = prelim_advice(final["elapsed_sec"], final["reached"], final.get("returncodes"),
+                                               bool(final.get("incomplete")), battles,
+                                               conds=list(cond["commands"]))
     _write_json(out_dir / "conditions.json", final)
     print(f"[p1] 終了: incomplete={final['incomplete']} 到達 {final['reached']} 所要 {final['elapsed_sec']} 秒")
     if args.prelim:
@@ -632,9 +656,10 @@ def main(argv: Optional[list] = None) -> int:
         worst = adv["worst_sec_per_battle"]
         print(f"[p1] 予備測定: 秒/戦 (最大) {worst if worst is None else round(worst, 2)} "
               f"/ 本番 {P1_FINAL_BATTLES} 戦の見込み {adv['projected_final_sec'] if adv['projected_final_sec'] is None else round(adv['projected_final_sec'] / 60)} 分")
-        if not adv["start_final"]:
-            print(f"[p1] 目安: 秒/戦が {P1_ABORT_SEC_PER_BATTLE} を超えた (または測れない) → 本番を始めない目安 "
-                  f"({P1_FINAL_BATTLES} 戦で上限 {args.time_limit_sec} 秒を超える見込み)。判断は人")
+        if adv["start_final"]:
+            print("[p1] 本番開始可: 全条件が規定数に到達・正常終了・未完了でない・最遅の秒/戦が上限内 (判断は人)")
+        else:
+            print("[p1] 本番を始めない目安 (判断は人): " + " / ".join(adv["reasons"]))
     print(f"[p1] 集計: python -m tools.usefulness_verdict --out {out_dir}")
     return 0
 

@@ -72,6 +72,10 @@ def test_k_changes_decision():
     print("test_k_changes_decision OK")
 
 
+def _ids(n: int) -> list:
+    return [f"t{i % 33}" for i in range(n)]
+
+
 def _outcomes_600():
     """3 条件で基準 (rl25) の列を共有する合成データ: rl0 は平均差 +0.05 (分散小 → 採用候補)、rl5 は平均差 0 (→ 支持しない)"""
     c0, b = _pair(30, 0, 300, 270)      # b = 基準: 先頭 30 敗、続く 300 勝、残り 270 敗
@@ -85,18 +89,19 @@ def _outcomes_600():
 
 def test_build_verdict_final_and_interim():
     outs = _outcomes_600()
-    v = V.build_verdict({"incomplete": False}, outs, (0.0, 5.0, 25.0), 25.0, 600, 0.05, 0.05)
+    ids = {c: _ids(600) for c in outs}          # 対応の確認には全条件の相手 id の列が要る (2026-10-09)
+    v = V.build_verdict({"incomplete": False}, outs, (0.0, 5.0, 25.0), 25.0, 600, 0.05, 0.05, opp_ids_by_cond=ids)
     assert v["mode"] == V.MODE_FINAL and v["k"] == 2 and abs(v["z"] - 2.241403) < 1e-5, v
     d = {r["cond"]: r for r in v["comparisons"]}
     assert d["rl0"]["decision"] == V.ADOPT and d["rl5"]["decision"] == V.NOT_SUPPORTED, d
     assert v["per_condition"]["rl25"]["n"] == 600 and v["per_condition"]["rl25"]["wilson_low"] is not None
     # 未完了 (incomplete: true) → n が揃っていても採否を出さない
-    vi = V.build_verdict({"incomplete": True}, outs, (0.0, 5.0, 25.0), 25.0, 600, 0.05, 0.05)
+    vi = V.build_verdict({"incomplete": True}, outs, (0.0, 5.0, 25.0), 25.0, 600, 0.05, 0.05, opp_ids_by_cond=ids)
     assert vi["mode"] == V.MODE_INTERIM and all(r["decision"] is None for r in vi["comparisons"]), vi
     assert all(r["mean_diff"] is not None and r["ci_low"] is not None for r in vi["comparisons"])   # 推定値と区間は出す
     # n が最終対戦数に満たない (300 戦の中間確認) → 採否を出さない (--interim の指定なしで自動)
     half = {c: o[:300] for c, o in outs.items()}
-    vh = V.build_verdict({"incomplete": False}, half, (0.0, 5.0, 25.0), 25.0, 600, 0.05, 0.05)
+    vh = V.build_verdict({"incomplete": False}, half, (0.0, 5.0, 25.0), 25.0, 600, 0.05, 0.05, opp_ids_by_cond=ids)
     assert vh["mode"] == V.MODE_INTERIM and vh["n_used"] == 300 and all(r["decision"] is None for r in vh["comparisons"])
     assert any("300" in x for x in vh["interim_reasons"])
     text = V.render(vh, {"incomplete": False})
@@ -107,7 +112,8 @@ def test_build_verdict_final_and_interim():
 def test_length_mismatch_uses_common_prefix():
     outs = _outcomes_600()
     outs["rl5"] = outs["rl5"][:580]
-    v = V.build_verdict({"incomplete": False}, outs, (0.0, 5.0, 25.0), 25.0, 600, 0.05, 0.05)
+    ids = {c: _ids(600) for c in outs}
+    v = V.build_verdict({"incomplete": False}, outs, (0.0, 5.0, 25.0), 25.0, 600, 0.05, 0.05, opp_ids_by_cond=ids)
     assert v["n_used"] == 580 and all(r["n"] == 580 for r in v["comparisons"]), v
     assert any("共通の先頭 580" in x for x in v["notes"]), v["notes"]
     assert v["mode"] == V.MODE_INTERIM          # 共通の n が 600 未満なので採否を出さない
@@ -115,6 +121,43 @@ def test_length_mismatch_uses_common_prefix():
     v2 = V.build_verdict({"incomplete": False}, {"rl0": outs["rl0"], "rl25": outs["rl25"]}, (0.0, 5.0, 25.0), 25.0, 600)
     assert v2["mode"] == V.MODE_INTERIM and any("rl5" in x for x in v2["notes"])
     print("test_length_mismatch_uses_common_prefix OK")
+
+
+def test_correspondence_failure_blocks_final_verdict():
+    """2026-10-09 レビュー指摘 1: 対応が確認できなければ (相手 id の不一致・欠落・不足) 最終判定を出さない (mode invalid)。
+    統計的な判定不能 (interim) とは別の「比較条件の不成立」"""
+    outs = _outcomes_600()
+    good = {c: _ids(600) for c in outs}
+    v = V.build_verdict({"incomplete": False}, outs, (0.0, 5.0, 25.0), 25.0, 600, 0.05, 0.05, opp_ids_by_cond=good)
+    assert v["mode"] == V.MODE_FINAL and v["invalid_reasons"] == [] and v["opponent_mismatches"] == 0, v["invalid_reasons"]
+    assert [r["decision"] for r in v["comparisons"]] == [V.ADOPT, V.NOT_SUPPORTED]
+    # 全条件で相手 id を食い違わせた 600 戦 → 不成立 (以前は注記だけで adopt_candidate が返った)
+    bad = {"rl0": _ids(600), "rl5": [f"x{i}" for i in range(600)], "rl25": [f"y{i}" for i in range(600)]}
+    vb = V.build_verdict({"incomplete": False}, outs, (0.0, 5.0, 25.0), 25.0, 600, 0.05, 0.05, opp_ids_by_cond=bad)
+    assert vb["mode"] == V.MODE_INVALID and all(r["decision"] is None for r in vb["comparisons"]), vb
+    assert any("食い違う対戦が 600 件" in x for x in vb["invalid_reasons"]), vb["invalid_reasons"]
+    # 1 件でも食い違えば不成立
+    one = {c: _ids(600) for c in outs}
+    one["rl5"] = list(one["rl5"])
+    one["rl5"][10] = "zz"
+    v1 = V.build_verdict({"incomplete": False}, outs, (0.0, 5.0, 25.0), 25.0, 600, 0.05, 0.05, opp_ids_by_cond=one)
+    assert v1["mode"] == V.MODE_INVALID and any("1 件" in x for x in v1["invalid_reasons"]), v1["invalid_reasons"]
+    # 相手 id の列が欠落 (条件 1 つ / 全部) → 不成立
+    for ids in ({"rl0": _ids(600), "rl25": _ids(600)}, {}, None):
+        vm = V.build_verdict({"incomplete": False}, outs, (0.0, 5.0, 25.0), 25.0, 600, 0.05, 0.05, opp_ids_by_cond=ids)
+        assert vm["mode"] == V.MODE_INVALID and any("列が無い" in x for x in vm["invalid_reasons"]), vm["invalid_reasons"]
+    # 列が対象の 600 戦に足りない → 不成立
+    short = {c: _ids(600) for c in outs}
+    short["rl25"] = _ids(590)
+    vs = V.build_verdict({"incomplete": False}, outs, (0.0, 5.0, 25.0), 25.0, 600, 0.05, 0.05, opp_ids_by_cond=short)
+    assert vs["mode"] == V.MODE_INVALID and any("足りない" in x for x in vs["invalid_reasons"]), vs["invalid_reasons"]
+    # 中間確認 (300 戦) で対応が成り立たないときも不成立として出す (推定値は出す)
+    half = {c: o[:300] for c, o in outs.items()}
+    vh = V.build_verdict({"incomplete": False}, half, (0.0, 5.0, 25.0), 25.0, 600, 0.05, 0.05, opp_ids_by_cond=bad)
+    assert vh["mode"] == V.MODE_INVALID and vh["interim_reasons"] and vh["comparisons"][0]["mean_diff"] is not None
+    text = V.render(vb, {"incomplete": False})
+    assert "比較条件の不成立" in text and "採用候補" not in text and "不成立" in text, text
+    print("test_correspondence_failure_blocks_final_verdict OK")
 
 
 def test_wilson_and_opponent_mismatch():
@@ -136,10 +179,13 @@ def test_run_reads_json_and_jsonl_fallback():
                                                          "incomplete": False, "elapsed_sec": 3000.0}), encoding="utf-8")
         for c in ("rl0", "rl25"):
             (out / f"{c}.json").write_text(json.dumps({"outcomes": outs[c], "elapsed_s": 3000.0}), encoding="utf-8")
-        with (out / "rl5.battles.jsonl").open("w", encoding="utf-8") as f:
-            for i, w in enumerate(outs["rl5"]):
-                f.write(json.dumps({"won": bool(w), "opponent_team_id": f"t{i % 33}"}) + "\n")
-            f.write('{"won": tr')          # 書きかけの行は数えない
+        # 対応の確認には全条件の相手 id の列 (battles.jsonl) が要る (2026-10-09 レビュー指摘 1)
+        for c in ("rl0", "rl5", "rl25"):
+            with (out / f"{c}.battles.jsonl").open("w", encoding="utf-8") as f:
+                for i, w in enumerate(outs[c]):
+                    f.write(json.dumps({"won": bool(w), "opponent_team_id": f"t{i % 33}"}) + "\n")
+                if c == "rl5":
+                    f.write('{"won": tr')          # 書きかけの行は数えない
         v = V.run(out)
         assert v["mode"] == V.MODE_FINAL and v["n_used"] == 600, v["interim_reasons"]
         assert "battles.jsonl" in v["per_condition"]["rl5"]["source"]
@@ -156,6 +202,7 @@ def main():
     test_build_verdict_final_and_interim()
     test_length_mismatch_uses_common_prefix()
     test_wilson_and_opponent_mismatch()
+    test_correspondence_failure_blocks_final_verdict()
     test_run_reads_json_and_jsonl_fallback()
 
 
