@@ -5,7 +5,8 @@
 などが表示・分析・実戦バンクに「他の対戦の顔ぶれ」として混ざった。
 
 - adopt_selection_guess: 同種の重複を作らない (スコアの高い方を残す、確定済みには負ける)
-- replacement_slot / switch_to_species: 場に出た種は推定の重複 → タイプ一致 → 推定 → 未特定の順に置き換える
+- replacement_slot / switch_to_species: 場に出た種は推定の重複 → タイプ一致 → 未特定の枠の順に置き換え、どれにも当たらなければ
+  枠を置き換えず対応待ち (pending) に置く (2026-10-09 ④、ユーザー承認)
 - extract_selection: 推定の印を付け、重複を保留する
 - 分析 (analyze_battles / party_improvements): 推定 (guess) は相手の 6 体に数えない
 - apply_manual_species: 手入力は推定の枠を上書きできる (2026-10-06 第18回: 推定の枠への手入力が 9 回続けて無視された)
@@ -95,25 +96,58 @@ def test_type_match_prefers_unconfirmed_slot():
     print("test_type_match_prefers_unconfirmed_slot OK")
 
 
+def _slot_snapshot(side):
+    """元の 6 枠の種・推定・スコア・タイプ・HP・判明技 (対応待ちの前後で変わらないことを比べる)"""
+    return [(p.species_id, p.species_ja, p.species_guess, p.guess_score, list(p.types), p.hp_percent,
+             list(p.revealed_moves)) for p in side.party[:6]]
+
+
 def test_lowest_score_guess_replaced_without_type_match():
+    """タイプが一致する枠が無い初登場 (メタグロス) は、推定スコアが最も低い枠 (ミミッキュ 0.5) を置き換えない。
+    2026-10-09 の判断 (ユーザー承認、④): 推定スコア最低の枠への置き換えは対応の根拠が無く、正しかったかもしれない推定と
+    その枠の観測を失う (10/8 18:27: 「ヤドキング」が推定ムクホークの枠を上書き)。元の 6 枠をそのまま保持し、帰属先の
+    決まらない場の個体は対応待ち (party の 7 番目、pending) に置いて、HP・技はその個体に付ける。
+    旧来の期待値 (枠 3 がメタグロスに置き換わる) から変更"""
     rows = list(ROWS_DUP)
     rows[3] = ("ミミッキュ", "mimikyu", ["ゴースト", "フェアリー"], 0.5)
     st, side = _full_side(rows)
+    side.party[0].hp_percent = 70.0                           # 既存の枠の観測 (場に出た後で下がった)
+    side.party[0].revealed_moves = ["じしん"]
+    side.party[5].merge_species("ハッサム", "scizor")          # 手動確定 (推定でない)
+    before = _slot_snapshot(side)
     side.switch_to_species("メタグロス", "metagross")         # はがね/エスパー: タイプ一致なし
-    names = [p.species_ja for p in side.party]
-    assert names[3] == "メタグロス" and "ミミッキュ" not in names, names
+    assert len(side.party) == 7 and _slot_snapshot(side) == before, [q.species_ja for q in side.party]
+    assert side.party[3].species_ja == "ミミッキュ" and side.party[3].species_guess and side.party[3].guess_score == 0.5
+    pm = side.active()
+    assert pm is side.party[6] and pm.pending and pm.species_id == "metagross"
+    pm.hp_percent = 62.0                                      # 帰属先の決まらない観測は対応待ちの個体に付く
+    pm.revealed_moves.append("コメットパンチ")
+    assert _slot_snapshot(side) == before
+    assert side.party[6].hp_percent == 62.0 and side.party[6].revealed_moves == ["コメットパンチ"]
     print("test_lowest_score_guess_replaced_without_type_match OK")
 
 
 def test_confirmed_slots_survive_guess_replacement():
-    """確定済み (推定でない) の枠は、推定枠がある限り置き換えられない"""
+    """確定済み (推定でない) の枠も、ただ 1 つの推定の枠 (リザードン 0.8) も、タイプの合わない初登場 (メタグロス) で
+    置き換えられない。2026-10-09 の判断 (ユーザー承認、④): 推定の枠を置き換える根拠はタイプの一致・同種の重複・未特定の枠
+    だけで、それ以外は元の 6 枠を保持して場の個体を対応待ち (pending) に置く。旧来の期待値 (枠 2 がメタグロスに
+    置き換わる) から変更"""
     rows = [("カバルドン", "hippowdon", ["じめん"], None), ("カイリュー", "dragonite", ["ドラゴン", "ひこう"], None),
             ("リザードン", "charizard", ["ほのお", "ひこう"], 0.8), ("サーフゴー", "gholdengo", ["はがね", "ゴースト"], None),
             ("ハッサム", "scizor", ["むし", "はがね"], None), ("ミミッキュ", "mimikyu", ["ゴースト", "フェアリー"], None)]
     st, side = _full_side(rows)
+    side.party[1].hp_percent = 45.0                           # 確定済みの枠の観測
+    side.party[1].status = "paralysis"
+    before = _slot_snapshot(side)
     side.switch_to_species("メタグロス", "metagross")
-    names = [p.species_ja for p in side.party]
-    assert names[2] == "メタグロス" and "リザードン" not in names, names
+    assert len(side.party) == 7 and _slot_snapshot(side) == before, [q.species_ja for q in side.party]
+    assert side.party[2].species_ja == "リザードン" and side.party[2].species_guess
+    assert side.party[1].status == "paralysis"
+    pm = side.active()
+    assert pm is side.party[6] and pm.pending and pm.species_ja == "メタグロス"
+    pm.hp_percent = 88.0
+    pm.revealed_moves.append("バレットパンチ")
+    assert _slot_snapshot(side) == before and side.party[6].hp_percent == 88.0
     print("test_confirmed_slots_survive_guess_replacement OK")
 
 

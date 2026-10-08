@@ -17,7 +17,7 @@ import numpy as np
 
 from vision import zones, ocr
 from vision.zones import crop
-from vision.state import BattleStateV2, MoveSlot, PokemonState, adopt_selection_guess
+from vision.state import BattleStateV2, MoveSlot, PokemonState, adopt_selection_guess, has_observation
 from vision.typeicons import classify_type_icon
 from champions_agent.config import (HP_BAR_MATCH_TOL, HP_REJECT_SPECIES_CUTOFF,
                                     MY_EXACT_RESOLVE_CUTOFF, MY_REGISTERED_MATCH_RATIO,
@@ -1163,16 +1163,28 @@ def link_active_to_party(state: BattleStateV2, side_name: str) -> None:
 
     相手側はタイプアイコンしか分からないため、種族のタイプと一致する枠へマージする。
     紐付け後、余った末尾のプレースホルダ枠 (7枠目以降) を削除する。
+
+    2026-10-09 ④ (枠と観測情報を失わない): 先に対応待ちの個体の対応を解消する (BattleStateV2.resolve_pending)。
+    形態の候補があれば候補のどれかとタイプが一致する枠が 1 つのときだけ統合する。同一種族以外で統合先と統合元の両方に
+    観測情報 (HP・技・状態) があれば統合しない。相手側で満枠のロスターの枠が統合元なら pop せず未特定の枠に戻す。
+    統合したら roster_merge のイベント (merged_from / merged_to / 移した情報) を残す。
     """
     side = state.side(side_name)
     side.prune_placeholders()
+    # 対応待ちの個体 (満枠で対応先を決められなかった場の個体、2026-10-09 ④) は、後の観測で対応が決まったら枠へ移す
+    state.resolve_pending(side_name)
     active = side.active()
-    if active is None or not active.species_ja:
+    if active is None or not active.species_ja or active.pending:
         return
     cur_idx = side.active_index
 
+    # 形態の候補 (ヤドキング = slowking / slowkinggalar) があれば、どれかとタイプが一致する未特定枠を探す
+    forms = list(active.species_candidates or []) or ([active.species_id] if active.species_id else [])
+    form_types = [(f, _species_types_ja(f)) for f in forms]
+    form_types = [(f, t) for f, t in form_types if t]
     types = _species_types_ja(active.species_id) if active.species_id else []
     target_idx = None
+    type_hits = []
     for i, p in enumerate(side.party):
         if p is active:
             continue
@@ -1181,13 +1193,44 @@ def link_active_to_party(state: BattleStateV2, side_name: str) -> None:
             target_idx = i
             break
         # 2) タイプが一致する未特定枠 (相手側: 選出画面のタイプアイコン由来)
-        if (target_idx is None and types and p.species_ja is None
-                and p.types and set(p.types) == set(types)):
-            target_idx = i
+        if p.species_ja is None and p.types:
+            hit = next((f for f, t in form_types if set(p.types) == set(t)), None)
+            if hit is not None:
+                type_hits.append((i, hit))
+    same_species = target_idx is not None
+    form = None
+    if not same_species and type_hits:
+        if len(form_types) <= 1:
+            target_idx, form = type_hits[0]   # 従来どおり (一致した最初の枠)
+        elif len({i for i, _ in type_hits}) == 1:
+            target_idx, form = type_hits[0]
     if target_idx is None:
         return
 
     slot = side.party[target_idx]
+    # 観測を失わない (2026-10-09 ④): 統合先と統合元の両方に場の観測 (HP・技・状態) があると、どちらかの観測を
+    # 失うので統合しない (同一種族は同じ個体なので統合する)
+    reason = None
+    if not same_species and has_observation(slot) and has_observation(active):
+        reason = "統合先と統合元の両方に観測情報がある"
+    if reason:
+        key = (active.species_id, target_idx, reason)
+        logged = getattr(side, "_merge_skip_logged", None)
+        if logged is None:
+            logged = side._merge_skip_logged = set()
+        if key not in logged:
+            logged.add(key)
+            state.log_event("system", f"{active.species_ja} を枠 {target_idx} に統合しない ({reason})",
+                            event_id="roster_merge_skip", target=side_name,
+                            detail={"from": cur_idx, "to": target_idx, "reason": reason})
+        return
+    replaced = {"species": slot.species_id, "ja": slot.species_ja, "guess": slot.species_guess,
+                "score": slot.guess_score, "types": list(slot.types or [])}
+    moved = {"hp": active.hp_percent, "revealed_moves": list(active.revealed_moves), "status": active.status}
+    if form and form != active.species_id:
+        active.species_id = form
+        active.species_candidates = []
+        types = _species_types_ja(form) or types
     # プレースホルダ (active) の情報を選出枠へマージ
     slot.merge_species(active.species_ja, active.species_id)
     for attr in ("display_name", "gender", "hp_percent", "hp_current", "hp_max",
@@ -1211,12 +1254,27 @@ def link_active_to_party(state: BattleStateV2, side_name: str) -> None:
     slot.is_active = True
 
     # マージ元 (プレースホルダ等) を除去
-    if cur_idx is not None and cur_idx != target_idx and cur_idx < len(side.party):
+    merged = cur_idx is not None and cur_idx != target_idx and cur_idx < len(side.party)
+    source_cleared = False
+    if merged and side.hold_unplaced and cur_idx < PARTY_SIZE and len(side.party) >= PARTY_SIZE:
+        # 相手側で満枠のロスターの枠が統合元: pop すると枠が 6 未満になり、後ろの枠の番号もずれる (10/8 18:27: 6 枠が
+        # 5 枠になり、手動確定が「枠の番号が範囲外」で無視された)。統合元の枠は未特定の枠に戻す (2026-10-09 ④。
+        # 自分側は登録済みのロスターなので従来どおり)
+        side.party[cur_idx] = PokemonState()
+        source_cleared = True
+    elif merged:
         side.party.pop(cur_idx)
         if target_idx > cur_idx:
             target_idx -= 1
     side.active_index = target_idx
     side.prune_placeholders()
+    if merged:
+        # 対戦ログの roster_change に merged_from / merged_to と移した情報を残す材料 (battle_logger._track_opponent)
+        state.log_event("system", f"{slot.species_ja} を枠 {target_idx} に統合 (元の枠 {cur_idx})",
+                        event_id="roster_merge", target=side_name,
+                        detail={"merged_from": cur_idx, "merged_to": target_idx, "source_cleared": source_cleared,
+                                "species": slot.species_id, "ja": slot.species_ja, "moved": moved,
+                                "replaced": replaced})
 
 
 # ==============================================================================

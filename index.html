@@ -151,7 +151,7 @@
         // ページの版と、この HTML が実装している機能 (2026-10-07: ブラウザがキャッシュの古い index.html を使った疑いを確かめる)。
         // 接続時に client_hello で送り、サーバーはディスクの index.html の CLIENT_HTML_VERSION と照合して対戦ログの client 行に残す。
         // ⚠ この HTML を変えたら CLIENT_HTML_VERSION を更新する (サーバーは正規表現でこの行を読む。形式を変えない)
-        const CLIENT_HTML_VERSION = "2026-10-07a";
+        const CLIENT_HTML_VERSION = "2026-10-09a";
         const CLIENT_FEATURES = ['client_hello', 'page_visibility', 'advice_shown_hidden', 'server_warning'];
         const emitHello = () => socket.emit('client_hello', {
             html_version: CLIENT_HTML_VERSION, features: CLIENT_FEATURES, visibility: document.visibilityState,
@@ -606,9 +606,12 @@
         // 相手のパーティ欄の描画 (HTML を返す。DOM への反映は表示の安定化を通す): 確定済みを先に、未確定枠は「予測 (あり得る順)」
         function renderOppPartyHtml(s) {
             const oppParty = s.opponent.party || [];
-            const confirmed = [], predicted = [];
+            const confirmed = [], predicted = [], pending = [];
             let unknownCount = 0;
             oppParty.forEach((p, i) => {
+                // 対応待ち (2026-10-09 ④): 場に出たが 6 枠のどれか決まっていない個体 (party の 7 番目以降)。
+                // 7 体目として並べず、下で「対応待ち」として場の個体の近くに出す
+                if (p.pending) { pending.push([i, p]); return; }
                 const isConfirmed = p.species_ja ||
                     i === s.opponent.active_index || p.hp_percent != null;
                 if (isConfirmed) {
@@ -623,7 +626,15 @@
                     unknownCount++;
                 }
             });
-            const shown = confirmed.map(([i, p]) => renderMon(p, i, s.opponent.active_index, 'opp'));
+            const shown = [];
+            pending.forEach(([i, p]) => {
+                const cands = (p.species_candidates || []).length > 1
+                    ? ` 形態未定: ${p.species_candidates.join(' / ')}` : '';
+                shown.push('<div style="border:1px dashed #fa6;border-radius:6px;padding:2px 4px;margin-bottom:4px">'
+                    + `<div style="font-size:11px;color:#fa6">対応待ち (6 枠のどれか未定。✏️で種族を確定すると枠に入ります)${cands}</div>`
+                    + renderMon(p, i, s.opponent.active_index, 'opp') + '</div>');
+            });
+            confirmed.forEach(([i, p]) => shown.push(renderMon(p, i, s.opponent.active_index, 'opp')));
             if (predicted.length) {
                 predicted.sort((a, b) => b[0] - a[0]);   // 最有力候補の確率順
                 shown.push('<div style="font-size:11px;color:#89a;margin-top:6px">裏の予測 (次に出してきそうな順):</div>');

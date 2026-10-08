@@ -100,8 +100,33 @@ def _eff_accuracy(mv: dict, atk_ability, def_ability) -> float:
 def fainted_allies_of(side_state: dict, self_index: Optional[int]) -> int:
     """その側のひんしの数 (自分 self_index を除く。純粋)。calc_damage の文脈 fainted_allies (そうりょうのつかさ・
     おはかまいり) に渡す。2026-10-07 のダメージ照合で、エンジンが渡していなかったため過小になっていた"""
-    return sum(1 for i, p in enumerate((side_state or {}).get("party") or [])
+    # 対応待ちの個体 (相手の party の 7 番目以降、2026-10-09 ④) は数えない (vision.state.roster_slots)
+    from vision.state import roster_slots
+    return sum(1 for i, p in roster_slots((side_state or {}).get("party"))
                if i != self_index and (p or {}).get("status") == "fainted")
+
+
+def _side_members(side_state: dict, side: str) -> list:
+    """その側の残存メンバーの候補 [(index, 要素)] (純粋)。相手側は vision.state.roster_slots (先頭 6 枠、対応待ちを除く)。
+    対応待ちの個体は 6 枠のどれかで追加の個体ではないので入れない (2026-10-09 ④。入れると同じ個体を枠と観測の 2 体として
+    数える)。相手の場の個体が対応待ちの間は、呼び出し側 (_run_endgame / _run_search) が評価そのものを保留する"""
+    party = (side_state or {}).get("party") or []
+    if side != "opponent":
+        return list(enumerate(party))
+    from vision.state import roster_slots
+    return roster_slots(party)
+
+
+def opp_active_pending(opp_state: Optional[dict]) -> bool:
+    """相手の場の個体が対応待ち (6 枠のどれか未定、vision.state の pending) か (純粋。2026-10-09 ④)。
+    True の間は、ロスターの対応が要る評価 (終盤評価・探索の相手の控えの列挙) を保留し、場の個体への直接の採点だけを使う"""
+    from vision.state import is_pending
+    party = (opp_state or {}).get("party") or []
+    idx = (opp_state or {}).get("active_index")
+    return isinstance(idx, int) and 0 <= idx < len(party) and is_pending(party[idx])
+
+
+OPP_PENDING_NOTE = "相手の場のポケモンが 6 枠のどれか未定 (対応待ち) のため、終盤評価と探索を保留 (直接の採点のみ)"
 
 
 def has_acted_since_entry(last_move_player: Optional[str], move_ids) -> bool:
@@ -833,6 +858,7 @@ def evaluate_common(state: dict, resolver=None) -> dict:
     # 探索より先に計算し、勝ち筋の温存を探索の葉評価へ渡す (定説H3)
     endgame = ""
     wincon_sid = None
+    opp_pending = opp_active_pending(opp_state)
     try:
         endgame = _run_endgame(my_state, opp_state, resolver)
         import re as _re
@@ -893,6 +919,9 @@ def evaluate_common(state: dict, resolver=None) -> dict:
         "opp_spread_note": opp_spread_note,
         "gtheory": gtheory,
         "endgame": endgame,
+        # 相手の場の個体が対応待ち: 終盤評価・探索を保留した印 (advice 行にそのまま残る。2026-10-09 ④)
+        "opp_pending": opp_pending,
+        "opp_pending_note": OPP_PENDING_NOTE if opp_pending else None,
         "encore": "encore" in my_vols,
         "encore_locked": encore_locked,
         "choice_locked": choice_locked,
@@ -1057,6 +1086,9 @@ def finish_evaluation(common: dict, rl_blend_weight: Optional[float] = None) -> 
         "gtheory": common["gtheory"],
         "endgame_note": endgame,
         "sacrifice_note": sacrifice_note,
+        # 相手の場の個体が対応待ち: 終盤評価・探索を保留した (2026-10-09 ④。advice 行にそのまま残る)
+        "opp_pending": bool(common.get("opp_pending")),
+        "opp_pending_note": common.get("opp_pending_note"),
         "rl_hint": common.get("rl_hint"),
         "best": actions[0] if actions else None,
     }
@@ -1160,8 +1192,10 @@ def _mega_timing_note(my_p, my_view, opp_view, my_field, resolver):
 
 
 def _run_endgame(my_state, opp_state, resolver) -> str:
-    """残存メンバーの1v1行列から勝ち筋/負け筋ノートを作る"""
+    """残存メンバーの1v1行列から勝ち筋/負け筋ノートを作る。相手の場の個体が対応待ちなら保留 (結果なし。2026-10-09 ④)"""
     from advisor.endgame import matchup_matrix, endgame_note
+    if opp_active_pending(opp_state):
+        return ""
 
     def mons_of(side_state, side):
         out = []
@@ -1170,7 +1204,7 @@ def _run_endgame(my_state, opp_state, resolver) -> str:
         if side == "player":
             from advisor.party import battle_party_indices
             allowed = battle_party_indices(side_state)
-        for i, p in enumerate(side_state.get("party", [])):
+        for i, p in _side_members(side_state, side):
             if p.get("status") == "fainted":
                 continue
             if allowed is not None and i not in allowed:
@@ -1241,9 +1275,10 @@ def _hp_frac_of(p: dict) -> float:
 
 def _run_search(state, my_state, my_view, my_p, opp_state, opp_view,
                 resolver, pool, my_field, opp_field, wincon_sid=None):
-    """状態辞書 -> SimSide を組み立てて同時手番探索を実行する"""
+    """状態辞書 -> SimSide を組み立てて同時手番探索を実行する。相手の場の個体が対応待ちなら、相手の控えを列挙できない
+    ので探索しない (相手が未判明のときと同じく None = 直接の採点だけ。2026-10-09 ④)"""
     from advisor.search import SimSide, search
-    if my_view is None or opp_view is None:
+    if my_view is None or opp_view is None or opp_active_pending(opp_state):
         return None
 
     my_moves = [m.get("move_id") for m in (my_p.get("moves") or [])
@@ -1259,7 +1294,7 @@ def _run_search(state, my_state, my_view, my_p, opp_state, opp_view,
         if side == "player":
             from advisor.party import battle_party_indices
             allowed = battle_party_indices(side_state)
-        for i, p in enumerate(side_state.get("party", [])):
+        for i, p in _side_members(side_state, side):
             if i == active_idx or p.get("status") == "fainted":
                 continue
             if allowed is not None and i not in allowed:

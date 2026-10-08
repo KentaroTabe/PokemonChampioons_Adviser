@@ -557,7 +557,10 @@ def encode_state(state: dict, my_spe_actual: Optional[float] = None) -> Optional
         opp_extra = np.zeros(2, dtype=np.float32)
 
     own_bench = [p for j, p in enumerate(my.get("party", [])) if j != mi][:2]
-    opp_bench = [p for j, p in enumerate(op.get("party", []))
+    # 相手の控え・残り・選出の数は vision.state.roster_slots (先頭 6 枠、対応待ちを除く。2026-10-09 ④)
+    from vision.state import roster_slots
+    opp_roster = [p for _j, p in roster_slots(op.get("party"))]
+    opp_bench = [p for j, p in roster_slots(op.get("party"))
                  if j != oi and (p.get("species_id") or p.get("types"))][:2]
     own_bench_vecs = [_bench_vec(own_bench[i] if i < len(own_bench) else None, False)
                       for i in range(2)]
@@ -565,7 +568,7 @@ def encode_state(state: dict, my_spe_actual: Optional[float] = None) -> Optional
                       for i in range(2)]
     opp_remaining = op.get("remaining")
     if opp_remaining is None:
-        known = [p for p in op.get("party", []) if p.get("species_id") or p.get("types")]
+        known = [p for p in opp_roster if p.get("species_id") or p.get("types")]
         opp_remaining = max(1, sum(1 for p in known if p.get("status") != "fainted")) \
             if known else 3
     opp_count = np.array([min(opp_remaining, 3) / 3.0], dtype=np.float32)
@@ -757,7 +760,7 @@ def encode_state(state: dict, my_spe_actual: Optional[float] = None) -> Optional
     race_vec = np.zeros(6, dtype=np.float32)
     try:
         my_hp_total = sum(_hp_frac(p) for p in picked[:3])
-        opp_seen = [p for p in op.get("party", [])
+        opp_seen = [p for p in opp_roster
                     if p.get("species_id") and p.get("hp_percent") is not None]
         opp_hp_total = sum(_hp_frac(p) for p in opp_seen) \
             + max(0, 3 - len(opp_seen))

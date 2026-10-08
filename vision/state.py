@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field, asdict
+from functools import lru_cache
 from typing import Optional
 
-from champions_agent.config import BSS_PICK_COUNT, PARTY_SIZE, SELECTION_GUESS_REPLACE_MARGIN
+from champions_agent.config import (BSS_PICK_COUNT, PARTY_SIZE, SAME_NAME_FORM_SUFFIXES,
+                                    SELECTION_GUESS_REPLACE_MARGIN)
 
 STAT_KEYS = ("atk", "def", "spa", "spd", "spe", "acc", "eva")
 
@@ -79,6 +81,71 @@ def _dex_types_ja_of(species_id: Optional[str]) -> Optional[set]:
         return {en2ja.get(t, t) for t in sp["types"]}
     except Exception:
         return None
+
+
+def same_name_forms_of(species_id: Optional[str], all_ids, illegal, suffixes=SAME_NAME_FORM_SUFFIXES) -> list:
+    """名前が同じで形態が違う種の候補 (純粋)。素の id と、図鑑にある「素の id + 地方の接尾辞」の id (参戦外は除く)。
+    素の id が既に地方の形態 (slowkinggalar 等) なら候補はそれだけ。例: slowking → [slowking, slowkinggalar]"""
+    if not species_id:
+        return []
+    out = [species_id]
+    for suf in suffixes:
+        f = species_id + suf
+        if f in all_ids and f not in illegal and f not in out:
+            out.append(f)
+    return out
+
+
+@lru_cache(maxsize=1024)
+def same_name_forms(species_id: Optional[str]) -> tuple:
+    """same_name_forms_of を図鑑 (advisor.dex) と参戦外の id (vision.normalize) で引く。引けなければ (species_id,)"""
+    if not species_id:
+        return ()
+    try:
+        from advisor.dex import get_dex
+        from vision.normalize import champions_illegal_ids
+        return tuple(same_name_forms_of(species_id, set(get_dex().species_ids()), champions_illegal_ids()))
+    except Exception:
+        return (species_id,)
+
+
+def _same_family(a: Optional[str], b: Optional[str]) -> bool:
+    """種族 id が同じ種の形態違い (同じ id、または「素の id + 地方の接尾辞 / メガ」: slowking / slowkinggalar) か (純粋)。
+    単なる前方一致 (mew / mewtwo) は同じ種にしない"""
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    short, long_ = (a, b) if len(a) < len(b) else (b, a)
+    if not long_.startswith(short):
+        return False
+    rest = long_[len(short):]
+    return rest in SAME_NAME_FORM_SUFFIXES or rest.startswith("mega")
+
+
+def is_pending(p) -> bool:
+    """対応待ちの個体か (純粋)。PokemonState / state.to_dict の要素 / 対戦ログの簡約 (scene 行) のどれでも読む"""
+    if p is None:
+        return False
+    return bool(p.get("pending") if isinstance(p, dict) else getattr(p, "pending", False))
+
+
+def roster_slots(party, active_index: Optional[int] = None) -> list:
+    """相手の「枠」として数える要素 [(枠の番号, 要素)] (純粋。2026-10-09 ④)。先頭 PARTY_SIZE 枠のうち対応待ち (pending)
+    でないもの。種・枠・選出・残り体数・ひんし数を数える箇所はすべてこれを通す (対応待ちの個体 = party の 7 番目以降は
+    6 体のどれかで、枠が決まっていないだけ。数に入れると相手が 7 体になる)。
+    active_index を渡すと、場の個体が対応待ちのときに限りそれも含める (助言エンジンが場の個体として使う用途。数を
+    数える用途では渡さない)。PokemonState / state.to_dict の要素 / 対戦ログの簡約のどれでも読む"""
+    party = list(party or [])
+    out = [(i, p) for i, p in enumerate(party[:PARTY_SIZE]) if not is_pending(p)]
+    if isinstance(active_index, int) and PARTY_SIZE <= active_index < len(party) and is_pending(party[active_index]):
+        out.append((active_index, party[active_index]))
+    return out
+
+
+def has_observation(p) -> bool:
+    """場で観測した情報 (HP・技・状態異常) を持つ枠か (選出画面の推定・タイプアイコンは観測に数えない)"""
+    return bool(p.hp_percent is not None or p.revealed_moves or p.moves or p.status)
 
 
 @dataclass
@@ -154,6 +221,13 @@ class PokemonState:
     # (2026-09-29 第17回: 推定の カイリュー が 2 枠に入り、実体は セグレイブ。表示と集計に他の対戦の顔ぶれが混ざって見えた)
     species_guess: bool = False
     guess_score: Optional[float] = None   # 推定時の視覚照合スコア (同種の重複でどちらを残すか)
+    # 対応待ち (2026-10-09 ④): 満枠で場に出た種の対応先の枠を根拠をもって決められないとき、枠を壊さずに party の末尾
+    # (PARTY_SIZE 以降) に置く場の個体。後の観測 (タイプ・形態の訂正・手動確定) で対応が決まった時点で枠へ移す
+    # (SideState.resolve_pending)。(10/8 18:27: 対応先が無い「ヤドキング」が推定スコア最低の別の推定の枠を上書きした)
+    pending: bool = False
+    # 名前が複数の形態に当たる (ヤドキング = slowking / slowkinggalar) とき、形態が決まるまでの候補の種族 id。決まったら空
+    species_candidates: list = field(default_factory=list)
+    t_first_seen: Optional[float] = None   # 対応待ちになった時刻
 
     def merge_species(self, species_ja: str, species_id: Optional[str], guess: bool = False,
                       score: Optional[float] = None):
@@ -221,14 +295,23 @@ def apply_manual_species(party: list, idx: int, species_ja: str, species_id: Opt
     - 対象枠が別の種で確定済み → 未確定の枠へ付け替える (プルダウンの描画から選択までの間に、対象枠が別フレームで自動確定
       されることがある。2026-08-20)。未確定の枠が無ければ入れない
     - 入れる種が別の枠にもあるとき (同種 2 体はルール上あり得ない): 別の枠が確定済みなら入れない、推定ならそちらを取り消す
+    - 対象が対応待ちの個体 (pending) → その個体の種 (形態) を確定する。どの枠に当たるかは呼び出し側が
+      SideState.resolve_pending で決める (2026-10-09 ④)
+    - 対象枠が同じ種の別の形態 (ヤドキング / ガラルヤドキング) で確定済み → その枠の形態を直す (同じ個体)
+    - 対応待ちの個体は「入れる種が別の枠にもある」の判定に使わない (枠が決まっていないので、手動確定が対応を決める側)
     """
     out = {"index": None, "moved": False, "cleared": [], "reason": None}
     if not (0 <= idx < len(party)):
-        out["reason"] = "枠の番号が範囲外"
+        out["reason"] = MANUAL_REASON_OUT_OF_RANGE
         return out
     slot = party[idx]
+    if slot.pending:
+        _merge_manual(slot, species_ja, species_id)
+        out["index"] = idx
+        return out
     target = idx
-    if slot.species_ja and not slot.species_guess and slot.species_ja != species_ja:
+    if slot.species_ja and not slot.species_guess and slot.species_ja != species_ja \
+            and not _same_family(slot.species_id, species_id):
         target = next((j for j, p in enumerate(party) if not p.species_ja), None)
         if target is None:
             out["reason"] = f"slot{idx} は {slot.species_ja} で確定済み (未確定の枠なし)"
@@ -238,7 +321,7 @@ def apply_manual_species(party: list, idx: int, species_ja: str, species_id: Opt
     def _same(q) -> bool:
         return q.species_ja == species_ja or bool(species_id and q.species_id == species_id)
 
-    others = [(j, q) for j, q in enumerate(party) if j != target and q.species_ja and _same(q)]
+    others = [(j, q) for j, q in enumerate(party) if j != target and q.species_ja and not q.pending and _same(q)]
     fixed = next((j for j, q in others if not q.species_guess), None)
     if fixed is not None:
         out["reason"] = f"{species_ja} は slot{fixed} で確定済み"
@@ -246,9 +329,57 @@ def apply_manual_species(party: list, idx: int, species_ja: str, species_id: Opt
     for j, q in others:
         q.clear_species_guess()
         out["cleared"].append(j)
-    party[target].merge_species(species_ja, species_id)
+    _merge_manual(party[target], species_ja, species_id)
     out["index"] = target
     return out
+
+
+def _merge_manual(p, species_ja: str, species_id: Optional[str]) -> None:
+    """手動確定の種を入れる。既に同じ種の形態違い (ヤドキング ← ガラルヤドキング) が入っている確定済みの枠・対応待ちの
+    個体は、表示名 (species_ja = 交代の文言・HUD の名前) を保って id とタイプだけ直し、入力の名前を別名に足す
+    (判明技による形態の訂正 events._maybe_correct_form と同じ扱い。名前が変わると集計で同じ個体が 2 種に見える)"""
+    if p.species_ja and not p.species_guess and species_id \
+            and _same_family(p.species_id, species_id):
+        p.species_id = species_id
+        t = _dex_types_ja_of(species_id)
+        if t:
+            p.types = list(t)
+        if species_ja and species_ja != p.species_ja and species_ja not in (p.aliases or []):
+            p.aliases.append(species_ja)
+    else:
+        p.merge_species(species_ja, species_id)
+    p.species_candidates = []
+
+
+MANUAL_REASON_OUT_OF_RANGE = "枠の番号が範囲外"
+
+
+def apply_manual_species_unplaced(party: list, species_ja: str, species_id: Optional[str]) -> dict:
+    """手動確定の枠の番号が範囲外 (表示の枠とサーバーの枠がずれた) のときの適用先を決めて入れる (純粋)。
+    1) 対応待ちの個体で同じ種 (形態の候補・形態違いを含む) のもの → その個体の種を確定する
+    2) 種族名 (形態違いを含む) で一致する枠 → apply_manual_species と同じ規則でその枠に入れる
+    どちらにも当たらなければ入れない。戻り値は apply_manual_species と同じ形 + "via" ("pending" / "species_match" / None)
+    (2026-10-09 ④: 10/8 18:27 に手動確定「ガラルヤドキング」が「枠の番号が範囲外」で無視された)"""
+    def _hits(q) -> bool:
+        if q.species_ja == species_ja:
+            return True
+        ids = [q.species_id, *(q.species_candidates or [])]
+        return any(species_id and (i == species_id or _same_family(i, species_id)) for i in ids if i)
+
+    pend = [j for j, q in enumerate(party) if q.pending and _hits(q)]
+    if len(pend) == 1:
+        res = apply_manual_species(party, pend[0], species_ja, species_id)
+        res["via"] = "pending"
+        return res
+    slots = [j for j, q in roster_slots(party) if q.species_ja and _hits(q)]
+    if len(slots) == 1:
+        res = apply_manual_species(party, slots[0], species_ja, species_id)
+        res["via"] = "species_match"
+        return res
+    why = "対応待ちの個体が複数当たる" if len(pend) > 1 else (
+        "同じ種の枠が複数ある" if len(slots) > 1 else "対応待ちの個体にも同じ種の枠にも当たらない")
+    return {"index": None, "moved": False, "cleared": [], "reason": f"{MANUAL_REASON_OUT_OF_RANGE} ({why})",
+            "via": None}
 
 
 @dataclass
@@ -270,6 +401,9 @@ class SideState:
     safeguard: bool = False
     tailwind: bool = False
     wish: bool = False
+    # 満枠で場に出た種の対応先を決められないとき、対応待ちの個体として保持するか (2026-10-09 ④)。相手側だけ True
+    # (BattleStateV2.__init__)。自分側は登録済みのロスターなので、満枠の初登場は誤読として扱う (従来どおり)
+    hold_unplaced: bool = False
 
     def active(self) -> Optional[PokemonState]:
         if self.active_index is not None and 0 <= self.active_index < len(self.party):
@@ -281,7 +415,9 @@ class SideState:
         picked_only=True で選出 (is_picked) が BSS_PICK_COUNT 体分かっていればその中だけを数える。
         (2026-09-29 第17回 15:53: 様子見画面の名前の誤読で生えた 7 体目 (HP 0) が 3 体目のひんしに数えられ、
         自分のガブリアスが残っているのに負けで終了扱い → 助言が止まり、勝った対戦が負けで記録された)"""
-        roster = self.party[:PARTY_SIZE]
+        # 対応待ちの個体 (PARTY_SIZE 以降、2026-10-09 ④) は数えない (roster_slots)。誤読の 7 体目のひんしで終了と
+        # 判定した 9/29 の事故と同じ形を避ける。対応待ちの個体が 3 体目のひんしなら、終了は WIN / LOSE 画面などで取る
+        roster = [p for _i, p in roster_slots(self.party)]
         if picked_only:
             picked = [p for p in roster if p.is_picked]
             if len(picked) >= BSS_PICK_COUNT:
@@ -359,65 +495,109 @@ class SideState:
         self.active_index = index
         self.party[index].is_active = True
 
-    def replacement_slot(self, new_types: Optional[set]) -> Optional[int]:
-        """満枠で初登場の種が来たとき置き換える枠を選ぶ (純粋)。候補は非アクティブ・技未判明・非ひんし。優先順:
+    def roster_eligible(self) -> list:
+        """場に出た種の対応先にできる枠 [(i, 枠)]: ロスターの枠 (PARTY_SIZE 枠まで、対応待ちを除く) のうち
+        非アクティブ・技未判明・非ひんし"""
+        return [(i, p) for i, p in roster_slots(self.party)
+                if i != self.active_index and not p.revealed_moves and p.status != "fainted"]
+
+    def match_slot(self, cands: list) -> tuple:
+        """場に出た種の対応先の枠を、根拠のある規則だけで決める (純粋)。cands = 形態の候補 [(species_id, 図鑑タイプの集合
+        または None)] (形態が 1 つなら 1 要素)。戻り値 (枠, 形態の id) — 枠が決まらなければ (None, None)、枠は決まったが
+        形態が決まらなければ形態は None。優先順:
         1) 選出画面の推定 (species_guess) で同じ種が 2 枠以上ある重複のうちスコアが低い枠 (同種 2 体はルール上あり得ない。
            2026-09-29 第17回: セグレイブ が カイリュー と推定され、実物の カイリュー と 2 枠になった)
-        2) 図鑑タイプが一致する推定枠 / 未特定枠、次いでタイプが一致する枠
-        3) 推定枠のうち視覚照合スコアが最も低いもの
-        4) 未特定枠
-        5) それ以外の候補の先頭"""
-        elig = [(i, p) for i, p in enumerate(self.party)
-                if i != self.active_index and not p.revealed_moves and p.status != "fainted"]
+        2) 図鑑タイプが一致する推定枠 / 未特定枠、次いでタイプが一致する枠。形態の候補が複数のときは、候補のどれかと
+           タイプが一致する枠が 1 つだけのときに限る (その形態に決まる)。2 つ以上なら 2) では決めない
+        4) 未特定枠 (種もタイプも無い枠)
+        2026-10-09 ④: 従来の 3) 推定枠のうち視覚照合スコアが最も低いもの / 5) それ以外の候補の先頭 は、対応の根拠が無いので
+        使わない (10/8 18:27: タイプが一致する枠が無い「ヤドキング」が、正しかったかもしれない推定 ムクホーク の枠を上書きした)。
+        決まらなければ呼び出し側が対応待ち (pending) として枠を壊さずに保持する"""
+        elig = self.roster_eligible()
         if not elig:
-            return None
+            return None, None
+        multi = len(cands) > 1
         counts: dict = {}
-        for p in self.party:
+        for _i, p in roster_slots(self.party):
             if p.species_id:
                 counts[p.species_id] = counts.get(p.species_id, 0) + 1
         dups = [((p.guess_score or 0.0), i) for i, p in elig
                 if p.species_guess and counts.get(p.species_id, 0) >= 2]
         if dups:
-            return min(dups)[1]
-        if new_types:
+            i = min(dups)[1]
+            return i, self._form_by_slot_types(self.party[i], cands)
+        typed = [(sid, t) for sid, t in cands if t]
+        if typed:
             for only_unconfirmed in (True, False):
-                for i, p in elig:
-                    if p.types and set(p.types) == new_types and \
-                            (not only_unconfirmed or p.species_guess or not p.species_ja):
-                        return i
-        guesses = [((p.guess_score or 0.0), i) for i, p in elig if p.species_guess]
-        if guesses:
-            return min(guesses)[1]
+                hits = [(i, sid) for i, p in elig for sid, t in typed
+                        if p.types and set(p.types) == set(t) and
+                        (not only_unconfirmed or p.species_guess or not p.species_ja)]
+                if not hits:
+                    continue
+                if not multi:
+                    return hits[0][0], hits[0][1]
+                slots = {i for i, _ in hits}
+                if len(slots) == 1:
+                    return hits[0][0], hits[0][1]
+                break   # 形態ごとに別の枠が当たる = 決められない
         for i, p in elig:
-            if not p.species_ja:
-                return i
-        return elig[0][0]
+            if not p.species_ja and not p.types:
+                return i, (None if multi else cands[0][0])
+        return None, None
 
-    def switch_to_species(self, species_ja: str, species_id: Optional[str]) -> PokemonState:
+    @staticmethod
+    def _form_by_slot_types(p, cands: list) -> Optional[str]:
+        """形態の候補のうち、枠のタイプ (選出画面のアイコン) と図鑑タイプが一致するもの。候補が 1 つならそれ"""
+        if len(cands) == 1:
+            return cands[0][0]
+        hit = [sid for sid, t in cands if t and p.types and set(p.types) == set(t)]
+        return hit[0] if len(hit) == 1 else None
+
+    def replacement_slot(self, new_types: Optional[set]) -> Optional[int]:
+        """満枠で初登場の種 (形態が 1 つ) が来たとき置き換える枠 (純粋。match_slot の枠だけを返す)。決まらなければ None"""
+        return self.match_slot([(None, new_types)])[0]
+
+    def switch_to_species(self, species_ja: str, species_id: Optional[str],
+                          now: Optional[float] = None) -> PokemonState:
         idx = self.find_by_species(species_ja, species_id)
-        if idx is None and len(self.party) >= 6:
+        # 名前が複数の形態に当たる (ヤドキング = slowking / slowkinggalar) なら既定の形態に即確定しない (2026-10-09 ④)
+        forms = list(same_name_forms(species_id)) if species_id else []
+        ambiguous = len(forms) > 1
+        if idx is None and len(self.party) >= PARTY_SIZE:
             # 満枠での「初登場」= 既存枠の視覚同定ミスが濃厚 (実測:
             # ラフレシアと誤同定した枠の実体がフシギバナで、appendにより
-            # ルール上あり得ない7匹構成になった)。置き換える枠は
-            # replacement_slot (推定の重複 → タイプ一致 → 推定 → 未特定)。
-            # ロスターは対戦中に6を超えない
-            new_types = _dex_types_ja_of(species_id)
-            cand = self.replacement_slot(new_types)
+            # ルール上あり得ない7匹構成になった)。対応先は match_slot
+            # (推定の重複 → タイプ一致 → 未特定) の根拠のある規則だけで決める
+            cands = [(f, _dex_types_ja_of(f)) for f in forms] or [(species_id, _dex_types_ja_of(species_id))]
+            cand, form = self.match_slot(cands)
             if cand is not None:
                 p = self.party[cand]
-                p.species_ja, p.species_id = species_ja, species_id
+                sid = form or species_id
+                p.species_ja, p.species_id = species_ja, sid
+                new_types = _dex_types_ja_of(sid) if (form or not ambiguous) else None
                 p.types = list(new_types) if new_types else []
                 p.species_guess, p.guess_score = False, None   # 場に出た = 確定
+                p.species_candidates = list(forms) if (ambiguous and not form) else []
                 idx = cand
-        if idx is None:
-            if len(self.party) >= 6:
-                # 満枠で置換候補も無い場合は7枠目を作らない (ロスターは
-                # 対戦中に6を超えない。2026-08-05接続テストで誤読由来の
-                # 7枠目が生えて表示を汚した)。現在のアクティブを維持する
+            elif not self.hold_unplaced:
+                # 対応待ちを持たない側 (自分側: ロスターは登録済みで、満枠の初登場は名前の誤読): 7 枠目を作らず、
+                # 枠も置き換えずに現在のアクティブを維持する (2026-08-05 接続テスト: 誤読由来の 7 枠目が表示を汚した)
                 return self.ensure_active()
+            else:
+                # 対応先を決められない: 既存の枠を置き換えず、対応待ちの個体として末尾 (PARTY_SIZE 以降) に置く。
+                # 場の個体なので以後の HP・技はこの個体に付き、対応が決まったら resolve_pending が枠へ移す
+                # (2026-10-09 ④。従来は推定スコア最低の枠などを上書きし、正しかった推定と観測情報を失っていた)
+                t = None if ambiguous else _dex_types_ja_of(species_id)
+                mon = PokemonState(species_ja=species_ja, species_id=species_id, types=list(t) if t else [],
+                                   pending=True, species_candidates=list(forms) if ambiguous else [],
+                                   t_first_seen=round(now if now is not None else time.time(), 2))
+                self.party.append(mon)
+                idx = len(self.party) - 1
+        if idx is None:
             # 初登場 -> 一旦末尾に追加する (どの選出枠に対応するかは
             # link_active_to_party がタイプ照合で解決し、余剰枠を除去する)
-            mon = PokemonState(species_ja=species_ja, species_id=species_id)
+            mon = PokemonState(species_ja=species_ja, species_id=species_id,
+                               species_candidates=list(forms) if ambiguous else [])
             self.party.append(mon)
             idx = len(self.party) - 1
         self.switch_to(idx)
@@ -430,6 +610,100 @@ class SideState:
         if not downgrade:
             mon.merge_species(species_ja, species_id)
         return mon
+
+    # --- 対応待ちの個体 (2026-10-09 ④) ---
+    def pending_indices(self) -> list:
+        return [i for i, p in enumerate(self.party) if p.pending]
+
+    def pending_target(self, pm: PokemonState) -> tuple:
+        """対応待ちの個体 pm の対応先の枠 (純粋) → (枠, 形態の id, 根拠 "species" / "rule")。決まらなければ
+        (None, None, None)。
+        a) ロスターの枠に同じ種 (同名 / 形態の候補の id / 形態違い) がちょうど 1 つ (手動確定・名前の読みで枠に入った)
+        b) match_slot (推定の重複 → タイプ一致 → 未特定)。形態の訂正 (判明技) で候補が絞れていればその形態のタイプで照合する"""
+        forms = list(pm.species_candidates or []) or ([pm.species_id] if pm.species_id else [])
+        same = []
+        for i, p in roster_slots(self.party):
+            if not (p.species_ja or p.species_id):
+                continue
+            if p.species_id and (p.species_id in forms or any(_same_family(p.species_id, f) for f in forms)):
+                same.append((i, p.species_id))   # 枠の形態 (手動確定のガラル形など、より具体的なもの) を採る
+            elif p.species_ja and p.species_ja == pm.species_ja:
+                same.append((i, forms[0] if len(forms) == 1 else None))
+        if len(same) == 1:
+            return same[0][0], same[0][1], "species"
+        if len(same) > 1:
+            return None, None, None
+        slot, form = self.match_slot([(f, _dex_types_ja_of(f)) for f in forms])
+        return slot, form, ("rule" if slot is not None else None)
+
+    def merge_pending_into(self, src_idx: int, dst_idx: int, form: Optional[str]) -> dict:
+        """対応待ちの個体 party[src_idx] を枠 party[dst_idx] へ移す (純粋)。観測した HP・技・状態・持ち物・特性・別名を
+        枠に移し、対応待ちの個体は party から除く (末尾にあるので枠の番号はずれない)。戻り値: 対戦ログ用の記録"""
+        src, dst = self.party[src_idx], self.party[dst_idx]
+        replaced = {"species": dst.species_id, "ja": dst.species_ja, "guess": dst.species_guess,
+                    "score": dst.guess_score, "types": list(dst.types or [])}
+        keep_dst_species = bool(dst.species_id and not dst.species_guess
+                                and (form is None or dst.species_id == form or _same_family(dst.species_id, form)))
+        if not keep_dst_species:
+            sid = form or src.species_id
+            dst.species_ja, dst.species_id = src.species_ja, sid
+            determined = bool(form) or len(src.species_candidates or []) <= 1
+            t = _dex_types_ja_of(sid) if determined else None
+            if t:
+                dst.types = list(t)
+            dst.species_candidates = [] if determined else list(src.species_candidates)
+        else:
+            # 枠の種 (手動確定のガラル形など) を保つ。表示名は場の個体の名前 (交代の文言・HUD の名前) にそろえ、枠の名前は
+            # 別名に残す (名前でのイベントの帰属と、集計で同じ個体が 2 つの名前に分かれないため)
+            if src.species_ja and dst.species_ja and src.species_ja != dst.species_ja:
+                if dst.species_ja not in (dst.aliases or []):
+                    dst.aliases.append(dst.species_ja)
+                dst.species_ja = src.species_ja
+            dst.species_candidates = []
+        dst.species_guess, dst.guess_score = False, None
+        for attr in ("display_name", "gender", "hp_percent", "hp_current", "hp_max", "hp_read_ts", "status",
+                     "ability_ja", "ability_id", "item_ja", "item_id"):
+            val = getattr(src, attr)
+            if val is not None:
+                setattr(dst, attr, val)
+        for attr in ("hp_uncertain", "hp_estimated", "item_consumed", "item_removed", "is_mega", "type_changed"):
+            setattr(dst, attr, bool(getattr(src, attr) or getattr(dst, attr)))
+        if any(src.boosts.values()):
+            dst.boosts = dict(src.boosts)
+        if src.volatiles:
+            dst.volatiles = list(src.volatiles)
+        dst.moves = src.moves or dst.moves
+        dst.revealed_moves = list(dict.fromkeys([*dst.revealed_moves, *src.revealed_moves]))
+        dst.aliases = list(dict.fromkeys([*dst.aliases, *src.aliases]))[-6:]
+        dst.last_seen_ts = max(dst.last_seen_ts, src.last_seen_ts)
+        was_active = self.active_index == src_idx
+        dst.is_active = was_active or dst.is_active
+        self.party.pop(src_idx)
+        if was_active:
+            self.active_index = dst_idx
+        elif self.active_index is not None and self.active_index > src_idx:
+            self.active_index -= 1
+        return {"merged_from": src_idx, "merged_to": dst_idx, "species": dst.species_id, "ja": dst.species_ja,
+                "form_determined": not dst.species_candidates, "t_first_seen": src.t_first_seen,
+                "moved": {"hp": src.hp_percent, "revealed_moves": list(src.revealed_moves), "status": src.status},
+                "replaced": replaced}
+
+    def resolve_pending(self) -> list:
+        """対応待ちの個体のうち対応先が決まったものを枠へ移す (純粋)。戻り値: 移した記録の list (merge_pending_into)"""
+        out = []
+        for pi in reversed(self.pending_indices()):   # 後ろから (pop で前の番号がずれない)
+            if pi < PARTY_SIZE:
+                continue   # 対応待ちは満枠のときだけ末尾に置く。ロスターの範囲にあるものは扱わない
+            pm = self.party[pi]
+            target, form, basis = self.pending_target(pm)
+            if target is None:
+                continue
+            if basis != "species" and has_observation(self.party[target]) and has_observation(pm):
+                continue   # 別の個体かもしれない枠の観測を上書きしない (同じ種の枠は同じ個体なので移す)
+            r = self.merge_pending_into(pi, target, form)
+            r["basis"] = basis
+            out.append(r)
+        return out
 
     def prune_placeholders(self):
         """種族もタイプも不明な非アクティブの余剰枠 (7枠目以降) を削除する"""
@@ -495,7 +769,7 @@ class BattleStateV2:
     def __init__(self):
         self.field = FieldState()
         self.player = SideState()
-        self.opponent = SideState()
+        self.opponent = SideState(hold_unplaced=True)
         self.scene: str = "unknown"
         self.selection_picked: Optional[int] = None   # 選出画面の「N/3」のN
         self.command_no: Optional[int] = None     # 画面右上のCOMMAND番号 (残り時間秒)
@@ -562,6 +836,16 @@ class BattleStateV2:
     def side(self, name: str) -> SideState:
         return self.player if name == "player" else self.opponent
 
+    def resolve_pending(self, side_name: str = "opponent") -> list:
+        """対応待ちの個体の対応が決まったら枠へ移し、移した内容をイベントに残す (対戦ログの roster_change に
+        merged_from / merged_to を付ける材料。2026-10-09 ④)。戻り値: SideState.resolve_pending の記録"""
+        res = self.side(side_name).resolve_pending()
+        for r in res:
+            self.log_event("system", f"対応待ちの {r.get('ja')} を枠 {r['merged_to']} に対応 "
+                           f"(置き換えた枠: {r['replaced'].get('ja') or '未特定'})",
+                           event_id="roster_pending_resolved", target=side_name, detail=r)
+        return res
+
     def needs_reset_for_new_battle(self) -> bool:
         """確定選出画面に入ったとき、前の対戦の内容が載っているか (= reset_battle が要るか)。純粋。
 
@@ -597,7 +881,8 @@ class BattleStateV2:
                       "status", "volatiles", "boosts", "ability_ja",
                       "ability_id", "item_ja", "item_id", "item_consumed",
                       "revealed_moves", "aliases", "is_mega", "is_active",
-                      "is_picked", "pick_order", "species_guess", "guess_score"):
+                      "is_picked", "pick_order", "species_guess", "guess_score",
+                      "pending", "species_candidates", "t_first_seen"):
                 if k in md and md[k] is not None:
                     setattr(mon, k, md[k])
             mon.moves = [MoveSlot(**{kk: m.get(kk) for kk in
@@ -609,7 +894,10 @@ class BattleStateV2:
         for side_name in ("player", "opponent"):
             sd = d.get(side_name) or {}
             side = self.side(side_name)
-            side.party = [load_mon(m) for m in (sd.get("party") or [])[:6]]
+            rows = sd.get("party") or []
+            # ロスターは 6 枠まで。7 枠目以降は対応待ちの個体 (2026-10-09 ④) だけを戻す
+            side.party = [load_mon(m) for m in rows[:PARTY_SIZE]] + \
+                [load_mon(m) for m in rows[PARTY_SIZE:] if m.get("pending")]
             side.active_index = sd.get("active_index")
             hz = sd.get("hazards") or {}
             side.stealth_rock = bool(hz.get("stealth_rock"))

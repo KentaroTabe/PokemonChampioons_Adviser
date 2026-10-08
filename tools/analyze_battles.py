@@ -25,6 +25,7 @@ from pathlib import Path
 
 from champions_agent.config import RATE_CHAIN_GAP_SEC, RATE_INFER_MIN_DELTA, RATE_MAX_DELTA_PER_BATTLE
 from tools.battle_outcome import OutcomeTracker, apply_rate_chain
+from vision.state import roster_slots
 from tools.pick_labels import complete_subset, split_status, status_by_ja
 
 REPO = Path(__file__).resolve().parent.parent
@@ -68,7 +69,8 @@ def _parse_battle(path: str) -> dict:
             if in_battle:
                 n_battle_scenes += 1
             opp = st.get("opponent") or {}
-            for i, p in enumerate(opp.get("party", [])):
+            # 対応待ちの個体 (party の 7 番目以降、pending) は 6 体のどれかで枠が未定。種・選出に数えない (2026-10-09 ④)
+            for i, p in roster_slots(opp.get("party")):
                 if not p.get("ja"):
                     continue
                 slot_last[i] = p["ja"]

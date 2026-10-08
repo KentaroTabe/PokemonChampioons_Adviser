@@ -7,7 +7,7 @@
 
 使い方: scripts/run_test.sh test_roster_cap
 """
-from vision.state import BattleStateV2, PokemonState
+from vision.state import BattleStateV2, PokemonState, roster_slots
 
 
 def _full_side():
@@ -39,14 +39,26 @@ def test_full_roster_replaces_misidentified():
 
 
 def test_revealed_moves_slot_not_replaced():
+    """技判明枠 (ラフレシア) は保護される。タイプが一致する枠がそれしか無いとき、フシギバナは他の枠も置き換えない。
+    2026-10-09 の判断 (ユーザー承認、④): 旧来は「別の枠 (候補の先頭) が置き換わる」を期待していたが、その置き換えは
+    対応の根拠が無く、その枠の種と観測を失う。ロスターの 6 枠は対戦中に増えない (7 枠目を枠として作らない) 方針は保ったまま、
+    帰属先の決まらない場の個体は対応待ち (party の 7 番目、pending。種・枠・選出・ひんしの数には入らない) に置く"""
     st, side = _full_side()
     side.party[1].revealed_moves = ["gigadrain"]   # 技判明枠は保護される
+    side.party[1].hp_percent = 40.0
+    side.party[4].hp_percent = 55.0                 # 別の枠の観測 (置き換え先にされない)
+    before = [(p.species_id, list(p.types), p.hp_percent, list(p.revealed_moves)) for p in side.party]
     side.switch_to_species("フシギバナ", "venusaur")
-    assert len(side.party) == 6
-    names = [p.species_ja for p in side.party]
-    assert "ラフレシア" in names, names           # 保護された
-    assert "フシギバナ" in names, names           # 別の枠が置き換わった
-    print("test_revealed_moves_slot_not_replaced OK:", names)
+    assert len(side.party) == 7, [p.species_ja for p in side.party]
+    assert [(p.species_id, list(p.types), p.hp_percent, list(p.revealed_moves)) for p in side.party[:6]] == before
+    assert len(roster_slots(side.party)) == 6       # ロスターの枠は 6 のまま
+    pm = side.active()
+    assert pm is side.party[6] and pm.pending and pm.species_ja == "フシギバナ"
+    pm.hp_percent = 77.0                            # 帰属先の決まらない観測は対応待ちの個体に付く
+    pm.revealed_moves.append("ヘドロばくだん")
+    assert side.party[1].hp_percent == 40.0 and side.party[1].revealed_moves == ["gigadrain"]
+    assert side.party[6].revealed_moves == ["ヘドロばくだん"]
+    print("test_revealed_moves_slot_not_replaced OK:", [p.species_ja for p in side.party])
 
 
 def test_known_species_still_matches():
