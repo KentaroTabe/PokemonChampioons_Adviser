@@ -29,10 +29,10 @@ from vision.pipeline import VisionPipeline
 from vision.scenes import SCENE_SELECTION, SCENE_STANDBY
 from vision.end_notice import battle_end_notice, outcome_revision_notice
 from vision.stale_notice import advice_target, stale_advice_notice
-from vision.state import apply_manual_species
+from vision.state import MANUAL_REASON_OUT_OF_RANGE, apply_manual_species, apply_manual_species_unplaced
 from vision.frame_burst import BurstPlanner
 from champions_agent.config import (CLIENT_HELLO_WAIT_SEC, DISPLAY_HIDDEN_WARN_COUNT, FRAME_BURST_DIR,
-                                    MANUAL_SPECIES_RESOLVE_CUTOFF, SHADOW_VARIANTS_ENABLED)
+                                    MANUAL_SPECIES_RESOLVE_CUTOFF, PARTY_SIZE, SHADOW_VARIANTS_ENABLED)
 from client_state import (VIS_HIDDEN, VIS_VISIBLE, ClientRegistry, HiddenDisplayWatch, served_html_version, short_sid,
                           stale_of)
 
@@ -1299,9 +1299,12 @@ async def set_species(sid, data):
         party = pipeline.state.opponent.party
 
         async def _skip(reason: str) -> None:
-            # 入れなかった理由をイベント欄とサーバーのログに出す
+            # 入れなかった理由をイベント欄とサーバーのログに出す。対戦ログの manual_fix 行に applied: false と理由を残す
+            # (2026-10-09 ④)
             pipeline.state.log_event("manual", f"手動確定を無視: {species_ja} ({reason})",
-                                     event_id="species_manual_skip")
+                                     event_id="species_manual_skip",
+                                     detail={"applied": False, "reason": reason, "index": idx,
+                                             "species_id": species_id})
             print(f"[server] 手動確定を無視: {species_ja} ({reason})")
             st = pipeline.state.to_dict()
             _attach_candidates(st)
@@ -1314,12 +1317,26 @@ async def set_species(sid, data):
                 return
             species_ja, species_id = r[0], r[1]
         res = apply_manual_species(party, idx, species_ja, species_id)
+        via = "slot"
+        if res["index"] is None and res["reason"] == MANUAL_REASON_OUT_OF_RANGE:
+            # 表示の枠とサーバーの枠がずれた: 無視せず、対応待ちの個体または種族名で一致する枠に入れる (2026-10-09 ④。
+            # 10/8 18:27 に「ガラルヤドキング」が範囲外で無視された)
+            res = apply_manual_species_unplaced(party, species_ja, species_id)
+            via = res.get("via")
         if res["index"] is None:
             await _skip(res["reason"])
             return
         if res["moved"]:
             print(f"[server] 手動確定: slot{idx} は確定済みのため slot{res['index']} へ付け替え")
+        requested_idx = idx
         idx = res["index"]
+        if party[idx].pending:
+            via = "pending" if via == "slot" else via
+        # 対応待ちの個体の種が決まった / 枠の種が決まった → 対応待ちの個体が枠に当たれば移す
+        for r in pipeline.state.resolve_pending("opponent"):
+            if r["merged_from"] == idx:
+                idx = r["merged_to"]
+        party = pipeline.state.opponent.party
         if 0 <= idx < len(party):
             # 直近の「HUD名不一致」で観測された別名をこの個体に紐づける
             # (試合中の個体名キャッシュ: 以後その名前のイベントが正しく帰属する)
@@ -1337,14 +1354,19 @@ async def set_species(sid, data):
                         party[idx].aliases.append(alias)
                         print(f"[server] 別名を紐づけ: {species_ja} <- {alias}")
             party[idx].aliases = party[idx].aliases[-6:]
+            # 文言の名前は枠の表示名 (形態違いの手動確定は表示名を保つ。対戦ログの manual_fix_key がこの名前で枠を引く)
             pipeline.state.log_event(
-                "manual", f"相手の{species_ja}を手動確定 (候補から選択)",
-                event_id="species_manual")
+                "manual", f"相手の{party[idx].species_ja or species_ja}を手動確定 (候補から選択)",
+                event_id="species_manual",
+                detail={"applied": True, "index": idx, "requested_index": requested_idx, "via": via,
+                        "pending": bool(party[idx].pending), "species_id": species_id})
             print(f"[server] 手動確定: 相手slot{idx} = {species_ja}")
             # 自己改善ループ: 確定した種族のアイコンを直近の選出フレームから
             # 収穫し、実キャプチャテンプレートとして保存する (次回から
             # 同タイプ複数候補でも視覚照合で自動確定できるようになる)
             try:
+                if idx >= PARTY_SIZE or party[idx].pending:
+                    raise ValueError("対応待ちの個体 (選出画面の枠が決まっていない)")
                 from vision.spriteid import harvest_from_frame
                 import glob as _glob
                 frames = sorted(_glob.glob(str(DUMP_DIR / "sel_*.png")),

@@ -52,6 +52,19 @@
     ファイルを開いたときは、可視状態の分かっている接続の最新の状態を 1 行ずつ書く
   frame_burst 行に "reason" ("scene:<場面>" / "timeout")・"battle_seq"・"battle_index"。保存を始めなかった対戦は終わりに
     {"type": "frame_burst", "skipped": true, "reason": no_start_scene|count_exhausted|not_every|disabled, "battle_seq", "battle_index"}
+
+2026-10-09 ④ 相手の枠と観測情報を失わない (欄・値を足すだけ。既存の欄・値の意味は変えない):
+  roster_change 行に、枠の統合 (link_active_to_party) / 対応待ちの個体の解消 (resolve_pending) のときだけ
+    "merged_from" (統合元の枠の番号。対応待ちは PARTY_SIZE 以降)、"merged_to"、"merge_kind" (placeholder / pending)、
+    "moved" ({"hp", "revealed_moves", "status"} 移した観測)、"replaced" (統合先の枠にあった種・推定・スコア・タイプ)、
+    "source_cleared" (満枠で統合元の枠を未特定に戻した)、"t_first_seen" (対応待ちになった時刻)。種の無かった枠への統合は
+    from が null の roster_change 行を 1 つ書く
+  対応待ちのまま終わった場の個体: 終了時に {"type": "roster_change", "slot": null, "to", "to_ja", "unresolved": true,
+    "candidates" (形態の候補), "t_first_seen", "moved", "final"}。読み手は t_first_seen ごとに最後の行を採る
+  guess_confirm の verdict に superseded (推定の枠が統合で消えた・枠の番号がずれた) / unresolved (未判明だが対応待ちのまま
+    終わった個体がいる) を足した。推定の的中率の集計は、この 2 値を分母から除く (match / mismatch だけで率を出す)
+  manual_fix 行に、種の手動確定のとき "applied" (入れたか) と、入れなかったときの "reason"
+  scene 行の相手の枠に "pending": true (対応待ちの個体) と "candidates" (形態が決まっていない種の候補)
 """
 from __future__ import annotations
 
@@ -65,6 +78,7 @@ from champions_agent.config import (BSS_PICK_COUNT, DECISION_ACTION_WAIT_SEC, DE
                                     OUTCOME_LAST_ZERO_MAX_SEC, OUTCOME_ZERO_HP_PCT, PARTY_SIZE, RATE_INFER_MAX_DELTA,
                                     RATE_INFER_MIN_DELTA, SELECTION_GUESS_SURE_PROB, SELECTION_PRIOR_AUTO_ACCEPT)
 from tools.battle_outcome import rate_inference, text_outcome_basis, text_outcome_of
+from vision.state import roster_slots
 from vision.scenes import (SCENE_BATTLE_HUD, SCENE_COMMAND, SCENE_FIELD, SCENE_FIELD_CHECK, SCENE_MOVE_SELECT,
                            SCENE_STANDBY, SCENE_WATCH)
 
@@ -83,6 +97,11 @@ OPP_APPEAR_SCENES = (SCENE_COMMAND, SCENE_MOVE_SELECT, SCENE_WATCH, SCENE_FIELD_
 PICK_CONFIRMED = "picked_confirmed"
 PICK_UNPICKED = "unpicked_confirmed"
 PICK_UNKNOWN = "unknown"
+# guess_confirm の verdict に足した値 (2026-10-09 ④。既存の match / mismatch / unrevealed の意味は変えない)
+GUESS_SUPERSEDED = "superseded"   # 推定の枠が統合で消えた (枠の番号がずれた)
+GUESS_UNRESOLVED = "unresolved"   # 未判明だが、対応待ちのまま終わった場の個体がいる
+# 枠の統合・対応待ちの解消のイベント (vision/extractors.link_active_to_party / vision/state.BattleStateV2.resolve_pending)
+ROSTER_MERGE_EVENTS = ("roster_merge", "roster_pending_resolved")
 
 
 # ------------------------------------------------------------------ 段 0 の行の純粋関数 (2026-10-07)
@@ -139,11 +158,11 @@ def frames_row(start: dict, end: dict, t_start: Optional[float]) -> dict:
 
 
 def opp_slots_of(state: Optional[dict]) -> dict:
-    """相手の枠 {slot: {"species", "ja", "guess", "score", "types"}} (PARTY_SIZE 枠まで、純粋)"""
-    party = (((state or {}).get("opponent") or {}).get("party") or [])[:PARTY_SIZE]
+    """相手の枠 {slot: {"species", "ja", "guess", "score", "types"}} (PARTY_SIZE 枠まで、対応待ちを除く。純粋)"""
+    party = (((state or {}).get("opponent") or {}).get("party") or [])
     return {i: {"species": p.get("species_id"), "ja": p.get("species_ja"), "guess": bool(p.get("species_guess")),
                 "score": p.get("guess_score"), "types": list(p.get("types") or [])}
-            for i, p in enumerate(party)}
+            for i, p in roster_slots(party)}
 
 
 def _slot_identity(s: Optional[dict]):
@@ -152,13 +171,14 @@ def _slot_identity(s: Optional[dict]):
 
 def opp_appeared_now(state: Optional[dict], scene: Optional[str]) -> list:
     """このフレームで場に出ていた (= 選出された) と分かる相手 [(slot, species_id)] (純粋)。
-    従来の読み手 (analyze_battles) と同じ規則: 対戦の場面で、場の枠か HP が読めている枠。選出画面の推定 (guess) は数えない"""
+    従来の読み手 (analyze_battles) と同じ規則: 対戦の場面で、場の枠か HP が読めている枠。選出画面の推定 (guess) と
+    対応待ちの個体 (roster_slots の外。roster_change の unresolved 行で別に残す) は数えない"""
     if scene not in OPP_APPEAR_SCENES:
         return []
     opp = (state or {}).get("opponent") or {}
     act = opp.get("active_index")
     out = []
-    for i, p in enumerate((opp.get("party") or [])[:PARTY_SIZE]):
+    for i, p in roster_slots(opp.get("party")):
         if not p.get("species_id") or p.get("species_guess"):
             continue
         if i == act or p.get("hp_percent") is not None:
@@ -222,6 +242,42 @@ def guess_verdict(guessed: Optional[str], revealed_in_slot: Optional[str], appea
     if revealed_in_slot and _base_sid(revealed_in_slot) != g:
         return revealed_in_slot, "mismatch"
     return None, "unrevealed"
+
+
+def final_guess_verdict(revealed: Optional[str], verdict: str, superseded: bool, pending_open: bool) -> tuple:
+    """guess_verdict の結果に、枠の統合と対応待ちを反映する (純粋。2026-10-09 ④) → (判明した種, verdict)。
+    - superseded: 推定の枠が統合で消えた (枠の番号がずれた)。その枠の後の判明は推定と比べられない (一致は残す)
+    - unresolved: 未判明だが、どの枠か決まらないまま終わった場の個体 (対応待ち) がいる。その個体がこの枠だった可能性が
+      あるので未判明とは言えない
+    既存の値 (match / mismatch / unrevealed) の意味は変えない。読み手は superseded / unresolved を的中率の分母から除く"""
+    if verdict == "match":
+        return revealed, verdict
+    if superseded:
+        return None, GUESS_SUPERSEDED
+    if verdict == "unrevealed" and pending_open:
+        return None, GUESS_UNRESOLVED
+    return revealed, verdict
+
+
+def shift_slot_keys(d: dict, popped: int) -> dict:
+    """枠の番号をキーにした dict を、枠 popped が除かれた後の番号に直す (純粋): popped は落とし、後ろは 1 つ詰める"""
+    return {(k - 1 if k > popped else k): v for k, v in d.items() if k != popped}
+
+
+def opp_pending_of(state: Optional[dict]) -> list:
+    """対応待ちの相手の個体 (party の PARTY_SIZE 以降で pending、純粋) → [{"key", "species", "ja", "candidates",
+    "t_first_seen", "hp", "revealed", "status"}]"""
+    party = (((state or {}).get("opponent") or {}).get("party") or [])
+    out = []
+    for i, p in enumerate(party):
+        if i < PARTY_SIZE or not p.get("pending"):
+            continue
+        out.append({"key": p.get("t_first_seen") if p.get("t_first_seen") is not None else f"{i}:{p.get('species_id')}",
+                    "species": p.get("species_id"), "ja": p.get("species_ja"),
+                    "candidates": list(p.get("species_candidates") or []), "t_first_seen": p.get("t_first_seen"),
+                    "hp": p.get("hp_percent"), "revealed": list(p.get("revealed_moves") or []),
+                    "status": p.get("status")})
+    return out
 
 
 def player_action_of(fired: list) -> Optional[dict]:
@@ -370,6 +426,11 @@ def _compact_state(state: dict) -> dict:
         # 選出画面の推定 (確定ではない) の印。分析・実戦バンクは推定を「相手の 6 体」に数えない (2026-09-29)
         if p.get("species_guess"):
             d["guess"] = True
+        # 対応待ちの個体 (party の PARTY_SIZE 以降に置く場の個体) と、形態が決まっていない種の候補 (2026-10-09 ④)
+        if p.get("pending"):
+            d["pending"] = True
+        if p.get("species_candidates"):
+            d["candidates"] = list(p["species_candidates"])
         return d
 
     return {
@@ -502,6 +563,8 @@ class BattleLogger:
         self._guesses: list = []         # 選出画面の推定 [{"slot", "species", "ja", "prob", "score", "t_guess"}]
         self._guess_keys: set = set()
         self._guess_prob_of: dict = {}   # (slot, species) → 推定時の確率 (roster_change の from_prob)
+        self._merge_seen: set = set()    # 処理済みの枠の統合・対応待ちの解消のイベント (ts, event, text)
+        self._pending_open: dict = {}    # いまの対応待ちの個体 (opp_pending_of、key → 内容)。終了時に残れば unresolved
         self._fixes: list = []           # 追跡中の手入力の訂正 [{"fix_id", "key", "manual_value", ...}]
         self._dec: Optional[dict] = None   # 決定の追跡 {"advice_id", "best", "t_gen", "turn", "n_advice", "t_decided", ...}
         self._dec_open = False           # 決定画面を見てから、まだ解決側の場面に移っていない
@@ -684,7 +747,8 @@ class BattleLogger:
             return None
 
     def _write_end_rows(self, final: bool) -> None:
-        """対戦の終わりの行: 決めた後に行動を待っている decision、frames、opp_picks、guess_confirm。
+        """対戦の終わりの行: 決めた後に行動を待っている decision、frames、opp_picks、guess_confirm、
+        対応待ちのまま終わった個体の roster_change (unresolved: true)。
         勝敗を記録した時と次の対戦への切り替え (close を含む) で呼ぶ。内容が前に書いたものと同じなら書き直さない"""
         if self._file is None:
             return
@@ -704,20 +768,33 @@ class BattleLogger:
             lab = label_opp_picks([s for s in slots if _slot_identity(s) or s.get("types")], self._appeared)
             guesses = []
             for g in self._guesses:
-                revealed, verdict = guess_verdict(g["species"], self._slot_revealed.get(g["slot"]), self._appeared)
+                slot_now = g.get("_slot", g["slot"])
+                revealed, verdict = guess_verdict(g["species"], self._slot_revealed.get(slot_now), self._appeared)
+                revealed, verdict = final_guess_verdict(revealed, verdict, bool(g.get("_superseded")),
+                                                        bool(self._pending_open))
                 prob = g.get("prob")
-                guesses.append({**g, "revealed": revealed, "verdict": verdict,
+                pub = {k: v for k, v in g.items() if not k.startswith("_")}
+                guesses.append({**pub, "revealed": revealed, "verdict": verdict,
                                 "auto_accept": (prob >= SELECTION_PRIOR_AUTO_ACCEPT) if prob is not None else None,
                                 "sure": (prob >= SELECTION_GUESS_SURE_PROB) if prob is not None else None,
                                 "threshold_auto_accept": SELECTION_PRIOR_AUTO_ACCEPT,
                                 "threshold_sure": SELECTION_GUESS_SURE_PROB})
-            sig = json.dumps([lab, guesses], sort_keys=True, ensure_ascii=False, default=str)
+            # 対応待ちのまま終わった場の個体 (2026-10-09 ④): roster_change に unresolved: true で残す (集計から除けるように)
+            unresolved = [{"type": "roster_change", "slot": None, "scene": None, "turn": None,
+                           "from": None, "from_ja": None, "from_guess": None, "from_prob": None, "from_score": None,
+                           "to": p["species"], "to_ja": p["ja"], "to_guess": False, "basis": "field",
+                           "unresolved": True, "candidates": p["candidates"], "t_first_seen": p["t_first_seen"],
+                           "moved": {"hp": p["hp"], "revealed_moves": p["revealed"], "status": p["status"]}}
+                          for _k, p in sorted(self._pending_open.items(), key=lambda kv: str(kv[0]))]
+            sig = json.dumps([lab, guesses, unresolved], sort_keys=True, ensure_ascii=False, default=str)
             if sig == self._picks_sig:
                 return
             self._picks_sig = sig
             self._write({"type": "opp_picks", **lab, "final": bool(final)})
             for g in guesses:
                 self._write({"type": "guess_confirm", **g, "final": bool(final)})
+            for r in unresolved:
+                self._write({**r, "final": bool(final)})
         except Exception as e:      # 記録の失敗で対戦ログを止めない
             print(f"[battle_log] 終了時の行の記録に失敗: {e}")
 
@@ -726,18 +803,93 @@ class BattleLogger:
         if self._file is not None:
             self._write_end_rows(final=True)
 
+    def _new_roster_merges(self, state: dict) -> list:
+        """このフレームで新しく出た枠の統合・対応待ちの解消のイベント [(event, detail)] (state の events から)"""
+        out = []
+        for e in state.get("events", []) or []:
+            if e.get("event") not in ROSTER_MERGE_EVENTS or (e.get("target") or "opponent") != "opponent":
+                continue
+            key = (e.get("ts"), e.get("event"), e.get("text"))
+            if key in self._merge_seen:
+                continue
+            self._merge_seen.add(key)
+            out.append((e["event"], dict(e.get("detail") or {})))
+        return out
+
+    def _shift_slots(self, popped: int) -> None:
+        """相手の枠 popped が party から除かれた (統合): 枠の番号で持っている追跡を詰め直す。その枠の推定は superseded"""
+        self._opp_slots = shift_slot_keys(self._opp_slots, popped)
+        self._slot_revealed = shift_slot_keys(self._slot_revealed, popped)
+        self._guess_keys = {((k - 1 if k > popped else k), s) for k, s in self._guess_keys if k != popped}
+        self._guess_prob_of = {((k - 1 if k > popped else k), s): v for (k, s), v in self._guess_prob_of.items()
+                               if k != popped}
+        for g in self._guesses:
+            if g.get("_superseded"):
+                continue
+            if g["_slot"] == popped:
+                g["_superseded"] = True
+            elif g["_slot"] > popped:
+                g["_slot"] -= 1
+
+    @staticmethod
+    def _merge_fields(ev: str, det: dict) -> dict:
+        """roster_change 行に足す統合の欄 (2026-10-09 ④): 統合元・統合先の枠と、移した観測情報・置き換えた枠の推定"""
+        out = {"merged_from": det.get("merged_from"), "merged_to": det.get("merged_to"),
+               "merge_kind": "pending" if ev == "roster_pending_resolved" else "placeholder",
+               "moved": det.get("moved"), "replaced": det.get("replaced")}
+        if det.get("source_cleared"):
+            out["source_cleared"] = True
+        if det.get("t_first_seen") is not None:
+            out["t_first_seen"] = det.get("t_first_seen")
+        return out
+
     def _track_opponent(self, state: dict, scene: Optional[str], manual_species: bool) -> None:
-        """相手の枠の置き換え (roster_change)、選出画面の推定 (guess_confirm の材料)、場に出た種 (opp_picks の材料) を追う"""
+        """相手の枠の置き換え (roster_change)、選出画面の推定 (guess_confirm の材料)、場に出た種 (opp_picks の材料) を追う。
+        2026-10-09 ④: 枠の統合 (roster_merge) と対応待ちの解消 (roster_pending_resolved) を roster_change 行に
+        merged_from / merged_to として付け、統合で枠の番号がずれたら追跡を詰め直す (ずれた番号で推定と判明を比べない)"""
+        merges = self._new_roster_merges(state)
+        for ev, det in merges:
+            src = det.get("merged_from")
+            if ev != "roster_merge" or not isinstance(src, int) or src >= PARTY_SIZE:
+                continue
+            if det.get("source_cleared"):
+                # 統合元の枠は未特定の枠に戻った: その枠で場に判明した種は統合先へ移ったので、その枠の推定と比べない
+                self._slot_revealed.pop(src, None)
+                for g in self._guesses:
+                    if g["_slot"] == src and not g.get("_superseded"):
+                        g["_superseded"] = True
+            else:
+                self._shift_slots(src)
+        merged_to = {det["merged_to"]: (ev, det) for ev, det in merges if isinstance(det.get("merged_to"), int)}
         cur = opp_slots_of(state)
         act = (state.get("opponent") or {}).get("active_index")
+        written = set()
         for i, before, after in roster_changes(self._opp_slots, cur):
-            self._write({"type": "roster_change", "slot": i, "scene": scene, "turn": state.get("turn"),
-                         "from": before.get("species"), "from_ja": before.get("ja"), "from_guess": before.get("guess"),
-                         "from_prob": self._guess_prob_of.get((i, _slot_identity(before))),
-                         "from_score": before.get("score"),
-                         "to": (after or {}).get("species"), "to_ja": (after or {}).get("ja"),
-                         "to_guess": bool((after or {}).get("guess")),
-                         "basis": roster_change_basis(after, i, act, scene, manual_species)})
+            row = {"type": "roster_change", "slot": i, "scene": scene, "turn": state.get("turn"),
+                   "from": before.get("species"), "from_ja": before.get("ja"), "from_guess": before.get("guess"),
+                   "from_prob": self._guess_prob_of.get((i, _slot_identity(before))),
+                   "from_score": before.get("score"),
+                   "to": (after or {}).get("species"), "to_ja": (after or {}).get("ja"),
+                   "to_guess": bool((after or {}).get("guess")),
+                   "basis": roster_change_basis(after, i, act, scene, manual_species)}
+            if i in merged_to:
+                row.update(self._merge_fields(*merged_to[i]))
+            self._write(row)
+            written.add(i)
+        for i, (ev, det) in sorted(merged_to.items()):
+            if i in written or i >= PARTY_SIZE:
+                continue
+            # 種の無かった枠 (未特定の枠) への統合: 置き換えの行は出ないので、統合の行を 1 つ書く
+            after = cur.get(i) or {}
+            rep = det.get("replaced") or {}
+            row = {"type": "roster_change", "slot": i, "scene": scene, "turn": state.get("turn"),
+                   "from": rep.get("species"), "from_ja": rep.get("ja"), "from_guess": bool(rep.get("guess")),
+                   "from_prob": self._guess_prob_of.get((i, rep.get("species"))) if rep.get("species") else None,
+                   "from_score": rep.get("score"),
+                   "to": after.get("species"), "to_ja": after.get("ja"), "to_guess": bool(after.get("guess")),
+                   "basis": roster_change_basis(after, i, act, scene, manual_species)}
+            row.update(self._merge_fields(ev, det))
+            self._write(row)
         now = time.time()
         for i, s in cur.items():
             if s.get("guess") and s.get("species") and (i, s["species"]) not in self._guess_keys:
@@ -750,10 +902,11 @@ class BattleLogger:
                         prob = None
                 self._guess_prob_of[(i, s["species"])] = prob
                 self._guesses.append({"slot": i, "species": s["species"], "ja": s.get("ja"), "prob": prob,
-                                      "score": s.get("score"), "t_guess": round(now, 2)})
+                                      "score": s.get("score"), "t_guess": round(now, 2), "_slot": i})
         for i, sid in opp_appeared_now(state, scene):
             self._appeared.add(sid)
             self._slot_revealed[i] = sid
+        self._pending_open = {p["key"]: p for p in opp_pending_of(state)}
         self._opp_slots = cur
 
     def _register_fix(self, event: dict, state: dict, fix_id: str, t: float) -> None:
@@ -936,9 +1089,15 @@ class BattleLogger:
                 # fix_id (2026-10-07 段 0): 後の推定で上書きされたら manual_fix_overwritten の行がこの id で結ぶ
                 self._fix_seq += 1
                 fix_id = f"m{self._fix_seq:04d}"
-                self._write({"type": "manual_fix", "turn": state.get("turn"),
-                             "scene": scene,
-                             "text": e["text"], "detail": e.get("detail"), "fix_id": fix_id})
+                row = {"type": "manual_fix", "turn": state.get("turn"), "scene": scene,
+                       "text": e["text"], "detail": e.get("detail"), "fix_id": fix_id}
+                det = e.get("detail") or {}
+                if "applied" in det:
+                    # 種の手動確定を入れたか / 入れなかった理由 (2026-10-09 ④。入れなかったときだけ reason)
+                    row["applied"] = bool(det.get("applied"))
+                    if not row["applied"]:
+                        row["reason"] = det.get("reason")
+                self._write(row)
                 if e.get("event") == "species_manual":
                     manual_species = True
                 try:
@@ -978,7 +1137,7 @@ class BattleLogger:
         self._fainted_last = (
             sum(1 for p in state.get("player", {}).get("party", [])
                 if p.get("status") == "fainted"),
-            sum(1 for p in state.get("opponent", {}).get("party", [])
+            sum(1 for _i, p in roster_slots(state.get("opponent", {}).get("party"))   # 対応待ちは数えない
                 if p.get("status") == "fainted"))
 
     def on_advice(self, advice: dict, kind: str, state: Optional[dict] = None) -> str:

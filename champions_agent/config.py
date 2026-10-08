@@ -252,6 +252,11 @@ WIN_LOSE_TEXT_YELLOW_MAX_OTHER = 0.10  # 負けた側の文字の枠の黄色の
 # 視覚照合スコアがこの余裕以上高ければ既存を取り消して入れ替える (同種 2 体はルール上あり得ない)。小さいとフレーム間の
 # スコア揺れで入れ替わり続ける
 SELECTION_GUESS_REPLACE_MARGIN = 0.05
+# 交代の文言・HUD の名前が同じでも形態が違う種 (地方の姿): 名前が素の種 (例 slowking) に解決されたとき、図鑑に
+# 「素の id + この接尾辞」の id があれば形態の候補に加え、既定の形態に即確定しない (vision/state.same_name_forms)。
+# 2026-10-09 ④ (10/8 18:27): 「ヤドキング」がカントー形に解決され、ガラル形の [どく/エスパー] の枠ではなく別の推定の枠を上書きした
+SAME_NAME_FORM_SUFFIXES = ("galar", "alola", "hisui", "paldea", "paldeacombatbreed", "paldeablazebreed",
+                           "paldeaaquabreed")
 # 選出画面の相手枠: タイプからの候補の事前確率がこれ以上なら「候補が実質 1 体」として視覚照合なしで採る
 # (vision/spriteid.identify_species。2026-10-06 まで spriteid に 0.85 で直書き)。
 # 0.85 → 0.95 (2026-10-06): 第18回の選出画面の保存フレーム 347 枚 (15 戦、修正後の重み) で、第一候補の事前確率が 0.85〜0.95 の

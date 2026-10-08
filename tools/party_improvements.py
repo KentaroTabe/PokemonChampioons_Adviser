@@ -30,6 +30,7 @@ from champions_agent.config import (PARTY_IMPROVE_DEFAULT_LAST, PARTY_IMPROVE_FR
                                     PARTY_IMPROVE_TOP_PROPOSALS, PARTY_IMPROVE_TOP_THREATS, RATE_CHAIN_GAP_SEC,
                                     RATE_INFER_MIN_DELTA, RATE_MAX_DELTA_PER_BATTLE, USAGE_TARGET_FORMAT)
 from tools.battle_outcome import OutcomeTracker, apply_rate_chain
+from vision.state import roster_slots
 from tools.pick_labels import status_by_ja
 
 REPO = Path(__file__).resolve().parent.parent
@@ -156,7 +157,9 @@ def parse_battle(path: str) -> dict:
                 n_battle_scenes += 1
             opp = st.get("opponent") or {}
             party = opp.get("party") or []
-            for i, p in enumerate(party):
+            # 対応待ちの個体 (party の 7 番目以降、pending) は 6 体のどれかで枠が未定。ロースター・選出に数えない
+            # (2026-10-09 ④)。場の個体 (opp_active_ja / 先発) としては下で使う
+            for i, p in roster_slots(party):
                 if not p.get("ja"):
                     continue
                 slot_last[i] = p["ja"]
