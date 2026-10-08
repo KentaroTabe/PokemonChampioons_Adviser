@@ -433,10 +433,12 @@ def _latest_snapshot_ro(notes: list) -> Optional[int]:
         notes.append(f"usage_db: {DB_PATH} が無い")
         return None
     try:
-        from champions_agent.data import database as db
+        # advisor/sets.py と同じ直接の SELECT (database.latest_snapshot_id は row_factory=Row の接続を前提にしていて、
+        # 素の接続では TypeError になる。2026-10-09 の dry-run で判明)
         conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
         try:
-            return db.latest_snapshot_id(conn)
+            row = conn.execute("SELECT id FROM usage_snapshot ORDER BY id DESC LIMIT 1").fetchone()
+            return int(row[0]) if row else None
         finally:
             conn.close()
     except Exception as e:
