@@ -1,0 +1,16 @@
+{
+ "_comment": "共通の状態遷移 (advisor/transition.py) が使う Showdown の仕様の値 (2026-10-09 M1b、docs/ADVICE_ACCURACY_PLAN_1009.md 段 B-2)。自滅 (selfdestruct) と反動 (recoil) の割合は技の効果表 (move_effects.json) の selfdestruct / recoil / mindblown を使い、ここには効果表に無い値だけを置く。hp_cost_on_damage_moves = 与ダメージがあったときだけ最大 HP の 1/2 を失う技 (chloroblastRecoil、効果は 'recoil' なので いしあたま で防げる)。damp_blocked_moves = しめりけ (Damp) で不発になる技 (TryMove で失敗: 自滅も HP の消費も起きない)。survive_one_hit_items / contact_damage_items / self_damage_items は遷移で未対応の効果の印 (unsupported) を付けるためだけの一覧",
+ "source": [
+  "pokemon-showdown/sim/battle-actions.ts useMoveInner (selfdestruct: 'always' は TryMove の後・命中判定の前に faint。対象が居なければ faint の前に失敗)",
+  "pokemon-showdown/sim/battle-actions.ts applyRecoilDamage (recoil: clampIntRange(Math.round(damageDealt * recoil[0] / recoil[1]), 1) / mindBlownRecoil・chloroblastRecoil: Math.round(maxhp / 2))",
+  "pokemon-showdown/data/moves.ts mindblown / steelbeam (onMoveFail でも Math.round(maxhp / 2))、chloroblast (onMoveFail なし)",
+  "pokemon-showdown/data/abilities.ts damp (onAnyTryMove: explosion / mindblown / mistyexplosion / selfdestruct)、rockhead (effect.id === 'recoil')、magicguard (技以外のダメージ)"
+ ],
+ "half_hp_cost": {"num": 1, "den": 2},
+ "recoil_min_hp": 1,
+ "hp_cost_on_damage_moves": ["chloroblast"],
+ "damp_blocked_moves": ["explosion", "mindblown", "mistyexplosion", "selfdestruct"],
+ "survive_one_hit_items": ["focussash"],
+ "contact_damage_items": ["rockyhelmet"],
+ "self_damage_items": ["lifeorb"]
+}
