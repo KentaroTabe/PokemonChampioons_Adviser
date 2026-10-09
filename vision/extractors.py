@@ -18,11 +18,13 @@ import numpy as np
 from vision import zones, ocr
 from vision.zones import crop
 from vision.state import BattleStateV2, MoveSlot, PokemonState, adopt_selection_guess, has_observation
-from vision.typeicons import classify_type_icon
+from vision.typeicons import classify_type_icon, classify_type_icon_detail, icon_std
+from vision import type_reading as TR
 from champions_agent.config import (HP_BAR_MATCH_TOL, HP_REJECT_SPECIES_CUTOFF,
                                     MY_EXACT_RESOLVE_CUTOFF, MY_REGISTERED_MATCH_RATIO,
                                     MY_ROSTER_MATCH_RATIO, OPP_HP_UNVERIFIED_MAX_CHANGE,
-                                    OPP_HUD_NAME_MATCH_MIN, PARTY_SIZE)
+                                    OPP_HUD_NAME_MATCH_MIN, PARTY_SIZE, TYPE_ICON_EMPTY_STD_MAX,
+                                    TYPE_READ_STABLE_FRAMES, WATCH_TYPE_STRICT_HASH)
 
 # 相性ヒント表記 -> 内部表現
 EFFECTIVENESS_MAP = [
@@ -658,37 +660,123 @@ def extract_selection(img, state: BattleStateV2, resolver) -> None:
             state.opponent.party.append(PokemonState())
         slot = state.opponent.party[i]
 
-        if not slot.types:
-            t1 = classify_type_icon(crop(img, z["type1"]))
-            t2 = classify_type_icon(crop(img, z["type2"]))
-            types = [t for t in (t1, t2) if t]
-            if types:
-                slot.types = types
+        # タイプは一度入っても読み直す (2026-10-09 fix/type-recognition。従来は `if not slot.types` で 1 回目の読みだけを使い、
+        # 10/9 の 1 戦目は後のフレームで エスパー/ノーマル と読めていたのに [ノーマル, ノーマル] のままだった)。
+        # 同じタイプが 2 つ並ぶ読みは採用しない、読みが安定したら確定・訂正する (vision/type_reading)
+        cells = [_type_cell(img, z["type1"]), _type_cell(img, z["type2"])]
+        _apply_type_reading(state, i, slot, cells, TR.SINGLE_COL_SELECTION, "selection")
 
         # 種族の推定: タイプから候補を絞り、パネルのアイコンで視覚照合。結果は「推定」(species_guess) であり、
         # 場に出て名前が読めた時点で確定に置き換わる。同じ種が別枠に既にあれば入れない/スコアの低い方を取り消す
         # (adopt_selection_guess。2026-09-29 第17回: 推定の カイリュー が 2 枠、実体は セグレイブ)
         if slot.types and not slot.species_ja:
-            try:
-                from advisor.infer import get_inference
-                from vision.spriteid import identify_species
-                cands = get_inference().candidates(slot.types)
-                hit = identify_species(crop(img, z["icon"]), cands)
-                if hit:
-                    verdict = adopt_selection_guess(state.opponent.party, i, hit[0], hit[1], float(hit[2]))
-                    note = (verdict, hit[0])
-                    if getattr(slot, "_guess_note", None) != note:   # 同じ結論を毎フレーム書かない
-                        slot._guess_note = note
-                        if verdict == "skip":
-                            state.log_event("selection", f"相手枠{i + 1}の{hit[1]}推定は保留 (別枠に同種の推定あり、"
-                                            f"視覚照合{hit[2]})", event_id="species_guess_dup")
-                        else:
-                            extra = "、同種の別枠の推定を取り消し" if verdict == "replaced" else ""
-                            state.log_event("selection", f"相手枠{i + 1}を{hit[1]}と推定 (視覚照合{hit[2]}{extra})",
-                                            event_id="species_identified")
-            except Exception:
-                pass
+            _estimate_slot_species(state, i, slot, crop(img, z["icon"]))
 
+
+def _type_cell(img, zone) -> tuple:
+    """選出画面のタイプの欄 → (状態, タイプ) (vision/type_reading.cell_of)"""
+    c = crop(img, zone)
+    return TR.cell_of(classify_type_icon(c), icon_std(c), TYPE_ICON_EMPTY_STD_MAX)
+
+
+def _watch_type_cell(img, zone) -> tuple:
+    """様子を見る画面の相手の列のタイプの欄 → (strict の欄, loose の欄) (それぞれ (状態, タイプ))。
+    strict: 形状の照合が WATCH_TYPE_STRICT_HASH 以下の読みだけ。loose: 分類の既定の採用 (複合スコアを含む) から色の
+    フォールバックを除いたもの。枠のタイプの訂正には strict だけを使う。loose は対応待ちの個体の「候補の枠」にだけ使う
+    (type_reading.watch_loose_matches)。
+    2026-10-09 実測: 既定の採用では じめん → ほのお (距離 75) が 2 枚続けて出た"""
+    c = crop(img, zone)
+    d = classify_type_icon_detail(c)
+    shape = d["via"] == "shape"
+    strict = shape and d["hash_dist"] is not None and d["hash_dist"] <= WATCH_TYPE_STRICT_HASH
+    return (TR.cell_of(d["type"] if strict else None, d["std"], TYPE_ICON_EMPTY_STD_MAX),
+            TR.cell_of(d["type"] if shape else None, d["std"], TYPE_ICON_EMPTY_STD_MAX))
+
+
+def _apply_type_reading(state: BattleStateV2, i: int, slot: PokemonState, cells, single_col: int,
+                        source: str) -> Optional[str]:
+    """相手枠 i のタイプの読み (2 欄) を枠に反映する。戻り値: vision/type_reading の ACTION_* か None。
+    - 同じタイプが 2 つ並ぶ読みは採用せず、読みの連続を切る (type_inconsistent のイベントを読みごとに 1 回)
+    - タイプの無い枠: 最初の読みを仮に入れる (安定判定は後のフレーム)
+    - 入っているタイプと違う読みが TYPE_READ_STABLE_FRAMES 回続いた: 訂正し、そのタイプに依存した推定 (species_guess) を
+      取り消す (type_reread のイベント → 対戦ログの roster_change に types_from / types_to / reason)。手動確定・場で確認した
+      種の枠 (type_reading.species_locked) は読み直さない"""
+    verdict, types = TR.normalize_reading(cells, single_col)
+    label = "selection" if source == "selection" else "system"
+    if verdict == TR.READ_INCONSISTENT:
+        key = tuple(types)
+        if getattr(slot, "_type_incons_note", None) != key:
+            slot._type_incons_note = key
+            state.log_event(label, f"相手枠{i + 1}のタイプの読み {'/'.join(types)} は同じタイプが 2 つ並ぶため採用しない (読み直し)",
+                            event_id="type_inconsistent", target="opponent",
+                            detail={"slot": i, "types": list(types), "source": source})
+    streak = TR.update_streak(getattr(slot, "_type_streak", None), verdict, types)
+    slot._type_streak = streak
+    action = TR.type_reread_action(slot.types, getattr(slot, "_types_stable", False), streak,
+                                   TYPE_READ_STABLE_FRAMES, TR.species_locked(slot))
+    if action == TR.ACTION_ADOPT:
+        slot.types = list(streak["cand"])
+        slot._types_stable = TR.is_stable(streak, TYPE_READ_STABLE_FRAMES)
+    elif action == TR.ACTION_CONFIRM:
+        slot._types_stable = True
+    elif action == TR.ACTION_CORRECT:
+        types_from = list(slot.types or [])
+        cancelled = (slot.species_id, slot.species_ja) if slot.species_guess else (None, None)
+        if slot.species_guess:
+            slot.clear_species_guess()
+        slot.types = list(streak["cand"])
+        slot._types_stable = True
+        slot._guess_note = None   # 再計算の結論を記録し直す
+        extra = f"、推定 {cancelled[1]} を取り消し" if cancelled[0] else ""
+        state.log_event(label, f"相手枠{i + 1}のタイプを {'/'.join(types_from)} → {'/'.join(slot.types)} に訂正 "
+                        f"(読み直し {streak['n']} フレーム{extra})", event_id="type_reread", target="opponent",
+                        detail={"slot": i, "types_from": types_from, "types_to": list(slot.types),
+                                "cancelled": cancelled[0], "cancelled_ja": cancelled[1], "source": source,
+                                "frames": int(streak["n"])})
+    return action
+
+
+def _estimate_slot_species(state: BattleStateV2, i: int, slot: PokemonState, icon_crop) -> None:
+    """相手枠 i の種族の推定 (タイプからの候補 + アイコンの視覚照合)。icon_crop が None なら視覚照合をせず、事前確率だけの採用
+    (候補が実質 1 種) だけを試す (様子を見る画面でタイプを訂正した後の再計算)。
+    事前確率だけの無照合採用はタイプが安定して確定した枠に限る (2026-10-09。安定前は候補を出すだけ)。照合の方式が候補間で
+    混在する (実キャプチャのある種と図鑑画像だけの種) ときは採用しない (vision/spriteid)"""
+    try:
+        from advisor.infer import get_inference
+        from vision.spriteid import identify_species
+        cands = get_inference().candidates(slot.types)
+        why: dict = {}
+        hit = identify_species(icon_crop, cands, allow_prior_accept=bool(getattr(slot, "_types_stable", False)),
+                               detail=why)
+        if hit:
+            verdict = adopt_selection_guess(state.opponent.party, i, hit[0], hit[1], float(hit[2]))
+            note = (verdict, hit[0])
+            if getattr(slot, "_guess_note", None) != note:   # 同じ結論を毎フレーム書かない
+                slot._guess_note = note
+                if verdict == "skip":
+                    state.log_event("selection", f"相手枠{i + 1}の{hit[1]}推定は保留 (別枠に同種の推定あり、"
+                                    f"視覚照合{hit[2]})", event_id="species_guess_dup")
+                else:
+                    extra = "、同種の別枠の推定を取り消し" if verdict == "replaced" else ""
+                    state.log_event("selection", f"相手枠{i + 1}を{hit[1]}と推定 (視覚照合{hit[2]}{extra})",
+                                    event_id="species_identified")
+        elif why.get("reason") in HELD_REASONS:
+            note = ("held", why["reason"], tuple(slot.types))
+            if getattr(slot, "_guess_note", None) != note:
+                slot._guess_note = note
+                state.log_event("selection", f"相手枠{i + 1}の推定は保留 ({HELD_REASONS[why['reason']]}。候補を表示)",
+                                event_id="species_guess_held", target="opponent",
+                                detail={"slot": i, "reason": why["reason"], "types": list(slot.types),
+                                        "candidates": [c[0] for c in cands[:5]]})
+    except Exception:
+        pass
+
+
+# 推定を保留した理由 (vision/spriteid.identify_species の detail["reason"]) → イベントの文言
+HELD_REASONS = {
+    "prior_needs_stable_types": "タイプが安定していないため、事前確率だけでは採用しない",
+    "mixed_template_sources": "候補の照合の方式 (実キャプチャ / 図鑑画像) が混在し、点数を比べられない",
+}
 
 _MY_LEGAL_MAXES = None
 # 様子見画面の自分HP実数値で「0/xxx」を連続で読んだらひんし確定とみなす
@@ -1238,6 +1326,14 @@ def link_active_to_party(state: BattleStateV2, side_name: str) -> None:
         val = getattr(active, attr)
         if val is not None:
             setattr(slot, attr, val)
+    if active.hp_percent is not None:
+        # HP の値と一緒に推定の印 (推定値か・古い可能性・最後に実際に読めた時刻・出所) も移す。印なしで推定値が枠に移ると、
+        # 実測として扱われる (2026-10-09。hp_source は fix/hp-estimate で足される欄で、無い版では移さない)
+        slot.hp_estimated = bool(active.hp_estimated)
+        slot.hp_uncertain = bool(active.hp_uncertain)
+        slot.hp_read_ts = active.hp_read_ts
+        if getattr(active, "hp_source", None) is not None:
+            slot.hp_source = active.hp_source
     # ブースト/揮発状態はプレースホルダが実情報を持つときだけ上書きする。
     # HUD由来のプレースホルダは常に空なので、無条件代入だとイベントで
     # 付けたランク変化が毎フレーム消える (2026-08-05接続テスト:
@@ -2563,6 +2659,12 @@ def _extract_watch_side_columns(img, state: BattleStateV2, resolver) -> None:
         if frac[0] == 0 and mon.hp_current == 0:
             mon.status = "fainted"
 
+    # 右列: 相手パーティのタイプアイコンの読み直し (2026-10-09 fix/type-recognition)
+    try:
+        _reread_watch_opp_types(img, state)
+    except Exception as e:
+        print(f"[extractors] 様子見画面のタイプの読み直しに失敗: {e}")
+
     # 右列: 相手パーティのHP% (視認済みのポケモンのみ表示される)
     # ⚠ 行の並びは視認順で、選出画面由来のparty配列の順とは一致しない。
     # 位置対応で書くとHPが別ポケモンへ入れ替わり続ける (2026-08-04監査:
@@ -2605,3 +2707,65 @@ def _extract_watch_side_columns(img, state: BattleStateV2, resolver) -> None:
             if pct > 3.0:
                 mon2._zero_read_count = 0
             mon2.hp_percent = float(pct)
+
+
+def _family_type_sets(species_id) -> list:
+    """種族 id のタイプの組と、メガの前後 (素の種 / メガ形態) のタイプの組 (様子を見る画面の行の並びの確認用)"""
+    from vision.state import mega_family
+    return [t for t in (_species_types_ja(f) for f in mega_family(species_id)) if t]
+
+
+def _reread_watch_opp_types(img, state: BattleStateV2) -> None:
+    """様子を見る画面の相手の列 (6 行、並びは選出画面の枠と同じ) のタイプアイコンで、相手枠のタイプを読み直す
+    (2026-10-09 段 2。10/9 1 戦目: 選出画面で [ノーマル, ノーマル] と読んだ枠が、この画面では エスパー/ノーマル と出ていた)。
+    - 枠のタイプの訂正に使う読みは形状の照合が確かなもの (strict) だけ。単タイプは 1 つ目の欄
+    - 確かさの足りない読み (loose) が対応待ちの個体のタイプと一致する行は、訂正せず、その枠を対応待ちの個体の候補
+      (pending_hint の source "watch_loose") に加える (type_reading.watch_loose_matches。確定は人が枠を指定する)
+    - 確定済みの種 (手動確定・場で確認) の行の読みがその種 (メガの前後を含む) のタイプと合わなければ、並びが違う疑いとして
+      そのフレームの読みを使わない
+    - 枠のタイプの訂正は選出画面と同じ経路 (_apply_type_reading: 安定判定 → 訂正 → 推定の取り消し)。訂正したら事前確率だけで
+      推定し直し (視覚照合はしない)、対応待ちの個体の対応を解消し直す"""
+    party = state.opponent.party
+    rows, loose = [], []
+    for i, z in enumerate(zones.WATCH_OPP):
+        if i >= len(party) or i >= PARTY_SIZE:
+            break
+        (s1, l1), (s2, l2) = _watch_type_cell(img, z["type1"]), _watch_type_cell(img, z["type2"])
+        cells = [s1, s2]
+        verdict, types = TR.normalize_reading(cells, TR.SINGLE_COL_WATCH)
+        rows.append((i, cells, verdict, types))
+        loose.append((i, cells, [l1, l2]))
+    # 弱い読みが対応待ちの個体のタイプと一致する枠 → その個体の候補 (訂正はしない)。様子を見る画面を開くたびに更新する
+    for p in party[PARTY_SIZE:]:
+        if not p.pending:
+            continue
+        forms = list(p.species_candidates or []) or ([p.species_id] if p.species_id else [])
+        sets = [t for f in forms for t in _family_type_sets(f)]
+        hits = [i for i, sc, lc in loose if TR.watch_loose_matches(sc, lc, sets) and not TR.species_locked(party[i])]
+        if hits != getattr(p, "_watch_loose_slots", None):
+            p._watch_loose_slots = hits
+            if hits:
+                state.log_event("system", f"対応待ちの {p.species_ja} の候補: 枠 {', '.join(str(h + 1) for h in hits)} "
+                                f"(様子見画面の弱い読みがタイプと一致。自動では統合しない)", event_id="pending_hint_watch_loose",
+                                target="opponent", detail={"slots": hits, "species": p.species_id})
+    if not any(v == TR.READ_OK for _i, _c, v, _t in rows):
+        return
+    check = [(types if verdict == TR.READ_OK else None,
+              party[i].species_id if (TR.species_locked(party[i]) and not party[i].pending) else None)
+             for i, _c, verdict, types in rows]
+    if not TR.watch_rows_agree(check, _family_type_sets):
+        if not any(e.get("event") == "watch_type_order_mismatch" for e in state.events[-50:]):
+            state.log_event("system", "様子見画面の相手の列のタイプが確定済みの種と合わない (並びが違う疑い)。このフレームの読みは使わない",
+                            event_id="watch_type_order_mismatch", target="opponent")
+        return
+    changed = False
+    for i, cells, _verdict, _types in rows:
+        slot = party[i]
+        if slot.pending:
+            continue
+        action = _apply_type_reading(state, i, slot, cells, TR.SINGLE_COL_WATCH, "watch")
+        changed = changed or action is not None
+        if slot.types and not slot.species_ja and action in (TR.ACTION_CORRECT, TR.ACTION_CONFIRM, TR.ACTION_ADOPT):
+            _estimate_slot_species(state, i, slot, None)
+    if changed:
+        state.resolve_pending("opponent")

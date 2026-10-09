@@ -129,6 +129,20 @@ def opp_active_pending(opp_state: Optional[dict]) -> bool:
 OPP_PENDING_NOTE = "相手の場のポケモンが 6 枠のどれか未定 (対応待ち) のため、終盤評価と探索を保留 (直接の採点のみ)"
 
 
+def opp_pending_note(opp_state: Optional[dict]) -> Optional[str]:
+    """対応待ちの注記 (純粋)。場の個体に候補の枠 (vision.state.SideState.pending_hint。タイプが 1 個だけ重なる枠が 1 つ) が
+    あれば「候補: 枠 N (種)」を足す (2026-10-09 段 2。自動では統合しない。画面の相手欄で人が枠を指定する)。枠の番号は 1 始まり"""
+    if not opp_active_pending(opp_state):
+        return None
+    party = (opp_state or {}).get("party") or []
+    hint = party[opp_state["active_index"]].get("pending_hint") or []
+    if not hint:
+        return OPP_PENDING_NOTE
+    parts = [f"枠 {h['slot'] + 1} ({h.get('ja') or '/'.join(h.get('types') or []) or '未特定'}"
+             f"{'、様子見画面の弱い読み' if h.get('source') == 'watch_loose' else ''})" for h in hint]
+    return f"{OPP_PENDING_NOTE}。候補: {'、'.join(parts)} (画面の相手欄で枠を指定すると確定)"
+
+
 def has_acted_since_entry(last_move_player: Optional[str], move_ids) -> bool:
     """自分の場のポケモンが場に出てから技を使ったか (純粋)。
 
@@ -921,7 +935,7 @@ def evaluate_common(state: dict, resolver=None) -> dict:
         "endgame": endgame,
         # 相手の場の個体が対応待ち: 終盤評価・探索を保留した印 (advice 行にそのまま残る。2026-10-09 ④)
         "opp_pending": opp_pending,
-        "opp_pending_note": OPP_PENDING_NOTE if opp_pending else None,
+        "opp_pending_note": opp_pending_note(opp_state) if opp_pending else None,
         "encore": "encore" in my_vols,
         "encore_locked": encore_locked,
         "choice_locked": choice_locked,

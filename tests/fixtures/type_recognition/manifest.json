@@ -1,0 +1,75 @@
+{
+ "_note": "原寸の切り出し。offset (px) で frame_size の黒い画像に貼り戻して使う (tests/test_type_recognition)",
+ "sel_502960_slot0.png": {
+  "source": "debug_frames/sel_1791502960.png",
+  "frame_size": [
+   1920,
+   1080
+  ],
+  "offset": [
+   1545,
+   140
+  ],
+  "memo": "10/9 1 戦目の選出画面、相手 1 枠目 イエッサン [エスパー/ノーマル]。従来は 1 つ目の欄がノーマル (距離 54) と読まれ [ノーマル, ノーマル] になった"
+ },
+ "sel_503272_slot5.png": {
+  "source": "debug_frames/sel_1791503272.png",
+  "frame_size": [
+   1920,
+   1080
+  ],
+  "offset": [
+   1545,
+   771
+  ],
+  "memo": "10/9 2 戦目の選出画面、相手 6 枠目 サーナイト [エスパー/フェアリー]。従来は [ノーマル/フェアリー] と読まれ、候補 プクリン だけで採用された"
+ },
+ "sel_503296_slot3.png": {
+  "source": "debug_frames/sel_1791503296.png",
+  "frame_size": [
+   1920,
+   1080
+  ],
+  "offset": [
+   1545,
+   519
+  ],
+  "memo": "10/9 2 戦目の選出画面、相手 4 枠目 カイリュー [ドラゴン/ひこう]。実キャプチャのある ボーマンダ と誤認された"
+ },
+ "watch_503118_col.png": {
+  "source": "debug_frames/frame_1791503118.png",
+  "frame_size": [
+   1920,
+   1080
+  ],
+  "offset": [
+   1739,
+   228
+  ],
+  "memo": "10/9 1 戦目の様子を見る画面の相手の列 (タイプの欄)。行 0 イエッサン [エスパー/ノーマル] (カーソル、45%)"
+ },
+ "watch_503393_rows.png": {
+  "source": "debug_frames/frame_1791503393.png",
+  "frame_size": [
+   1920,
+   1080
+  ],
+  "offset": [
+   1739,
+   604
+  ],
+  "memo": "10/9 2 戦目の様子を見る画面の相手の列 (タイプの欄、行 3〜5)。行 5 サーナイト [エスパー/フェアリー] (100%)、行 3 カイリュー (カーソル)"
+ },
+ "salamence_real_0.png": {
+  "source": "images/species_icons/salamence_0.png",
+  "memo": "実キャプチャのテンプレート (10/8 の手動確定で収穫、本体の images/species_icons)"
+ },
+ "dex_149.png": {
+  "source": "images/templetes/149.png",
+  "memo": "図鑑スプライト カイリュー (dragonite、図鑑番号 149)"
+ },
+ "dex_373.png": {
+  "source": "images/templetes/373.png",
+  "memo": "図鑑スプライト ボーマンダ (salamence、図鑑番号 373)"
+ }
+}

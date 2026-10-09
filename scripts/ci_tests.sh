@@ -132,6 +132,7 @@ TESTS=(
   test_client_state
   test_hp_intake
   test_roster_retention
+  test_type_recognition
   test_roster_cap
   test_dmg_compare
   test_scene_samples
