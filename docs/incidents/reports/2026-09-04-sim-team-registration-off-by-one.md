@@ -7,7 +7,7 @@
 | 発生 | 2026-09-04 (advisor-as-player の評価経路の導入 cf9a01f2 から)。自チームを対戦ごとに引く経路 (`tools.check_advisor_player` を `--team-file` なしで動かす) で、対戦 k の選出・行動が対戦 k+1 のチームの型で計算されていた |
 | 検知 | 2026-10-09 深夜。採点方式の比較を一般的なチーム (対戦ごとに引く経路) で行う道具を作る委託の中で、サブエージェントがコードの読みから疑いを報告し、別のサブエージェントが 3 戦の実測で確定した |
 | 復旧 | 2026-10-09 深夜、feature/team-build d7869aff。teambuilder が出した順の本文を持ち、対戦の生成順 k で送った本文を登録する |
-| 影響 | `--team-file` なしの測定: 2026-09-04〜05 の信念つき探索アークの判定 (advisor baseline / P6-a / P6-b / P7 / P7b / P8 / P9 / P10) の自分側の型。`--team-file` を渡す測定 (P1 の RL 加点の比較、構築 run の racing / holdout、team_candidates_measure.sh) は無傷 |
+| 影響 | `--team-file` なしの advisor-as-player の測定: 2026-09-04〜05 の advisor baseline と P9 中間 / P9 / P9' (計 4,800 戦) の自分側の型。**訂正 (10/9 21 時台)**: 初版は P6-a / P6-b / P7 / P7b / P8 / P10 も影響ありと書いたが、これらは `tools.check_search_expert` (battle.team の実数値を直接使い、型の登録を通らない。当時の版 8786537a でも同じ) で測っており無傷。`--team-file` を渡す測定 (P1 の RL 加点の比較、構築 run の racing / holdout、team_candidates_measure.sh) は無傷 |
 | 失われた生データ | なし。対戦の記録はそのまま。失われたのは「正しい型で計算した判定」で、再測定しないと復元できない |
 
 ## 2. 前提
@@ -65,8 +65,8 @@ poke-env の `Player._send_challenges` は、対戦 k の challenge (このと�
 | 測定 | 時期 | 記録 | 影響 |
 |---|---|---|---|
 | advisor baseline (`scripts/advisor_baseline.sh`) | 2026-09-04 | logs/advisor_verdict | 自分側の型が上の内訳でずれていた |
-| 信念つき探索アークの判定 P6-a / P6-b / P7 / P7b / P8 / P10 (同スクリプト経由) | 2026-09-04〜05 | logs/p6a_verdict ほか | 同上。各判定は同じ seed の対応比較なので両腕とも同じずれ方だが、ずれた型での比較であり、正しい型での結論は未確認 |
-| P9 / P9' (`scripts/p9_measure.sh`、探索値の採点統合) | 2026-09-05 | logs/p9_verdict | 同上 |
+| P9 中間 (300 戦、A は advisor baseline と同じ走) | 2026-09-04 | logs/advisor_verdict | 同上。同じ seed の対応比較なので両腕とも同じずれ方だが、ずれた型での比較であり、正しい型での結論は未確認 |
+| P9 (600 戦) / P9' (1,500 戦) (`scripts/p9_measure.sh`、探索値の採点統合) | 2026-09-04〜05 | logs/advisor_verdict、logs/p9_verdict | 同上 |
 
 無傷だった範囲 (同じ粒度で):
 
@@ -74,6 +74,7 @@ poke-env の `Player._send_challenges` は、対戦 k の challenge (このと�
 |---|---|
 | P1 (2026-10-09、RL 加点 0 / ×5 / ×25) | `--team-file` で登録チームを固定。毎戦同じ本文なので登録は常に一致 |
 | 構築 run の racing (S8〜S10)・封印 holdout・team_candidates_measure.sh | `racing.py` と同スクリプトは `--team-file` を渡す |
+| P6-a / P6-b / P7 / P7b / P8 / P10 (logs/p6a_verdict 〜 p10_verdict) | `tools.check_search_expert` で測定。自分側は `battle.team` の実数値から MonView を作り、型の登録 (`register_team_text` / `get_my_build`) を通らない (当時の版 8786537a でも同じ。10/9 の棚卸しで確認) |
 | 相手側のチーム | `SequenceTeambuilder.id_for_battle(k)` で対戦ごとの id を引いており、登録とは別の仕組み |
 | 実機 (接続テスト) | 登録は config/my_team.json で、シムの登録 (`_SIM_BUILDS`) は使わない |
 | RL の学習・ベンチ (`champions_agent.train`) | advisor-as-player を使わない |
@@ -83,7 +84,7 @@ poke-env の `Player._send_challenges` は、対戦 k の challenge (このと�
 ## 5. 失われたもの
 
 - 生データ: なし。対戦記録と結果 JSON はそのまま。
-- 派生物: 2026-09-04〜05 のアークの判定 (8 本。採用したのは P6-a の葉評価だけ、他は棄却) は「ずれた型での対応比較」になっている。正しい型での判定は再測定が要る (約 8 本 × 600 戦)。
+- 派生物: 2026-09-04〜05 の advisor-as-player の判定 3 本 (P9 中間 / P9 / P9'。いずれも棄却) と advisor baseline は「ずれた型での対応比較」になっている。正しい型での判定は再測定が要る (合計 4,800 戦、見積もり 4.85 時間。`tools/arc_remeasure.py`)。P6-a (採用した葉評価) を含む他の 6 本は影響なし。
 - 時間: 当時の測定 (約 1 夜分) と、今回の検証 (8 戦、約 1 時間)。
 
 ## 6. なぜ防げなかったか
@@ -108,4 +109,4 @@ poke-env の `Player._send_challenges` は、対戦 k の challenge (このと�
 
 - 「直近の 1 本」を状態として持つ設計は、非同期に次が始まる経路で必ずずれる。対戦ごとの id や順番で引く (相手側と同じ) 形にする。
 - 対応比較は両腕が同じ誤りを共有すると差では見えない。入力の正しさ (送ったものと計算に使ったものの一致) を結果に数えて残す。
-- 未対応: (1) 選出計画の相手の系統 (`opp_source.last_id`、racing の `--selection-plan` と `tools/collect_selection_data.py`) も同じ仕組みで、3 戦の実測では対戦 0 だけずれた (タイミング依存)。`id_for_battle(k)` に替えれば直るが既存の挙動の変更なので未着手。(2) メガ後の自分の個体は `get_my_build(species_ja)` がメガ名で引くため、シムの登録に当たらず仮定の型になる (修正前後とも)。(3) 2026-09-04〜05 のアークの判定の再測定は未定 (採用した P6-a は葉評価の有無の比較で、型のずれの影響は未確認)。(4) 勝率への影響は未測定。
+- 未対応: (1) 選出計画の相手の系統 (`opp_source.last_id`、racing の `--selection-plan` と `tools/collect_selection_data.py`) も同じ仕組みで、3 戦の実測では対戦 0 だけずれた (タイミング依存)。`id_for_battle(k)` に替えれば直るが既存の挙動の変更なので未着手。(2) メガ後の自分の個体は `get_my_build(species_ja)` がメガ名で引くため、シムの登録に当たらず仮定の型になる (修正前後とも)。(3) P9 系 3 本の再測定は 2026-10-09 ユーザー判断で実施 (道具 `tools/arc_remeasure.py`、結果はこの報告に追記する)。当時のピン・コード・venv とは違う「現行条件での再測定」で、純粋な「型のずれの影響」だけを分離する測定ではない。(4) 勝率への影響は未測定。
