@@ -509,6 +509,30 @@ def scene_row_state(state: dict) -> dict:
     return d
 
 
+def move_locks_of(state: Optional[dict]) -> dict:
+    """advice 行の move_locks (純粋。2026-10-09 M1a): 技の固定の判定に使う状態 (簡約状態 = digest には入っていない欄)。
+    {"turn", "last_move", "player": {...}, "opponent": {...}}。各側は場の個体の volatiles / encore_move / volatile_turns /
+    entry_turn。どれも空なら {} (欄を書かない)。tools.advice_replay.compact_to_engine_state が復元に使う"""
+    if not state:
+        return {}
+    out = {}
+    for side in ("player", "opponent"):
+        sd = state.get(side) or {}
+        idx, party = sd.get("active_index"), sd.get("party") or []
+        p = party[idx] if isinstance(idx, int) and 0 <= idx < len(party) else None
+        if not p:
+            continue
+        row = {k: p.get(k) for k in ("volatiles", "encore_move", "volatile_turns", "entry_turn") if p.get(k) not in (None, [], {})}
+        if row:
+            out[side] = row
+    last_move = {k: v for k, v in (state.get("last_move") or {}).items() if v}
+    if not out and not last_move:
+        return {}
+    out["turn"] = state.get("turn")
+    out["last_move"] = last_move
+    return out
+
+
 def my_hp_context_of(state: Optional[dict]) -> dict:
     """advice 行の context (純粋): 自分の場の個体の HP が推定値なら {"my_hp_estimated": True, "my_hp_source": 出所}、
     推定でなければ {} (2026-10-09。採点には使わない記録だけの欄)"""
@@ -1314,6 +1338,13 @@ class BattleLogger:
         if state is not None:
             try:
                 rec["hp_stale"] = hp_stale_of(state, time.time())
+            except Exception:
+                pass
+            # 技の固定の判定に使う状態 (2026-10-09 M1a。digest の外に欄を足すだけ)
+            try:
+                locks = move_locks_of(state)
+                if locks:
+                    rec["move_locks"] = locks
             except Exception:
                 pass
             # 自分の HP が推定値 (バー推定) のときだけ context を残す (2026-10-09)

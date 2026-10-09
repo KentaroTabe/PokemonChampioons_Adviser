@@ -64,8 +64,12 @@ def _mon_from_compact(m: dict, resolver) -> dict:
     }
 
 
-def compact_to_engine_state(c: dict, resolver) -> dict:
-    """ログの簡約状態をエンジン入力 (evaluateが受ける形) に復元する"""
+def compact_to_engine_state(c: dict, resolver, move_locks: dict = None) -> dict:
+    """ログの簡約状態をエンジン入力 (evaluateが受ける形) に復元する。
+
+    move_locks: advice 行の move_locks (battle_logger.move_locks_of、2026-10-09 M1a 以降の行だけにある)。渡せば
+    turn / last_move と場の個体の技の固定 (volatiles / encore_move / volatile_turns / entry_turn) も戻す。
+    それ以前の行には無いので、技の固定は復元できない (戻した状態では固定なしになる)"""
     def side(sd: dict) -> dict:
         return {
             "active_index": sd.get("active"),
@@ -80,7 +84,7 @@ def compact_to_engine_state(c: dict, resolver) -> dict:
             "party": [_mon_from_compact(m, resolver)
                       for m in (sd.get("party") or [])],
         }
-    return {
+    out = {
         "field": dict(c.get("field") or
                       {"weather": None, "terrain": None, "trick_room": False}),
         "mega_used": dict(c.get("mega_used") or
@@ -88,6 +92,18 @@ def compact_to_engine_state(c: dict, resolver) -> dict:
         "player": side(c.get("player") or {}),
         "opponent": side(c.get("opponent") or {}),
     }
+    if move_locks:
+        out["turn"] = move_locks.get("turn")
+        out["last_move"] = dict(move_locks.get("last_move") or {})
+        for sname in ("player", "opponent"):
+            row = move_locks.get(sname) or {}
+            sd = out[sname]
+            idx = sd.get("active_index")
+            if row and isinstance(idx, int) and 0 <= idx < len(sd["party"]):
+                for k in ("volatiles", "encore_move", "volatile_turns", "entry_turn"):
+                    if k in row:
+                        sd["party"][idx][k] = row[k]
+    return out
 
 
 def _active(state: dict, side: str):

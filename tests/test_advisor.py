@@ -19,6 +19,13 @@ from advisor.damage import MonView, FieldView, calc_damage
 from advisor.engine import evaluate
 
 
+def _illegal(adv, mid):
+    """選択自体ができない技 (illegal_actions) を引く。2026-10-09 M1a (docs/ADVICE_ACCURACY_PLAN_1009.md 段 A-2) で、選べない技を
+    −99 点で actions に残す方式から、候補 (actions) から外して illegal_actions に理由を残す方式に変えた。actions に無いことも確かめる"""
+    assert all(a["id"] != mid for a in adv["actions"]), [a["id"] for a in adv["actions"]]
+    return next(a for a in adv["illegal_actions"] if a["id"] == mid)
+
+
 def approx(a, b, tol):
     assert abs(a - b) <= tol, f"{a} != {b} (+-{tol})"
 
@@ -162,15 +169,15 @@ def test_evaluate_end_to_end():
     sealed = copy.deepcopy(state)
     sealed["player"]["party"][0]["volatiles"] = ["taunt"]
     adv2 = evaluate(sealed)
-    protect = next(a for a in adv2["actions"] if a["id"] == "protect")
-    assert protect["score"] <= -90, protect
+    protect = _illegal(adv2, "protect")     # 旧: actions に score <= -90 で残っていた (M1a で候補から外す)
+    assert protect["legal"] is False, protect
     assert "ちょうはつ" in protect["reason"], protect
     # かなしばり: 封じられた技のみ除外される
     sealed["player"]["party"][0]["volatiles"] = ["disable",
                                                  "disable_dragonpulse"]
     adv3 = evaluate(sealed)
-    dp = next(a for a in adv3["actions"] if a["id"] == "dragonpulse")
-    assert dp["score"] <= -90, dp
+    dp = _illegal(adv3, "dragonpulse")      # 旧: actions に score <= -90
+    assert "かなしばり" in dp["reason"], dp
     es = next(a for a in adv3["actions"] if a["id"] == "electroshot")
     assert es["score"] > 0, es
     print("test_move_seal_filter OK")
@@ -180,8 +187,7 @@ def test_evaluate_end_to_end():
     sealed["player"]["party"][0]["volatiles"] = ["encore"]
     sealed["last_move"] = {"player": "dragonpulse"}
     adv4 = evaluate(sealed)
-    es4 = next(a for a in adv4["actions"] if a["id"] == "electroshot")
-    assert es4["score"] <= -90, es4
+    es4 = _illegal(adv4, "electroshot")     # 旧: actions に score <= -90
     assert "アンコール" in es4["reason"], es4
     dp4 = next(a for a in adv4["actions"] if a["id"] == "dragonpulse")
     assert dp4["score"] > 0, dp4
@@ -726,8 +732,8 @@ def test_choice_lock():
     state = _mini_state(my, opp)
     state["last_move"] = {"player": "bravebird", "opponent": None}
     adv = evaluate(state, resolver)
-    qa = next(a for a in adv["actions"] if a["id"] == "quickattack")
-    assert qa["score"] == -99.0 and "こだわり" in qa["reason"], qa
+    qa = _illegal(adv, "quickattack")       # 旧: actions に score == -99.0
+    assert "こだわり" in qa["reason"], qa
     bb = next(a for a in adv["actions"] if a["id"] == "bravebird")
     assert bb["score"] > -90, bb
     assert "こだわり中" in adv["speed_note"], adv["speed_note"]
@@ -776,8 +782,8 @@ def test_first_turn_only_moves():
     st = _mini_state(dict(my), dict(opp))
     st["last_move"] = {"player": "ironhead", "opponent": None}
     adv = evaluate(st, resolver, rl_blend_weight=0)
-    fi = next(a for a in adv["actions"] if a["id"] == "firstimpression")
-    assert fi["score"] == -99.0 and "最初のターン" in fi["reason"], fi
+    fi = _illegal(adv, "firstimpression")   # 旧: actions に score == -99.0
+    assert "最初のターン" in fi["reason"], fi
     assert adv["best"]["id"] != "firstimpression", adv["best"]
     # last_move が今の個体の技でない (交代の取り逃し等で分からない) なら制限しない
     st2 = _mini_state(dict(my), dict(opp))

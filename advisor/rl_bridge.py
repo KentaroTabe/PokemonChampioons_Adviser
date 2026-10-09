@@ -519,8 +519,23 @@ def _is_mega_stone(p: Optional[dict]) -> bool:
     return iid.endswith(("ite", "itex", "itey")) and iid != "eviolite"
 
 
+def resolve_state_forms(state: dict) -> dict:
+    """状態辞書の複製の両陣営の個体に、解決した形態 (advisor.gimmick.with_resolved_form: species_id = 現在形態、
+    types = 評価に使うタイプ) を入れる (純粋。入力は書き換えない)。RL の入力の種族値・タイプ・特性を、助言エンジンの
+    ダメージ・行動順と同じ形態にする (2026-10-09 M1a: メガ後の個体が通常形態の species_id のまま観測に入っていた)"""
+    from advisor.gimmick import with_resolved_form
+    out = dict(state)
+    for side in ("player", "opponent"):
+        sd = state.get(side)
+        if not isinstance(sd, dict) or not sd.get("party"):
+            continue
+        out[side] = dict(sd, party=[with_resolved_form(p) if isinstance(p, dict) else p for p in sd["party"]])
+    return out
+
+
 def encode_state(state: dict, my_spe_actual: Optional[float] = None) -> Optional[np.ndarray]:
     """状態辞書 -> encode_battle と同義・同並びの観測 (OBS_DIM次元)"""
+    state = resolve_state_forms(state)
     my = state.get("player") or {}
     op = state.get("opponent") or {}
     mi, oi = my.get("active_index"), op.get("active_index")

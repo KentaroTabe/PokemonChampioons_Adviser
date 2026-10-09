@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from typing import Optional
 
@@ -157,6 +157,108 @@ def mega_probability(species_id: str, item_id: Optional[str] = None, is_mega: bo
                      mega_used: bool = False, snapshot_id: Optional[int] = None, usage: Optional[dict] = None) -> float:
     """この先メガシンカする確率の合計 (0..1)"""
     return min(1.0, sum(expected_mega(species_id, item_id, is_mega, mega_used, snapshot_id, usage).values()))
+
+
+@dataclass(frozen=True)
+class FormResolution:
+    """個体の形態の解決結果 (resolve_form)。2026-10-09 M1a (docs/ADVICE_ACCURACY_PLAN_1009.md 段 A-1)。
+
+    base_species: 基本種 (メガ前) の id。species: 現在形態の id (種族値・タイプ・固定特性の参照先)。
+    types: 評価に使うタイプ (英語、図鑑の表記)。types_temporary: 観測した一時的なタイプ変化 (へんげんじざい等) を使ったか。
+    is_mega: 現在形態がメガ形態か。ability: 現在形態で一意に決まる特性 (無ければ None)。
+    note: 入力の矛盾・未確定を解決したときの説明 (矛盾が無ければ None)"""
+    base_species: str
+    species: str
+    types: tuple
+    types_temporary: bool
+    is_mega: bool
+    ability: Optional[str]
+    note: Optional[str] = None
+
+
+def _types_en(types) -> list:
+    """状態の types (日本語 / 英語の混在可) → 図鑑の表記の英語 (Normal 等)"""
+    from advisor.engine import type_ja2en
+    ja2en = type_ja2en()
+    out = []
+    for t in types or []:
+        en = ja2en.get(t, t)
+        en = str(en)[:1].upper() + str(en)[1:].lower() if en else en
+        if en and en not in out:
+            out.append(en)
+    return out
+
+
+def resolve_form(p: Optional[dict]) -> Optional[FormResolution]:
+    """個体 (PokemonState の辞書 / その簡約) の基本種・現在形態・評価に使うタイプを解決する (副作用なし。図鑑と石の表を引く)。
+
+    ダメージ (advisor.engine.build_mon_view)・行動順 (同じ MonView の素早さ)・RL の入力 (advisor.rl_bridge.encode_state) が
+    この 1 つの結果を使う。見た目の名前 (species_ja = HUD の通常名) は個体の同定用で、ここでは見ない。
+    - species_id がメガ形態 → そのまま (メガ後)。
+    - is_mega なのに species_id が基本種 (HUD の通常名で戻された・文言のメガ名が読めなかった) → 持ち物の石でメガ形態を引く
+      (石の表 = requiredItem)。持ち物が不明・総称 (megastone) ならメガ形態が 1 つの種だけ導出する (X/Y 等で決まらなければ
+      基本種のまま = 曖昧な形態を強制確定しない)。持ち物がこの種の石以外と分かっていれば矛盾として基本種のまま。
+    - is_mega でなければ基本種のまま (陣営のメガ権利の消費 mega_used は個体の形態を変えない)。
+    タイプ: 一時的なタイプ変化の印 (type_changed) があれば観測値。メガ形態では、観測値が空・基本種の図鑑タイプ (メガ前の
+    読みの残り)・メガ形態の図鑑タイプのどれかならメガ形態の図鑑タイプ、それ以外は観測値 (一時的な変化とみなす)。
+    メガでなければ従来どおり観測値 (無ければ図鑑)。図鑑に無い種は None"""
+    if not p:
+        return None
+    from advisor.dex import get_dex
+    from vision.abilities import fixed_ability, mega_form_id
+    dex = get_dex()
+    sid = _toid(p.get("species_id"))
+    if not sid or dex.species(sid) is None:
+        return None
+    note = None
+    if is_mega_form(sid):
+        base, cur = _base_of(sid), sid
+    else:
+        base, cur = sid, sid
+        if p.get("is_mega"):
+            item = _toid(p.get("item_id"))
+            form = None
+            if item and item != "megastone":
+                stone = stone_table().get(item)
+                if stone and stone in mega_forms(sid):
+                    form = stone
+                else:
+                    note = f"メガの印と持ち物 ({item}) が矛盾するため形態は {sid} のまま"
+            else:
+                form = mega_form_id(sid, None)
+                if form is None:
+                    note = f"メガ後の形態が 1 つに決まらないため {sid} のまま"
+            if form and dex.species(form) is not None:
+                cur = form
+    if dex.species(base) is None:
+        base = cur
+    is_mega_cur = cur != base or is_mega_form(cur)
+    dex_cur = list(dex.species(cur)["types"])
+    dex_base = list(dex.species(base)["types"])
+    obs = _types_en(p.get("types"))
+    temporary = False
+    if p.get("type_changed") and obs:
+        types, temporary = obs, set(obs) != set(dex_cur)
+    elif is_mega_cur:
+        if not obs or set(obs) in (set(dex_base), set(dex_cur)):
+            types = dex_cur
+        else:
+            types, temporary = obs, True
+    else:
+        types = obs or dex_cur
+        temporary = bool(obs) and set(obs) != set(dex_cur)
+    ability = fixed_ability(cur, is_mega=is_mega_cur, item_id=p.get("item_id"))
+    return FormResolution(base_species=base, species=cur, types=tuple(types), types_temporary=temporary,
+                          is_mega=is_mega_cur, ability=ability, note=note)
+
+
+def with_resolved_form(p: Optional[dict]) -> Optional[dict]:
+    """個体の辞書の複製に、解決した形態 (species_id = 現在形態、types = 評価に使うタイプ (英語)、is_mega) を入れる (純粋)。
+    解決できなければ元の辞書をそのまま返す。RL の入力 (advisor.rl_bridge.encode_state) が状態全体に適用する"""
+    form = resolve_form(p)
+    if form is None:
+        return p
+    return dict(p, species_id=form.species, types=list(form.types), is_mega=form.is_mega)
 
 
 def mega_view(view, mega_sid: str):

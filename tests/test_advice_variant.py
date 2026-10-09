@@ -295,9 +295,12 @@ def test_evaluate_split_matches_reference_on_fixtures():
             # 返す辞書の鍵は改修前と同じ (共通部分の内部の欄を漏らさない)。
             # opp_pending / opp_pending_note は 2026-10-09 ④ (ユーザー承認) で足した「相手の場の個体が対応待ちのため
             # 終盤評価と探索を保留した」印 (advice 行に残す)。鍵の追加だけで、採点の値は変えていない
+            # illegal_actions / unevaluated_actions / legality_unconfirmed / position_key は 2026-10-09 M1a
+            # (docs/ADVICE_ACCURACY_PLAN_1009.md 段 A-2・A-4) で足した合法性の欄と据え置きの局面の鍵。鍵の追加だけ
             assert set(d0) == {"ok", "actions", "threats", "speed_note", "mega_note", "opp_inference", "opp_moves_note",
                                "opp_spread_note", "gtheory", "endgame_note", "sacrifice_note", "rl_hint", "best",
-                               "opp_pending", "opp_pending_note"}, set(d0)
+                               "opp_pending", "opp_pending_note",
+                               "illegal_actions", "unevaluated_actions", "legality_unconfirmed", "position_key"}, set(d0)
     print("test_evaluate_split_matches_reference_on_fixtures OK")
 
 

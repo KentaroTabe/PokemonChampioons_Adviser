@@ -177,6 +177,46 @@ def _same_family(a: Optional[str], b: Optional[str]) -> bool:
     return rest in SAME_NAME_FORM_SUFFIXES or rest.startswith("mega")
 
 
+def keeps_mega_form(cur_id: Optional[str], is_mega: bool, new_id: Optional[str]) -> bool:
+    """メガ後の個体の種族 id (cur_id) を、新しい読み new_id で上書きせずに保つか (純粋)。
+    is_mega で、cur_id がメガ形態、new_id がその基本種 (HUD の通常名の読み) のとき True。別の種・別のメガ形態は False
+    (上書きしてよい)。HUD はメガ後も通常名を出すので、名前の読みで形態をメガ前へ戻さない (2026-10-09 M1a)"""
+    if not (is_mega and cur_id and new_id) or cur_id == new_id:
+        return False
+    try:
+        from advisor.gimmick import _base_of, is_mega_form
+        return is_mega_form(cur_id) and _base_of(cur_id) == new_id
+    except Exception:
+        return False
+
+
+def lock_turns_left(base_turns: int, target_moved_this_turn: bool) -> int:
+    """技の固定 (アンコール・ちょうはつ) を受けた時点の残り (この後に技を選ぶ回数、純粋)。対象がそのターンに既に行動して
+    いれば base_turns、まだならそのターンの行動が固定されるので base_turns − 1 (champions_agent.config の注記)"""
+    return int(base_turns) if target_moved_this_turn else max(0, int(base_turns) - 1)
+
+
+def tick_volatile_turns(mon) -> list:
+    """新しいターンの行動選択に入ったとき、ターン経過で切れる揮発状態 (volatile_turns) の残りを 1 減らし、
+    残りが無いものを外す (mon を更新する)。戻り値: 外したキーの list。
+    残り n = この後に技を選ぶ回数なので、残り 0 で新しいターンに入ったら外し、1 以上なら 1 減らして固定を続ける"""
+    expired = []
+    for key, left in list((mon.volatile_turns or {}).items()):
+        if left is None:
+            continue
+        if left <= 0:
+            expired.append(key)
+        else:
+            mon.volatile_turns[key] = left - 1
+    for key in expired:
+        mon.volatile_turns.pop(key, None)
+        if key in (mon.volatiles or []):
+            mon.volatiles.remove(key)
+        if key == "encore":
+            mon.encore_move = None
+    return expired
+
+
 def is_pending(p) -> bool:
     """対応待ちの個体か (純粋)。PokemonState / state.to_dict の要素 / 対戦ログの簡約 (scene 行) のどれでも読む"""
     if p is None:
@@ -286,12 +326,22 @@ class PokemonState:
     # 名前が複数の形態に当たる (ヤドキング = slowking / slowkinggalar) とき、形態が決まるまでの候補の種族 id。決まったら空
     species_candidates: list = field(default_factory=list)
     t_first_seen: Optional[float] = None   # 対応待ちになった時刻
+    # 技の固定 (2026-10-09 M1a、docs/ADVICE_ACCURACY_PLAN_1009.md 段 A-2): アンコールで固定された技 (アンコールを受けた時点の
+    # この個体の直前の技)、ターン経過で切れる揮発状態の残りターン {"encore": n, "taunt": n} (この後に技を選ぶ回数。
+    # tick_volatile_turns が新しいターンの行動選択で 1 減らし、尽きたら外す)、場に出たターン (初手限定の技の判定)。
+    # どれも交代 (reset_on_switch_out) で消える
+    encore_move: Optional[str] = None
+    volatile_turns: dict = field(default_factory=dict)
+    entry_turn: Optional[int] = None
 
     def merge_species(self, species_ja: str, species_id: Optional[str], guess: bool = False,
                       score: Optional[float] = None):
-        """種族を設定する。guess=True は選出画面の推定 (確定ではない)。既定 (確定) は推定の印を消す"""
+        """種族を設定する。guess=True は選出画面の推定 (確定ではない)。既定 (確定) は推定の印を消す。
+        メガ後の個体 (is_mega、species_id がメガ形態) に、その基本種の id (HUD はメガ後も通常名を出す) が来ても形態を戻さない
+        (keeps_mega_form。2026-10-09 M1a: battle_20261009_113830 で adopt_my_hud_species の HUD 名 ミミロップ が
+        lopunnymega を lopunny に戻し、メガ後なのに通常形態で評価された)"""
         self.species_ja = species_ja
-        if species_id:
+        if species_id and not keeps_mega_form(self.species_id, self.is_mega, species_id):
             self.species_id = species_id
         self.species_guess = bool(guess)
         self.guess_score = float(score) if (guess and score is not None) else None
@@ -310,6 +360,10 @@ class PokemonState:
         self.boosts = {k: 0 for k in STAT_KEYS}
         keep = {"leechseed"}  # やどりぎも交代で消えるが表記簡略化のため消す
         self.volatiles = []
+        # 技の固定 (アンコール・ちょうはつの残りターン) と場に出たターンも交代で消える (2026-10-09 M1a)
+        self.encore_move = None
+        self.volatile_turns = {}
+        self.entry_turn = None
         self.is_active = False
         # タイプ変化は交代で元に戻る。フラグを解除すると次のbackfillが
         # 図鑑タイプへ正してくれる (typesをここで直接触ると図鑑参照が要る)
@@ -791,6 +845,11 @@ class SideState:
             dst.boosts = dict(src.boosts)
         if src.volatiles:
             dst.volatiles = list(src.volatiles)
+            # 技の固定の付帯情報も揮発状態と一緒に移す (2026-10-09 M1a)
+            dst.encore_move = src.encore_move
+            dst.volatile_turns = dict(src.volatile_turns)
+        if src.entry_turn is not None:
+            dst.entry_turn = src.entry_turn
         dst.moves = src.moves or dst.moves
         dst.revealed_moves = list(dict.fromkeys([*dst.revealed_moves, *src.revealed_moves]))
         dst.aliases = list(dict.fromkeys([*dst.aliases, *src.aliases]))[-6:]
@@ -929,6 +988,8 @@ class BattleStateV2:
         # 各側のアクティブが直前に使った技 {side: move_id}。
         # アンコールの技固定の解決に使う。交代・ひんしでその側をクリア
         self.last_move: dict = {}
+        # 各側のアクティブが最後に技を使ったターン {side: turn} (技の固定の残りターンの判定。2026-10-09 M1a)
+        self.moved_turn: dict = {}
         # 側ごとの「最後に捨てた HP の読み」(record_hp_reject。理由の一覧は HP_REJECT_REASONS の注記)
         self.hp_reject: dict = {"player": None, "opponent": None}
         # 自分の HP の読みの経過 (record_my_hp_trace、直近 MY_HP_TRACE_LEN 件。MY_HP_TRACE_ACCEPT の注記)
@@ -996,6 +1057,18 @@ class BattleStateV2:
     def side(self, name: str) -> SideState:
         return self.player if name == "player" else self.opponent
 
+    def tick_move_locks(self) -> list:
+        """新しいターンの行動選択に入ったとき (vision.pipeline のターン加算) に、両陣営の個体の技の固定の残りターンを進め、
+        尽きたものを外してイベントに残す (2026-10-09 M1a)。戻り値: [(側, 種族名, 外したキー)]"""
+        out = []
+        for side_name in ("player", "opponent"):
+            for p in self.side(side_name).party:
+                for key in tick_volatile_turns(p):
+                    out.append((side_name, p.species_ja, key))
+                    self.log_event("system", f"{p.species_ja or '?'} の {key} がターン経過で終了と推定",
+                                   event_id=f"{key}_expire", target=side_name)
+        return out
+
     def resolve_pending(self, side_name: str = "opponent") -> list:
         """対応待ちの個体の対応が決まったら枠へ移し、移した内容をイベントに残す (対戦ログの roster_change に
         merged_from / merged_to を付ける材料。2026-10-09 ④)。戻り値: SideState.resolve_pending の記録"""
@@ -1058,7 +1131,8 @@ class BattleStateV2:
                       "ability_id", "item_ja", "item_id", "item_consumed",
                       "revealed_moves", "aliases", "is_mega", "is_active",
                       "is_picked", "pick_order", "species_guess", "guess_score",
-                      "pending", "species_candidates", "t_first_seen"):
+                      "pending", "species_candidates", "t_first_seen",
+                      "encore_move", "volatile_turns", "entry_turn"):
                 if k in md and md[k] is not None:
                     setattr(mon, k, md[k])
             mon.moves = [MoveSlot(**{kk: m.get(kk) for kk in
@@ -1101,6 +1175,7 @@ class BattleStateV2:
         self.selection_picked = d.get("selection_picked")
         self.battle_seq = int(d.get("battle_seq") or 0)
         self.last_move = dict(d.get("last_move") or {})
+        self.moved_turn = dict(d.get("moved_turn") or {})
 
     def to_dict(self):
         return {
@@ -1122,6 +1197,7 @@ class BattleStateV2:
             "protect_streak": dict(self.protect_streak),
             "battle_seq": self.battle_seq,
             "last_move": dict(self.last_move),
+            "moved_turn": dict(self.moved_turn),
             "hp_reject": {k: (dict(v) if v else None) for k, v in self.hp_reject.items()},
             # 2026-10-09 fix/hp-paths: このフレームで対戦ログに出す自分の HP の読みの経過 (ふだんは空)・様子見画面の右列の読み
             "my_hp_trace_dumps": [dict(d) for d in self.my_hp_trace_outbox],

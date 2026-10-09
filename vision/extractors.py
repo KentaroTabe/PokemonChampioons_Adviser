@@ -127,6 +127,10 @@ def adopt_my_hud_species(state: BattleStateV2, sp) -> Optional[PokemonState]:
                             event_id="missed_switch")
         state.player.switch_to(idx)
         me = state.player.party[idx]
+        # 前の個体の直前の技を新しい個体の技の固定 (こだわり・アンコール) に使わない。場に出たターンも分からない
+        # (2026-10-09 M1a: 交代の文言を取り逃すと last_move が前の個体の技のまま残っていた)
+        state.last_move.pop("player", None)
+        me.entry_turn = None
     me.merge_species(sp[0], sp[1])
     return me
 
@@ -1523,6 +1527,11 @@ def link_active_to_party(state: BattleStateV2, side_name: str) -> None:
         slot.boosts = active.boosts
     if active.volatiles:
         slot.volatiles = active.volatiles
+        # 技の固定の付帯情報も揮発状態と一緒に移す (2026-10-09 M1a)
+        slot.encore_move = active.encore_move
+        slot.volatile_turns = dict(active.volatile_turns)
+    if active.entry_turn is not None:
+        slot.entry_turn = active.entry_turn
     slot.moves = active.moves or slot.moves
     slot.revealed_moves = list({*slot.revealed_moves, *active.revealed_moves})
     slot.is_mega = active.is_mega or slot.is_mega
