@@ -92,13 +92,30 @@ def compose_team(rng: random.Random, weights: dict, teammates: dict, base_key, s
     return chosen
 
 
-def _meta_tables(snapshot_id: Optional[int] = None) -> dict:
-    """合成に要る表 (使用率の重み / 共起 / 種ごとの代表型 / 持ち物の予備 / メガ石) を最新 (または指定) のスナップショットから読む"""
+def _ro_connection(db_path):
+    """使用率 DB を読み取り専用で開く (sqlite3 の mode=ro。database.get_connection と同じ row_factory)。with で閉じる"""
+    import contextlib
+    import sqlite3
+
+    @contextlib.contextmanager
+    def _cm():
+        conn = sqlite3.connect(f"file:{Path(db_path).resolve()}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+        finally:
+            conn.close()
+    return _cm()
+
+
+def _meta_tables(snapshot_id: Optional[int] = None, db_path: Optional[Path] = None) -> dict:
+    """合成に要る表 (使用率の重み / 共起 / 種ごとの代表型 / 持ち物の予備 / メガ石) を最新 (または指定) のスナップショットから読む。
+    db_path を渡すとその DB を読み取り専用で開く (2026-10-09 M2d: 実験専用の構築プールを本体の DB から作る。既定は config.DB_PATH)"""
     from champions_agent.data import database as db
     from champions_agent.env import team_builder as TB
     from champions_agent.env.legality import fill_moves
     from tools.team_build.meta_snapshot import merge_ranked
-    with db.get_connection() as conn:
+    with (_ro_connection(db_path) if db_path is not None else db.get_connection()) as conn:
         snap = snapshot_id if snapshot_id is not None else db.latest_snapshot_id(conn)
         if snap is None:
             raise RuntimeError("usage_snapshot が無い (bash champions_agent/scripts/update_usage_db.sh)")

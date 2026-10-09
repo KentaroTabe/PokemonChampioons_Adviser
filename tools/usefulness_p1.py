@@ -29,6 +29,14 @@
   - registered (--compare rl の既定): config/my_team.json (最新の登録) の本文を team.txt に書いて --team-file で渡す。
     sha16 の期待値は --compare rl が P1_TEAM_SHA16 (P1 の記録)、--compare scoring が P1_SCORING_TEAM_SHA16。違えば起動しない。
   条件表の team.source (ranked / registered)・purpose・notes に自チームの出所を残す。--compare rl --team registered の条件表は従来と同じ。
+2026-10-09 M2d (レビュー 2〜4・6):
+  - --team general は実験専用の構築プール (tools.scoring_pool で最新の使用率スナップショットから合成し、現行規制の validate-team で
+    合法性を確かめたファイル) を --own-pool で子プロセスに渡す (team.source pool、パスと sha16 を条件表に、起動前検査で sha16 と件数)。
+    旧固定プール (META_PIN) で測る従来の general は --team general-pinned (条件表に「旧固定プール上の比較」と明記)。
+  - --compare scoring は子プロセスで感度の計算を切る (TRANSITION_SENSITIVITY=0、全条件で共通)。
+  - 条件表の showdown に git commit・未コミットの変更・フォーマットの name / mod / ruleset を残し、commit と mod が取れなければ起動しない。
+  - --compare scoring の条件表に own_check (自チームの対応の検査。usefulness_verdict が読む) を書く。--prelim-dir (予備測定の出力) を
+    渡すと、その相手 id と自チームの対応が成り立つことを起動前に確かめる (渡さなければ注意だけ)。
 開始時刻の注意 (ツールでは強制しない): launchd の track-progress (毎日 21:50、17〜34 分) の後に始め、06:30 の usage-update の前に終える。
 
 純粋な部分 (条件表・コマンド・環境・進捗・終了時の更新) は tests/test_usefulness_p1.py で確かめる。
@@ -49,8 +57,9 @@ from champions_agent.config import (
     BUILD_FOLD_ADAPT, BUILD_FOLD_EVAL, BUILD_FOLD_VALIDATE, P1_ABORT_SEC_PER_BATTLE, P1_ALPHA, P1_BASELINE_WEIGHT, P1_BELIEF_K,
     P1_FINAL_BATTLES, P1_INTERIM_BATTLES, P1_MDE, P1_OPP_OFFSET, P1_OPP_PICK_POLICY, P1_OPP_PILOT, P1_OUT_ROOT, P1_PICK_POLICY,
     P1_PRELIM_BATTLES, P1_PROGRESS_SEC, P1_SEED, P1_SELECTION_MODEL, P1_SPLIT_FILE, P1_SPLIT_SEALED_ID, P1_SPLIT_TIER,
-    P1_SCORING_BASELINE, P1_SCORING_MODES, P1_SCORING_TEAM_SHA16, P1_TEAM_DEFAULT, P1_TEAM_SHA16, P1_TEAM_SOURCES,
-    P1_TERMINATE_GRACE_SEC, P1_TIME_LIMIT_SEC, P1_WEIGHTS, MY_TEAM_DISABLED_ENV, SHOWDOWN_PORT, TRAINING_BATTLE_FORMAT)
+    P1_SCORING_BASELINE, P1_SCORING_MODES, P1_SCORING_POOL_FILE, P1_SCORING_POOL_SHA16, P1_SCORING_TEAM_SHA16, P1_TEAM_DEFAULT,
+    P1_TEAM_SHA16, P1_TEAM_SOURCES, P1_TERMINATE_GRACE_SEC, P1_TIME_LIMIT_SEC, P1_WEIGHTS, MY_TEAM_DISABLED_ENV, SHOWDOWN_PORT,
+    TRAINING_BATTLE_FORMAT, TRANSITION_SENSITIVITY_ENV)
 from tools.usefulness_verdict import TEAM_LABELS, cond_file, cond_name, corrected_z
 
 REPO = Path(__file__).resolve().parent.parent
@@ -69,6 +78,15 @@ SELECTION_META_FILE = "selection_model_meta.json"
 RANKED_TOP_N = None
 RANKED_INCLUDE_EXTERNAL = True
 RANKED_SEED_OFFSET = 1
+# 一般的なチーム (登録参照を無効化する自チームの出所)。general = 実験専用の構築プール (--own-pool、2026-10-09 M2d) /
+# general-pinned = 旧固定プール (META_PIN の RankedTeambuilder。条件表に「旧固定プール上の比較」と明記する)
+GENERAL_SOURCES = ("general", "general-pinned")
+PINNED_NOTE = "旧固定プール上の比較 (META_PIN / POOL_PIN の 7 月の構築プール。回帰確認用で、現行規制での採点方式の選定には使わない)"
+# 自チームの対応の検査 (2026-10-09 M2d、レビュー 6。条件表の own_check。tools/usefulness_verdict が読む)
+OWN_CHECK = {"required": True,
+             "items": ["(a) 対戦 i の送った自チームの本文の sha16 (battles.jsonl の own_team_sha16) が条件間で一致",
+                       "(b) 各条件で助言が参照した自分の場の個体の型 (配分・性格・持ち物・技。メガ後も) が送った型と一致 (ref_check.mismatch = 0)",
+                       "(c) 確認できない対戦 (own_team_sha16 / ref_check が無い・検査 0 件) が無い"]}
 
 
 # ------------------------------------------------------------------ 純粋
@@ -139,11 +157,14 @@ def default_out_dir(now: float, prelim: bool, root: Path = REPO / P1_OUT_ROOT) -
 
 def build_command(weight: float, out_dir: Path, team_file: Optional[Path], split_file: Path, fold: int, seed: int, battles: int,
                   selection_model: Path, pin_dir: str, python: str = sys.executable, offset: int = P1_OPP_OFFSET,
-                  tier: str = P1_SPLIT_TIER, cond: Optional[str] = None) -> list:
+                  tier: str = P1_SPLIT_TIER, cond: Optional[str] = None, own_pool: Optional[Path] = None) -> list:
     """1 条件の tools.check_advisor_player のコマンド (純粋)。cond (条件名) が無ければ重みの条件名 rl<W>。
-    team_file が None (一般的なチーム) なら --team-file を渡さない (check_advisor_player の既定 = RankedTeambuilder)"""
+    team_file が None (一般的なチーム) なら --team-file を渡さない。own_pool (実験専用の構築プール、2026-10-09 M2d) があれば
+    --own-pool で渡す (無ければ check_advisor_player の既定 = RankedTeambuilder)"""
     c = cond_file(cond or cond_name(weight))
     team_args = ["--team-file", str(team_file)] if team_file is not None else []
+    if own_pool is not None:
+        team_args += ["--own-pool", str(own_pool)]
     return [python, "-m", "tools.check_advisor_player",
             "--battles", str(int(battles)), "--opp-seed", str(int(seed)), "--opp-offset", str(int(offset)),
             "--opp-split", f"{split_file}:{tier}:{int(fold)}",
@@ -154,17 +175,22 @@ def build_command(weight: float, out_dir: Path, team_file: Optional[Path], split
             "--candidate-id", f"p1_{c}"]
 
 
-def child_environment(pin_dir: str, base: Optional[dict] = None, team_source: str = "registered") -> dict:
+def child_environment(pin_dir: str, base: Optional[dict] = None, team_source: str = "registered",
+                      sensitivity_off: bool = False) -> dict:
     """測定の子プロセスの環境 (純粋): racing.child_env (スレッド数 1 の一式) + CHAMPIONS_MODELS_DIR = ピン。
-    一般的なチーム (team_source general) は全条件で共通に登録参照を無効化する (MY_TEAM_DISABLED_ENV=1。条件ごとの cond_env とは別)。
-    registered は従来どおり (無効化の変数を足さない。呼び出し側の環境に残っていれば消す)"""
+    一般的なチーム (team_source general / general-pinned) は全条件で共通に登録参照を無効化する (MY_TEAM_DISABLED_ENV=1。条件ごとの
+    cond_env とは別)。registered は従来どおり (無効化の変数を足さない。呼び出し側の環境に残っていれば消す)。
+    sensitivity_off (採点方式の比較、2026-10-09 M2d) なら感度の計算を切る (TRANSITION_SENSITIVITY_ENV=0、全条件で共通。
+    HP の悲観側を T と V に渡す本採点は変わらない)"""
     from tools.team_build.racing import child_env
     env = child_env(base)
     env["CHAMPIONS_MODELS_DIR"] = str(pin_dir)
-    if team_source == "general":
+    if team_source in GENERAL_SOURCES:
         env[MY_TEAM_DISABLED_ENV] = "1"
     else:
         env.pop(MY_TEAM_DISABLED_ENV, None)
+    if sensitivity_off:
+        env[TRANSITION_SENSITIVITY_ENV] = "0"
     return env
 
 
@@ -176,6 +202,8 @@ def env_record(env: dict) -> dict:
     rec = {k: env.get(k) for k in keys}
     if env.get(MY_TEAM_DISABLED_ENV):
         rec[MY_TEAM_DISABLED_ENV] = env.get(MY_TEAM_DISABLED_ENV)
+    if env.get(TRANSITION_SENSITIVITY_ENV) is not None:
+        rec[TRANSITION_SENSITIVITY_ENV] = env.get(TRANSITION_SENSITIVITY_ENV)
     return rec
 
 
@@ -185,8 +213,15 @@ def team_record(facts_team: Optional[dict], factor: str, team_source: str) -> di
     registered: 登録チームの本文の sha16 を期待値と照合する (RL の比較は P1_TEAM_SHA16 で従来と同じ項目、採点方式の比較は
     P1_SCORING_TEAM_SHA16 で source / label を足す)"""
     team = dict(facts_team or {})
-    if team_source == "general":
+    if team_source == "general" and team.get("source") == "pool":
+        # 実験専用の構築プール (2026-10-09 M2d)。期待 sha16 (P1_SCORING_POOL_SHA16) があれば照合する
+        team.update(label=TEAM_LABELS["pool"], expected_sha16=P1_SCORING_POOL_SHA16)
+        team["match"] = (team.get("sha16") == P1_SCORING_POOL_SHA16) if P1_SCORING_POOL_SHA16 else None
+        return team
+    if team_source in GENERAL_SOURCES:
         team.update(source="ranked", label=TEAM_LABELS["ranked"])
+        if team_source == "general-pinned":
+            team.update(pinned=True, pinned_note=PINNED_NOTE)
         return team
     if factor == "scoring":
         team.update(source="registered", label=TEAM_LABELS["registered"], expected_sha16=expected_team_sha16(factor))
@@ -198,8 +233,15 @@ def team_record(facts_team: Optional[dict], factor: str, team_source: str) -> di
 
 def team_note(team: dict) -> str:
     """条件表の notes に残す自チームの出所の 1 行 (純粋)"""
+    if team.get("source") == "pool":
+        return (f"自チーム: {TEAM_LABELS['pool']} (tools.scoring_pool のファイル {team.get('path')}: 使用率スナップショット "
+                f"{team.get('snapshot_id')}、{team.get('battle_format')} の validate-team で合法性を確認した {team.get('n_teams')} 件、"
+                f"本文の sha16 {team.get('sha16')}。check_advisor_player --own-pool で rng = Random(相手 seed + 1 = {team.get('seed')}) "
+                f"から対戦ごとに引く。条件間で同じ seed なので対戦 i の自チームが対応する。助言の登録参照 (config/my_team.json) は "
+                f"{MY_TEAM_DISABLED_ENV}=1 で両条件とも無効化 (シムの登録は送った本文から)。共通ピン (META_PIN / POOL_PIN) は使わない)")
     if team.get("source") == "ranked":
-        return (f"自チーム: {TEAM_LABELS['ranked']} (check_advisor_player の既定 = RankedTeambuilder。META_PIN の使用率スナップショット "
+        pinned = f"【{PINNED_NOTE}】" if team.get("pinned") else ""
+        return (f"自チーム: {pinned}{TEAM_LABELS['ranked']} (check_advisor_player の既定 = RankedTeambuilder。META_PIN の使用率スナップショット "
                 f"{team.get('meta_snapshot_id')} の構築プール {team.get('n_teams')} 件から rng = Random(相手 seed + 1 = {team.get('seed')}) で"
                 f"対戦ごとに引く。条件間で同じ seed なので対戦 i の自チームが対応する。助言の登録参照 (config/my_team.json) は "
                 f"{MY_TEAM_DISABLED_ENV}=1 で両条件とも無効化)")
@@ -220,10 +262,17 @@ def build_conditions(design: dict, facts: dict, battles: int, prelim: bool, seed
                "分けて評価する)" if factor == "scoring" else
                "RL の行動確率の加点 0 / ×5 / ×25 の対応比較 (シミュレータ条件。OCR を通らない。実戦の有用性とは分けて評価する)")
     notes = list(notes)
-    if factor == "scoring" or team_source == "general":
+    if factor == "scoring" or team_source in GENERAL_SOURCES:
         purpose += f"。自チーム: {team.get('label')}"
+        if team.get("pinned"):
+            purpose += f" ({PINNED_NOTE})"
         notes.append(team_note(team))
-    return {
+    extra = {}
+    if factor == "scoring":
+        # 2026-10-09 M2d: 自チームの対応の検査 (verdict が読む) と、予備測定の対応の確認 (facts の prelim_check)
+        extra["own_check"] = dict(OWN_CHECK)
+        extra["prelim_check"] = f.get("prelim_check")
+    return {**extra,
         "experiment": "P1",
         "factor": factor,
         "purpose": purpose,
@@ -283,7 +332,17 @@ def preflight_errors(cond: dict, out_has_results: bool = False) -> list:
     """起動前の検査 (純粋)。空なら起動してよい"""
     errs = []
     team = cond.get("team") or {}
-    if team.get("source") == "ranked":
+    if team.get("source") == "pool":
+        # 実験専用の構築プール (2026-10-09 M2d): 指定されていて、本文の sha16 と件数が記録と一致し、期待 sha16 があれば一致
+        if not team.get("path"):
+            errs.append("一般的なチームの実験専用の構築プールが指定されていない (--own-pool、tools.scoring_pool で作る)")
+        elif team.get("errors"):
+            errs.append(f"構築プール {team.get('path')} が不正: {' / '.join(team['errors'])}")
+        elif not team.get("n_teams"):
+            errs.append(f"構築プール {team.get('path')} が空")
+        elif team.get("expected_sha16") and team.get("match") is False:
+            errs.append(f"構築プールの sha16 {team.get('sha16')} が期待 {team.get('expected_sha16')} と違う")
+    elif team.get("source") == "ranked":
         # 一般的なチーム: 登録チームの sha16 は照合しない。構築プールを固定する META_PIN の snapshot id があること
         if team.get("meta_snapshot_id") is None:
             errs.append(f"一般的なチームの使用率スナップショット (META_PIN) が読めない ({team.get('meta_pin_file')})")
@@ -302,6 +361,14 @@ def preflight_errors(cond: dict, out_has_results: bool = False) -> list:
     if not rl.get("sha16"):
         errs.append(f"RL の checkpoint がピンに無い ({rl.get('pin_dir')})")
     sd = cond.get("showdown") or {}
+    # Showdown の版とルール (2026-10-09 M2d、レビュー 4): commit と使う mod を条件表に記録できたこと
+    if not sd.get("commit"):
+        errs.append(f"Showdown の版 (git commit) を記録できない ({sd.get('dir')})")
+    if "mod" in sd and not sd.get("mod"):
+        errs.append(f"フォーマット {sd.get('battle_format')} の mod を config/formats.ts から特定できない ({sd.get('dir')})")
+    pc = cond.get("prelim_check")
+    if isinstance(pc, dict) and pc.get("reasons"):
+        errs.append(f"予備測定 {pc.get('dir')} の対応の確認が成り立たない: {' / '.join(pc['reasons'])}")
     if not sd.get("listening"):
         errs.append(f"Showdown がポート {sd.get('port')} で待ち受けていない (bash scripts/ensure_showdown.sh {sd.get('port')})")
     if out_has_results:
@@ -321,6 +388,14 @@ def preflight_warnings(cond: dict) -> list:
     if emb and emb.get("matches_production") is False:
         warns.append("選出モデルの機能埋め込みが実機 (配備版の selection_model_emb.json) と違うものになる: "
                      f"測定は {emb.get('used')} を読む (ピンの {emb.get('pin_file')} が無いか実機と違う)")
+    team = cond.get("team") or {}
+    if team.get("source") == "pool" and team.get("path") and not team.get("expected_sha16"):
+        warns.append(f"構築プールの期待 sha16 (config P1_SCORING_POOL_SHA16) が未固定: 今回のプールは {team.get('sha16')}")
+    if team.get("pinned"):
+        warns.append(PINNED_NOTE)
+    pc = cond.get("prelim_check")
+    if cond.get("factor") == "scoring" and not cond.get("prelim") and not pc:
+        warns.append("予備測定の結果を指定していない (--prelim-dir): 予備測定での自チームの対応の確認をしていない")
     if (cond.get("git") or {}).get("dirty_files"):
         warns.append(f"作業ツリーに未コミットの変更がある: {cond['git']['dirty_files']}")
     return warns
@@ -463,15 +538,120 @@ def ranked_team_facts(seed: Optional[int], notes: list) -> dict:
     return team
 
 
+def pool_team_facts(own_pool: Optional[Path], seed: Optional[int], notes: list) -> dict:
+    """実験専用の構築プール (--team general の自チーム、2026-10-09 M2d) の材料: パス・本文の sha16 (記録と計算)・件数・
+    snapshot・フォーマット・抽選 seed。プールの検査 (tools.scoring_pool.check_pool_doc) の問題は errors に"""
+    from tools.scoring_pool import check_pool_doc
+    team = {"source": "pool", "path": str(own_pool) if own_pool else None, "sha16": None, "n_teams": None,
+            "snapshot_id": None, "battle_format": None, "pool_seed": None, "seed": own_team_seed(seed), "errors": [],
+            "registration_disabled_env": MY_TEAM_DISABLED_ENV}
+    if own_pool is None:
+        notes.append("team: 実験専用の構築プールが指定されていない (--own-pool / config P1_SCORING_POOL_FILE)")
+        return team
+    try:
+        doc = json.loads(Path(own_pool).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        team["errors"] = [f"読めない ({e!r})"]
+        return team
+    cond = doc.get("conditions") or {}
+    team.update(sha16=doc.get("sha16"), n_teams=len(doc.get("teams") or []), snapshot_id=cond.get("snapshot_id"),
+                battle_format=cond.get("battle_format"), pool_seed=cond.get("seed"), n_excluded=cond.get("n_excluded"),
+                file_sha16=_sha16(own_pool), errors=check_pool_doc(doc))
+    if cond.get("battle_format") and cond.get("battle_format") != TRAINING_BATTLE_FORMAT:
+        team["errors"].append(f"プールのフォーマット {cond.get('battle_format')} が測定の {TRAINING_BATTLE_FORMAT} と違う")
+    return team
+
+
+def format_rule(formats_text: Optional[str], battle_format: str) -> dict:
+    """pokemon-showdown/config/formats.ts の本文 → フォーマット id の {name, mod, ruleset} (純粋)。
+    name の英数字だけの小文字 (Showdown の toID) が battle_format と一致する項目の、次の項目までの mod: / ruleset: の行を読む"""
+    import re
+    out = {"name": None, "mod": None, "ruleset": None}
+    if not formats_text:
+        return out
+    lines = formats_text.splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(r"\s*name:\s*[\"'](.+?)[\"'],", line)
+        if not m or re.sub(r"[^a-z0-9]", "", m.group(1).lower()) != battle_format:
+            continue
+        out["name"] = m.group(1)
+        for ln in lines[i + 1:]:
+            if re.match(r"\s*name:", ln) or (re.match(r"\s*\},?\s*$", ln) and out["mod"]):
+                break
+            mm = re.match(r"\s*mod:\s*[\"'](.+?)[\"']", ln)
+            if mm:
+                out["mod"] = mm.group(1)
+            mr = re.match(r"\s*ruleset:\s*(\[.*\])", ln)
+            if mr:
+                out["ruleset"] = mr.group(1)
+        break
+    return out
+
+
+def showdown_facts(sd_dir: Path, notes: list) -> dict:
+    """Showdown の版とルール (2026-10-09 M2d、レビュー 4): git commit・未コミットの変更・フォーマットの name / mod / ruleset と
+    mod の dir があるか。待ち受け (listening) も"""
+    sd = {"dir": str(sd_dir), "commit": _git(["rev-parse", "HEAD"], sd_dir) if sd_dir.exists() else None,
+          "dirty_files": dirty_files(_git(["status", "--porcelain", "--untracked-files=no"], sd_dir, raw=True))
+          if sd_dir.exists() else None,
+          "battle_format": TRAINING_BATTLE_FORMAT, "port": SHOWDOWN_PORT, "listening": _listening(SHOWDOWN_PORT)}
+    try:
+        text = (sd_dir / "config" / "formats.ts").read_text(encoding="utf-8")
+    except OSError:
+        text = None
+    rule = format_rule(text, TRAINING_BATTLE_FORMAT)
+    sd.update(format_name=rule["name"], mod=rule["mod"], ruleset=rule["ruleset"],
+              mod_dir_exists=(sd_dir / "data" / "mods" / rule["mod"]).is_dir() if rule["mod"] else None)
+    if sd["commit"] is None:
+        notes.append(f"showdown.commit: {sd_dir} が無いか git でない")
+    if rule["mod"] is None:
+        notes.append(f"showdown.mod: {sd_dir}/config/formats.ts から {TRAINING_BATTLE_FORMAT} の mod を読めない")
+    return sd
+
+
+def prelim_correspondence(prelim_dir: Optional[Path]) -> Optional[dict]:
+    """予備測定 (--prelim の出力 dir) の対応の確認 (2026-10-09 M2d、レビュー 6): 相手 id と自チーム (送った本文の sha16・参照した型)
+    の対応が先頭 n 戦 (全条件で揃った数) で成り立つか。dir が無ければ None"""
+    if prelim_dir is None:
+        return None
+    from tools.usefulness_verdict import (correspondence_check, load_outcomes_conds, load_records_conds,
+                                          own_correspondence_check, scoring_conds)
+    d = Path(prelim_dir)
+    try:
+        conds_doc = json.loads((d / "conditions.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        return {"dir": str(d), "n": 0, "reasons": [f"条件表が読めない ({e!r})"]}
+    base, others = scoring_conds(conds_doc)
+    conds = [base] + others
+    _o, _s, opp_ids, _e = load_outcomes_conds(d, conds)
+    recs = load_records_conds(d, conds)
+    lens = [len(recs.get(c) or []) for c in conds]
+    n = min(lens) if lens else 0
+    reasons = []
+    if n == 0:
+        reasons.append("対戦記録 (battles.jsonl) が無い条件がある")
+    else:
+        reasons += correspondence_check(opp_ids, conds, n)
+        own_reasons, _summary = own_correspondence_check(recs, conds, n)
+        reasons += own_reasons
+    return {"dir": str(d), "n": n, "reasons": reasons}
+
+
 def collect_facts(team_text: Optional[str], selection_model: Path, split_file: Path, fold: int, pin_dir: Optional[Path],
-                  notes: list, team_source: str = "registered", seed: Optional[int] = None) -> dict:
+                  notes: list, team_source: str = "registered", seed: Optional[int] = None,
+                  own_pool: Optional[Path] = None, showdown_dir: Optional[Path] = None,
+                  prelim_dir: Optional[Path] = None) -> dict:
     """条件表の材料を集める。取れない項目は None にして notes に理由を足す (例外で落とさない)。
-    team_source general なら自チームは一般的なチーム (ranked_team_facts)、registered なら登録チームの本文"""
+    team_source general なら自チームは実験専用の構築プール (pool_team_facts、2026-10-09 M2d)、general-pinned なら旧固定プール
+    (ranked_team_facts)、registered なら登録チームの本文。showdown_dir (既定 REPO/pokemon-showdown) は版とルールの記録に、
+    prelim_dir (予備測定の出力) があれば対応の確認 (prelim_check) に使う"""
     from advisor.versions import sha256_text
     facts: dict = {}
     # 自チーム
     team = {"sha16": None, "species": None, "file": "team.txt"}
     if team_source == "general":
+        team = pool_team_facts(own_pool, seed, notes)
+    elif team_source == "general-pinned":
         team = ranked_team_facts(seed, notes)
     elif team_text:
         team["sha16"] = sha256_text(team_text)
@@ -538,13 +718,9 @@ def collect_facts(team_text: Optional[str], selection_model: Path, split_file: P
     if git["commit"] is None:
         notes.append("git.commit: 取得できない")
     facts["data"], facts["git"] = data, git
-    # Showdown
-    sd_dir = REPO / "pokemon-showdown"
-    sd = {"dir": str(sd_dir), "commit": _git(["rev-parse", "HEAD"], sd_dir) if sd_dir.exists() else None,
-          "port": SHOWDOWN_PORT, "listening": _listening(SHOWDOWN_PORT)}
-    if sd["commit"] is None:
-        notes.append(f"showdown.commit: {sd_dir} が無いか git でない")
-    facts["showdown"] = sd
+    # Showdown (版とルール。2026-10-09 M2d)
+    facts["showdown"] = showdown_facts(Path(showdown_dir) if showdown_dir else REPO / "pokemon-showdown", notes)
+    facts["prelim_check"] = prelim_correspondence(prelim_dir)
     # season_pin (読むだけ。pin_for は表を書くので使わない)
     try:
         from tools.team_build.season_pin import PINS_PATH, load_table
@@ -736,16 +912,27 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--compare", choices=("rl", "scoring"), default="rl",
                     help="比べる条件: rl = RL 加点の重み 0 / 5 / 25 (既定)、scoring = 採点方式 legacy / transition (2026-10-09 M2b)")
     ap.add_argument("--team", choices=P1_TEAM_SOURCES, default=None,
-                    help="自チームの出所: general = 一般的なチーム (使用率上位の構築を seed で引く。登録参照は無効化) / "
+                    help="自チームの出所: general = 一般的なチーム (実験専用の構築プール --own-pool から seed で引く。登録参照は無効化) / "
+                         "general-pinned = 旧固定プール (META_PIN の構築を seed で引く。旧固定プール上の比較) / "
                          "registered = 最新の登録チーム (config/my_team.json)。既定は --compare scoring → general、rl → registered")
+    ap.add_argument("--own-pool", default=P1_SCORING_POOL_FILE,
+                    help="--team general の実験専用の構築プール (tools.scoring_pool のファイル。既定 config P1_SCORING_POOL_FILE)")
+    ap.add_argument("--showdown-dir", default=None, help="Showdown の版とルールを記録する pokemon-showdown (既定 REPO/pokemon-showdown)")
+    ap.add_argument("--prelim-dir", default=None,
+                    help="予備測定 (--prelim) の出力 dir。本番の起動前検査で、その相手 id と自チームの対応が成り立つことを確かめる")
     args = ap.parse_args(argv)
     team_source = resolve_team_source(args.team, args.compare)
+    own_pool: Optional[Path] = _abs(args.own_pool).resolve() if (args.own_pool and team_source == "general") else None
+    showdown_dir: Optional[Path] = Path(args.showdown_dir).resolve() if args.showdown_dir else None
+    prelim_dir: Optional[Path] = Path(args.prelim_dir).resolve() if args.prelim_dir else None
 
     now = time.time()
     battles = resolve_battles(args.battles, args.prelim)
     out_dir = Path(args.out).resolve() if args.out else default_out_dir(now, args.prelim)
     split_file, selection_model = _abs(args.split), _abs(args.selection_model)
     design = plan_scoring() if args.compare == "scoring" else plan()
+    # 採点方式の比較では感度 (楽観側の HP・持ち物) を切る (2026-10-09 M2d、レビュー 3。全条件で共通の環境)
+    sens_off = args.compare == "scoring"
     notes: list = []
     if args.prelim and battles != P1_PRELIM_BATTLES:
         notes.append(f"予備測定だが対戦数は --battles {battles} を使った")
@@ -761,14 +948,15 @@ def main(argv: Optional[list] = None) -> int:
         pin_s = str(pin_now) if pin_now is not None else pin_for_cmd
         notes_now = list(notes)
         facts = collect_facts(team_text, selection_model, split_file, args.fold, pin_now, notes_now,
-                              team_source=team_source, seed=args.seed)
+                              team_source=team_source, seed=args.seed, own_pool=own_pool, showdown_dir=showdown_dir,
+                              prelim_dir=prelim_dir)
         if design.get("factor") == "scoring":
             cmds = {c: build_command(design["cond_weight"][c], out_dir, team_file, split_file, args.fold, args.seed, battles,
-                                     selection_model, pin_s, cond=c) for c in design["conditions"]}
+                                     selection_model, pin_s, cond=c, own_pool=own_pool) for c in design["conditions"]}
         else:
             cmds = {cond_name(w): build_command(w, out_dir, team_file, split_file, args.fold, args.seed, battles,
-                                                selection_model, pin_s) for w in design["weights"]}
-        env = child_environment(pin_s, team_source=team_source)
+                                                selection_model, pin_s, own_pool=own_pool) for w in design["weights"]}
+        env = child_environment(pin_s, team_source=team_source, sensitivity_off=sens_off)
         return build_conditions(design, facts, battles, args.prelim, args.seed, args.fold, str(split_file),
                                 args.time_limit_sec, str(out_dir), cmds, env, started_at, notes_now, team_source=team_source)
 
@@ -776,7 +964,8 @@ def main(argv: Optional[list] = None) -> int:
         cond = assemble(pin_dir, None)
         print(json.dumps(cond, ensure_ascii=False, indent=1))
         print("\n# コマンド列 (環境: CHAMPIONS_MODELS_DIR = ピン、スレッド数 1"
-              + (f"、{MY_TEAM_DISABLED_ENV}=1 (登録参照の無効化、全条件)" if team_source == "general" else "") + ")")
+              + (f"、{MY_TEAM_DISABLED_ENV}=1 (登録参照の無効化、全条件)" if team_source in GENERAL_SOURCES else "")
+              + (f"、{TRANSITION_SENSITIVITY_ENV}=0 (感度を切る、全条件)" if sens_off else "") + ")")
         for c, cmd in cond["commands"].items():
             extra = " ".join(f"{k}={v}" for k, v in ((cond.get("cond_env") or {}).get(c) or {}).items())
             print(f"{c}: " + (extra + " " if extra else "") + " ".join(cmd))
@@ -816,7 +1005,7 @@ def main(argv: Optional[list] = None) -> int:
     _write_json(out_dir / "conditions.json", cond)
     print(f"[p1] 条件表 {out_dir / 'conditions.json'} / {battles} 戦 × {len(cond['commands'])} 条件 / 開始 {started_at}")
     print(f"[p1] 注意: {SCHEDULE_NOTE}")
-    env = child_environment(str(pin_dir), team_source=team_source)
+    env = child_environment(str(pin_dir), team_source=team_source, sensitivity_off=sens_off)
     final = launch(cond, out_dir, env, battles, args.time_limit_sec)
     if args.prelim:
         final["prelim_advice"] = prelim_advice(final["elapsed_sec"], final["reached"], final.get("returncodes"),

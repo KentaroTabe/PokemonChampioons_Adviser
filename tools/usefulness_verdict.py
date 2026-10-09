@@ -16,6 +16,9 @@ ranked = 一般的なチーム / registered = 最新の登録チーム) と、�
   - 判定不能 (inconclusive): それ以外 (現状維持)
 n が最終対戦数に満たない、または条件表が incomplete: true なら採否を出さない (中間確認: 推定値・区間・費用の更新だけ)。
 全条件の対象 n 戦ぶんの相手 id (battles.jsonl の opponent_team_id) が揃い条件間で一致することを確かめられなければ、比較条件の不成立 (mode invalid) として採否を出さない (統計的な判定不能とは別。2026-10-09 レビュー指摘 1)。
+採点方式の比較で条件表が own_check.required を持てば (2026-10-09 M2d、usefulness_p1 が書く)、自チームの対応も確かめる: 対戦 i の
+送った自チームの本文の sha16 (battles.jsonl の own_team_sha16) が条件間で一致し、各条件で助言が参照した型と送った型の不一致
+(ref_check.mismatch) が 0 で、確認できない対戦が無いときだけ最終判定を出す (満たさなければ mode invalid、理由と件数を残す)。
 各条件の勝率と Wilson 区間は参考値 (対応比較の代わりにはならない)。
 
 純粋な部分 (corrected_z / decide / compare / wilson / align / build_verdict / render) は tests/test_usefulness_verdict.py で確かめる。
@@ -42,7 +45,8 @@ MODE_INTERIM = "interim"
 # 比較条件の不成立 (対応の確認ができない: 相手 id の不一致・欠落・不足。統計的な「判定不能」とは別。2026-10-09 レビュー指摘 1)
 MODE_INVALID = "invalid"
 # 自チームの出所 (条件表の team.source) の表示名
-TEAM_LABELS = {"ranked": "一般的なチーム", "registered": "最新の登録チーム"}
+TEAM_LABELS = {"ranked": "一般的なチーム", "registered": "最新の登録チーム",
+               "pool": "一般的なチーム (実験専用の構築プール)"}
 
 
 # ------------------------------------------------------------------ 純粋
@@ -75,8 +79,58 @@ def scoring_fallback_summary(doc: Optional[dict]) -> Optional[dict]:
     n_tr = int(st.get("scoring_transition") or 0)
     n_fb = int(st.get("scoring_fallback") or 0)
     by_reason = {k.split(":", 1)[1]: int(v) for k, v in st.items() if str(k).startswith("scoring_fallback:")}
+    # 2026-10-09 M2d: 本採点 (時間と予算超過の退避) / 感度 (有効か・状態・省略の理由) / 全処理時間 (感度込み) を分ける。
+    # 未評価の応手が出た決定 (区間で順位が決まった・決まらず退避の両方) の数と技も載せる
+    timing = doc.get("transition_timing") or {}
+    n_budget = int(st.get("scoring_fallback:budget") or 0)
+    sens_status = {k.split(":", 1)[1]: int(v) for k, v in st.items() if str(k).startswith("sens:")}
+    sens_omit = {k.split(":", 1)[1]: int(v) for k, v in st.items() if str(k).startswith("sens_omitted:")}
+    une_by = {k.split(":", 1)[1]: int(v) for k, v in st.items() if str(k).startswith("scoring_unevaluated:")}
     return {"advice_scoring_mode": doc.get("advice_scoring_mode"), "scoring_transition": n_tr, "scoring_fallback": n_fb,
-            "fallback_rate": (n_fb / n_tr) if n_tr else None, "fallback_by_reason": by_reason}
+            "fallback_rate": (n_fb / n_tr) if n_tr else None, "fallback_by_reason": by_reason,
+            "main": {"budget_fallback": n_budget, "budget_fallback_rate": (n_budget / n_tr) if n_tr else None,
+                     "p50_ms": (timing.get("main") or {}).get("p50_ms"), "p95_ms": (timing.get("main") or {}).get("p95_ms")},
+            "sens": {"enabled": doc.get("transition_sensitivity"), "status": sens_status, "omitted": sens_omit},
+            "total": {"p50_ms": (timing.get("total") or {}).get("p50_ms"), "p95_ms": (timing.get("total") or {}).get("p95_ms")},
+            "unevaluated": {"n": int(st.get("scoring_unevaluated") or 0),
+                            "by_move": dict(sorted(une_by.items(), key=lambda kv: (-kv[1], kv[0])))}}
+
+
+def own_correspondence_check(records_by_cond: Optional[dict], conds: Sequence[str], n: int) -> tuple:
+    """自チームの対応の検査 (純粋。2026-10-09 M2d、レビュー 6)。records_by_cond = 条件名 → battles.jsonl の記録の列。
+    対戦 i (先頭 n 戦) について (a) 送った自チームの本文の sha16 (own_team_sha16) が条件間で一致、(b) 各条件で助言が参照した型と
+    送った型の不一致 (ref_check.mismatch) が 0、(c) 確認できない対戦 (own_team_sha16 が無い・ref_check が無いか検査 0 件) が無い。
+    戻り値 (成り立たない理由の list, 要約)。理由が空なら成立"""
+    recs = records_by_cond or {}
+    unverifiable, ref_bad, unbuilt = {}, {}, {}
+    hash_mismatch = 0
+    for c in conds:
+        rows = list(recs.get(c) or [])[:n]
+        if len(rows) < n:
+            unverifiable[c] = unverifiable.get(c, 0) + (n - len(rows))
+        for r in rows:
+            rc = r.get("ref_check") if isinstance(r.get("ref_check"), dict) else None
+            if not r.get("own_team_sha16") or rc is None or int(rc.get("n") or 0) == 0:
+                unverifiable[c] = unverifiable.get(c, 0) + 1
+            if rc is not None and int(rc.get("mismatch") or 0) > 0:
+                ref_bad[c] = ref_bad.get(c, 0) + 1
+            if rc is not None and int(rc.get("unbuilt") or 0) > 0:
+                unbuilt[c] = unbuilt.get(c, 0) + 1
+    for i in range(n):
+        shas = {(list(recs.get(c) or [])[i].get("own_team_sha16") if i < len(recs.get(c) or []) else None) for c in conds}
+        shas.discard(None)
+        if len(shas) > 1:
+            hash_mismatch += 1
+    reasons = []
+    if hash_mismatch:
+        reasons.append(f"自チームの本文の sha16 が条件間で食い違う対戦が {hash_mismatch} 件")
+    if ref_bad:
+        reasons.append(f"助言が参照した型が送った型と違う対戦: {ref_bad}")
+    if unverifiable:
+        reasons.append(f"自チームの対応を確認できない対戦: {unverifiable}")
+    summary = {"n": n, "hash_mismatch": hash_mismatch, "ref_mismatch_battles": ref_bad, "unverifiable": unverifiable,
+               "unbuilt_battles": unbuilt}
+    return reasons, summary
 
 
 def corrected_z(k: int, alpha: float = P1_ALPHA) -> float:
@@ -163,10 +217,12 @@ def build_verdict(conditions: dict, outcomes_by_cond: dict, weights: Sequence[fl
                   mde: float = P1_MDE, alpha: float = P1_ALPHA, sources: Optional[dict] = None,
                   opp_ids_by_cond: Optional[dict] = None, elapsed_by_cond: Optional[dict] = None,
                   baseline_cond: Optional[str] = None, compare_conds: Optional[Sequence[str]] = None,
-                  scoring_stats: Optional[dict] = None) -> dict:
+                  scoring_stats: Optional[dict] = None, own_records_by_cond: Optional[dict] = None) -> dict:
     """集計 (純粋)。conditions = 条件表 (incomplete を見る)。outcomes_by_cond = 条件名 → 勝敗列 (1/0)。
     baseline_cond / compare_conds (採点方式の比較: scoring:legacy / [scoring:transition]) を渡せばその条件名で比べる
-    (無ければ重みの条件 rl<W>)。scoring_stats (条件名 → scoring_fallback_summary) があれば結果に残す"""
+    (無ければ重みの条件 rl<W>)。scoring_stats (条件名 → scoring_fallback_summary) があれば結果に残す。
+    own_records_by_cond (条件名 → battles.jsonl の記録。2026-10-09 M2d) を渡せば自チームの対応 (own_correspondence_check) も
+    確かめ、成り立たなければ比較条件の不成立 (invalid)。渡さなければ確かめない (RL の比較・M2d より前の条件表)"""
     if baseline_cond is not None:
         base = baseline_cond
         others = [c for c in (compare_conds or []) if c != base]
@@ -193,6 +249,10 @@ def build_verdict(conditions: dict, outcomes_by_cond: dict, weights: Sequence[fl
     mode = MODE_INTERIM if reasons else MODE_FINAL
     # 対応の確認 (全条件の対象 n 戦ぶんの相手 id が揃い、条件間で一致する)。できなければ比較条件の不成立 → 採否を出さない
     invalid_reasons = correspondence_check(opp_ids_by_cond, [base] + others, n) if not missing else []
+    own_summary = None
+    if own_records_by_cond is not None and not missing:
+        own_reasons, own_summary = own_correspondence_check(own_records_by_cond, [base] + others, n)
+        invalid_reasons = invalid_reasons + own_reasons
     if invalid_reasons:
         mode = MODE_INVALID
     comparisons = []
@@ -223,6 +283,8 @@ def build_verdict(conditions: dict, outcomes_by_cond: dict, weights: Sequence[fl
            "per_condition": per_cond, "cost": cost, "opponent_mismatches": mism, "notes": notes}
     if scoring_stats is not None:
         out["scoring_stats"] = dict(scoring_stats)
+    if own_summary is not None:
+        out["own_correspondence"] = own_summary
     return out
 
 
@@ -235,6 +297,13 @@ def _f(x, nd: int = 3, signed: bool = False) -> str:
 def team_summary(team: dict) -> tuple:
     """条件表の team → 表示用の (項目, 値) (純粋)。source が無い (RL の比較の登録チーム) なら従来の表示"""
     src = (team or {}).get("source")
+    if src == "pool":
+        return ("自チーム", f"{TEAM_LABELS['pool']} ({team.get('path')}、使用率スナップショット {team.get('snapshot_id')}、"
+                            f"{team.get('battle_format')}、{team.get('n_teams')} 件 sha16={team.get('sha16')}、抽選 seed {team.get('seed')}、"
+                            f"登録参照は無効化)")
+    if src == "ranked" and team.get("pinned"):
+        return ("自チーム", f"{TEAM_LABELS['ranked']} 【旧固定プール上の比較】 (使用率スナップショット {team.get('meta_snapshot_id')}、"
+                            f"抽選 seed {team.get('seed')}、プール {team.get('n_teams')} 件 sha16={team.get('pool_sha16')}、登録参照は無効化)")
     if src == "ranked":
         return ("自チーム", f"{TEAM_LABELS['ranked']} (使用率スナップショット {team.get('meta_snapshot_id')}、"
                             f"抽選 seed {team.get('seed')}、プール {team.get('n_teams')} 件 sha16={team.get('pool_sha16')}、登録参照は無効化)")
@@ -313,6 +382,23 @@ def render(verdict: dict, conditions: Optional[dict] = None) -> str:
             reasons = ", ".join(f"{k} {n}" for k, n in top) or "-"
             lines.append(f"| {c} | {s.get('advice_scoring_mode') or '-'} | {s.get('scoring_transition')} | {s.get('scoring_fallback')} | "
                          f"{_f(s.get('fallback_rate'))} | {reasons} |")
+    if v.get("scoring_stats"):
+        lines += ["", "### 本採点 / 感度 / 全処理時間 (transition。2026-10-09 M2d)", "",
+                  "| 条件 | 本採点 p50 / p95 ms | 本採点の予算超過の退避 | 感度 (有効 / 状態 / 省略) | 全処理 p50 / p95 ms | 未評価の応手が出た決定 (技の上位) |",
+                  "|---|---|---|---|---|---|"]
+        for c, s in v["scoring_stats"].items():
+            if not s or not s.get("scoring_transition"):
+                continue
+            m, sn, t, u = s.get("main") or {}, s.get("sens") or {}, s.get("total") or {}, s.get("unevaluated") or {}
+            top = ", ".join(f"{k} {n}" for k, n in list((u.get("by_move") or {}).items())[:3]) or "-"
+            lines.append(f"| {c} | {_f(m.get('p50_ms'), 1)} / {_f(m.get('p95_ms'), 1)} | {m.get('budget_fallback')} "
+                         f"({_f(m.get('budget_fallback_rate'))}) | {sn.get('enabled')} / {sn.get('status') or '-'} / "
+                         f"{sn.get('omitted') or '-'} | {_f(t.get('p50_ms'), 1)} / {_f(t.get('p95_ms'), 1)} | {u.get('n')} ({top}) |")
+    if v.get("own_correspondence") is not None:
+        oc = v["own_correspondence"]
+        lines += ["", f"自チームの対応 (送った本文の sha16 の条件間の一致・参照した型の一致): 食い違い {oc['hash_mismatch']} 件 / "
+                      f"参照の不一致 {oc['ref_mismatch_battles'] or 0} / 確認できない {oc['unverifiable'] or 0} / "
+                      f"助言の図鑑に無い個体を含む対戦 {oc['unbuilt_battles'] or 0}"]
     if v["opponent_mismatches"] is not None:
         lines += ["", f"相手 id の条件間の食い違い: {v['opponent_mismatches']} 件"]
     if v["notes"]:
@@ -374,6 +460,16 @@ def load_outcomes_conds(out_dir: Path, conds: Sequence[str]) -> tuple:
     return outcomes, sources, opp_ids, elapsed
 
 
+def load_records_conds(out_dir: Path, conds: Sequence[str]) -> dict:
+    """条件名 → battles.jsonl の記録の列 (自チームの対応の検査用。ファイルが無い条件は入れない)"""
+    out = {}
+    for c in conds:
+        jl = out_dir / f"{cond_file(c)}.battles.jsonl"
+        if jl.exists():
+            out[c] = _read_jsonl(jl)
+    return out
+
+
 def run(out_dir: Path) -> dict:
     cpath = out_dir / "conditions.json"
     try:
@@ -388,12 +484,15 @@ def run(out_dir: Path) -> dict:
     mde = float(conditions.get("mde", P1_MDE))
     alpha = float(conditions.get("alpha", P1_ALPHA))
     scoring = conditions.get("factor") == "scoring"
-    base_c, other_c, sstats = None, None, None
+    base_c, other_c, sstats, own_recs = None, None, None, None
     if scoring:
         # 採点方式の比較: 基準 scoring:legacy、比較 scoring:transition − legacy (k = 1)。退避率は各条件の json の stats
         base_c, other_c = scoring_conds(conditions)
         outcomes, sources, opp_ids, elapsed = load_outcomes_conds(out_dir, [base_c] + other_c)
         sstats = {c: scoring_fallback_summary(_read_json(out_dir / f"{cond_file(c)}.json")) for c in [base_c] + other_c}
+        # 自チームの対応 (2026-10-09 M2d): 条件表が検査を指定していれば (usefulness_p1 --compare scoring の own_check.required)
+        if (conditions.get("own_check") or {}).get("required"):
+            own_recs = load_records_conds(out_dir, [base_c] + other_c)
     else:
         outcomes, sources, opp_ids, elapsed = load_outcomes(out_dir, weights)
     # 時間上限で止めた等で rl<W>.json に経過秒が無ければ、条件表の所要秒で代用する (並列なので全条件で同じ)
@@ -401,7 +500,9 @@ def run(out_dir: Path) -> dict:
         if elapsed.get(c) is None and conditions.get("elapsed_sec") is not None:
             elapsed[c] = conditions["elapsed_sec"]
     v = build_verdict(conditions, outcomes, weights, baseline, final_battles, mde, alpha, sources, opp_ids, elapsed,
-                      baseline_cond=base_c, compare_conds=other_c, scoring_stats=sstats)
+                      baseline_cond=base_c, compare_conds=other_c, scoring_stats=sstats, own_records_by_cond=own_recs)
+    if scoring and own_recs is None:
+        v["notes"].append("条件表に自チームの対応の検査の指定 (own_check.required) が無い (M2d より前の条件表): 自チームの型の対応は未確認")
     text = render(v, conditions)
     (out_dir / "verdict.json").write_text(json.dumps(v, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     (out_dir / "verdict.md").write_text(text, encoding="utf-8")

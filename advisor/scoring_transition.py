@@ -24,6 +24,14 @@ T は共通の遷移 advisor.transition.resolve_turn_branches (行動順・同�
 入れ替えた順位も感度 (sensitivity) に残す (どちらも順位には使わない。計算予算の残りで計算し、超えたら省略して理由を残す)。
 判明情報と矛盾する仮説 (消費済みの持ち物・相手の技の固定) は build_inputs で除く。退避率は決定単位でも集計できる (summarize_fallbacks)。
 
+2026-10-09 M2d で変えたこと (レビュー 1・3):
+- 未評価の確率の区間: 相手の応手の未対応の効果が**使用率の推定技**から出たときは退避せず、その応手を「未評価」に分ける (判明技なら
+  従来どおり opp_unsupported で退避)。未評価の応手の確率の合計 ε は全候補で共通、候補の q は残りの応手で正規化した期待値、
+  Q の区間は [(1 − ε) q − ε, (1 − ε) q + ε] (V ∈ [−1, 1])。第一候補の下限が他の全候補の上限を上回るときだけ順位を確定し、
+  そうでなければ退避 ("opp_unevaluated_ambiguous")。未評価の応手を外して正規化するだけの案は不採用 (ε を残す)。
+- 本採点と感度の分離: 感度 (楽観側の HP・持ち物) は config.TRANSITION_SENSITIVITY_ENABLED で切れる。感度の予算超過は感度を省略する
+  だけで退避ではない (退避は本採点の予算超過だけ)。transition_stats の main / sens / elapsed_total_ms に分けて残す。
+
 継続方策 (対戦の仕様ではなく評価のための仮定): ひんし後の繰り出し先と交代技の繰り出し先は transition.best_bench、2 ターン目以降は
 V の後続の対面 (1 回の撃ち合い) で近似する。
 """
@@ -198,6 +206,9 @@ class TransitionInputs:
     hp_alt: Optional[tuple] = None
     # 持ち物の感度 (段 5): [(名前, 相手の陣営 or None, 省略の理由 or None)]。名前は "scarf" / "sash"
     item_alts: list = field(default_factory=list)
+    # 相手の技の候補のうち使用率で推定した技 (判明技でない。pool の重み < 100) の id (2026-10-09 M2d)。これらの応手の未対応の効果は
+    # 退避せず「未評価」に回す (_score_core)。空なら従来どおり全部退避
+    opp_estimated: frozenset = frozenset()
 
 
 def _fallback(reason: str, t0: float, **extra) -> dict:
@@ -221,61 +232,111 @@ def _responses_for(me: SimSide, opp: SimSide, pool: list, damage_fn: Callable, o
     return None
 
 
+# 局面評価 V の値域 (advisor.valuation: 終了 ±1、終了していない局面は ±VALUATION_NONTERMINAL_MAX)。未評価の応手の寄与の上下限に使う
+V_MIN, V_MAX = -1.0, 1.0
+
+
+def _unevaluated_ok(inp: "TransitionInputs", oa: Action) -> bool:
+    """相手の応手 oa の未対応の効果を「未評価」に回してよいか (2026-10-09 M2d、レビュー 1)。
+    使用率で推定した技 (inp.opp_estimated に入っている技) だけ。判明技・交代・推定の集合が無い入力は従来どおり退避"""
+    return oa.kind == "move" and bool(oa.move_id) and oa.move_id in (inp.opp_estimated or ())
+
+
 def _score_core(inp: TransitionInputs, t0: float, deadline: float, budget: float) -> dict:
-    """候補ごとの Q / Q_worst / 分岐の要約 (score の本体。退避の判定もここ)"""
-    out = []
+    """候補ごとの Q / Q_worst / 分岐の要約 (score の本体。退避の判定もここ)。
+
+    未評価の応手 (2026-10-09 M2d): 相手の応手の解決に未対応の効果が出たとき、その応手が使用率の推定技なら退避せずに「未評価」に
+    分ける。未評価の応手の集合 U は全候補で共通 (どれかの候補の解決で出たら全候補で U に入れる)、確率の合計を ε とする。
+    各候補の q は U を除いた応手で正規化した期待値、候補の Q の区間は [(1 − ε) q + ε V_MIN, (1 − ε) q + ε V_MAX]。
+    第一候補の下限が他の全候補の上限を上回るときだけ順位を確定し、そうでなければ決定全体を退避する
+    ("opp_unevaluated_ambiguous")。ε = 0 なら従来どおり (q は全応手の期待値、区間の欄は付けない)。
+    判明技の未対応・自分の候補の未対応は従来どおり即座に退避"""
+    rows = []          # (cand, [(応手の番号, 確率, 期待値, ラベル, 統計)], 分岐数)
     n_total = 0
     reserves = {"me": int(inp.vctx.my_unknown or 0), "opp": int(inp.vctx.opp_unknown or 0)}
+    unevaluated: dict = {}     # 応手の番号 → (効果, 技)
     for cand in inp.candidates:
-        per_resp = []      # (確率, 期待値, 応手のラベル)
-        p_skip = p_ko = p_faint = p_win = p_lose = 0.0
+        per_resp = []
         n_br = 0
         if cand.mode == "replace" or inp.responses is None:
             me2 = apply_switch(inp.me, cand.action.bench_index) if cand.action.kind == "switch" else inp.me
             v = value(me2, inp.opp, inp.vctx)
-            per_resp.append((1.0, v, None))
-            p_faint = 1.0 if me2.active_hp <= 0 else 0.0
+            st = {"skip": 0.0, "ko": 0.0, "faint": 1.0 if me2.active_hp <= 0 else 0.0, "win": 0.0, "lose": 0.0}
+            per_resp.append((None, 1.0, v, None, st))
             n_br = 1
         else:
-            for p_o, oa in inp.responses:
+            for ri, (p_o, oa) in enumerate(inp.responses):
                 brs = resolve_turn_branches(inp.me, inp.opp, cand.action, oa, inp.my_field, inp.opp_field,
                                             damage_fn=inp.damage_fn, reserves=reserves)
                 e = 0.0
+                st = {"skip": 0.0, "ko": 0.0, "faint": 0.0, "win": 0.0, "lose": 0.0}
+                skip_resp = False
                 for p_b, res in brs:
                     if res.unsupported_by.get("me"):
                         w, eff, src = res.unsupported_by["me"][0]
                         return _fallback(f"unsupported:{eff}:{src}", t0, candidate=cand.id)
                     if res.unsupported_by.get("opp"):
-                        # 相手の応手の未対応の効果 (2026-10-09 M2c): 記録だけで続行せず、その決定を legacy に退避する
                         w, eff, src = res.unsupported_by["opp"][0]
+                        if _unevaluated_ok(inp, oa):
+                            # 推定技の未対応の効果: この応手を未評価に回す (全候補で共通の集合)
+                            unevaluated.setdefault(ri, (eff, oa.move_id))
+                            skip_resp = True
+                            break
+                        # 判明技の未対応の効果 (2026-10-09 M2c): 記録だけで続行せず、その決定を legacy に退避する
                         return _fallback(f"opp_unsupported:{eff}:{src}", t0, candidate=cand.id, response=oa.label)
                     e += p_b * value(res.me, res.opp, inp.vctx, res.winner)
                     if cand.kind == "move" and any(w == "me" and k == "skip" and d == "fainted_before_acting"
                                                    for w, k, d in res.events):
-                        p_skip += p_o * p_b
+                        st["skip"] += p_b
                     if res.fainted.get("opp"):
-                        p_ko += p_o * p_b
+                        st["ko"] += p_b
                     if res.fainted.get("me"):
-                        p_faint += p_o * p_b
+                        st["faint"] += p_b
                     if res.winner == "me":
-                        p_win += p_o * p_b
+                        st["win"] += p_b
                     elif res.winner == "opp":
-                        p_lose += p_o * p_b
+                        st["lose"] += p_b
                 n_br += len(brs)
-                per_resp.append((p_o, e, oa.label))
+                if not skip_resp:
+                    per_resp.append((ri, p_o, e, oa.label, st))
                 if time.perf_counter() > deadline:
                     return _fallback("budget", t0, candidate=cand.id, budget_ms=budget)
         n_total += n_br
-        q = sum(p * e for p, e, _l in per_resp)
-        worst_p, worst_e, worst_l = min(per_resp, key=lambda t: t[1])
-        br = {"n": n_br, "p_ko_before_act": round(p_skip, 4), "p_ko": round(p_ko, 4), "p_faint": round(p_faint, 4)}
-        if p_win > 0 or p_lose > 0:
-            br["p_win_now"] = round(p_win, 4)
-            br["p_lose_now"] = round(p_lose, 4)
-        out.append((cand, q, worst_e, worst_l, br))
+        rows.append((cand, per_resp, n_br))
+    eps = sum(inp.responses[ri][0] for ri in unevaluated) if (unevaluated and inp.responses) else 0.0
+    une_info = None
+    if unevaluated:
+        une_info = {"eps": round(eps, 6),
+                    "moves": sorted({m for _e, m in unevaluated.values()}),
+                    "effects": sorted({f"{e}:{m}" for e, m in unevaluated.values()})}
+    out = []
+    for cand, per_resp, n_br in rows:
+        kept = [r for r in per_resp if r[0] is None or r[0] not in unevaluated]
+        if not kept:
+            return _fallback("opp_unevaluated_ambiguous", t0, candidate=cand.id, unevaluated=une_info)
+        tot = sum(p for _i, p, _e, _l, _s in kept)
+        norm = 1.0 if not unevaluated else (tot or 1.0)
+        q = sum(p * e for _i, p, e, _l, _s in kept) / norm
+        worst = min(kept, key=lambda t: t[2])
+        agg = {k: sum(p * s[k] for _i, p, _e, _l, s in kept) / norm for k in ("skip", "ko", "faint", "win", "lose")}
+        br = {"n": n_br, "p_ko_before_act": round(agg["skip"], 4), "p_ko": round(agg["ko"], 4),
+              "p_faint": round(agg["faint"], 4)}
+        if agg["win"] > 0 or agg["lose"] > 0:
+            br["p_win_now"] = round(agg["win"], 4)
+            br["p_lose_now"] = round(agg["lose"], 4)
+        out.append((cand, q, worst[2], worst[3], br))
     # 並べ替えは丸める前の Q (同じ Q は候補の順 = 技の枠の順 → 交代の順のまま)
     out.sort(key=lambda t: -round(t[1], 9))      # 浮動小数の誤差で同じ Q の順が入れ替わらないように 9 桁で比べる
-    return {"ok": True, "ranked": out, "n_branches": n_total}
+    intervals = None
+    if unevaluated:
+        intervals = {(c.kind, c.id): ((1.0 - eps) * q + eps * V_MIN, (1.0 - eps) * q + eps * V_MAX) for c, q, *_r in out}
+        if len(out) > 1:
+            lo_best = intervals[(out[0][0].kind, out[0][0].id)][0]
+            hi_other = max(intervals[(c.kind, c.id)][1] for c, *_r in out[1:])
+            if not lo_best > hi_other:
+                return _fallback("opp_unevaluated_ambiguous", t0, unevaluated=dict(
+                    une_info, best=out[0][0].id, best_lo=round(lo_best, 4), other_hi=round(hi_other, 4)))
+    return {"ok": True, "ranked": out, "n_branches": n_total, "unevaluated": une_info, "intervals": intervals}
 
 
 def _best_id(core: dict) -> Optional[tuple]:
@@ -285,34 +346,54 @@ def _best_id(core: dict) -> Optional[tuple]:
     return (c.kind, c.id)
 
 
-def score(inp: TransitionInputs, budget_ms: Optional[float] = None) -> dict:
+def sensitivity_enabled() -> bool:
+    """感度 (楽観側の HP・スカーフ / タスキの有無) を計算するか (config.TRANSITION_SENSITIVITY_ENABLED を呼ぶたびに読む)"""
+    return bool(C.TRANSITION_SENSITIVITY_ENABLED)
+
+
+def score(inp: TransitionInputs, budget_ms: Optional[float] = None, sensitivity: Optional[bool] = None) -> dict:
     """候補ごとの Q / Q_worst / 分岐の要約を計算する (純粋。入力は書き換えない)。
 
-    戻り値: 成功 {"ok": True, "actions": [...] (スコア順), "elapsed_ms", "n_branches", "responses", "opp_unmodeled",
-    "hp_range", "sensitivity"} / 退避 {"ok": False, "fallback": 理由, "elapsed_ms", ...}。
+    戻り値: 成功 {"ok": True, "actions": [...] (スコア順), "elapsed_ms", "elapsed_total_ms", "n_branches", "responses",
+    "opp_unmodeled", "hp_range", "sensitivity", "unevaluated", "main", "sens"} / 退避 {"ok": False, "fallback": 理由, "elapsed_ms", ...}。
 
-    順位は inp の状態 (HP が不確かな個体は悲観側の仮説: 自分 = 下限、相手 = 上限) の期待値で決める (2026-10-09 M2c)。計算予算の
-    残りで、楽観側の HP の仮説 (hp_alt) と、相手の場の個体のスカーフ / タスキの有無を入れ替えた仮説 (item_alts) でも順位を計算し、
-    第一候補が変わるかを hp_range / sensitivity に残す (順位には使わない。予算を超えたら省略して理由を残す)。
-    elapsed_ms は順位の計算 (悲観側) にかかった時間、elapsed_total_ms は感度の計算を含む時間"""
+    順位は inp の状態 (HP が不確かな個体は悲観側の仮説: 自分 = 下限、相手 = 上限) の期待値で決める (2026-10-09 M2c。この悲観側を
+    T と V に渡す処理は感度の有無に関係なく常に行う)。
+
+    本採点と感度の分離 (2026-10-09 M2d、レビュー 3):
+    - 本採点 ("main"): 順位を決める計算。elapsed_ms はその時間。計算予算 (TRANSITION_BUDGET_MS) を超えたらその決定は legacy に
+      退避する (fallback "budget"。退避はこの場合だけ)。
+    - 感度 ("sens"): 楽観側の HP の仮説 (hp_alt) と、相手の場の個体のスカーフ / タスキの有無を入れ替えた仮説 (item_alts) での
+      順位。順位には使わない。sensitivity (既定 config.TRANSITION_SENSITIVITY_ENABLED) が偽なら計算しない (status "disabled")。
+      本採点の残りの予算で計算し、予算を超えた仮説は省略して理由を残す (**省略しても本採点の結果を返す。退避ではない**)。
+    - 全処理時間 (elapsed_total_ms): 感度込みの時間"""
     t0 = time.perf_counter()
     budget = C.TRANSITION_BUDGET_MS if budget_ms is None else float(budget_ms)
     deadline = t0 + budget / 1000.0
+    sens_on = sensitivity_enabled() if sensitivity is None else bool(sensitivity)
     if not inp.candidates:
         return _fallback("no_candidates", t0)
     core = _score_core(inp, t0, deadline, budget)
     if not core.get("ok"):
+        core["main"] = {"elapsed_ms": core.get("elapsed_ms"), "budget_ms": budget,
+                        "budget_fallback": core.get("fallback") == "budget"}
         return core
     elapsed_main = round((time.perf_counter() - t0) * 1000, 1)
     best = _best_id(core)
+    sens_run: list = []
+    sens_omitted: dict = {}
 
-    def alt_eval(me: SimSide, opp: SimSide) -> dict:
+    def alt_eval(name: str, me: SimSide, opp: SimSide) -> dict:
         if time.perf_counter() > deadline:
+            sens_omitted[name] = "budget"
             return {"omitted": "budget"}
         alt = variant_inputs(inp, me, opp)
         r = _score_core(alt, t0, deadline, budget)
         if not r.get("ok"):
-            return {"omitted": r.get("fallback") or "unknown"}
+            why = r.get("fallback") or "unknown"
+            sens_omitted[name] = why
+            return {"omitted": why}
+        sens_run.append(name)
         b = _best_id(r)
         return {"best": b[1] if b else None, "best_kind": b[0] if b else None, "changes": b != best,
                 "q": {(c.kind, c.id): q for c, q, _qw, _wl, _br in r["ranked"]}}
@@ -322,32 +403,59 @@ def score(inp: TransitionInputs, budget_ms: Optional[float] = None) -> dict:
     if inp.hp_ranges:
         hp_info = {"individuals": [dict(h) for h in inp.hp_ranges], "best": best[1] if best else None}
         if inp.hp_alt is not None:
-            r = alt_eval(*inp.hp_alt)
-            q_opt = r.pop("q", {}) or {}
-            hp_info["optimistic"] = r
+            if sens_on:
+                r = alt_eval("hp_optimistic", *inp.hp_alt)
+                q_opt = r.pop("q", {}) or {}
+                hp_info["optimistic"] = r
+            else:
+                hp_info["optimistic"] = {"omitted": "disabled"}
     sens = {}
-    for name, alt_opp, why in inp.item_alts:
-        if alt_opp is None:
-            sens[name] = {"omitted": why}
-            continue
-        r = alt_eval(inp.me, alt_opp)
-        r.pop("q", None)
-        r["flip"] = why
-        sens[name] = r
+    if sens_on:
+        for name, alt_opp, why in inp.item_alts:
+            if alt_opp is None:
+                sens[name] = {"omitted": why}
+                sens_omitted[name] = why
+                continue
+            r = alt_eval(name, inp.me, alt_opp)
+            r.pop("q", None)
+            r["flip"] = why
+            sens[name] = r
     actions = []
+    intervals = core.get("intervals") or {}
+    une = core.get("unevaluated")
     for cand, q, qw, wl, br in core["ranked"]:
         a = _action_dict(inp, cand, q, qw, wl, br)
         if (cand.kind, cand.id) in q_opt:
             a["q_hp_opt"] = round(q_opt[(cand.kind, cand.id)], 4)
+        if (cand.kind, cand.id) in intervals:
+            lo, hi = intervals[(cand.kind, cand.id)]
+            a["q_lo"], a["q_hi"], a["eps_unevaluated"] = round(lo, 4), round(hi, 4), une["eps"]
+            a["reason"] += f" / 未評価の応手 {une['eps']:.0%} ({', '.join(une['moves'])}): Q の区間 {lo:+.3f}〜{hi:+.3f}"
         actions.append(a)
+    elapsed_total = round((time.perf_counter() - t0) * 1000, 1)
+    has_alts = bool(inp.item_alts) or inp.hp_alt is not None
+    if not sens_on:
+        sens_status = "disabled"
+    elif not has_alts:
+        sens_status = "none"
+    elif sens_omitted and not sens_run:
+        sens_status = "omitted"
+    elif sens_omitted:
+        sens_status = "partial"
+    else:
+        sens_status = "run"
     return {"ok": True, "actions": actions, "elapsed_ms": elapsed_main,
-            "elapsed_total_ms": round((time.perf_counter() - t0) * 1000, 1),
+            "elapsed_total_ms": elapsed_total,
             "n_branches": core["n_branches"],
             "responses": [{"label": a.label + ("+メガ" if a.mega and not a.label.endswith("+メガ") else ""),
                            "p": round(p, 4)} for p, a in (inp.responses or [])],
             "opp_unmodeled": [],
             "hp_range": hp_info,
-            "sensitivity": sens or None}
+            "sensitivity": sens or None,
+            "unevaluated": une,
+            "main": {"elapsed_ms": elapsed_main, "budget_ms": budget, "budget_fallback": False},
+            "sens": {"enabled": sens_on, "status": sens_status, "run": list(sens_run), "omitted": dict(sens_omitted),
+                     "elapsed_ms": round(elapsed_total - elapsed_main, 1)}}
 
 
 def _action_dict(inp: TransitionInputs, cand: Candidate, q: float, q_worst: float, worst_label, br: dict) -> dict:
@@ -545,7 +653,7 @@ def build_inputs(state: dict, resolver, *, my_view: MonView, opp_view: Optional[
     from dataclasses import replace as _r
 
     from advisor.engine import (_hp_frac_of, _opp_mega_forms, _rl_probs, build_mon_view, complete_moves_from_registration,
-                                opponent_move_pool, registered_moves_of)
+                                opponent_move_pool, registered_moves_of_mon)
     from advisor.party import battle_party_indices
     from vision.state import roster_slots
     if opp_view is None or opp_p is None:
@@ -604,7 +712,7 @@ def build_inputs(state: dict, resolver, *, my_view: MonView, opp_view: Optional[
         obs = list(p.get("moves") or [])
         if len(obs) < 4 and resolver is not None:
             try:
-                obs = complete_moves_from_registration(obs, registered_moves_of(p.get("species_ja"), resolver))
+                obs = complete_moves_from_registration(obs, registered_moves_of_mon(p, resolver))
             except Exception:
                 pass
         my_moves.setdefault(v.species_id, tuple(s.get("move_id") for s in obs
@@ -744,8 +852,20 @@ def build_inputs(state: dict, resolver, *, my_view: MonView, opp_view: Optional[
     inp = TransitionInputs(me=me, opp=opp, my_field=my_field, opp_field=opp_field, candidates=cands, responses=responses,
                            vctx=vctx, damage_fn=damage_fn, rl_probs=_rl_probs(rl_hint), legacy_by_key=legacy_by_key,
                            notes=notes, pool=list(pool), response_mode=mode, hp_ranges=ranges, hp_alt=hp_alt,
-                           item_alts=item_alts)
+                           item_alts=item_alts, opp_estimated=estimated_moves(pool, opp_p, resolver))
     return inp, None
+
+
+def estimated_moves(pool: list, opp_p: Optional[dict], resolver) -> frozenset:
+    """相手の技の候補のうち「使用率で推定した技」の id (純粋。2026-10-09 M2d)。
+    pool の重みが 100 未満 (engine.opponent_move_pool: 判明技 = 100、推定技 = 使用率 × 減衰、型の代表技 = 50) で、
+    相手の個体の判明技 (revealed_moves を resolver で引いたもの) に入っていない技"""
+    revealed = set()
+    for ja in (opp_p or {}).get("revealed_moves") or []:
+        r = resolver.resolve(ja, "moves", cutoff=0.8) if resolver is not None else None
+        if r:
+            revealed.add(r[1])
+    return frozenset(m for m, w in (pool or []) if float(w) < 100.0 and m not in revealed)
 
 
 def _side_volatiles(vols: set, encore_locked: Optional[str]) -> frozenset:
@@ -778,10 +898,27 @@ def _reason_key(fb) -> str:
     return ":".join(key[:3]) if key[0] in ("unsupported", "opp_unsupported") else key[0]
 
 
+def _pct(vals: list, q: float) -> Optional[float]:
+    """分位点 (最近傍。vals が空なら None)"""
+    if not vals:
+        return None
+    s = sorted(vals)
+    return s[min(len(s) - 1, int(len(s) * q))]
+
+
 def _rate_of(advs: list) -> dict:
     n = n_fb = 0
     by: dict = {}
     opp_by: dict = {}
+    # 未評価の応手 (2026-10-09 M2d): 未評価が出た決定の数 (続行 / 区間で順位が決まらず退避) と技の頻度
+    une_n = une_cont = une_amb = 0
+    une_by: dict = {}
+    # 本採点 / 感度 / 全処理時間 (2026-10-09 M2d)
+    main_ms: list = []
+    total_ms: list = []
+    n_budget = 0
+    sens_status: dict = {}
+    sens_omit: dict = {}
     for adv in advs:
         if adv.get("scoring_mode") != "transition":
             continue
@@ -794,11 +931,44 @@ def _rate_of(advs: list) -> dict:
             if k.startswith("opp_unsupported:"):
                 eff = k.split(":", 2)[1]
                 opp_by[eff] = opp_by.get(eff, 0) + 1
+            if k == "budget":
+                n_budget += 1
+        ts = adv.get("transition_stats") or {}
+        une = ts.get("unevaluated")
+        if une:
+            une_n += 1
+            if fb:
+                une_amb += 1
+            else:
+                une_cont += 1
+            for m in une.get("moves") or []:
+                une_by[m] = une_by.get(m, 0) + 1
+        main = ts.get("main") or {}
+        em = main.get("elapsed_ms", ts.get("elapsed_ms") if ts else None)
+        if em is not None and not fb:
+            main_ms.append(float(em))
+        if ts.get("elapsed_total_ms") is not None and not fb:
+            total_ms.append(float(ts["elapsed_total_ms"]))
+        sens = ts.get("sens")
+        if sens and not fb:
+            st = sens.get("status") or "unknown"
+            sens_status[st] = sens_status.get(st, 0) + 1
+            for name, why in (sens.get("omitted") or {}).items():
+                key = f"{name}:{why}"
+                sens_omit[key] = sens_omit.get(key, 0) + 1
     n_opp = sum(opp_by.values())
     return {"n": n, "n_fallback": n_fb, "rate": (n_fb / n) if n else None,
             "by_reason": dict(sorted(by.items(), key=lambda kv: (-kv[1], kv[0]))),
             "opp_unsupported": {"n": n_opp, "rate": (n_opp / n) if n else None,
-                                "by_effect": dict(sorted(opp_by.items(), key=lambda kv: (-kv[1], kv[0])))}}
+                                "by_effect": dict(sorted(opp_by.items(), key=lambda kv: (-kv[1], kv[0])))},
+            "unevaluated": {"n": une_n, "rate": (une_n / n) if n else None, "continued": une_cont, "ambiguous": une_amb,
+                            "by_move": dict(sorted(une_by.items(), key=lambda kv: (-kv[1], kv[0])))},
+            # 3 つを分ける: 本採点 (時間と予算超過の退避) / 感度 (実行・省略) / 全処理時間 (感度込み)。時間は採点できた決定だけ
+            "main": {"n": len(main_ms), "p50_ms": _pct(main_ms, 0.5), "p95_ms": _pct(main_ms, 0.95),
+                     "budget_fallback": n_budget, "budget_fallback_rate": (n_budget / n) if n else None},
+            "sens": {"status": dict(sorted(sens_status.items())),
+                     "omitted": dict(sorted(sens_omit.items(), key=lambda kv: (-kv[1], kv[0])))},
+            "total": {"n": len(total_ms), "p50_ms": _pct(total_ms, 0.5), "p95_ms": _pct(total_ms, 0.95)}}
 
 
 def summarize_fallbacks(advices, decisions=None) -> dict:
@@ -810,7 +980,10 @@ def summarize_fallbacks(advices, decisions=None) -> dict:
     decisions (battle_logger の decision 行の列) を渡せば、各 decision 行の advice_id の advice (決定の時点に出ていた助言) を
     その決定の代表にする (advice_id が advice の列に無い決定は数えない)。渡さなければ、advice の列の並びで position_key
     (engine.position_key_of: 場の個体・技の固定・交代しか選べないか) と turn が続けて同じ行を 1 つの決定とみなし、その最後の行を
-    代表にする。opp_unsupported = 相手の応手の未対応の効果で退避した割合と効果の内訳"""
+    代表にする。opp_unsupported = 相手の応手の未対応の効果で退避した割合と効果の内訳。
+    2026-10-09 M2d: unevaluated = 未評価の応手が出た決定 (区間で順位が決まって続行 continued / 決まらず退避 ambiguous) と技の頻度
+    (頻出する未対応の技を実装の優先順位の材料にする)。main = 本採点の時間 (p50 / p95、採点できた行だけ) と予算超過の退避、
+    sens = 感度の状態 (disabled / none / run / partial / omitted) と省略の理由、total = 感度込みの全処理時間"""
     advs = [x for x in (_advice_of(a) for a in (advices or ())) if x is not None]
     out = _rate_of(advs)
     reps: list = []

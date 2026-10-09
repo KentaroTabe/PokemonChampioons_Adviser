@@ -230,6 +230,49 @@ def registered_moves_of(species_ja: Optional[str], resolver) -> list:
     return out
 
 
+def registration_names(p: Optional[dict]) -> list:
+    """自分の個体の登録 (config/my_team.json・シムの登録 advisor_player._SIM_BUILDS) を引く名前の順 (2026-10-09 M2d)。
+    登録は通常形態の名前 (HUD の名前 / 種族 id の日本語名) で入っているので、現在形態がメガなら基本種 (gimmick.resolve_form の
+    base_species) の日本語名を先に引き、次に個体の species_ja (メガ名で登録してあればそれ)。メガでなければ species_ja だけ
+    (フォルム違いの登録キーの扱いは変えない)"""
+    if not p:
+        return []
+    ja = p.get("species_ja")
+    names = []
+    try:
+        from advisor.gimmick import resolve_form
+        form = resolve_form(p)
+    except Exception:
+        form = None
+    if form is not None and form.is_mega and form.base_species != form.species:
+        from advisor.infer import species_ja_name
+        base_ja = species_ja_name(form.base_species)
+        if base_ja and base_ja != form.base_species:
+            names.append(base_ja)
+    if ja and ja not in names:
+        names.append(ja)
+    return names
+
+
+def my_build_of(p: Optional[dict]) -> Optional[dict]:
+    """自分の個体の登録の型 (my_team.get_my_build を registration_names の順に引いて最初に見つかったもの。無ければ None)"""
+    from advisor import my_team as _mt
+    for name in registration_names(p):
+        b = _mt.get_my_build(name)
+        if b:
+            return b
+    return None
+
+
+def registered_moves_of_mon(p: Optional[dict], resolver) -> list:
+    """自分の個体の登録の技 [(日本語名, move_id)] (registered_moves_of を registration_names の順に引いて最初に空でないもの)"""
+    for name in registration_names(p):
+        r = registered_moves_of(name, resolver)
+        if r:
+            return r
+    return []
+
+
 @dataclass
 class MoveLegality:
     """場の自分の個体の技の枠 (登録で補完した後) と、それぞれの合法性 (legal_move_slots の戻り値。2026-10-09 M2a)。
@@ -434,8 +477,9 @@ def build_mon_view(p: dict, resolver=None, side: str = "opponent") -> Optional[M
     # 能力ポイント/性格/持ち物で計算する (未登録は攻撃系252仮定)
     ev, nature, item = dict(OFFENSIVE_EV), {}, p.get("item_id")
     if side == "player":
-        from advisor.my_team import get_my_build
-        build = get_my_build(p.get("species_ja"))
+        # 登録は基本種の名前で引く (2026-10-09 M2d: メガ後はメガ名で引いて外れ、メガミミロップが登録の配分・性格ではなく
+        # 既定の攻撃系 252・性格なしで評価されていた)。種族値・タイプ・固定特性は上の現在形態 (メガ) のまま
+        build = my_build_of(p)
         if build:
             if build["ev"]:
                 ev = build["ev"]
@@ -769,7 +813,7 @@ def evaluate_common(state: dict, resolver=None, scoring_mode: Optional[str] = No
     registered = None
     if len(my_p.get("moves") or []) < 4 and not switch_only and resolver is not None:
         try:
-            registered = registered_moves_of(my_p.get("species_ja"), resolver)
+            registered = registered_moves_of_mon(my_p, resolver)
         except Exception:
             registered = None
     legality = legal_move_slots(state, my_p, item=my_view.item, registered=registered, switch_only=switch_only)
@@ -1363,12 +1407,15 @@ def finish_evaluation(common: dict, rl_blend_weight: Optional[float] = None) -> 
         "position_key": common.get("position_key"),
         # 採点方式 (2026-10-09 M2b。advice 行に残る)。legacy では scoring_mode だけ (鍵の追加だけで採点の値は変えない)。
         # transition では 実際に使った方式 (scoring_used)・退避の理由 (scoring_fallback、退避しなければ None)・遷移の統計も残す。
-        # 退避率 = scoring_mode が transition の行のうち scoring_fallback がある割合
+        # 退避率 = scoring_mode が transition の行のうち scoring_fallback がある割合。
+        # 2026-10-09 M2d: transition_stats に 本採点 (main: elapsed_ms / 予算超過の退避)、感度 (sens: 有効か・実行 / 省略と理由)、
+        # 未評価の応手 (unevaluated: 確率 ε と技) を足した (elapsed_total_ms は感度込みの全処理時間)
         "scoring_mode": scoring_mode,
         **({"scoring_used": scoring_used, "scoring_fallback": common.get("scoring_fallback"),
             "transition_stats": {k: tr.get(k) for k in ("elapsed_ms", "elapsed_total_ms", "n_branches", "responses",
                                                          "opp_unmodeled", "notes", "fallback", "candidate", "response",
-                                                         "hp_range", "sensitivity") if k in tr} if tr else None}
+                                                         "hp_range", "sensitivity", "unevaluated", "main", "sens")
+                                                         if k in tr} if tr else None}
            if scoring_mode == "transition" else {}),
         "best": actions[0] if actions else None,
     }
