@@ -705,7 +705,10 @@ def test_prelim_correspondence():
 def main():
     test_unevaluated_interval_continue_and_fallback()
     test_eps_zero_unchanged()
-    test_unevaluated_through_engine_and_summary()
+    # 本体の config/my_team.json (ガブリアスの登録) に依存しない: 登録なしで評価する (2026-10-09: 本体の CI で登録の型と技の補完が
+    # 入って区間が重なり opp_unevaluated_ambiguous になった。アサーションは変えない)
+    with _Patch():
+        test_unevaluated_through_engine_and_summary()
     test_sensitivity_toggle_same_ranking()
     test_sensitivity_budget_omitted_not_fallback()
     test_sensitivity_env()
