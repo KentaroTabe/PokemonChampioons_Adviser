@@ -2,7 +2,8 @@
 
     python -m tools.check_advisor_player --battles 100 --opp-seed 20260904 --json out.json
     オプション: --belief-k K (engine.BELIEF_K) / --sensor-q q / --workers N /
-                --rl-blend W (RL 加点の重み。既定 = engine.RL_BLEND_DEFAULT) / --no-rl-blend (= --rl-blend 0) / --skip-random
+                --rl-blend W (RL 加点の重み。既定 = engine.RL_BLEND_DEFAULT) / --no-rl-blend (= --rl-blend 0) / --skip-random /
+                --battle-format ID (既定 = config.TRAINING_BATTLE_FORMAT)
 重みは evaluate の引数で渡す (2026-10-07: 環境変数 RL_BLEND_WEIGHT は書かない。起動時の既定値の供給源としてだけ読まれる)。
 探索プレイヤー (check_search_expert) と同じ固定軸 (META_PIN) と相手列で測る。
 """
@@ -87,7 +88,7 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
               candidate_id: str | None = None,
               opp_offset: int = 0, selection_plan: str | None = None,
               opp_pilot: str | None = None, opp_pick_policy: str | None = None,
-              rl_blend: float | None = None) -> None:
+              rl_blend: float | None = None, battle_format: str | None = None) -> None:
     from poke_env import AccountConfiguration
     from poke_env.player import RandomPlayer
     import advisor.engine as eng
@@ -98,6 +99,8 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
     from champions_agent.env.showdown_env import TrainingServerConfiguration, make_benchmark_player
     from tools.team_build.pilot import make_opponent_player
     opp_pilot = opp_pilot or BUILD_OPP_PILOT
+    # 対戦のフォーマット (2026-10-09: 過去の判定の再測定で当時の M-B を指定するため。既定は学習と同じ TRAINING_BATTLE_FORMAT)
+    battle_format = battle_format or TRAINING_BATTLE_FORMAT
     opp_pick_policy = opp_pick_policy or BUILD_OPP_PICK_POLICY
 
     if belief_k is not None:
@@ -118,7 +121,7 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
         # 不正なチームだと Showdown が拒否し poke-env が対戦を待ち続けるので、先に合法性を検査して即終了する
         try:
             from tools.team_build.sets import validate_team_text
-            ok, errs = validate_team_text(team_text, TRAINING_BATTLE_FORMAT)
+            ok, errs = validate_team_text(team_text, battle_format)
         except Exception:
             ok, errs = True, []
         if not ok:
@@ -167,11 +170,11 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
         rng=random.Random((opp_seed or 0) + 7), recorder=recorder, opp_source=opp_team,
         selection_plan=plan, family_of=family_of, rl_blend_weight=rl_blend_weight,
         account_configuration=AccountConfiguration(f"ADv{uid}", None),
-        battle_format=TRAINING_BATTLE_FORMAT,
+        battle_format=battle_format,
         server_configuration=TrainingServerConfiguration,
         team=own_tb)
     # 環境チームの操縦 (2026-10-05): 行動は opp_pilot (heuristic / rl)、選出は opp_pick_policy。全腕で同じ設定 (racing が渡す)
-    bench = make_opponent_player(opp_pilot, opp_team, TRAINING_BATTLE_FORMAT, AccountConfiguration(f"ADo{uid}", None),
+    bench = make_opponent_player(opp_pilot, opp_team, battle_format, AccountConfiguration(f"ADo{uid}", None),
                                  pick_policy=opp_pick_policy, rng=random.Random((opp_seed or 0) + 11))
     t0 = time.time()
     await player.battle_against(bench, n_battles=n_battles)
@@ -184,7 +187,7 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
     print(f"=== 助言エンジン (belief_k={eng.BELIEF_K} sensor_q={eng.SENSOR_Q_DEFAULT} "
           f"search_blend={eng.SEARCH_BLEND} "
           f"workers={eng.SEARCH_WORKERS} rl_blend={rl_blend_weight:g} "
-          f"meta={meta_pin or 'latest'}) vs ベンチマーク {n_battles}戦 ({dt:.0f}s) ===")
+          f"meta={meta_pin or 'latest'} format={battle_format}) vs ベンチマーク {n_battles}戦 ({dt:.0f}s) ===")
     print(f"勝率: {player.n_won_battles / n_battles:.2f}")
     print(f"助言レイテンシ: p50 {p50:.0f}ms / p95 {p95:.0f}ms ({len(lat)}決定)")
     print(f"意思決定: 助言{stats.get('decide', 0)} / フォールバック{stats.get('fallback', 0)} "
@@ -207,7 +210,7 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
             "rl_blend": rl_blend_weight,
             # 採点方式 (2026-10-09 M2b。環境変数 ADVICE_SCORING_MODE → config)。transition の退避の件数は stats の scoring_fallback*
             "advice_scoring_mode": _CFG.ADVICE_SCORING_MODE,
-            "opp_seed": opp_seed, "meta_snapshot": meta_pin,
+            "opp_seed": opp_seed, "meta_snapshot": meta_pin, "battle_format": battle_format,
             "latency_p50_ms": round(p50, 1), "latency_p95_ms": round(p95, 1),
             "stats": {k: v for k, v in stats.items()
                       if k not in ("last_error", "_registered")},
@@ -218,11 +221,11 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
         return
     rand = RandomPlayer(
         account_configuration=AccountConfiguration(f"ADr{uid}", None),
-        battle_format=TRAINING_BATTLE_FORMAT,
+        battle_format=battle_format,
         server_configuration=TrainingServerConfiguration,
         team=RankedTeambuilder(meta_snapshot_id=meta_pin))
     bench2 = make_benchmark_player(
-        battle_format=TRAINING_BATTLE_FORMAT,
+        battle_format=battle_format,
         account_configuration=AccountConfiguration(f"ADr2{uid}", None))
     await rand.battle_against(bench2, n_battles=n_battles)
     print(f"--- 基準線: RandomPlayer 勝率 {rand.n_won_battles / n_battles:.2f}")
@@ -261,6 +264,8 @@ def main() -> None:
     ap.add_argument("--candidate-id", default=None, help="対戦記録に付ける候補 id")
     ap.add_argument("--opp-offset", type=int, default=0,
                     help="相手列の開始位置 (racing の追加測定で同じ相手列の続きを使う)")
+    ap.add_argument("--battle-format", default=None,
+                    help="対戦のフォーマット id (既定 config TRAINING_BATTLE_FORMAT)。過去の判定の再測定で当時の M-B (gen9championsbssregmb) を指定する")
     ap.add_argument("--team-file", default=None,
                     help="自分側を固定チーム (Showdownテキスト) にする (構築の操縦しやすさ測定)")
     args = ap.parse_args()
@@ -276,7 +281,7 @@ def main() -> None:
                     candidate_id=args.candidate_id,
                     opp_offset=args.opp_offset, selection_plan=args.selection_plan,
                     opp_pilot=args.opp_pilot, opp_pick_policy=args.opp_pick_policy,
-                    rl_blend=args.rl_blend))
+                    rl_blend=args.rl_blend, battle_format=args.battle_format))
 
 
 if __name__ == "__main__":

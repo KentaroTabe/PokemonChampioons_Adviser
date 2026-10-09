@@ -149,6 +149,7 @@ TESTS=(
   test_scene_samples
   test_usefulness_p1
   test_usefulness_verdict
+  test_arc_remeasure
 )
 
 fail=0
