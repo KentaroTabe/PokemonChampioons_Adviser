@@ -21,13 +21,17 @@ from champions_agent.config import TRAINING_BATTLE_FORMAT
 
 
 def _constant_teambuilder(text: str):
-    """固定チームテキストを毎戦出す Teambuilder (last_text で型登録に使う)"""
+    """固定チームテキストを毎戦出す Teambuilder (text_for_battle で型登録に使う。どの対戦も同じ本文)"""
     from poke_env.teambuilder import Teambuilder
 
     class _Const(Teambuilder):
         def __init__(self):
             self.last_text = text
+            self.texts = [text]
             self._packed = self.join_team(self.parse_showdown_team(text))
+
+        def text_for_battle(self, k: int):
+            return text
 
         def yield_team(self):
             return self._packed
@@ -36,19 +40,27 @@ def _constant_teambuilder(text: str):
 
 
 def _remembering_teambuilder(inner):
-    """RankedTeambuilder をラップし、直近に出したチームテキストを覚える
+    """RankedTeambuilder をラップし、出したチームテキストを出した順に覚える
     (poke-env の Player は Teambuilder 派生でないと受理しないため、
-    import を遅延させてクラスを作る)"""
+    import を遅延させてクラスを作る)。
+    型登録は text_for_battle(k) = k 番目の対戦で出したチームで行う (2026-10-09)。last_text (直近に出した本文) は
+    poke-env が対戦 k の開始直後に対戦 k+1 のチームを引くため、対戦 k の時点で既に次のチームになっている
+    (advisor_player.team_text_for_battle の説明)"""
     from poke_env.teambuilder import Teambuilder
 
     class _Remembering(Teambuilder):
         def __init__(self):
             self.inner = inner
             self.last_text = None
+            self.texts: list = []
+
+        def text_for_battle(self, k: int):
+            return self.texts[k] if 0 <= k < len(self.texts) else None
 
         def yield_team(self):
             text = self.inner.rng.choice(self.inner.teams)
             self.last_text = text
+            self.texts.append(text)
             return self.join_team(self.parse_showdown_team(text))
 
     return _Remembering()
