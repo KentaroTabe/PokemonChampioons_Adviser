@@ -194,6 +194,120 @@ def test_run_reads_json_and_jsonl_fallback():
     print("test_run_reads_json_and_jsonl_fallback OK")
 
 
+SC_BASE, SC_TR = "scoring:legacy", "scoring:transition"
+
+
+def _scoring_conditions(incomplete=False, team=None) -> dict:
+    """tools.usefulness_p1 --compare scoring の条件表の該当部分"""
+    return {"experiment": "P1", "factor": "scoring", "weights": [25.0, 25.0], "baseline_weight": 25.0,
+            "baseline": SC_BASE, "comparisons": [{"cond": SC_TR, "mode": "transition", "vs": SC_BASE}], "k": 1,
+            "final_battles": 600, "mde": 0.05, "alpha": 0.05, "incomplete": incomplete, "elapsed_sec": 3000.0,
+            "team": team or {"source": "ranked", "label": "一般的なチーム", "meta_snapshot_id": 58, "seed": 20261010,
+                             "n_teams": 120, "pool_sha16": "pppp"}}
+
+
+def test_scoring_verdict_final_interim_invalid():
+    """採点方式の比較 (2026-10-09): 基準 scoring:legacy、比較 transition − legacy の 1 本 (k = 1、z = 1.96)。
+    §0.5 の判定 (final / interim / invalid) は RL の比較と同じ規則で働く"""
+    base, cond = _pair(166, 130, 150, 154)     # 平均差 0.06。k = 1 なら採用候補 (k = 2 なら判定不能、test_k_changes_decision)
+    outs = {SC_BASE: base, SC_TR: cond}
+    ids = {c: _ids(600) for c in outs}
+    assert V.scoring_conds(_scoring_conditions()) == (SC_BASE, [SC_TR])
+    assert V.scoring_conds({"factor": "scoring"}) == (SC_BASE, [SC_TR])        # 条件表に無ければ config の既定の方式
+    kw = dict(baseline_cond=SC_BASE, compare_conds=[SC_TR])
+    v = V.build_verdict(_scoring_conditions(), {SC_BASE: base, SC_TR: cond}, final_battles=600, mde=0.05, alpha=0.05,
+                        opp_ids_by_cond=ids, **kw)
+    # 注意: _pair は (条件, 基準) の順。ここでは base = 条件側の列を legacy に入れたので transition − legacy = −0.06
+    assert v["mode"] == V.MODE_FINAL and v["k"] == 1 and abs(v["z"] - 1.959964) < 1e-5, v
+    assert v["baseline"] == SC_BASE and [r["cond"] for r in v["comparisons"]] == [SC_TR]
+    assert abs(v["comparisons"][0]["mean_diff"] + 0.06) < 1e-12 and v["comparisons"][0]["decision"] == V.NOT_SUPPORTED
+    outs = {SC_BASE: cond, SC_TR: base}                                          # transition − legacy = +0.06
+    v = V.build_verdict(_scoring_conditions(), outs, final_battles=600, mde=0.05, alpha=0.05, opp_ids_by_cond=ids, **kw)
+    assert v["mode"] == V.MODE_FINAL and v["comparisons"][0]["decision"] == V.ADOPT, v["comparisons"]
+    assert set(v["per_condition"]) == {SC_BASE, SC_TR} and "scoring_stats" not in v
+    # 未完了 (incomplete: true) → 採否を出さない (推定値・区間は出す)
+    vi = V.build_verdict(_scoring_conditions(incomplete=True), outs, final_battles=600, opp_ids_by_cond=ids, **kw)
+    assert vi["mode"] == V.MODE_INTERIM and vi["comparisons"][0]["decision"] is None, vi
+    assert vi["comparisons"][0]["mean_diff"] is not None and any("incomplete" in x for x in vi["interim_reasons"])
+    # n < 600 → 中間確認
+    half = {c: o[:300] for c, o in outs.items()}
+    vh = V.build_verdict(_scoring_conditions(), half, final_battles=600, opp_ids_by_cond=ids, **kw)
+    assert vh["mode"] == V.MODE_INTERIM and vh["n_used"] == 300 and vh["comparisons"][0]["decision"] is None
+    # 条件が欠ける → 中間確認 (採否を出さない)
+    vm = V.build_verdict(_scoring_conditions(), {SC_BASE: outs[SC_BASE]}, final_battles=600, opp_ids_by_cond=ids, **kw)
+    assert vm["mode"] == V.MODE_INTERIM and any(SC_TR in x for x in vm["notes"])
+    # 相手 id の食い違い (1 件) / 欠落 → 比較条件の不成立 (invalid)
+    one = {c: _ids(600) for c in outs}
+    one[SC_TR] = list(one[SC_TR])
+    one[SC_TR][5] = "zz"
+    vb = V.build_verdict(_scoring_conditions(), outs, final_battles=600, opp_ids_by_cond=one, **kw)
+    assert vb["mode"] == V.MODE_INVALID and vb["comparisons"][0]["decision"] is None
+    assert any("1 件" in x for x in vb["invalid_reasons"]), vb["invalid_reasons"]
+    vn = V.build_verdict(_scoring_conditions(), outs, final_battles=600, opp_ids_by_cond={SC_BASE: _ids(600)}, **kw)
+    assert vn["mode"] == V.MODE_INVALID and any(SC_TR in x and "列が無い" in x for x in vn["invalid_reasons"])
+    # 未完了でも対応が成り立たなければ invalid (RL の比較と同じ優先)
+    vbi = V.build_verdict(_scoring_conditions(incomplete=True), outs, final_battles=600, opp_ids_by_cond=one, **kw)
+    assert vbi["mode"] == V.MODE_INVALID and vbi["interim_reasons"]
+    text = V.render(vb, _scoring_conditions())
+    assert "比較条件の不成立" in text and "scoring:transition − scoring:legacy" in text and "一般的なチーム" in text, text
+    print("test_scoring_verdict_final_interim_invalid OK")
+
+
+def test_scoring_fallback_summary_and_team_rows():
+    s = V.scoring_fallback_summary({"advice_scoring_mode": "transition",
+                                    "stats": {"decide": 900, "scoring_transition": 1000, "scoring_fallback": 50,
+                                              "scoring_fallback:unsupported:volatile:protect": 30, "scoring_fallback:no_opp": 20}})
+    assert s["advice_scoring_mode"] == "transition" and s["scoring_transition"] == 1000 and s["scoring_fallback"] == 50
+    assert abs(s["fallback_rate"] - 0.05) < 1e-12
+    assert s["fallback_by_reason"] == {"unsupported:volatile:protect": 30, "no_opp": 20}, s
+    # legacy (transition の決定が 0) は退避率なし、json が無ければ None
+    s0 = V.scoring_fallback_summary({"advice_scoring_mode": "legacy", "stats": {"decide": 900}})
+    assert s0["scoring_transition"] == 0 and s0["fallback_rate"] is None and s0["fallback_by_reason"] == {}
+    assert V.scoring_fallback_summary(None) is None
+    # 条件表の要約: 自チームの出所
+    rows = dict(V.condition_summary(_scoring_conditions()))
+    assert "一般的なチーム" in rows["自チーム"] and "58" in rows["自チーム"] and "比較 / 基準 / k" in rows, rows
+    reg = dict(V.condition_summary(_scoring_conditions(team={"source": "registered", "sha16": "fae570ac86ab02fd",
+                                                             "expected_sha16": "fae570ac86ab02fd"})))
+    assert "最新の登録チーム" in reg["自チーム"] and "fae570ac86ab02fd" in reg["自チーム"]
+    # RL の比較の条件表 (source なし) は従来の表示
+    old = dict(V.condition_summary({"weights": [0.0, 5.0, 25.0], "team": {"sha16": "a", "expected_sha16": "b"}}))
+    assert "登録チーム sha16" in old and "自チーム" not in old and "重み / 基準 / k" in old
+    print("test_scoring_fallback_summary_and_team_rows OK")
+
+
+def test_run_scoring_reads_files():
+    """run: factor scoring の条件表なら scoring_legacy.json / scoring_transition.json (+ battles.jsonl) を読み、
+    退避率と自チームの出所を verdict.md に載せる。結果の無い RL の条件 (rl<W>) は読まない"""
+    base, cond = _pair(166, 130, 150, 154)
+    outs = {SC_BASE: cond, SC_TR: base}
+    stats = {SC_BASE: {"decide": 1000}, SC_TR: {"decide": 1000, "scoring_transition": 1000, "scoring_fallback": 40,
+                                                 "scoring_fallback:no_opp": 40}}
+    with tempfile.TemporaryDirectory() as d:
+        out = Path(d)
+        (out / "conditions.json").write_text(json.dumps(_scoring_conditions()), encoding="utf-8")
+        for c in (SC_BASE, SC_TR):
+            f = V.cond_file(c)
+            (out / f"{f}.json").write_text(json.dumps({"outcomes": outs[c], "elapsed_s": 3000.0, "stats": stats[c],
+                                                       "advice_scoring_mode": c.split(":")[1]}), encoding="utf-8")
+            with (out / f"{f}.battles.jsonl").open("w", encoding="utf-8") as fh:
+                for i, w in enumerate(outs[c]):
+                    fh.write(json.dumps({"won": bool(w), "opponent_team_id": f"t{i % 33}"}) + "\n")
+        v = V.run(out)
+        assert v["mode"] == V.MODE_FINAL and v["k"] == 1 and v["comparisons"][0]["decision"] == V.ADOPT, v
+        assert v["per_condition"][SC_TR]["source"] == "scoring_transition.json outcomes"
+        assert abs(v["scoring_stats"][SC_TR]["fallback_rate"] - 0.04) < 1e-12
+        assert v["scoring_stats"][SC_BASE]["advice_scoring_mode"] == "legacy"
+        md = (out / "verdict.md").read_text(encoding="utf-8")
+        assert "退避率" in md and "0.040" in md and "一般的なチーム" in md and "no_opp 40" in md, md
+        # 相手 id が食い違えば invalid (ファイル経由でも同じ)
+        with (out / "scoring_transition.battles.jsonl").open("w", encoding="utf-8") as fh:
+            for i, w in enumerate(outs[SC_TR]):
+                fh.write(json.dumps({"won": bool(w), "opponent_team_id": f"x{i}"}) + "\n")
+        assert V.run(out)["mode"] == V.MODE_INVALID
+    print("test_run_scoring_reads_files OK")
+
+
 def main():
     test_corrected_z_by_k()
     test_decide_boundaries()
@@ -204,6 +318,9 @@ def main():
     test_wilson_and_opponent_mismatch()
     test_correspondence_failure_blocks_final_verdict()
     test_run_reads_json_and_jsonl_fallback()
+    test_scoring_verdict_final_interim_invalid()
+    test_scoring_fallback_summary_and_team_rows()
+    test_run_scoring_reads_files()
 
 
 if __name__ == "__main__":

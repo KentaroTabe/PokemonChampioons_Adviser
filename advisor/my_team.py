@@ -72,8 +72,27 @@ _CACHE: Optional[dict] = None
 _CACHE_MTIME: float = -1.0
 
 
+def registration_disabled() -> bool:
+    """登録参照を無効化しているか (環境変数 config.MY_TEAM_DISABLED_ENV。呼ぶたびに読む)。
+    2026-10-09: 採点方式の比較を一般的なチーム (使用率上位の構築) で回すとき、自分側の種族名が登録チームと一致すると
+    登録の型 (努力値・性格・持ち物・技) が実際のチームと食い違う。測定の子プロセスだけに立てて「未登録」として扱う。
+    既定 (未設定・空・0/false/no) は無効化しない (実機と RL の比較は従来どおり)"""
+    import os
+    from champions_agent.config import MY_TEAM_DISABLED_ENV
+    raw = (os.environ.get(MY_TEAM_DISABLED_ENV) or "").strip().lower()
+    return raw not in ("", "0", "false", "no")
+
+
 def _load() -> dict:
-    """config/my_team.json を読む (更新されたら再読込)"""
+    """登録の読み取り経路 (get_my_build / get_my_moves / has_build / registered_species_* / team_advice など) が読む登録。
+    登録参照の無効化 (registration_disabled) 中は空 = 全種が未登録。書き込み (update_build / set_build) は _load_file を使う"""
+    if registration_disabled():
+        return {}
+    return _load_file()
+
+
+def _load_file() -> dict:
+    """config/my_team.json を読む (更新されたら再読込。無効化に関係なくファイルの中身)"""
     global _CACHE, _CACHE_MTIME
     try:
         mtime = CONFIG_PATH.stat().st_mtime
@@ -190,7 +209,7 @@ def update_build(species_ja: str, patch: dict) -> bool:
         patch["能力ポイント"] = {
             _POINT_KEYS.get(k, k): v
             for k, v in patch["能力ポイント"].items() if v}
-    data = {k: dict(v) for k, v in _load().items()}
+    data = {k: dict(v) for k, v in _load_file().items()}
     entry = data.get(species_ja, {})
     changed = False
     for key, val in patch.items():
@@ -249,7 +268,7 @@ def set_build(species_ja: str, entry: dict) -> bool:
         if val in (None, "", [], {}):
             continue
         clean[key] = _normalize_points(val) if key == "能力ポイント" else val
-    data = {k: dict(v) for k, v in _load().items()}
+    data = {k: dict(v) for k, v in _load_file().items()}
     data[species_ja] = clean
     try:
         CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
