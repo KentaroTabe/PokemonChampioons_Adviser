@@ -396,9 +396,10 @@ def _mon(sid, ja, types, hp, cur, mx, moves=None, **kw):
     return d
 
 
-def test_engine_context_and_scoring_unchanged():
-    """助言: 自分の HP が推定なら context に my_hp_estimated を残す。採点は変えない
-    (バー推定の hp_uncertain は交代の見逃しの減点・警告の対象にしない)"""
+def test_engine_context_and_uncertain_penalty():
+    """助言: 自分の HP が推定なら context に my_hp_estimated を残す (場の個体の採点はそのまま)。控えへの交代は既存の減点規則を
+    維持する (2026-10-09 ユーザー判断 B): バー推定の控えも減点 15 の対象で、警告の文言は「バーからの概算」。
+    交代の見逃しの控えは従来どおり減点され、文言も従来の「HP不明 (交代の見逃し…)」"""
     from advisor import engine
     from vision.normalize import NameResolver
     res = NameResolver()
@@ -415,22 +416,25 @@ def test_engine_context_and_scoring_unchanged():
     assert [(a["kind"], a["id"], a["score"]) for a in est["actions"]] == \
         [(a["kind"], a["id"], a["score"]) for a in base["actions"]]
 
-    # 控えがバー推定の値 (hp_uncertain + hp_source="bar"): 減点・警告なし (推定でない控えと同じ採点)
+    assert engine.UNCERTAIN_EXEMPT_BAR_ESTIMATE is False
+    # 控えがバー推定の値 (hp_uncertain + hp_source="bar"): 減点 15、文言は「バーからの概算」
     b_est = engine.evaluate(_mini_state(dict(me), dict(opp),
                                         dict(bench, hp_estimated=True, hp_uncertain=True, hp_source="bar")), res)
     b_base = engine.evaluate(_mini_state(dict(me), dict(opp), dict(bench)), res)
     sw_e = next(a for a in b_est["actions"] if a["kind"] == "switch")
     sw_b = next(a for a in b_base["actions"] if a["kind"] == "switch")
-    assert "HP不明" not in sw_e["reason"] and sw_e["score"] == sw_b["score"], (sw_e, sw_b)
-    # 交代の見逃し (hp_source なし) は従来どおり減点・警告
+    assert "バーからの概算" in sw_e["reason"] and "HP不明" not in sw_e["reason"], sw_e
+    assert abs(sw_b["score"] - sw_e["score"] - engine.UNCERTAIN_SWITCH_PENALTY) < 1e-6, (sw_e, sw_b)
+    # 交代の見逃し (hp_source なし) は従来どおり減点 15、文言も従来の「HP不明 (交代の見逃し…)」
     b_miss = engine.evaluate(_mini_state(dict(me), dict(opp), dict(bench, hp_uncertain=True)), res)
     sw_m = next(a for a in b_miss["actions"] if a["kind"] == "switch")
-    assert "HP不明" in sw_m["reason"] and sw_m["score"] < sw_b["score"], (sw_m, sw_b)
-    print("test_engine_context_and_scoring_unchanged OK")
+    assert "HP不明 (交代の見逃しあり" in sw_m["reason"] and "バーからの概算" not in sw_m["reason"], sw_m
+    assert abs(sw_b["score"] - sw_m["score"] - engine.UNCERTAIN_SWITCH_PENALTY) < 1e-6, (sw_m, sw_b)
+    print("test_engine_context_and_uncertain_penalty OK")
 
 
 def test_missed_switch_overrides_bar_source():
-    """バー推定の値を持つ個体で交代の見逃しが起きたら、hp_source を外して「不明」(減点の対象) に戻す"""
+    """バー推定の値を持つ個体で交代の見逃しが起きたら、hp_source を外して「不明」に戻す (減点の警告の文言が交代の見逃しになる)"""
     from vision.extractors import adopt_my_hud_species
     st = BattleStateV2()
     a = PokemonState(species_ja=NAME, species_id="sneasler", display_name=NAME, hp_percent=4.4,
@@ -485,6 +489,45 @@ def test_restore_and_merge_keep_source():
     print("test_restore_and_merge_keep_source OK")
 
 
+def test_max_hp_adoption_guards():
+    """最大 HP の実測採用 (extract_my_hud の MY_MAX_ADOPT_READS、_my_max_adopted) の受入前の対処 (2026-10-09):
+    桁分割で推測した分数 ('1595' → 15/95) と、種族の物理可能域に無い最大 HP は採用の数え上げに入れない。
+    '/' で区切られた正しい読み (登録の理論値 161 と実測 181 が違う) は従来どおり採用する"""
+    from tests.test_hp_intake import _frame as intake_frame
+    from vision.extractors import MY_MAX_ADOPT_READS
+    assert ocr.fraction_is_split_guess("1595") is True and ocr.parse_fraction("1595") == (15, 95)
+    assert ocr.fraction_is_split_guess("4/159") is False
+    assert ocr.fraction_is_split_guess("15/95") is False
+    for txt in ("167", "13723", "", None):        # 分数として読めない
+        assert ocr.fraction_is_split_guess(txt) is False, txt
+    saved = _saved_counts()
+    try:
+        img = _frame()   # バー 0.044: 15/95 (0.158) とは照合の許容 (0.15) 内
+        # (b) 桁分割の推測は数えない (種族未特定で物理可能域の検査が効かない場合でも)
+        st, mon = _state_with_me(ja=None, sid=None)
+        mon.display_name = None
+        for _ in range(MY_MAX_ADOPT_READS + 2):
+            _run(img, st, "1595", name_text="")
+        assert getattr(mon, "_my_max_adopted", None) is None, mon._my_max_adopted
+        assert mon._max_adopt_counts.get(95) == 0, mon._max_adopt_counts
+        assert st.hp_reject["player"]["reason"] == "max_hp_mismatch"
+        # (a) '/' のある読みでも、種族の物理可能域 (オオニューラ) に無い最大 HP 95 は数えない
+        st, mon = _state_with_me()
+        for _ in range(MY_MAX_ADOPT_READS + 2):
+            _run(img, st, "15/95")
+        assert getattr(mon, "_my_max_adopted", None) is None and mon._max_adopt_counts.get(95) == 0
+        # 従来どおり: 登録の理論値 161 と違う実測 181/181 (満タンのバー) が続けば採用する
+        full = intake_frame("my_full_137of137.png")
+        st, mon = _state_with_me(ja="ムクホーク", sid="staraptor")
+        for _ in range(MY_MAX_ADOPT_READS):
+            _run(full, st, "181/181", expected_max=161, name_text="")
+        assert mon._my_max_adopted == 181, getattr(mon, "_my_max_adopted", None)
+        assert any(e.get("event") == "max_hp_mismatch_staraptor" for e in st.events), st.events
+    finally:
+        _restore_counts(saved)
+    print("test_max_hp_adoption_guards OK")
+
+
 if __name__ == "__main__":
     t0 = time.time()
     test_pure_rules()
@@ -495,7 +538,8 @@ if __name__ == "__main__":
     test_unstable_bar_not_estimated()
     test_set_hp_marks_kept_until_real_reading()
     test_log_rows_carry_source()
-    test_engine_context_and_scoring_unchanged()
+    test_engine_context_and_uncertain_penalty()
     test_missed_switch_overrides_bar_source()
     test_restore_and_merge_keep_source()
+    test_max_hp_adoption_guards()
     print(f"\nALL OK ({time.time() - t0:.1f}s)")

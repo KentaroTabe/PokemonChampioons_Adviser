@@ -116,7 +116,8 @@ def adopt_my_hud_species(state: BattleStateV2, sp) -> Optional[PokemonState]:
         if prev is not None and prev.status != "fainted" \
                 and prev.species_ja and prev.species_ja != sp[0]:
             prev.hp_uncertain = True
-            # バー推定の値でも、交代の見逃しの「不明」を優先する (助言の交代候補の減点はバー推定を除外しているため)
+            # バー推定の値でも、交代の見逃しの「不明」を優先する (助言の交代候補の警告の文言が出所で分かれるため。
+            # 減点はどちらも同じ。advisor.engine の UNCERTAIN_EXEMPT_BAR_ESTIMATE)
             prev.hp_source = None
             state.log_event("system", f"交代見逃し: {prev.species_ja}の状態を不明扱い",
                             event_id="missed_switch")
@@ -1658,7 +1659,12 @@ def extract_my_hud(img, state: BattleStateV2, resolver, bar_zone: Optional[dict]
                 bar_now = ocr.hp_bar_ratio(crop(img, bar_zone))
                 bar = bar_now
                 counts = getattr(me, "_max_adopt_counts", None) or {}
+                # 採用の数え上げに入れるのは、'/' で区切られた読み (桁分割の推測 '1595' → 15/95 は除く) で、
+                # 種族が分かるなら図鑑の物理可能域に入る最大 HP だけ (2026-10-09: 4/159 の読み落ち '1595' の 15/95 が
+                # バー照合の許容内に入り、3 回で最大 HP 95 が採用される恐れ。KNOWN_ISSUES A1)
                 if bar_now is not None and cur <= mx and \
+                        not ocr.fraction_is_split_guess(my_hp) and \
+                        _plausible_max_hp(me.species_id, mx) and \
                         my_bar_agrees(cur, mx, bar_now):
                     counts[mx] = counts.get(mx, 0) + 1
                 else:
