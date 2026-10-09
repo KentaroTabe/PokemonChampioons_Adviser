@@ -31,6 +31,7 @@ TESTS=(
   test_scoring_transition
   test_advice_m2c
   test_advice_m2d
+  test_mega_registration_forms
   test_anchor_pool
   test_battle_active
   test_battle_outcome_infer

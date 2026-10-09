@@ -230,11 +230,30 @@ def registered_moves_of(species_ja: Optional[str], resolver) -> list:
     return out
 
 
+BATTLE_FORMS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "battle_forms.json")
+_BATTLE_FORMS: Optional[dict] = None
+
+
+def battle_form_source(species_id: Optional[str]) -> Optional[str]:
+    """戦闘中の形態変化 (mimikyubusted / aegislashblade 等) の変化前の種の id (advisor/data/battle_forms.json、
+    tools.build_battle_forms が Showdown の battleOnly から起こす)。表に無い・読めなければ None"""
+    global _BATTLE_FORMS
+    if _BATTLE_FORMS is None:
+        try:
+            with open(BATTLE_FORMS_PATH, encoding="utf-8") as f:
+                _BATTLE_FORMS = dict(json.load(f).get("forms") or {})
+        except (OSError, ValueError):
+            _BATTLE_FORMS = {}
+    return _BATTLE_FORMS.get(str(species_id or "")) if species_id else None
+
+
 def registration_names(p: Optional[dict]) -> list:
     """自分の個体の登録 (config/my_team.json・シムの登録 advisor_player._SIM_BUILDS) を引く名前の順 (2026-10-09 M2d)。
     登録は通常形態の名前 (HUD の名前 / 種族 id の日本語名) で入っているので、現在形態がメガなら基本種 (gimmick.resolve_form の
     base_species) の日本語名を先に引き、次に個体の species_ja (メガ名で登録してあればそれ)。メガでなければ species_ja だけ
-    (フォルム違いの登録キーの扱いは変えない)"""
+    (フォルム違いの登録キーの扱いは変えない)。
+    最後に、戦闘中の形態変化 (battle_form_source: ばけのかわが剥がれた mimikyubusted → mimikyu 等) の変化前の種の日本語名を足す
+    (2026-10-09: 送った本文の名前「ミミッキュ」の登録に当たらず既定の型で参照されていた)。地方フォルムは表に無いので足さない"""
     if not p:
         return []
     ja = p.get("species_ja")
@@ -251,6 +270,12 @@ def registration_names(p: Optional[dict]) -> list:
             names.append(base_ja)
     if ja and ja not in names:
         names.append(ja)
+    src = battle_form_source(p.get("species_id"))
+    if src:
+        from advisor.infer import species_ja_name
+        src_ja = species_ja_name(src)
+        if src_ja and src_ja != src and src_ja not in names:
+            names.append(src_ja)
     return names
 
 
