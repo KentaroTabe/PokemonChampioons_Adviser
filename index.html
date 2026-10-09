@@ -26,6 +26,8 @@
     </style>
 </head>
 <body>
+    <!-- サーバーからの警告 (server_warning。2026-10-07: 表示通知が hidden のまま続いた等)。次に見える状態で助言を表示したら消す -->
+    <div id="server-warning" style="display:none;background:#c60;color:#fff;font-weight:bold;font-size:15px;padding:10px 14px;border-radius:6px;margin-bottom:8px"></div>
     <div>
         <button id="start-btn">カメラ映像取得開始</button>
         <button id="reset-btn">状態リセット</button>
@@ -146,10 +148,31 @@
         const ADVISOR_PORT = new URLSearchParams(location.search).get('api') || window.ADVISOR_PORT || 8000;
         const socket = io('http://' + location.hostname + ':' + ADVISOR_PORT);
         const connLabel = document.getElementById('conn-label');
+        // ページの版と、この HTML が実装している機能 (2026-10-07: ブラウザがキャッシュの古い index.html を使った疑いを確かめる)。
+        // 接続時に client_hello で送り、サーバーはディスクの index.html の CLIENT_HTML_VERSION と照合して対戦ログの client 行に残す。
+        // ⚠ この HTML を変えたら CLIENT_HTML_VERSION を更新する (サーバーは正規表現でこの行を読む。形式を変えない)
+        const CLIENT_HTML_VERSION = "2026-10-09c";
+        const CLIENT_FEATURES = ['client_hello', 'page_visibility', 'advice_shown_hidden', 'server_warning'];
+        const emitHello = () => socket.emit('client_hello', {
+            html_version: CLIENT_HTML_VERSION, features: CLIENT_FEATURES, visibility: document.visibilityState,
+            user_agent: navigator.userAgent, href: location.href,
+            served_commit: window.FRONTEND_GIT_COMMIT || null});   // config/ports.local.js (起動スクリプトが書く)
+        // ページが隠れているか (2026-10-07 段 0): 受信フレームのうち隠れたページから届いた割合を対戦ログの frames 行に残すため、
+        // 表示状態が変わるたびと接続時にサーバーへ知らせる (隠れたページでは送信が 1〜2 fps に落ちる)。表示は何も変えない
+        const emitVisibility = () => socket.emit('page_visibility', {hidden: document.hidden});
+        document.addEventListener('visibilitychange', emitVisibility);
         socket.on('connect', () => {
             console.log('バックエンドに接続しました');
             connLabel.textContent = 'バックエンド: 接続中';
             connLabel.style.background = '#284';
+            emitHello();          // 順序: client_hello → page_visibility
+            emitVisibility();
+        });
+        // サーバーからの警告 (例: 表示通知が hidden のまま続いた = 窓がゲーム画面に覆われている)。画面上部の帯に出す
+        const warnBand = document.getElementById('server-warning');
+        socket.on('server_warning', (w) => {
+            warnBand.textContent = '⚠ ' + ((w && w.text) || 'サーバーからの警告');
+            warnBand.style.display = 'block';
         });
         socket.on('disconnect', () => {
             connLabel.textContent = 'バックエンド: 切断';
@@ -170,6 +193,14 @@
             const [id, ja] = val.split('|');
             socket.emit('set_species', {index: i, species_id: id, species_ja: ja});
             // 選択完了: 再描画の保留を解除し、確定を即座に反映させる
+            if (el && el.blur) el.blur();
+            releaseOppHold();
+        }
+
+        // 対応待ちの個体 (party の i 番目) を枠 slot (0 始まり) に割り当てる (2026-10-09。サーバーの set_species の assign_to)
+        function assignPending(i, slot, el) {
+            if (slot === '' || slot == null) return;
+            socket.emit('set_species', {index: i, assign_to: +slot});
             if (el && el.blur) el.blur();
             releaseOppHold();
         }
@@ -431,6 +462,9 @@
             let hp = '';
             if (p.hp_current != null) hp = ` ${p.hp_current}/${p.hp_max}`;
             else if (p.hp_percent != null) hp = ` ${p.hp_percent}%`;
+            // 自分の HP が推定値 (HUD の数字が読めず、バーの長さと最大 HP から概算。2026-10-09)
+            if (side === 'my' && hp && p.hp_estimated && p.status !== 'fainted')
+                hp += ` <span style="font-size:10px;color:#db9" title="${p.hp_source === 'bar' ? 'HP の数字が読めないため、バーの長さと最大 HP から概算した値' : '技のダメージからの推定値'}。数字が読めたら置き換わります">推定</span>`;
             let tags = (p.types || []).map(t => `<span class="tag">${t}</span>`).join('');
             if (p.status && STATUS_JA[p.status]) tags += `<span class="tag" style="background:#833">${STATUS_JA[p.status]}</span>`;
             if (p.is_mega) tags += '<span class="tag" style="background:#a3a">メガ</span>';
@@ -583,9 +617,12 @@
         // 相手のパーティ欄の描画 (HTML を返す。DOM への反映は表示の安定化を通す): 確定済みを先に、未確定枠は「予測 (あり得る順)」
         function renderOppPartyHtml(s) {
             const oppParty = s.opponent.party || [];
-            const confirmed = [], predicted = [];
+            const confirmed = [], predicted = [], pending = [];
             let unknownCount = 0;
             oppParty.forEach((p, i) => {
+                // 対応待ち (2026-10-09 ④): 場に出たが 6 枠のどれか決まっていない個体 (party の 7 番目以降)。
+                // 7 体目として並べず、下で「対応待ち」として場の個体の近くに出す
+                if (p.pending) { pending.push([i, p]); return; }
                 const isConfirmed = p.species_ja ||
                     i === s.opponent.active_index || p.hp_percent != null;
                 if (isConfirmed) {
@@ -600,7 +637,32 @@
                     unknownCount++;
                 }
             });
-            const shown = confirmed.map(([i, p]) => renderMon(p, i, s.opponent.active_index, 'opp'));
+            const shown = [];
+            pending.forEach(([i, p]) => {
+                const cands = (p.species_candidates || []).length > 1
+                    ? ` 形態未定: ${p.species_candidates.join(' / ')}` : '';
+                // 候補の枠 (2026-10-09: タイプが 1 個だけ重なる枠が 1 つ。自動では統合しない) と、枠を指定して確定するプルダウン
+                const slotLabel = (j) => {
+                    const q = oppParty[j] || {};
+                    return `枠 ${j + 1} (${q.species_ja || (q.types || []).join('/') || '未特定'}${q.species_guess ? ' 推定' : ''})`;
+                };
+                const hint = (p.pending_hint || []).map(h => slotLabel(h.slot)
+                    + (h.source === 'watch_loose' ? ' [様子見画面の弱い読み]' : '')).join('、');
+                const hintHtml = hint ? `<div style="font-size:11px;color:#fc8">候補: ${hint}</div>` : '';
+                const hintSlots = (p.pending_hint || []).map(h => h.slot);
+                const slotOpts = oppParty.slice(0, 6).map((q, j) => [j, q])
+                    .filter(([j, q]) => !q.pending && !(q.species_ja && !q.species_guess && q.species_ja !== p.species_ja))
+                    .sort((a, b) => (hintSlots.includes(b[0]) ? 1 : 0) - (hintSlots.includes(a[0]) ? 1 : 0))
+                    .map(([j, q]) => `<option value="${j}">${hintSlots.includes(j) ? '★ ' : ''}${slotLabel(j)}</option>`).join('');
+                const assign = slotOpts ? `<select onchange="assignPending(${i}, this.value, this)"
+                    style="margin-left:6px;font-size:11px;background:#223;color:#cde;border:1px solid #446;border-radius:4px">
+                    <option value="">枠に割り当て…</option>${slotOpts}</select>` : '';
+                shown.push('<div style="border:1px dashed #fa6;border-radius:6px;padding:2px 4px;margin-bottom:4px">'
+                    + `<div style="font-size:11px;color:#fa6">対応待ち (6 枠のどれか未定。✏️で種族を確定するか、枠を指定すると枠に入ります)${cands}${assign}</div>`
+                    + hintHtml
+                    + renderMon(p, i, s.opponent.active_index, 'opp') + '</div>');
+            });
+            confirmed.forEach(([i, p]) => shown.push(renderMon(p, i, s.opponent.active_index, 'opp')));
             if (predicted.length) {
                 predicted.sort((a, b) => b[0] - a[0]);   // 最有力候補の確率順
                 shown.push('<div style="font-size:11px;color:#89a;margin-top:6px">裏の予測 (次に出してきそうな順):</div>');
@@ -747,8 +809,10 @@
                 if (document.hidden) {
                     socket.emit('advice_shown', Object.assign(payload, {t_shown: Date.now() / 1000, hidden: true}));
                 } else {
-                    requestAnimationFrame(() => socket.emit('advice_shown',
-                        Object.assign(payload, {t_shown: Date.now() / 1000, hidden: false})));
+                    requestAnimationFrame(() => {
+                        socket.emit('advice_shown', Object.assign(payload, {t_shown: Date.now() / 1000, hidden: false}));
+                        warnBand.style.display = 'none';   // 見える状態で表示できたので server_warning の警告バーを消す
+                    });
                 }
             }
         });

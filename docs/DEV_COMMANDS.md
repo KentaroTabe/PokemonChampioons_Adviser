@@ -60,7 +60,7 @@ plist本体は `scripts/com.championsadviser.train.plist` (repo管理)。編集�
 #   /bin/bash -lc 'cd <repo> && source .venv/bin/activate && \
 #     PYTHONUNBUFFERED=1 uvicorn server:app_asgi --host 0.0.0.0 --port 8000'
 # 例: フロントエンド(3000)
-#   /bin/bash -lc 'cd <repo> && python3 -m http.server 3000'
+#   /bin/bash -lc 'cd <repo> && python3 -m tools.frontend_server 3000'
 # 例: Showdown(8100)
 #   /bin/bash -lc 'cd <repo> && node pokemon-showdown/pokemon-showdown start 8100 --no-security'
 # ラベル(Label)とログ出力先(Standard*Path)は plist ごとに一意にすること。
@@ -152,6 +152,14 @@ sonnetは疑い箇所の検証+少数サンプルの網羅に専念する (タ�
 2ヶ月分たまるまで自動無効) と `--archive-mix` (過去の優勝チーム=PSRO反復)
 を混ぜられる。`--update-archive` で今回の最優秀をアーカイブへ追加し、
 定期実行すると「対策の対策」まで見た頑健な構築へ収束していく。
+
+## 有用性検証 P1 (RL 加点 0 / ×5 / ×25 の対応比較、docs/USEFULNESS_VERIFICATION_PLAN_1007.md §0.5・§4)
+
+1. 開始前: `scripts/status.sh` と `pgrep -fl "tools.team_build.run|check_advisor_player|train_forever"` で構築 run・学習・測定が無いことを実測する (あれば止めるか別の夜にする)。launchd の track-progress (毎日 21:50、17〜34 分) の後に始め、06:30 の usage-update の前に終える。Showdown は `bash scripts/ensure_showdown.sh 8100`。
+2. `python -m tools.usefulness_p1 --prelim --dry-run` で条件表とコマンド列を確認 (登録チームの sha16 が `P1_TEAM_SHA16` と違えば起動しない)。
+3. 予備: `python -m tools.usefulness_p1 --prelim` (50 戦 / 条件)。秒/戦が `P1_ABORT_SEC_PER_BATTLE` (12) を超えたら本番を始めない目安 (判断は人)。
+4. 本番: `python -m tools.usefulness_p1` (600 戦 / 条件、3 プロセス並列、ピンは起動時に作る。2 時間を超えたら止めて incomplete)。
+5. 集計: `python -m tools.usefulness_verdict --out logs/usefulness/p1_<日時>` (verdict.json / verdict.md。n < 600 か未完了なら採否を出さず中間確認)。
 
 ## 振り返り・環境分析
 

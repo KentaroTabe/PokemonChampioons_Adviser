@@ -90,6 +90,7 @@ TESTS=(
   test_articles_fetch
   test_env_match
   test_advice_trace
+  test_advice_variant
   test_team_build_experiments
   test_team_build_archetypes
   test_team_build_banned
@@ -124,6 +125,23 @@ TESTS=(
   test_cheap_drift
   test_register_selection
   test_sim_caches
+  test_stage0_logger
+  test_selection_record
+  test_pick_labels
+  test_frame_burst
+  test_client_state
+  test_hp_intake
+  test_hp_bar_estimate
+  test_hp_paths
+  test_hp_fraction_ocr
+  test_watch_opp_color
+  test_roster_retention
+  test_type_recognition
+  test_roster_cap
+  test_dmg_compare
+  test_scene_samples
+  test_usefulness_p1
+  test_usefulness_verdict
 )
 
 fail=0

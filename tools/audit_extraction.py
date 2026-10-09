@@ -15,6 +15,8 @@ import json
 import time
 from pathlib import Path
 
+from vision.state import is_pending
+
 REPO = Path(__file__).resolve().parent.parent
 FRAME_DIR = REPO / "debug_frames"
 
@@ -51,8 +53,9 @@ def _summarize_state(st: dict) -> str:
             mega = "[メガ]" if p.get("mega") else ""
             types = "/".join(p.get("types") or [])
             rev = ",".join(p.get("revealed") or [])
+            pend = " (対応待ち: 枠が未定)" if is_pending(p) else ""
             rows.append(f"    {p.get('ja') or '?'}{mega}{hp_s}"
-                        f" [{types}]" + (f" 判明技:{rev}" if rev else ""))
+                        f" [{types}]" + (f" 判明技:{rev}" if rev else "") + pend)
         act = sd.get("active")
         sc = sd.get("screens") or {}
         walls = [n for k, n in (("reflect", "リフレクター"),

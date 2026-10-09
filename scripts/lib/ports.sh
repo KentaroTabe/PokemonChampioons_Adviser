@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 常駐 (アドバイザー uvicorn / フロント http.server) のポート解決。scripts から `. scripts/lib/ports.sh` で読む。
+# 常駐 (アドバイザー uvicorn / フロント tools.frontend_server) のポート解決。scripts から `. scripts/lib/ports.sh` で読む。
 #
 # - 既定は config/ports.env (ADVISOR_PORT_DEFAULT / FRONTEND_PORT_DEFAULT / PORT_SEARCH_RANGE)
 # - 待ち受け中のポートが「自分たち」(コマンドが一致し、作業ディレクトリがこのリポジトリ) なら稼働中として使う
@@ -12,6 +12,7 @@
 #   choose_port DEFAULT LAST PATTERN  → "PORT STATE" (STATE: ours=稼働中 / start=このポートで起動 / none=空き無し)
 #   load_ports                        → ADVISOR_PORT / FRONTEND_PORT (前回の logs/ports.env、無ければ既定)
 #   save_ports ADV FRONT              → logs/ports.env と config/ports.local.js を書く
+#                                       (ports.local.js には配信する版の git commit window.FRONTEND_GIT_COMMIT も書く)
 #   port_owner PORT                   → 表示用 "pid コマンド (cwd ...)"
 # 呼び出し側が set -e / pipefail でも落ちないよう、失敗し得るパイプには || true を付けている。
 
@@ -20,7 +21,11 @@ PORTS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 PORTS_STATE="${PORTS_STATE:-$PORTS_ROOT/logs/ports.env}"
 PORTS_JS="${PORTS_JS:-$PORTS_ROOT/config/ports.local.js}"
 ADVISOR_PATTERN="uvicorn server:app_asgi"
-FRONTEND_PATTERN="http.server"
+# フロントの配信 (index.html)。Cache-Control: no-store を付ける (2026-10-07: http.server ではブラウザがキャッシュの古い
+# index.html を使った疑い)。起動は `python3 -m "$FRONTEND_MODULE" PORT`、判定 (port_state) と停止 (pkill) は FRONTEND_PATTERN。
+# tools/control_panel.py もこの行を読む (パターンの定義はここだけ)
+FRONTEND_MODULE="tools.frontend_server"
+FRONTEND_PATTERN="$FRONTEND_MODULE"
 
 port_listener_pid() {   # $1=port → 待ち受けている pid (無ければ空)
   lsof -nP -iTCP:"$1" -sTCP:LISTEN -t 2>/dev/null | head -n 1 || true
@@ -98,8 +103,16 @@ load_ports() {
   return 0
 }
 
+git_commit_js() {   # → 配信する作業ツリーの git commit (短縮) を JS の文字列で。git が無ければ null
+  local c
+  c="$(git -C "$PORTS_ROOT" rev-parse --short HEAD 2>/dev/null || true)"
+  if [ -n "$c" ]; then printf '"%s"' "$c"; else printf 'null'; fi
+}
+
 save_ports() {   # $1=advisor $2=frontend
   mkdir -p "$(dirname "$PORTS_STATE")" "$(dirname "$PORTS_JS")"
   printf 'ADVISOR_PORT=%s\nFRONTEND_PORT=%s\n' "$1" "$2" > "$PORTS_STATE"
-  printf '// 起動スクリプトが生成する (コミットしない)。フロントが接続するアドバイザーのポート\nwindow.ADVISOR_PORT = %s;\n' "$1" > "$PORTS_JS"
+  # フロントが接続するアドバイザーのポートと、配信する版の git commit (ページが client_hello の served_commit で返す。2026-10-07)
+  printf '// 起動スクリプトが生成する (コミットしない)。フロントが接続するアドバイザーのポートと配信する版の git commit\nwindow.ADVISOR_PORT = %s;\nwindow.FRONTEND_GIT_COMMIT = %s;\n' \
+    "$1" "$(git_commit_js)" > "$PORTS_JS"
 }

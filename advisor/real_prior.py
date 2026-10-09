@@ -33,6 +33,35 @@ def load_bank(path: Optional[Path] = None) -> Optional[dict]:
     return bank
 
 
+_ver_cache = {"path": None, "mtime": None, "info": None}
+
+
+def bank_version(path: Optional[Path] = None) -> Optional[dict]:
+    """バンクの版と集計の締切時刻 (2026-10-07 段 0。選出の advice 行の opp_pick_pred に残す)。無ければ None。
+    {"path", "sha256" (先頭 16 桁), "mtime", "built_at", "data_until" (このデータまでを使った: 使った対戦の最後の時刻。
+    古いバンクには無い), "cutoff" (data_until、無ければ built_at), "cutoff_basis", "n_battles"}。mtime でキャッシュする"""
+    import hashlib
+    p = Path(path) if path else REPO / REAL_BANK_PATH
+    try:
+        mtime = p.stat().st_mtime
+    except OSError:
+        return None
+    if _ver_cache["path"] == str(p) and _ver_cache["mtime"] == mtime:
+        return _ver_cache["info"]
+    try:
+        raw = p.read_bytes()
+        bank = json.loads(raw.decode("utf-8"))
+    except Exception:
+        return None
+    until = bank.get("data_until")
+    info = {"path": str(REAL_BANK_PATH) if path is None else str(p), "sha256": hashlib.sha256(raw).hexdigest()[:16],
+            "mtime": round(mtime, 2), "built_at": bank.get("built_at"), "data_until": until,
+            "cutoff": until if until is not None else bank.get("built_at"),
+            "cutoff_basis": "data_until" if until is not None else "built_at", "n_battles": bank.get("n_battles")}
+    _ver_cache.update({"path": str(p), "mtime": mtime, "info": info})
+    return info
+
+
 def species_pick_prior(sid: str, bank: Optional[dict] = None,
                        min_appear: int = SELECTION_REAL_PRIOR_MIN_APPEAR) -> Optional[float]:
     bank = bank if bank is not None else load_bank()

@@ -16,6 +16,7 @@ from typing import Optional
 from advisor.dex import get_dex, BOOST_MULT
 from advisor.damage import MonView, FieldView, _is_grounded, calc_damage
 from advisor.sets import get_predictor
+from champions_agent.config import RL_BLEND_WEIGHT_DEFAULT
 
 # 画面の相性ヒント -> タイプ倍率
 HINT_MULT = {
@@ -58,6 +59,10 @@ CHOICE_ITEM_IDS = {"choicescarf", "choiceband", "choicespecs"}
 # 交代の取り逃しでHPが古い可能性のある控えへの交代スコア減点
 # (2026-08-18: ひんしを取り逃した個体が100%のまま交代候補に推奨された)
 UNCERTAIN_SWITCH_PENALTY = 15.0
+# バー推定 (hp_source="bar") の控えを上の減点の対象から外すか。2026-10-09 ユーザー判断 B: 外さない (False)。
+# 3 フレームの差 0.03 以内は読取値の安定性であり真値からの誤差の保証ではない (同じ座標ずれは何フレーム読んでも安定する)。
+# 減点 15 が最適と確認されたわけではなく、既存の減点規則を暫定維持し、推定誤差と交代順位への影響を確認してから見直す
+UNCERTAIN_EXEMPT_BAR_ESTIMATE = False
 # 「行動前に倒される見込み」(素早さ負け or 相手のKO圏先制技) の局面で、
 # 先に動けない技のスコアに掛ける割引。ダメージ期待値はほぼ実現しないが、
 # 素早さ推定や相手の交代の可能性があるためゼロにはしない
@@ -96,6 +101,65 @@ def _eff_accuracy(mv: dict, atk_ability, def_ability) -> float:
     return (mv["accuracy"] or 100) / 100.0
 
 
+def fainted_allies_of(side_state: dict, self_index: Optional[int]) -> int:
+    """その側のひんしの数 (自分 self_index を除く。純粋)。calc_damage の文脈 fainted_allies (そうりょうのつかさ・
+    おはかまいり) に渡す。2026-10-07 のダメージ照合で、エンジンが渡していなかったため過小になっていた"""
+    # 対応待ちの個体 (相手の party の 7 番目以降、2026-10-09 ④) は数えない (vision.state.roster_slots)
+    from vision.state import roster_slots
+    return sum(1 for i, p in roster_slots((side_state or {}).get("party"))
+               if i != self_index and (p or {}).get("status") == "fainted")
+
+
+def _side_members(side_state: dict, side: str) -> list:
+    """その側の残存メンバーの候補 [(index, 要素)] (純粋)。相手側は vision.state.roster_slots (先頭 6 枠、対応待ちを除く)。
+    対応待ちの個体は 6 枠のどれかで追加の個体ではないので入れない (2026-10-09 ④。入れると同じ個体を枠と観測の 2 体として
+    数える)。相手の場の個体が対応待ちの間は、呼び出し側 (_run_endgame / _run_search) が評価そのものを保留する"""
+    party = (side_state or {}).get("party") or []
+    if side != "opponent":
+        return list(enumerate(party))
+    from vision.state import roster_slots
+    return roster_slots(party)
+
+
+def opp_active_pending(opp_state: Optional[dict]) -> bool:
+    """相手の場の個体が対応待ち (6 枠のどれか未定、vision.state の pending) か (純粋。2026-10-09 ④)。
+    True の間は、ロスターの対応が要る評価 (終盤評価・探索の相手の控えの列挙) を保留し、場の個体への直接の採点だけを使う"""
+    from vision.state import is_pending
+    party = (opp_state or {}).get("party") or []
+    idx = (opp_state or {}).get("active_index")
+    return isinstance(idx, int) and 0 <= idx < len(party) and is_pending(party[idx])
+
+
+OPP_PENDING_NOTE = "相手の場のポケモンが 6 枠のどれか未定 (対応待ち) のため、終盤評価と探索を保留 (直接の採点のみ)"
+
+
+def opp_pending_note(opp_state: Optional[dict]) -> Optional[str]:
+    """対応待ちの注記 (純粋)。場の個体に候補の枠 (vision.state.SideState.pending_hint。タイプが 1 個だけ重なる枠が 1 つ) が
+    あれば「候補: 枠 N (種)」を足す (2026-10-09 段 2。自動では統合しない。画面の相手欄で人が枠を指定する)。枠の番号は 1 始まり"""
+    if not opp_active_pending(opp_state):
+        return None
+    party = (opp_state or {}).get("party") or []
+    hint = party[opp_state["active_index"]].get("pending_hint") or []
+    if not hint:
+        return OPP_PENDING_NOTE
+    parts = [f"枠 {h['slot'] + 1} ({h.get('ja') or '/'.join(h.get('types') or []) or '未特定'}"
+             f"{'、様子見画面の弱い読み' if h.get('source') == 'watch_loose' else ''})" for h in hint]
+    return f"{OPP_PENDING_NOTE}。候補: {'、'.join(parts)} (画面の相手欄で枠を指定すると確定)"
+
+
+def has_acted_since_entry(last_move_player: Optional[str], move_ids) -> bool:
+    """自分の場のポケモンが場に出てから技を使ったか (純粋)。
+
+    state["last_move"]["player"] は自分側が技を使うと入り、交代・ひんしで消える (vision.events)。
+    入っていて、それが今の場のポケモンの技 (move_ids) のどれかなら「使った」とする。技の欄に無い技名
+    (交代の取り逃しで前の個体の技が残っている等) や未記録は「分からない」として False を返す
+    (推測で選べなくしない)。であいがしら・ねこだまし の初手制限に使う (2026-10-07 ダメージ照合の合法手 122/124)
+    """
+    if not last_move_player:
+        return False
+    return last_move_player in {m for m in (move_ids or []) if m}
+
+
 def type_ja2en() -> dict:
     global _TYPE_JA2EN
     if _TYPE_JA2EN is None:
@@ -129,6 +193,31 @@ SEARCH_WORKERS = 1
 # 探索の推奨値を行動スコアへ統合する重み (P9、事前登録 2026-09-04 20:30)。
 # score += SEARCH_BLEND × (rec_a − max_rec)。0 で無効 (従来: 択評価は表示のみ)
 SEARCH_BLEND = 0.0
+
+
+def _rl_blend_default_from_env() -> float:
+    """RL 加点の重みの既定値 (起動時に 1 回だけ読む)。
+
+    既定は config の RL_BLEND_WEIGHT_DEFAULT。後方互換のため環境変数 RL_BLEND_WEIGHT があれば
+    それを既定値の供給源として使う (tests/test_advisor が import 前に 0 を setdefault する、
+    測定の子プロセスが環境変数を引き継ぐ)。2026-10-07 (影の計算の隔離条件 (a)): 以前は評価のたびに
+    関数内で os.environ を読んでいたため、別スレッドから重みを変えると本番の助言まで変わり得た。
+    今は重みを evaluate(rl_blend_weight=...) の引数で渡し、環境変数は起動時の既定値にしか効かない。
+    数値として読めない値は警告して config の既定値を使う。
+    """
+    raw = os.environ.get("RL_BLEND_WEIGHT")
+    if raw is None or not str(raw).strip():
+        return float(RL_BLEND_WEIGHT_DEFAULT)
+    try:
+        return float(raw)
+    except ValueError:
+        print(f"[engine] RL_BLEND_WEIGHT={raw!r} は数値でないため既定値 "
+              f"{RL_BLEND_WEIGHT_DEFAULT} を使う")
+        return float(RL_BLEND_WEIGHT_DEFAULT)
+
+
+# RL 加点の重みの既定値 (evaluate の rl_blend_weight が None のとき)。import 時に 1 回決まる
+RL_BLEND_DEFAULT = _rl_blend_default_from_env()
 
 
 def build_mon_view(p: dict, resolver=None, side: str = "opponent") -> Optional[MonView]:
@@ -274,8 +363,25 @@ def opponent_move_pool(opp_state: dict, opp_view: MonView, resolver) -> list:
 # ==============================================================================
 # メインの評価
 # ==============================================================================
-def evaluate(state: dict, resolver=None) -> dict:
-    """状態辞書から行動候補のランキングを生成する"""
+def evaluate(state: dict, resolver=None,
+             rl_blend_weight: Optional[float] = None) -> dict:
+    """状態辞書から行動候補のランキングを生成する。
+
+    rl_blend_weight: RL の行動確率の加点の重み (score += 重み × 確率)。None なら既定値
+    (RL_BLEND_DEFAULT = config RL_BLEND_WEIGHT_DEFAULT、起動時の環境変数 RL_BLEND_WEIGHT があればその値)。
+    採点は 2 段: evaluate_common (加点より前の共通部分) → finish_evaluation (加点以降)。
+    影の計算 (advisor.shadow) は共通部分を使い回し、重みだけ変えて加点以降を再計算する。
+    """
+    return finish_evaluation(evaluate_common(state, resolver), rl_blend_weight)
+
+
+def evaluate_common(state: dict, resolver=None) -> dict:
+    """採点の共通部分 (RL 加点より前): ダメージ・採点の基礎・詰み筋・同時手番探索・SEARCH_BLEND・rl_hint の取得まで。
+
+    戻り値: 評価できなければ {"ok": False, "reason"} (evaluate の戻り値と同じ)。評価できれば
+    {"ok": True, "actions": 加点前の行動 (並べ替え済み), "rl_hint", "move_type_mult", 表示用の注記, 後段の判定に使う旗,
+     "context": 影の計算の層別用の局面の要約} — finish_evaluation の入力。
+    """
     dex = get_dex()
     my_state = state["player"]
     opp_state = state["opponent"]
@@ -342,6 +448,9 @@ def evaluate(state: dict, resolver=None) -> dict:
     actions = []
     threats = []
     speed_note = ""
+    # ダメージ計算の盤面の文脈: 味方のひんしの数 (そうりょうのつかさ・おはかまいり)
+    my_ctx = {"fainted_allies": fainted_allies_of(my_state, my_active_idx)}
+    opp_ctx = {"fainted_allies": fainted_allies_of(opp_state, opp_active_idx)}
     opp_status_ratio = 0.0   # 相手の技プールに占める変化技の重み比率
     opp_taunted = False      # 相手が挑発中 (重ねる価値なし)
 
@@ -365,7 +474,7 @@ def evaluate(state: dict, resolver=None) -> dict:
             mv = dex.move(mid)
             if not mv:
                 continue
-            d = calc_damage(opp_view, my_view, mid, opp_field)
+            d = calc_damage(opp_view, my_view, mid, opp_field, ctx=opp_ctx)
             acc = _eff_accuracy(mv, opp_view.ability, my_view.ability)
             exp = d["avg"] * acc
             if d["avg"] > 0:
@@ -482,6 +591,11 @@ def evaluate(state: dict, resolver=None) -> dict:
                         {"name_ja": mv_r[0], "move_id": mv_r[1], "pp": None})
         except Exception:
             pass
+    # であいがしら・ねこだまし (場に出た最初の行動でしか選べない) の制限: 場に出てから技を使ったか
+    acted_since_entry = has_acted_since_entry(
+        (state.get("last_move") or {}).get("player"),
+        [s.get("move_id") for s in my_move_slots])
+    from advisor import effects as _E
     for slot in ([] if switch_only else my_move_slots):
         mid = slot.get("move_id")
         mv = dex.move(mid)
@@ -489,6 +603,11 @@ def evaluate(state: dict, resolver=None) -> dict:
         if mv is None:
             continue
         if slot.get("pp") == 0:
+            continue
+        if acted_since_entry and _E.first_turn_only(_E.move_entry(mid)):
+            actions.append({"kind": "move", "id": mid, "name": name,
+                            "score": -99.0,
+                            "reason": "場に出た最初のターンしか選べない"})
             continue
         if mid in disabled_ids:
             actions.append({"kind": "move", "id": mid, "name": name,
@@ -576,14 +695,14 @@ def evaluate(state: dict, resolver=None) -> dict:
                 override = HINT_MULT.get(slot.get("effectiveness")) \
                     if slot.get("effectiveness") else 1.0
             if opp_view is not None:
-                d = calc_damage(my_view, opp_view, mid, my_field)
+                d = calc_damage(my_view, opp_view, mid, my_field, ctx=my_ctx)
             else:
                 dummy = MonView(species_id="", types=["Normal"],
                                 base={"hp": 80, "atk": 80, "def": 80,
                                       "spa": 80, "spd": 80, "spe": 80},
                                 ev=dict(OFFENSIVE_EV))
                 d = calc_damage(my_view, dummy, mid, my_field,
-                                override_type_mult=override)
+                                override_type_mult=override, ctx=my_ctx)
             exp = d["avg"] * acc
             move_type_mult[mid] = d["type_mult"]
 
@@ -674,7 +793,7 @@ def evaluate(state: dict, resolver=None) -> dict:
 
         incoming = 0.0
         if opp_best_move:
-            d_in = calc_damage(opp_view, cand, opp_best_move, opp_field)
+            d_in = calc_damage(opp_view, cand, opp_best_move, opp_field, ctx=opp_ctx)
             incoming = d_in["avg"]
 
         hazard_dmg = 0.0
@@ -696,7 +815,8 @@ def evaluate(state: dict, resolver=None) -> dict:
                        "Steel": "ironhead", "Fairy": "moonblast", "Normal": "doubleedge"}
             g = generic.get(t)
             if g:
-                d_out = calc_damage(cand, opp_view, g, my_field)
+                d_out = calc_damage(cand, opp_view, g, my_field,
+                                    ctx={"fainted_allies": fainted_allies_of(my_state, i)})
                 counter = max(counter, d_out["avg"])
 
         cand_hp_pct = cand.hp_frac * 100.0
@@ -712,10 +832,15 @@ def evaluate(state: dict, resolver=None) -> dict:
                   + f" / 交代後の打点 約{counter:.0f}%")
         if not survives:
             reason += " / 交代出しで倒される危険あり"
-        if p.get("hp_uncertain"):
+        # バー推定 (hp_source="bar"、2026-10-09) も hp_uncertain を立てる。既存の減点規則を維持し、バー推定の控えも
+        # 減点の対象にする (UNCERTAIN_EXEMPT_BAR_ESTIMATE の注記、ユーザー判断 B)。警告の文言だけ出所で分ける:
+        # バー推定は「バーからの概算」、交代の見逃しを検出した個体 (missed_switch で hp_source が None に戻る) は従来の文言
+        bar_estimate = p.get("hp_source") == "bar"
+        if p.get("hp_uncertain") and not (UNCERTAIN_EXEMPT_BAR_ESTIMATE and bar_estimate):
             # 交代を見逃した個体はHPが古い (ひんし済みの可能性すらある)
             score -= UNCERTAIN_SWITCH_PENALTY
-            reason += " / ⚠HP不明 (交代の見逃しあり。実際は瀕死の可能性)"
+            reason += (" / ⚠HP はバーからの概算" if bar_estimate
+                       else " / ⚠HP不明 (交代の見逃しあり。実際は瀕死の可能性)")
 
         actions.append({
             "kind": "switch",
@@ -756,6 +881,7 @@ def evaluate(state: dict, resolver=None) -> dict:
     # 探索より先に計算し、勝ち筋の温存を探索の葉評価へ渡す (定説H3)
     endgame = ""
     wincon_sid = None
+    opp_pending = opp_active_pending(opp_state)
     try:
         endgame = _run_endgame(my_state, opp_state, resolver)
         import re as _re
@@ -784,7 +910,7 @@ def evaluate(state: dict, resolver=None) -> dict:
         actions.sort(key=lambda a: -a["score"])
 
     # RL学習済み方策 (行動分布+局面価値)。表示に加えて、
-    # 行動スコアへ確率をブレンドし推奨順位にも反映する
+    # 行動スコアへ確率をブレンドし推奨順位にも反映する (加点は finish_evaluation → rescore_actions)
     rl_hint = None
     try:
         from advisor.rl_bridge import policy_hint
@@ -800,23 +926,85 @@ def evaluate(state: dict, resolver=None) -> dict:
             rl_state = dict(state,
                             player=dict(my_state, party=rl_party))
         rl_hint = policy_hint(rl_state, my_spe_actual=_es2(my_view, my_field))
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "actions": actions,
+        "rl_hint": rl_hint,
+        "move_type_mult": move_type_mult,
+        "threats": threats,
+        "speed_note": speed_note,
+        "mega_note": mega_note,
+        "opp_inference": opp_inference_note,
+        "opp_moves_note": opp_moves_note,
+        "opp_spread_note": opp_spread_note,
+        "gtheory": gtheory,
+        "endgame": endgame,
+        # 相手の場の個体が対応待ち: 終盤評価・探索を保留した印 (advice 行にそのまま残る。2026-10-09 ④)
+        "opp_pending": opp_pending,
+        "opp_pending_note": opp_pending_note(opp_state) if opp_pending else None,
+        "encore": "encore" in my_vols,
+        "encore_locked": encore_locked,
+        "choice_locked": choice_locked,
+        "threat_faces_me": threat_faces_me,
+        "can_ko_first": can_ko_first,
+        "my_fainted": my_fainted,
+        "pivot_pending": pivot_pending,
+        # 影の計算 (advice_variant) の層別用 (攻め / 受け / 残り体数)。表示の助言には出さない
+        "context": {
+            "turn": state.get("turn"),
+            "my_hp_pct": round(my_hp_pct, 1),
+            "opp_hp_pct": round(opp_hp_pct, 1),
+            "i_am_faster": i_am_faster,
+            "threat_ko": threat_ko,
+            "threat_faces_me": threat_faces_me,
+            "can_ko_first": can_ko_first,
+            "switch_only": switch_only,
+            "my_remaining": my_state.get("remaining"),
+            "opp_remaining": opp_state.get("remaining"),
+            # 自分の HP が推定値のときだけ印を足す (2026-10-09。記録だけで採点には使わない)
+            **({"my_hp_estimated": True, "my_hp_source": my_p.get("hp_source")}
+               if my_p.get("hp_estimated") else {}),
+        },
+    }
+
+
+def _rl_probs(rl_hint: Optional[dict]) -> dict:
+    """RL の行動分布 (rl_hint["top"]) → {ラベル: 確率} (純粋)。
+
+    「技名+メガ」は技名側にも最大値で寄せる (素の技の確率で上書きしない。2026-09-12 修正:
+    上書きのせいで「たきのぼり+メガ 100% / たきのぼり 0%」が技側 0% になりブレンドが消えていた)
+    """
+    probs: dict = {}
+    for t in (rl_hint or {}).get("top") or []:
+        base_label = t["label"].replace("+メガ", "")
+        probs[base_label] = max(probs.get(base_label, 0.0), t["prob"])
+        if t["label"] != base_label:
+            probs[t["label"]] = max(probs.get(t["label"], 0.0), t["prob"])
+    return probs
+
+
+def rescore_actions(actions: list, rl_hint: Optional[dict], move_type_mult: dict,
+                    rl_blend_weight: float) -> list:
+    """加点以降の採点 (純粋関数): RL 加点 → KO 前割引 → 交代技の複合価値の補正 → 並べ替え。
+
+    actions は evaluate_common の加点前の行動 (並べ替え済み)。入力は書き換えず、行動の辞書を複製して返す
+    (影の計算が同じ共通部分から重みだけ変えて何度でも呼べるように)。2026-10-07 に evaluate から切り出した。
+    中身 (順序・丸め・例外の扱い) は切り出す前と同じ。
+    """
+    actions = [dict(a) for a in actions]
+    try:
         if rl_hint and rl_hint.get("top"):
-            probs = {}
-            for t in rl_hint["top"]:
-                # 「技名+メガ」は技名側にも最大値で寄せる (素の技の確率で上書きしない。2026-09-12 修正:
-                # 上書きのせいで「たきのぼり+メガ 100% / たきのぼり 0%」が技側 0% になりブレンドが消えていた)
-                base_label = t["label"].replace("+メガ", "")
-                probs[base_label] = max(probs.get(base_label, 0.0), t["prob"])
-                if t["label"] != base_label:
-                    probs[t["label"]] = max(probs.get(t["label"], 0.0), t["prob"])
-            RL_BLEND = float(os.environ.get("RL_BLEND_WEIGHT", "25"))
+            probs = _rl_probs(rl_hint)
             for a in actions:
                 if a["score"] <= -90:
                     continue   # わざふうじ等で選べない行動はブレンドしない
                 key = a["name"] if a["kind"] == "move" else f"交代:{a['name']}"
                 p = probs.get(key)
                 if p is not None:
-                    a["score"] = round(a["score"] + RL_BLEND * p, 1)
+                    a["score"] = round(a["score"] + rl_blend_weight * p, 1)
                     a["reason"] = (a.get("reason") or "") + f" / RL{p:.0%}"
             actions.sort(key=lambda a: -a["score"])
     except Exception:
@@ -860,8 +1048,26 @@ def evaluate(state: dict, resolver=None) -> dict:
             actions.sort(key=lambda a: -a["score"])
     except Exception:
         pass
+    return actions
 
-    if "encore" in my_vols:
+
+def finish_evaluation(common: dict, rl_blend_weight: Optional[float] = None) -> dict:
+    """採点の加点以降 (純粋関数): 共通部分 (evaluate_common の戻り値) と重みから、evaluate の戻り値を作る。
+
+    common は書き換えない。rl_blend_weight が None なら RL_BLEND_DEFAULT。
+    """
+    if not common.get("ok"):
+        return common
+    weight = RL_BLEND_DEFAULT if rl_blend_weight is None else float(rl_blend_weight)
+    actions = rescore_actions(common["actions"], common.get("rl_hint"),
+                              common.get("move_type_mult") or {}, weight)
+    speed_note = common["speed_note"]
+    encore_locked = common["encore_locked"]
+    choice_locked = common["choice_locked"]
+    endgame = common["endgame"]
+    my_fainted = common["my_fainted"]
+
+    if common["encore"]:
         if encore_locked:
             locked_ja = next((a["name"] for a in actions
                               if a.get("id") == encore_locked), encore_locked)
@@ -882,7 +1088,7 @@ def evaluate(state: dict, resolver=None) -> dict:
     # 倒され、次を無償で出すプランを明示する。勝ち筋の個体は温存する
     sacrifice_note = ""
     try:
-        if threat_faces_me and not can_ko_first and not my_fainted:
+        if common["threat_faces_me"] and not common["can_ko_first"] and not my_fainted:
             sacrifice_note = _sacrifice_note(actions, endgame)
     except Exception:
         pass
@@ -890,23 +1096,26 @@ def evaluate(state: dict, resolver=None) -> dict:
     if my_fainted:
         speed_note = ("ひんし: 交代先を選んでください (技は選べません)。"
                       + speed_note)
-    elif pivot_pending:
+    elif common["pivot_pending"]:
         speed_note = ("とんぼがえり系の交代先を選ぶ場面です。"
                       + speed_note)
 
     return {
         "ok": True,
         "actions": actions,
-        "threats": threats[:5],
+        "threats": common["threats"][:5],
         "speed_note": speed_note,
-        "mega_note": mega_note,
-        "opp_inference": opp_inference_note,
-        "opp_moves_note": opp_moves_note,
-        "opp_spread_note": opp_spread_note,
-        "gtheory": gtheory,
+        "mega_note": common["mega_note"],
+        "opp_inference": common["opp_inference"],
+        "opp_moves_note": common["opp_moves_note"],
+        "opp_spread_note": common["opp_spread_note"],
+        "gtheory": common["gtheory"],
         "endgame_note": endgame,
         "sacrifice_note": sacrifice_note,
-        "rl_hint": rl_hint,
+        # 相手の場の個体が対応待ち: 終盤評価・探索を保留した (2026-10-09 ④。advice 行にそのまま残る)
+        "opp_pending": bool(common.get("opp_pending")),
+        "opp_pending_note": common.get("opp_pending_note"),
+        "rl_hint": common.get("rl_hint"),
         "best": actions[0] if actions else None,
     }
 
@@ -1009,8 +1218,10 @@ def _mega_timing_note(my_p, my_view, opp_view, my_field, resolver):
 
 
 def _run_endgame(my_state, opp_state, resolver) -> str:
-    """残存メンバーの1v1行列から勝ち筋/負け筋ノートを作る"""
+    """残存メンバーの1v1行列から勝ち筋/負け筋ノートを作る。相手の場の個体が対応待ちなら保留 (結果なし。2026-10-09 ④)"""
     from advisor.endgame import matchup_matrix, endgame_note
+    if opp_active_pending(opp_state):
+        return ""
 
     def mons_of(side_state, side):
         out = []
@@ -1019,7 +1230,7 @@ def _run_endgame(my_state, opp_state, resolver) -> str:
         if side == "player":
             from advisor.party import battle_party_indices
             allowed = battle_party_indices(side_state)
-        for i, p in enumerate(side_state.get("party", [])):
+        for i, p in _side_members(side_state, side):
             if p.get("status") == "fainted":
                 continue
             if allowed is not None and i not in allowed:
@@ -1090,9 +1301,10 @@ def _hp_frac_of(p: dict) -> float:
 
 def _run_search(state, my_state, my_view, my_p, opp_state, opp_view,
                 resolver, pool, my_field, opp_field, wincon_sid=None):
-    """状態辞書 -> SimSide を組み立てて同時手番探索を実行する"""
+    """状態辞書 -> SimSide を組み立てて同時手番探索を実行する。相手の場の個体が対応待ちなら、相手の控えを列挙できない
+    ので探索しない (相手が未判明のときと同じく None = 直接の採点だけ。2026-10-09 ④)"""
     from advisor.search import SimSide, search
-    if my_view is None or opp_view is None:
+    if my_view is None or opp_view is None or opp_active_pending(opp_state):
         return None
 
     my_moves = [m.get("move_id") for m in (my_p.get("moves") or [])
@@ -1108,7 +1320,7 @@ def _run_search(state, my_state, my_view, my_p, opp_state, opp_view,
         if side == "player":
             from advisor.party import battle_party_indices
             allowed = battle_party_indices(side_state)
-        for i, p in enumerate(side_state.get("party", [])):
+        for i, p in _side_members(side_state, side):
             if i == active_idx or p.get("status") == "fainted":
                 continue
             if allowed is not None and i not in allowed:

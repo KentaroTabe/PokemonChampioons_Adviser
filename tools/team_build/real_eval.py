@@ -265,7 +265,9 @@ def audit_aggregate(paths: list) -> Optional[dict]:
 def format_summary(s: dict, title: str) -> str:
     lines = [f"[{title}] 対戦ログ {s['n_logs']} / 勝敗確定 {s['n_decided']} (勝 {s['wins']} 敗 {s['n_decided'] - s['wins']})"]
     if s["win_rate"] is not None:
-        lines.append(f"  勝率 {s['win_rate']:.1%} ± {s['ci_halfwidth']:.1%} (実戦の重み w={s['weight']:.2f})")
+        # 実戦とシムを混ぜた指標は表示しない (2026-10-07 docs/USEFULNESS_VERIFICATION_PLAN_1007.md §7: 実戦とシムは別の欄で報告する)。
+        # 混合の重み w (weight) は JSON の出力には残す
+        lines.append(f"  勝率 {s['win_rate']:.1%} ± {s['ci_halfwidth']:.1%} (実戦のみ)")
     else:
         lines.append("  勝率: 勝敗確定の対戦がまだ無い")
     bs = s["by_source"]

@@ -939,6 +939,9 @@ class EventParser:
             return
         old = mon.species_id
         mon.species_id = form
+        # 形態が決まった (交代の文言の名前が複数の形態に当たって保留していた候補を消す。対応待ちの個体なら、次の
+        # link_active_to_party がこの形態のタイプで枠を決める。2026-10-09 ④)
+        mon.species_candidates = []
         from vision.state import _dex_types_ja_of
         t = _dex_types_ja_of(form)
         if t:

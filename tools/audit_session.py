@@ -25,6 +25,7 @@ from collections import Counter
 from pathlib import Path
 
 from tools.audit_extraction import collect_pairs
+from vision.state import is_pending
 from tools.audit_subtask import MODEL, PROMPT_HEADER, REPORT_DIR
 from tools.claude_cli import claude_command
 
@@ -75,8 +76,10 @@ def detect_anomalies(battle_log: str) -> list:
             for side in ("player", "opponent"):
                 party = (st.get(side) or {}).get("party") or []
                 named = [p for p in party if p.get("ja")]
-                if len(named) > 6:
-                    out.append((t, f"{side}のパーティが{len(named)}匹 "
+                # 対応待ちの個体 (pending、2026-10-09 ④) は 6 体のどれかなので上限の超過に数えない
+                n_named = sum(1 for p in named if not is_pending(p))
+                if n_named > 6:
+                    out.append((t, f"{side}のパーティが{n_named}匹 "
                                    "(ルール上の上限6を超過)"))
                 for p in named:
                     ja, hp = p["ja"], p.get("hp")

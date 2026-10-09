@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from advisor.engine import evaluate
+from advisor.engine import evaluate, evaluate_common, finish_evaluation
 
 # 推奨のヒステリシス: 同一ターン内の再計算で、新しい最善が前回の最善を
 # この点差以上上回らない限り、前回の推奨を先頭に据え置く。
@@ -91,6 +91,7 @@ class Advisor:
         self._resolver = resolver
         self._last_best: Optional[dict] = None
         self._stab_hist: Optional[dict] = None
+        self.last_common: Optional[dict] = None   # 直近の advise(keep_common=True) の採点の共通部分
 
     @property
     def resolver(self):
@@ -119,9 +120,19 @@ class Advisor:
         result["text"] = format_selection_advice(result)
         return result
 
-    def advise(self, state_dict: dict) -> dict:
+    def advise(self, state_dict: dict, rl_blend_weight: Optional[float] = None,
+               keep_common: bool = False) -> dict:
+        """対戦の助言。rl_blend_weight は RL 加点の重み (None = 既定値)。
+        keep_common=True なら採点の共通部分 (advisor.engine.evaluate_common の戻り値) を self.last_common に残す
+        (影の計算 advisor.shadow の入力。False のときは保持しない = 追加処理なし)"""
+        self.last_common = None
         try:
-            result = evaluate(state_dict, self.resolver)
+            if keep_common:
+                common = evaluate_common(state_dict, self.resolver)
+                result = finish_evaluation(common, rl_blend_weight)
+                self.last_common = common
+            else:
+                result = evaluate(state_dict, self.resolver, rl_blend_weight=rl_blend_weight)
             result, self._last_best = apply_advice_hysteresis(
                 result, self._last_best, state_dict.get("turn"))
             result, self._stab_hist = apply_advice_stability(

@@ -96,11 +96,148 @@ def test_freshness_with_db():
     print("test_freshness_with_db OK")
 
 
+def _split_doc(seed: int = 7) -> dict:
+    """families の純粋関数で作った分割 (opponents.build_split と同じ形の一部)。構築は 30、系統化の閾値 0.5"""
+    from tools.team_build import families as F
+    pool = [f"s{i}" for i in range(40)]
+    teams = []
+    for i in range(30):
+        sp = frozenset(pool[(i * 3 + k) % 40] for k in range(6))
+        teams.append(F.Team(team_id=f"t{i:02d}", species=sp, mega=None, rank=i + 1))
+    fams = F.cluster_families(teams, min_jaccard=0.5)
+    split = F.stratified_split(fams, seed=seed)
+    search_fams = [f for f in fams if split["families"][f.family_id] == "search"]
+    folds = F.cross_fit_folds(search_fams, k=3, seed=seed)
+    return {"run_id": "r1", "seed": seed, "pool_source": "latest", "pool_snapshot": 58, "top_n": 30, "min_jaccard": 0.5,
+            "tiers": {k: split[k] for k in F.TIERS}, "search_folds": folds, "sealed_id": F.sealed_id(split["holdout"]),
+            "families": [{"family_id": f.family_id, "tier": split["families"][f.family_id], "teams": [t.team_id for t in f.teams]}
+                         for f in fams],
+            "teams": {t.team_id: {"rank": t.rank, "species": sorted(t.species), "mega": t.mega} for t in teams}}
+
+
+def test_split_independence_pure():
+    doc = _split_doc()
+    r = SP.split_independence(doc)
+    assert r["ok"] is True and r["sealed_ok"] is True, r
+    assert r["team_multi_tier"] == 0 and r["family_cross_tier"] == 0 and r["folds"]["overlap"] == 0, r
+    assert r["folds"]["missing_from_folds"] == 0 and r["folds"]["not_in_search"] == 0 and r["folds"]["family_cross_fold"] == 0, r
+    assert sum(r["n_teams"].values()) == 30 and r["folds"]["n_folds"] == 3
+    # 層の重なり: holdout の構築を selection にも入れる → 構築・系統の跨ぎ、封印 id はそのまま (holdout の列は変えない)
+    leak = json.loads(json.dumps(doc))
+    leak["tiers"]["selection"].append(leak["tiers"]["holdout"][0])
+    r2 = SP.split_independence(leak)
+    assert r2["ok"] is False and r2["team_multi_tier"] == 1 and r2["family_cross_tier"] >= 1 and r2["family_tier_mismatch"] >= 1, r2
+    assert r2["identical_cross_tier"] >= 1, r2       # 同じ構築が 2 つの層 = 種族が完全に同じ組
+    # fold の重なりと search 外
+    leak2 = json.loads(json.dumps(doc))
+    leak2["search_folds"][1].append(leak2["search_folds"][0][0])
+    leak2["search_folds"][2].append(leak2["tiers"]["holdout"][0])
+    r3 = SP.split_independence(leak2)
+    assert r3["ok"] is False and r3["folds"]["overlap"] == 1 and r3["folds"]["not_in_search"] == 1, r3["folds"]
+    assert r3["folds"]["family_cross_fold"] >= 1, r3["folds"]
+    # 封印 id の食い違い
+    leak3 = dict(doc, sealed_id="0" * 16)
+    assert SP.split_independence(leak3)["sealed_ok"] is False
+    # 似た組: メガ軸だけ違う同じ 6 体を別の層に置く → 別のメガ軸の似た組 (系統の定義の外。ok には含めない)
+    sim = json.loads(json.dumps(doc))
+    h0 = sim["tiers"]["holdout"][0]
+    sim["teams"]["tx"] = dict(sim["teams"][h0], mega="s0")
+    sim["tiers"]["search"].append("tx")
+    sim["search_folds"][0].append("tx")
+    sim["families"].append({"family_id": "FX", "tier": "search", "teams": ["tx"]})
+    r4 = SP.split_independence(sim)
+    assert r4["similar_cross_tier"]["other_mega"] >= 1 and r4["ok"] is True, r4
+    print("test_split_independence_pure OK")
+
+
+def test_similar_pair_details():
+    """判断 10: 別メガ軸の似た組の 1 組ごとの集計 (構築 id・重み・型の共通性)。種・型の名前は出さない"""
+    doc = _split_doc()
+    h0 = doc["tiers"]["holdout"][0]
+    doc["teams"]["tx"] = dict(doc["teams"][h0], mega="s0")
+    doc["tiers"]["search"].append("tx")
+    doc["search_folds"][0].append("tx")
+    doc["families"].append({"family_id": "FX", "tier": "search", "teams": ["tx"]})
+    sp = doc["teams"][h0]["species"]
+    text_h = "\n\n".join(f"{s} @ Leftovers\nAbility: Pressure\n- Protect\n- Tackle\n- Growl\n- Ember" for s in sp)
+    text_x = "\n\n".join(f"{s} @ {'Leftovers' if i < 2 else 'Life Orb'}\nAbility: Pressure\n- Protect\n- Tackle\n- Surf\n- Ember"
+                         for i, s in enumerate(sp))
+    doc["texts"] = {h0: text_h, "tx": text_x}
+    pairs = SP.similar_pair_details(doc, scope="tier")
+    p = next(x for x in pairs if {x["a"]["team_id"], x["b"]["team_id"]} == {h0, "tx"})
+    assert p["jaccard"] == 1.0 and p["same_mega"] is False, p
+    assert p["type"] == {"common_species": 6, "common_moves": 18, "moves_compared": 24, "same_item": 2, "same_ability": 6}, p["type"]
+    side = p["a"] if p["a"]["team_id"] == "tx" else p["b"]
+    n_search = len(doc["tiers"]["search"])
+    assert side["group"] == "search" and side["family_id"] == "FX" and side["family_size"] == 1, side
+    assert abs(side["measure_share"] - round(1 / n_search, 5)) < 1e-9 and side["family_share"] == side["measure_share"], side
+    # 中身 (種の名前) は行に入らない
+    assert not any(s in json.dumps(p) for s in sp), p
+    # 同じメガ軸の組は既定で外す。fold をまたぐ組は fold の群で数える
+    assert all(x["same_mega"] is False for x in pairs)
+    assert all(x["a"]["group"].startswith("fold") for x in SP.similar_pair_details(doc, scope="fold"))
+    txt = SP.format_similar_pairs(pairs, "層をまたぐ別メガ軸の似た組")
+    assert "tx" in txt and f"{len(pairs)} 組" in txt, txt
+    print("test_similar_pair_details OK")
+
+
+def test_cross_run_and_selection():
+    a, b = _split_doc(), _split_doc()
+    b["run_id"] = "r2"
+    res = SP.cross_run_consistency({"r1": a, "r2": b})
+    assert res["ok"] is True and res["groups"][0]["runs"] == ["r1", "r2"] and res["groups"][0]["teams_conflict_tier"] == 0, res
+    # 同じ固定なのに分割が違う (構築を別の層へ) → 食い違い
+    c = json.loads(json.dumps(b))
+    moved = c["tiers"]["holdout"].pop(0)
+    c["tiers"]["selection"].append(moved)
+    c["sealed_id"] = "x"
+    res2 = SP.cross_run_consistency({"r1": a, "r3": c})
+    assert res2["ok"] is False and res2["groups"][0]["teams_conflict_tier"] == 1 and len(res2["groups"][0]["sealed_ids"]) == 2, res2
+    # 固定の別 (seed が違う) は別の群
+    d = dict(_split_doc(seed=8), run_id="r4")
+    assert len(SP.cross_run_consistency({"r1": a, "r4": d})["groups"]) == 2
+    # 固定を使った run の選び方: 由来が fixed で seed が表と同じもの
+    table = {"regA": {"seed": 7}}
+    mans = {"r1": {"regulation": "regA", "season_pin": {"seed": 7, "source": "fixed:new"}},
+            "r2": {"regulation": "regA", "season_pin": {"seed": 7, "source": "fixed:regA"}},
+            "r3": {"regulation": "regA", "season_pin": {"seed": 9, "source": "fixed:regA+arg"}},
+            "r4": {"regulation": "regA", "seed": 7},
+            "r5": {"regulation": "regB", "season_pin": {"seed": 7, "source": "fixed:new"}}}
+    assert SP.select_pinned_runs(mans, table) == {"r1": "regA", "r2": "regA"}
+    print("test_cross_run_and_selection OK")
+
+
+def test_check_splits_files():
+    with tempfile.TemporaryDirectory() as d:
+        runs = Path(d) / "runs"
+        pins = Path(d) / "season_pins.json"
+        pins.write_text(json.dumps({"regA": {"seed": 7}}), encoding="utf-8")
+        for rid in ("r1", "r2"):
+            (runs / rid).mkdir(parents=True)
+            (runs / rid / "manifest.json").write_text(json.dumps({"regulation": "regA", "season_pin": {"seed": 7, "source": "fixed:regA"}}),
+                                                      encoding="utf-8")
+            (runs / rid / "opponent_families.json").write_text(json.dumps(dict(_split_doc(), run_id=rid)), encoding="utf-8")
+        (runs / "old").mkdir()
+        (runs / "old" / "manifest.json").write_text(json.dumps({"regulation": "regA", "seed": 1}), encoding="utf-8")
+        (runs / "old" / "opponent_families.json").write_text(json.dumps(_split_doc(seed=1)), encoding="utf-8")
+        res = SP.check_splits(runs, pins)
+        assert res["ok"] is True and sorted(res["runs"]) == ["r1", "r2"], res
+        txt = SP.format_check_splits(res)
+        assert "重なり 0" in txt and "[r1]" in txt and "同じ固定の run ['r1', 'r2']" in txt, txt
+        # 固定を使った run が無ければ ok にしない
+        assert SP.check_splits(runs, Path(d) / "none.json")["ok"] is False
+    print("test_check_splits_files OK")
+
+
 def main() -> None:
     test_resolve_pure()
     test_overlap_pure()
     test_file_roundtrip_and_repin()
     test_freshness_with_db()
+    test_split_independence_pure()
+    test_similar_pair_details()
+    test_cross_run_and_selection()
+    test_check_splits_files()
     print("ALL OK")
 
 

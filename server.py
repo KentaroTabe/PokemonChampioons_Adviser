@@ -29,8 +29,13 @@ from vision.pipeline import VisionPipeline
 from vision.scenes import SCENE_SELECTION, SCENE_STANDBY
 from vision.end_notice import battle_end_notice, outcome_revision_notice
 from vision.stale_notice import advice_target, stale_advice_notice
-from vision.state import apply_manual_species
-from champions_agent.config import MANUAL_SPECIES_RESOLVE_CUTOFF
+from vision.state import (HP_REJECT_COUNTS, MANUAL_REASON_OUT_OF_RANGE, apply_manual_species,
+                          apply_manual_species_unplaced, format_hp_reject_counts)
+from vision.frame_burst import BurstPlanner
+from champions_agent.config import (CLIENT_HELLO_WAIT_SEC, DISPLAY_HIDDEN_WARN_COUNT, FRAME_BURST_DIR,
+                                    MANUAL_SPECIES_RESOLVE_CUTOFF, PARTY_SIZE, SHADOW_VARIANTS_ENABLED)
+from client_state import (VIS_HIDDEN, VIS_VISIBLE, ClientRegistry, HiddenDisplayWatch, served_html_version, short_sid,
+                          stale_of)
 
 
 def should_advise_selection(state: dict) -> bool:
@@ -56,6 +61,35 @@ advisor = Advisor(resolver=pipeline.resolver)
 battle_log = BattleLogger()
 from advisor.ev_infer import get_tracker as _get_spread_tracker
 spread_tracker = _get_spread_tracker()
+
+# 影の計算 (advisor.shadow、advice_variant 行。計画 §2、判断 3 2026-10-07): config SHADOW_VARIANTS_ENABLED で ON のときだけ
+# ワーカー (スレッド 1 本) を作る。既定 OFF (OFF のときは共通部分の保持も仕事の投入もしない)。行の書き込みは
+# イベントループのスレッドへ回す (他の対戦ログの行の書き込みと同じスレッドにして競合させない)
+_shadow = None
+_shadow_loop = None
+if SHADOW_VARIANTS_ENABLED:
+    from advisor.shadow import ShadowWorker
+
+    def _shadow_sink(rec: dict) -> None:
+        if _shadow_loop is not None:
+            _shadow_loop.call_soon_threadsafe(battle_log.on_advice_variant, rec)
+
+    _shadow = ShadowWorker(sink=_shadow_sink)
+    print("[server] 影の計算 (advice_variant) を有効化しました")
+
+
+def _submit_shadow(loop, state: dict, advice: dict) -> None:
+    """表示した助言と同じ共通部分で影の計算を投入する (ON のときだけ呼ぶ。失敗しても助言は止めない)"""
+    global _shadow_loop
+    try:
+        from advisor.shadow import make_job
+        from battle_logger import _compact_state, state_digest
+        _shadow_loop = loop
+        job = make_job(advisor.last_common, advice.get("advice_id"), state_digest(_compact_state(state)),
+                       shown_best=advice.get("best"))
+        _shadow.submit(job)
+    except Exception as e:
+        print(f"[server] 影の計算の投入に失敗: {e}")
 
 # 起動 (更新反映) のタイミングで不要ログを掃除する
 # (断片対戦ログ / 古いデバッグフレーム。失敗してもサーバーは起動する)
@@ -94,6 +128,17 @@ except Exception as e:
 frame_counter = 0
 processed_counter = 0
 dropped_counter = 0
+# 受信フレームを送信元の接続の可視状態で数える (2026-10-07 段 0: 対戦ログの frames 行。隠れたページでは送信が 1〜2 fps に落ちる)。
+# 可視状態は接続 (sid) ごとに client_state.ClientRegistry が持つ (page_visibility / client_hello の通知)。通知の無い接続からの
+# フレームは unknown (以前は単一の bool が False で始まり、通知が無いと「隠れていない」に数えていた。2026-10-07 実機確認)
+hidden_counter = 0
+visible_counter = 0
+unknown_counter = 0
+_clients = ClientRegistry()
+_display_watch = HiddenDisplayWatch(DISPLAY_HIDDEN_WARN_COUNT)
+# 配信する index.html (tools/frontend_server がリポジトリのルートを配信する)。ページの CLIENT_HTML_VERSION と照合する
+INDEX_HTML = Path(__file__).resolve().parent / "index.html"
+print(f"[server] 配信する index.html の版: {served_html_version(INDEX_HTML)}")
 _busy = False
 _pending_frame = None      # 処理中に届いた最新フレーム (sid, data)
 _last_state_json = ""
@@ -122,6 +167,22 @@ def _pct(values, q: float) -> float:
 
 _last_frame_ts = 0.0
 
+
+def _frame_counts() -> dict:
+    """フレームの累積件数 (対戦ログの frames 行が対戦ごとの差を取る)"""
+    return {"received": frame_counter, "processed": processed_counter, "dropped": dropped_counter,
+            "hidden": hidden_counter, "visible": visible_counter, "unknown": unknown_counter,
+            "last_recv_ts": _last_frame_ts}
+
+
+battle_log.frame_source = _frame_counts
+# 対戦ファイルを開いたとき、接続中の全クライアントの client 行と最新の visibility 行を書く (served_version はそのときのディスクの値)
+battle_log.open_rows_source = lambda: _clients.open_rows(served_html_version(INDEX_HTML))
+
+# 連続フレームの保存 (DEBUG_DUMP_FRAMES=1 のときだけ。vision/frame_burst、2026-10-07 段 0)
+_burst = BurstPlanner()
+BURST_DIR = Path(FRAME_BURST_DIR)
+
 # デバッグフレームの保存は1枚あたり約46ms (1920x1080 PNG) かかり、
 # フレーム処理と同じ経路に置くとその間に届くフレームが捨てられる。
 # 専用スレッド1本に投げて処理を止めない (順序は保たれ、取りこぼし時も
@@ -138,6 +199,18 @@ def _dump_frame_async(img, prefix: str) -> None:
             print(f"[server] フレーム保存に失敗: {e}")
 
     _dump_pool.submit(_write, img.copy(), f"{prefix}_{int(time.time())}.png")
+
+
+def _dump_raw_async(data: str, burst_id: str, ts: float) -> None:
+    """連続保存: 受信した JPEG (data URL) をデコードせずそのまま書く (再圧縮なし。保存のスレッドで base64 を戻す)"""
+    def _write(d, path):
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(base64.b64decode(d.split(',', 1)[1]))
+        except Exception as e:
+            print(f"[server] 連続保存に失敗: {e}")
+
+    _dump_pool.submit(_write, data, BURST_DIR / burst_id / f"{int(ts * 1000)}.jpg")
 
 
 def _advice_key(state: dict) -> str:
@@ -159,6 +232,8 @@ def _advice_key(state: dict) -> str:
 @sio.on('connect')
 async def connect(sid, environ):
     print(f"[server] フロントエンドが接続しました: {sid}")
+    _clients.on_connect(sid, time.time())
+    asyncio.get_event_loop().create_task(_check_hello(sid))
     await sio.emit('state_update', pipeline.state.to_dict(), room=sid)
     # 構築提案の実行中にページを開き直しても「作成中」表示が復元されるように
     # (2026-08-25 第9回: 実行中である旨の表示が無いという指摘。進捗配信は
@@ -169,15 +244,70 @@ async def connect(sid, environ):
                         "running": True}, room=sid)
 
 
+async def _check_hello(sid) -> None:
+    """接続から CLIENT_HELLO_WAIT_SEC 待っても client_hello が来なければ、古い版のページの疑いとして警告し、対戦ログに
+    hello=false の client 行を書く (client_hello は 2026-10-07 に足した。それより前の index.html は送らない)"""
+    await asyncio.sleep(CLIENT_HELLO_WAIT_SEC)
+    if sid not in _clients.clients or _clients.has_hello(sid):
+        return
+    print(f"[server] ⚠ 接続 {short_sid(sid)} から client_hello が {CLIENT_HELLO_WAIT_SEC:.0f} 秒届かない: "
+          "ブラウザがキャッシュの古い index.html を使っている疑い (助言ページを Cmd+Shift+R で再読み込み)")
+    battle_log.on_client_row(_clients.client_row(sid, served_html_version(INDEX_HTML)))
+
+
+@sio.on('disconnect')
+async def disconnect(sid):
+    _clients.on_disconnect(sid)
+
+
+@sio.on('client_hello')
+async def client_hello(sid, data):
+    """ページの版と対応機能 {html_version, features, visibility, user_agent, href, served_commit} (2026-10-07)。
+    ディスクの index.html の版と照合し、対戦中ならその対戦ログに client 行 (と hello が持つ可視状態の visibility 行) を書く"""
+    try:
+        now = time.time()
+        vis_row = _clients.on_hello(sid, data, now)
+        served = served_html_version(INDEX_HTML)
+        row = _clients.client_row(sid, served)
+        print(f"[server] client_hello {row['sid']}: 版 {row['html_version']} (ディスク {served}) 機能 {row['features']} "
+              f"可視 {row['visibility']} commit {row['served_commit']}")
+        if stale_of(row["html_version"], served):
+            print(f"[server] ⚠ ページの版 {row['html_version']} がディスクの index.html の版 {served} と違う: "
+                  "ブラウザがキャッシュの古いページを使っている疑い (助言ページを Cmd+Shift+R で再読み込み)")
+        battle_log.on_client_row(row)
+        battle_log.on_client_row(vis_row)
+    except Exception as e:
+        print(f"[server] client_hello の記録に失敗: {e}")
+
+
 @sio.on('advice_shown')
 async def advice_shown(sid, data):
     """ブラウザが助言を描画した時刻 (2026-10-05 ②: 生成時刻と表示時刻を分けて記録する)。
-    data = {advice_id, kind, t_shown (秒), hidden (タブが隠れていて描画されずに送った: 2026-10-06)}"""
+    data = {advice_id, kind, t_shown (秒), hidden (タブが隠れていて描画されずに送った: 2026-10-06)}。
+    hidden はフレームの可視状態の数字には使わない。同じ対戦で DISPLAY_HIDDEN_WARN_COUNT 件続いたら警告する (2026-10-07)"""
     try:
         d = data or {}
         battle_log.on_display(d.get("advice_id"), d.get("t_shown"), d.get("kind"), hidden=d.get("hidden"))
     except Exception as e:
         print(f"[server] 表示の記録に失敗: {e}")
+    try:
+        if _display_watch.on_display((data or {}).get("hidden"), pipeline.state.battle_seq):
+            text = _display_watch.warning_text()
+            print(f"[server] ⚠ {text}")
+            await sio.emit('server_warning', {"kind": "display_hidden", "text": text, "count": _display_watch.streak})
+    except Exception as e:
+        print(f"[server] 表示の警告に失敗: {e}")
+
+
+@sio.on('page_visibility')
+async def page_visibility(sid, data):
+    """フロントのページが隠れたか (document.hidden)。送信元の接続 (sid) の可視状態にして、その接続から届くフレームを数える
+    (表示は変えない)。可視状態の通知ごとに対戦ログへ visibility 行を書く (開いていなければ次に開いたファイルの先頭に最新を書く)"""
+    try:
+        row = _clients.on_visibility(sid, bool((data or {}).get("hidden")), time.time())
+        battle_log.on_client_row(row)
+    except Exception as e:
+        print(f"[server] 可視状態の記録に失敗: {e}")
 
 
 @sio.on('send_frame')
@@ -191,9 +321,21 @@ async def handle_frame(sid, data):
     確実に拾う (メッセージの見落とし削減)。
     """
     global frame_counter, dropped_counter, _busy, _pending_frame
-    global _last_frame_ts
+    global _last_frame_ts, hidden_counter, visible_counter, unknown_counter
     frame_counter += 1
     _last_frame_ts = time.time()
+    _vis = _clients.frame_state(sid)
+    if _vis == VIS_HIDDEN:
+        hidden_counter += 1
+    elif _vis == VIS_VISIBLE:
+        visible_counter += 1
+    else:
+        unknown_counter += 1
+    # 連続保存中は破棄されるフレームも含めて受信したものを全部保存する
+    if DUMP_FRAMES:
+        _bid = _burst.active(_last_frame_ts)
+        if _bid and isinstance(data, str):
+            _dump_raw_async(data, _bid, _last_frame_ts)
 
     if _busy:
         if _pending_frame is not None:
@@ -250,8 +392,19 @@ async def _handle_one_frame(sid, data):
         state, fired = await loop.run_in_executor(None, pipeline.process, img)
         _proc_ms.append((time.time() - _t_proc) * 1000.0)
         processed_counter += 1
+        # 連続保存を始めなかった対戦は、対戦ファイルを閉じる前 (battle_log.on_frame が次の対戦へ切り替える前) に理由を書く
+        if DUMP_FRAMES and _burst.is_new_battle(state.get("battle_seq")):
+            _write_burst_skipped(time.time())
         battle_log.on_frame(state, fired)
         spread_tracker.on_frame(state, fired)   # 相手の型推定 (先後/ダメージ観測)
+        if DUMP_FRAMES:
+            _b = _burst.on_processed(state.get("scene"), state.get("battle_seq"), time.time())
+            if _b:
+                print(f"[server] 連続保存を開始: {BURST_DIR / _b['id']} ({_burst.seconds:.0f} 秒、{_burst.started}/{_burst.count} 回目、"
+                      f"{_b['reason']})")
+                battle_log.on_frame_burst({"dir": str(BURST_DIR / _b["id"]), "t_start": _b["t_start"],
+                                           "seconds": _burst.seconds, "n": _burst.started, "reason": _b["reason"],
+                                           "battle_seq": _b["battle_seq"], "battle_index": _b["battle_index"]})
         # 勝敗を推定・不明で記録した後にレートが読めて推定が変わったら、助言欄に出す (2026-10-06 第18回)
         _rev = outcome_revision_notice(battle_log.pop_revision())
         if _rev:
@@ -280,7 +433,9 @@ async def _handle_one_frame(sid, data):
                   f"救出={rs['stashed']}/OCR{rs['ocr']}/発火{rs['events']} "
                   f"events={len(state['events'])} "
                   f"処理時間 p50={_pct(_proc_ms, 50):.0f}ms p95={_pct(_proc_ms, 95):.0f}ms "
-                  f"助言 p50={_pct(_advise_ms, 50):.0f}ms max={max(_advise_ms) if _advise_ms else 0:.0f}ms")
+                  f"助言 p50={_pct(_advise_ms, 50):.0f}ms max={max(_advise_ms) if _advise_ms else 0:.0f}ms "
+                  f"可視状態 隠れ={hidden_counter} 可視={visible_counter} 不明={unknown_counter} "
+                  f"{format_hp_reject_counts(HP_REJECT_COUNTS)}")
 
         if fired:
             for f in fired:
@@ -355,8 +510,11 @@ async def _handle_one_frame(sid, data):
                 _last_advice_key = sel_key
                 _last_advice_time = now
                 advice = await loop.run_in_executor(None, advisor.advise_selection, state)
-                battle_log.on_advice(advice, "selection", state)
+                aid = battle_log.on_advice(advice, "selection", state)
                 await sio.emit('advice_update', advice, room=sid)
+                # 記録だけの欄 (方式ごとの候補・相手の選出の予測の全分布、2026-10-07 段 0): 助言を送った後に別に計算して
+                # selection_record 行に書く (表示を遅らせない。フレーム処理も待たせない)
+                asyncio.ensure_future(_write_selection_record(aid, advice, state))
                 print("--- 選出アドバイス ---")
                 print(advice["text"])
 
@@ -370,13 +528,20 @@ async def _handle_one_frame(sid, data):
                 _last_advice_key = key
                 _last_advice_time = now
                 _t_adv = time.time()
-                advice = await loop.run_in_executor(None, advisor.advise, state)
+                if _shadow is None:
+                    advice = await loop.run_in_executor(None, advisor.advise, state)
+                else:
+                    advice = await loop.run_in_executor(
+                        None, lambda: advisor.advise(state, keep_common=True))
                 _advise_ms.append((time.time() - _t_adv) * 1000.0)
                 _last_advice_target = advice_target(state, advice)
                 _stale_notified = False
                 advice["text"] = advisor.format_advice(advice)
                 battle_log.on_advice(advice, "battle", state)
                 await sio.emit('advice_update', advice, room=sid)
+                if _shadow is not None:
+                    # 表示の後に投入する (表示を待たせない)。計算はワーカーのスレッドで行う
+                    _submit_shadow(loop, state, advice)
                 if advice.get("provisional"):
                     # 確定前: 次フレームで即再計算して安定を確認する
                     # (キーを消さないと状態が動くまで10秒待ちになる)
@@ -404,6 +569,54 @@ async def _handle_one_frame(sid, data):
 
 
 _end_notice_seq = None   # 対戦終了の通知 (vision.end_notice.battle_end_notice) を出した battle_seq (1 対戦 1 回)
+
+
+def _write_burst_skipped(now: float) -> None:
+    """いまの対戦で連続保存を始めなかったなら、理由つきの frame_burst 行 (skipped) を書く (DEBUG_DUMP_FRAMES=1 のときだけ呼ぶ)"""
+    try:
+        sk = _burst.on_battle_end(now)
+        if sk:
+            battle_log.on_frame_burst(sk)
+    except Exception as e:
+        print(f"[server] 連続保存の記録に失敗: {e}")
+
+
+async def _write_selection_record(advice_id: str, advice: dict, state: dict) -> None:
+    """選出の助言を送った後に、記録用の欄を executor で計算して selection_record 行に書く (失敗しても助言は止めない)"""
+    try:
+        rec = await asyncio.get_event_loop().run_in_executor(None, _selection_record_extra, advice, state)
+        battle_log.on_selection_record(advice_id, rec)
+    except Exception as e:
+        print(f"[server] 選出の記録に失敗: {e}")
+
+
+def _selection_record_extra(advice: dict, state: dict) -> dict:
+    """選出の selection_record 行の欄 {"candidates", "opp_pick_pred"} (advisor.selection_record)。失敗しても助言は止めない"""
+    out = {}
+    my_party = state.get("player", {}).get("party", [])
+    opp_party = state.get("opponent", {}).get("party", [])
+    try:
+        from advisor.selection_record import selection_candidates
+        out["candidates"] = selection_candidates(advice, my_party, opp_party)
+    except Exception as e:
+        out["candidates"] = {"error": repr(e)[:200]}
+    try:
+        from advisor.selection_record import opp_pick_pred_live
+        out["opp_pick_pred"] = opp_pick_pred_live(opp_party)
+    except Exception as e:
+        out["opp_pick_pred"] = {"error": repr(e)[:200]}
+    return out
+
+
+@app.on_event("shutdown")
+async def _on_shutdown():
+    """サーバー停止時に、開いている対戦の終わりの行 (frames / opp_picks / guess_confirm、連続保存の skipped) を書く (2026-10-07 段 0)"""
+    if DUMP_FRAMES and battle_log.file_open:
+        _write_burst_skipped(time.time())
+    try:
+        battle_log.close()
+    except Exception as e:
+        print(f"[server] 停止時の記録に失敗: {e}")
 
 
 def _attach_candidates(state: dict) -> None:
@@ -1061,11 +1274,14 @@ async def set_state(sid, data):
                 side.spikes = max(0, min(3, int(value)))
             elif field_name == "toxic_spikes":
                 side.toxic_spikes = max(0, min(2, int(value)))
+        # side / index (2026-10-07 段 0): 訂正が後の推定で上書きされたかを対戦ログが追う (manual_fix_overwritten)
         pipeline.state.log_event(
             "manual", f"手動修正 {label}: {before} -> {value}",
             event_id="manual_fix",
             detail={"target": target, "field": field_name,
-                    "label": label, "before": before, "after": value})
+                    "label": label, "before": before, "after": value,
+                    "side": data.get("side") if target in ("mon", "hazards") else None,
+                    "index": int(data["index"]) if target == "mon" else None})
         print(f"[server] 手動修正: {label} {before} -> {value}")
         st = pipeline.state.to_dict()
         _attach_candidates(st)
@@ -1085,14 +1301,29 @@ async def set_species(sid, data):
         party = pipeline.state.opponent.party
 
         async def _skip(reason: str) -> None:
-            # 入れなかった理由をイベント欄とサーバーのログに出す
+            # 入れなかった理由をイベント欄とサーバーのログに出す。対戦ログの manual_fix 行に applied: false と理由を残す
+            # (2026-10-09 ④)
             pipeline.state.log_event("manual", f"手動確定を無視: {species_ja} ({reason})",
-                                     event_id="species_manual_skip")
+                                     event_id="species_manual_skip",
+                                     detail={"applied": False, "reason": reason, "index": idx,
+                                             "species_id": species_id})
             print(f"[server] 手動確定を無視: {species_ja} ({reason})")
             st = pipeline.state.to_dict()
             _attach_candidates(st)
             await sio.emit('state_update', st, room=sid)
 
+        if data.get("assign_to") is not None:
+            # 対応待ちの個体を、人が指定した枠に割り当てる (2026-10-09 段 2。index = 対応待ちの個体の番号、assign_to = 枠の
+            # 番号 (0 始まり))。タイプが 1 個だけ重なる枠は自動で統合せず候補として出し、ここで人が確定する
+            res = pipeline.state.assign_pending("opponent", idx, int(data["assign_to"]))
+            if not res["ok"]:
+                await _skip(res["reason"])
+                return
+            print(f"[server] 対応待ちの割り当て: party[{idx}] -> slot{res['record']['merged_to']}")
+            st = pipeline.state.to_dict()
+            _attach_candidates(st)
+            await sio.emit('state_update', st, room=sid)
+            return
         if not species_id:
             r = pipeline.resolver.resolve_species(str(species_ja or ""), cutoff=MANUAL_SPECIES_RESOLVE_CUTOFF)
             if not r:
@@ -1100,12 +1331,26 @@ async def set_species(sid, data):
                 return
             species_ja, species_id = r[0], r[1]
         res = apply_manual_species(party, idx, species_ja, species_id)
+        via = "slot"
+        if res["index"] is None and res["reason"] == MANUAL_REASON_OUT_OF_RANGE:
+            # 表示の枠とサーバーの枠がずれた: 無視せず、対応待ちの個体または種族名で一致する枠に入れる (2026-10-09 ④。
+            # 10/8 18:27 に「ガラルヤドキング」が範囲外で無視された)
+            res = apply_manual_species_unplaced(party, species_ja, species_id)
+            via = res.get("via")
         if res["index"] is None:
             await _skip(res["reason"])
             return
         if res["moved"]:
             print(f"[server] 手動確定: slot{idx} は確定済みのため slot{res['index']} へ付け替え")
+        requested_idx = idx
         idx = res["index"]
+        if party[idx].pending:
+            via = "pending" if via == "slot" else via
+        # 対応待ちの個体の種が決まった / 枠の種が決まった → 対応待ちの個体が枠に当たれば移す
+        for r in pipeline.state.resolve_pending("opponent"):
+            if r["merged_from"] == idx:
+                idx = r["merged_to"]
+        party = pipeline.state.opponent.party
         if 0 <= idx < len(party):
             # 直近の「HUD名不一致」で観測された別名をこの個体に紐づける
             # (試合中の個体名キャッシュ: 以後その名前のイベントが正しく帰属する)
@@ -1123,14 +1368,19 @@ async def set_species(sid, data):
                         party[idx].aliases.append(alias)
                         print(f"[server] 別名を紐づけ: {species_ja} <- {alias}")
             party[idx].aliases = party[idx].aliases[-6:]
+            # 文言の名前は枠の表示名 (形態違いの手動確定は表示名を保つ。対戦ログの manual_fix_key がこの名前で枠を引く)
             pipeline.state.log_event(
-                "manual", f"相手の{species_ja}を手動確定 (候補から選択)",
-                event_id="species_manual")
+                "manual", f"相手の{party[idx].species_ja or species_ja}を手動確定 (候補から選択)",
+                event_id="species_manual",
+                detail={"applied": True, "index": idx, "requested_index": requested_idx, "via": via,
+                        "pending": bool(party[idx].pending), "species_id": species_id})
             print(f"[server] 手動確定: 相手slot{idx} = {species_ja}")
             # 自己改善ループ: 確定した種族のアイコンを直近の選出フレームから
             # 収穫し、実キャプチャテンプレートとして保存する (次回から
             # 同タイプ複数候補でも視覚照合で自動確定できるようになる)
             try:
+                if idx >= PARTY_SIZE or party[idx].pending:
+                    raise ValueError("対応待ちの個体 (選出画面の枠が決まっていない)")
                 from vision.spriteid import harvest_from_frame
                 import glob as _glob
                 frames = sorted(_glob.glob(str(DUMP_DIR / "sel_*.png")),

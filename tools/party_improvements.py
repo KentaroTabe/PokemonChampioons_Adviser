@@ -30,6 +30,8 @@ from champions_agent.config import (PARTY_IMPROVE_DEFAULT_LAST, PARTY_IMPROVE_FR
                                     PARTY_IMPROVE_TOP_PROPOSALS, PARTY_IMPROVE_TOP_THREATS, RATE_CHAIN_GAP_SEC,
                                     RATE_INFER_MIN_DELTA, RATE_MAX_DELTA_PER_BATTLE, USAGE_TARGET_FORMAT)
 from tools.battle_outcome import OutcomeTracker, apply_rate_chain
+from vision.state import roster_slots
+from tools.pick_labels import status_by_ja
 
 REPO = Path(__file__).resolve().parent.parent
 BATTLE_DIR = REPO / "logs" / "battles"
@@ -116,6 +118,12 @@ def parse_battle(path: str) -> dict:
     reads: list = []       # 読めたレート (値が変わるたびに 1 つ)。対戦をまたいだ並びの解決に使う (load_battles)
     opp_mega = False
     opp_lead_ja, opp_mega_ja = None, set()
+    # 段 0 (2026-10-07) の行: 選出ラベル 3 値 / フレームの件数 / 勝敗の根拠 / 選出の候補 (どれも最後の行を採る。無い古いログは None)
+    picks_row, frames, outcome_row, sel_row = None, None, None, None
+    sel_records: dict = {}     # selection_record 行 (advice_id → 行)。選出の advice 行と advice_id で結ぶ
+    # 表示通知 (display 行) の件数と hidden=true の件数、ページの版 (client 行の stale)。2026-10-07 実機確認
+    display = {"n": 0, "hidden": 0}
+    clients: list = []
     for line in open(path, encoding="utf-8"):
         try:
             d = json.loads(line)
@@ -125,6 +133,21 @@ def parse_battle(path: str) -> dict:
         t1 = d.get("t") or t1
         typ = d.get("type")
         ot.feed(d)
+        if typ == "opp_picks":
+            picks_row = d
+        elif typ == "frames":
+            frames = d
+        elif typ == "outcome":
+            outcome_row = d
+        elif typ == "advice" and d.get("kind") == "selection" and (d.get("advice") or {}).get("ok"):
+            sel_row = d
+        elif typ == "selection_record" and d.get("advice_id"):
+            sel_records[str(d["advice_id"])] = d
+        elif typ == "display":
+            display["n"] += 1
+            display["hidden"] += 1 if d.get("hidden") else 0
+        elif typ == "client":
+            clients.append(d)
         if typ == "rate" and d.get("value") is not None and (not reads or reads[-1] != float(d["value"])):
             reads.append(float(d["value"]))
         elif typ == "scene":
@@ -134,7 +157,9 @@ def parse_battle(path: str) -> dict:
                 n_battle_scenes += 1
             opp = st.get("opponent") or {}
             party = opp.get("party") or []
-            for i, p in enumerate(party):
+            # 対応待ちの個体 (party の 7 番目以降、pending) は 6 体のどれかで枠が未定。ロースター・選出に数えない
+            # (2026-10-09 ④)。場の個体 (opp_active_ja / 先発) としては下で使う
+            for i, p in roster_slots(party):
                 if not p.get("ja"):
                     continue
                 slot_last[i] = p["ja"]
@@ -177,11 +202,119 @@ def parse_battle(path: str) -> dict:
     final = set(slot_last.values())
     opp_roster = [ja for ja in opp_roster if ja in final or ja in opp_fielded]
     outcome, inferred, corrected = ot.result()
+    status = status_by_ja(picks_row)
     return {"file": Path(path).name, "t0": t0 or 0.0, "t1": t1 or t0 or 0.0, "reads": reads,
             "outcome": outcome, "inferred": inferred, "corrected": corrected,
             "opp_roster": opp_roster, "opp_fielded": sorted(opp_fielded), "my_picked": sorted(my_picked),
             "opp_lead": opp_lead_ja, "opp_mega_ja": sorted(opp_mega_ja),
-            "decisions": decisions, "events": events, "n_battle_scenes": n_battle_scenes, "opp_mega": opp_mega}
+            "decisions": decisions, "events": events, "n_battle_scenes": n_battle_scenes, "opp_mega": opp_mega,
+            # 段 0 (2026-10-07)。読み手 (real_opponents.build_bank) は opp_pick_status があれば 3 値を使う
+            "opp_pick_status": status, "opp_picks_complete": (bool(picks_row.get("complete")) if picks_row else None),
+            "frames": frames, "outcome_basis": outcome_basis_of(outcome_row),
+            "display": display, "client_stale": client_stale_of(clients),
+            "selection": selection_summary(sel_row, sel_records.get(str((sel_row or {}).get("advice_id"))))}
+
+
+def outcome_basis_of(row: Optional[dict]) -> Optional[dict]:
+    """最後の outcome 行 → 勝敗の根拠 {"inferred", "basis", "basis_text", "corrected_from", "revised_from"} (純粋)"""
+    if not row:
+        return None
+    return {"inferred": bool(row.get("inferred")), "basis": row.get("basis"), "basis_text": row.get("basis_text"),
+            "corrected_from": row.get("corrected_from"), "revised_from": row.get("revised_from")}
+
+
+def selection_summary(row: Optional[dict], record: Optional[dict] = None) -> Optional[dict]:
+    """最後の選出の advice 行 (と advice_id で結んだ selection_record 行) → {"recommend": ◎ の 3 体, "primary",
+    "candidates": {方式: 3 体の名前 or None}} (純粋)。selection_record 行 (2026-10-07 段 0) の無い古いログは、
+    advice の recommend / rule_recommend / model_pick / model_pick_real から作る"""
+    if not row:
+        return None
+    adv = row.get("advice") or {}
+    rec = [r.get("name") for r in (adv.get("recommend") or [])]
+    cands = {}
+    cand_field = (record or {}).get("candidates")
+    if isinstance(cand_field, dict) and "error" not in cand_field:
+        for m, e in cand_field.items():
+            if m in ("reasons", "primary", "used"):
+                continue
+            cands[m] = list(e.get("names") or []) if e else None
+    else:
+        rr = adv.get("rule_recommend") if adv.get("primary") == "model" else adv.get("recommend")
+        cands["rule"] = [r.get("name") for r in (rr or [])] or None
+        cands["model_pick"] = list((adv.get("model_pick") or {}).get("names") or []) or None
+        cands["model_pick_real"] = list((adv.get("model_pick_real") or {}).get("names") or []) or None
+    return {"recommend": rec, "primary": adv.get("primary"), "candidates": cands}
+
+
+def client_stale_of(clients: list) -> Optional[bool]:
+    """対戦の client 行 → ページの版が古いか (純粋)。どれかが stale=true / hello=false なら True、全部 stale=false なら False、
+    client 行が無い (古いログ) か判定できなければ None"""
+    if not clients:
+        return None
+    if any(c.get("stale") is True or c.get("hello") is False for c in clients):
+        return True
+    if all(c.get("stale") is False for c in clients):
+        return False
+    return None
+
+
+def visibility_ratios(fr: Optional[dict]) -> dict:
+    """frames 行 → {"hidden_ratio", "visible_ratio", "unknown_ratio"} (純粋)。隠れ・可視は可視状態の通知のあった受信 (既知) に
+    対する比、不明は受信全体に対する比。visible 欄の無い古い frames 行は可視・不明を None にする (隠れは行の hidden_ratio)"""
+    fr = fr or {}
+    if fr.get("visible") is None:
+        return {"hidden_ratio": fr.get("hidden_ratio"), "visible_ratio": None, "unknown_ratio": None}
+    hid, vis, unk = (int(fr.get(k) or 0) for k in ("hidden", "visible", "unknown"))
+    known, recv = hid + vis, int(fr.get("received") or 0)
+    return {"hidden_ratio": round(hid / known, 3) if known else None,
+            "visible_ratio": round(vis / known, 3) if known else None,
+            "unknown_ratio": round(unk / recv, 3) if recv else None}
+
+
+def session_record(battles: list) -> dict:
+    """終了レポートの「接続テストの記録」(純粋): 対戦ごとの 受信 fps と可視状態の比率 (frames 行)、表示通知の hidden 件数
+    (display 行)、ページの版 (client 行)、勝敗と根拠、選出候補と実際の自分の選出。frames 行の無い古いログは fps を None にする
+    (送信 10 fps の仮定では埋めない)。隠れ・可視の比は可視状態の通知のあった受信 (既知) に対する比 (visible 欄の無い古い行は
+    受信を既知とみなす = 従来の比)、不明は受信全体に対する比 (visible 欄のある行だけで数える)"""
+    rows = []
+    tot = {"received": 0, "hidden": 0, "known": 0, "visible": 0, "unknown": 0, "recv_vis": 0, "hidden_vis": 0, "span": 0.0,
+           "n_frames_rows": 0, "n_display": 0, "n_display_hidden": 0}
+    for b in battles:
+        fr = b.get("frames") or {}
+        if fr:
+            tot["n_frames_rows"] += 1
+            tot["received"] += int(fr.get("received") or 0)
+            tot["hidden"] += int(fr.get("hidden") or 0)
+            tot["span"] += float(fr.get("span_sec") or 0.0)
+            if fr.get("visible") is None:
+                tot["known"] += int(fr.get("received") or 0)
+            else:
+                tot["visible"] += int(fr.get("visible") or 0)
+                tot["unknown"] += int(fr.get("unknown") or 0)
+                tot["recv_vis"] += int(fr.get("received") or 0)
+                tot["hidden_vis"] += int(fr.get("hidden") or 0)
+                tot["known"] += int(fr.get("hidden") or 0) + int(fr.get("visible") or 0)
+        disp = b.get("display") or {}
+        tot["n_display"] += int(disp.get("n") or 0)
+        tot["n_display_hidden"] += int(disp.get("hidden") or 0)
+        sel = b.get("selection") or {}
+        rows.append({"file": b.get("file"), "outcome": b.get("outcome"), "inferred": b.get("inferred"),
+                     "corrected": b.get("corrected"), "by_rate": b.get("by_rate"),
+                     "basis": b.get("outcome_basis"), "recv_fps": fr.get("recv_fps"), "proc_fps": fr.get("proc_fps"),
+                     **visibility_ratios(fr),
+                     "n_display": disp.get("n"), "n_display_hidden": disp.get("hidden"),
+                     "client_stale": b.get("client_stale"), "recommend": sel.get("recommend"),
+                     "candidates": sel.get("candidates"), "my_picked": b.get("my_picked") or []})
+    stale = [r["client_stale"] for r in rows]
+    return {"battles": rows, "n_frames_rows": tot["n_frames_rows"],
+            "recv_fps": (round(tot["received"] / tot["span"], 2) if tot["span"] > 0 else None),
+            "hidden_ratio": (round(tot["hidden"] / tot["known"], 3) if tot["known"] else None),
+            "visible_ratio": (round(tot["visible"] / (tot["hidden_vis"] + tot["visible"]), 3)
+                              if tot["hidden_vis"] + tot["visible"] else None),
+            "unknown_ratio": (round(tot["unknown"] / tot["recv_vis"], 3) if tot["recv_vis"] else None),
+            "n_display": tot["n_display"], "n_display_hidden": tot["n_display_hidden"],
+            "n_client_stale": sum(1 for x in stale if x is True), "n_client_ok": sum(1 for x in stale if x is False),
+            "n_client_unknown": sum(1 for x in stale if x is None)}
 
 
 def session_start_ts() -> Optional[float]:
@@ -540,6 +673,7 @@ def build_report(battles: list, hypothetical: Optional[list] = None) -> dict:
     threat_weights_norm = {oid: round(v / top_score, 4) for oid, v in threat_score.items()} if top_score > 0 else {}
     return {"generated_at": time.strftime("%Y-%m-%d %H:%M"), "current": current,
             "current_ja": [_ja(resolver, s) for s in current], "n_battles": len(battles),
+            "session_record": session_record(battles),
             "parties": parties, "structural": structural, "threat_weights": threat_weights_norm,
             "ja": {sid: _ja(resolver, sid) for sid in set(list(owned_views) + all_opp_ids)}}
 
@@ -577,17 +711,95 @@ def render(rep: dict) -> str:
         for sid, m in sorted(pd["per_member"].items(), key=lambda kv: -kv[1]["drop"]):
             if m["priority_moves"]:
                 L.append(f"  - {ja.get(sid, sid)}: {m['coverage']} → {m['coverage_no_priority']} (先制技 {', '.join(m['priority_moves'])})")
+    L += render_session_record(rep.get("session_record"))
     L += ["", "### 改善案 (測定済みのパーティのみ)"]
     m = rep.get("measure") or {}
     if m.get("launched"):
         L.append(f"- 測定を起動しました: run `{m['run_id']}` (現行 + 近傍 {m['neighbors']} 並びを S8a〜S13 に掛ける。"
                  f"見込み数時間)。結果: `python -m tools.party_improvements --report {m['run_id']}`")
+    elif m.get("proposed"):
+        L += render_proposal(m)
     elif m.get("skipped"):
         L.append(f"- 測定は起動していません: {m['skipped']}")
     else:
-        L.append("- 未測定の入替案は載せません。`python -m tools.party_improvements --session --measure` で現行 + 近傍を"
-                 "構築システムの測定に掛け、`--report <run_id>` で 6 体の型つきパーティとして出します")
+        L.append("- 未測定の入替案は載せません。`python -m tools.party_improvements --session --measure` で現行 + 近傍の"
+                 "測定の目的・概算所要時間・起動コマンドを出し (起動は人が行う。その場で起動するなら --launch)、"
+                 "`--report <run_id>` で 6 体の型つきパーティとして出します")
     return "\n".join(L) + "\n"
+
+
+_OUTCOME_JA = {"win": "勝ち", "loss": "負け"}
+_METHOD_JA = {"rule": "規則", "deployed": "配布版", "general": "汎用", "registered": "登録チーム専用", "experiment": "試用 Package",
+              "model_pick_real": "実戦傾向つき", "model_pick": "学習モデル"}
+
+
+def _pct_text(x: Optional[float]) -> str:
+    return str(int(round(x * 100))) if x is not None else "?"
+
+
+def render_session_record(sr: Optional[dict]) -> list:
+    """終了レポートの「接続テストの記録」の行 (純粋)"""
+    if not sr or not sr.get("battles"):
+        return []
+    fps = sr.get("recv_fps")
+    hid = sr.get("hidden_ratio")
+    L = ["", "### 接続テストの記録",
+         (f"- 受信 {fps} fps / 隠れたページからの受信 {_pct_text(hid)}% / 可視 {_pct_text(sr.get('visible_ratio'))}% "
+          f"/ 不明 {_pct_text(sr.get('unknown_ratio'))}% "
+          f"(frames 行のある {sr['n_frames_rows']}/{len(sr['battles'])} 戦。fps は対戦の時間の幅で割った実測。"
+          "隠れ・可視は可視状態の通知のあった受信に対する比、不明は受信全体に対する比)"
+          if sr.get("n_frames_rows") else "- 受信 fps: frames 行のある対戦なし (古いログ。送信 10 fps の仮定では埋めない)")]
+    if sr.get("unknown_ratio") == 1.0:
+        L.append("  - ⚠ 可視状態の通知なし (ページの版が古い可能性。助言ページを Cmd+Shift+R で再読み込み)")
+    L.append(f"- 表示通知の hidden: {sr.get('n_display_hidden', 0)}/{sr.get('n_display', 0)} 件")
+    if sr.get("n_client_stale") or sr.get("n_client_ok"):
+        L.append(f"- ページの版 (client 行): 古い {sr.get('n_client_stale', 0)} 戦 / 一致 {sr.get('n_client_ok', 0)} 戦 / "
+                 f"判定なし {sr.get('n_client_unknown', 0)} 戦")
+    for r in sr["battles"]:
+        oc = _OUTCOME_JA.get(r.get("outcome"), "不明")
+        basis = r.get("basis") or {}
+        if r.get("by_rate"):
+            why = "レートの読みの並びから"
+        elif r.get("corrected"):
+            why = "勝負の文言で訂正"
+        elif r.get("inferred"):
+            why = "推定: " + (basis.get("basis_text") or basis.get("basis") or "根拠不明")
+        else:
+            why = "確定 (" + (basis.get("basis") or "勝負の文言 / 終了画面") + ")"
+        head = f"- {r['file']}: {oc} ({why})"
+        if r.get("recv_fps") is not None:
+            head += f" / 受信 {r['recv_fps']} fps・隠れ {_pct_text(r.get('hidden_ratio'))}%"
+            if r.get("unknown_ratio") is not None:
+                head += f"・可視 {_pct_text(r.get('visible_ratio'))}%・不明 {_pct_text(r.get('unknown_ratio'))}%"
+                if r.get("unknown_ratio") == 1.0:
+                    head += " ⚠ 可視状態の通知なし (ページの版が古い可能性)"
+        if r.get("n_display"):
+            head += f" / 表示通知の hidden {r.get('n_display_hidden') or 0}/{r['n_display']}"
+        if r.get("client_stale") is True:
+            head += " / ⚠ ページの版が古い"
+        L.append(head)
+        cands = r.get("candidates") or {}
+        if cands or r.get("recommend"):
+            parts = [f"{_METHOD_JA.get(m, m)} {'/'.join(v)}" for m, v in cands.items() if v]
+            L.append(f"  - 選出の候補: ◎ {'/'.join(r.get('recommend') or []) or '-'}"
+                     + (f" ({'、'.join(parts)})" if parts else ""))
+        L.append(f"  - 実際の自分の選出: {'/'.join(r.get('my_picked') or []) or '(読めず)'}")
+    return L
+
+
+def render_proposal(m: dict) -> list:
+    """測定の提案 (確認制) の行 (純粋)"""
+    est = m.get("estimate")
+    L = ["- 測定は自動では起動していません (確認制、2026-10-07)。起動するなら次のコマンドを実行してください:",
+         f"  - 目的: {m.get('purpose')}",
+         ("  - 概算所要時間: 中央値 約 " + f"{est['median_h']} 時間 (過去の完了した改善 run {est['n']} 本の実測、"
+          f"{est['min_h']}〜{est['max_h']} 時間)" if est else "  - 概算所要時間: 過去の完了した改善 run の実測なし"),
+         f"  - 起動コマンド: `{m.get('command')}`"]
+    if m.get("team_problem"):
+        L.append(f"  - ⚠ いまのままでは起動しても止まります: {m['team_problem']}")
+    if m.get("active"):
+        L.append(f"  - ⚠ 構築 run が実行中です ({str(m['active'])[:80]})。終わってから起動してください")
+    return L
 
 
 # ------------------------------------------------------------------ 測定の起動と、測定済みパーティの報告
@@ -627,34 +839,119 @@ def active_measurement(run=None) -> Optional[str]:
     return lines[0] if lines else None
 
 
-def launch_measurement(rep: dict, neighbors: int, profile: str, parallel: int) -> dict:
-    """セッションの脅威重みを書き出し、現行 + 近傍の測定 run を nohup で起動する。既に run が走っていれば起動しない"""
-    import subprocess
-    if not rep.get("threat_weights"):
-        return {"skipped": "動きづらかった相手が無い (脅威重みが空)"}
-    # 現行チーム (登録の型) が不正だと参照が作れず測定が全滅する → 先に validate-team で弾く
+def _validate_current_team() -> Optional[str]:
+    """現行チーム (登録の型) が不正だと参照が作れず測定が全滅する → 先に validate-team で弾く。問題があれば理由、無ければ None"""
     try:
         from champions_agent.config import TRAINING_BATTLE_FORMAT
         from tools.evaluate_team import build_myteam_text
         from tools.team_build.sets import validate_team_text
         ok, errs = validate_team_text(build_myteam_text(), TRAINING_BATTLE_FORMAT)
         if not ok:
-            return {"skipped": "現行チームの登録の型が不正 (config/my_team.json を直してから --measure): " + " / ".join(errs[:4])}
+            return "現行チームの登録の型が不正 (config/my_team.json を直してから --measure): " + " / ".join(errs[:4])
     except Exception as e:
-        return {"skipped": f"現行チームの検証に失敗: {e!r}"}
-    active = active_measurement()
-    if active:
-        return {"skipped": f"構築 run が実行中か確認できない ({active[:80]}…)。終了後に --measure を再実行"}
+        return f"現行チームの検証に失敗: {e!r}"
+    return None
+
+
+def _write_threat_weights(weights: dict) -> tuple:
+    """セッションの脅威重みを logs/build_search/session_threats_<時刻>.json に書く → (ファイル, 時刻の文字列)"""
     ts = time.strftime("%Y%m%d_%H%M")
-    run_id = f"improve_{ts}"
     wdir = REPO / "logs" / "build_search"
     wdir.mkdir(parents=True, exist_ok=True)
     wfile = wdir / f"session_threats_{ts}.json"
-    wfile.write_text(json.dumps(rep["threat_weights"], ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    wfile.write_text(json.dumps(weights, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    return wfile, ts
+
+
+def _launch_with_weights(wfile: Path, neighbors: int, profile: str, parallel: int) -> dict:
+    """脅威重みのファイルで現行 + 近傍の測定 run を nohup で起動する。既に run が走っていれば起動しない"""
+    import subprocess
+    bad = _validate_current_team()
+    if bad:
+        return {"skipped": bad}
+    active = active_measurement()
+    if active:
+        return {"skipped": f"構築 run が実行中か確認できない ({active[:80]}…)。終了後に --measure を再実行"}
+    run_id = f"improve_{time.strftime('%Y%m%d_%H%M')}"
     cmd = measure_command(run_id, wfile, neighbors, profile, parallel, int(time.time()) % 1_000_000)
     res = subprocess.run(cmd, cwd=str(REPO), capture_output=True, text=True)
     return {"launched": res.returncode == 0, "run_id": run_id, "neighbors": neighbors, "weights_file": str(wfile),
             "stdout": res.stdout.strip(), "stderr": res.stderr.strip()[-300:]}
+
+
+def launch_measurement(rep: dict, neighbors: int, profile: str, parallel: int) -> dict:
+    """セッションの脅威重みを書き出し、現行 + 近傍の測定 run を nohup で起動する。既に run が走っていれば起動しない
+    (旧動作。2026-10-07 から終了処理は propose_measurement を使い、PARTY_IMPROVE_AUTO_LAUNCH=True か --launch のときだけここに来る)"""
+    if not rep.get("threat_weights"):
+        return {"skipped": "動きづらかった相手が無い (脅威重みが空)"}
+    bad = _validate_current_team()
+    if bad:
+        return {"skipped": bad}
+    active = active_measurement()
+    if active:
+        return {"skipped": f"構築 run が実行中か確認できない ({active[:80]}…)。終了後に --measure を再実行"}
+    wfile, _ts = _write_threat_weights(rep["threat_weights"])
+    return _launch_with_weights(wfile, neighbors, profile, parallel)
+
+
+# ------------------------------------------------------------------ 測定の確認制 (2026-10-07 判断 1)
+MEASURE_PURPOSE = ("今回のセッションで動きづらかった相手 (脅威重み) に対して、現行チームと近傍 {n} 並び (1〜2 枠の入替) を"
+                   "構築システムの測定 (S8a〜S13、封印 holdout まで) に掛け、入替案が現行より勝てるかを実測する")
+
+
+def duration_estimate(hours: list) -> Optional[dict]:
+    """過去の改善 run の所要時間 (時間) → {"n", "median_h", "min_h", "max_h"} (純粋)。無ければ None"""
+    xs = sorted(float(h) for h in hours if h is not None and h > 0)
+    if not xs:
+        return None
+    mid = len(xs) // 2
+    med = xs[mid] if len(xs) % 2 else (xs[mid - 1] + xs[mid]) / 2
+    return {"n": len(xs), "median_h": round(med, 1), "min_h": round(xs[0], 1), "max_h": round(xs[-1], 1)}
+
+
+def past_run_hours(runs_dir: Optional[Path] = None, last: Optional[int] = None) -> list:
+    """完了した改善 run (logs/build_search/runs/improve_*、evaluation/summary.json あり) の所要時間 [(run_id, 時間)]。
+    開始 = request.json の更新時刻、終了 = summary.json と run.log の更新時刻の遅い方 (副作用: ファイルの時刻を読む)"""
+    from champions_agent.config import PARTY_IMPROVE_DURATION_SAMPLE
+    rdir = Path(runs_dir) if runs_dir else REPO / "logs" / "build_search" / "runs"
+    out = []
+    for d in sorted(rdir.glob("improve_*")):
+        req, summ, log = d / "request.json", d / "evaluation" / "summary.json", d / "run.log"
+        try:
+            if not (req.exists() and summ.exists()):
+                continue
+            end = max(summ.stat().st_mtime, log.stat().st_mtime if log.exists() else 0.0)
+            out.append((d.name, round((end - req.stat().st_mtime) / 3600.0, 2)))
+        except OSError:
+            continue
+    n = last if last is not None else PARTY_IMPROVE_DURATION_SAMPLE
+    return out[-n:] if n else out
+
+
+def launch_command(wfile: Path, neighbors: int, profile: str, parallel: int) -> str:
+    """人が測定を起動するコマンド (純粋)。起動前の検証と「run が実行中なら起動しない」判定は --launch-weights が行う"""
+    return (f"python -m tools.party_improvements --launch-weights {wfile} --neighbors {neighbors} "
+            f"--profile {profile} --parallel {parallel}")
+
+
+def propose_measurement(rep: dict, neighbors: int, profile: str, parallel: int) -> dict:
+    """測定を起動せず、目的・概算所要時間・起動コマンドを返す (確認制。脅威重みのファイルはここで書いておく)"""
+    if not rep.get("threat_weights"):
+        return {"skipped": "動きづらかった相手が無い (脅威重みが空)"}
+    wfile, _ts = _write_threat_weights(rep["threat_weights"])
+    try:
+        runs = past_run_hours()
+    except Exception:
+        runs = []
+    active = None
+    try:
+        active = active_measurement()
+    except Exception as e:
+        active = f"確認できない ({e!r})"
+    return {"proposed": True, "purpose": MEASURE_PURPOSE.format(n=neighbors), "neighbors": neighbors,
+            "estimate": duration_estimate([h for _r, h in runs]), "estimate_runs": runs,
+            "command": launch_command(wfile, neighbors, profile, parallel), "weights_file": str(wfile),
+            "team_problem": _validate_current_team(), "active": active}
 
 
 def _best_any(res: dict) -> dict:
@@ -725,7 +1022,11 @@ def main(argv=None) -> int:
     ap.add_argument("--days", type=float, default=None)
     ap.add_argument("--opponents", default=None, help="仮想の相手パーティ (species id のカンマ区切り)。ログは使わない")
     ap.add_argument("--measure", action="store_true",
-                    help="現行 + 近傍を構築システムの測定 (S8a〜S13) に掛ける run を nohup で起動する")
+                    help="現行 + 近傍を構築システムの測定 (S8a〜S13) に掛ける。既定 (PARTY_IMPROVE_AUTO_LAUNCH=False) は起動せず、"
+                         "目的・概算所要時間・起動コマンドを出す (確認制、2026-10-07)")
+    ap.add_argument("--launch", action="store_true", help="--measure で測定 run をその場で起動する (旧動作)")
+    ap.add_argument("--launch-weights", default=None,
+                    help="--measure が出した脅威重みのファイルで測定 run を起動する (人が確認してから実行するコマンド)")
     ap.add_argument("--neighbors", type=int, default=PARTY_IMPROVE_MEASURE_NEIGHBORS)
     ap.add_argument("--profile", default=PARTY_IMPROVE_MEASURE_PROFILE)
     ap.add_argument("--parallel", type=int, default=5)
@@ -733,6 +1034,10 @@ def main(argv=None) -> int:
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--no-save", action="store_true")
     args = ap.parse_args(argv)
+    if args.launch_weights:
+        res = _launch_with_weights(Path(args.launch_weights), args.neighbors, args.profile, args.parallel)
+        print(json.dumps(res, ensure_ascii=False, indent=1))
+        return 0 if res.get("launched") else 1
     if args.report:
         md = measured_report(args.report)
         print(md)
@@ -753,7 +1058,11 @@ def main(argv=None) -> int:
         battles = load_battles(since_ts=since, last=last, days=args.days)
     rep = build_report(battles, hypothetical=hyp)
     if args.measure:
-        rep["measure"] = launch_measurement(rep, args.neighbors, args.profile, args.parallel)
+        from champions_agent.config import PARTY_IMPROVE_AUTO_LAUNCH
+        if args.launch or PARTY_IMPROVE_AUTO_LAUNCH:
+            rep["measure"] = launch_measurement(rep, args.neighbors, args.profile, args.parallel)
+        else:
+            rep["measure"] = propose_measurement(rep, args.neighbors, args.profile, args.parallel)
     if args.json:
         print(json.dumps(rep, ensure_ascii=False, indent=1, default=str))
         return 0
