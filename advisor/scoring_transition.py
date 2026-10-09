@@ -16,7 +16,13 @@ T は共通の遷移 advisor.transition.resolve_turn_branches (行動順・同�
 - 退避 (設計判断 10): 自分の候補の解決に未対応の効果 (TurnResult.unsupported_by["me"]) が出た、計算予算 (TRANSITION_BUDGET_MS) を
   超えた、相手の場の個体が分からない / 対応待ち / ひんし、のどれかなら、その決定全体を legacy に退避する (score が ok=False と
   fallback の理由を返し、engine が legacy の結果と scoring_fallback を出す)。未評価の技を低得点にして比較を成立させない。
-  相手の応手の解決に出た未対応の効果は退避せず、近似として opp_unmodeled に残す (相手の行動の効果は応手モデル自体が近似のため)。
+  2026-10-09 M2c: 相手の応手の解決に出た未対応の効果も退避する (scoring_fallback = "opp_unsupported:<効果>:<技>"。M2b までは
+  opp_unmodeled に記録して続行していた。opp_unmodeled の欄は互換のため空の列で残す)。HP の範囲を作れない個体 ("hp_range") も退避。
+
+2026-10-09 M2c で足したこと: V の終了は遷移の勝者 (TurnResult.winner) を使う。HP が不確かな個体は範囲の悲観側で T と V を
+評価して順位を決め、楽観側の順位は感度 (hp_range、候補の q_hp_opt) に残す。相手の場の個体の持ち物 (スカーフ / タスキ) の有無を
+入れ替えた順位も感度 (sensitivity) に残す (どちらも順位には使わない。計算予算の残りで計算し、超えたら省略して理由を残す)。
+判明情報と矛盾する仮説 (消費済みの持ち物・相手の技の固定) は build_inputs で除く。退避率は決定単位でも集計できる (summarize_fallbacks)。
 
 継続方策 (対戦の仕様ではなく評価のための仮定): ひんし後の繰り出し先と交代技の繰り出し先は transition.best_bench、2 ターン目以降は
 V の後続の対面 (1 回の撃ち合い) で近似する。
@@ -46,21 +52,54 @@ def _field_key(f: Optional[FieldView]) -> Optional[tuple]:
     return (f.weather, f.terrain, f.trick_room, f.reflect, f.light_screen, f.aurora_veil)
 
 
+def _ctx_key(ctx: Optional[dict]) -> Optional[tuple]:
+    if not ctx:
+        return None
+    return tuple(sorted((str(k), repr(v)) for k, v in ctx.items()))
+
+
 def make_damage_fn(my_species: set, my_ctx: Optional[dict], opp_ctx: Optional[dict]) -> Callable:
     """calc_damage を盤面の文脈 (fainted_allies) 込みで呼び、結果をキャッシュする関数 (純粋な計算の再利用)。
 
-    キャッシュのキーは攻撃側・防御側の MonView のダメージに効く部分 (valuation.view_key) と、HP の区分 (攻撃側: 満タン / 1/3 超 /
-    以下、防御側: 満タンか)。HP に連続的に依存する技 (ふんか・きしかいせい 等) は同じ区分の中で最初の HP の値を使う (近似)。
-    文脈は攻撃側の種族が自分の選出にあれば自分側 (同じ種族どうしの対面では自分側の文脈を使う近似)"""
+    キャッシュのキー (2026-10-09 M2c で修正): 攻撃側・防御側の MonView のダメージに効く部分 (valuation.view_key)、技、場、
+    使った文脈 (陣営の fainted_allies 等) と、ダメージが残り HP で変わり得る側 (damage.hp_dependence: ふんか・しおふき・
+    きしかいせい・じたばた・しぼりとる・しおみず、もうか系・マルチスケイル 等) の残り HP そのもの (9 桁に丸めた値)。
+    M2b までは HP を「満タン / 1/3 超 / 以下」の区分でしかキーに入れず、ふんかを HP 90% で計算した後に 40% で計算すると 90% の
+    結果が返っていた (評価の順で結果が変わる)。HP で変わらない技はキーに HP を入れない (乱数の分岐で HP が細かく分かれても
+    再計算しない)。
+    文脈: 呼び出し側が陣営 side ("me" / "opp") を渡せばその陣営の文脈、渡さなければ攻撃側の種族が自分の選出にあれば自分側
+    (同じ種族どうしの対面では自分側の文脈を使う近似。M2b までと同じ)"""
+    from advisor.damage import hp_dependence
     cache: dict = {}
+    dep_cache: dict = {}
+    vk_cache: dict = {}
+
+    def vk(v):
+        hit = vk_cache.get(id(v))
+        if hit is not None and hit[0] is v:
+            return hit[1]
+        out = view_key(v)
+        vk_cache[id(v)] = (v, out)
+        return out
 
     def fn(att_view: MonView, att_hp: float, def_view: MonView, def_hp: float, move_id: str,
-           fieldv: Optional[FieldView]) -> Optional[dict]:
-        key = (view_key(att_view), att_hp >= 0.999, att_hp > 1 / 3, view_key(def_view), def_hp >= 0.999, move_id,
-               _field_key(fieldv))
+           fieldv: Optional[FieldView], side: Optional[str] = None) -> Optional[dict]:
+        if side == "me":
+            ctx = my_ctx
+        elif side == "opp":
+            ctx = opp_ctx
+        else:
+            ctx = my_ctx if att_view.species_id in my_species else opp_ctx
+        ak, dk = vk(att_view), vk(def_view)
+        dkey = (ak, dk, move_id)
+        dep = dep_cache.get(dkey)
+        if dep is None:
+            dep = hp_dependence(att_view, def_view, move_id)
+            dep_cache[dkey] = dep
+        key = (ak, round(float(att_hp), 9) if dep[0] else None, dk, round(float(def_hp), 9) if dep[1] else None,
+               move_id, _field_key(fieldv), _ctx_key(ctx))
         if key in cache:
             return cache[key]
-        ctx = my_ctx if att_view.species_id in my_species else opp_ctx
         try:
             from dataclasses import replace
             d = calc_damage(replace(att_view, hp_frac=att_hp), replace(def_view, hp_frac=def_hp), move_id, fieldv,
@@ -99,7 +138,7 @@ def opponent_responses(opp: SimSide, me: SimSide, pool: list, damage_fn: Callabl
             continue
         exp = 0.0
         if mv.get("category") != "Status" and opp.active_hp > 0 and me.active_hp > 0:
-            d = damage_fn(opp.active, opp.active_hp, me.active, me.active_hp, mid, field_against(opp_field, me))
+            d = damage_fn(opp.active, opp.active_hp, me.active, me.active_hp, mid, field_against(opp_field, me), side="opp")
             if d:
                 exp = min(me.active_hp, float(d.get("expected") or 0.0) / 100.0)
         rows.append((mid, prior, exp, idx))
@@ -149,28 +188,47 @@ class TransitionInputs:
     rl_probs: dict = field(default_factory=dict)
     legacy_by_key: dict = field(default_factory=dict)   # (kind, id) → legacy の行動 (self_cost 等の欄を写す)
     notes: list = field(default_factory=list)
+    # 以下は 2026-10-09 M2c。応手を別の仮説の状態で作り直すための材料 (pool = engine.opponent_move_pool の結果を技の固定で
+    # 絞ったもの、response_mode = "full" (技 + 交代) / "no_switch" (交代技の後の繰り出し) / None (相手は行動しない))
+    pool: list = field(default_factory=list)
+    response_mode: Optional[str] = None
+    # HP の範囲 (段 3): 不確かな個体ごとの {"side", "slot", "name", "hp", "lo", "hi", "source", "age_s"}。me / opp は悲観側の仮説
+    # (自分の個体 = 下限、相手の個体 = 上限)、hp_alt は楽観側の仮説の (me, opp)。範囲が無ければ空 / None
+    hp_ranges: list = field(default_factory=list)
+    hp_alt: Optional[tuple] = None
+    # 持ち物の感度 (段 5): [(名前, 相手の陣営 or None, 省略の理由 or None)]。名前は "scarf" / "sash"
+    item_alts: list = field(default_factory=list)
 
 
 def _fallback(reason: str, t0: float, **extra) -> dict:
     return {"ok": False, "fallback": reason, "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1), **extra}
 
 
-def score(inp: TransitionInputs, budget_ms: Optional[float] = None) -> dict:
-    """候補ごとの Q / Q_worst / 分岐の要約を計算する (純粋。入力は書き換えない)。
+def variant_inputs(inp: TransitionInputs, me: SimSide, opp: SimSide) -> TransitionInputs:
+    """別の仮説の状態 (me, opp) で同じ候補を比べる入力 (応手はその状態で作り直す。全候補で同じ応手を使う規則は変えない)"""
+    from dataclasses import replace as _r
+    responses = _responses_for(me, opp, inp.pool, inp.damage_fn, inp.opp_field, inp.response_mode)
+    vctx = _r(inp.vctx, _cache={})
+    return _r(inp, me=me, opp=opp, responses=responses, vctx=vctx, hp_ranges=[], hp_alt=None, item_alts=[])
 
-    戻り値: 成功 {"ok": True, "actions": [...] (スコア順), "elapsed_ms", "n_branches", "responses", "opp_unmodeled"} /
-    退避 {"ok": False, "fallback": 理由, "elapsed_ms", ...}"""
-    t0 = time.perf_counter()
-    budget = C.TRANSITION_BUDGET_MS if budget_ms is None else float(budget_ms)
-    deadline = t0 + budget / 1000.0
-    if not inp.candidates:
-        return _fallback("no_candidates", t0)
+
+def _responses_for(me: SimSide, opp: SimSide, pool: list, damage_fn: Callable, opp_field: Optional[FieldView],
+                   mode: Optional[str]) -> Optional[list]:
+    if mode == "full":
+        return opponent_responses(opp, me, pool, damage_fn, opp_field)
+    if mode == "no_switch":
+        return opponent_responses(opp, me, pool, damage_fn, opp_field, include_switch=False)
+    return None
+
+
+def _score_core(inp: TransitionInputs, t0: float, deadline: float, budget: float) -> dict:
+    """候補ごとの Q / Q_worst / 分岐の要約 (score の本体。退避の判定もここ)"""
     out = []
     n_total = 0
-    opp_unmodeled: set = set()
+    reserves = {"me": int(inp.vctx.my_unknown or 0), "opp": int(inp.vctx.opp_unknown or 0)}
     for cand in inp.candidates:
         per_resp = []      # (確率, 期待値, 応手のラベル)
-        p_skip = p_ko = p_faint = 0.0
+        p_skip = p_ko = p_faint = p_win = p_lose = 0.0
         n_br = 0
         if cand.mode == "replace" or inp.responses is None:
             me2 = apply_switch(inp.me, cand.action.bench_index) if cand.action.kind == "switch" else inp.me
@@ -181,15 +239,17 @@ def score(inp: TransitionInputs, budget_ms: Optional[float] = None) -> dict:
         else:
             for p_o, oa in inp.responses:
                 brs = resolve_turn_branches(inp.me, inp.opp, cand.action, oa, inp.my_field, inp.opp_field,
-                                            damage_fn=inp.damage_fn)
+                                            damage_fn=inp.damage_fn, reserves=reserves)
                 e = 0.0
                 for p_b, res in brs:
                     if res.unsupported_by.get("me"):
                         w, eff, src = res.unsupported_by["me"][0]
                         return _fallback(f"unsupported:{eff}:{src}", t0, candidate=cand.id)
-                    for w, eff, src in res.unsupported_by.get("opp") or ():
-                        opp_unmodeled.add(f"{eff}:{src}")
-                    e += p_b * value(res.me, res.opp, inp.vctx)
+                    if res.unsupported_by.get("opp"):
+                        # 相手の応手の未対応の効果 (2026-10-09 M2c): 記録だけで続行せず、その決定を legacy に退避する
+                        w, eff, src = res.unsupported_by["opp"][0]
+                        return _fallback(f"opp_unsupported:{eff}:{src}", t0, candidate=cand.id, response=oa.label)
+                    e += p_b * value(res.me, res.opp, inp.vctx, res.winner)
                     if cand.kind == "move" and any(w == "me" and k == "skip" and d == "fainted_before_acting"
                                                    for w, k, d in res.events):
                         p_skip += p_o * p_b
@@ -197,6 +257,10 @@ def score(inp: TransitionInputs, budget_ms: Optional[float] = None) -> dict:
                         p_ko += p_o * p_b
                     if res.fainted.get("me"):
                         p_faint += p_o * p_b
+                    if res.winner == "me":
+                        p_win += p_o * p_b
+                    elif res.winner == "opp":
+                        p_lose += p_o * p_b
                 n_br += len(brs)
                 per_resp.append((p_o, e, oa.label))
                 if time.perf_counter() > deadline:
@@ -204,16 +268,86 @@ def score(inp: TransitionInputs, budget_ms: Optional[float] = None) -> dict:
         n_total += n_br
         q = sum(p * e for p, e, _l in per_resp)
         worst_p, worst_e, worst_l = min(per_resp, key=lambda t: t[1])
-        out.append((cand, q, worst_e, worst_l, {"n": n_br, "p_ko_before_act": round(p_skip, 4),
-                                                 "p_ko": round(p_ko, 4), "p_faint": round(p_faint, 4)}))
+        br = {"n": n_br, "p_ko_before_act": round(p_skip, 4), "p_ko": round(p_ko, 4), "p_faint": round(p_faint, 4)}
+        if p_win > 0 or p_lose > 0:
+            br["p_win_now"] = round(p_win, 4)
+            br["p_lose_now"] = round(p_lose, 4)
+        out.append((cand, q, worst_e, worst_l, br))
     # 並べ替えは丸める前の Q (同じ Q は候補の順 = 技の枠の順 → 交代の順のまま)
     out.sort(key=lambda t: -round(t[1], 9))      # 浮動小数の誤差で同じ Q の順が入れ替わらないように 9 桁で比べる
-    actions = [_action_dict(inp, cand, q, qw, wl, br) for cand, q, qw, wl, br in out]
-    return {"ok": True, "actions": actions, "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1),
-            "n_branches": n_total,
+    return {"ok": True, "ranked": out, "n_branches": n_total}
+
+
+def _best_id(core: dict) -> Optional[tuple]:
+    if not core.get("ok") or not core.get("ranked"):
+        return None
+    c = core["ranked"][0][0]
+    return (c.kind, c.id)
+
+
+def score(inp: TransitionInputs, budget_ms: Optional[float] = None) -> dict:
+    """候補ごとの Q / Q_worst / 分岐の要約を計算する (純粋。入力は書き換えない)。
+
+    戻り値: 成功 {"ok": True, "actions": [...] (スコア順), "elapsed_ms", "n_branches", "responses", "opp_unmodeled",
+    "hp_range", "sensitivity"} / 退避 {"ok": False, "fallback": 理由, "elapsed_ms", ...}。
+
+    順位は inp の状態 (HP が不確かな個体は悲観側の仮説: 自分 = 下限、相手 = 上限) の期待値で決める (2026-10-09 M2c)。計算予算の
+    残りで、楽観側の HP の仮説 (hp_alt) と、相手の場の個体のスカーフ / タスキの有無を入れ替えた仮説 (item_alts) でも順位を計算し、
+    第一候補が変わるかを hp_range / sensitivity に残す (順位には使わない。予算を超えたら省略して理由を残す)。
+    elapsed_ms は順位の計算 (悲観側) にかかった時間、elapsed_total_ms は感度の計算を含む時間"""
+    t0 = time.perf_counter()
+    budget = C.TRANSITION_BUDGET_MS if budget_ms is None else float(budget_ms)
+    deadline = t0 + budget / 1000.0
+    if not inp.candidates:
+        return _fallback("no_candidates", t0)
+    core = _score_core(inp, t0, deadline, budget)
+    if not core.get("ok"):
+        return core
+    elapsed_main = round((time.perf_counter() - t0) * 1000, 1)
+    best = _best_id(core)
+
+    def alt_eval(me: SimSide, opp: SimSide) -> dict:
+        if time.perf_counter() > deadline:
+            return {"omitted": "budget"}
+        alt = variant_inputs(inp, me, opp)
+        r = _score_core(alt, t0, deadline, budget)
+        if not r.get("ok"):
+            return {"omitted": r.get("fallback") or "unknown"}
+        b = _best_id(r)
+        return {"best": b[1] if b else None, "best_kind": b[0] if b else None, "changes": b != best,
+                "q": {(c.kind, c.id): q for c, q, _qw, _wl, _br in r["ranked"]}}
+
+    hp_info = None
+    q_opt = {}
+    if inp.hp_ranges:
+        hp_info = {"individuals": [dict(h) for h in inp.hp_ranges], "best": best[1] if best else None}
+        if inp.hp_alt is not None:
+            r = alt_eval(*inp.hp_alt)
+            q_opt = r.pop("q", {}) or {}
+            hp_info["optimistic"] = r
+    sens = {}
+    for name, alt_opp, why in inp.item_alts:
+        if alt_opp is None:
+            sens[name] = {"omitted": why}
+            continue
+        r = alt_eval(inp.me, alt_opp)
+        r.pop("q", None)
+        r["flip"] = why
+        sens[name] = r
+    actions = []
+    for cand, q, qw, wl, br in core["ranked"]:
+        a = _action_dict(inp, cand, q, qw, wl, br)
+        if (cand.kind, cand.id) in q_opt:
+            a["q_hp_opt"] = round(q_opt[(cand.kind, cand.id)], 4)
+        actions.append(a)
+    return {"ok": True, "actions": actions, "elapsed_ms": elapsed_main,
+            "elapsed_total_ms": round((time.perf_counter() - t0) * 1000, 1),
+            "n_branches": core["n_branches"],
             "responses": [{"label": a.label + ("+メガ" if a.mega and not a.label.endswith("+メガ") else ""),
                            "p": round(p, 4)} for p, a in (inp.responses or [])],
-            "opp_unmodeled": sorted(opp_unmodeled)}
+            "opp_unmodeled": [],
+            "hp_range": hp_info,
+            "sensitivity": sens or None}
 
 
 def _action_dict(inp: TransitionInputs, cand: Candidate, q: float, q_worst: float, worst_label, br: dict) -> dict:
@@ -221,7 +355,7 @@ def _action_dict(inp: TransitionInputs, cand: Candidate, q: float, q_worst: floa
     parts = []
     if cand.kind == "move":
         d = inp.damage_fn(inp.me.active, inp.me.active_hp, inp.opp.active, inp.opp.active_hp, cand.action.move_id,
-                          field_against(inp.my_field, inp.opp)) if inp.opp.active_hp > 0 else None
+                          field_against(inp.my_field, inp.opp), side="me") if inp.opp.active_hp > 0 else None
         if d and float(d.get("max") or 0) > 0:
             txt = f"予測ダメージ {d['min']:.0f}〜{d['max']:.0f}%"
             if d.get("accuracy") is not None and float(d["accuracy"]) < 100:
@@ -255,6 +389,12 @@ def _action_dict(inp: TransitionInputs, cand: Candidate, q: float, q_worst: floa
             a[k] = legacy[k]
     if cand.party_index is not None and legacy.get("hp_uncertain"):
         a["hp_uncertain"] = True
+    if cand.party_index is not None:
+        # HP の範囲 (2026-10-09 M2c): この交代先の HP が不確かなら、順位に使った悲観側 (下限) と範囲を残す
+        rng = next((h for h in inp.hp_ranges if h.get("side") == "me" and h.get("party_index") == cand.party_index), None)
+        if rng:
+            a["hp_range"] = [rng["lo"], rng["hi"]]
+            a["reason"] += f" / HP は範囲 {rng['lo']:.0%}〜{rng['hi']:.0%} の下限で評価"
     return a
 
 
@@ -276,15 +416,134 @@ def _seen(p: dict) -> bool:
     return p.get("hp_percent") is not None or p.get("status") == "fainted" or bool(p.get("revealed_moves"))
 
 
+def hp_range_of(p: dict, *, side: str, is_active: bool, now: Optional[float]) -> Optional[dict]:
+    """個体の HP の範囲 (純粋。2026-10-09 M2c、規則と係数は config の HP_RANGE_*)。
+
+    戻り値: 不確かでなければ None。不確かなら {"hp", "lo", "hi", "source", "age_s"}、範囲を作れなければ {"error": 理由}
+    (直近値が無い "no_recent_value" / 自分の個体の最大 HP が分からない "max_hp_unknown")。
+    不確かさの出所: バー推定 (hp_source == "bar") → ERR_BAR、交代の見逃し等 (hp_uncertain、出所なし) → ERR_UNCERTAIN、
+    技イベント由来の推定 (hp_estimated) → ERR_ESTIMATED、場の個体の観測が古い (now − hp_read_ts > STALE_SEC) → 経過時間で下限を下げる"""
+    if p.get("status") == "fainted":
+        return None
+    src = None
+    err = 0.0
+    if p.get("hp_source") == "bar":
+        src, err = "bar", float(C.HP_RANGE_ERR_BAR)
+    elif p.get("hp_uncertain"):
+        src, err = "uncertain", float(C.HP_RANGE_ERR_UNCERTAIN)
+    elif p.get("hp_estimated"):
+        src, err = "estimated", float(C.HP_RANGE_ERR_ESTIMATED)
+    age = None
+    drop = 0.0
+    ts = p.get("hp_read_ts")
+    if is_active and ts and now:
+        age = max(0.0, float(now) - float(ts))
+        if age > float(C.HP_RANGE_STALE_SEC):
+            drop = (age - float(C.HP_RANGE_STALE_SEC)) * float(C.HP_RANGE_STALE_DROP_PER_SEC)
+            src = src or "stale"
+    if src is None:
+        return None
+    if p.get("hp_percent") is None and not (p.get("hp_current") is not None and p.get("hp_max")):
+        return {"error": "no_recent_value"}
+    if side == "me":
+        mhp = p.get("hp_max")
+        if not mhp:
+            return {"error": "max_hp_unknown"}
+        floor = 1.0 / max(1, int(mhp))
+    else:
+        floor = 0.01
+    from advisor.engine import _hp_frac_of
+    h0 = _hp_frac_of(p)
+    lo = max(floor, min(h0, h0 - err - drop))
+    hi = max(lo, min(1.0, h0 + err))
+    return {"hp": round(h0, 4), "lo": round(lo, 4), "hi": round(hi, 4), "source": src,
+            "age_s": None if age is None else round(age, 1)}
+
+
+def _with_hp(side: SimSide, slot, hp: float) -> SimSide:
+    """陣営の 1 体の HP を差し替えた新しい陣営 (slot = "active" または控えの位置)"""
+    from dataclasses import replace as _r
+    if slot == "active":
+        return _r(side, active=_r(side.active, hp_frac=hp), active_hp=hp)
+    bench = list(side.bench)
+    v, _hp = bench[slot]
+    bench[slot] = (_r(v, hp_frac=hp), hp)
+    return _r(side, bench=bench)
+
+
+def restrict_opp_pool(pool: list, opp_p: dict, state: dict, opp_item_observed: Optional[str]) -> tuple:
+    """相手の技の候補を、選べない技と矛盾しないように絞る (純粋。2026-10-09 M2c、レビュー 4)。戻り値 (pool, 注記の列)。
+
+    アンコール (固定技だけ。evaluate_common でも絞っている)、ちょうはつ (変化技を除く)、かなしばり ("disable_<技>" を除く)、
+    観測で確定したこだわり系の持ち物 (直前の技 last_move.opponent が候補にあればそれだけ。直前の技は交代・ひんしで消える)。
+    相手の PP は観測していないので PP 0 は扱わない。全部除くと候補が無くなるときは絞らない (注記だけ残す)"""
+    from advisor.engine import CHOICE_ITEM_IDS
+    dex = get_dex()
+    vols = {str(v).lower() for v in (opp_p.get("volatiles") or [])}
+    notes = []
+    out = list(pool or [])
+    last = (state.get("last_move") or {}).get("opponent")
+    if "encore" in vols:
+        locked = opp_p.get("encore_move") or last
+        if locked and any(m == locked for m, _w in out):
+            out = [(locked, 100.0)]
+            notes.append(f"相手はアンコール中: {locked} だけ")
+    if "taunt" in vols:
+        kept = [(m, w) for m, w in out if (dex.move(m) or {}).get("category") != "Status"]
+        if kept and len(kept) < len(out):
+            notes.append("相手はちょうはつ中: 変化技を除く")
+            out = kept
+    disabled = {v.split("_", 1)[1] for v in vols if v.startswith("disable_")}
+    if disabled:
+        kept = [(m, w) for m, w in out if m not in disabled]
+        if kept and len(kept) < len(out):
+            notes.append(f"相手のかなしばり: {', '.join(sorted(disabled))} を除く")
+            out = kept
+    if opp_item_observed in CHOICE_ITEM_IDS and not opp_p.get("item_consumed") and not opp_p.get("item_removed") \
+            and last and any(m == last for m, _w in out) and len(out) > 1:
+        out = [(last, 100.0)]
+        notes.append(f"相手はこだわり中: {last} だけ")
+    return out, notes
+
+
+def _drop_contradicted_item(view: MonView, p: dict, observed: Optional[str], resolver) -> tuple:
+    """判明情報と矛盾する持ち物の仮定を外す (純粋。2026-10-09 M2c)。戻り値 (view, 注記 or None)。
+    消費済み (item_consumed: きあいのタスキ・きのみ 等)・はたきおとされた (item_removed) なら持ち物なし。
+    観測で確定していない (使用率・型推定の) とつげきチョッキは、変化技を使ったのを見たら外す"""
+    from dataclasses import replace as _r
+    if view.item and (p.get("item_consumed") or p.get("item_removed")):
+        return _r(view, item=None), f"{view.item} は消費済み / 失った"
+    if view.item == "assaultvest" and observed != "assaultvest" and resolver is not None:
+        dex = get_dex()
+        for ja in p.get("revealed_moves") or []:
+            r = resolver.resolve(ja, "moves", cutoff=0.8)
+            if r and (dex.move(r[1]) or {}).get("category") == "Status":
+                return _r(view, item=None), "変化技を使ったので とつげきチョッキ の仮定を外す"
+    return view, None
+
+
 def build_inputs(state: dict, resolver, *, my_view: MonView, opp_view: Optional[MonView], opp_p: Optional[dict],
                  pool: list, legal_move_ids: list, my_field: FieldView, opp_field: FieldView, my_ctx: dict,
                  opp_ctx: dict, my_fainted: bool, pivot_pending: bool, i_am_faster: Optional[bool],
-                 legacy_actions: list, rl_hint: Optional[dict], opp_pending: bool) -> tuple:
+                 legacy_actions: list, rl_hint: Optional[dict], opp_pending: bool,
+                 encore_locked: Optional[str] = None) -> tuple:
     """engine.evaluate_common の共有入力 (MonView・合法手・補完した技・相手の型の仮定・控え) から TransitionInputs を作る。
 
     戻り値 (TransitionInputs, None) / 作れなければ (None, 退避の理由)。自分の控えは legacy の交代候補と同じ規則 (選出済み・
     ひんしでない・場でない)。相手の控えは対戦に出たと分かっている個体 (_seen) だけ (登録 6 体を残存戦力にしない。計画書 §2.1)。
-    相手の未判明の残り = 選出数 (team_size があれば) − 判明した数、無ければ残数 − 判明した生存数 (残数も無ければ選出数 − 判明した数)"""
+    相手の未判明の残り = 選出数 (team_size があれば) − 判明した数、無ければ残数 − 判明した生存数 (残数も無ければ選出数 − 判明した数)。
+
+    2026-10-09 M2c で足したこと:
+    - 判明情報との矛盾の除外 (段 5): 消費済み・失った持ち物は外す (両陣営)、観測で確定していない持ち物の仮定のうち判明した技と矛盾
+      するもの (とつげきチョッキ と変化技) を外す、相手の技の候補を技の固定 (アンコール・ちょうはつ・かなしばり・観測したこだわり)
+      で絞る (restrict_opp_pool)、自分の控えの PP 0 の技を後続の対面の技から外す。
+    - 揮発状態の持ち越し: 状態のアンコール ("encore:<技>")・ちょうはつ・みがわり (残り HP は分からないので最大 HP の 1/4 と仮定) と
+      直前の技 (last_move) を SimSide に入れる。
+    - HP の範囲 (段 3、hp_range_of): 不確かな個体は悲観側の仮説 (自分 = 下限、相手 = 上限) を me / opp に入れ、楽観側を hp_alt に
+      残す。範囲を作れない個体があればその決定は legacy に退避 ("hp_range")。
+    - 持ち物の感度 (段 5): 相手の場の個体の持ち物が観測で確定していなければ、スカーフ / タスキの有無を入れ替えた仮説を item_alts に"""
+    from dataclasses import replace as _r
+
     from advisor.engine import (_hp_frac_of, _opp_mega_forms, _rl_probs, build_mon_view, complete_moves_from_registration,
                                 opponent_move_pool, registered_moves_of)
     from advisor.party import battle_party_indices
@@ -296,10 +555,35 @@ def build_inputs(state: dict, resolver, *, my_view: MonView, opp_view: Optional[
     dex = get_dex()
     my_state, opp_state = state["player"], state["opponent"]
     my_idx, opp_idx = my_state.get("active_index"), opp_state.get("active_index")
+    my_p = my_state["party"][my_idx]
     opp_hp = _hp_frac_of(opp_p)
     if opp_p.get("status") == "fainted" or opp_hp <= 0:
         if not my_fainted:
             return None, "opp_fainted"
+    now = state.get("now") or time.time()
+    notes = []
+    last = state.get("last_move") or {}
+
+    # 判明情報と矛盾する持ち物を外す (自分の場の個体・相手の場の個体)
+    my_view, n1 = _drop_contradicted_item(my_view, my_p, my_p.get("item_id"), None)
+    opp_view, n2 = _drop_contradicted_item(opp_view, opp_p, opp_p.get("item_id"), resolver)
+    notes.extend(n for n in (n1, n2) if n)
+    pool, pool_notes = restrict_opp_pool(pool, opp_p, state, opp_p.get("item_id"))
+    notes.extend(pool_notes)
+
+    # HP の範囲 (不確かな個体)
+    ranges = []
+    errors = []
+
+    def note_range(p, side, slot, is_active, party_index=None):
+        r = hp_range_of(p, side=side, is_active=is_active, now=now)
+        if r is None:
+            return
+        if "error" in r:
+            errors.append(f"{side}:{p.get('species_id') or p.get('species_ja')}:{r['error']}")
+            return
+        ranges.append(dict(r, side=side, slot=slot, party_index=party_index,
+                           name=p.get("species_ja") or p.get("species_id")))
 
     # 自分の控え (legacy の交代候補と同じ規則)
     allowed = battle_party_indices(my_state)
@@ -313,6 +597,8 @@ def build_inputs(state: dict, resolver, *, my_view: MonView, opp_view: Optional[
         v = build_mon_view(p, resolver, side="player")
         if v is None:
             continue
+        v, _n = _drop_contradicted_item(v, p, p.get("item_id"), None)
+        note_range(p, "me", len(bench), False, party_index=i)
         bench.append((v, _hp_frac_of(p)))
         bench_meta.append((i, p))
         obs = list(p.get("moves") or [])
@@ -322,12 +608,17 @@ def build_inputs(state: dict, resolver, *, my_view: MonView, opp_view: Optional[
             except Exception:
                 pass
         my_moves.setdefault(v.species_id, tuple(s.get("move_id") for s in obs
-                                                if s.get("move_id") and dex.move(s.get("move_id"))))
+                                                if s.get("move_id") and dex.move(s.get("move_id")) and s.get("pp") != 0))
+    if not my_fainted:
+        note_range(my_p, "me", "active", True, party_index=my_idx)
     my_hz, opp_hz = _hazards(my_state), _hazards(opp_state)
-    me = SimSide(active=my_view, active_hp=0.0 if my_fainted else _hp_frac_of(my_state["party"][my_idx]),
+    my_vols = {str(v).lower() for v in (my_p.get("volatiles") or [])}
+    me = SimSide(active=my_view, active_hp=0.0 if my_fainted else _hp_frac_of(my_p),
                  bench=bench, stealth_rock=my_hz["stealth_rock"], spikes=my_hz["spikes"],
                  sticky_web=my_hz["sticky_web"], mega_used=bool((state.get("mega_used") or {}).get("player")),
-                 screens=_screens_of(my_state), tailwind=bool(my_state.get("tailwind")))
+                 screens=_screens_of(my_state), tailwind=bool(my_state.get("tailwind")),
+                 volatiles=_side_volatiles(my_vols, encore_locked), last_move=last.get("player"),
+                 sub_hp=_sub_hp_of(my_vols, my_view))
 
     # 相手の控え: 対戦に出たと分かっている個体だけ
     opp_moves = {opp_view.species_id: tuple(m for m, _w in pool if dex.move(m))}
@@ -351,8 +642,14 @@ def build_inputs(state: dict, resolver, *, my_view: MonView, opp_view: Optional[
             opool = opponent_move_pool(p, v, resolver)
         except Exception:
             opool = []
+        v, _n = _drop_contradicted_item(v, p, p.get("item_id"), resolver)
+        note_range(p, "opp", len(obench), False)
         opp_moves.setdefault(v.species_id, tuple(m for m, _w in opool if dex.move(m))[:6])
         obench.append((v, hp))
+    if opp_hp > 0:
+        note_range(opp_p, "opp", "active", True)
+    if errors:
+        return None, "hp_range"
     # 相手の未判明の残り: 選出数が分かる (シミュレータの状態 team_size) なら 選出数 − 判明した数、無ければ残数 (画面の HUD) −
     # 判明した生存数、残数も無ければ VALUATION_TEAM_SIZE − 判明した数
     remaining = opp_state.get("remaining")
@@ -365,11 +662,33 @@ def build_inputs(state: dict, resolver, *, my_view: MonView, opp_view: Optional[
     # 自分の状態に無い残り (選出の印が足りず控えを特定できないとき): 残数 − 分かっている生存数
     my_known_alive = (0 if my_fainted else 1) + len(bench)
     my_unknown = max(0, int(my_state["remaining"]) - my_known_alive) if my_state.get("remaining") is not None else 0
+    opp_vols = {str(v).lower() for v in (opp_p.get("volatiles") or [])}
+    opp_locked = None
+    if "encore" in opp_vols:
+        cand = opp_p.get("encore_move") or last.get("opponent")
+        opp_locked = cand if cand and any(m == cand for m, _w in pool) else None
     opp = SimSide(active=opp_view, active_hp=opp_hp, bench=obench, stealth_rock=opp_hz["stealth_rock"],
                   spikes=opp_hz["spikes"], sticky_web=opp_hz["sticky_web"],
                   mega_forms=_opp_mega_forms(opp_p, state),
                   mega_used=bool((state.get("mega_used") or {}).get("opponent")),
-                  screens=_screens_of(opp_state), tailwind=bool(opp_state.get("tailwind")))
+                  screens=_screens_of(opp_state), tailwind=bool(opp_state.get("tailwind")),
+                  volatiles=_side_volatiles(opp_vols, opp_locked), last_move=last.get("opponent"),
+                  sub_hp=_sub_hp_of(opp_vols, opp_view))
+    # HP の仮説: 悲観側 (自分 = 下限、相手 = 上限) を順位に、楽観側を感度に
+    hp_alt = None
+    if ranges:
+        pess_me, pess_opp, opt_me, opt_opp = me, opp, me, opp
+        for r in ranges:
+            if r["side"] == "me":
+                pess_me = _with_hp(pess_me, r["slot"], r["lo"])
+                opt_me = _with_hp(opt_me, r["slot"], r["hi"])
+            else:
+                pess_opp = _with_hp(pess_opp, r["slot"], r["hi"])
+                opt_opp = _with_hp(opt_opp, r["slot"], r["lo"])
+        me, opp = pess_me, pess_opp
+        hp_alt = (opt_me, opt_opp)
+        notes.append("HP が不確かな個体は範囲の悲観側 (自分 = 下限、相手 = 上限) で評価: " +
+                     ", ".join(f"{r['name']} {r['lo']:.0%}〜{r['hi']:.0%}" for r in ranges))
     my_species = {my_view.species_id} | {v.species_id for v, _hp in bench}
     damage_fn = make_damage_fn(my_species, my_ctx, opp_ctx)
     vctx = ValuationContext(my_moves=my_moves, opp_moves=opp_moves, my_field=my_field, opp_field=opp_field,
@@ -389,20 +708,34 @@ def build_inputs(state: dict, resolver, *, my_view: MonView, opp_view: Optional[
         name = p.get("species_ja") or p.get("display_name") or f"{i}番"
         cands.append(Candidate("switch", sid, name, Action("switch", bench_index=j, label=f"交代:{name}"),
                                switch_mode, party_index=i))
-    notes = []
-    responses = None
+    mode = None
     if my_fainted:
         notes.append("ひんし後の繰り出し: 相手は行動しない (繰り出しの候補どうしを V で比べる)")
     elif pivot_pending:
         # 交代技の後の繰り出し先の選択: 自分が先に動いた (相手がまだ行動していない) なら相手の技を受ける (交代はしない)。
         # 相手が先に動いた後なら相手は行動しない
         if i_am_faster:
-            responses = opponent_responses(opp, me, pool, damage_fn, opp_field, include_switch=False)
+            mode = "no_switch"
             notes.append("交代技の後の繰り出し: 相手はまだ行動していない見込み (技を受ける)")
         else:
             notes.append("交代技の後の繰り出し: 相手は行動済みの見込み (技を受けない)")
     else:
-        responses = opponent_responses(opp, me, pool, damage_fn, opp_field)
+        mode = "full"
+    responses = _responses_for(me, opp, pool, damage_fn, opp_field, mode)
+    # 持ち物の感度: 相手の場の個体の持ち物が観測で確定していなければ、スカーフ / タスキの有無を入れ替えた仮説
+    item_alts = []
+    if mode is not None:
+        observed = opp_p.get("item_id")
+        for name, item in C.TRANSITION_SENSITIVITY_ITEMS:
+            if observed or opp_p.get("item_consumed") or opp_p.get("item_removed"):
+                item_alts.append((name, None, "item_known"))
+                continue
+            if item == "focussash" and opp.active_hp < 1.0 - 1e-6:
+                item_alts.append((name, None, "not_full_hp"))
+                continue
+            has = opp.active.item == item
+            alt_view = _r(opp.active, item=None if has else item)
+            item_alts.append((name, _r(opp, active=alt_view), "remove" if has else "add"))
     legacy_by_key = {(a.get("kind"), a.get("id")): a for a in legacy_actions}
     for (i, p) in bench_meta:
         if p.get("hp_uncertain"):
@@ -410,26 +743,103 @@ def build_inputs(state: dict, resolver, *, my_view: MonView, opp_view: Optional[
             legacy_by_key[k] = dict(legacy_by_key.get(k) or {}, hp_uncertain=True)
     inp = TransitionInputs(me=me, opp=opp, my_field=my_field, opp_field=opp_field, candidates=cands, responses=responses,
                            vctx=vctx, damage_fn=damage_fn, rl_probs=_rl_probs(rl_hint), legacy_by_key=legacy_by_key,
-                           notes=notes)
+                           notes=notes, pool=list(pool), response_mode=mode, hp_ranges=ranges, hp_alt=hp_alt,
+                           item_alts=item_alts)
     return inp, None
 
 
+def _side_volatiles(vols: set, encore_locked: Optional[str]) -> frozenset:
+    """状態の揮発状態 → SimSide.volatiles (アンコールは固定技が分かるときだけ "encore:<技>"、ちょうはつ)"""
+    out = set()
+    if "encore" in vols and encore_locked:
+        out.add(f"encore:{encore_locked}")
+    if "taunt" in vols:
+        out.add("taunt")
+    return frozenset(out)
+
+
+def _sub_hp_of(vols: set, view: MonView) -> float:
+    """状態にみがわりがあれば、その残り HP (分からないので最大 HP の 1/4 = 張った直後と仮定)"""
+    if "substitute" not in vols:
+        return 0.0
+    from advisor.transition import _frac_of, floor_hp_frac
+    return floor_hp_frac(view, *_frac_of("substitute_frac", (1, 4)))
+
+
 # ------------------------------------------------------------------ 退避率の集計 (advice 行から。純粋)
-def summarize_fallbacks(advices) -> dict:
-    """advice 行 (または evaluate の戻り値) の列から transition 方式の退避率を集計する (純粋)。
-    分母は scoring_mode が transition の行、分子はそのうち scoring_fallback がある行。理由は「:」の前で分類する"""
+def _advice_of(a) -> Optional[dict]:
+    adv = a.get("advice") if isinstance(a, dict) and isinstance(a.get("advice"), dict) else a
+    return adv if isinstance(adv, dict) else None
+
+
+def _reason_key(fb) -> str:
+    """退避の理由の分類: 未対応の効果 (unsupported / opp_unsupported) は「理由:効果:技」まで、ほかは「:」の前"""
+    key = str(fb).split(":", 2)
+    return ":".join(key[:3]) if key[0] in ("unsupported", "opp_unsupported") else key[0]
+
+
+def _rate_of(advs: list) -> dict:
     n = n_fb = 0
     by: dict = {}
-    for a in advices or ():
-        adv = a.get("advice") if isinstance(a, dict) and isinstance(a.get("advice"), dict) else a
-        if not isinstance(adv, dict) or adv.get("scoring_mode") != "transition":
+    opp_by: dict = {}
+    for adv in advs:
+        if adv.get("scoring_mode") != "transition":
             continue
         n += 1
         fb = adv.get("scoring_fallback")
         if fb:
             n_fb += 1
-            key = str(fb).split(":", 2)
-            k = key[0] if key[0] != "unsupported" else ":".join(key[:3])
+            k = _reason_key(fb)
             by[k] = by.get(k, 0) + 1
+            if k.startswith("opp_unsupported:"):
+                eff = k.split(":", 2)[1]
+                opp_by[eff] = opp_by.get(eff, 0) + 1
+    n_opp = sum(opp_by.values())
     return {"n": n, "n_fallback": n_fb, "rate": (n_fb / n) if n else None,
-            "by_reason": dict(sorted(by.items(), key=lambda kv: -kv[1]))}
+            "by_reason": dict(sorted(by.items(), key=lambda kv: (-kv[1], kv[0]))),
+            "opp_unsupported": {"n": n_opp, "rate": (n_opp / n) if n else None,
+                                "by_effect": dict(sorted(opp_by.items(), key=lambda kv: (-kv[1], kv[0])))}}
+
+
+def summarize_fallbacks(advices, decisions=None) -> dict:
+    """advice 行 (または evaluate の戻り値) の列から transition 方式の退避率を集計する (純粋)。
+
+    行の単位: 分母は scoring_mode が transition の行、分子はそのうち scoring_fallback がある行。理由は「:」の前で分類し、
+    未対応の効果 (自分の候補 unsupported / 相手の応手 opp_unsupported) は効果と技まで分ける。
+    決定の単位 (2026-10-09 M2c、"decisions"): 同じ決定の advice 行 (画面の更新ごとに何度も出る) を 1 つに数える。
+    decisions (battle_logger の decision 行の列) を渡せば、各 decision 行の advice_id の advice (決定の時点に出ていた助言) を
+    その決定の代表にする (advice_id が advice の列に無い決定は数えない)。渡さなければ、advice の列の並びで position_key
+    (engine.position_key_of: 場の個体・技の固定・交代しか選べないか) と turn が続けて同じ行を 1 つの決定とみなし、その最後の行を
+    代表にする。opp_unsupported = 相手の応手の未対応の効果で退避した割合と効果の内訳"""
+    advs = [x for x in (_advice_of(a) for a in (advices or ())) if x is not None]
+    out = _rate_of(advs)
+    reps: list = []
+    unit = "position"
+    if decisions is not None:
+        unit = "decision"
+        by_id = {}
+        for a, adv in zip(advices or (), (_advice_of(a) for a in (advices or ()))):
+            if adv is None:
+                continue
+            aid = (a.get("advice_id") if isinstance(a, dict) else None) or adv.get("advice_id")
+            if aid:
+                by_id[str(aid)] = adv
+        for d in decisions:
+            adv = by_id.get(str(d.get("advice_id")))
+            if adv is not None:
+                reps.append(adv)
+    else:
+        prev_key = object()
+        for a in advices or ():
+            adv = _advice_of(a)
+            if adv is None:
+                continue
+            turn = (a.get("turn") if isinstance(a, dict) and a is not adv else None) or adv.get("turn")
+            k = (repr(adv.get("position_key")), turn)
+            if reps and k == prev_key:
+                reps[-1] = adv
+            else:
+                reps.append(adv)
+            prev_key = k
+    out["decisions"] = dict(_rate_of(reps), unit=unit)
+    return out

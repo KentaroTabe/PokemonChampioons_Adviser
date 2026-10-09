@@ -34,5 +34,16 @@
  "type_immunity_status_moves": ["thunderwave"],
  "glaive_rush_moves": ["glaiverush"],
  "flinch_block_items": ["covertcloak"],
- "speed_tie_prob": 0.5
+ "speed_tie_prob": 0.5,
+ "_comment_m2c": "2026-10-09 M2c (1 ターンの状態変化: アンコール・ちょうはつ・みがわり・こらえる、両陣営)。encore_moves / taunt_moves = 対象に揮発状態を付ける技 (対象がこのターンにまだ行動していなければ、その行動を固定技に替える / 変化技を失敗させる)。encore_fail_flag = 固定できない技の印 (move_effects.json の flags)。volatile_cure_items = 付いた揮発状態をすぐ治して消費する持ち物 (メンタルハーブ)。substitute_frac = みがわりの HP と使用時の HP の消費 (最大 HP × num / den の切り捨て。HP がこれ以下なら失敗)。substitute_bypass_flags = みがわりを貫通する技の印 (音技は bypasssub を持つ)。substitute_bypass_ability_effect = 貫通する特性 (すりぬけ) の misc の効果名。endure_moves = こらえる (このターン、技のダメージを HP 1 で耐える。後に行動する者が居なければ失敗)",
+ "source_m2c": ["pokemon-showdown/data/moves.ts encore (lastMove が無い・failencore の技なら失敗、onOverrideAction)、data/mods/champions/moves.ts encore (まだ行動していない対象の行動をその場で固定技に替える。メンタルハーブなら替えない)", "pokemon-showdown/data/moves.ts taunt (onBeforeMove: 変化技は失敗)、substitute (onTryHit: 既にある・hp <= maxhp / 4 なら失敗、directDamage(maxhp / 4)、hp = floor(maxhp / 4)、onTryPrimaryHit: bypasssub / infiltrates 以外の技の damage を身代わりが受け、超えた分は通らない、recoil と drain は身代わりへのダメージで)、endure (onPrepareHit: queue.willAct()、onDamage: 技のダメージ >= hp なら hp - 1)", "pokemon-showdown/data/items.ts mentalherb (onUpdate: attract / taunt / encore / torment / disable / healblock を治して useItem)"],
+ "encore_moves": ["encore"],
+ "taunt_moves": ["taunt"],
+ "encore_fail_flag": "failencore",
+ "volatile_cure_items": {"mentalherb": ["encore", "taunt"]},
+ "substitute_moves": ["substitute"],
+ "substitute_frac": {"num": 1, "den": 4},
+ "substitute_bypass_flags": ["bypasssub"],
+ "substitute_bypass_ability_effect": "ignore_screens_substitute",
+ "endure_moves": ["endure"]
 }

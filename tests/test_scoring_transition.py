@@ -225,15 +225,18 @@ def test_d_service_final_ranking():
 # (e) 退避: 未対応の効果・予算超過・相手不明は決定全体を legacy に退避し、理由を残す。退避率を集計できる
 # ==============================================================================
 def test_e_fallback_recorded():
+    # 2026-10-09 M2c で期待値を変更 (仕様修正): 未対応の自分の技の例を アンコール から トリックルーム に替えた。アンコールは M2c で
+    # 遷移に入れた (1 ターンの状態変化) ので退避しない。旧挙動 (アンコールで "unsupported:effect_unmodeled:encore" に退避) と
+    # 変更後の挙動 (アンコールで退避しない) は tests.test_advice_m2c.test_opp_encore_not_fallback_and_unsupported_fallback
     ind = _mon("indeedee", "イエッサン", ["エスパー", "ノーマル"],
-               [("マジカルフレイム", "mysticalfire"), ("アンコール", "encore"), ("ワイドフォース", "expandingforce")])
+               [("マジカルフレイム", "mysticalfire"), ("トリックルーム", "trickroom"), ("ワイドフォース", "expandingforce")])
     opp = _mon("garchomp", "ガブリアス", ["ドラゴン", "じめん"], picked=False, revealed_moves=["じしん"])
     st = _state([ind, _mon("blastoise", "カメックス", ["みず"], [("なみのり", "surf")])], [opp], my_rem=3, opp_rem=3)
     with _Hint():
         leg = evaluate(copy.deepcopy(st), resolver, rl_blend_weight=0, scoring_mode="legacy")
         tr = evaluate(copy.deepcopy(st), resolver, rl_blend_weight=0, scoring_mode="transition")
     assert tr["scoring_mode"] == "transition" and tr["scoring_used"] == "legacy"
-    assert tr["scoring_fallback"] == "unsupported:effect_unmodeled:encore", tr["scoring_fallback"]
+    assert tr["scoring_fallback"] == "unsupported:effect_unmodeled:trickroom", tr["scoring_fallback"]
     assert tr["actions"] == leg["actions"]                       # 退避先は legacy の結果そのもの (未評価の技を低得点にしない)
     # 予算超過
     old = C.TRANSITION_BUDGET_MS
@@ -256,7 +259,7 @@ def test_e_fallback_recorded():
     rows = [{"type": "advice", "advice": a} for a in (tr, tb, tu, ok, leg)]
     s = ST.summarize_fallbacks(rows)
     assert s["n"] == 4 and s["n_fallback"] == 3 and abs(s["rate"] - 0.75) < 1e-12, s
-    assert s["by_reason"] == {"unsupported:effect_unmodeled:encore": 1, "budget": 1, "opp_unknown": 1}, s
+    assert s["by_reason"] == {"unsupported:effect_unmodeled:trickroom": 1, "budget": 1, "opp_unknown": 1}, s
     print("test_e_fallback_recorded OK")
 
 

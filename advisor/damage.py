@@ -285,7 +285,7 @@ def type_item_mult(item: Optional[str], move_type: Optional[str]) -> float:
 
 def _zero(category: str, notes: list) -> dict:
     return {"min": 0.0, "max": 0.0, "avg": 0.0, "expected": 0.0, "type_mult": 0.0, "category": category,
-            "hits": 1.0, "accuracy": None, "notes": notes}
+            "hits": 1.0, "accuracy": None, "notes": notes, "rolls": [0.0]}
 
 
 def _effective_accuracy(entry: dict, move: dict, fv: FieldView):
@@ -303,6 +303,41 @@ def _effective_accuracy(entry: dict, move: dict, fv: FieldView):
     return acc
 
 
+# 残り HP で威力・補正が変わる可変威力の種類 (advisor.effects.variable_power)。攻撃側 / 防御側
+_HP_VARIABLE_POWER_USER = ("user_hp_ratio", "user_hp_low")          # ふんか・しおふき・ドラゴンエナジー / じたばた・きしかいせい
+_HP_VARIABLE_POWER_TARGET = ("target_hp_half", "target_hp_ratio")  # しおみず / しぼりとる・にぎりつぶす・ハードプレス
+# 特性の式の条件語のうち残り HP を見るもの (effects.when_matches)。user_hp_below = 攻撃側の HP、full_hp = 防御側 (対象) の HP
+_HP_WHEN_USER = ("user_hp_below",)
+_HP_WHEN_TARGET = ("full_hp",)
+# 効果表に無い特性の従来の分岐 (calc_damage の not a_known / not d_known の枝) で残り HP を見るもの
+_LEGACY_HP_TARGET_ABILITIES = ("multiscale", "shadowshield")
+
+
+def hp_dependence(attacker: MonView, defender: MonView, move_id: str) -> tuple:
+    """calc_damage の結果が (攻撃側の残り HP, 防御側の残り HP) で変わり得るか (bool, bool) (純粋。2026-10-09 M2c)。
+
+    ダメージ計算のキャッシュ (advisor.scoring_transition.make_damage_fn) が、残り HP をキーに含めるかの判定に使う。
+    可変威力 (ふんか・きしかいせい・しぼりとる 等) と、特性の式の HP の条件 (もうか系 = 攻撃側の HP 1/3 以下、マルチスケイル =
+    防御側が満タン) と、効果表に無い特性の従来の分岐を見る。迷う場合は True (キーに HP を入れる側) に倒す"""
+    from advisor import effects as E
+    entry = E.move_entry(move_id)
+    vp = entry.get("variable_power") or ""
+    att = vp in _HP_VARIABLE_POWER_USER
+    dfn = vp in _HP_VARIABLE_POWER_TARGET
+    for ab in (attacker.ability, defender.ability):
+        if not ab:
+            continue
+        if E.ability_known(ab):
+            for f in E.ability_formulas(ab):
+                w = f.get("when") or {}
+                att = att or any(k in w for k in _HP_WHEN_USER)
+                dfn = dfn or any(k in w for k in _HP_WHEN_TARGET)
+        else:
+            att = att or ab in PINCH_ABILITIES
+            dfn = dfn or ab in _LEGACY_HP_TARGET_ABILITIES
+    return att, dfn
+
+
 def calc_damage(attacker: MonView, defender: MonView, move_id: str,
                 fieldv: Optional[FieldView] = None,
                 override_type_mult: Optional[float] = None,
@@ -311,7 +346,8 @@ def calc_damage(attacker: MonView, defender: MonView, move_id: str,
     """ダメージを計算して割合 (%表記) で返す。
 
     戻り値: {"min": %, "max": %, "avg": %, "expected": % (命中込み), "type_mult": x, "category": ..., "hits": 期待回数,
-             "accuracy": 実効命中 (None = 必中), "notes": [...]}  計算不能 (変化技等) なら 0
+             "accuracy": 実効命中 (None = 必中), "notes": [...], "rolls": [乱数ごとの %] (2026-10-09 M2c で追加)}
+    計算不能 (変化技等) なら 0 (rolls は [0.0])
     override_move_type: 条件でタイプが変わる技 (ウェザーボール/ダイチノハドウ) の実際のタイプ。
     ctx: 盤面の文脈 (任意): target_switched_in / moves_last / fainted_allies / times_hit / berry_eaten / target_item
     """
@@ -425,7 +461,8 @@ def calc_damage(attacker: MonView, defender: MonView, move_id: str,
         dmg = float(attacker.level) if "level" in str(fd) else float(str(fd).strip("'"))
         pct = round(100.0 * dmg / hp, 1)
         return {"min": pct, "max": pct, "avg": pct, "expected": pct, "type_mult": type_mult, "category": category,
-                "hits": 1.0, "accuracy": _effective_accuracy(entry, move, fv), "notes": notes + ["固定ダメージ"]}
+                "hits": 1.0, "accuracy": _effective_accuracy(entry, move, fv), "notes": notes + ["固定ダメージ"],
+                "rolls": [100.0 * dmg / hp]}
 
     # --- 攻撃/防御実数値 (参照する能力の上書き: ボディプレスは自分の防御、イカサマは相手の攻撃、サイコショックは相手の防御) ---
     if category == "Physical":
@@ -679,10 +716,14 @@ def calc_damage(attacker: MonView, defender: MonView, move_id: str,
         dmg_min = rolls[0] * extra * hits_noacc
         dmg_max = rolls[-1] * extra * hits_noacc
         avg = sum(rolls) / len(rolls) * extra * hits_noacc
+        roll_dmgs = [r * extra * hits_noacc for r in rolls]
     else:
         dmg_max = base * mult * hits_noacc
         dmg_min = dmg_max * 0.85
         avg = (dmg_min + dmg_max) / 2
+        # 小数の計算には乱数ごとの値が無いので、最小〜最大を等間隔に 16 点置く (従来の近似)
+        n_r = 16
+        roll_dmgs = [dmg_min + (dmg_max - dmg_min) * k / (n_r - 1) for k in range(n_r)]
     eff_acc = None if (acc is None or no_miss) else round(min(100.0, float(acc) * acc_mult), 1)
 
     return {
@@ -695,4 +736,8 @@ def calc_damage(attacker: MonView, defender: MonView, move_id: str,
         "hits": round(hits_noacc, 3),
         "accuracy": eff_acc,
         "notes": notes,
+        # 乱数 85〜100 の各値のダメージ (% 表記、丸めない。2026-10-09 M2c)。整数の計算 (DAMAGE_INTEGER_ROUNDING) では
+        # showdown_rolls の実際の 16 通り (急所の期待値・回数の補正込み)、小数の計算では最小〜最大の等間隔の 16 点。
+        # 連続技は min / max と同じく期待回数ぶんの合計。transition 方式の分岐 (advisor.transition.move_outcomes) が使う
+        "rolls": [100.0 * r / hp for r in roll_dmgs],
     }

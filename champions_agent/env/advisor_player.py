@@ -369,14 +369,14 @@ def _state_summary(battle) -> dict:
 
 def _count_scoring(stats: dict, advice: Optional[dict]) -> None:
     """transition 方式の決定数と退避 (scoring_fallback) の件数を stats に数える (純粋な集計。legacy では何も足さない)。
-    退避の理由は「unsupported:効果:技」までと、それ以外は「:」の前で分類する"""
+    退避の理由は「unsupported:効果:技」「opp_unsupported:効果:技」(2026-10-09 M2c) までと、それ以外は「:」の前で分類する"""
     if not advice or advice.get("scoring_mode") != "transition":
         return
     stats["scoring_transition"] = stats.get("scoring_transition", 0) + 1
     fb = advice.get("scoring_fallback")
     if fb:
         parts = str(fb).split(":")
-        key = ":".join(parts[:3]) if parts[0] == "unsupported" else parts[0]
+        key = ":".join(parts[:3]) if parts[0] in ("unsupported", "opp_unsupported") else parts[0]
         stats["scoring_fallback"] = stats.get("scoring_fallback", 0) + 1
         stats[f"scoring_fallback:{key}"] = stats.get(f"scoring_fallback:{key}", 0) + 1
 
