@@ -1237,3 +1237,10 @@ SCENE_SAMPLES_FRAME_TOL_SEC = 6.0
 SCENE_SAMPLES_ADVICE_MAX_AGE_SEC = 60.0
 SCENE_SAMPLES_TIME_FRAME_PREFIXES = ("frame_",)
 SCENE_SAMPLES_ANY_FRAME_PREFIXES = ("frame_", "sel_", "fc_")
+# 操縦提案の精度改善 M1a (2026-10-09、docs/ADVICE_ACCURACY_PLAN_1009.md 段 A-2): 技の固定の残りターン。
+# 第 9 世代 (Showdown の duration 3) は、対象がそのターンに既に行動していれば +1 ターン (次の 3 回の行動選択が固定)、
+# まだ行動していなければそのターンの行動が固定され、次の 2 回の行動選択が固定される。値は「行動済み」のときの回数。
+# 解除の文言 (「アンコール状態が解けた」「挑発の効果が解けた」) と交代でも外れる。ターンの数え方は vision.pipeline の
+# ターンカウント (コマンド画面への復帰) に従うので、取りこぼすと長めに残る (選べない技を推すより安全側)
+MOVE_LOCK_ENCORE_TURNS = 3
+MOVE_LOCK_TAUNT_TURNS = 3

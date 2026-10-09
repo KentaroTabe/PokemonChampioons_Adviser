@@ -17,9 +17,10 @@ import re
 import time
 from typing import Optional
 
-from champions_agent.config import BATTLE_END_FAINT_CONFIRM_SEC, BSS_PICK_COUNT
+from champions_agent.config import (BATTLE_END_FAINT_CONFIRM_SEC, BSS_PICK_COUNT, MOVE_LOCK_ENCORE_TURNS,
+                                    MOVE_LOCK_TAUNT_TURNS)
 from vision.normalize import loose_key, normalize
-from vision.state import BattleStateV2
+from vision.state import BattleStateV2, lock_turns_left
 
 # 同一イベントIDの再発火を抑止する窓 (秒)。メッセージは表示中にフレーム
 # 間隔で繰り返し読まれ、OCR揺れで別テキストとして 3〜7 秒後に再解析される
@@ -147,8 +148,14 @@ SIMPLE_EVENTS = [
      "action": "volatile", "key": "taunt", "value": True},
     {"id": "taunt_off", "keywords": [["挑発", "ちようはつ"], ["とけた", "解けた"]],
      "action": "volatile", "key": "taunt", "value": False},
-    {"id": "encore_on", "keywords": [["アンコール", "あんこる"]],
+    # アンコール: 対象の名前が付く「<対象>は アンコールを 受けた!」だけを開始とする。技の使用文「<使用者>の アンコール」は
+    # 使用者側に誤って付き (2026-10-09 M1a: battle_20261009_084212 で相手のアンコールが相手自身に付き、自分の技の固定が
+    # 取れなかった)、技の説明文「相手を アンコール状態に する」は場の個体に誤って付いていた。使用文からの開始は
+    # EventParser._infer_encore_from_move (対象 = 反対側の場の個体) が扱う
+    {"id": "encore_on", "keywords": [["アンコール", "あんこる"], ["受け", "うけ"]],
      "action": "volatile", "key": "encore", "value": True},
+    {"id": "encore_off", "keywords": [["アンコール", "あんこる"], ["とけた", "解けた"]],
+     "action": "volatile", "key": "encore", "value": False},
     # かなしばり: 解除を先に判定する (両方「かなしばり」を含むため)
     {"id": "disable_off", "keywords": [["かなしばり", "金縛り"],
                                        ["とけた", "解けた"]],
@@ -495,7 +502,9 @@ class EventParser:
         is_contact_msg = ("ひつかか" in norm or "ひっかか" in cleaned
                           or "引っかか" in cleaned
                           or "足下" in cleaned or "足元" in cleaned or "周りに" in cleaned)
-        if not is_contact_msg and \
+        # 「<対象>は アンコールを 受けた」「<対象>の アンコール状態が 解けた」も技の使用文ではない (対象側の技として記録され、
+        # 相手の技の固定が「アンコール」になっていた。2026-10-09 M1a)
+        if not is_contact_msg and "encore_on" not in fired and "encore_off" not in fired and \
                 not any(f.startswith("switch") or f.endswith("_end")
                         for f in fired):
             mu = self._parse_move_or_ability(cleaned, norm, source,
@@ -522,6 +531,8 @@ class EventParser:
         # 同じ側が他の技を使ったら0にリセット
         _PROTECT_IDS = ("protect", "detect", "banefulbunker", "spikyshield",
                         "kingsshield", "silktrap", "burningbulwark", "obstruct")
+        # アンコールの使用文からの推定は、下で last_move を更新する前に行う (固定する技はこのメッセージより前の直前の技)
+        fired.extend(self._infer_encore_from_move(fired))
         for side in ("player", "opponent"):
             # 交代・ひんしで直前技をクリア (アンコールの技固定も同時に切れる)
             if any(f == f"switch_{side}" or f == "faint" and
@@ -532,6 +543,7 @@ class EventParser:
             if not moves_fired:
                 continue
             self.state.last_move[side] = moves_fired[-1].split("_", 2)[2]
+            self.state.moved_turn[side] = self.state.turn
             if any(f.split("_", 2)[2] in _PROTECT_IDS for f in moves_fired):
                 self.state.protect_streak[side] = \
                     self.state.protect_streak.get(side, 0) + 1
@@ -653,6 +665,43 @@ class EventParser:
         st.log_event("system", "リザルト画面を検出 (対戦終了)", event_id="battle_end_result")
         return "battle_end_result"
 
+    def _moved_this_turn(self, side_name: str) -> bool:
+        """その側の場の個体が今のターンに既に技を使ったか (技の固定の残りターンの判定、2026-10-09 M1a)"""
+        return self.state.moved_turn.get(side_name) == self.state.turn
+
+    def _apply_encore(self, side_name: str, mon, confirmed: bool) -> bool:
+        """アンコールの開始を mon (side_name 側の場の個体) に入れる。固定する技は対象の直前の技 (state.last_move、交代・ひんしで
+        消える)。confirmed=False (技の使用文からの推定) で直前の技が分からなければ入れない (場に出てから技を使っていない個体への
+        アンコールは失敗する)。既にアンコール中なら固定の技・残りを変えない。戻り値: 入れたか (2026-10-09 M1a)"""
+        locked = self.state.last_move.get(side_name)
+        if not confirmed and not locked:
+            return False
+        if "encore" in mon.volatiles:
+            if locked and not mon.encore_move:
+                mon.encore_move = locked
+            return False
+        mon.volatiles.append("encore")
+        mon.encore_move = locked or None
+        mon.volatile_turns["encore"] = lock_turns_left(MOVE_LOCK_ENCORE_TURNS, self._moved_this_turn(side_name))
+        return True
+
+    def _infer_encore_from_move(self, fired: list) -> list:
+        """技の使用文「<使用者>の アンコール」から、反対側の場の個体のアンコールの開始を推定する (2026-10-09 M1a。
+        battle_20261009_084212 では対象側の「アンコールを受けた」が読めず、使用文だけが残っていた)。戻り値: 足したイベント id"""
+        out = []
+        if "encore_on" in fired:
+            return out
+        for user in ("player", "opponent"):
+            if f"move_{user}_encore" not in fired:
+                continue
+            target = "opponent" if user == "player" else "player"
+            mon = self.state.side(target).active()
+            if mon is None or mon.status == "fainted":
+                continue
+            if self._apply_encore(target, mon, confirmed=False):
+                out.append(f"encore_inferred_{target}")
+        return out
+
     def _parse_switch(self, cleaned: str, norm: str, fired: list) -> bool:
         if not any(k in norm for k in ("繰り出", "くりたし", "くりた", "ゆけつ")):
             return False
@@ -693,6 +742,10 @@ class EventParser:
         mon = side.switch_to_species(jp, sid)
         from vision.extractors import link_active_to_party
         link_active_to_party(self.state, side_name)
+        # 場に出たターン (であいがしら・ねこだまし の初手限定の判定。2026-10-09 M1a)
+        entered = side.active()
+        if entered is not None:
+            entered.entry_turn = self.state.turn
         # 確定特性の着地効果 (いかく等): 「〜のいかく!」「こうげきがさがった」
         # のメッセージは演出中で取り逃しやすい (第9回: 捕捉0件) ため、
         # 交代イベント時点で確定的に適用する。特性が確定している個体のみ
@@ -1217,6 +1270,10 @@ class EventParser:
             mon.volatiles = [v for v in mon.volatiles
                              if v not in ("taunt", "encore")
                              and not v.startswith("disable")]
+            # 技の固定の付帯情報も一緒に外す (2026-10-09 M1a)
+            mon.volatile_turns.pop("taunt", None)
+            mon.volatile_turns.pop("encore", None)
+            mon.encore_move = None
         elif cv:
             mon.volatiles = [v for v in mon.volatiles if v != cv]
         if eff.get("consume"):
@@ -1346,11 +1403,21 @@ class EventParser:
             if side.remaining:
                 side.remaining = max(0, side.remaining - 1)
         elif action == "volatile":
-            _, _, mon = self._target_mon(cleaned, source)
-            if ev["value"] and ev["key"] not in mon.volatiles:
+            side_name_v, _, mon = self._target_mon(cleaned, source)
+            if ev["key"] == "encore" and ev["value"]:
+                # 固定する技 (受けた時点の対象の直前の技) と残りターンも入れる (2026-10-09 M1a)
+                self._apply_encore(side_name_v, mon, confirmed=True)
+            elif ev["value"] and ev["key"] not in mon.volatiles:
                 mon.volatiles.append(ev["key"])
+                if ev["key"] == "taunt":
+                    mon.volatile_turns["taunt"] = lock_turns_left(MOVE_LOCK_TAUNT_TURNS,
+                                                                  self._moved_this_turn(side_name_v))
             elif not ev["value"] and ev["key"] in mon.volatiles:
                 mon.volatiles.remove(ev["key"])
+            if not ev["value"]:
+                mon.volatile_turns.pop(ev["key"], None)
+                if ev["key"] == "encore":
+                    mon.encore_move = None
             if ev["key"] == "disable":
                 if ev["value"]:
                     # 「◯◯の △△を かなしばりにした!」から封じられた技を特定

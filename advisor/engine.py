@@ -160,6 +160,73 @@ def has_acted_since_entry(last_move_player: Optional[str], move_ids) -> bool:
     return last_move_player in {m for m in (move_ids or []) if m}
 
 
+def first_turn_passed(entry_turn: Optional[int], turn: Optional[int]) -> bool:
+    """場に出てから最初の行動選択を過ぎたか (純粋。2026-10-09 M1a)。
+
+    場に出たターン entry_turn (交代の文言を読んだときの vision の turn) の次のターンが最初の行動選択で、turn がそれより
+    後なら過ぎた。行動できなかったターン (ひるみ・ねむり・まひ等) は技の使用文が無く last_move も入らないが、初手の機会は
+    過ぎる (has_acted_since_entry だけでは であいがしら・ねこだまし を選べるままにしていた)。どちらか不明なら False"""
+    if entry_turn is None or turn is None:
+        return False
+    try:
+        return int(turn) > int(entry_turn) + 1
+    except (TypeError, ValueError):
+        return False
+
+
+def illegal_move_reason(mid: Optional[str], mv: Optional[dict], pp, *, first_turn_only_move: bool = False,
+                        acted_since_entry: bool = False, disabled_ids=(), encore_locked: Optional[str] = None,
+                        choice_locked: Optional[str] = None, taunted: bool = False) -> Optional[str]:
+    """技が選択自体できない理由 (純粋。選べるなら None)。2026-10-09 M1a: 以前は選べない技を −99 点で候補に残していた。
+    合法性は候補の生成時に決め、選べない技は候補から外して理由だけ残す (evaluate の illegal_actions)。
+    「選べるが条件次第で不発」(サイコフィールド中の先制技・ふいうち等) はここでは扱わない (候補の may_fail)"""
+    if pp == 0:
+        return "PP が 0"
+    if acted_since_entry and first_turn_only_move:
+        return "場に出た最初のターンしか選べない"
+    if mid in (disabled_ids or ()):
+        return "かなしばりで選べない"
+    if encore_locked and mid != encore_locked:
+        return "アンコール中は直前の技しか選べない"
+    if choice_locked and mid != choice_locked:
+        return "こだわり中は直前の技しか選べない (交代で解除)"
+    if taunted and mv is not None and (mv["category"] == "Status" or not mv["power"]):
+        return "ちょうはつ中は変化技を選べない"
+    return None
+
+
+def complete_moves_from_registration(observed: list, registered: list, max_moves: int = 4) -> list:
+    """画面で読めた技の枠 observed に、登録の型の技 registered = [(日本語名, move_id)] で残りの枠を補う (純粋。2026-10-09 M1a)。
+
+    - 読めた枠 (技名が読めて id が引けなかった枠も 1 枠と数える) はそのまま残し、PP (0 を含む) も上書きしない。
+    - 補うのは「登録にあって読めた技に無い技」を登録の順に、空いている枠の数まで。読めた技に登録に無い技がある
+      (観測と登録の矛盾) ときも観測を優先し、空いている枠だけを埋める。
+    - 補った枠は {"name_ja", "move_id", "pp": None, "from_registration": True}。入力は書き換えない"""
+    slots = [dict(s) for s in (observed or [])]
+    free = max_moves - len(slots)
+    if free <= 0:
+        return slots
+    seen = {s.get("move_id") for s in slots if s.get("move_id")}
+    for ja, mid in registered or []:
+        if free <= 0:
+            break
+        if not mid or mid in seen:
+            continue
+        slots.append({"name_ja": ja, "move_id": mid, "pp": None, "from_registration": True})
+        seen.add(mid)
+        free -= 1
+    return slots
+
+
+def position_key_of(my_idx, my_species, my_fainted, opp_idx, opp_species, opp_fainted, locks: tuple,
+                    switch_only: bool) -> tuple:
+    """助言の据え置き (advisor.service.apply_advice_hysteresis) で「同じ局面か」を比べる鍵 (純粋。2026-10-09 M1a)。
+    場の個体 (枠と現在形態の id)、ひんし、技の固定、交代先選択の場面のどれかが変われば別の局面"""
+    return (("my", my_idx, my_species, bool(my_fainted)),
+            ("opp", opp_idx, opp_species, bool(opp_fainted)),
+            ("lock",) + tuple(locks), ("switch_only", bool(switch_only)))
+
+
 def type_ja2en() -> dict:
     global _TYPE_JA2EN
     if _TYPE_JA2EN is None:
@@ -221,16 +288,19 @@ RL_BLEND_DEFAULT = _rl_blend_default_from_env()
 
 
 def build_mon_view(p: dict, resolver=None, side: str = "opponent") -> Optional[MonView]:
-    """PokemonState辞書 -> MonView。種族不明なら None"""
-    dex = get_dex()
-    sid = p.get("species_id")
-    sp = dex.species(sid)
-    if sp is None:
-        return None
+    """PokemonState辞書 -> MonView。種族不明なら None。
 
-    types_en = [type_ja2en().get(t, t) for t in (p.get("types") or [])]
-    if not types_en:
-        types_en = sp["types"]
+    形態 (基本種 / 現在形態 / 一時的なタイプ変化) は advisor.gimmick.resolve_form の 1 か所で解決し、種族値・タイプ・
+    固定特性は現在形態から引く (2026-10-09 M1a: battle_20261009_113830 でメガ後のミミロップが species_id=lopunny の
+    まま通常形態の種族値・タイプで評価されていた)。MonView.species_id は現在形態の id"""
+    dex = get_dex()
+    from advisor.gimmick import resolve_form
+    form = resolve_form(p)
+    if form is None:
+        return None
+    sid = form.species
+    sp = dex.species(sid)
+    types_en = list(form.types)
 
     hp_frac = 1.0
     if p.get("hp_percent") is not None:
@@ -240,11 +310,9 @@ def build_mon_view(p: dict, resolver=None, side: str = "opponent") -> Optional[M
 
     # 特性が一意な場合 (単一特性/メガ後の固定特性) は確定値を使う。
     # メガ前に判明していた特性が状態に残っていてもメガ後は固定値が正
-    from vision.abilities import fixed_ability
     ability = p.get("ability_id")
-    fa = fixed_ability(sid, is_mega=bool(p.get("is_mega")),
-                       item_id=p.get("item_id"))
-    if fa and (p.get("is_mega") or not ability):
+    fa = form.ability
+    if fa and (form.is_mega or not ability):
         ability = fa
 
     # 自分側: config/my_team.json に登録された型があれば実際の
@@ -257,7 +325,8 @@ def build_mon_view(p: dict, resolver=None, side: str = "opponent") -> Optional[M
             if build["ev"]:
                 ev = build["ev"]
             nature = build["nature"]
-            if not item and build["item_ja"] and resolver:
+            # はたきおとす等で持ち物を失った個体は登録の持ち物で補わない (こだわりの技固定もこれで外れる。2026-10-09 M1a)
+            if not item and not p.get("item_removed") and build["item_ja"] and resolver:
                 r = resolver.resolve(build["item_ja"], "items", cutoff=0.85)
                 if r:
                     item = r[1]
@@ -466,7 +535,8 @@ def evaluate_common(state: dict, resolver=None) -> dict:
         pool = opponent_move_pool(opp_p, opp_view, resolver)
         # 相手がアンコール中で直前技が判明していれば、脅威はその技のみになる
         opp_vols_ = {str(v).lower() for v in (opp_p.get("volatiles") or [])}
-        opp_locked = (state.get("last_move") or {}).get("opponent")
+        # 固定された技は、アンコールを受けた時点の直前の技 (状態の encore_move、2026-10-09 M1a)。無ければ直前の技
+        opp_locked = opp_p.get("encore_move") or (state.get("last_move") or {}).get("opponent")
         if "encore" in opp_vols_ and opp_locked and \
                 any(m == opp_locked for m, _ in pool):
             pool = [(opp_locked, 100.0)]
@@ -550,20 +620,6 @@ def evaluate_common(state: dict, resolver=None) -> dict:
     # ------------------------------------------------------------------
     # 自分の技の評価
     # ------------------------------------------------------------------
-    # わざふうじ状態: ちょうはつ=変化技不可 / かなしばり=特定技不可 /
-    # アンコール=直前の技以外不可 (直前技はイベントの last_move で解決。
-    # 未判明の場合のみ従来どおり注記に留める)
-    my_vols = {str(v).lower() for v in (my_p.get("volatiles") or [])}
-    disabled_ids = {v.split("_", 1)[1] for v in my_vols
-                    if v.startswith("disable_")}
-    encore_locked = None
-    if "encore" in my_vols:
-        encore_locked = (state.get("last_move") or {}).get("player")
-    # こだわりロック: こだわり系を持って技を使った後は、交代するまで
-    # その技しか選べない (last_move は交代・ひんしでクリアされる)
-    choice_locked = None
-    if my_view.item in CHOICE_ITEM_IDS:
-        choice_locked = (state.get("last_move") or {}).get("player")
     can_ko_first = False   # 先に動いて倒せる技があるか (死に出し判定用)
     move_type_mult = {}    # 攻撃技のタイプ相性倍率 (交代技の無効判定用)
     # 自分の場のポケモンがひんしなら、この決定は「次を出す」しかない。
@@ -577,58 +633,70 @@ def evaluate_common(state: dict, resolver=None) -> dict:
     # フラグは vision 側 (events) が技使用で立て、交代完了/次ターンで下ろす
     pivot_pending = bool(state.get("pending_pivot_switch")) and not my_fainted
     switch_only = my_fainted or pivot_pending
-    # 技が画面から未読取でも、my_team登録の型があれば登録技で評価する
-    # (2026-08-18 接続テスト: 技選択画面を開くまで自分の技が不明のまま
-    #  助言していた。登録技はPP不明のまま扱う。画面読取が入れば上書きされる)
+    # 技が画面から読めていない枠は、my_team 登録の型の技で補う (2026-08-18 接続テスト: 技選択画面を開くまで自分の技が
+    # 不明のまま助言していた)。2026-10-09 M1a: 以前は 1 つも読めていないときだけ補っていたため、一部だけ読めたとき
+    # (battle_20261009_112839 のセグレイブ) は登録の技が候補から欠けていた。読めた技・観測した PP (0 を含む) は上書きしない
+    # (complete_moves_from_registration)。補った技は PP 不明で、候補に「登録からの補完」の印を付ける
     my_move_slots = list(my_p.get("moves") or [])
-    if not my_move_slots and not switch_only and resolver is not None:
+    if len(my_move_slots) < 4 and not switch_only and resolver is not None:
         try:
             from advisor.my_team import get_my_moves
+            registered = []
             for ja in get_my_moves(my_p.get("species_ja")):
                 mv_r = resolver.resolve(ja, "moves", cutoff=0.7)
                 if mv_r:
-                    my_move_slots.append(
-                        {"name_ja": mv_r[0], "move_id": mv_r[1], "pp": None})
+                    registered.append((mv_r[0], mv_r[1]))
+            my_move_slots = complete_moves_from_registration(my_move_slots, registered)
         except Exception:
             pass
-    # であいがしら・ねこだまし (場に出た最初の行動でしか選べない) の制限: 場に出てから技を使ったか
-    acted_since_entry = has_acted_since_entry(
-        (state.get("last_move") or {}).get("player"),
-        [s.get("move_id") for s in my_move_slots])
+    move_ids_now = [s.get("move_id") for s in my_move_slots if s.get("move_id")]
+    # 技の固定 (2026-10-09 M1a、合法性は候補の生成時に決める: illegal_move_reason)。
+    # ちょうはつ=変化技不可 / かなしばり=特定技不可 / アンコール=固定された技以外不可 / こだわり=直前の技以外不可。
+    # 固定する技 (アンコールを受けた時点の直前の技 = 状態の encore_move、無ければ last_move、こだわりは last_move) が今の
+    # 個体の技に無い (交代の取り逃しで前の個体の技が残っている等) ときは、分からないものとして絞らず、合法性が未確認の印を残す
+    my_vols = {str(v).lower() for v in (my_p.get("volatiles") or [])}
+    disabled_ids = {v.split("_", 1)[1] for v in my_vols
+                    if v.startswith("disable_")}
+    last_player_move = (state.get("last_move") or {}).get("player")
+    encore_locked = None
+    legality_unconfirmed = []
+    if "encore" in my_vols:
+        cand = my_p.get("encore_move") or last_player_move
+        if cand and cand in move_ids_now:
+            encore_locked = cand
+        else:
+            legality_unconfirmed.append("アンコール中だが固定された技が分からない")
+    # こだわりロック: こだわり系を持って技を使った後は、交代するまで
+    # その技しか選べない (last_move は交代・ひんしでクリアされる)
+    choice_locked = None
+    if my_view.item in CHOICE_ITEM_IDS and last_player_move:
+        if last_player_move in move_ids_now:
+            choice_locked = last_player_move
+        else:
+            legality_unconfirmed.append("こだわり中だが直前の技が今の技に無い")
+    # であいがしら・ねこだまし (場に出た最初の行動でしか選べない) の制限: 場に出てから技を使ったか、または場に出た次の
+    # ターンを過ぎたか (行動できなかったターン = ひるみ・ねむり・まひ等でも初手の機会は過ぎる。2026-10-09 M1a)
+    acted_since_entry = has_acted_since_entry(last_player_move, move_ids_now) or \
+        first_turn_passed(my_p.get("entry_turn"), state.get("turn"))
     from advisor import effects as _E
+    illegal_actions = []      # 選択自体ができない行動 (候補から外し、理由だけ残す)
+    unevaluated_actions = []  # 選べるが効果を計算できない行動 (技データが無い)
     for slot in ([] if switch_only else my_move_slots):
         mid = slot.get("move_id")
         mv = dex.move(mid)
         name = slot.get("name_ja") or mid or "不明な技"
+        illegal = illegal_move_reason(
+            mid, mv, slot.get("pp"),
+            first_turn_only_move=bool(mv) and _E.first_turn_only(_E.move_entry(mid)),
+            acted_since_entry=acted_since_entry, disabled_ids=disabled_ids,
+            encore_locked=encore_locked, choice_locked=choice_locked, taunted="taunt" in my_vols)
+        if illegal:
+            illegal_actions.append({"kind": "move", "id": mid, "name": name, "legal": False, "reason": illegal})
+            continue
         if mv is None:
-            continue
-        if slot.get("pp") == 0:
-            continue
-        if acted_since_entry and _E.first_turn_only(_E.move_entry(mid)):
-            actions.append({"kind": "move", "id": mid, "name": name,
-                            "score": -99.0,
-                            "reason": "場に出た最初のターンしか選べない"})
-            continue
-        if mid in disabled_ids:
-            actions.append({"kind": "move", "id": mid, "name": name,
-                            "score": -99.0,
-                            "reason": "かなしばりで選べない"})
-            continue
-        if encore_locked and mid != encore_locked:
-            actions.append({"kind": "move", "id": mid, "name": name,
-                            "score": -99.0,
-                            "reason": "アンコール中は直前の技しか選べない"})
-            continue
-        if choice_locked and mid != choice_locked:
-            actions.append({"kind": "move", "id": mid, "name": name,
-                            "score": -99.0,
-                            "reason": "こだわり中は直前の技しか選べない (交代で解除)"})
-            continue
-        if "taunt" in my_vols and (mv["category"] == "Status"
-                                   or not mv["power"]):
-            actions.append({"kind": "move", "id": mid, "name": name,
-                            "score": -99.0,
-                            "reason": "ちょうはつ中は変化技を選べない"})
+            if mid:
+                unevaluated_actions.append({"kind": "move", "id": mid, "name": name,
+                                            "reason": "技データが無く効果を計算できない"})
             continue
 
         acc = _eff_accuracy(
@@ -637,6 +705,7 @@ def evaluate_common(state: dict, resolver=None) -> dict:
         reason_parts = []
         score = 0.0
         act_discount = False   # 行動前に倒される見込み (RLブレンド後に割引)
+        may_fail = None        # 選べるが条件次第で不発になる理由 (選択自体が不可の illegal_actions とは別。2026-10-09 M1a)
 
         if mv["category"] == "Status" or not mv["power"]:
             desc, base_score = STATUS_MOVE_VALUE.get(mid, ("補助技", 8))
@@ -725,6 +794,7 @@ def evaluate_common(state: dict, resolver=None) -> dict:
                 exp, ko_prob, mv_pri = 0.0, 0.0, 0
                 score = PRIORITY_BLOCKED_SCORE
                 reason_parts.append("サイコフィールド中は接地した相手への先制技が不発")
+                may_fail = "サイコフィールド中は接地した相手への先制技が不発"
             # この技での実効先手: 優先度が相手のKO圏先制技を上回れば
             # 素早さ不問で先に動ける (しんそく+2 > かげうち+1 の撃ち合い等)
             strikes_first = (mv_pri > opp_priority_threat) or \
@@ -757,6 +827,7 @@ def evaluate_common(state: dict, resolver=None) -> dict:
                 reason_parts.append("行動前に倒される見込み (先制技/交代を優先)")
             if mid in ("suckerpunch", "thunderclap"):
                 reason_parts.append("相手が攻撃技以外 (交代/変化技) だと失敗")
+                may_fail = may_fail or "相手が攻撃技以外 (交代/変化技) だと失敗"
 
             eff_txt = {4.0: "抜群(4倍)", 2.0: "抜群", 1.0: "等倍", 0.5: "いまひとつ",
                        0.25: "いまひとつ(1/4)", 0.0: "無効"}.get(d["type_mult"], "")
@@ -775,6 +846,12 @@ def evaluate_common(state: dict, resolver=None) -> dict:
         }
         if act_discount:
             action["act_discount"] = True
+        if may_fail:
+            action["may_fail"] = may_fail
+        if slot.get("from_registration"):
+            # 画面で読めていない枠を登録の型で補った技 (2026-10-09 M1a)
+            action["from_registration"] = True
+            action["reason"] = (action["reason"] + " / " if action["reason"] else "") + "登録からの補完"
         actions.append(action)
 
     # ------------------------------------------------------------------
@@ -858,7 +935,9 @@ def evaluate_common(state: dict, resolver=None) -> dict:
 
     # メガシンカ可能なら、切った場合の打点/耐久差を定量評価して提案する
     mega_note = ""
+    from advisor.gimmick import is_mega_form as _is_mega_form
     if (not state.get("mega_used", {}).get("player")
+            and not _is_mega_form(my_view.species_id)     # 既にメガ形態で評価している個体には出さない (2026-10-09 M1a)
             and (my_p.get("item_id") == "megastone"
                  or (my_p.get("item_ja") or "").endswith(("ナイトX", "ナイトY", "ナイトZ", "ナイト")))):
         mega_note = "メガシンカが可能です (種族値+100)。攻撃するターンにメガシンカを推奨。"
@@ -920,7 +999,7 @@ def evaluate_common(state: dict, resolver=None) -> dict:
         # RL確率が交代に集中→技画面を開いた瞬間に推奨が反転した。
         # 2026-08-18 第3回: command画面 交代RL100% → move_select 剣舞RL70%)
         rl_state = state
-        if my_move_slots and not (my_p.get("moves") or []):
+        if any(s.get("from_registration") for s in my_move_slots):
             rl_party = list(my_state["party"])
             rl_party[my_active_idx] = dict(my_p, moves=my_move_slots)
             rl_state = dict(state,
@@ -948,6 +1027,17 @@ def evaluate_common(state: dict, resolver=None) -> dict:
         "encore": "encore" in my_vols,
         "encore_locked": encore_locked,
         "choice_locked": choice_locked,
+        # 合法性 (2026-10-09 M1a): 選択自体ができない行動 (候補から外した)、選べるが効果を計算できない行動、
+        # 技の固定が分からず合法性を確かめられなかった理由、据え置きの判定に使う局面の鍵
+        "illegal_actions": illegal_actions,
+        "unevaluated_actions": unevaluated_actions,
+        "legality_unconfirmed": legality_unconfirmed,
+        "position_key": position_key_of(
+            my_active_idx, my_view.species_id, my_fainted,
+            opp_active_idx, opp_view.species_id if opp_view is not None else (opp_p or {}).get("species_id"),
+            (opp_p or {}).get("status") == "fainted",
+            ("encore" in my_vols, encore_locked, choice_locked, "taunt" in my_vols, tuple(sorted(disabled_ids))),
+            switch_only),
         "threat_faces_me": threat_faces_me,
         "can_ko_first": can_ko_first,
         "my_fainted": my_fainted,
@@ -1116,6 +1206,11 @@ def finish_evaluation(common: dict, rl_blend_weight: Optional[float] = None) -> 
         "opp_pending": bool(common.get("opp_pending")),
         "opp_pending_note": common.get("opp_pending_note"),
         "rl_hint": common.get("rl_hint"),
+        # 合法性 (2026-10-09 M1a。advice 行に欄を足すだけで、既存の欄の意味は変えない)
+        "illegal_actions": list(common.get("illegal_actions") or []),
+        "unevaluated_actions": list(common.get("unevaluated_actions") or []),
+        "legality_unconfirmed": list(common.get("legality_unconfirmed") or []),
+        "position_key": common.get("position_key"),
         "best": actions[0] if actions else None,
     }
 

@@ -59,29 +59,55 @@ def apply_advice_stability(result: dict, hist: Optional[dict], turn,
     return result, hist
 
 
+def is_legal_action(a: dict, illegal_keys=frozenset()) -> bool:
+    """行動が選べるか (純粋)。evaluate の illegal_actions に入った行動、legal=False、旧形式の −90 点以下は選べない"""
+    return a.get("legal", True) is not False and (a.get("score") or 0) > -90 \
+        and (a.get("kind"), a.get("id")) not in illegal_keys
+
+
+def legal_action_set(result: dict) -> frozenset:
+    """助言の結果の合法手の集合 {(kind, id)} (純粋)"""
+    illegal = frozenset((a.get("kind"), a.get("id")) for a in (result.get("illegal_actions") or []))
+    return frozenset((a.get("kind"), a.get("id")) for a in (result.get("actions") or []) if is_legal_action(a, illegal))
+
+
 def apply_advice_hysteresis(result: dict, last: Optional[dict],
                              turn, margin: float = HYSTERESIS_MARGIN):
     """前回bestの据え置き判定 (純粋関数)。
 
-    戻り値: (result, 新しい last)。last は {"turn", "kind", "id"}。
+    戻り値: (result, 新しい last)。last は {"turn", "kind", "id", "position", "legal"}。
     据え置いた場合は actions を並べ替え best を差し替える。
+    2026-10-09 M1a: turn と点差 (margin) だけで判定していたため、同じターンの中で場の個体・形態・技の固定・ひんし・
+    合法手の集合が変わっても旧候補を据え置いていた。局面の鍵 (evaluate の position_key) か合法手の集合が前回と違えば
+    据え置かない。最終の第一候補にも合法性の検査を通す (選べない行動を best にしない)。点差の幅は変えない
     """
     actions = result.get("actions") or []
     if not result.get("ok") or not actions:
         return result, last
+    illegal = frozenset((a.get("kind"), a.get("id")) for a in (result.get("illegal_actions") or []))
     best = actions[0]
-    if last and last.get("turn") == turn:
+    if not is_legal_action(best, illegal):
+        first_legal = next((a for a in actions if is_legal_action(a, illegal)), None)
+        if first_legal is not None:
+            actions = [first_legal] + [a for a in actions if a is not first_legal]
+            result = dict(result, actions=actions, best=first_legal)
+            best = first_legal
+    position = result.get("position_key")
+    legal = legal_action_set(result)
+    if last and last.get("turn") == turn and last.get("position") == position \
+            and last.get("legal", legal) == legal:
         prev = next((a for a in actions
                      if (a["kind"], a.get("id")) == (last["kind"], last["id"])),
                     None)
-        if prev is not None and prev is not best and prev["score"] > -90 \
+        if prev is not None and prev is not best and is_legal_action(prev, illegal) \
                 and best["score"] - prev["score"] < margin:
             actions = [prev] + [a for a in actions if a is not prev]
             result = dict(result)
             result["actions"] = actions
             result["best"] = prev
             best = prev
-    new_last = {"turn": turn, "kind": best["kind"], "id": best.get("id")}
+    new_last = {"turn": turn, "kind": best["kind"], "id": best.get("id"),
+                "position": position, "legal": legal}
     return result, new_last
 
 

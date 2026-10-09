@@ -357,6 +357,8 @@ class VisionPipeline:
             # (無効化されて交代が発生しなかったケースのフラグ滞留を防ぐ)
             self.state.pending_pivot_switch = False
             self._tick_field_effects()
+            # アンコール・ちょうはつの残りターン (2026-10-09 M1a)
+            self.state.tick_move_locks()
 
         heavy = self._should_run_heavy(scene, force=single_shot)
 
