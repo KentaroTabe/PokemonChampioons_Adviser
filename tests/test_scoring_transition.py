@@ -17,6 +17,7 @@ import sys
 
 os.environ.setdefault("RL_BLEND_WEIGHT", "0")
 
+import advisor.engine as ENG
 import advisor.rl_bridge as RB
 from advisor import scoring_transition as ST
 from advisor import valuation as VA
@@ -29,8 +30,23 @@ resolver = NameResolver()
 _ORIG_HINT = RB.policy_hint
 
 
+_ORIG_POOL = ENG.opponent_move_pool
+
+
+def _revealed_only_pool(opp_p, opp_view, resolver):
+    """相手の技プールを判明技 (revealed_moves) だけ・重み 100 に固定する。本体には使用率 DB (champions.sqlite3) があり、
+    推定技 (あくのはどう のひるみ等) が応手に入って分岐の確率が環境で変わるため (2026-10-09: 本体の CI で p_faint が 0.9963)。
+    テストの局面は判明技だけで応手が決まる前提で書いてある"""
+    out = []
+    for ja in (opp_p or {}).get("revealed_moves") or []:
+        r = resolver.resolve(ja, "moves", cutoff=0.7) if resolver is not None else None
+        if r and r[1] not in {m for m, _w in out}:
+            out.append((r[1], 100.0))
+    return out
+
+
 class _Hint:
-    """rl_bridge.policy_hint を固定の分布に差し替える (テストの間だけ)"""
+    """rl_bridge.policy_hint を固定の分布に差し替え、相手の技プールを判明技だけに固定する (テストの間だけ。使用率 DB に依存しない)"""
 
     def __init__(self, top=None):
         self.top = top
@@ -38,10 +54,12 @@ class _Hint:
     def __enter__(self):
         top = self.top
         RB.policy_hint = (lambda *a, **k: {"top": top, "style": "test", "value": 0.0}) if top else (lambda *a, **k: None)
+        ENG.opponent_move_pool = _revealed_only_pool
         return self
 
     def __exit__(self, *a):
         RB.policy_hint = _ORIG_HINT
+        ENG.opponent_move_pool = _ORIG_POOL
 
 
 def _mon(sid, ja, types, moves=(), hp=100.0, picked=True, **kw):
