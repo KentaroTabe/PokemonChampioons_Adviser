@@ -98,6 +98,67 @@ def register_team_text(text: str, resolver=None) -> dict:
     return out
 
 
+def team_text_species(text: str) -> list:
+    """チームテキストの各個体の種族 id (register_team_text と同じ読み方: 1 行目の「@」より前を英数字だけにする)"""
+    out = []
+    for block in (text or "").strip().split("\n\n"):
+        lines = [l.strip() for l in block.strip().splitlines() if l.strip()]
+        if lines:
+            out.append(re.sub(r"[^a-z0-9]", "", lines[0].split("@")[0].strip().lower()))
+    return out
+
+
+def team_matches_species(text: str, species) -> bool:
+    """チームテキストが対戦の自分の個体 (poke-env の battle.team の種族 id) と合うか (純粋)。
+    メガ・フォルム違い (gyaradosmega / aegislashblade) は本文の種族 id の前方一致で同じ個体とみなす"""
+    sids = [s for s in team_text_species(text) if s]
+    sp = [str(s or "") for s in (species or []) if s]
+    if not sids or not sp:
+        return False
+    return all(any(b == t or b.startswith(t) for t in sids) for b in sp)
+
+
+def team_text_for_battle(team_source, k: int, species=()) -> tuple:
+    """k 番目 (0 始まり、対戦の生成順) の対戦で自分が送ったチームテキストと、その決め方を返す (純粋)。
+
+    poke-env の Player は対戦 k が作られた直後に対戦 k+1 の challenge を送り、そのとき yield_team を呼ぶ
+    (player.py `_send_challenges`: challenge(next_team) → `_battle_semaphore.acquire()` → 次の challenge。
+    semaphore は `_create_battle` で対戦が作られたときに解放される)。そのため「直近に出したチーム (last_text)」は
+    対戦 k の選出・行動の時点で既にチーム k+1 になっている (2026-10-09 実測、最後の対戦だけ一致)。
+    相手側の id_for_battle(k) と同じく、出した順の k 番目を引く。
+
+    team_source が text_for_battle(k) を持てばそれ (species と合わなければ texts から種族が合うものを k に近い順に探す)、
+    持たなければ従来どおり last_text。戻り値: (text, how)。how は "index" / "species" / "unverified" / "last_text" / "none"
+    """
+    get = getattr(team_source, "text_for_battle", None)
+    if get is None:
+        text = getattr(team_source, "last_text", None)
+        return (text, "last_text") if text else (None, "none")
+    text = get(k)
+    species = list(species or [])
+    if not species or (text and team_matches_species(text, species)):
+        return (text, "index") if text else (None, "none")
+    texts = list(getattr(team_source, "texts", None) or [])
+    for i in sorted(range(len(texts)), key=lambda i: (abs(i - k), i)):
+        if team_matches_species(texts[i], species):
+            return texts[i], "species"
+    return (text, "unverified") if text else (None, "none")
+
+
+def register_team_for_battle(team_source, k: int, species=(), resolver=None,
+                             stats: Optional[dict] = None) -> Optional[str]:
+    """対戦 k のチームでシムの型を登録する (同じ本文が登録済みなら何もしない)。登録に使った本文を返す。
+    stats があれば決め方 (team_reg_<how>) を数え、登録済みの本文を stats["_registered"] に置く"""
+    stats = stats if stats is not None else {}
+    text, how = team_text_for_battle(team_source, k, species)
+    if how not in ("index", "last_text"):
+        stats[f"team_reg_{how}"] = stats.get(f"team_reg_{how}", 0) + 1
+    if text and stats.get("_registered") != text:
+        register_team_text(text, resolver)
+        stats["_registered"] = text
+    return text
+
+
 def _mon_entry(p, own: bool, resolver, active: bool, available=None) -> dict:
     sid = p.species or ""
     status = p.status
@@ -340,7 +401,9 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
         計画を選出モデルの初期値にする (plan_prior)。相手の系統は opp_source.last_id から引く
     rl_blend_weight: 助言の RL 加点の重み (evaluate の引数で渡す。None = 既定値。2026-10-07: 環境変数で渡さない)
 
-    team_source: last_text 属性を持つ Teambuilder (自分側の型登録に使う)。
+    team_source: 自分側の型登録に使う Teambuilder。text_for_battle(k) (k 番目の対戦で出したチームテキスト) と
+        texts (出した順の本文) を持つものを推奨 (2026-10-09)。無ければ従来どおり last_text (対戦 k の時点で
+        次の対戦のチームに進んでいるので、チームが対戦ごとに変わる teambuilder では 1 戦ずれる)。
     stats / latencies: 診断用の集計先 (省略可)。
     """
     from poke_env.player import Player
@@ -357,7 +420,7 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
             t0 = time.perf_counter()
             advice, followed, d = None, True, None
             try:
-                self._register_team()
+                self._register_team(battle)
                 state = battle_to_state(battle, resolver)
                 if state:
                     # 採点方式は config.ADVICE_SCORING_MODE (環境変数 ADVICE_SCORING_MODE で上書き。2026-10-09 M2b)
@@ -390,14 +453,17 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
                 return self.create_order(d["move"], mega=d["mega"])
             return self.create_order(d["pokemon"])
 
-        def _register_team(self):
-            text = getattr(team_source, "last_text", None)
-            if text and stats.get("_registered") != text:
-                register_team_text(text, resolver)
-                stats["_registered"] = text
+        def _register_team(self, battle):
+            # 対戦の生成順 (poke-env の battles は生成順の dict) で k を決め、その対戦で送ったチームを登録する
+            # (last_text は次の対戦のチームに先に進んでいる。team_text_for_battle の説明)
+            tags = list(self.battles)
+            tag = getattr(battle, "battle_tag", None)
+            k = tags.index(tag) if tag in tags else max(0, len(tags) - 1)
+            species = [getattr(p, "species", None) for p in (getattr(battle, "team", None) or {}).values()]
+            register_team_for_battle(team_source, k, species, resolver, stats)
 
         def teampreview(self, battle):
-            self._register_team()
+            self._register_team(battle)
             order = self._pick(battle)
             if recorder is not None:
                 try:
