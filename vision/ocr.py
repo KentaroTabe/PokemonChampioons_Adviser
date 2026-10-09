@@ -233,17 +233,154 @@ def read_text(processed, allowlist: Optional[str] = None) -> str:
     return "".join(res).replace(" ", "") if res else ""
 
 
+class OcrText(str):
+    """OCR の文字列に読み方 (method) を添えたもの。str としてそのまま扱える (2026-10-09 fix/hp-ocr-watch)。
+
+    method: "direct" (ゾーン全体を 1 回で読んだ) / "split" (read_fraction_split で現在値と '/最大' を分けて読んだ)。
+    呼び出し側は ocr_method(text) で取り出す (テストのモックが返す素の str は "direct" 扱い)"""
+    method = "direct"
+
+    def __new__(cls, s, method: str = "direct"):
+        o = super().__new__(cls, s)
+        o.method = method
+        return o
+
+
+def ocr_method(text) -> str:
+    """read_zone_text の戻り値の読み方 ("direct" / "split")。素の str は "direct" """
+    return getattr(text, "method", "direct")
+
+
+def fraction_text_ok(text: str) -> bool:
+    """'a/b' の形の分数として読めているか (純粋)。'/' で区切られ、b が HP_FRACTION_MAX_MIN 以上 999 以下、a <= b。
+
+    '189/8' (分母の欠け)、'189/89' (現在値 > 最大)、'189' (分母の落ち)、'1897' (区切りの誤読) は False"""
+    import re
+    from champions_agent.config import HP_FRACTION_MAX_MIN
+    if not text:
+        return False
+    m = re.search(r"(\d+)/(\d+)", text)
+    if not m:
+        return False
+    cur, mx = int(m.group(1)), int(m.group(2))
+    return HP_FRACTION_MAX_MIN <= mx <= 999 and cur <= mx
+
+
+def hp_text_white_mask(c):
+    """HP の数字 (白文字) の画素 (純粋)。彩度 < HP_TEXT_WHITE_SAT_MAX かつ明度 > HP_TEXT_WHITE_VAL_MIN"""
+    from champions_agent.config import HP_TEXT_WHITE_SAT_MAX, HP_TEXT_WHITE_VAL_MIN
+    hsv = cv2.cvtColor(c, cv2.COLOR_BGR2HSV)
+    return (hsv[..., 1] < HP_TEXT_WHITE_SAT_MAX) & (hsv[..., 2] > HP_TEXT_WHITE_VAL_MIN)
+
+
+def big_digits_right_col(c) -> Optional[int]:
+    """自分の HP の文字の切り出しで、大きい数字 (現在値) の右端の列 (純粋)。見つからなければ None。
+
+    zones.MY_HP_TEXT_SPLIT の big_band_y の行帯 (大きい数字だけがある高さ) で、白文字の画素が
+    HP_TEXT_SPLIT_COL_MIN_PIXELS 以上ある最も右の列。big_right_max_x より右なら検出の失敗とみなす"""
+    from champions_agent.config import HP_TEXT_SPLIT_COL_MIN_PIXELS
+    from vision.zones import MY_HP_TEXT_SPLIT
+    if c is None or c.size == 0:
+        return None
+    h, w = c.shape[:2]
+    b0, b1 = MY_HP_TEXT_SPLIT["big_band_y"]
+    band = hp_text_white_mask(c)[int(b0 * h):int(b1 * h)]
+    cols = np.where(band.sum(axis=0) >= HP_TEXT_SPLIT_COL_MIN_PIXELS)[0]
+    if len(cols) == 0:
+        return None
+    right = int(cols.max())
+    return right if right < MY_HP_TEXT_SPLIT["big_right_max_x"] * w else None
+
+
+def desaturate_gray(c, invert: bool = False):
+    """彩度の高い画素 (HP バーの塗り) を暗くしたグレー (BGR 3 チャネル) (純粋)。白文字は白いまま残る。
+    明度 × (1 - HP_TEXT_DESAT_GAIN × max(0, 彩度 - HP_TEXT_DESAT_SAT0))。invert=True で白黒を反転 (黒文字・明るい地)"""
+    from champions_agent.config import HP_TEXT_DESAT_GAIN, HP_TEXT_DESAT_SAT0
+    hsv = cv2.cvtColor(c, cv2.COLOR_BGR2HSV)
+    sat = hsv[..., 1].astype(np.float32) / 255.0
+    f = np.clip(1.0 - HP_TEXT_DESAT_GAIN * np.clip(sat - HP_TEXT_DESAT_SAT0, 0, 1), 0, 1)
+    v = (hsv[..., 2].astype(np.float32) * f).astype(np.uint8)
+    if invert:
+        v = 255 - v
+    return cv2.cvtColor(v, cv2.COLOR_GRAY2BGR)
+
+
+def denominator_digits(text: str) -> str:
+    """分母側 ('/189' の切り出し) の読みから最大 HP の数字を取り出す (純粋)。
+
+    '/' は '7' '2' '1' に読まれることが多い (10/9 の満タンのバーストで '7189' '2189' '1189')。最大 HP は 3 桁以下なので、
+    数字が 4 桁なら先頭 ('/' の誤読) を落とす。3 桁以下はそのまま ('/' が読み落とされた '189')。5 桁以上は読めないとみなして空"""
+    import re
+    d = re.sub(r"\D", "", text or "")
+    if len(d) == 4:
+        d = d[1:]
+    return d if len(d) <= 3 else ""
+
+
+def read_fraction_split(c) -> Optional[str]:
+    """自分の HP の文字の切り出し c を、大きい現在値と小さい '/最大' に分けて読み、'現在値/最大' を返す。読めなければ None。
+
+    満タン付近では HP バーの塗りが小さい分母の上端とつながり、ゾーン全体の読みが '189' '189/g' '1897' 等になる (KNOWN_ISSUES A1)。
+    現在値: 大きい数字の右端 (big_digits_right_col) までを生のまま (読めなければ減光グレーで) 読む。
+    分母: その右を、バーの塗りを暗くしたグレーの反転 + 余白で、HP_TEXT_DENOM_SCALES の倍率を順に試して読む (3 桁で採用)。
+    Apple Vision が使えないときは None"""
+    import re
+    from champions_agent.config import HP_TEXT_DENOM_PAD, HP_TEXT_DENOM_SCALES
+    from vision.zones import MY_HP_TEXT_SPLIT
+    if not _get_apple_vision() or c is None or c.size == 0:
+        return None
+    right = big_digits_right_col(c)
+    if right is None:
+        return None
+    h = c.shape[0]
+    big = c[:, :right + 3]
+    cur = re.sub(r"\D", "", apple_ocr_text(big, scale=2.0, langs=("en-US",)))
+    if not cur:
+        cur = re.sub(r"\D", "", apple_ocr_text(desaturate_gray(big), scale=2.0, langs=("en-US",)))
+    if not cur:
+        return None
+    y0, y1 = MY_HP_TEXT_SPLIT["denom_y"]
+    den = c[int(y0 * h):int(y1 * h), right + 2:]
+    if den.size == 0:
+        return None
+    p = HP_TEXT_DENOM_PAD
+    den = cv2.copyMakeBorder(desaturate_gray(den, invert=True), p, p, p, p, cv2.BORDER_CONSTANT,
+                             value=(255, 255, 255))
+    best = ""
+    for s in HP_TEXT_DENOM_SCALES:
+        d = denominator_digits(apple_ocr_text(den, scale=s, langs=("en-US",)))
+        if len(d) == 3:
+            best = d
+            break
+        if len(d) == 2 and not best:
+            best = d
+    if not best:
+        return None
+    return f"{cur}/{best}"
+
+
 def read_zone_text(img, zone, mode="panel", allowlist: Optional[str] = None,
-                   val_min=170) -> str:
-    """ゾーンを切り出してOCR。Vision利用時は前処理なしで生画像を読む"""
+                   val_min=170, fraction: bool = False) -> str:
+    """ゾーンを切り出してOCR。Vision利用時は前処理なしで生画像を読む。
+
+    fraction=True (自分の HP の分数のゾーン): ゾーン全体の読みが 'a/b' の分数にならないとき (fraction_text_ok)、
+    read_fraction_split で現在値と '/最大' に分けて読み直し、分数になればそれを返す (2026-10-09 fix/hp-ocr-watch)。
+    戻り値は OcrText (読み方 method つきの str)。fraction=False の戻り値と挙動は従来どおり"""
     from vision.zones import crop
     c = crop(img, zone)
     if c is None:
-        return ""
+        return OcrText("", "direct") if fraction else ""
     if _get_apple_vision():
         langs = ("en-US",) if _is_ascii_allowlist(allowlist) else ("ja-JP", "en-US")
-        return _apply_ascii_allowlist(apple_ocr_text(c, scale=2.0, langs=langs),
+        text = _apply_ascii_allowlist(apple_ocr_text(c, scale=2.0, langs=langs),
                                       allowlist)
+        if not fraction:
+            return text
+        if not fraction_text_ok(text):
+            sp = read_fraction_split(c)
+            if sp and fraction_text_ok(sp):
+                return OcrText(sp, "split")
+        return OcrText(text, "direct")
     if mode == "outline":
         processed = outlined_text_mask(c)
     else:

@@ -87,11 +87,14 @@
     (vision.state の my_hp_trace、直近 MY_HP_TRACE_LEN 件)。自分の HP の棄却が MY_HP_TRACE_DUMP_STREAK 回続いたときと、
     対戦の終わりに書く (1 対戦で最大 MY_HP_TRACE_MAX_DUMPS 行)。rows の各行は {t, scene, source ("hud"/"field"), name_text,
     hud_species, active_species, hp_text, frac, split_guess, known_max, bar, decision, reason} と、_set_hp に渡した読みの
-    new / stable_count / since_commit、field 経路の HUD の判定の opp_banner / my_bar_px、バー推定の est_decision / est_reason。
+    new / stable_count / since_commit、field 経路の HUD の判定の opp_banner / my_bar_px、バー推定の est_decision / est_reason、
+    分数の文字の読み方 ocr_method ("direct" / "split" = 現在値と '/最大' を分けて読んだ。2026-10-09 で追加)。
     scene 行の state には載せない
   scene 行の state の個体 (両側) に "hp_read_ts" (HP を最後に実際に読んで確定した時刻)。助言の行の state と digest には足さない
   scene 行 (scene が watch のとき) の state に "watch_opp_rows": 様子見画面の右列の行ごとの読み [{row, hp_text, pct,
-    species (色照合で同定した種族 id), method ("color"), score, written (書いたか / 書かなかった理由), slot}]
+    species (色照合で同定した種族 id), method ("color"), score, written (書いたか / 書かなかった理由), slot,
+    (2026-10-09 で追加) match_reason (不一致の理由 low_score / small_margin / no_foreground 等、採用は None),
+    top_species / top_score / second_species / second_score (照合の 1 位・2 位と見た目のスコア), margin (1 位と 2 位の差)}]
   hp_reject.opponent の reason に "watch_right_big_increase" (様子見画面の右列で、交代の文言なしに WATCH_OPP_BIG_INCREASE を
     超えて増えた読み。書かずに残す。row / species / method / score / hp_before つき)
 """
