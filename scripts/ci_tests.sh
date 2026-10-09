@@ -47,6 +47,7 @@ TESTS=(
   test_hp_freshness
   test_meta_thin_guard
   test_my_team_manual
+  test_my_team
   test_team_build_core
   test_team_build_opponents
   test_team_build_player

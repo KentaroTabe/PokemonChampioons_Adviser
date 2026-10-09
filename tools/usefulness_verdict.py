@@ -4,6 +4,11 @@
 
 入力は tools/usefulness_p1.py の出力ディレクトリ: conditions.json (条件表) と各条件の rl<W>.json の outcomes (対戦の並び = 対応)。
 rl<W>.json が無い (時間上限で止めた等) 条件は rl<W>.battles.jsonl の won を順に使う (出所を記録する)。
+採点方式の比較 (条件表の factor が scoring、tools.usefulness_p1 --compare scoring): 条件名 scoring:legacy / scoring:transition
+(ファイル名は「:」を「_」に: scoring_legacy.json 等) を読み、基準 = 条件表の baseline (scoring:legacy)、比較 = transition − legacy の
+1 本 (k = 1) で下の判定を出す (未完了・中間確認・対応の確認は重みの比較と同じ)。報告には自チームの出所 (条件表の team.source:
+ranked = 一般的なチーム / registered = 最新の登録チーム) と、各条件の json の stats の退避率 (scoring_fallback / scoring_transition、
+理由別) を載せる。重みの比較 (rl<W>) の読み方は変えない。
 
 判定 (§0.5、基準条件に対する比較が k 本なら区間の水準を 1 − α / k に上げる):
   - 採用候補 (adopt_candidate): 差の推定値 ≥ MDE かつ 補正区間の下限 > 0
@@ -24,7 +29,8 @@ from pathlib import Path
 from statistics import NormalDist
 from typing import Optional, Sequence
 
-from champions_agent.config import (BUILD_CI_Z, P1_ALPHA, P1_BASELINE_WEIGHT, P1_FINAL_BATTLES, P1_MDE, P1_WEIGHTS)
+from champions_agent.config import (BUILD_CI_Z, P1_ALPHA, P1_BASELINE_WEIGHT, P1_FINAL_BATTLES, P1_MDE, P1_SCORING_BASELINE,
+                                    P1_SCORING_MODES, P1_WEIGHTS)
 from tools.team_build.verdict import paired_diff
 
 ADOPT = "adopt_candidate"
@@ -35,12 +41,42 @@ MODE_FINAL = "final"
 MODE_INTERIM = "interim"
 # 比較条件の不成立 (対応の確認ができない: 相手 id の不一致・欠落・不足。統計的な「判定不能」とは別。2026-10-09 レビュー指摘 1)
 MODE_INVALID = "invalid"
+# 自チームの出所 (条件表の team.source) の表示名
+TEAM_LABELS = {"ranked": "一般的なチーム", "registered": "最新の登録チーム"}
 
 
 # ------------------------------------------------------------------ 純粋
 def cond_name(weight: float) -> str:
     """重み → 条件名 (0.0 → rl0、5.0 → rl5、25.0 → rl25、2.5 → rl2.5)"""
     return f"rl{float(weight):g}"
+
+
+def cond_file(cond: str) -> str:
+    """条件名 → ファイル名の部分 (「:」を「_」に。rl<W> はそのまま。scoring:legacy → scoring_legacy)"""
+    return str(cond).replace(":", "_")
+
+
+def scoring_conds(conditions: dict) -> tuple:
+    """採点方式の比較の条件表 → (基準の条件名, 比較の条件名の列) (純粋)。条件表に無ければ config の既定の方式"""
+    c = conditions or {}
+    base = c.get("baseline") or f"scoring:{P1_SCORING_BASELINE}"
+    others = [x.get("cond") for x in (c.get("comparisons") or []) if x.get("cond")]
+    if not others:
+        others = [f"scoring:{m}" for m in P1_SCORING_MODES if f"scoring:{m}" != base]
+    return base, others
+
+
+def scoring_fallback_summary(doc: Optional[dict]) -> Optional[dict]:
+    """check_advisor_player の json → 採点方式と transition の退避率 (純粋)。stats の scoring_transition (transition で採点した
+    決定数) と scoring_fallback (そのうち legacy に退避した数)、理由別 (scoring_fallback:<理由>)。json が無ければ None"""
+    if not doc:
+        return None
+    st = doc.get("stats") or {}
+    n_tr = int(st.get("scoring_transition") or 0)
+    n_fb = int(st.get("scoring_fallback") or 0)
+    by_reason = {k.split(":", 1)[1]: int(v) for k, v in st.items() if str(k).startswith("scoring_fallback:")}
+    return {"advice_scoring_mode": doc.get("advice_scoring_mode"), "scoring_transition": n_tr, "scoring_fallback": n_fb,
+            "fallback_rate": (n_fb / n_tr) if n_tr else None, "fallback_by_reason": by_reason}
 
 
 def corrected_z(k: int, alpha: float = P1_ALPHA) -> float:
@@ -125,10 +161,18 @@ def correspondence_check(opp_ids_by_cond: Optional[dict], conds: Sequence[str], 
 def build_verdict(conditions: dict, outcomes_by_cond: dict, weights: Sequence[float] = P1_WEIGHTS,
                   baseline_weight: float = P1_BASELINE_WEIGHT, final_battles: int = P1_FINAL_BATTLES,
                   mde: float = P1_MDE, alpha: float = P1_ALPHA, sources: Optional[dict] = None,
-                  opp_ids_by_cond: Optional[dict] = None, elapsed_by_cond: Optional[dict] = None) -> dict:
-    """集計 (純粋)。conditions = 条件表 (incomplete を見る)。outcomes_by_cond = 条件名 → 勝敗列 (1/0)"""
-    base = cond_name(baseline_weight)
-    others = [cond_name(w) for w in weights if float(w) != float(baseline_weight)]
+                  opp_ids_by_cond: Optional[dict] = None, elapsed_by_cond: Optional[dict] = None,
+                  baseline_cond: Optional[str] = None, compare_conds: Optional[Sequence[str]] = None,
+                  scoring_stats: Optional[dict] = None) -> dict:
+    """集計 (純粋)。conditions = 条件表 (incomplete を見る)。outcomes_by_cond = 条件名 → 勝敗列 (1/0)。
+    baseline_cond / compare_conds (採点方式の比較: scoring:legacy / [scoring:transition]) を渡せばその条件名で比べる
+    (無ければ重みの条件 rl<W>)。scoring_stats (条件名 → scoring_fallback_summary) があれば結果に残す"""
+    if baseline_cond is not None:
+        base = baseline_cond
+        others = [c for c in (compare_conds or []) if c != base]
+    else:
+        base = cond_name(baseline_weight)
+        others = [cond_name(w) for w in weights if float(w) != float(baseline_weight)]
     k = len(others)
     z = corrected_z(k, alpha)
     notes = []
@@ -174,15 +218,29 @@ def build_verdict(conditions: dict, outcomes_by_cond: dict, weights: Sequence[fl
     mism = opponent_mismatches(opp_ids_by_cond or {}, n)
     if mism:
         notes.append(f"相手 id が条件間で食い違う対戦が {mism} 件 (条件の取り違えか相手列の不一致。対応比較が成り立たない)")
-    return {"mode": mode, "interim_reasons": reasons, "invalid_reasons": invalid_reasons, "k": k, "alpha": alpha, "level": 1.0 - alpha / max(1, k), "z": z,
-            "mde": mde, "final_battles": final_battles, "n_used": n, "baseline": base, "comparisons": comparisons,
-            "per_condition": per_cond, "cost": cost, "opponent_mismatches": mism, "notes": notes}
+    out = {"mode": mode, "interim_reasons": reasons, "invalid_reasons": invalid_reasons, "k": k, "alpha": alpha, "level": 1.0 - alpha / max(1, k), "z": z,
+           "mde": mde, "final_battles": final_battles, "n_used": n, "baseline": base, "comparisons": comparisons,
+           "per_condition": per_cond, "cost": cost, "opponent_mismatches": mism, "notes": notes}
+    if scoring_stats is not None:
+        out["scoring_stats"] = dict(scoring_stats)
+    return out
 
 
 def _f(x, nd: int = 3, signed: bool = False) -> str:
     if x is None:
         return "-"
     return f"{x:+.{nd}f}" if signed else f"{x:.{nd}f}"
+
+
+def team_summary(team: dict) -> tuple:
+    """条件表の team → 表示用の (項目, 値) (純粋)。source が無い (RL の比較の登録チーム) なら従来の表示"""
+    src = (team or {}).get("source")
+    if src == "ranked":
+        return ("自チーム", f"{TEAM_LABELS['ranked']} (使用率スナップショット {team.get('meta_snapshot_id')}、"
+                            f"抽選 seed {team.get('seed')}、プール {team.get('n_teams')} 件 sha16={team.get('pool_sha16')}、登録参照は無効化)")
+    if src == "registered":
+        return ("自チーム", f"{TEAM_LABELS['registered']} sha16={team.get('sha16')} (期待 {team.get('expected_sha16')})")
+    return ("登録チーム sha16", f"{(team or {}).get('sha16')} (期待 {(team or {}).get('expected_sha16')})")
 
 
 def condition_summary(conditions: dict) -> list:
@@ -193,12 +251,17 @@ def condition_summary(conditions: dict) -> list:
     rl = c.get("rl_checkpoint") or {}
     opp = c.get("opponents") or {}
     git = c.get("git") or {}
+    if c.get("factor") == "scoring":
+        base, others = scoring_conds(c)
+        design = ("比較 / 基準 / k", f"{others} − {base} / {base} / {c.get('k')} (RL 加点の重みは両条件とも ×{c.get('baseline_weight')})")
+    else:
+        design = ("重み / 基準 / k", f"{c.get('weights')} / ×{c.get('baseline_weight')} / {c.get('k')}")
     return [
         ("実験", f"{c.get('experiment', '-')}{' (予備)' if c.get('prelim') else ''}"),
         ("開始", str(c.get("started_at") or "-")),
-        ("重み / 基準 / k", f"{c.get('weights')} / ×{c.get('baseline_weight')} / {c.get('k')}"),
+        design,
         ("対戦数 (この測定 / 最終)", f"{c.get('battles')} / {c.get('final_battles')}"),
-        ("登録チーム sha16", f"{team.get('sha16')} (期待 {team.get('expected_sha16')})"),
+        team_summary(team),
         ("選出モデル", f"{sel.get('path')} sha16={sel.get('sha16')}"),
         ("RL checkpoint", f"{rl.get('file')} sha16={rl.get('sha16')} pin={rl.get('pin_dir')}"),
         ("相手", f"{opp.get('tier')} fold {opp.get('fold_label')} seed={opp.get('seed')} offset={opp.get('offset')} "
@@ -239,6 +302,17 @@ def render(verdict: dict, conditions: Optional[dict] = None) -> str:
         lines += ["", "### 費用", "", "| 条件 | n | 経過秒 | 秒/戦 | 最終対戦数までの見込み (秒) |", "|---|---|---|---|---|"]
         for c, s in v["cost"].items():
             lines.append(f"| {c} | {s['n']} | {s['elapsed_sec']} | {s['sec_per_battle']} | {s['projected_final_sec']:.0f} |")
+    if v.get("scoring_stats"):
+        lines += ["", "### 採点方式と退避率 (transition で採点した決定のうち legacy に退避した割合)", "",
+                  "| 条件 | 方式 | transition の決定数 | 退避数 | 退避率 | 退避の理由 (上位) |", "|---|---|---|---|---|---|"]
+        for c, s in v["scoring_stats"].items():
+            if not s:
+                lines.append(f"| {c} | - | - | - | - | (json なし) |")
+                continue
+            top = sorted((s.get("fallback_by_reason") or {}).items(), key=lambda kv: -kv[1])[:3]
+            reasons = ", ".join(f"{k} {n}" for k, n in top) or "-"
+            lines.append(f"| {c} | {s.get('advice_scoring_mode') or '-'} | {s.get('scoring_transition')} | {s.get('scoring_fallback')} | "
+                         f"{_f(s.get('fallback_rate'))} | {reasons} |")
     if v["opponent_mismatches"] is not None:
         lines += ["", f"相手 id の条件間の食い違い: {v['opponent_mismatches']} 件"]
     if v["notes"]:
@@ -263,10 +337,24 @@ def _read_jsonl(path: Path) -> list:
 
 def load_outcomes(out_dir: Path, weights: Sequence[float]) -> tuple:
     """各条件の (勝敗列, 出所, 相手 id 列, 経過秒) を読む。rl<W>.json の outcomes が無ければ battles.jsonl の won を使う"""
+    return load_outcomes_conds(out_dir, [cond_name(w) for w in weights])
+
+
+def _read_json(path: Path) -> Optional[dict]:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def load_outcomes_conds(out_dir: Path, conds: Sequence[str]) -> tuple:
+    """条件名の列で (勝敗列, 出所, 相手 id 列, 経過秒) を読む。ファイル名は cond_file (scoring:legacy → scoring_legacy.json)"""
     outcomes, sources, opp_ids, elapsed = {}, {}, {}, {}
-    for w in weights:
-        c = cond_name(w)
-        js, jl = out_dir / f"{c}.json", out_dir / f"{c}.battles.jsonl"
+    for c in conds:
+        f = cond_file(c)
+        js, jl = out_dir / f"{f}.json", out_dir / f"{f}.battles.jsonl"
         recs = _read_jsonl(jl) if jl.exists() else []
         if recs:
             opp_ids[c] = [r.get("opponent_team_id") for r in recs]
@@ -299,12 +387,21 @@ def run(out_dir: Path) -> dict:
     final_battles = int(conditions.get("final_battles") or P1_FINAL_BATTLES)
     mde = float(conditions.get("mde", P1_MDE))
     alpha = float(conditions.get("alpha", P1_ALPHA))
-    outcomes, sources, opp_ids, elapsed = load_outcomes(out_dir, weights)
+    scoring = conditions.get("factor") == "scoring"
+    base_c, other_c, sstats = None, None, None
+    if scoring:
+        # 採点方式の比較: 基準 scoring:legacy、比較 scoring:transition − legacy (k = 1)。退避率は各条件の json の stats
+        base_c, other_c = scoring_conds(conditions)
+        outcomes, sources, opp_ids, elapsed = load_outcomes_conds(out_dir, [base_c] + other_c)
+        sstats = {c: scoring_fallback_summary(_read_json(out_dir / f"{cond_file(c)}.json")) for c in [base_c] + other_c}
+    else:
+        outcomes, sources, opp_ids, elapsed = load_outcomes(out_dir, weights)
     # 時間上限で止めた等で rl<W>.json に経過秒が無ければ、条件表の所要秒で代用する (並列なので全条件で同じ)
     for c in outcomes:
         if elapsed.get(c) is None and conditions.get("elapsed_sec") is not None:
             elapsed[c] = conditions["elapsed_sec"]
-    v = build_verdict(conditions, outcomes, weights, baseline, final_battles, mde, alpha, sources, opp_ids, elapsed)
+    v = build_verdict(conditions, outcomes, weights, baseline, final_battles, mde, alpha, sources, opp_ids, elapsed,
+                      baseline_cond=base_c, compare_conds=other_c, scoring_stats=sstats)
     text = render(v, conditions)
     (out_dir / "verdict.json").write_text(json.dumps(v, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     (out_dir / "verdict.md").write_text(text, encoding="utf-8")

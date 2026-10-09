@@ -14,9 +14,17 @@ from champions_agent.config import P1_ABORT_SEC_PER_BATTLE, P1_FINAL_BATTLES, P1
 from tools import usefulness_p1 as P
 
 
+def _ranked_team(meta=58, n_teams=120) -> dict:
+    """一般的なチーム (collect_facts の team_source general) の材料の例"""
+    return {"source": "ranked", "meta_snapshot_id": meta, "meta_pin_file": "/a/META_PIN", "pool_pin": "pokedb_s3.json.gz",
+            "seed": P1_SEED + 1, "top_n": None, "include_external": True, "n_teams": n_teams, "pool_sha16": "pppp",
+            "registration_disabled_env": "ADVISOR_MY_TEAM_DISABLED"}
+
+
 def _facts(team_sha=P1_TEAM_SHA16, sel_sha="aaaa", rl_sha="bbbb", split_sha="cccc", listening=True, emb_match=True,
-           sealed="e80afbea9a925dc8", dirty=None) -> dict:
-    return {"team": {"sha16": team_sha, "species": ["a", "b", "c", "d", "e", "f"], "file": "team.txt"},
+           sealed="e80afbea9a925dc8", dirty=None, team=None) -> dict:
+    """team を渡せばそれを自チームの材料にする (一般的なチーム: _ranked_team())。無ければ登録チーム (sha16 = team_sha)"""
+    return {"team": team if team is not None else {"sha16": team_sha, "species": ["a", "b", "c", "d", "e", "f"], "file": "team.txt"},
             "selection_model": {"path": "sel.pt", "sha16": sel_sha, "mtime": "2026-08-30 17:43:19",
                                 "embedding": {"pin_file": "pin/selection_model_emb.json", "fallback": "species_embedding.json",
                                               "matches_production": emb_match}},
@@ -262,7 +270,8 @@ def test_scoring_compare_dry_run():
     try:
         P.registered_team_text = lambda: "team text"
         P.make_pin, P.launch = _no, _no
-        P.collect_facts = lambda *a, **k: _facts()
+        # 2026-10-09: --compare scoring の既定の自チームは一般的なチーム。材料は collect_facts の team_source に合わせる
+        P.collect_facts = lambda *a, **k: _facts(team=_ranked_team() if k.get("team_source") == "general" else None)
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "p1_scoring"
             buf = io.StringIO()
@@ -281,6 +290,137 @@ def test_scoring_compare_dry_run():
     print("test_scoring_compare_dry_run OK")
 
 
+def _scoring_cond(team_source: str, facts: dict) -> dict:
+    d = P.plan_scoring()
+    tf = Path("/out/team.txt") if team_source == "registered" else None
+    cmds = {c: P.build_command(d["cond_weight"][c], Path("/out"), tf, Path("/s.json"), 1, P1_SEED, 600, Path("/sel.pt"), "/pin",
+                               python="py", cond=c) for c in d["conditions"]}
+    env = P.child_environment("/pin", base={}, team_source=team_source)
+    return P.build_conditions(d, facts, 600, False, P1_SEED, 1, "/s.json", 7200, "/out", cmds, env, None, ["n1"],
+                              team_source=team_source)
+
+
+def test_team_source_general_and_registered():
+    """2026-10-09 ユーザー判断: 採点方式の比較は一般的なチーム (--team general、既定) で行い、登録チームを使うなら最新の登録
+    (--team registered、期待 sha16 は P1_SCORING_TEAM_SHA16)。RL の比較 (registered、P1_TEAM_SHA16) の条件表は従来どおり"""
+    from champions_agent.config import MY_TEAM_DISABLED_ENV, P1_SCORING_TEAM_SHA16
+    # 既定と明示
+    assert P.resolve_team_source(None, "scoring") == "general" and P.resolve_team_source(None, "rl") == "registered"
+    assert P.resolve_team_source("registered", "scoring") == "registered" and P.resolve_team_source("general", "rl") == "general"
+    try:
+        P.resolve_team_source("mine", "scoring")
+        raise AssertionError("未知の出所が通った")
+    except ValueError:
+        pass
+    assert P.own_team_seed(P1_SEED) == P1_SEED + 1 and P.own_team_seed(None) is None
+    assert P.expected_team_sha16("scoring") == P1_SCORING_TEAM_SHA16 and P.expected_team_sha16("rl") == P1_TEAM_SHA16
+    # コマンド: 一般的なチームは --team-file を渡さない
+    s_gen = " ".join(P.build_command(25.0, Path("/o"), None, Path("/s"), 1, 1, 600, Path("/m"), "/p", python="py"))
+    assert "--team-file" not in s_gen and "--selection-model /m" in s_gen, s_gen
+    # 環境: 一般的なチームは登録参照の無効化を全条件に共通で立てる。registered は立てない (呼び出し側に残っていても消す)
+    eg = P.child_environment("/pin", base={}, team_source="general")
+    assert eg[MY_TEAM_DISABLED_ENV] == "1" and P.env_record(eg)[MY_TEAM_DISABLED_ENV] == "1"
+    er = P.child_environment("/pin", base={MY_TEAM_DISABLED_ENV: "1"}, team_source="registered")
+    assert MY_TEAM_DISABLED_ENV not in er and MY_TEAM_DISABLED_ENV not in P.env_record(er)
+    assert MY_TEAM_DISABLED_ENV not in P.child_environment("/pin", base={})          # 既定 (RL の比較) も立てない
+
+    # general の条件表
+    g = _scoring_cond("general", _facts(team=_ranked_team()))
+    assert g["team"]["source"] == "ranked" and g["team"]["label"] == "一般的なチーム" and g["team"]["seed"] == P1_SEED + 1
+    assert g["team"]["meta_snapshot_id"] == 58 and g["team"]["top_n"] is None and g["team"]["include_external"] is True
+    assert "expected_sha16" not in g["team"] and "match" not in g["team"]          # 登録チームの sha16 は照合しない
+    assert "一般的なチーム" in g["purpose"] and any(x.startswith("自チーム: 一般的なチーム") for x in g["notes"]), g["notes"]
+    assert g["notes"][0] == "n1" and g["env"][MY_TEAM_DISABLED_ENV] == "1"
+    assert all("--team-file" not in " ".join(c) for c in g["commands"].values())
+    assert g["cond_env"]["scoring:transition"] == {"ADVICE_SCORING_MODE": "transition"}   # 方式は条件ごと、無効化は共通の env
+    json.dumps(g)
+    assert P.preflight_errors(g) == []
+    errs = P.preflight_errors(_scoring_cond("general", _facts(team=_ranked_team(meta=None))))
+    assert len(errs) == 1 and "META_PIN" in errs[0], errs
+    errs = P.preflight_errors(_scoring_cond("general", _facts(team=_ranked_team(n_teams=0))))
+    assert len(errs) == 1 and "プールが空" in errs[0], errs
+    # プールの件数が分からない (DB が無い等) だけでは止めない (理由は notes)
+    assert P.preflight_errors(_scoring_cond("general", _facts(team=_ranked_team(n_teams=None)))) == []
+
+    # registered (採点方式の比較): 期待は P1_SCORING_TEAM_SHA16。P1_TEAM_SHA16 (RL の比較の記録) とは照合しない
+    r = _scoring_cond("registered", _facts(team_sha=P1_SCORING_TEAM_SHA16))
+    assert r["team"]["source"] == "registered" and r["team"]["label"] == "最新の登録チーム"
+    assert r["team"]["expected_sha16"] == P1_SCORING_TEAM_SHA16 and r["team"]["match"] is True
+    assert "最新の登録チーム" in r["purpose"] and any(x.startswith("自チーム: 最新の登録チーム") for x in r["notes"])
+    assert MY_TEAM_DISABLED_ENV not in r["env"]
+    assert all("--team-file /out/team.txt" in " ".join(c) for c in r["commands"].values())
+    assert P.preflight_errors(r) == []
+    errs = P.preflight_errors(_scoring_cond("registered", _facts(team_sha=P1_TEAM_SHA16)))
+    assert len(errs) == 1 and P1_SCORING_TEAM_SHA16 in errs[0] and "sha16" in errs[0], errs
+    assert any("登録チーム" in e for e in P.preflight_errors(_scoring_cond("registered", _facts(team_sha=None))))
+
+    # RL の比較 (registered) の条件表は従来と同じ項目 (source / label を足さない、notes も足さない)
+    c = _cond()
+    assert "source" not in c["team"] and c["team"]["expected_sha16"] == P1_TEAM_SHA16 and c["team"]["match"] is True
+    assert c["notes"] == ["n1"] and MY_TEAM_DISABLED_ENV not in c["env"] and "自チーム" not in c["purpose"]
+    print("test_team_source_general_and_registered OK")
+
+
+def test_main_team_source():
+    """main: --compare scoring の既定は general (登録チームの本文を読まない・--team-file なし・無効化の環境変数)。
+    --team registered は最新の登録を P1_SCORING_TEAM_SHA16 と照合する。--compare rl は従来どおり registered"""
+    from champions_agent.config import MY_TEAM_DISABLED_ENV, P1_SCORING_TEAM_SHA16
+    orig = (P.collect_facts, P.registered_team_text, P.make_pin, P.launch)
+    seen = []
+
+    def _no(*a, **k):
+        raise AssertionError("呼ばれてはいけない")
+
+    def _collect(team_sha=P1_TEAM_SHA16, meta=58):
+        def f(*a, **k):
+            seen.append(dict(k))
+            return _facts(team_sha=team_sha, team=_ranked_team(meta=meta) if k.get("team_source") == "general" else None)
+        return f
+
+    def _run(argv):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = P.main(argv)
+        text = buf.getvalue()
+        return rc, text, json.loads(text[:text.index("\n# コマンド列")])
+    try:
+        P.make_pin, P.launch = _no, _no
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "p1"
+            # 既定 general: 登録チームの本文は読まない
+            P.registered_team_text = _no
+            P.collect_facts = _collect()
+            rc, text, doc = _run(["--compare", "scoring", "--prelim", "--dry-run", "--out", str(out)])
+            assert rc == 0 and "起動前の検査: OK" in text, text
+            assert seen[-1]["team_source"] == "general" and seen[-1]["seed"] == P1_SEED
+            assert doc["team"]["source"] == "ranked" and doc["env"][MY_TEAM_DISABLED_ENV] == "1"
+            assert all("--team-file" not in " ".join(c) for c in doc["commands"].values())
+            assert f"{MY_TEAM_DISABLED_ENV}=1" in text and not out.exists()
+            # META_PIN が無い → dry-run は 3、本番は 2 (ピンを作らない・起動しない)
+            P.collect_facts = _collect(meta=None)
+            with redirect_stdout(io.StringIO()):
+                assert P.main(["--compare", "scoring", "--dry-run", "--out", str(out)]) == 3
+                assert P.main(["--compare", "scoring", "--out", str(out)]) == 2
+            assert not out.exists()
+            # --team registered: 最新の登録 (P1_SCORING_TEAM_SHA16) と照合
+            P.registered_team_text = lambda: "team text"
+            P.collect_facts = _collect(team_sha=P1_SCORING_TEAM_SHA16)
+            rc, text, doc = _run(["--compare", "scoring", "--team", "registered", "--prelim", "--dry-run", "--out", str(out)])
+            assert rc == 0 and seen[-1]["team_source"] == "registered", text
+            assert doc["team"]["source"] == "registered" and doc["team"]["expected_sha16"] == P1_SCORING_TEAM_SHA16
+            assert MY_TEAM_DISABLED_ENV not in doc["env"]
+            assert all(f"--team-file {out.resolve() / 'team.txt'}" in " ".join(c) for c in doc["commands"].values())
+            P.collect_facts = _collect(team_sha=P1_TEAM_SHA16)
+            with redirect_stdout(io.StringIO()):
+                assert P.main(["--compare", "scoring", "--team", "registered", "--dry-run", "--out", str(out)]) == 3
+            # --compare rl の既定は registered (P1_TEAM_SHA16 と照合、従来どおり)
+            rc, text, doc = _run(["--prelim", "--dry-run", "--out", str(out)])
+            assert rc == 0 and seen[-1]["team_source"] == "registered" and "source" not in doc["team"], text
+    finally:
+        P.collect_facts, P.registered_team_text, P.make_pin, P.launch = orig
+    print("test_main_team_source OK")
+
+
 def main():
     test_plan()
     test_battles_and_out_dir()
@@ -292,6 +432,8 @@ def main():
     test_embedding_source_and_copy()
     test_main_dry_run_and_guard()
     test_scoring_compare_dry_run()
+    test_team_source_general_and_registered()
+    test_main_team_source()
 
 
 if __name__ == "__main__":

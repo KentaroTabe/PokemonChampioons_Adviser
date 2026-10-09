@@ -2,6 +2,7 @@
 
     python -m tools.usefulness_p1 --prelim --dry-run          # 条件表とコマンド列を出すだけ (起動しない・ピンを作らない)
     python -m tools.usefulness_p1 --compare scoring --prelim --dry-run   # 採点方式 scoring:legacy / scoring:transition (M2b)
+    python -m tools.usefulness_p1 --compare scoring --team registered --prelim --dry-run   # 自チームを最新の登録チームにする
     python -m tools.usefulness_p1 --prelim                     # 予備 50 戦 / 条件 (秒/戦の見積もり)
     python -m tools.usefulness_p1                              # 本番 600 戦 / 条件
     python -m tools.usefulness_verdict --out <出力 dir>        # 集計と §0.5 の 3 値判定
@@ -10,14 +11,24 @@
 シミュレータの状態から直接助言を計算する (OCR を通らない) ので、分かるのはシミュレーション条件下での RL 加点の効果で、実戦の有用性とは分ける。
 
 起動前に条件表 conditions.json (§0.5 の「開始前に固定する項目」+ 版と経路の条件) を書く。取得できない項目は null にして理由を notes に残す。
-起動前の検査 (不合格なら起動しない): 登録チームの本文の sha16 が config P1_TEAM_SHA16 と一致 / 選出モデル・分割ファイルがある /
+起動前の検査 (不合格なら起動しない): 登録チームの本文の sha16 が期待値と一致 (一般的なチームは META_PIN) / 選出モデル・分割ファイルがある /
 ピンに RL の checkpoint がある / Showdown (SHOWDOWN_PORT) が待ち受けている / 出力先に前の結果が無い。
 環境変数: CHAMPIONS_MODELS_DIR = ピン (相手の rl は config.MODELS_DIR を読むので --models-dir だけでは届かない)、スレッド数 1 の一式
 (tools.team_build.racing.child_env と同じ)。
 時間上限 (P1_TIME_LIMIT_SEC) を過ぎたら 3 プロセスを止めて incomplete: true (採否は出さない)。
 --compare scoring (2026-10-09 M2b 設計判断 11): 条件は採点方式 scoring:legacy (基準) / scoring:transition の 2 つ。重みは両方とも
 既定 (P1_BASELINE_WEIGHT)、方式は条件ごとの環境変数 ADVICE_SCORING_MODE (条件表の cond_env) で子プロセスに渡す。ファイル名は
-条件名の「:」を「_」にしたもの (scoring_legacy.json 等)。集計 (tools.usefulness_verdict) はまだ重みの条件 (rl<W>) しか読まない。
+条件名の「:」を「_」にしたもの (scoring_legacy.json 等)。集計 (tools.usefulness_verdict) は条件表の factor scoring を見て
+基準 scoring:legacy、比較 transition − legacy の 1 本 (k = 1) で判定する。
+--team general|registered (自チームの出所。2026-10-09 ユーザー判断: 採点方式の比較は一般的なチームをベースに行う):
+  - general (--compare scoring の既定): --team-file を渡さない = check_advisor_player の既定の自チーム (RankedTeambuilder。
+    META_PIN の使用率スナップショットの構築プールから rng = Random(相手 seed + 1) で対戦ごとに引く)。seed が条件間で同じなので
+    対戦 i の自チームも対応する。助言は自分側の種族名が登録チームと一致すると登録の型 (努力値・性格・持ち物・技) を使うので、
+    全条件の子プロセスに MY_TEAM_DISABLED_ENV=1 (登録参照の無効化。条件ごとの cond_env とは別の共通の環境) を立てる。
+    起動前の検査は登録チームの sha16 の代わりに META_PIN の snapshot id があること (構築プールが空でないこと) を見る。
+  - registered (--compare rl の既定): config/my_team.json (最新の登録) の本文を team.txt に書いて --team-file で渡す。
+    sha16 の期待値は --compare rl が P1_TEAM_SHA16 (P1 の記録)、--compare scoring が P1_SCORING_TEAM_SHA16。違えば起動しない。
+  条件表の team.source (ranked / registered)・purpose・notes に自チームの出所を残す。--compare rl --team registered の条件表は従来と同じ。
 開始時刻の注意 (ツールでは強制しない): launchd の track-progress (毎日 21:50、17〜34 分) の後に始め、06:30 の usage-update の前に終える。
 
 純粋な部分 (条件表・コマンド・環境・進捗・終了時の更新) は tests/test_usefulness_p1.py で確かめる。
@@ -38,9 +49,9 @@ from champions_agent.config import (
     BUILD_FOLD_ADAPT, BUILD_FOLD_EVAL, BUILD_FOLD_VALIDATE, P1_ABORT_SEC_PER_BATTLE, P1_ALPHA, P1_BASELINE_WEIGHT, P1_BELIEF_K,
     P1_FINAL_BATTLES, P1_INTERIM_BATTLES, P1_MDE, P1_OPP_OFFSET, P1_OPP_PICK_POLICY, P1_OPP_PILOT, P1_OUT_ROOT, P1_PICK_POLICY,
     P1_PRELIM_BATTLES, P1_PROGRESS_SEC, P1_SEED, P1_SELECTION_MODEL, P1_SPLIT_FILE, P1_SPLIT_SEALED_ID, P1_SPLIT_TIER,
-    P1_SCORING_BASELINE, P1_SCORING_MODES, P1_TEAM_SHA16, P1_TERMINATE_GRACE_SEC, P1_TIME_LIMIT_SEC, P1_WEIGHTS, SHOWDOWN_PORT,
-    TRAINING_BATTLE_FORMAT)
-from tools.usefulness_verdict import cond_name, corrected_z
+    P1_SCORING_BASELINE, P1_SCORING_MODES, P1_SCORING_TEAM_SHA16, P1_TEAM_DEFAULT, P1_TEAM_SHA16, P1_TEAM_SOURCES,
+    P1_TERMINATE_GRACE_SEC, P1_TIME_LIMIT_SEC, P1_WEIGHTS, MY_TEAM_DISABLED_ENV, SHOWDOWN_PORT, TRAINING_BATTLE_FORMAT)
+from tools.usefulness_verdict import TEAM_LABELS, cond_file, cond_name, corrected_z
 
 REPO = Path(__file__).resolve().parent.parent
 FOLD_LABELS = {BUILD_FOLD_ADAPT: "A", BUILD_FOLD_EVAL: "B", BUILD_FOLD_VALIDATE: "V"}
@@ -52,6 +63,12 @@ PIN_PLANNED = "(起動時に scripts/pin_models.sh で作成)"
 CKPT_DIR = REPO / "champions_agent" / "train" / "checkpoints"
 SELECTION_EMB_FILE = "selection_model_emb.json"    # 選出モデルの機能埋め込みのピン (selection_model.EMB_PIN_PATH の名前)
 SELECTION_META_FILE = "selection_model_meta.json"
+# 一般的なチーム (--team general) の構築プール: tools.check_advisor_player の既定の自チーム (--team-file なし) は
+# RankedTeambuilder(rng=Random(相手 seed + 1), meta_snapshot_id=META_PIN) で、top_n / include_external は RankedTeambuilder の既定
+# (全件 / 外部構築を含む)。ここでは条件表に残すために同じ値を持つ (check_advisor_player を変えたら合わせる)
+RANKED_TOP_N = None
+RANKED_INCLUDE_EXTERNAL = True
+RANKED_SEED_OFFSET = 1
 
 
 # ------------------------------------------------------------------ 純粋
@@ -73,11 +90,6 @@ def scoring_cond_name(mode: str) -> str:
     return f"scoring:{mode}"
 
 
-def cond_file(cond: str) -> str:
-    """条件名 → ファイル名の部分 (「:」を「_」に。rl<W> はそのまま)"""
-    return str(cond).replace(":", "_")
-
-
 def plan_scoring(modes: Sequence[str] = P1_SCORING_MODES, baseline: str = P1_SCORING_BASELINE,
                  alpha: float = P1_ALPHA, weight: float = P1_BASELINE_WEIGHT) -> dict:
     """採点方式の比較の設計 (純粋。2026-10-09 M2b)。条件ごとの RL 加点の重み (cond_weight) と環境変数 (cond_env) を持つ"""
@@ -94,6 +106,24 @@ def plan_scoring(modes: Sequence[str] = P1_SCORING_MODES, baseline: str = P1_SCO
             "cond_env": {scoring_cond_name(m): {"ADVICE_SCORING_MODE": m} for m in modes}}
 
 
+def resolve_team_source(team: Optional[str], compare: str) -> str:
+    """自チームの出所 (純粋): 明示があればそれ、無ければ比較ごとの既定 (scoring → general、rl → registered)"""
+    src = team or P1_TEAM_DEFAULT.get(compare, "registered")
+    if src not in P1_TEAM_SOURCES:
+        raise ValueError(f"自チームの出所 {src} は {P1_TEAM_SOURCES} に無い")
+    return src
+
+
+def expected_team_sha16(factor: str) -> str:
+    """登録チームの本文の期待 sha16 (純粋): RL の比較は P1 の記録 (P1_TEAM_SHA16)、採点方式の比較は P1_SCORING_TEAM_SHA16"""
+    return P1_SCORING_TEAM_SHA16 if factor == "scoring" else P1_TEAM_SHA16
+
+
+def own_team_seed(seed: Optional[int]) -> Optional[int]:
+    """一般的なチームの抽選の seed (純粋): check_advisor_player は Random(相手 seed + 1) で対戦ごとに引く"""
+    return None if seed is None else int(seed) + RANKED_SEED_OFFSET
+
+
 def resolve_battles(battles: Optional[int], prelim: bool) -> int:
     """この測定の対戦数 (純粋): 明示があればそれ、無ければ予備 P1_PRELIM_BATTLES / 本番 P1_FINAL_BATTLES"""
     if battles is not None:
@@ -107,49 +137,92 @@ def default_out_dir(now: float, prelim: bool, root: Path = REPO / P1_OUT_ROOT) -
     return Path(root) / (f"p1_prelim_{stamp}" if prelim else f"p1_{stamp}")
 
 
-def build_command(weight: float, out_dir: Path, team_file: Path, split_file: Path, fold: int, seed: int, battles: int,
+def build_command(weight: float, out_dir: Path, team_file: Optional[Path], split_file: Path, fold: int, seed: int, battles: int,
                   selection_model: Path, pin_dir: str, python: str = sys.executable, offset: int = P1_OPP_OFFSET,
                   tier: str = P1_SPLIT_TIER, cond: Optional[str] = None) -> list:
-    """1 条件の tools.check_advisor_player のコマンド (純粋)。cond (条件名) が無ければ重みの条件名 rl<W>"""
+    """1 条件の tools.check_advisor_player のコマンド (純粋)。cond (条件名) が無ければ重みの条件名 rl<W>。
+    team_file が None (一般的なチーム) なら --team-file を渡さない (check_advisor_player の既定 = RankedTeambuilder)"""
     c = cond_file(cond or cond_name(weight))
+    team_args = ["--team-file", str(team_file)] if team_file is not None else []
     return [python, "-m", "tools.check_advisor_player",
             "--battles", str(int(battles)), "--opp-seed", str(int(seed)), "--opp-offset", str(int(offset)),
             "--opp-split", f"{split_file}:{tier}:{int(fold)}",
             "--opp-pilot", P1_OPP_PILOT, "--opp-pick-policy", P1_OPP_PICK_POLICY, "--pick-policy", P1_PICK_POLICY,
-            "--team-file", str(team_file), "--selection-model", str(selection_model), "--models-dir", str(pin_dir),
+            *team_args, "--selection-model", str(selection_model), "--models-dir", str(pin_dir),
             "--rl-blend", f"{float(weight):g}", "--skip-random", "--belief-k", str(P1_BELIEF_K),
             "--json", str(Path(out_dir) / f"{c}.json"), "--battle-log", str(Path(out_dir) / f"{c}.battles.jsonl"),
             "--candidate-id", f"p1_{c}"]
 
 
-def child_environment(pin_dir: str, base: Optional[dict] = None) -> dict:
-    """測定の子プロセスの環境 (純粋): racing.child_env (スレッド数 1 の一式) + CHAMPIONS_MODELS_DIR = ピン"""
+def child_environment(pin_dir: str, base: Optional[dict] = None, team_source: str = "registered") -> dict:
+    """測定の子プロセスの環境 (純粋): racing.child_env (スレッド数 1 の一式) + CHAMPIONS_MODELS_DIR = ピン。
+    一般的なチーム (team_source general) は全条件で共通に登録参照を無効化する (MY_TEAM_DISABLED_ENV=1。条件ごとの cond_env とは別)。
+    registered は従来どおり (無効化の変数を足さない。呼び出し側の環境に残っていれば消す)"""
     from tools.team_build.racing import child_env
     env = child_env(base)
     env["CHAMPIONS_MODELS_DIR"] = str(pin_dir)
+    if team_source == "general":
+        env[MY_TEAM_DISABLED_ENV] = "1"
+    else:
+        env.pop(MY_TEAM_DISABLED_ENV, None)
     return env
 
 
 def env_record(env: dict) -> dict:
-    """条件表に残す環境変数 (純粋): ピン・スレッド数・経路に効くもの"""
+    """条件表に残す環境変数 (純粋): ピン・スレッド数・経路に効くもの。登録参照の無効化は立っているときだけ残す
+    (RL の比較 (registered) の条件表の項目は従来と同じ)"""
     from tools.team_build.racing import THREAD_ENV_VARS
     keys = ("CHAMPIONS_MODELS_DIR",) + tuple(THREAD_ENV_VARS) + PATH_ENV_VARS
-    return {k: env.get(k) for k in keys}
+    rec = {k: env.get(k) for k in keys}
+    if env.get(MY_TEAM_DISABLED_ENV):
+        rec[MY_TEAM_DISABLED_ENV] = env.get(MY_TEAM_DISABLED_ENV)
+    return rec
+
+
+def team_record(facts_team: Optional[dict], factor: str, team_source: str) -> dict:
+    """条件表の team (純粋)。
+    general: 一般的なチーム (source ranked、META_PIN の snapshot id・抽選 seed・プール)。登録チームの sha16 は照合しない。
+    registered: 登録チームの本文の sha16 を期待値と照合する (RL の比較は P1_TEAM_SHA16 で従来と同じ項目、採点方式の比較は
+    P1_SCORING_TEAM_SHA16 で source / label を足す)"""
+    team = dict(facts_team or {})
+    if team_source == "general":
+        team.update(source="ranked", label=TEAM_LABELS["ranked"])
+        return team
+    if factor == "scoring":
+        team.update(source="registered", label=TEAM_LABELS["registered"], expected_sha16=expected_team_sha16(factor))
+    else:
+        team.setdefault("expected_sha16", P1_TEAM_SHA16)
+    team["match"] = (team.get("sha16") == team.get("expected_sha16")) if team.get("sha16") else False
+    return team
+
+
+def team_note(team: dict) -> str:
+    """条件表の notes に残す自チームの出所の 1 行 (純粋)"""
+    if team.get("source") == "ranked":
+        return (f"自チーム: {TEAM_LABELS['ranked']} (check_advisor_player の既定 = RankedTeambuilder。META_PIN の使用率スナップショット "
+                f"{team.get('meta_snapshot_id')} の構築プール {team.get('n_teams')} 件から rng = Random(相手 seed + 1 = {team.get('seed')}) で"
+                f"対戦ごとに引く。条件間で同じ seed なので対戦 i の自チームが対応する。助言の登録参照 (config/my_team.json) は "
+                f"{MY_TEAM_DISABLED_ENV}=1 で両条件とも無効化)")
+    return (f"自チーム: {TEAM_LABELS['registered']} (config/my_team.json の本文を team.txt に書いて --team-file で全対戦に使う。"
+            f"sha16 {team.get('sha16')}、期待 {team.get('expected_sha16')})")
 
 
 def build_conditions(design: dict, facts: dict, battles: int, prelim: bool, seed: int, fold: int, split_file: str,
                      time_limit_sec: int, out_dir: str, commands: dict, env: dict, started_at: Optional[str],
-                     notes: Sequence[str] = ()) -> dict:
-    """条件表 (純粋)。facts = collect_facts の結果 (取得できない項目は None)。notes = 取得できなかった理由など"""
+                     notes: Sequence[str] = (), team_source: str = "registered") -> dict:
+    """条件表 (純粋)。facts = collect_facts の結果 (取得できない項目は None)。notes = 取得できなかった理由など。
+    team_source = 自チームの出所 (general / registered)。RL の比較で registered (既定) なら従来と同じ条件表"""
     f = facts or {}
-    team = dict(f.get("team") or {})
-    team.setdefault("expected_sha16", P1_TEAM_SHA16)
-    team["match"] = (team.get("sha16") == team.get("expected_sha16")) if team.get("sha16") else False
     split = f.get("split") or {}
     factor = design.get("factor", "rl")
+    team = team_record(f.get("team"), factor, team_source)
     purpose = ("採点方式 legacy (基準) / transition (2026-10-09 M2b) の対応比較 (シミュレータ条件。OCR を通らない。実戦の有用性とは"
                "分けて評価する)" if factor == "scoring" else
                "RL の行動確率の加点 0 / ×5 / ×25 の対応比較 (シミュレータ条件。OCR を通らない。実戦の有用性とは分けて評価する)")
+    notes = list(notes)
+    if factor == "scoring" or team_source == "general":
+        purpose += f"。自チーム: {team.get('label')}"
+        notes.append(team_note(team))
     return {
         "experiment": "P1",
         "factor": factor,
@@ -183,7 +256,7 @@ def build_conditions(design: dict, facts: dict, battles: int, prelim: bool, seed
         "schedule_note": SCHEDULE_NOTE,
         "started_at": started_at,
         "incomplete": None, "reached": None, "elapsed_sec": None,
-        "notes": list(notes),
+        "notes": notes,
     }
 
 
@@ -210,7 +283,13 @@ def preflight_errors(cond: dict, out_has_results: bool = False) -> list:
     """起動前の検査 (純粋)。空なら起動してよい"""
     errs = []
     team = cond.get("team") or {}
-    if not team.get("sha16"):
+    if team.get("source") == "ranked":
+        # 一般的なチーム: 登録チームの sha16 は照合しない。構築プールを固定する META_PIN の snapshot id があること
+        if team.get("meta_snapshot_id") is None:
+            errs.append(f"一般的なチームの使用率スナップショット (META_PIN) が読めない ({team.get('meta_pin_file')})")
+        if team.get("n_teams") == 0:
+            errs.append(f"一般的なチームの構築プールが空 (snapshot {team.get('meta_snapshot_id')})")
+    elif not team.get("sha16"):
         errs.append("登録チームの本文が作れない (config/my_team.json)")
     elif not team.get("match"):
         errs.append(f"登録チームの sha16 {team.get('sha16')} が期待 {team.get('expected_sha16')} と違う")
@@ -349,14 +428,52 @@ def rl_checkpoint_in(models_dir: Path) -> Optional[Path]:
     return next((models_dir / n for n in order if (models_dir / n).exists()), None)
 
 
+def ranked_team_facts(seed: Optional[int], notes: list) -> dict:
+    """一般的なチーム (check_advisor_player の既定の自チーム) の材料: META_PIN の snapshot id、POOL_PIN、抽選 seed、
+    構築プールの件数と本文の sha16 (使用率 DB があるときだけ作る。DB が無ければ作らない)"""
+    from advisor.versions import sha256_text
+    from champions_agent.config import DB_PATH
+    team = {"source": "ranked", "meta_snapshot_id": None, "meta_pin_file": None, "pool_pin": None,
+            "seed": own_team_seed(seed), "top_n": RANKED_TOP_N, "include_external": RANKED_INCLUDE_EXTERNAL,
+            "n_teams": None, "pool_sha16": None, "registration_disabled_env": MY_TEAM_DISABLED_ENV}
+    try:
+        from champions_agent.env.ranked_teams import META_PIN_PATH, PIN_PATH, pinned_meta_snapshot_id
+        team["meta_pin_file"] = str(META_PIN_PATH)
+        team["meta_snapshot_id"] = pinned_meta_snapshot_id()
+        try:
+            team["pool_pin"] = PIN_PATH.read_text(encoding="utf-8").strip() or None
+        except OSError:
+            notes.append(f"team.pool_pin: {PIN_PATH} が無い (ラダー構築は最新のアーカイブを使う)")
+    except Exception as e:
+        notes.append(f"team: META_PIN が読めない ({e!r})")
+    if team["meta_snapshot_id"] is None:
+        notes.append(f"team.meta_snapshot_id: META_PIN ({team['meta_pin_file']}) が無いか読めない")
+        return team
+    if not Path(DB_PATH).exists():
+        notes.append(f"team.n_teams: 使用率 DB ({DB_PATH}) が無いので構築プールを作らない")
+        return team
+    try:
+        from champions_agent.env.ranked_teams import build_ranked_teams
+        teams = build_ranked_teams(top_n=RANKED_TOP_N, include_external=RANKED_INCLUDE_EXTERNAL,
+                                   meta_snapshot_id=team["meta_snapshot_id"])
+        team["n_teams"] = len(teams)
+        team["pool_sha16"] = sha256_text("\n\n\n".join(teams)) if teams else None
+    except Exception as e:
+        notes.append(f"team.n_teams: 構築プールを作れない ({e!r})")
+    return team
+
+
 def collect_facts(team_text: Optional[str], selection_model: Path, split_file: Path, fold: int, pin_dir: Optional[Path],
-                  notes: list) -> dict:
-    """条件表の材料を集める。取れない項目は None にして notes に理由を足す (例外で落とさない)"""
+                  notes: list, team_source: str = "registered", seed: Optional[int] = None) -> dict:
+    """条件表の材料を集める。取れない項目は None にして notes に理由を足す (例外で落とさない)。
+    team_source general なら自チームは一般的なチーム (ranked_team_facts)、registered なら登録チームの本文"""
     from advisor.versions import sha256_text
     facts: dict = {}
-    # 登録チーム
+    # 自チーム
     team = {"sha16": None, "species": None, "file": "team.txt"}
-    if team_text:
+    if team_source == "general":
+        team = ranked_team_facts(seed, notes)
+    elif team_text:
         team["sha16"] = sha256_text(team_text)
         try:
             from tools.team_build.opponents import parse_team_text
@@ -618,7 +735,11 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--dry-run", action="store_true", help="条件表とコマンド列を出すだけ (起動しない・ピンを作らない)")
     ap.add_argument("--compare", choices=("rl", "scoring"), default="rl",
                     help="比べる条件: rl = RL 加点の重み 0 / 5 / 25 (既定)、scoring = 採点方式 legacy / transition (2026-10-09 M2b)")
+    ap.add_argument("--team", choices=P1_TEAM_SOURCES, default=None,
+                    help="自チームの出所: general = 一般的なチーム (使用率上位の構築を seed で引く。登録参照は無効化) / "
+                         "registered = 最新の登録チーム (config/my_team.json)。既定は --compare scoring → general、rl → registered")
     args = ap.parse_args(argv)
+    team_source = resolve_team_source(args.team, args.compare)
 
     now = time.time()
     battles = resolve_battles(args.battles, args.prelim)
@@ -630,29 +751,32 @@ def main(argv: Optional[list] = None) -> int:
         notes.append(f"予備測定だが対戦数は --battles {battles} を使った")
 
     pin_dir: Optional[Path] = Path(args.pin_dir).resolve() if args.pin_dir else None
-    team_text = registered_team_text()
-    team_file = out_dir / "team.txt"
+    # 一般的なチームは --team-file を渡さない (登録チームの本文は読まない・team.txt を書かない)
+    team_text = registered_team_text() if team_source == "registered" else None
+    team_file: Optional[Path] = out_dir / "team.txt" if team_source == "registered" else None
     # ピン未作成の dry-run でもコマンドに入るパス
     pin_for_cmd = str(pin_dir) if pin_dir is not None else PIN_PLANNED
 
     def assemble(pin_now: Optional[Path], started_at: Optional[str]) -> dict:
         pin_s = str(pin_now) if pin_now is not None else pin_for_cmd
         notes_now = list(notes)
-        facts = collect_facts(team_text, selection_model, split_file, args.fold, pin_now, notes_now)
+        facts = collect_facts(team_text, selection_model, split_file, args.fold, pin_now, notes_now,
+                              team_source=team_source, seed=args.seed)
         if design.get("factor") == "scoring":
             cmds = {c: build_command(design["cond_weight"][c], out_dir, team_file, split_file, args.fold, args.seed, battles,
                                      selection_model, pin_s, cond=c) for c in design["conditions"]}
         else:
             cmds = {cond_name(w): build_command(w, out_dir, team_file, split_file, args.fold, args.seed, battles,
                                                 selection_model, pin_s) for w in design["weights"]}
-        env = child_environment(pin_s)
+        env = child_environment(pin_s, team_source=team_source)
         return build_conditions(design, facts, battles, args.prelim, args.seed, args.fold, str(split_file),
-                                args.time_limit_sec, str(out_dir), cmds, env, started_at, notes_now)
+                                args.time_limit_sec, str(out_dir), cmds, env, started_at, notes_now, team_source=team_source)
 
     if args.dry_run:
         cond = assemble(pin_dir, None)
         print(json.dumps(cond, ensure_ascii=False, indent=1))
-        print("\n# コマンド列 (環境: CHAMPIONS_MODELS_DIR = ピン、スレッド数 1)")
+        print("\n# コマンド列 (環境: CHAMPIONS_MODELS_DIR = ピン、スレッド数 1"
+              + (f"、{MY_TEAM_DISABLED_ENV}=1 (登録参照の無効化、全条件)" if team_source == "general" else "") + ")")
         for c, cmd in cond["commands"].items():
             extra = " ".join(f"{k}={v}" for k, v in ((cond.get("cond_env") or {}).get(c) or {}).items())
             print(f"{c}: " + (extra + " " if extra else "") + " ".join(cmd))
@@ -677,7 +801,8 @@ def main(argv: Optional[list] = None) -> int:
         pin_dir = make_pin()
         print(f"[p1] ピン {pin_dir}")
     out_dir.mkdir(parents=True, exist_ok=True)
-    team_file.write_text(team_text or "", encoding="utf-8")
+    if team_file is not None:
+        team_file.write_text(team_text or "", encoding="utf-8")
     started_at = time.strftime("%Y-%m-%d %H:%M:%S")
     cond = assemble(pin_dir, started_at)
     errs = preflight_errors(cond)
@@ -691,7 +816,7 @@ def main(argv: Optional[list] = None) -> int:
     _write_json(out_dir / "conditions.json", cond)
     print(f"[p1] 条件表 {out_dir / 'conditions.json'} / {battles} 戦 × {len(cond['commands'])} 条件 / 開始 {started_at}")
     print(f"[p1] 注意: {SCHEDULE_NOTE}")
-    env = child_environment(str(pin_dir))
+    env = child_environment(str(pin_dir), team_source=team_source)
     final = launch(cond, out_dir, env, battles, args.time_limit_sec)
     if args.prelim:
         final["prelim_advice"] = prelim_advice(final["elapsed_sec"], final["reached"], final.get("returncodes"),

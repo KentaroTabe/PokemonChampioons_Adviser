@@ -404,6 +404,18 @@ P1_OUT_ROOT = "logs/usefulness"
 # 環境変数 ADVICE_SCORING_MODE で渡す。相手列・分割・ピン・登録チームは RL の比較と同じ
 P1_SCORING_MODES = ("legacy", "transition")
 P1_SCORING_BASELINE = "legacy"
+# 自チームの出所 (2026-10-09 ユーザー判断: 採点方式の比較は一般的なチームをベースに行う。登録チームを使うなら一番最近のもの)。
+# general = tools.check_advisor_player の既定の自チーム (--team-file なし: RankedTeambuilder、META_PIN の使用率スナップショットの
+# 上位構築を rng = Random(相手 seed + 1) で対戦ごとに引く) / registered = config/my_team.json (最新の登録) の本文。
+# 既定は --compare scoring → general、--compare rl → registered (P1 の記録どおり)
+P1_TEAM_SOURCES = ("general", "registered")
+P1_TEAM_DEFAULT = {"rl": "registered", "scoring": "general"}
+# 採点方式の比較で --team registered のときの登録チームの本文の sha16 (2026-10-09 の登録)。違えば起動しない。
+# RL の比較の記録 (P1_TEAM_SHA16) とは別に持つ
+P1_SCORING_TEAM_SHA16 = "fae570ac86ab02fd"
+# 登録参照の無効化 (advisor.my_team.registration_disabled) の環境変数の名前。値が空・0・false・no 以外なら、登録 (config/my_team.json)
+# を読む経路 (get_my_build / get_my_moves ほか) が全種「未登録」を返す。一般的なチームの測定の子プロセス (両条件で共通) に立てる
+MY_TEAM_DISABLED_ENV = "ADVISOR_MY_TEAM_DISABLED"
 
 # --- パーティ構築システム (docs/TEAM_BUILDING_IMPLEMENTATION.md §9 の決定値、2026-09-06) ---
 # 対応差 (候補 − 参照) の判定: 実用差 ε の帯に CI が収まれば「実用上同等」
