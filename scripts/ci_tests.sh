@@ -30,6 +30,7 @@ TESTS=(
   test_valuation
   test_scoring_transition
   test_advice_m2c
+  test_advice_m2d
   test_anchor_pool
   test_battle_active
   test_battle_outcome_infer

@@ -672,12 +672,12 @@ def splice_registered_sets(text: str, registered_text: str) -> tuple:
     return "\n\n".join(blocks) + "\n", replaced
 
 
-def validate_team_text(text: str, fmt: str, timeout: int = 60) -> tuple:
-    """Showdown の validate-team で合法性を検査する。(ok, errors)"""
+def validate_team_text(text: str, fmt: str, timeout: int = 60, showdown_dir=None) -> tuple:
+    """Showdown の validate-team で合法性を検査する。(ok, errors)。showdown_dir (既定 SHOWDOWN_DIR) は pokemon-showdown の dir"""
     try:
         res = subprocess.run(["node", "pokemon-showdown", "validate-team", fmt],
                              input=text, capture_output=True, text=True,
-                             cwd=str(SHOWDOWN_DIR), timeout=timeout)
+                             cwd=str(showdown_dir or SHOWDOWN_DIR), timeout=timeout)
     except Exception as e:
         return False, [f"validate-team 実行失敗: {e!r}"]
     if res.returncode == 0:

@@ -408,8 +408,18 @@ P1_SCORING_BASELINE = "legacy"
 # general = tools.check_advisor_player の既定の自チーム (--team-file なし: RankedTeambuilder、META_PIN の使用率スナップショットの
 # 上位構築を rng = Random(相手 seed + 1) で対戦ごとに引く) / registered = config/my_team.json (最新の登録) の本文。
 # 既定は --compare scoring → general、--compare rl → registered (P1 の記録どおり)
-P1_TEAM_SOURCES = ("general", "registered")
+# 2026-10-09 M2d (レビュー 2): general は実験専用の構築プール (tools/scoring_pool で最新の使用率スナップショットから合成し、現行規制
+# の validate-team で合法性を確かめたチームのファイル。check_advisor_player --own-pool) に変えた。7 月の固定プール (META_PIN / POOL_PIN)
+# で測る従来の general は general-pinned (条件表に「旧固定プール上の比較」と明記する。回帰確認用)
+P1_TEAM_SOURCES = ("general", "general-pinned", "registered")
 P1_TEAM_DEFAULT = {"rl": "registered", "scoring": "general"}
+# 実験専用の構築プール (--team general)。P1_SCORING_POOL_FILE = 既定のプールファイル (REPO からの相対 or 絶対。None なら --own-pool が要る)、
+# P1_SCORING_POOL_SHA16 = 期待する本文の sha16 (None なら照合せず注意だけ出す。プールを固定したらここに書く)。
+# 生成の既定: 件数 P1_SCORING_POOL_N (= 構築の相手プールと同じ BUILD_POOL_TOP_N 相当の 200、合法性の検査の前)、seed P1_SCORING_POOL_SEED
+P1_SCORING_POOL_FILE = None
+P1_SCORING_POOL_SHA16 = None
+P1_SCORING_POOL_N = 200
+P1_SCORING_POOL_SEED = 20261009
 # 採点方式の比較で --team registered のときの登録チームの本文の sha16 (2026-10-09 の登録)。違えば起動しない。
 # RL の比較の記録 (P1_TEAM_SHA16) とは別に持つ
 P1_SCORING_TEAM_SHA16 = "fae570ac86ab02fd"
@@ -1336,3 +1346,18 @@ HP_RANGE_STALE_DROP_PER_SEC = 1.0 / 120.0
 # 持ち物の感度 (2026-10-09 M2c、レビュー 4): 相手の場の個体の持ち物が観測で確定していないとき、これらの有無を入れ替えた仮説でも
 # 順位を計算し、第一候補が変わるかを transition_stats.sensitivity に残す (順位には使わない。予算の残りで計算し、超えたら省略)
 TRANSITION_SENSITIVITY_ITEMS = (("scarf", "choicescarf"), ("sash", "focussash"))
+# 感度の計算の有無 (2026-10-09 M2d、レビュー 3)。感度 = 楽観側の HP の仮説 (HP_RANGE_*) と TRANSITION_SENSITIVITY_ITEMS の有無を
+# 入れ替えた仮説での順位 (順位には使わない)。本採点 (HP の悲観側を T と V に渡す処理を含む) はこの設定に関係なく行う。
+# 既定は計算する。方式比較の測定 (tools/usefulness_p1 --compare scoring) は子プロセスに環境変数 TRANSITION_SENSITIVITY_ENV=0 を立てて切る
+# (感度は本採点の残りの予算で計算し、超えたら省略するだけで退避は増やさないが、全処理時間を延ばす)
+TRANSITION_SENSITIVITY_ENV = "TRANSITION_SENSITIVITY"
+
+
+def _transition_sensitivity_from_env() -> bool:
+    raw = (os.environ.get(TRANSITION_SENSITIVITY_ENV) or "").strip().lower()
+    if not raw:
+        return True
+    return raw not in ("0", "false", "no", "off")
+
+
+TRANSITION_SENSITIVITY_ENABLED = _transition_sensitivity_from_env()

@@ -159,6 +159,132 @@ def register_team_for_battle(team_source, k: int, species=(), resolver=None,
     return text
 
 
+# ------------------------------------------------------------------ 対応の確認 (2026-10-09 M2d、レビュー 6)
+# 対戦ごとに (a) 送った自チームの本文の sha16 (型込み)、(b) 助言が参照した自分の場の個体の型 (配分・性格・持ち物・技。メガ後も) の
+# sha16 と、(a) の該当個体の型との一致を記録する。条件間で (a) が一致し、各条件で (b) の不一致が 0 のときだけ採否を出す
+# (tools/usefulness_verdict)
+def team_text_sha16(text: Optional[str]) -> Optional[str]:
+    """送った自チームの本文の sha16 (advisor.versions.sha256_text と同じ計算。本文が無ければ None)"""
+    if not text:
+        return None
+    from advisor.versions import sha256_text
+    return sha256_text(text)
+
+
+def _ev_of_line(line: str) -> dict:
+    ev = {}
+    for part in line.split(":", 1)[1].split("/"):
+        m = re.match(r"\s*(\d+)\s+(\w+)", part)
+        if m:
+            pts, key = int(m.group(1)), m.group(2)
+            k = _EV_KEYS.get(key, key.lower())
+            ev[k] = min(252, pts * 8) if pts <= 32 else min(252, pts)      # 能力ポイント (0-32) 表記は努力値へ
+    return ev
+
+
+def canonical_set(ev: Optional[dict], nature: Optional[dict], item: Optional[str], moves) -> dict:
+    """型の比較用の正規形 (純粋): 努力値は 0 を落とす、持ち物と技は英数字の id、技は並べ替え"""
+    def toid(x):
+        return re.sub(r"[^a-z0-9]", "", str(x or "").lower()) or None
+    return {"ev": {k: int(v) for k, v in sorted((ev or {}).items()) if int(v or 0) > 0},
+            "nature": {k: float(v) for k, v in sorted((nature or {}).items())},
+            "item": toid(item), "moves": sorted({toid(m) for m in (moves or []) if toid(m)})}
+
+
+def set_sha16(canon: Optional[dict]) -> Optional[str]:
+    if canon is None:
+        return None
+    import json
+    from advisor.versions import sha256_text
+    return sha256_text(json.dumps(canon, sort_keys=True, ensure_ascii=False))
+
+
+def text_set_of(text: Optional[str], species_id: Optional[str]) -> Optional[dict]:
+    """送った本文のうち、種族 id (メガ・フォルム違いは本文の種族 id の前方一致) の個体の型の正規形 (純粋)。無ければ None"""
+    sid = re.sub(r"[^a-z0-9]", "", str(species_id or "").lower())
+    if not text or not sid:
+        return None
+    best = None
+    for block in (text or "").strip().split("\n\n"):
+        lines = [l.strip() for l in block.strip().splitlines() if l.strip()]
+        if not lines:
+            continue
+        head, _, item = lines[0].partition("@")
+        bid = re.sub(r"[^a-z0-9]", "", head.lower())
+        if not bid or not (sid == bid or sid.startswith(bid)):
+            continue
+        if best is not None and len(bid) <= best[0]:
+            continue
+        ev, nature, moves = {}, {}, []
+        for l in lines[1:]:
+            if l.startswith("- "):
+                moves.append(l[2:].strip())
+            elif l.startswith("EVs:"):
+                ev = _ev_of_line(l)
+            elif l.endswith("Nature"):
+                nature = _nature_mult(l.split()[0].lower())
+        best = (len(bid), canonical_set(ev, nature, item.strip() or None, moves))
+    return best[1] if best else None
+
+
+def referenced_set(p: dict, resolver) -> Optional[dict]:
+    """助言が自分の個体 p (状態辞書) について参照した型の正規形: build_mon_view (side=player) の努力値・性格・持ち物と、
+    登録の技 (engine.registered_moves_of_mon。登録を引く名前の順は engine.registration_names)。個体を作れなければ None"""
+    from advisor.engine import build_mon_view, registered_moves_of_mon
+    v = build_mon_view(p, resolver, side="player")
+    if v is None:
+        return None
+    try:
+        moves = [mid for _ja, mid in registered_moves_of_mon(p, resolver)]
+    except Exception:
+        moves = []
+    return canonical_set(v.ev, v.nature, v.item, moves)
+
+
+def sets_match(ref: Optional[dict], exp: Optional[dict]) -> bool:
+    """参照した型と送った型が一致するか (純粋)。持ち物は参照側が無い (消費・はたきおとされた) なら比べない"""
+    if ref is None or exp is None:
+        return False
+    if ref["ev"] != exp["ev"] or ref["nature"] != exp["nature"] or ref["moves"] != exp["moves"]:
+        return False
+    return ref["item"] is None or ref["item"] == exp["item"]
+
+
+def check_reference(corr: dict, p: Optional[dict], text: Optional[str], resolver) -> Optional[bool]:
+    """1 決定ぶんの (b) の検査を corr (対戦ごとの記録) に積む。戻り値: 一致 True / 不一致 False / 検査できない None。
+    助言の図鑑に無い種 (フォルム違い: indeedeef 等。build_mon_view が None) は型を参照していないので不一致に数えず、
+    ref_unbuilt に数える (助言はその個体を評価できない。両条件で同じ)"""
+    if not p or not p.get("species_id"):
+        return None
+    ref = referenced_set(p, resolver)
+    if ref is None:
+        corr["ref_unbuilt"] = corr.get("ref_unbuilt", 0) + 1
+        corr.setdefault("unbuilt_species", [])
+        if str(p.get("species_id")) not in corr["unbuilt_species"]:
+            corr["unbuilt_species"].append(str(p.get("species_id")))
+        return None
+    exp = text_set_of(text, p.get("species_id"))
+    ok = sets_match(ref, exp)
+    corr["ref_checked"] = corr.get("ref_checked", 0) + 1
+    sid = str(p.get("species_id"))
+    corr.setdefault("ref_sets", {})[sid] = set_sha16(ref)
+    corr.setdefault("sent_sets", {})[sid] = set_sha16(exp)
+    if not ok:
+        corr["ref_mismatch"] = corr.get("ref_mismatch", 0) + 1
+        corr.setdefault("first_mismatch", {"species": sid, "referenced": ref, "sent": exp})
+    return ok
+
+
+def correspondence_record(corr: Optional[dict]) -> dict:
+    """対戦記録 (battles.jsonl) に足す対応の確認の欄 (純粋)。own_team_sha16 = (a)、ref_check = (b) の件数と型の sha16"""
+    c = corr or {}
+    return {"own_team_sha16": c.get("own_team_sha16"),
+            "ref_check": {"n": int(c.get("ref_checked") or 0), "mismatch": int(c.get("ref_mismatch") or 0),
+                          "unbuilt": int(c.get("ref_unbuilt") or 0), "unbuilt_species": list(c.get("unbuilt_species") or []),
+                          "referenced": dict(c.get("ref_sets") or {}), "sent": dict(c.get("sent_sets") or {}),
+                          "first_mismatch": c.get("first_mismatch")}}
+
+
 def _mon_entry(p, own: bool, resolver, active: bool, available=None) -> dict:
     sid = p.species or ""
     status = p.status
@@ -379,6 +505,39 @@ def _count_scoring(stats: dict, advice: Optional[dict]) -> None:
         key = ":".join(parts[:3]) if parts[0] in ("unsupported", "opp_unsupported") else parts[0]
         stats["scoring_fallback"] = stats.get("scoring_fallback", 0) + 1
         stats[f"scoring_fallback:{key}"] = stats.get(f"scoring_fallback:{key}", 0) + 1
+    # 2026-10-09 M2d: 未評価の応手 (決定数と技)、本採点と全処理時間 (stats["_tr_main_ms"] / ["_tr_total_ms"] に積む。json には
+    # 要約だけ書く: transition_timing)、感度の状態 (sens:<状態>) と省略の理由 (sens_omitted:<仮説>:<理由>)
+    ts = advice.get("transition_stats") or {}
+    une = ts.get("unevaluated")
+    if une:
+        stats["scoring_unevaluated"] = stats.get("scoring_unevaluated", 0) + 1
+        for m in une.get("moves") or []:
+            stats[f"scoring_unevaluated:{m}"] = stats.get(f"scoring_unevaluated:{m}", 0) + 1
+    if fb:
+        return
+    if (ts.get("main") or {}).get("elapsed_ms") is not None:
+        stats.setdefault("_tr_main_ms", []).append(float(ts["main"]["elapsed_ms"]))
+    if ts.get("elapsed_total_ms") is not None:
+        stats.setdefault("_tr_total_ms", []).append(float(ts["elapsed_total_ms"]))
+    sens = ts.get("sens")
+    if sens:
+        k = f"sens:{sens.get('status') or 'unknown'}"
+        stats[k] = stats.get(k, 0) + 1
+        for name, why in (sens.get("omitted") or {}).items():
+            k = f"sens_omitted:{name}:{why}"
+            stats[k] = stats.get(k, 0) + 1
+
+
+def transition_timing(stats: dict) -> dict:
+    """stats に積んだ transition の時間 (_tr_main_ms / _tr_total_ms) の要約 (純粋): 本採点と全処理時間 (感度込み) の p50 / p95"""
+    def pct(vals, q):
+        if not vals:
+            return None
+        s = sorted(vals)
+        return round(s[min(len(s) - 1, int(len(s) * q))], 1)
+    main, total = list(stats.get("_tr_main_ms") or []), list(stats.get("_tr_total_ms") or [])
+    return {"main": {"n": len(main), "p50_ms": pct(main, 0.5), "p95_ms": pct(main, 0.95)},
+            "total": {"n": len(total), "p50_ms": pct(total, 0.5), "p95_ms": pct(total, 0.95)}}
 
 
 def make_advisor_player(team_source=None, stats: Optional[dict] = None,
@@ -414,18 +573,33 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
     stats = stats if stats is not None else {}
     _install_build_hook()
     rng = rng or random.Random(0)
+    # 対戦ごとの対応の確認の記録 (battle_tag → {own_team_sha16, ref_checked, ref_mismatch, ...}。2026-10-09 M2d)
+    corr_by_tag: dict = {}
 
     class _AdvisorPlayer(Player):
         def choose_move(self, battle):
             t0 = time.perf_counter()
             advice, followed, d = None, True, None
             try:
-                self._register_team(battle)
+                text = self._register_team(battle)
                 state = battle_to_state(battle, resolver)
                 if state:
                     # 採点方式は config.ADVICE_SCORING_MODE (環境変数 ADVICE_SCORING_MODE で上書き。2026-10-09 M2b)
                     advice = evaluate(state, resolver, rl_blend_weight=rl_blend_weight)
                     _count_scoring(stats, advice)
+                    try:
+                        me = state["player"]
+                        p_act = me["party"][me["active_index"]] if me.get("active_index") is not None else None
+                        ok = check_reference(self._corr(battle), p_act, text, resolver)
+                        if ok is None and p_act:
+                            stats["ref_unbuilt"] = stats.get("ref_unbuilt", 0) + 1
+                        if ok is not None:
+                            stats["ref_checked"] = stats.get("ref_checked", 0) + 1
+                            if not ok:
+                                stats["ref_mismatch"] = stats.get("ref_mismatch", 0) + 1
+                    except Exception as e:
+                        stats["ref_error"] = stats.get("ref_error", 0) + 1
+                        stats["last_ref_error"] = repr(e)
                     adv2, followed = apply_action_noise(advice, action_noise, rng)
                     d = choose_from_advice(battle, adv2)
                     if not followed:
@@ -460,7 +634,15 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
             tag = getattr(battle, "battle_tag", None)
             k = tags.index(tag) if tag in tags else max(0, len(tags) - 1)
             species = [getattr(p, "species", None) for p in (getattr(battle, "team", None) or {}).values()]
-            register_team_for_battle(team_source, k, species, resolver, stats)
+            text = register_team_for_battle(team_source, k, species, resolver, stats)
+            corr = self._corr(battle)
+            corr["own_team_sha16"] = team_text_sha16(text)
+            corr["battle_index"] = k
+            return text
+
+        def _corr(self, battle) -> dict:
+            tag = getattr(battle, "battle_tag", None) or id(battle)
+            return corr_by_tag.setdefault(tag, {})
 
         def teampreview(self, battle):
             self._register_team(battle)
@@ -525,7 +707,8 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
                         opp_id = opp_source.id_for_battle(k)
                     else:
                         opp_id = getattr(opp_source, "last_id", None)
-                    recorder.on_end(battle, opponent_team_id=opp_id)
+                    tag = getattr(battle, "battle_tag", None) or id(battle)
+                    recorder.on_end(battle, opponent_team_id=opp_id, extra=correspondence_record(corr_by_tag.pop(tag, None)))
                 except Exception as e:
                     stats["record_error"] = stats.get("record_error", 0) + 1
                     stats["last_record_error"] = repr(e)

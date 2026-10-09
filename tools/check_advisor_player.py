@@ -5,6 +5,8 @@
                 --rl-blend W (RL 加点の重み。既定 = engine.RL_BLEND_DEFAULT) / --no-rl-blend (= --rl-blend 0) / --skip-random
 重みは evaluate の引数で渡す (2026-10-07: 環境変数 RL_BLEND_WEIGHT は書かない。起動時の既定値の供給源としてだけ読まれる)。
 探索プレイヤー (check_search_expert) と同じ固定軸 (META_PIN) と相手列で測る。
+自チーム: --team-file (固定) / --own-pool FILE (実験専用の構築プール、tools.scoring_pool。Random(相手 seed + 1) で対戦ごとに引く。
+2026-10-09 M2d) / どちらも無ければ RankedTeambuilder (META_PIN の構築プール、同じ seed の取り方)。
 """
 from __future__ import annotations
 
@@ -66,6 +68,15 @@ def _remembering_teambuilder(inner):
     return _Remembering()
 
 
+class _PoolSource:
+    """実験専用の構築プール (tools/scoring_pool のファイル) から引く元 (_remembering_teambuilder の inner。RankedTeambuilder と同じ
+    teams / rng の 2 つだけを持つ)"""
+
+    def __init__(self, texts: list, rng: random.Random):
+        self.teams = list(texts)
+        self.rng = rng
+
+
 def resolve_rl_blend(rl_blend: float | None, no_rl_blend: bool, default: float) -> float:
     """測定で使う RL 加点の重み (純粋)。--no-rl-blend は 0 の別名、どちらも無ければ既定値。
     両方を矛盾する値で指定したらエラー (どちらを測ったか manifest と食い違わないように)"""
@@ -87,11 +98,11 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
               candidate_id: str | None = None,
               opp_offset: int = 0, selection_plan: str | None = None,
               opp_pilot: str | None = None, opp_pick_policy: str | None = None,
-              rl_blend: float | None = None) -> None:
+              rl_blend: float | None = None, own_pool: str | None = None) -> None:
     from poke_env import AccountConfiguration
     from poke_env.player import RandomPlayer
     import advisor.engine as eng
-    from champions_agent.env.advisor_player import make_advisor_player
+    from champions_agent.env.advisor_player import make_advisor_player, transition_timing
     from champions_agent.env.ranked_teams import (
         RankedTeambuilder, pinned_meta_snapshot_id)
     from champions_agent.config import BUILD_OPP_PICK_POLICY, BUILD_OPP_PILOT
@@ -110,9 +121,12 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
     if search_blend is not None:
         eng.SEARCH_BLEND = search_blend
     meta_pin = pinned_meta_snapshot_id()
+    own_pool_info = None
     stats: dict = {}
     latencies: list = []
     uid = os.getpid() % 100000
+    if team_file and own_pool:
+        raise SystemExit("--team-file と --own-pool は同時に指定できない")
     if team_file:
         team_text = Path(team_file).read_text(encoding="utf-8")
         # 不正なチームだと Showdown が拒否し poke-env が対戦を待ち続けるので、先に合法性を検査して即終了する
@@ -124,6 +138,19 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
         if not ok:
             raise SystemExit(f"チーム本文が不正 (validate-team): {errs[:3]}")
         own_tb = _constant_teambuilder(team_text)
+    elif own_pool:
+        # 実験専用の構築プール (2026-10-09 M2d、tools/scoring_pool): RankedTeambuilder と同じく Random(相手 seed + 1) で対戦ごとに引く
+        if opp_seed is None:
+            raise SystemExit("--own-pool には --opp-seed が要る (条件間で自チームの列を対応させるため)")
+        from tools.scoring_pool import load_pool
+        try:
+            pool_texts, pool_doc = load_pool(own_pool)
+        except ValueError as e:
+            raise SystemExit(f"--own-pool が不正: {e}")
+        own_pool_info = {"path": str(own_pool), "sha16": pool_doc.get("sha16"), "n": len(pool_texts),
+                         "snapshot_id": (pool_doc.get("conditions") or {}).get("snapshot_id"),
+                         "battle_format": (pool_doc.get("conditions") or {}).get("battle_format")}
+        own_tb = _remembering_teambuilder(_PoolSource(pool_texts, random.Random(opp_seed + 1)))
     else:
         own_tb = _remembering_teambuilder(RankedTeambuilder(
             rng=random.Random(opp_seed + 1) if opp_seed is not None else None,
@@ -207,10 +234,15 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
             "rl_blend": rl_blend_weight,
             # 採点方式 (2026-10-09 M2b。環境変数 ADVICE_SCORING_MODE → config)。transition の退避の件数は stats の scoring_fallback*
             "advice_scoring_mode": _CFG.ADVICE_SCORING_MODE,
+            # 2026-10-09 M2d: 感度の計算の有無 (環境変数 TRANSITION_SENSITIVITY → config)、自チームのプール (--own-pool)、
+            # transition の本採点と全処理時間 (感度込み) の p50 / p95
+            "transition_sensitivity": _CFG.TRANSITION_SENSITIVITY_ENABLED,
+            "own_pool": own_pool_info,
+            "transition_timing": transition_timing(stats),
             "opp_seed": opp_seed, "meta_snapshot": meta_pin,
             "latency_p50_ms": round(p50, 1), "latency_p95_ms": round(p95, 1),
             "stats": {k: v for k, v in stats.items()
-                      if k not in ("last_error", "_registered")},
+                      if k not in ("last_error",) and not str(k).startswith("_")},
             "elapsed_s": round(dt, 1),
         }, ensure_ascii=False, indent=1), encoding="utf-8")
         print(f"保存: {json_out}")
@@ -263,6 +295,8 @@ def main() -> None:
                     help="相手列の開始位置 (racing の追加測定で同じ相手列の続きを使う)")
     ap.add_argument("--team-file", default=None,
                     help="自分側を固定チーム (Showdownテキスト) にする (構築の操縦しやすさ測定)")
+    ap.add_argument("--own-pool", default=None,
+                    help="自分側を実験専用の構築プール (tools.scoring_pool のファイル) から Random(相手 seed + 1) で対戦ごとに引く")
     args = ap.parse_args()
     if args.models_dir:
         # rl_bridge は import 時に CHAMPIONS_MODELS_DIR を読むので、run (内部で import) の前に設定する
@@ -276,7 +310,7 @@ def main() -> None:
                     candidate_id=args.candidate_id,
                     opp_offset=args.opp_offset, selection_plan=args.selection_plan,
                     opp_pilot=args.opp_pilot, opp_pick_policy=args.opp_pick_policy,
-                    rl_blend=args.rl_blend))
+                    rl_blend=args.rl_blend, own_pool=args.own_pool))
 
 
 if __name__ == "__main__":
