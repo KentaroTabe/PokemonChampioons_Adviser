@@ -364,19 +364,54 @@ except Exception:  # pragma: no cover - poke-env 無しの環境
 class SequenceTeambuilder(_PokeEnvTeambuilder):
     """相手列 (team_id の並び) の順にチームを出す。last_id で今出したチームが分かる"""
 
-    def __init__(self, sequence: list, texts: dict, offset: int = 0):
+    def __init__(self, sequence: list, texts: dict, offset: int = 0, is_legal=None, on_skip=None):
+        """is_legal (本文 → (ok, errors)。check_advisor_player.TeamLegality) を渡すと、対戦フォーマットで不合法な構築を飛ばす
+        (2026-10-09)。そのとき offset は対戦の数 (= 合法な構築の数) で数え、列の先頭から合法な構築を offset 個読み飛ばした位置から出す
+        (同じ列・同じ判定の追加測定が続きになる)。on_skip([(本文, errors)]) は飛ばした構築を受け取る (stats への記録)。
+        is_legal が無ければ従来どおり"""
         self.sequence = list(sequence)
         self.texts = texts
         self.offset = int(offset)
         self.i = 0
         self.last_id = None
+        self.is_legal = is_legal
+        self.on_skip = on_skip
+        self.sent_ids: list = []
+        self.pos = 0
+        if is_legal is not None:
+            for _ in range(self.offset):
+                self._next_legal()
+
+    def _next_legal(self) -> tuple:
+        """列の現在位置から次の合法な構築 → (id, 飛ばした [(本文, errors)])。列の異なる構築が全部不合法なら RuntimeError"""
+        skipped: list = []
+        bad: set = set()
+        n_unique = len(set(self.sequence))
+        while True:
+            tid = self.sequence[self.pos % len(self.sequence)]
+            self.pos += 1
+            ok, errs = self.is_legal(self.texts[tid])
+            if ok:
+                return tid, skipped
+            skipped.append((self.texts[tid], errs))
+            bad.add(tid)
+            if len(bad) >= n_unique:
+                raise RuntimeError(f"相手列の全 {n_unique} 構築が不合法")
 
     def id_for_battle(self, k: int) -> str:
-        """k 番目 (0 始まり) の対戦の相手 id。対戦は逐次なので相手列の順と一致する"""
+        """k 番目 (0 始まり) の対戦の相手 id。対戦は逐次なので相手列の順と一致する (不合法を飛ばすときは実際に出した順)"""
+        if self.is_legal is not None:
+            return self.sent_ids[k] if 0 <= k < len(self.sent_ids) else None
         return self.sequence[(self.offset + k) % len(self.sequence)]
 
     def yield_team(self) -> str:
-        tid = self.sequence[(self.offset + self.i) % len(self.sequence)]
+        if self.is_legal is not None:
+            tid, skipped = self._next_legal()
+            if skipped and self.on_skip is not None:
+                self.on_skip(skipped)
+            self.sent_ids.append(tid)
+        else:
+            tid = self.sequence[(self.offset + self.i) % len(self.sequence)]
         self.i += 1
         self.last_id = tid
         return self.join_team(self.parse_showdown_team(self.texts[tid]))

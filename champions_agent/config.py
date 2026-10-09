@@ -445,6 +445,17 @@ ARC_REMEASURE_DEADLINE = "06:30"     # この時刻までに終える (launchd �
 ARC_REMEASURE_FORMATS = {"mb": "gen9championsbssregmb", "mc": "gen9championsbssregmc"}   # 当時 (9/4〜05) は M-B
 ARC_REMEASURE_FORMAT_DEFAULT = "mb"
 ARC_REMEASURE_META_SNAPSHOT = 24     # 当時の META_PIN。起動前に現在の META_PIN と一致するか確かめる (違えば起動しない)
+# 起動前検査の上限 (2026-10-09 停滞の対応): 自チームのプール (RankedTeambuilder) のうち対戦フォーマットで不合法なチームの割合と、
+# 相手の列 (上位 60) で対戦数のうち不合法を飛ばす件数の割合。不合法は両側とも対戦ごとに飛ばす (check_advisor_player) が、
+# 割合が大きいのはフォーマットの取り違えか検査の故障なので起動しない。
+# 2026-10-09 の実測 (M-B): 自チーム 12/276 (4.3%)、相手 1/60 で 1500 戦中 22 件 (1.5%)。M-C は両方 0
+ARC_REMEASURE_MAX_INVALID_FRAC = 0.10
+
+# --- 助言エンジンの実戦診断 (tools/check_advisor_player) が黙って止まらないための仕組み (2026-10-09: アークの再測定が 3 腕とも
+# 7 戦目で停滞。Showdown がチームを拒否すると poke-env は popup を記録するだけで対戦の開始を待ち続ける) ---
+ADVISOR_PLAYER_STALL_SEC = 600            # 両方のクライアントがこの秒数 Showdown から何も受け取らなければ停滞とみなして異常終了する
+ADVISOR_PLAYER_EXIT_TEAM_REJECTED = 3     # チームの拒否 (popup) を受け取ったときの終了コード
+ADVISOR_PLAYER_EXIT_STALLED = 4           # 停滞 (ADVISOR_PLAYER_STALL_SEC) で止めたときの終了コード
 
 # --- パーティ構築システム (docs/TEAM_BUILDING_IMPLEMENTATION.md §9 の決定値、2026-09-06) ---
 # 対応差 (候補 − 参照) の判定: 実用差 ε の帯に CI が収まれば「実用上同等」

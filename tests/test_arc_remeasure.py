@@ -8,7 +8,8 @@ import datetime as dt
 from pathlib import Path
 
 from champions_agent.config import (
-    ARC_REMEASURE_FORMATS, ARC_REMEASURE_META_SNAPSHOT, ARC_REMEASURE_SEC_PER_BATTLE, MY_TEAM_DISABLED_ENV)
+    ARC_REMEASURE_FORMATS, ARC_REMEASURE_MAX_INVALID_FRAC, ARC_REMEASURE_META_SNAPSHOT, ARC_REMEASURE_SEC_PER_BATTLE,
+    MY_TEAM_DISABLED_ENV)
 from tools import arc_remeasure as R
 from tools import arc_remeasure_summary as S
 
@@ -121,6 +122,53 @@ def test_preflight():
     print("test_preflight OK")
 
 
+def test_pool_preflight():
+    """プールの合法性の起動前検査 (2026-10-09: M-B の再測定が 7 戦目で停滞)"""
+    texts = ["t0", "t1", "t2", "t3", "t4"]
+    res = [(True, []), (False, ["Overqwil's item Air Balloon does not exist in Gen 9."]), (True, []),
+           (False, ["Hippowdon's item Rocky Helmet does not exist in Gen 9.", "x"]), (False, ["Hippowdon's item Rocky Helmet does not exist in Gen 9."])]
+    s = R.summarize_pool(texts, res)
+    assert s["n"] == 5 and s["invalid"] == 3 and s["frac"] == 0.6
+    assert s["reasons"] == {"Hippowdon's item Rocky Helmet does not exist in Gen 9.": 2,
+                            "Overqwil's item Air Balloon does not exist in Gen 9.": 1}
+    assert R.summarize_pool([], [])["frac"] is None
+    # 列 (飛ばす) で n 戦のあいだに飛ばす数 = 生の列で n 個の合法が揃うまでに出た不合法の数 (自チーム・相手で共通)
+    import random
+    bad = {"t1", "t3"}
+    rng = random.Random(9)
+    legal, skipped = 0, 0
+    while legal < 20:
+        if rng.choice(texts) in bad:
+            skipped += 1
+        else:
+            legal += 1
+    assert R.skips_in_run(9, texts, bad, 20) == skipped > 0
+    assert R.skips_in_run(9, texts, set(), 20) == 0
+    assert R.skips_in_run(9, texts, set(texts), 20) == 0               # 全件不合法でも無限に回らない (判定は pool_errors)
+    ok_pools = {"battle_format": "f", "error": None, "n_battles": 1500,
+                "own": {"n": 276, "invalid": 12, "frac": 12 / 276, "skips_in_run": 69},
+                "opp": {"n": 60, "invalid": 1, "frac": 1 / 60, "skips_in_run": 22,
+                        "reasons": {"Hippowdon's item Rocky Helmet does not exist in Gen 9.": 1}}}
+    assert R.pool_errors(ok_pools) == [] and R.pool_errors(None) == []           # 2026-10-09 の M-B の実測値は起動してよい
+    assert len(R.pool_errors(ok_pools, max_invalid_frac=0.04)) == 1          # 自チーム 4.3% > 4% (相手 1.5% は通る)
+    over = dict(ok_pools, own={"n": 276, "invalid": 40, "frac": 40 / 276})
+    assert len(R.pool_errors(over)) == 1 and "ARC_REMEASURE_MAX_INVALID_FRAC" in R.pool_errors(over)[0]
+    # 相手は「列で飛ばす件数 / 対戦数」が上限を超えたら起動しない (ちょうど 10% は通す)
+    edge = dict(ok_pools, opp=dict(ok_pools["opp"], skips_in_run=150))
+    assert R.pool_errors(edge) == []
+    opp_bad = dict(ok_pools, opp=dict(ok_pools["opp"], skips_in_run=151))
+    e = R.pool_errors(opp_bad)
+    assert len(e) == 1 and "151 件" in e[0] and "Rocky Helmet" in e[0] and "相手" in e[0]
+    assert R.pool_errors(dict(ok_pools, n_battles=0, opp=dict(ok_pools["opp"], skips_in_run=5))) == []
+    assert R.pool_errors({"error": "validate-team 実行失敗: x"}) and "検査できない" in R.pool_errors({"error": "y"})[0]
+    good = {"meta_pin": ARC_REMEASURE_META_SNAPSHOT, "pin_has_ckpt": True, "showdown_listening": True,
+            "format_known": True, "pin_dir": "/p"}
+    assert R.preflight_errors(dict(good, pools=ok_pools), "f", False) == []
+    assert len(R.preflight_errors(dict(good, pools=opp_bad), "f", False)) == 1
+    assert ARC_REMEASURE_MAX_INVALID_FRAC == 0.10
+    print("test_pool_preflight OK")
+
+
 def _doc(outcomes, stats=None, sb=0.0):
     return {"n_battles": len(outcomes), "wins": sum(outcomes), "win_rate": sum(outcomes) / len(outcomes),
             "outcomes": list(outcomes), "stats": stats or {}, "search_blend": sb}
@@ -179,6 +227,7 @@ def main():
     test_schedule_and_estimate()
     test_finish_check()
     test_preflight()
+    test_pool_preflight()
     test_decide_boundaries()
     test_paired_and_rows()
     test_verdict_row_and_summary()

@@ -21,7 +21,10 @@ heuristic 操縦 + heuristic 選出 (当時の make_benchmark_player)、フォ�
 
 RL モデル: CHAMPIONS_MODELS_DIR か --pin-dir があればそれ (既存のピン)、無ければ開始時に scripts/pin_models.sh で新しいピンを作る。
 どちらにしたかは manifest.json の pin に残す。子プロセスはスレッド数 1 (tools.team_build.racing.child_env)。
-純粋な部分 (計画・コマンド・環境・割り付け・見積もり) は tests/test_arc_remeasure.py で確かめる。
+起動前検査 (2026-10-09 追加): 自チームと相手のプールを対戦フォーマットで全件検査し (collect_pool_facts)、自チームの不合法の割合が
+config ARC_REMEASURE_MAX_INVALID_FRAC を超えるか、相手の列で飛ばす件数が対戦数の同じ割合を超えれば起動しない (pool_errors)。
+件数と理由は manifest.json の facts.pools に残す。不合法は自チーム・相手とも check_advisor_player が対戦ごとに飛ばす。
+純粋な部分 (計画・コマンド・環境・割り付け・見積もり・プールの検査の判定) は tests/test_arc_remeasure.py で確かめる。
 """
 from __future__ import annotations
 
@@ -38,8 +41,8 @@ from typing import Optional, Sequence
 
 from champions_agent.config import (
     ARC_REMEASURE_DEADLINE, ARC_REMEASURE_FORMAT_DEFAULT, ARC_REMEASURE_FORMATS, ARC_REMEASURE_JOBS,
-    ARC_REMEASURE_META_SNAPSHOT, ARC_REMEASURE_OUT_PREFIX, ARC_REMEASURE_SEC_PER_BATTLE, MY_TEAM_DISABLED_ENV,
-    SHOWDOWN_PORT)
+    ARC_REMEASURE_MAX_INVALID_FRAC, ARC_REMEASURE_META_SNAPSHOT, ARC_REMEASURE_OUT_PREFIX, ARC_REMEASURE_SEC_PER_BATTLE,
+    MY_TEAM_DISABLED_ENV, SHOWDOWN_PORT)
 
 REPO = Path(__file__).resolve().parent.parent
 ARC_SEED = 20260904
@@ -233,6 +236,60 @@ def preflight_errors(facts: dict, battle_format: str, out_has_results: bool) -> 
         errs.append(f"フォーマット {battle_format} が pokemon-showdown/config/formats.ts に見つからない")
     if out_has_results:
         errs.append("出力先に前の結果 (*.json) がある")
+    errs.extend(pool_errors(facts.get("pools")))
+    return errs
+
+
+def summarize_pool(texts: Sequence[str], results: Sequence[tuple]) -> dict:
+    """プールの検査結果 (texts と同じ順の [(ok, errors)]) → {n, invalid, frac, reasons {理由: 件数}} (純粋)"""
+    from tools.check_advisor_player import skip_reason
+    reasons: dict = {}
+    bad = 0
+    for ok, errs in results:
+        if not ok:
+            bad += 1
+            r = skip_reason(errs)
+            reasons[r] = reasons.get(r, 0) + 1
+    n = len(list(texts))
+    return {"n": n, "invalid": bad, "frac": round(bad / n, 4) if n else None,
+            "reasons": dict(sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0])))}
+
+
+def skips_in_run(seed: int, texts: Sequence[str], bad: set, n: int) -> int:
+    """Random(seed).choice の列 (不合法を飛ばす: check_advisor_player.draw_legal) で n 戦するあいだに飛ばす件数 (純粋)。
+    自チーム (seed + 1、全件 + 外部構築) と相手 (seed、上位 60) の両方に使う。全件不合法なら 0 (判定は summarize_pool の frac)"""
+    import random as _random
+    from tools.check_advisor_player import draw_legal
+    rng = _random.Random(seed)
+    texts = list(texts)
+    if not texts or len(bad & set(texts)) >= len(set(texts)):
+        return 0
+    legal = (lambda t: (t not in bad, ["不合法"] if t in bad else []))
+    return sum(len(draw_legal(rng, texts, legal)[1]) for _ in range(int(n)))
+
+
+def pool_errors(pools: Optional[dict], max_invalid_frac: float = ARC_REMEASURE_MAX_INVALID_FRAC) -> list:
+    """プールの合法性の起動前検査 (純粋)。pools が無ければ検査しない (未確認)。不合法は自チーム・相手とも対戦ごとに飛ばす
+    (check_advisor_player) ので、少数なら起動してよい。
+    - 検査そのものが動かない → 起動しない
+    - 自チームのプールの不合法の割合が max_invalid_frac を超える → 起動しない (フォーマットの取り違えか検査の故障の疑い)
+    - 相手の列で n 戦のあいだに飛ばす件数が n の max_invalid_frac を超える → 起動しない (2026-10-09 運用側の判断で
+      「列に 1 件でも来たら起動しない」から変更)"""
+    if not pools:
+        return []
+    if pools.get("error"):
+        return [f"プールの合法性を検査できない: {pools['error']}"]
+    errs = []
+    own, opp = pools.get("own") or {}, pools.get("opp") or {}
+    fmt = pools.get("battle_format")
+    if own.get("frac") is not None and own["frac"] > max_invalid_frac:
+        errs.append(f"自チームのプールの {own['invalid']}/{own['n']} ({own['frac']:.1%}) が {fmt} で不合法 "
+                    f"(上限 {max_invalid_frac:.0%}、ARC_REMEASURE_MAX_INVALID_FRAC)。フォーマットの取り違えか検査の故障の疑い")
+    n = int(pools.get("n_battles") or 0)
+    k = int(opp.get("skips_in_run") or 0)
+    if n > 0 and k / n > max_invalid_frac:
+        errs.append(f"相手の列で {n} 戦のあいだに {k} 件 ({k / n:.1%}) の不合法なチームを飛ばす見込み "
+                    f"(上限 {max_invalid_frac:.0%}、ARC_REMEASURE_MAX_INVALID_FRAC。理由: {'; '.join(opp.get('reasons') or {})})")
     return errs
 
 
@@ -313,6 +370,31 @@ def collect_facts(pin_dir: Optional[Path], battle_format: str) -> dict:
             "showdown_listening": _listening(SHOWDOWN_PORT), "format_known": _format_known(battle_format),
             "git_head": _git(["rev-parse", "--short", "HEAD"]), "git_branch": _git(["rev-parse", "--abbrev-ref", "HEAD"]),
             "git_dirty": [ln[3:] for ln in (_git(["status", "--porcelain"]) or "").splitlines() if ln.strip()]}
+
+
+def collect_pool_facts(battle_format: str, n_battles: int, validate_many=None) -> dict:
+    """自チームのプール (RankedTeambuilder 既定: 全件 + 外部構築) と相手のプール (上位 60、外部なし) を、META_PIN の型で組んで
+    対戦フォーマットで全件検査する (2026-10-09。276 + 60 件を 4 並列で約 25 秒)。check_advisor_player の腕と同じ組み方・seed"""
+    from champions_agent.env.ranked_teams import build_ranked_teams, pinned_meta_snapshot_id
+    from tools.team_build.sets import VALIDATE_RUN_FAILED, validate_team_texts
+    validate_many = validate_many or validate_team_texts
+    t0 = time.time()
+    meta = pinned_meta_snapshot_id()
+    own = build_ranked_teams(top_n=None, include_external=True, meta_snapshot_id=meta)
+    opp = build_ranked_teams(top_n=60, include_external=False, meta_snapshot_id=meta)
+    out: dict = {"battle_format": battle_format, "meta_snapshot": meta, "n_battles": int(n_battles), "error": None}
+    res_own = validate_many(own, battle_format)
+    res_opp = validate_many(opp, battle_format)
+    failed = [e[0] for ok, e in list(res_own) + list(res_opp) if not ok and e and str(e[0]).startswith(VALIDATE_RUN_FAILED)]
+    if failed:
+        out["error"] = failed[0]
+        return out
+    bad_own = {t for t, (ok, _) in zip(own, res_own) if not ok}
+    bad_opp = {t for t, (ok, _) in zip(opp, res_opp) if not ok}
+    out["own"] = dict(summarize_pool(own, res_own), skips_in_run=skips_in_run(ARC_SEED + 1, own, bad_own, n_battles))
+    out["opp"] = dict(summarize_pool(opp, res_opp), skips_in_run=skips_in_run(ARC_SEED, opp, bad_opp, n_battles))
+    out["sec"] = round(time.time() - t0, 1)
+    return out
 
 
 def make_pin() -> Path:
@@ -432,6 +514,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     pin["dir"] = str(pin_dir)
     pin["arc_pin"] = "無し (ピンは 2026-09-05 04:09 に導入、最初のピンは 20260905_184623。アーク中は常時学習中のライブの EMA)"
     facts = collect_facts(pin_dir, battle_format)
+    # プールの合法性 (2026-10-09: M-B の再測定が 7 戦目で停滞)。不合法の件数は manifest の facts.pools に残る
+    facts["pools"] = collect_pool_facts(battle_format, max(j["battles"] for j in jobs))
+    pools = facts["pools"]
+    if not pools.get("error"):
+        print(f"[arc] プールの合法性 ({battle_format}、{pools.get('sec')} 秒): 自チーム 不合法 {pools['own']['invalid']}/"
+              f"{pools['own']['n']} (この対戦数で飛ばす見込み {pools['own']['skips_in_run']} 件) / 相手 不合法 "
+              f"{pools['opp']['invalid']}/{pools['opp']['n']} (この対戦数で飛ばす見込み {pools['opp']['skips_in_run']} 件)")
     out_has = out_dir.exists() and any(out_dir.glob("*/*.json"))
     errs = preflight_errors(facts, battle_format, out_has)
     if errs:

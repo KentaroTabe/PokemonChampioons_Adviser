@@ -153,6 +153,7 @@ TESTS=(
   test_usefulness_p1
   test_usefulness_verdict
   test_arc_remeasure
+  test_advisor_team_validate
 )
 
 fail=0
