@@ -64,12 +64,13 @@ def register_team_text(text: str, resolver=None) -> dict:
     out = {}
     _SIM_BUILDS.clear()
     _SIM_MOVES.clear()
+    aliases: list = []
     for block in (text or "").strip().split("\n\n"):
         lines = [l.strip() for l in block.strip().splitlines() if l.strip()]
         if not lines:
             continue
-        head = lines[0].split("@")[0].strip()
-        sid = re.sub(r"[^a-z0-9]", "", head.lower())
+        head, _, item = lines[0].partition("@")
+        sid = re.sub(r"[^a-z0-9]", "", head.strip().lower())
         ja = species_ja_name(sid) or sid
         ev, nature = {}, {}
         moves: list = []
@@ -95,7 +96,51 @@ def register_team_text(text: str, resolver=None) -> dict:
         _SIM_BUILDS[ja] = build
         _SIM_MOVES[ja] = moves
         out[ja] = build
+        mega_ja = _mega_alias_ja(sid, item)
+        if mega_ja and mega_ja != ja:
+            aliases.append((mega_ja, build, moves))
+    # メガ後の形態の日本語名でも同じ型を引けるようにする (2026-10-09: フォルム違いの基本種からのメガ。
+    # floetteeternal @ floettite → メガ後 floettemega の基本種は gimmick._base_of で floette に戻り、送った名前
+    # 「フラエッテ(えいえんのはな)」に当たらず既定の型で参照されていた)。基本種の名前で引ける個体 (ミミロップ等) には足さない
+    # (_mega_alias_ja)。本文の個体の名前の登録は上書きしない。戻り値には含めない
+    for mega_ja, build, moves in aliases:
+        if mega_ja not in _SIM_BUILDS:
+            _SIM_BUILDS[mega_ja] = build
+            _SIM_MOVES[mega_ja] = moves
     return out
+
+
+def _mega_stone_form(sid: str, item: Optional[str]) -> Optional[str]:
+    """本文の個体 (種族 id sid) の持ち物がその種のメガ石なら、メガ後の形態 id (石の表 gimmick.stone_table)。
+    その種の石と言えるのは、メガ後の基本種 (gimmick._base_of) が sid と同じか sid の前方 (フォルム違い: floetteeternal と
+    floette) のとき。石でない・別の種の石なら None (純粋。図鑑と石の表を引く)"""
+    iid = re.sub(r"[^a-z0-9]", "", str(item or "").lower())
+    if not iid or not sid:
+        return None
+    try:
+        from advisor.gimmick import _base_of, stone_table
+        form = stone_table().get(iid)
+    except Exception:
+        return None
+    if not form:
+        return None
+    base = _base_of(form)
+    return form if (base and sid.startswith(base)) else None
+
+
+def _mega_alias_ja(sid: str, item: Optional[str]) -> Optional[str]:
+    """本文の個体がメガ石を持ち、メガ後の登録参照 (engine.registration_names: 基本種の日本語名 → 個体の日本語名) が本文の名前に
+    当たらないとき、メガ後の形態の日本語名 (別名の登録用)。それ以外は None。
+    基本種の日本語名が本文の名前と同じ (lopunny → ミミロップ) なら基本種の名前で引けるので別名は作らない (従来の登録のまま)。
+    作るのはフォルム違いの基本種 (floetteeternal: 本文の名前 フラエッテ(えいえんのはな)、基本種 floette の名前 フラエッテ) だけ"""
+    form = _mega_stone_form(sid, item)
+    if not form:
+        return None
+    from advisor.gimmick import _base_of
+    if species_ja_name(_base_of(form)) == (species_ja_name(sid) or sid):
+        return None
+    ja = species_ja_name(form)
+    return ja if ja and ja != form else None
 
 
 def team_text_species(text: str) -> list:
@@ -200,7 +245,8 @@ def set_sha16(canon: Optional[dict]) -> Optional[str]:
 
 
 def text_set_of(text: Optional[str], species_id: Optional[str]) -> Optional[dict]:
-    """送った本文のうち、種族 id (メガ・フォルム違いは本文の種族 id の前方一致) の個体の型の正規形 (純粋)。無ければ None"""
+    """送った本文のうち、種族 id (メガ・フォルム違いは本文の種族 id の前方一致。前方一致しないメガ後の形態は、その石を持つ個体)
+    の個体の型の正規形 (純粋)。無ければ None"""
     sid = re.sub(r"[^a-z0-9]", "", str(species_id or "").lower())
     if not text or not sid:
         return None
@@ -211,9 +257,17 @@ def text_set_of(text: Optional[str], species_id: Optional[str]) -> Optional[dict
             continue
         head, _, item = lines[0].partition("@")
         bid = re.sub(r"[^a-z0-9]", "", head.lower())
-        if not bid or not (sid == bid or sid.startswith(bid)):
+        if not bid:
             continue
-        if best is not None and len(bid) <= best[0]:
+        if sid == bid or sid.startswith(bid):
+            rank = len(bid)
+        elif _mega_stone_form(bid, item.strip()) == sid:
+            # メガ後の種族 id が本文の名前の前方一致にならない (floettemega と本文の floetteeternal @ floettite) ときは、
+            # その石でメガシンカした個体とみなす (2026-10-09)。石で決まるので名前の前方一致より優先する
+            rank = len(sid) + 1
+        else:
+            continue
+        if best is not None and rank <= best[0]:
             continue
         ev, nature, moves = {}, {}, []
         for l in lines[1:]:
@@ -223,7 +277,7 @@ def text_set_of(text: Optional[str], species_id: Optional[str]) -> Optional[dict
                 ev = _ev_of_line(l)
             elif l.endswith("Nature"):
                 nature = _nature_mult(l.split()[0].lower())
-        best = (len(bid), canonical_set(ev, nature, item.strip() or None, moves))
+        best = (rank, canonical_set(ev, nature, item.strip() or None, moves))
     return best[1] if best else None
 
 

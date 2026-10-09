@@ -1,0 +1,36 @@
+{
+ "_source": {
+  "file": "pokemon-showdown/data/pokedex.ts",
+  "showdown_commit": "d849b2200",
+  "include_changes_from": false,
+  "rule": "battleOnly (複数なら先頭)。形態と変化前の種が advisor.dex にあり、地方フォルムをまたがない"
+ },
+ "forms": {
+  "aegislashblade": "aegislash",
+  "castformrainy": "castform",
+  "castformsnowy": "castform",
+  "castformsunny": "castform",
+  "cramorantgorging": "cramorant",
+  "cramorantgulping": "cramorant",
+  "darmanitanzen": "darmanitan",
+  "eiscuenoice": "eiscue",
+  "floettemega": "floetteeternal",
+  "magearnaoriginalmega": "magearnaoriginal",
+  "meloettapirouette": "meloetta",
+  "mimikyubusted": "mimikyu",
+  "morpekohangry": "morpeko",
+  "palafinhero": "palafin",
+  "tatsugiricurlymega": "tatsugiri",
+  "tatsugiridroopymega": "tatsugiridroopy",
+  "tatsugiristretchymega": "tatsugiristretchy",
+  "terapagosstellar": "terapagos",
+  "terapagosterastal": "terapagos",
+  "toxtricitylowkeygmax": "toxtricitylowkey",
+  "urshifurapidstrikegmax": "urshifurapidstrike",
+  "wishiwashischool": "wishiwashi",
+  "zaciancrowned": "zacian",
+  "zamazentacrowned": "zamazenta",
+  "zygardecomplete": "zygarde",
+  "zygardemega": "zygarde"
+ }
+}
