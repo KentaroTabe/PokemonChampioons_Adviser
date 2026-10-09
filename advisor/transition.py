@@ -72,6 +72,15 @@ resolve_move(full=True) (= _resolve_move_full) を使い、次を追加で解決
 | どんかん・アロマベール 等 / マジックミラー | 揮発状態を受けない / 跳ね返しは未対応 (unsupported "magic_bounce") | abilities (status_immune の volatile) |
 | みがわり | 最大 HP の 1/4 (切り捨て) を失い同じ HP の身代わり (HP が 1/4 以下・既にあれば失敗)。身代わりは次の攻撃を受け (超えた分は通らない)、反動・吸収は身代わりへのダメージで掛かり、接触ダメージ・追加効果は無い。状態異常の技は失敗。音技 (bypasssub)・すりぬけは貫通 | data/moves.ts substitute |
 | こらえる | このターン、技のダメージを HP 1 で耐える (タスキより先)。後に行動する者が居なければ失敗。ターンの終わりに消える | data/moves.ts endure |
+
+2026-10-09 M2e で resolve_turn_branches / full に足したこと (数値・表は data/transition_effects.json の *_m2e の欄。両陣営):
+
+| 効果 | 扱い | Showdown の根拠 |
+|---|---|---|
+| くろいきり | 場の両方の個体の能力ランクを 0 に戻す (対象は場全体: 相手がひんし・まもる・みがわりでも出る)。遷移後の状態のランクが 0 なので V の後続の対面にも効く | data/moves.ts haze (onHitField → clearBoosts) |
+| ふきとばし・ほえる | 優先度 −6、必中、まもる・みがわりを貫通。失敗: 対象の陣営に交代できる控えが無い (最後の 1 体)、きゅうばん・ばんけん (かたやぶりで無視)、ねをはる、おうごんのからだ、ぼうおん (ほえる)、かぜのり (ふきとばし。攻撃 +1)。マジックミラーは未対応 (unsupported "magic_bounce")。成功したら対象の控え (生存) と未判明の残りから均等に 1 体を引き出す分岐 (引き出された個体は着地時の設置技を受け、引っ込んだ個体の能力ランクは 0)。未判明の残りを引いた分岐は未評価 (TurnResult.unevaluated。その分岐ではそれ以後の行動を解決しない) | data/moves.ts whirlwind / roar、sim/battle-actions.ts forceSwitch / dragIn、data/abilities.ts suctioncups / guarddog / goodasgold / windrider |
+| トリック・やどりぎのタネ | 未対応のまま (effect_unmodeled。次の単位) | |
+| 攻撃技の強制交代 (ドラゴンテール・ともえなげ) | 範囲外 (従来どおりダメージだけ。強制交代は解決しない) | |
 """
 from __future__ import annotations
 
@@ -194,6 +203,9 @@ class TurnResult:
     winner: Optional[str] = None
     end_reason: Optional[str] = None
     faint_seq: list = field(default_factory=list)
+    # 未評価の分岐の印 (2026-10-09 M2e。resolve_turn_branches だけが埋める): [(who, effect, source)]。ふきとばし・ほえる で
+    # 未判明の個体を引き出した分岐など、状態を作れない分岐。採点 (advisor.scoring_transition) はこの分岐の確率を未評価の区間に回す
+    unevaluated: list = field(default_factory=list)
 
 
 def is_attack_action(act: Action) -> bool:
@@ -286,6 +298,12 @@ def apply_switch(side: SimSide, idx: int) -> SimSide:
     new_bench[idx] = (side.active, side.active_hp)
     return replace(side, active=view, active_hp=hp, bench=new_bench, mega_forms={}, volatiles=frozenset(),
                    last_move=None, sub_hp=0.0)
+
+
+def drag_in(side: SimSide, idx: int) -> SimSide:
+    """強制交代 (ふきとばし・ほえる。2026-10-09 M2e): 控え idx を引き出す。引っ込んだ個体の能力ランクは 0 に戻り (Showdown の
+    clearVolatile)、引き出された個体は着地時の設置技を受ける (apply_switch)。apply_switch 自体は変えない (通常の交代は従来どおり)"""
+    return apply_switch(replace(side, active=replace(side.active, boosts={})), idx)
 
 
 def mega_evolve(side: SimSide) -> SimSide:
@@ -718,6 +736,33 @@ def _bypasses_sub(move_id: str, user_view: MonView) -> bool:
     return (te.get("substitute_bypass_ability_effect") or "ignore_screens_substitute") in misc
 
 
+def _force_switch_immunity(move_id: str, user: SimSide, target: SimSide) -> Optional[tuple]:
+    """ふきとばし・ほえる (2026-10-09 M2e) が対象の特性・状態で失敗する理由 (失敗しなければ None)。戻り値 (理由, 対象の能力変化 or None)。
+    TryHit の段 (おうごんのからだ = 変化技、ぼうおん等 = 技の印、かぜのり = wind の技で攻撃 +1) と DragOut の段 (きゅうばん・
+    ばんけん = force_switch_block_effect、ねをはる = force_switch_block_volatiles) の順。特性はかたやぶり系で無視する"""
+    from advisor import effects as E
+    te = transition_effects()
+    tv = target.active
+    flags = set(E.move_entry(move_id).get("flags") or ())
+    mold = _ignores_target_ability(user.active)
+    if not mold:
+        for f in E.ability_formulas(tv.ability):
+            if f.get("kind") != "immune" or f.get("effect") == "reflect":
+                continue
+            if f.get("status_moves"):
+                return ("status_move_immune", None)
+            if f.get("move_flag") and f["move_flag"] in flags:
+                return (f"{f['move_flag']}_immune", None)
+        wind = (te.get("wind_immune_abilities") or {}).get(tv.ability or "")
+        if wind is not None and "wind" in flags:
+            return ("wind_immune", dict(wind))
+        if E.has_effect(tv.ability, te.get("force_switch_block_effect") or "no_force_switch"):
+            return ("force_switch_blocked", None)
+    if any(v in target.volatiles for v in (te.get("force_switch_block_volatiles") or ())):
+        return ("force_switch_blocked", None)
+    return None
+
+
 def _no_secondary_taken(view: MonView) -> bool:
     _k, misc = _ability_kinds(view.ability)
     return "no_secondary_taken" in misc or (view.item or "") in (transition_effects().get("flinch_block_items") or ())
@@ -816,6 +861,12 @@ def _resolve_move_full(user: SimSide, target: SimSide, move_id: str, fieldv: Opt
         user = replace(user, volatiles=user.volatiles | {"endure"})
         events.append(("user", "endure", None))
         return MoveResult(user, target, True, 0.0, events, unsupported, faint_order)
+    if move_id in (te.get("clear_all_boosts_moves") or ()):
+        # くろいきり (M2e): 場の全個体の能力ランクを 0 に戻す (target "all"。まもる・みがわり・対象のひんしに関係なく出る)
+        user = replace(user, active=replace(user.active, boosts={}))
+        target = replace(target, active=replace(target.active, boosts={}))
+        events.append(("user", "clear_all_boosts", move_id))
+        return MoveResult(user, target, True, 0.0, events, unsupported, faint_order)
 
     # --- 相手を対象にする技: 対象がひんしなら失敗、しめりけ ---
     if target.active_hp <= 0:
@@ -850,6 +901,28 @@ def _resolve_move_full(user: SimSide, target: SimSide, move_id: str, fieldv: Opt
             tag = f"encore:{target.last_move}" if encore else "taunt"
             target = replace(target, volatiles=target.volatiles | {tag})
             events.append(("target", vol, target.last_move if encore else None))
+        return MoveResult(user, target, True, 0.0, events, unsupported, faint_order)
+
+    if entry.get("force_switch") and category == "Status":
+        # ふきとばし・ほえる (M2e): 必中。まもるは技の印 protect が無ければ貫通、みがわりは bypasssub で貫通。成功したら
+        # 印 ("target", "force_switch") を返し、引き出す個体の分岐 (対象の陣営の控えが無ければ失敗) は呼び出し側 (_act) が作る
+        flags = set(entry.get("flags") or ())
+        tv = target.active
+        blocked = _force_switch_immunity(move_id, user, target)
+        if target_protected and "protect" in flags:
+            events.append(("target", "protected", move_id))
+        elif _reflects_status(tv) and not _ignores_target_ability(user.active):
+            unsupported.append(("user", "magic_bounce", move_id))
+        elif target.sub_hp > 0 and not _bypasses_sub(move_id, user.active):
+            events.append(("target", "substitute_block", move_id))
+        elif blocked is not None:
+            why, boost = blocked
+            if boost:
+                target = replace(target, active=_apply_boosts(tv, boost))
+                events.append(("target", "boost", why))
+            events.append(("user", "fail", why))
+        else:
+            events.append(("target", "force_switch", move_id))
         return MoveResult(user, target, True, 0.0, events, unsupported, faint_order)
 
     drowsy = move_id in (te.get("drowsy_moves") or ())
@@ -1267,12 +1340,13 @@ class _Branch:
     winner: Optional[str] = None      # 対戦が終わった分岐の勝者 (M2c)
     end_reason: Optional[str] = None
     skips: tuple = ()                 # 行動しなかった理由 ((陣営, 理由), ...)。併合のキーに入れる (score の「先に倒される」の集計)
+    unevaluated: tuple = ()           # 未評価の分岐の印 ((陣営, 効果, 技), ...)。空でなければ以後の行動を解決しない (M2e)
 
     def fork(self, mult: float) -> "_Branch":
         return _Branch(self.p * mult, self.me, self.opp, list(self.events), dict(self.acted), dict(self.fainted),
                        list(self.unsupported), {k: list(v) for k, v in self.unsupported_by.items()},
                        dict(self.protected), self.moved, self.flinched, self.faint_seq, self.winner, self.end_reason,
-                       self.skips)
+                       self.skips, self.unevaluated)
 
     def side(self, who: str) -> SimSide:
         return self.me if who == "me" else self.opp
@@ -1390,7 +1464,14 @@ def _step(br: _Branch, order: list, i: int, acts: dict, fields: dict, damage_fn,
     """order[i] の行動を解決した分岐の列 (行動前のひんし・ひるみ・ねむり/こおり・まひの行動不能を含む)"""
     if br.winner is not None or br.end_reason is not None:
         return [br]                     # 対戦が終わった分岐ではもう誰も行動しない
+    if br.unevaluated:
+        return [br]                     # 未評価の分岐 (未判明の個体を引き出した 等) は以後を解決しない (M2e)
     who = order[i][0]
+    if who in br.moved:
+        # まだ行動していないうちに ふきとばし・ほえる で場から外された (M2e): その行動は出ない。引き出された個体も行動しない
+        br.events.append((who, "skip", "dragged_out"))
+        br.skips = br.skips + ((who, "dragged_out"),)
+        return [br]
     atk = br.side(who)
     if atk.active_hp <= 0:
         # 行動前にひんし: 行動しない (与ダメージ 0、自滅も HP の消費も起きない)
@@ -1480,6 +1561,10 @@ def _act(br: _Branch, order: list, i: int, acts: dict, fields: dict, damage_fn, 
         nb.set_side(who, mr.user)
         nb.set_side(def_side, mr.target)
         _check_end(nb, reserves)
+        if nb.winner is None and any(w == "target" and k == "force_switch" for w, k, _d in mr.events):
+            # ふきとばし・ほえる (M2e): 対象の控え (生存) と未判明の残りから均等に 1 体 (dragIn = getRandomSwitchable)
+            out.extend(_force_switch_branches(nb, who, def_side, move_id, reserves))
+            continue
         # 交代技: 当たったら使用者はその場で控えを出す (繰り出し先は継続方策 best_bench)
         if nb.winner is None and any(w == "user" and k == "pivot" for w, k, _d in mr.events):
             s = nb.side(who)
@@ -1501,6 +1586,45 @@ def _act(br: _Branch, order: list, i: int, acts: dict, fields: dict, damage_fn, 
                 out.append(nb.fork(1.0 - chance))
         else:
             out.append(nb)
+    return out
+
+
+def _force_switch_branches(nb: _Branch, who: str, def_side: str, move_id: str, reserves: dict) -> list:
+    """強制交代の成功後の分岐 (M2e)。対象の陣営に交代できる個体 (生存した控え + 未判明の残り) が無ければ失敗 (moveHit の canSwitch)。
+    使用者・対象がひんしなら引き出さない (forceSwitch の target.hp > 0 かつ source.hp > 0)。判明した控えは drag_in の分岐、
+    未判明の残りを引いた分岐は未評価の印を付ける (状態を作れない)。確率は個体ごとに均等"""
+    s = nb.side(def_side)
+    if s.active_hp <= 0 or nb.side(who).active_hp <= 0:
+        return [nb]
+    alive = [i for i, (_v, hp) in enumerate(s.bench) if hp > 0]
+    unknown = max(0, int(reserves.get(def_side, 0) or 0))
+    total = len(alive) + unknown
+    if total == 0:
+        nb.events.append((who, "fail", "force_switch_no_reserve"))
+        return [nb]
+    out = []
+    # 対象の陣営がこのターンまだ行動していなければ、その行動は取り消し (場から外れた個体の行動は出ない。引き出された個体も
+    # 行動しない)。行動済みの印 (moved) を立て、_step が skip "dragged_out" にする
+    nb.moved = nb.moved | {def_side}
+    for i in alive:
+        f = nb.fork(1.0 / total)
+        s2 = drag_in(s, i)
+        f.set_side(def_side, s2)
+        f.events.append((def_side, "dragged_in", s2.active.species_id))
+        if s2.active_hp <= 0:
+            # 着地時の設置技でひんし (ターンの終わりに繰り出し)
+            f.faint_seq = f.faint_seq + (def_side,)
+            if not f.fainted[def_side]:
+                f.fainted[def_side] = True
+                f.events.append((def_side, "faint", None))
+            _check_end(f, reserves)
+        out.append(f)
+    if unknown:
+        f = nb.fork(unknown / total)
+        mark = (def_side, "force_switch_unknown", move_id)
+        f.unevaluated = f.unevaluated + (mark,)
+        f.events.append((def_side, "dragged_in", None))
+        out.append(f)
     return out
 
 
@@ -1556,7 +1680,7 @@ def _branch_key(b: _Branch, units: float, cache: dict) -> tuple:
     return (side_state_key(b.me, units, cache), side_state_key(b.opp, units, cache),
             b.acted["me"], b.acted["opp"], b.fainted["me"], b.fainted["opp"], b.protected["me"], b.protected["opp"],
             b.moved, b.flinched, b.faint_seq, b.winner, b.end_reason, b.skips, tuple(b.unsupported),
-            tuple(b.unsupported_by["me"]), tuple(b.unsupported_by["opp"]))
+            tuple(b.unsupported_by["me"]), tuple(b.unsupported_by["opp"]), b.unevaluated)
 
 
 def merge_branches(branches: list, units: float = 0.0, cache: Optional[dict] = None) -> list:
@@ -1591,7 +1715,7 @@ def _finish_branch(br: _Branch) -> TurnResult:
     1 ターンの揮発状態 (こらえる) を外す"""
     res = TurnResult(me=br.me, opp=br.opp, events=br.events, acted=br.acted, fainted=br.fainted,
                      unsupported=br.unsupported, unsupported_by=br.unsupported_by, winner=br.winner,
-                     end_reason=br.end_reason, faint_seq=list(br.faint_seq))
+                     end_reason=br.end_reason, faint_seq=list(br.faint_seq), unevaluated=list(br.unevaluated))
     me, opp = br.me, br.opp
     for lbl in ("me", "opp"):
         side = me if lbl == "me" else opp

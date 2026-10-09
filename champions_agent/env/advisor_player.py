@@ -155,9 +155,11 @@ def team_text_species(text: str) -> list:
 
 def team_matches_species(text: str, species) -> bool:
     """チームテキストが対戦の自分の個体 (poke-env の battle.team の種族 id) と合うか (純粋)。
-    メガ・フォルム違い (gyaradosmega / aegislashblade) は本文の種族 id の前方一致で同じ個体とみなす"""
-    sids = [s for s in team_text_species(text) if s]
-    sp = [str(s or "") for s in (species or []) if s]
+    メガ・フォルム違い (gyaradosmega / aegislashblade) は本文の種族 id の前方一致で同じ個体とみなす。
+    両方の id を advisor.dex.canonical_species_id で正規化してから比べる (2026-10-09 M2e: indeedeef と indeedeefemale 等)"""
+    from advisor.dex import canonical_species_id
+    sids = [canonical_species_id(s) for s in team_text_species(text) if s]
+    sp = [canonical_species_id(s) for s in (species or []) if s]
     if not sids or not sp:
         return False
     return all(any(b == t or b.startswith(t) for t in sids) for b in sp)
@@ -246,8 +248,9 @@ def set_sha16(canon: Optional[dict]) -> Optional[str]:
 
 def text_set_of(text: Optional[str], species_id: Optional[str]) -> Optional[dict]:
     """送った本文のうち、種族 id (メガ・フォルム違いは本文の種族 id の前方一致。前方一致しないメガ後の形態は、その石を持つ個体)
-    の個体の型の正規形 (純粋)。無ければ None"""
-    sid = re.sub(r"[^a-z0-9]", "", str(species_id or "").lower())
+    の個体の型の正規形 (純粋)。無ければ None。名前の照合は両方を advisor.dex.canonical_species_id で正規化して行う (2026-10-09 M2e)"""
+    from advisor.dex import canonical_species_id
+    sid = canonical_species_id(species_id)
     if not text or not sid:
         return None
     best = None
@@ -256,12 +259,13 @@ def text_set_of(text: Optional[str], species_id: Optional[str]) -> Optional[dict
         if not lines:
             continue
         head, _, item = lines[0].partition("@")
-        bid = re.sub(r"[^a-z0-9]", "", head.lower())
+        raw_bid = re.sub(r"[^a-z0-9]", "", head.lower())
+        bid = canonical_species_id(raw_bid)
         if not bid:
             continue
         if sid == bid or sid.startswith(bid):
             rank = len(bid)
-        elif _mega_stone_form(bid, item.strip()) == sid:
+        elif _mega_stone_form(raw_bid, item.strip()) == sid:
             # メガ後の種族 id が本文の名前の前方一致にならない (floettemega と本文の floetteeternal @ floettite) ときは、
             # その石でメガシンカした個体とみなす (2026-10-09)。石で決まるので名前の前方一致より優先する
             rank = len(sid) + 1
@@ -306,8 +310,9 @@ def sets_match(ref: Optional[dict], exp: Optional[dict]) -> bool:
 
 def check_reference(corr: dict, p: Optional[dict], text: Optional[str], resolver) -> Optional[bool]:
     """1 決定ぶんの (b) の検査を corr (対戦ごとの記録) に積む。戻り値: 一致 True / 不一致 False / 検査できない None。
-    助言の図鑑に無い種 (フォルム違い: indeedeef 等。build_mon_view が None) は型を参照していないので不一致に数えず、
-    ref_unbuilt に数える (助言はその個体を評価できない。両条件で同じ)"""
+    助言の図鑑に無い種 (build_mon_view が None) は型を参照していないので不一致に数えず、ref_unbuilt に数える
+    (助言はその個体を評価できない。2026-10-09 M2e から ref_unbuilt > 0 の対戦があれば正式判定を出さない: usefulness_verdict)。
+    シミュレータの id が図鑑の別名 (indeedeef 等) のものは advisor.dex.canonical_species_id で図鑑を引けるので unbuilt にならない"""
     if not p or not p.get("species_id"):
         return None
     ref = referenced_set(p, resolver)
@@ -347,6 +352,8 @@ def _mon_entry(p, own: bool, resolver, active: bool, available=None) -> dict:
     if p.fainted:
         st = "fainted"
     item = p.item if p.item not in (None, "", "unknown_item") else None
+    # species_id はシミュレータの id のまま (使用率 DB の名前と同じ)。図鑑・名前は別名を正規化して引く
+    # (advisor.dex.canonical_species_id / species_ja_name。2026-10-09 M2e)
     entry = {
         "species_id": sid,
         "species_ja": species_ja_name(sid) or sid,

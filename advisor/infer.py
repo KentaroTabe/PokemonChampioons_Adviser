@@ -89,6 +89,12 @@ def species_ja_name(species_id: str) -> str:
             _ID2JA.setdefault(v["id"], ja)
     if species_id in _ID2JA:
         return _ID2JA[species_id]
+    # シミュレータの id と図鑑の id が別名のもの (indeedeef → indeedeefemale 等、advisor.dex.canonical_species_id) は
+    # 図鑑の id の名前にする (2026-10-09 M2e: 送った本文の登録と場の個体が同じ名前になる)
+    from advisor.dex import species_aliases
+    alias = species_aliases().get(species_id or "")
+    if alias and alias != species_id:
+        return species_ja_name(alias)
     if species_id in _FORM_EXPLICIT:
         return _FORM_EXPLICIT[species_id]
     for suf, fmt in _FORM_SUFFIXES:

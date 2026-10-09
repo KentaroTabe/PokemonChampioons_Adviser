@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
@@ -27,9 +28,15 @@ class Dex:
         return list(self._species.keys())
 
     def species(self, species_id: Optional[str]) -> Optional[dict]:
+        """種族 id → 図鑑の項目。シミュレータの id の別名 (indeedeef 等、canonical_species_id) も同じ項目を引く"""
         if not species_id:
             return None
-        return self._species.get(species_id)
+        got = self._species.get(species_id)
+        if got is None:
+            alias = species_aliases().get(species_id)
+            if alias:
+                got = self._species.get(alias)
+        return got
 
     def move(self, move_id: Optional[str]) -> Optional[dict]:
         if not move_id:
@@ -43,6 +50,28 @@ class Dex:
         for t in defender_types:
             mult *= row.get(t, 1.0)
         return mult
+
+
+SPECIES_ALIASES_PATH = Path(__file__).resolve().parent / "data" / "species_aliases.json"
+
+
+@lru_cache(maxsize=1)
+def species_aliases() -> dict:
+    """シミュレータ (Showdown / poke-env) の種族 id → 助言の図鑑の id の別名表 (advisor/data/species_aliases.json)。読めなければ空"""
+    try:
+        return dict(json.loads(SPECIES_ALIASES_PATH.read_text(encoding="utf-8")).get("aliases") or {})
+    except Exception:
+        return {}
+
+
+def canonical_species_id(species_id: Optional[str]) -> str:
+    """種族 id の正規化 (2026-10-09 M2e): 英数字の小文字にし、シミュレータの id と図鑑の id が別名のもの (indeedeef →
+    indeedeefemale、vivillonfancy → vivillon 等。表は species_aliases) を図鑑の id にする。別名でなければそのまま。
+    図鑑の項目の引き当て (Dex.species)・助言の個体の名前 (advisor.infer.species_ja_name)・送った本文と参照した型の照合
+    (champions_agent.env.advisor_player)・構築プールの検査 (tools.scoring_pool) がこの 1 つの変換を使う。
+    状態の species_id そのものは書き換えない (使用率 DB の名前はシミュレータの id のため)"""
+    sid = re.sub(r"[^a-z0-9]", "", str(species_id or "").lower())
+    return species_aliases().get(sid, sid)
 
 
 def get_dex() -> Dex:

@@ -38,6 +38,22 @@ def pool_sha16(texts: Sequence[str]) -> str:
     return sha256_text("\n\n\n".join(texts))
 
 
+def unsupported_species(texts: Sequence[str]) -> dict:
+    """本文の列のうち、助言の図鑑 (advisor.dex) で引けない種を持つチーム {本文の位置: [種族 id]} (2026-10-09 M2e)。
+    種族 id は champions_agent.env.advisor_player.team_text_species の読み方 (1 行目の「@」より前を英数字だけ) で、
+    advisor.dex.canonical_species_id の別名 (indeedeef → indeedeefemale 等) で引ければ対応済み。
+    引けない種の個体は助言が評価できない (advisor_player.check_reference の ref_unbuilt、usefulness_verdict で正式判定を止める)"""
+    from advisor.dex import canonical_species_id, get_dex
+    from champions_agent.env.advisor_player import team_text_species
+    dex = get_dex()
+    out = {}
+    for i, t in enumerate(texts):
+        bad = [sid for sid in team_text_species(t) if sid and dex.species(canonical_species_id(sid)) is None]
+        if bad:
+            out[i] = bad
+    return out
+
+
 def pool_doc(texts: Sequence[str], team_ids: Sequence[str], *, snapshot_id: Optional[int], battle_format: str, seed: int,
              n_requested: int, n_generated: int, excluded: Sequence[dict], db_path: Optional[str],
              showdown: Optional[dict] = None, created_at: Optional[str] = None) -> dict:
@@ -59,7 +75,8 @@ def pool_doc(texts: Sequence[str], team_ids: Sequence[str], *, snapshot_id: Opti
 
 
 def check_pool_doc(doc: Optional[dict]) -> list:
-    """プールファイルの検査 (純粋)。問題の list (空なら使ってよい): 本文の sha16 が記録と一致・件数が記録と一致・1 件以上"""
+    """プールファイルの検査 (純粋)。問題の list (空なら使ってよい): 本文の sha16 が記録と一致・件数が記録と一致・1 件以上・
+    全チームの種が助言の図鑑で引ける (unsupported_species。2026-10-09 M2e)"""
     if not doc:
         return ["プールファイルが読めない"]
     errs = []
@@ -71,6 +88,10 @@ def check_pool_doc(doc: Optional[dict]) -> list:
     actual = pool_sha16(texts) if texts else None
     if doc.get("sha16") != actual:
         errs.append(f"本文の sha16 {actual} が記録 {doc.get('sha16')} と違う")
+    bad = unsupported_species(texts)
+    if bad:
+        sp = sorted({sid for v in bad.values() for sid in v})
+        errs.append(f"助言の図鑑で引けない種を持つチーム {len(bad)} 件 ({', '.join(sp)})")
     return errs
 
 
@@ -109,6 +130,12 @@ def build_pool(db_path: Path, showdown_dir: Path, n: int, seed: int, snapshot_id
     texts, ids, excluded = [], [], []
     for i, t in enumerate(teams):
         text = by_id[t.team_id]
+        # 助言の図鑑で引けない種 (別名の表 advisor/data/species_aliases.json でも対応できないもの) は勝敗を見ずに先に除く
+        # (2026-10-09 M2e。理由は excluded に残す)
+        bad = unsupported_species([text]).get(0)
+        if bad:
+            excluded.append({"team_id": t.team_id, "errors": [f"助言の図鑑で引けない種: {', '.join(bad)}"]})
+            continue
         ok, errs = validate_team_text(text, battle_format, showdown_dir=showdown_dir)
         if ok:
             texts.append(text)

@@ -1,0 +1,23 @@
+{
+ "_source": {
+  "file": "pokemon-showdown/data/pokedex.ts, data/mods/champions/learnsets.ts",
+  "showdown_commit": "d849b2200",
+  "rule": "シミュレータ (Showdown / poke-env) の種族 id → 助言の図鑑 (advisor/data/dex.json) の id。同じ個体で id の綴りだけが違うもの。種族値・タイプが一致することを確かめたものだけ載せる (2026-10-09 M2e)。メガ形態は載せない (石の表 gimmick.stone_table が Showdown の id を使うため)",
+  "notes": {
+   "vivillonfancy": "図鑑に無い。Showdown の Vivillon-Fancy は vivillon と種族値・タイプ・特性が同じで、champions mod の learnset は空 (基本種の vivillon の learnset を引く。sim/dex-species.ts の forme without its own learnset) なので vivillon の別名にする"
+  }
+ },
+ "aliases": {
+  "basculegionf": "basculegionfemale",
+  "indeedeef": "indeedeefemale",
+  "mausholdfour": "mausholdfamilyoffour",
+  "meowsticf": "meowsticfemale",
+  "squawkabillyblue": "squawkabillyblueplumage",
+  "squawkabillywhite": "squawkabillywhiteplumage",
+  "squawkabillyyellow": "squawkabillyyellowplumage",
+  "taurospaldeaaqua": "taurospaldeaaquabreed",
+  "taurospaldeablaze": "taurospaldeablazebreed",
+  "taurospaldeacombat": "taurospaldeacombatbreed",
+  "vivillonfancy": "vivillon"
+ }
+}

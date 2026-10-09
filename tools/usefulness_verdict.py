@@ -18,8 +18,15 @@ n が最終対戦数に満たない、または条件表が incomplete: true な
 全条件の対象 n 戦ぶんの相手 id (battles.jsonl の opponent_team_id) が揃い条件間で一致することを確かめられなければ、比較条件の不成立 (mode invalid) として採否を出さない (統計的な判定不能とは別。2026-10-09 レビュー指摘 1)。
 採点方式の比較で条件表が own_check.required を持てば (2026-10-09 M2d、usefulness_p1 が書く)、自チームの対応も確かめる: 対戦 i の
 送った自チームの本文の sha16 (battles.jsonl の own_team_sha16) が条件間で一致し、各条件で助言が参照した型と送った型の不一致
-(ref_check.mismatch) が 0 で、確認できない対戦が無いときだけ最終判定を出す (満たさなければ mode invalid、理由と件数を残す)。
+(ref_check.mismatch) が 0 で、確認できない対戦と助言が評価できない個体 (ref_check.unbuilt、2026-10-09 M2e) を含む対戦が無いときだけ
+最終判定を出す (満たさなければ mode invalid、理由と件数を残す)。
 各条件の勝率と Wilson 区間は参考値 (対応比較の代わりにはならない)。
+2 夜分割 (2026-10-09 M2e、usefulness_p1 --part k/n): --out に全 part の出力 dir を渡し、--merged-out に結合した判定を書く。
+各 part の条件表の part の範囲の順に、勝敗・相手 id・battles.jsonl の記録を条件ごとに連結して 1 回だけ判定する。結合の検査
+(merge_parts): 全 part が同じ n の別々の k、範囲が重複しない、各 part に全条件の結果がある、相手列の offset が範囲の先頭、
+比較の条件 (seed・fold・分割・自チームのプール・比較の設計・最終対戦数・git と Showdown の commit) が全 part で同じ。満たさなければ
+比較条件の不成立 (invalid)。範囲の抜け・part の未完了は対戦数の不足として中間確認 (interim)。全 part の所要秒の合計が採点比較の
+全体の上限 (条件表の scoring_time.time_limit_total_sec) を超えたら未完了。
 
 純粋な部分 (corrected_z / decide / compare / wilson / align / build_verdict / render) は tests/test_usefulness_verdict.py で確かめる。
 """
@@ -99,10 +106,13 @@ def scoring_fallback_summary(doc: Optional[dict]) -> Optional[dict]:
 def own_correspondence_check(records_by_cond: Optional[dict], conds: Sequence[str], n: int) -> tuple:
     """自チームの対応の検査 (純粋。2026-10-09 M2d、レビュー 6)。records_by_cond = 条件名 → battles.jsonl の記録の列。
     対戦 i (先頭 n 戦) について (a) 送った自チームの本文の sha16 (own_team_sha16) が条件間で一致、(b) 各条件で助言が参照した型と
-    送った型の不一致 (ref_check.mismatch) が 0、(c) 確認できない対戦 (own_team_sha16 が無い・ref_check が無いか検査 0 件) が無い。
+    送った型の不一致 (ref_check.mismatch) が 0、(c) 確認できない対戦 (own_team_sha16 が無い・ref_check が無いか検査 0 件) が無い、
+    (d) 助言が評価できない個体 (図鑑に無い種、ref_check.unbuilt) を含む対戦が無い (2026-10-09 M2e、レビュー: 両条件で同じ
+    評価不能が起きても比較が正しくなるわけではない)。
     戻り値 (成り立たない理由の list, 要約)。理由が空なら成立"""
     recs = records_by_cond or {}
     unverifiable, ref_bad, unbuilt = {}, {}, {}
+    unbuilt_species: dict = {}
     hash_mismatch = 0
     for c in conds:
         rows = list(recs.get(c) or [])[:n]
@@ -116,6 +126,8 @@ def own_correspondence_check(records_by_cond: Optional[dict], conds: Sequence[st
                 ref_bad[c] = ref_bad.get(c, 0) + 1
             if rc is not None and int(rc.get("unbuilt") or 0) > 0:
                 unbuilt[c] = unbuilt.get(c, 0) + 1
+                for sid in rc.get("unbuilt_species") or []:
+                    unbuilt_species[str(sid)] = unbuilt_species.get(str(sid), 0) + 1
     for i in range(n):
         shas = {(list(recs.get(c) or [])[i].get("own_team_sha16") if i < len(recs.get(c) or []) else None) for c in conds}
         shas.discard(None)
@@ -128,8 +140,11 @@ def own_correspondence_check(records_by_cond: Optional[dict], conds: Sequence[st
         reasons.append(f"助言が参照した型が送った型と違う対戦: {ref_bad}")
     if unverifiable:
         reasons.append(f"自チームの対応を確認できない対戦: {unverifiable}")
+    if unbuilt:
+        sp = ", ".join(f"{k} {v}" for k, v in sorted(unbuilt_species.items(), key=lambda kv: (-kv[1], kv[0]))) or "種の記録なし"
+        reasons.append(f"助言が評価できない個体 (図鑑に無い種) を含む対戦: {unbuilt} (種: {sp})")
     summary = {"n": n, "hash_mismatch": hash_mismatch, "ref_mismatch_battles": ref_bad, "unverifiable": unverifiable,
-               "unbuilt_battles": unbuilt}
+               "unbuilt_battles": unbuilt, "unbuilt_species": unbuilt_species}
     return reasons, summary
 
 
@@ -217,7 +232,8 @@ def build_verdict(conditions: dict, outcomes_by_cond: dict, weights: Sequence[fl
                   mde: float = P1_MDE, alpha: float = P1_ALPHA, sources: Optional[dict] = None,
                   opp_ids_by_cond: Optional[dict] = None, elapsed_by_cond: Optional[dict] = None,
                   baseline_cond: Optional[str] = None, compare_conds: Optional[Sequence[str]] = None,
-                  scoring_stats: Optional[dict] = None, own_records_by_cond: Optional[dict] = None) -> dict:
+                  scoring_stats: Optional[dict] = None, own_records_by_cond: Optional[dict] = None,
+                  extra_invalid: Sequence[str] = ()) -> dict:
     """集計 (純粋)。conditions = 条件表 (incomplete を見る)。outcomes_by_cond = 条件名 → 勝敗列 (1/0)。
     baseline_cond / compare_conds (採点方式の比較: scoring:legacy / [scoring:transition]) を渡せばその条件名で比べる
     (無ければ重みの条件 rl<W>)。scoring_stats (条件名 → scoring_fallback_summary) があれば結果に残す。
@@ -253,6 +269,8 @@ def build_verdict(conditions: dict, outcomes_by_cond: dict, weights: Sequence[fl
     if own_records_by_cond is not None and not missing:
         own_reasons, own_summary = own_correspondence_check(own_records_by_cond, [base] + others, n)
         invalid_reasons = invalid_reasons + own_reasons
+    # 2 夜分割の結合の検査 (2026-10-09 M2e、merge_parts) で成り立たなかった理由
+    invalid_reasons = invalid_reasons + list(extra_invalid or [])
     if invalid_reasons:
         mode = MODE_INVALID
     comparisons = []
@@ -406,6 +424,115 @@ def render(verdict: dict, conditions: Optional[dict] = None) -> str:
     return "\n".join(lines) + "\n"
 
 
+# 2 夜分割の part の間で同じでなければならない条件表の項目 (2026-10-09 M2e。merge_parts)
+PART_SAME_KEYS = (("factor",), ("baseline",), ("comparisons",), ("final_battles",), ("opponents", "seed"),
+                  ("opponents", "tier"), ("opponents", "fold"), ("opponents", "split_sha16"), ("team", "source"),
+                  ("team", "sha16"), ("git", "commit"), ("showdown", "commit"), ("scoring_time", "time_limit_total_sec"))
+
+
+def _dig(d: Optional[dict], path: tuple):
+    for k in path:
+        if not isinstance(d, dict):
+            return None
+        d = d.get(k)
+    return d
+
+
+def merge_parts(parts: Sequence[dict], conds: Sequence[str]) -> dict:
+    """2 夜分割の part の結合 (純粋。2026-10-09 M2e)。parts = [{"dir", "conditions", "outcomes", "sources", "opp_ids",
+    "elapsed", "records"}] (load_part の結果)。part の範囲 (conditions.part.start) の順に条件ごとに連結する。
+    戻り値 {"conditions" (結合した条件表), "outcomes", "sources", "opp_ids", "elapsed", "records", "invalid" (比較条件の不成立の
+    理由), "notes"}。範囲の抜けと part の未完了は incomplete (対戦数の不足として中間確認)、範囲の重複・条件の欠け・比較の条件の
+    食い違いは invalid"""
+    invalid, notes, incomplete_reasons = [], [], []
+    infos = []
+    for i, pt in enumerate(parts):
+        c = pt.get("conditions") or {}
+        pr = c.get("part")
+        if not isinstance(pr, dict):
+            invalid.append(f"{pt.get('dir')}: 条件表に part が無い (usefulness_p1 --part で測った出力ではない)")
+            continue
+        infos.append((int(pr.get("start", 0)), int(pr.get("end", 0)), i, pr))
+    infos.sort()
+    ns = {pr.get("n") for _s, _e, _i, pr in infos}
+    ks = [pr.get("k") for _s, _e, _i, pr in infos]
+    if len(ns) > 1:
+        invalid.append(f"part の分割数 n が違う: {sorted(ns)}")
+    if len(set(ks)) != len(ks):
+        invalid.append(f"同じ part (k) が重複している: {ks}")
+    prev_end = None
+    total = None
+    for start, end, i, pr in infos:
+        total = pr.get("total_battles", total)
+        if prev_end is not None and start < prev_end:
+            invalid.append(f"part の範囲が重複する: {start} < 前の part の終わり {prev_end}")
+        elif prev_end is not None and start > prev_end:
+            incomplete_reasons.append(f"part の範囲に抜けがある: {prev_end}〜{start - 1}")
+        prev_end = end if prev_end is None else max(prev_end, end)
+    if infos and infos[0][0] != 0:
+        incomplete_reasons.append(f"part の範囲が 0 から始まらない (最初は {infos[0][0]})")
+    if infos and total is not None and prev_end is not None and prev_end < int(total):
+        incomplete_reasons.append(f"part の範囲が {total} 戦に届かない (最後は {prev_end})")
+    if infos and ns and len(ns) == 1 and len(infos) < int(next(iter(ns)) or 0):
+        incomplete_reasons.append(f"part が {len(infos)} / {next(iter(ns))} 個しか無い")
+    base_c = (parts[infos[0][2]].get("conditions") or {}) if infos else {}
+    for path in PART_SAME_KEYS:
+        vals = {repr(_dig(parts[i].get("conditions"), path)) for _s, _e, i, _p in infos}
+        if len(vals) > 1:
+            invalid.append(f"比較の条件が part の間で違う ({'.'.join(path)}): {sorted(vals)}")
+    outcomes = {c: [] for c in conds}
+    opp_ids = {c: [] for c in conds}
+    records = {c: [] for c in conds}
+    elapsed = {c: 0.0 for c in conds}
+    sources = {c: [] for c in conds}
+    part_rows = []
+    elapsed_total = 0.0
+    for start, end, i, pr in infos:
+        pt = parts[i]
+        c_doc = pt.get("conditions") or {}
+        want = end - start
+        if int(_dig(c_doc, ("opponents", "offset")) or 0) != int(pr.get("opp_offset", start)):
+            invalid.append(f"part {pr.get('k')}/{pr.get('n')}: 相手列の offset {_dig(c_doc, ('opponents', 'offset'))} が範囲の先頭 "
+                           f"{pr.get('opp_offset', start)} と違う")
+        lacking = [c for c in conds if c not in (pt.get("outcomes") or {})]
+        if lacking:
+            invalid.append(f"part {pr.get('k')}/{pr.get('n')} ({pt.get('dir')}) に条件の結果が無い: {lacking}")
+        got = {c: len((pt.get("outcomes") or {}).get(c) or []) for c in conds}
+        if c_doc.get("incomplete") or any(v < want for v in got.values()):
+            incomplete_reasons.append(f"part {pr.get('k')}/{pr.get('n')} が未完了 (到達 {got} / {want} 戦"
+                                      + (f"、{' / '.join(c_doc.get('incomplete_reasons') or [])}" if c_doc.get("incomplete") else "") + ")")
+        for c in conds:
+            # 範囲の対戦数で切りそろえる (条件間で長さが違えば、短い方に合わせるのは build_verdict の align)
+            m = min(want, min(got.values()) if got else 0)
+            outcomes[c] += list((pt.get("outcomes") or {}).get(c) or [])[:m]
+            opp_ids[c] += list((pt.get("opp_ids") or {}).get(c) or [])[:m]
+            records[c] += list((pt.get("records") or {}).get(c) or [])[:m]
+            e = (pt.get("elapsed") or {}).get(c)
+            if e is None:
+                e = c_doc.get("elapsed_sec")
+            elapsed[c] += float(e or 0.0)
+            sources[c].append(f"part {pr.get('k')}/{pr.get('n')}: {(pt.get('sources') or {}).get(c)}")
+        el = c_doc.get("elapsed_sec")
+        elapsed_total += float(el or 0.0)
+        part_rows.append({"k": pr.get("k"), "n": pr.get("n"), "start": start, "end": end, "dir": pt.get("dir"),
+                          "elapsed_sec": el, "incomplete": c_doc.get("incomplete"), "started_at": c_doc.get("started_at")})
+    limit = _dig(base_c, ("scoring_time", "time_limit_total_sec"))
+    if limit is not None and elapsed_total > float(limit):
+        incomplete_reasons.append(f"全 part の所要秒の合計 {elapsed_total:.0f} が全体の上限 {float(limit):.0f} 秒を超える")
+    merged = dict(base_c)
+    merged.update(battles=sum(len(outcomes[c]) for c in conds[:1]) if conds else 0,
+                  incomplete=bool(incomplete_reasons),
+                  incomplete_reasons=incomplete_reasons, elapsed_sec=round(elapsed_total, 1),
+                  parts=part_rows, merged_from=[pt.get("dir") for pt in parts])
+    merged.pop("part", None)
+    ranges = ", ".join("%s/%s [%s, %s)" % (r["k"], r["n"], r["start"], r["end"]) for r in part_rows)
+    notes.append(f"2 夜分割の結合: {len(part_rows)} part ({ranges})")
+    return {"conditions": merged, "outcomes": {c: v for c, v in outcomes.items() if v},
+            "sources": {c: " + ".join(v) for c, v in sources.items()}, "opp_ids": {c: v for c, v in opp_ids.items() if v},
+            "elapsed": {c: (v if v > 0 else None) for c, v in elapsed.items()},
+            "records": {c: v for c, v in records.items() if v}, "invalid": invalid, "notes": notes}
+
+
 # ------------------------------------------------------------------ 読み込み (副作用: ファイル)
 def _read_jsonl(path: Path) -> list:
     out = []
@@ -470,6 +597,48 @@ def load_records_conds(out_dir: Path, conds: Sequence[str]) -> dict:
     return out
 
 
+def load_part(out_dir: Path) -> dict:
+    """1 part の出力 dir → merge_parts の入力 (採点方式の比較の条件で読む)"""
+    cpath = out_dir / "conditions.json"
+    conditions = _read_json(cpath) or {}
+    base_c, other_c = scoring_conds(conditions)
+    conds = [base_c] + other_c
+    outcomes, sources, opp_ids, elapsed = load_outcomes_conds(out_dir, conds)
+    return {"dir": str(out_dir), "conditions": conditions, "outcomes": outcomes, "sources": sources, "opp_ids": opp_ids,
+            "elapsed": elapsed, "records": load_records_conds(out_dir, conds), "conds": conds,
+            "sstats": {c: scoring_fallback_summary(_read_json(out_dir / f"{cond_file(c)}.json")) for c in conds}}
+
+
+def run_merged(out_dirs: Sequence[Path], merged_out: Path) -> dict:
+    """2 夜分割の全 part を結合して 1 回だけ判定する (2026-10-09 M2e)。結果は merged_out に書く"""
+    parts = [load_part(Path(d)) for d in out_dirs]
+    conds = parts[0]["conds"] if parts else []
+    m = merge_parts(parts, conds)
+    conditions = m["conditions"]
+    final_battles = int(conditions.get("final_battles") or P1_FINAL_BATTLES)
+    mde = float(conditions.get("mde", P1_MDE))
+    alpha = float(conditions.get("alpha", P1_ALPHA))
+    base_c, other_c = scoring_conds(conditions)
+    # 退避率は part ごとの json の stats を足し合わせない (part ごとに残す。決定単位の集計は別の道具)
+    sstats = {f"{c} (part {p['conditions'].get('part', {}).get('k')})": p["sstats"].get(c) for p in parts for c in conds}
+    own_recs = m["records"] if (conditions.get("own_check") or {}).get("required") else None
+    v = build_verdict(conditions, m["outcomes"], tuple(conditions.get("weights") or P1_WEIGHTS),
+                      float(conditions.get("baseline_weight", P1_BASELINE_WEIGHT)), final_battles, mde, alpha, m["sources"],
+                      m["opp_ids"], m["elapsed"], baseline_cond=base_c, compare_conds=other_c, scoring_stats=sstats,
+                      own_records_by_cond=own_recs, extra_invalid=m["invalid"])
+    v["notes"] = list(m["notes"]) + list(v["notes"])
+    v["parts"] = conditions.get("parts")
+    text = render(v, conditions)
+    merged_out.mkdir(parents=True, exist_ok=True)
+    (merged_out / "conditions_merged.json").write_text(json.dumps(conditions, ensure_ascii=False, indent=1) + "\n",
+                                                       encoding="utf-8")
+    (merged_out / "verdict.json").write_text(json.dumps(v, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    (merged_out / "verdict.md").write_text(text, encoding="utf-8")
+    print(text)
+    print(f"保存: {merged_out / 'verdict.json'} / {merged_out / 'verdict.md'}")
+    return v
+
+
 def run(out_dir: Path) -> dict:
     cpath = out_dir / "conditions.json"
     try:
@@ -503,6 +672,10 @@ def run(out_dir: Path) -> dict:
                       baseline_cond=base_c, compare_conds=other_c, scoring_stats=sstats, own_records_by_cond=own_recs)
     if scoring and own_recs is None:
         v["notes"].append("条件表に自チームの対応の検査の指定 (own_check.required) が無い (M2d より前の条件表): 自チームの型の対応は未確認")
+    if isinstance(conditions.get("part"), dict):
+        pr = conditions["part"]
+        v["notes"].append(f"この出力は 2 夜分割の part {pr.get('k')}/{pr.get('n')} (対戦 {pr.get('start')}〜{pr.get('end', 0) - 1}) だけ。"
+                          "最終判定は全 part を --out に並べて --merged-out で結合して 1 回だけ出す")
     text = render(v, conditions)
     (out_dir / "verdict.json").write_text(json.dumps(v, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     (out_dir / "verdict.md").write_text(text, encoding="utf-8")
@@ -513,9 +686,16 @@ def run(out_dir: Path) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="P1 (RL 加点) の対応比較の集計と §0.5 の 3 値判定")
-    ap.add_argument("--out", required=True, help="tools/usefulness_p1.py の出力ディレクトリ")
+    ap.add_argument("--out", required=True, nargs="+",
+                    help="tools/usefulness_p1.py の出力ディレクトリ (2 夜分割は全 part の dir を並べる)")
+    ap.add_argument("--merged-out", default=None, help="2 夜分割の結合した判定の書き込み先 (--out が複数のとき必須)")
     args = ap.parse_args()
-    run(Path(args.out))
+    if len(args.out) > 1:
+        if not args.merged_out:
+            raise SystemExit("--out を複数渡すとき (2 夜分割の結合) は --merged-out が要る")
+        run_merged([Path(d) for d in args.out], Path(args.merged_out))
+    else:
+        run(Path(args.out[0]))
 
 
 if __name__ == "__main__":

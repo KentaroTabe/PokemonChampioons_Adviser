@@ -37,6 +37,15 @@
   - 条件表の showdown に git commit・未コミットの変更・フォーマットの name / mod / ruleset を残し、commit と mod が取れなければ起動しない。
   - --compare scoring の条件表に own_check (自チームの対応の検査。usefulness_verdict が読む) を書く。--prelim-dir (予備測定の出力) を
     渡すと、その相手 id と自チームの対応が成り立つことを起動前に確かめる (渡さなければ注意だけ)。
+2026-10-09 M2e (レビューの推奨。採点方式の比較に限る。RL の比較の既定値は変えない):
+  - --compare scoring の時間上限は P1_SCORING_TIME_LIMIT_SEC (600 戦 / 条件の全体で 180 分)。予備測定の後の本番の開始可否は
+    「最も遅い条件の秒/戦 × P1_FINAL_BATTLES + P1_SCORING_START_MARGIN_SEC ≤ P1_SCORING_TIME_LIMIT_SEC」(prelim_advice の
+    time_limit_sec / margin_sec)。RL の比較は従来どおり P1_ABORT_SEC_PER_BATTLE (12 秒/戦) の基準。
+  - --part k/n (2 夜分割): 事前に固定した 600 対戦の列 (相手列 = 分割の階層を seed で並べた列、自チームの列 = --own-pool の
+    Random(相手 seed + 1) の抽選の列) を n 個の連続した範囲に重複なく分け、k 番目の範囲だけを両条件で測る (相手は --opp-offset =
+    範囲の先頭、自チームの抽選も check_advisor_player が同じ数だけ進める)。各 part の時間上限は全体の上限の按分。条件表の part に
+    範囲を残し、tools.usefulness_verdict に全 part の出力を渡して結合し、最終判定は 1 回だけ出す (各 part に両条件が揃い、範囲が
+    重複しないことを検査)。予備測定 (--prelim) と旧固定プール (--team general-pinned、抽選を進められない) には使えない。
 開始時刻の注意 (ツールでは強制しない): launchd の track-progress (毎日 21:50、17〜34 分) の後に始め、06:30 の usage-update の前に終える。
 
 純粋な部分 (条件表・コマンド・環境・進捗・終了時の更新) は tests/test_usefulness_p1.py で確かめる。
@@ -57,7 +66,8 @@ from champions_agent.config import (
     BUILD_FOLD_ADAPT, BUILD_FOLD_EVAL, BUILD_FOLD_VALIDATE, P1_ABORT_SEC_PER_BATTLE, P1_ALPHA, P1_BASELINE_WEIGHT, P1_BELIEF_K,
     P1_FINAL_BATTLES, P1_INTERIM_BATTLES, P1_MDE, P1_OPP_OFFSET, P1_OPP_PICK_POLICY, P1_OPP_PILOT, P1_OUT_ROOT, P1_PICK_POLICY,
     P1_PRELIM_BATTLES, P1_PROGRESS_SEC, P1_SEED, P1_SELECTION_MODEL, P1_SPLIT_FILE, P1_SPLIT_SEALED_ID, P1_SPLIT_TIER,
-    P1_SCORING_BASELINE, P1_SCORING_MODES, P1_SCORING_POOL_FILE, P1_SCORING_POOL_SHA16, P1_SCORING_TEAM_SHA16, P1_TEAM_DEFAULT,
+    P1_SCORING_BASELINE, P1_SCORING_MODES, P1_SCORING_POOL_FILE, P1_SCORING_POOL_SHA16, P1_SCORING_START_MARGIN_SEC,
+    P1_SCORING_TEAM_SHA16, P1_SCORING_TIME_LIMIT_SEC, P1_TEAM_DEFAULT,
     P1_TEAM_SHA16, P1_TEAM_SOURCES, P1_TERMINATE_GRACE_SEC, P1_TIME_LIMIT_SEC, P1_WEIGHTS, MY_TEAM_DISABLED_ENV, SHOWDOWN_PORT,
     TRAINING_BATTLE_FORMAT, TRANSITION_SENSITIVITY_ENV)
 from tools.usefulness_verdict import TEAM_LABELS, cond_file, cond_name, corrected_z
@@ -149,10 +159,55 @@ def resolve_battles(battles: Optional[int], prelim: bool) -> int:
     return int(P1_PRELIM_BATTLES if prelim else P1_FINAL_BATTLES)
 
 
-def default_out_dir(now: float, prelim: bool, root: Path = REPO / P1_OUT_ROOT) -> Path:
-    """既定の出力先 (純粋): logs/usefulness/p1_<YYYYMMDD_HHMM> (予備は p1_prelim_...)"""
+def default_out_dir(now: float, prelim: bool, root: Path = REPO / P1_OUT_ROOT, part: Optional[tuple] = None) -> Path:
+    """既定の出力先 (純粋): logs/usefulness/p1_<YYYYMMDD_HHMM> (予備は p1_prelim_...、part k/n は末尾に _part<k>of<n>)"""
     stamp = time.strftime("%Y%m%d_%H%M", time.localtime(now))
-    return Path(root) / (f"p1_prelim_{stamp}" if prelim else f"p1_{stamp}")
+    name = f"p1_prelim_{stamp}" if prelim else f"p1_{stamp}"
+    if part:
+        name += f"_part{int(part[0])}of{int(part[1])}"
+    return Path(root) / name
+
+
+def parse_part(spec: Optional[str]) -> Optional[tuple]:
+    """--part の値 "k/n" → (k, n) (純粋。2026-10-09 M2e)。None はそのまま。1 ≤ k ≤ n でなければ ValueError"""
+    if spec is None:
+        return None
+    try:
+        k, n = (int(x) for x in str(spec).split("/", 1))
+    except ValueError:
+        raise ValueError(f"--part は k/n の形 (例 1/2): {spec}")
+    if not (1 <= k <= n):
+        raise ValueError(f"--part {spec}: 1 ≤ k ≤ n でない")
+    return k, n
+
+
+def part_range(k: int, n: int, total: int = P1_FINAL_BATTLES) -> tuple:
+    """part k/n の対戦の範囲 [start, end) (純粋)。total 戦を n 個の連続した範囲に重複なく分ける (端数は後ろの part に寄せる)"""
+    if not (1 <= int(k) <= int(n)):
+        raise ValueError(f"part {k}/{n}: 1 ≤ k ≤ n でない")
+    return (int(k) - 1) * int(total) // int(n), int(k) * int(total) // int(n)
+
+
+def part_record(k: int, n: int, total: int = P1_FINAL_BATTLES, base_offset: int = P1_OPP_OFFSET) -> dict:
+    """条件表の part (純粋): k / n / 範囲 [start, end) / 対戦数 / 相手列の offset (= base_offset + start) / 全体の対戦数"""
+    start, end = part_range(k, n, total)
+    return {"k": int(k), "n": int(n), "start": start, "end": end, "battles": end - start, "total_battles": int(total),
+            "opp_offset": int(base_offset) + start,
+            "note": "事前に固定した対戦の列 (相手列と自チームの抽選の列) の範囲 [start, end)。tools.usefulness_verdict で全 part を結合して 1 回だけ判定する"}
+
+
+def resolve_time_limit(time_limit_sec: Optional[int], compare: str, part_battles: Optional[int] = None,
+                       total: int = P1_FINAL_BATTLES) -> int:
+    """この測定の時間上限 (純粋。2026-10-09 M2e)。明示があればそれ。無ければ RL の比較は P1_TIME_LIMIT_SEC (従来どおり)、
+    採点方式の比較は P1_SCORING_TIME_LIMIT_SEC (part なら対戦数で按分して切り上げ)"""
+    if time_limit_sec is not None:
+        return int(time_limit_sec)
+    if compare != "scoring":
+        return int(P1_TIME_LIMIT_SEC)
+    limit = int(P1_SCORING_TIME_LIMIT_SEC)
+    if part_battles is not None:
+        return -(-limit * int(part_battles) // int(total))
+    return limit
 
 
 def build_command(weight: float, out_dir: Path, team_file: Optional[Path], split_file: Path, fold: int, seed: int, battles: int,
@@ -251,9 +306,12 @@ def team_note(team: dict) -> str:
 
 def build_conditions(design: dict, facts: dict, battles: int, prelim: bool, seed: int, fold: int, split_file: str,
                      time_limit_sec: int, out_dir: str, commands: dict, env: dict, started_at: Optional[str],
-                     notes: Sequence[str] = (), team_source: str = "registered") -> dict:
+                     notes: Sequence[str] = (), team_source: str = "registered", offset: int = P1_OPP_OFFSET,
+                     part: Optional[dict] = None) -> dict:
     """条件表 (純粋)。facts = collect_facts の結果 (取得できない項目は None)。notes = 取得できなかった理由など。
-    team_source = 自チームの出所 (general / registered)。RL の比較で registered (既定) なら従来と同じ条件表"""
+    team_source = 自チームの出所 (general / registered)。RL の比較で registered (既定) なら従来と同じ条件表。
+    2026-10-09 M2e: offset = 相手列の offset (part の範囲の先頭)、part = part_record (2 夜分割)。採点方式の比較には
+    時間上限と開始条件 (scoring_time) を足す"""
     f = facts or {}
     split = f.get("split") or {}
     factor = design.get("factor", "rl")
@@ -272,6 +330,12 @@ def build_conditions(design: dict, facts: dict, battles: int, prelim: bool, seed
         # 2026-10-09 M2d: 自チームの対応の検査 (verdict が読む) と、予備測定の対応の確認 (facts の prelim_check)
         extra["own_check"] = dict(OWN_CHECK)
         extra["prelim_check"] = f.get("prelim_check")
+        # 2026-10-09 M2e: 採点方式の比較だけの時間上限 (全体) と本番の開始条件
+        extra["scoring_time"] = {"time_limit_total_sec": int(P1_SCORING_TIME_LIMIT_SEC),
+                                 "start_margin_sec": int(P1_SCORING_START_MARGIN_SEC),
+                                 "start_rule": "最も遅い条件の秒/戦 × final_battles + start_margin_sec ≤ time_limit_total_sec"}
+    if part is not None:
+        extra["part"] = dict(part)
     return {**extra,
         "experiment": "P1",
         "factor": factor,
@@ -294,7 +358,7 @@ def build_conditions(design: dict, facts: dict, battles: int, prelim: bool, seed
         "opponents": {"split_file": str(split_file), "split_sha16": split.get("sha16"), "sealed_id": split.get("sealed_id"),
                       "sealed_id_expected": P1_SPLIT_SEALED_ID, "run_id": split.get("run_id"),
                       "tier": P1_SPLIT_TIER, "fold": int(fold), "fold_label": FOLD_LABELS.get(int(fold)),
-                      "n_teams_in_fold": split.get("n_teams_in_fold"), "seed": int(seed), "offset": P1_OPP_OFFSET,
+                      "n_teams_in_fold": split.get("n_teams_in_fold"), "seed": int(seed), "offset": int(offset),
                       "pilot": P1_OPP_PILOT, "pick_policy": P1_OPP_PICK_POLICY, "battle_format": TRAINING_BATTLE_FORMAT},
         "advisor": dict(f.get("advisor") or {}, pick_policy=P1_PICK_POLICY, belief_k=P1_BELIEF_K, skip_random=True),
         "env": env_record(env),
@@ -429,11 +493,14 @@ def finalize(cond: dict, reached: dict, elapsed: float, timed_out: bool, returnc
 
 def prelim_advice(elapsed: float, reached: dict, returncodes: Optional[dict] = None, incomplete: bool = False,
                   battles: int = P1_PRELIM_BATTLES, threshold: float = P1_ABORT_SEC_PER_BATTLE,
-                  final_battles: int = P1_FINAL_BATTLES, conds: Sequence[str] = ()) -> dict:
+                  final_battles: int = P1_FINAL_BATTLES, conds: Sequence[str] = (),
+                  time_limit_sec: Optional[float] = None, margin_sec: float = 0.0) -> dict:
     """予備測定の秒/戦と本番の目安 (純粋)。秒/戦は並列の各プロセスの経過 / 到達数。
     本番開始可 (start_final) の条件 (2026-10-09 レビュー指摘 2): 全条件 (conds、既定は P1_WEIGHTS の 3 条件) が揃い、
     どの条件も battles 戦に到達し、全部が正常終了 (rc 0) で、条件表が未完了でなく、最も遅い条件の秒/戦が threshold 以内。
-    到達 0 戦の条件は秒/戦が無いので、それだけで開始不可 (以前は速度の計算から除いていて 0 / 50 / 50 でも開始可になった)"""
+    到達 0 戦の条件は秒/戦が無いので、それだけで開始不可 (以前は速度の計算から除いていて 0 / 50 / 50 でも開始可になった)。
+    time_limit_sec を渡すと (採点方式の比較、2026-10-09 M2e) 速度の基準を「最も遅い条件の秒/戦 × final_battles + margin_sec ≤
+    time_limit_sec」に替える (threshold は使わない)。渡さなければ従来どおり (RL の比較)"""
     conds = list(conds) or [cond_name(w) for w in P1_WEIGHTS]
     spb = {c: (elapsed / reached[c] if reached.get(c) else None) for c in conds}
     reasons = []
@@ -453,11 +520,21 @@ def prelim_advice(elapsed: float, reached: dict, returncodes: Optional[dict] = N
     worst = max(vals) if vals and len(vals) == len(conds) else None
     if worst is None:
         reasons.append("秒/戦を全条件で測れていない")
+    elif time_limit_sec is not None:
+        need = worst * final_battles + float(margin_sec)
+        if need > float(time_limit_sec):
+            reasons.append(f"最も遅い条件の秒/戦 {worst:.1f} × {final_battles} 戦 + 余裕 {float(margin_sec):.0f} 秒 = {need:.0f} 秒が"
+                           f"上限 {float(time_limit_sec):.0f} 秒を超える")
     elif worst > threshold:
         reasons.append(f"最も遅い条件の秒/戦 {worst:.1f} が上限 {threshold} を超える (600 戦で 2 時間を超える見込み)")
-    return {"sec_per_battle": spb, "worst_sec_per_battle": worst, "threshold": threshold,
-            "projected_final_sec": (worst * final_battles if worst is not None else None),
-            "start_final": not reasons, "reasons": reasons}
+    out = {"sec_per_battle": spb, "worst_sec_per_battle": worst, "threshold": threshold,
+           "projected_final_sec": (worst * final_battles if worst is not None else None),
+           "start_final": not reasons, "reasons": reasons}
+    if time_limit_sec is not None:
+        out.update(threshold=None, criterion="sec_per_battle × final_battles + margin ≤ time_limit",
+                   time_limit_sec=float(time_limit_sec), margin_sec=float(margin_sec), final_battles=int(final_battles),
+                   max_sec_per_battle=(float(time_limit_sec) - float(margin_sec)) / max(1, int(final_battles)))
+    return out
 
 
 # ------------------------------------------------------------------ 取得 (副作用: ファイル・git・ソケットの読み取り)
@@ -907,7 +984,11 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--fold", type=int, default=BUILD_FOLD_EVAL, help="search の fold (既定 B = 方式の比較用)")
     ap.add_argument("--selection-model", default=P1_SELECTION_MODEL, help="選出モデル (3 条件で共通)")
     ap.add_argument("--pin-dir", default=None, help="RL のピン dir (既定: 起動時に scripts/pin_models.sh で作る)")
-    ap.add_argument("--time-limit-sec", type=int, default=P1_TIME_LIMIT_SEC, help="時間上限 (超えたら止めて未完了)")
+    ap.add_argument("--time-limit-sec", type=int, default=None,
+                    help=f"時間上限 (超えたら止めて未完了。既定: rl は {P1_TIME_LIMIT_SEC}、scoring は {P1_SCORING_TIME_LIMIT_SEC} "
+                         f"(--part は対戦数で按分))")
+    ap.add_argument("--part", default=None,
+                    help="k/n: 600 対戦の列を n 個の範囲に分けた k 番目だけを測る (--compare scoring の 2 夜分割。2026-10-09 M2e)")
     ap.add_argument("--dry-run", action="store_true", help="条件表とコマンド列を出すだけ (起動しない・ピンを作らない)")
     ap.add_argument("--compare", choices=("rl", "scoring"), default="rl",
                     help="比べる条件: rl = RL 加点の重み 0 / 5 / 25 (既定)、scoring = 採点方式 legacy / transition (2026-10-09 M2b)")
@@ -922,13 +1003,37 @@ def main(argv: Optional[list] = None) -> int:
                     help="予備測定 (--prelim) の出力 dir。本番の起動前検査で、その相手 id と自チームの対応が成り立つことを確かめる")
     args = ap.parse_args(argv)
     team_source = resolve_team_source(args.team, args.compare)
+    try:
+        part = parse_part(args.part)
+    except ValueError as e:
+        print(f"[p1] {e}")
+        return 2
+    part_rec = None
+    if part is not None:
+        # 2 夜分割 (2026-10-09 M2e): 採点方式の比較の本番だけ。旧固定プールは自チームの抽選を進められないので使わない
+        bad = []
+        if args.compare != "scoring":
+            bad.append("--part は --compare scoring だけ")
+        if args.prelim:
+            bad.append("--part は本番 (600 戦の列) だけ。--prelim とは併用しない")
+        if team_source == "general-pinned":
+            bad.append("--part は --team general-pinned (RankedTeambuilder、抽選の位置を進められない) では使えない")
+        part_rec = part_record(*part)
+        if args.battles is not None and int(args.battles) != part_rec["battles"]:
+            bad.append(f"--battles {args.battles} が part {args.part} の対戦数 {part_rec['battles']} と違う")
+        if bad:
+            for b in bad:
+                print(f"[p1] {b}")
+            return 2
     own_pool: Optional[Path] = _abs(args.own_pool).resolve() if (args.own_pool and team_source == "general") else None
     showdown_dir: Optional[Path] = Path(args.showdown_dir).resolve() if args.showdown_dir else None
     prelim_dir: Optional[Path] = Path(args.prelim_dir).resolve() if args.prelim_dir else None
 
     now = time.time()
-    battles = resolve_battles(args.battles, args.prelim)
-    out_dir = Path(args.out).resolve() if args.out else default_out_dir(now, args.prelim)
+    battles = part_rec["battles"] if part_rec else resolve_battles(args.battles, args.prelim)
+    offset = part_rec["opp_offset"] if part_rec else P1_OPP_OFFSET
+    time_limit = resolve_time_limit(args.time_limit_sec, args.compare, part_rec["battles"] if part_rec else None)
+    out_dir = Path(args.out).resolve() if args.out else default_out_dir(now, args.prelim, part=part)
     split_file, selection_model = _abs(args.split), _abs(args.selection_model)
     design = plan_scoring() if args.compare == "scoring" else plan()
     # 採点方式の比較では感度 (楽観側の HP・持ち物) を切る (2026-10-09 M2d、レビュー 3。全条件で共通の環境)
@@ -952,13 +1057,15 @@ def main(argv: Optional[list] = None) -> int:
                               prelim_dir=prelim_dir)
         if design.get("factor") == "scoring":
             cmds = {c: build_command(design["cond_weight"][c], out_dir, team_file, split_file, args.fold, args.seed, battles,
-                                     selection_model, pin_s, cond=c, own_pool=own_pool) for c in design["conditions"]}
+                                     selection_model, pin_s, cond=c, own_pool=own_pool, offset=offset)
+                    for c in design["conditions"]}
         else:
             cmds = {cond_name(w): build_command(w, out_dir, team_file, split_file, args.fold, args.seed, battles,
                                                 selection_model, pin_s, own_pool=own_pool) for w in design["weights"]}
         env = child_environment(pin_s, team_source=team_source, sensitivity_off=sens_off)
         return build_conditions(design, facts, battles, args.prelim, args.seed, args.fold, str(split_file),
-                                args.time_limit_sec, str(out_dir), cmds, env, started_at, notes_now, team_source=team_source)
+                                time_limit, str(out_dir), cmds, env, started_at, notes_now, team_source=team_source,
+                                offset=offset, part=part_rec)
 
     if args.dry_run:
         cond = assemble(pin_dir, None)
@@ -1006,11 +1113,14 @@ def main(argv: Optional[list] = None) -> int:
     print(f"[p1] 条件表 {out_dir / 'conditions.json'} / {battles} 戦 × {len(cond['commands'])} 条件 / 開始 {started_at}")
     print(f"[p1] 注意: {SCHEDULE_NOTE}")
     env = child_environment(str(pin_dir), team_source=team_source, sensitivity_off=sens_off)
-    final = launch(cond, out_dir, env, battles, args.time_limit_sec)
+    final = launch(cond, out_dir, env, battles, time_limit)
     if args.prelim:
+        # 採点方式の比較 (2026-10-09 M2e): 全体の上限 (600 戦) と余裕から開始可否を求める。RL の比較は従来の秒/戦の基準
+        scoring_rule = ({"time_limit_sec": P1_SCORING_TIME_LIMIT_SEC, "margin_sec": P1_SCORING_START_MARGIN_SEC}
+                        if args.compare == "scoring" else {})
         final["prelim_advice"] = prelim_advice(final["elapsed_sec"], final["reached"], final.get("returncodes"),
                                                bool(final.get("incomplete")), battles,
-                                               conds=list(cond["commands"]))
+                                               conds=list(cond["commands"]), **scoring_rule)
     _write_json(out_dir / "conditions.json", final)
     print(f"[p1] 終了: incomplete={final['incomplete']} 到達 {final['reached']} 所要 {final['elapsed_sec']} 秒")
     if args.prelim:
@@ -1019,10 +1129,16 @@ def main(argv: Optional[list] = None) -> int:
         print(f"[p1] 予備測定: 秒/戦 (最大) {worst if worst is None else round(worst, 2)} "
               f"/ 本番 {P1_FINAL_BATTLES} 戦の見込み {adv['projected_final_sec'] if adv['projected_final_sec'] is None else round(adv['projected_final_sec'] / 60)} 分")
         if adv["start_final"]:
-            print("[p1] 本番開始可: 全条件が規定数に到達・正常終了・未完了でない・最遅の秒/戦が上限内 (判断は人)")
+            rule = (f"最遅の秒/戦 × {adv.get('final_battles')} 戦 + 余裕 {adv.get('margin_sec'):.0f} 秒が上限 "
+                    f"{adv.get('time_limit_sec'):.0f} 秒以内" if adv.get("time_limit_sec") is not None else "最遅の秒/戦が上限内")
+            print(f"[p1] 本番開始可: 全条件が規定数に到達・正常終了・未完了でない・{rule} (判断は人)")
         else:
             print("[p1] 本番を始めない目安 (判断は人): " + " / ".join(adv["reasons"]))
-    print(f"[p1] 集計: python -m tools.usefulness_verdict --out {out_dir}")
+    if part_rec:
+        print(f"[p1] part {part_rec['k']}/{part_rec['n']} (対戦 {part_rec['start']}〜{part_rec['end'] - 1})。全 part が揃ったら "
+              f"python -m tools.usefulness_verdict --out <part 1 の dir> ... <part {part_rec['n']} の dir> --merged-out <dir> で結合して判定")
+    else:
+        print(f"[p1] 集計: python -m tools.usefulness_verdict --out {out_dir}")
     return 0
 
 
