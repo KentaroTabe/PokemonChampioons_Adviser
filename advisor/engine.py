@@ -1131,7 +1131,8 @@ def evaluate_common(state: dict, resolver=None, scoring_mode: Optional[str] = No
                 state, resolver, my_view=my_view, opp_view=opp_view, opp_p=opp_p, pool=pool,
                 legal_move_ids=[] if switch_only else legality.legal_move_ids, my_field=my_field, opp_field=opp_field,
                 my_ctx=my_ctx, opp_ctx=opp_ctx, my_fainted=my_fainted, pivot_pending=pivot_pending,
-                i_am_faster=i_am_faster, legacy_actions=actions, rl_hint=rl_hint, opp_pending=opp_pending)
+                i_am_faster=i_am_faster, legacy_actions=actions, rl_hint=rl_hint, opp_pending=opp_pending,
+                encore_locked=legality.encore_locked)
             if inp is None:
                 scoring_fallback = why
             else:
@@ -1365,8 +1366,9 @@ def finish_evaluation(common: dict, rl_blend_weight: Optional[float] = None) -> 
         # 退避率 = scoring_mode が transition の行のうち scoring_fallback がある割合
         "scoring_mode": scoring_mode,
         **({"scoring_used": scoring_used, "scoring_fallback": common.get("scoring_fallback"),
-            "transition_stats": {k: tr.get(k) for k in ("elapsed_ms", "n_branches", "responses", "opp_unmodeled",
-                                                         "notes", "fallback", "candidate") if k in tr} if tr else None}
+            "transition_stats": {k: tr.get(k) for k in ("elapsed_ms", "elapsed_total_ms", "n_branches", "responses",
+                                                         "opp_unmodeled", "notes", "fallback", "candidate", "response",
+                                                         "hp_range", "sensitivity") if k in tr} if tr else None}
            if scoring_mode == "transition" else {}),
         "best": actions[0] if actions else None,
     }

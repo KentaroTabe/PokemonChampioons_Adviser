@@ -1297,7 +1297,30 @@ OPP_MOVE_RANK_DECAY = 0.5
 # transition 方式の計算予算 (設計判断 10・作業の規約): 遷移の採点にかかった時間がこれを超えたら、その決定は legacy に退避する
 # (scoring_fallback = "budget")。legacy の evaluate は 1 回 50〜130 ms (M1b の計測)、上限は 300 ms (3 倍の目安と同じ桁)
 TRANSITION_BUDGET_MS = 300.0
-# ダメージ乱数の代表点: calc_damage の最小〜最大を等間隔に TRANSITION_ROLL_POINTS 点 (Showdown の整数 16 通りの近似。calc_damage は
-# 最小・最大・平均しか返さないので、16 通りを最小〜最大の等間隔で置く) とし、倒せる / 倒せない の 2 分岐に集約する (分岐の数を減らす。
-# 倒せない側は平均ダメージ)。連続技は 1 発ごとの平均ダメージで回数を分岐する (1 発ごとの乱数は分岐しない)
+# ダメージ乱数 (2026-10-09 M2c で変更): calc_damage の rolls (整数の計算の実際の 16 通り) を 1 つずつ解決し、結果が同じ乱数だけを
+# 束ねる (倒せる乱数は 1 つ、倒せない乱数は値ごと。平均には潰さない)。TRANSITION_ROLL_POINTS は rolls を返さない damage_fn のときに
+# 最小〜最大を等間隔に置く点の数 (M2b までの近似)。連続技は 1 発ごとの平均ダメージで回数を分岐する (1 発ごとの乱数は分岐しない)
 TRANSITION_ROLL_POINTS = 16
+# 分岐の併合の粒度 (2026-10-09 M2c): 0 = 状態が完全に同じ分岐だけを併合する。正の値 = ターンの最後の行動の後だけ、HP をこの HP 量
+# (実数値) に丸めて併合する (HP は群の確率の重みつき平均、ひんしと生存は混ぜない。途中の行動の後は丸めない: HP の消費・反動・ひんしの
+# 閾値をまたいで平均に潰さないため)。実ログ 298 行の計測で予算 (TRANSITION_BUDGET_MS) に収まったので 0 (丸めない)
+TRANSITION_MERGE_HP_UNITS = 0
+# HP の不確かさ (2026-10-09 M2c、レビュー 1。transition 方式だけが使う。legacy の減点 UNCERTAIN_SWITCH_PENALTY は重ねない)。
+# 不確かな個体 (自分の控えの hp_uncertain、バー推定 hp_source="bar"、技イベント由来の推定 hp_estimated、場の個体の古い観測
+# hp_read_ts) の HP を範囲 [下限, 上限] で扱う: 下限 = 直近値 − 誤差 − 経過時間による低下、上限 = 直近値 + 誤差 (最大 HP 比、
+# 下限は 1 HP (相手は 1%) で止める)。順位は悲観側 (自分の個体 = 下限、相手の個体 = 上限) の仮説で決め、楽観側の仮説の順位は感度として
+# 残す。値はすべて暫定 (較正していない):
+# - ERR_BAR 0.05: バー推定の誤差。実測 (vision/my_hp_estimate の注記: frame_1791503228 で正解 2.5%、バー 4.4%) の差 1.9 pt と
+#   「バーの割合は実際の値と数 % ずれる」から、その 2 倍強を許す
+# - ERR_ESTIMATED 0.15: 技イベント由来の推定 (期待ダメージで減らした値)。乱数の幅 (85〜100%) と型の仮定の誤りの分
+# - ERR_UNCERTAIN 1.0: 交代の見逃し (出所なしの hp_uncertain)。実際は瀕死の可能性がある (2026-08-18 の事故) ので下限は 1 HP
+# - STALE_SEC 30 / STALE_DROP_PER_SEC 1/120: 場の個体の HP の観測が 30 秒 (およそ 1 ターン) より古ければ、超えた秒数 × 1/120
+#   (2 分で最大 HP の全部) だけ下限を下げる。控えは場に居ない間 HP が変わらないので経過時間では下げない
+HP_RANGE_ERR_BAR = 0.05
+HP_RANGE_ERR_ESTIMATED = 0.15
+HP_RANGE_ERR_UNCERTAIN = 1.0
+HP_RANGE_STALE_SEC = 30.0
+HP_RANGE_STALE_DROP_PER_SEC = 1.0 / 120.0
+# 持ち物の感度 (2026-10-09 M2c、レビュー 4): 相手の場の個体の持ち物が観測で確定していないとき、これらの有無を入れ替えた仮説でも
+# 順位を計算し、第一候補が変わるかを transition_stats.sensitivity に残す (順位には使わない。予算の残りで計算し、超えたら省略)
+TRANSITION_SENSITIVITY_ITEMS = (("scarf", "choicescarf"), ("sash", "focussash"))
