@@ -344,3 +344,37 @@ k本なら水準1−0.05/k、推定差≥0.05かつ区間下限>0で採用候補
 - `tools/decision_audit.py`、`tools/dmg_compare.py`、`tools/usefulness_p1.py`、`tools/usefulness_verdict.py`。
 - `pokemon-showdown/sim/state.ts`: 状態のシリアライズ・復元。実戦ログからの変換は別の実装。
 - [有用性検証計画](USEFULNESS_VERIFICATION_PLAN_1007.md)、[P1実験記録](USEFULNESS_P1_RL_BLEND_20261009.md)、[既知の問題](KNOWN_ISSUES.md)。
+
+## 8. 実施記録 (運用側が追記)
+
+### 8.1 M1a (2026-10-09、feat/advice-m1a → feature/team-build 831149cc)
+
+- 形態の解決を `advisor/gimmick.resolve_form` に一元化 (基本種 / 現在形態 / タイプ / 固定特性)。`engine.build_mon_view` と RL の入力が同じ結果を使う。
+  原因の経路: 自分側は HUD の通常名で `adopt_my_hud_species` → `merge_species` がメガ形態を基本種に戻していた (10/8〜10/9 の自分側 mega=true 204 行中 191 行が基本種。相手側は前方一致の保護で戻らない)。113830:171 のミミロップは 攻撃 128 / 素早さ 172 → 188 / 205、ノーマル/かくとう で評価されるようになった。
+- 選べない技 (PP 0 / 初手限定 / かなしばり / アンコール / こだわり / ちょうはつ) は候補から外して `illegal_actions` に理由を残す (旧: −99 点で候補に残す)。固定する技が今の技に無ければ絞らず `legality_unconfirmed`。条件次第で不発は `may_fail`。
+- アンコールの開始は「受けた」の文言か、使用文からの推定 (反対側の場の個体、直前の技が無ければ失敗扱い)。解除の文言・ターン経過 (`MOVE_LOCK_*_TURNS`、`tick_move_locks`)・交代で外す。初手限定は場に出たターン `entry_turn` も見る。旧実装は「アンコール」の語だけで発火し、使用文で使用者側に付いていた (084212 ターン 3 の原因)。
+- 読めた技が 4 未満なら登録の型で空き枠を補う (`complete_moves_from_registration`。観測と PP は上書きしない、`from_registration` の印)。
+- 据え置きは局面の鍵 (`position_key`) と合法手の集合が前回と同じときだけ。最終の第一候補にも合法性の検査。点差 6 は不変。advice 行に `move_locks` 欄、`advice_replay` で復元可。
+- 既存テストの期待値の変更 (§2.3 の規則で承認): test_advisor の 5 箇所 (−99 点で残る → illegal_actions)、test_advice_variant の鍵集合に 4 鍵、test_selection_advice の last に position / legal。旧挙動の再現 (通常形態なら 128 / 172) は test_advice_m1a に残した。
+- 受入: tests/test_advice_m1a (17 関数)。CI 相当 121 本 OK (test_advice_m1a は本体の登録ファイルに依存していたので `_Patch()` で包んで隔離、アサーションは不変)。
+
+### 8.2 M1b (2026-10-09、feat/advice-m1b → feature/team-build)
+
+- `advisor/transition.py` に遷移を抽出 (`SimSide` / `Action` / `TurnResult` / `MoveResult`、`resolve_turn` / `resolve_move`)。`search.simulate_turn` は薄い委譲。抽出だけの時点で探索の出力は完全一致。対応範囲と未対応 (`unsupported` の印) は transition.py 冒頭の表。
+- ひんしの判定は技ごと、繰り出しはターンの終わり。行動前にひんしの個体は行動しない (与ダメージ 0、自滅も HP の消費も無し)。**繰り出した控えが倒れた個体の予定行動を実行する不具合** (旧 simulate_turn) を修正。探索の順位が 2 局面 (lethal / lowhp) で入れ替わり、ミストバーストは自滅を解決して探索で最下位 (表示専用、SEARCH_BLEND=0)。
+- 自滅 (selfdestruct "always")・てっていこうせん等の HP 1/2・クロロブラスト・反動・しめりけ・いしあたま・マジックガードを Showdown の sim (battle-actions.ts useMoveInner / applyRecoilDamage、abilities.ts damp) を根拠に解決。数値は `advisor/data/transition_effects.json`。
+- 採点への受け渡し: 自滅・HP コスト・反動のある技の候補に `self_cost` ({kind, faints, hp_loss_frac, requires_switch, before_ko_risk}) と理由の文言 (「自分はひんし (控えを出す)」等)。**スコアと順位は変えていない** (§3.0: 共通尺度が整うまで任意の減点を足さない)。112839:39 の復元でミストバーストは 47.4 で 1 位のまま (RL 94%)。
+- evaluate 1 回の時間: 51.8 → 59.1 ms (6 体局面 120.9 → 131.5 ms)。既存テストの期待値の変更なし。受入: tests/test_transition (11 関数)。
+- 「自滅技の提案改善が完了」とは記録しない (採点の接続は段 B の方式比較で行う)。
+
+### 8.3 M1 で見つかった、段 B 以降に送る事項
+
+1. 113830:171 を遷移で解くと、HP 18.5% のペロリームは交代で出た直後に倒れて反撃しない (繰り出し要求あり)。交代の評価「交代後の打点 約 104%」と遷移が食い違う (段 B-3)。
+2. `engine._run_search` は状態の技しか見ない: 登録から補完した技は探索に入らない。探索・終盤評価・`_mega_timing_note` は合法性 (illegal_actions) も反映していない。RL の合法手も PP 0 しか除外しない。
+3. `advisor/endgame.py` の 1 対 1 判定は最大打点の技を撃ち続ける前提で、だいばくはつ等も繰り返し撃てる扱い。
+4. 相手の「これからのメガ」が直接の採点に入っていない (10/8 グソクムシャ: 助言時はメガ前で評価は正しかったが、そのターンにメガして はがね を含みインファイトが等倍になった。段 B-5 の応手)。
+5. command / move_select 画面の「メガシンカ」の文字で `mega_evolve` が発火し `is_mega` / `mega_used` が立つ (50 件中 15 件は実際のメガの文言が続かない)。メガの可否の注記が誤って消える可能性 (未対応)。
+6. 復元した 112839:39 の予測ダメージが 22〜26% で、ログの 17〜20% と合わない (型推定の状態の違いと推測、未確認)。
+7. `ability_effects.json` に テラボルテージ / ターボブレイズ の ignore_target_ability と てつのトゲ が無い。tests/test_search.py の「ミミッキュ先手」のコメントは誤り (ガブリアスが先)。
+8. 据え置きの解除条件に「合法手の集合の変化」を足したため、技の読みが揺れると据え置きが外れやすい。次の接続テストで第一候補の切替の回数を見る。
+
