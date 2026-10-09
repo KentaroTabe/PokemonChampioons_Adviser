@@ -109,6 +109,36 @@ def same_name_forms(species_id: Optional[str]) -> tuple:
         return (species_id,)
 
 
+def mega_family_of(species_id: Optional[str], all_ids) -> list:
+    """メガシンカの前後の種族 id (純粋)。species_id 自身、メガ形態なら素の種 (図鑑にあるとき)、素の種のメガ形態 (末尾 mega /
+    megax / megay / megaz)。例: gardevoirmega → [gardevoirmega, gardevoir]、charizard → [charizard, charizardmegax, charizardmegay]
+    (2026-10-09: 対応待ちの個体の照合で、場の個体がメガ後でも選出画面のタイプ (メガ前) の枠に当てるため)"""
+    if not species_id:
+        return []
+    import re
+    out = [species_id]
+    m = re.match(r"^(.+)mega[xyz]?$", species_id)
+    base = m.group(1) if (m and m.group(1) in all_ids) else species_id
+    if base != species_id:
+        out.append(base)
+    for x in sorted(all_ids):
+        if x not in out and x.startswith(base) and re.fullmatch(r"mega[xyz]?", x[len(base):]):
+            out.append(x)
+    return out
+
+
+@lru_cache(maxsize=1024)
+def mega_family(species_id: Optional[str]) -> tuple:
+    """mega_family_of を図鑑 (advisor.dex) で引く。引けなければ (species_id,)"""
+    if not species_id:
+        return ()
+    try:
+        from advisor.dex import get_dex
+        return tuple(mega_family_of(species_id, set(get_dex().species_ids())))
+    except Exception:
+        return (species_id,)
+
+
 def _same_family(a: Optional[str], b: Optional[str]) -> bool:
     """種族 id が同じ種の形態違い (同じ id、または「素の id + 地方の接尾辞 / メガ」: slowking / slowkinggalar) か (純粋)。
     単なる前方一致 (mew / mewtwo) は同じ種にしない"""
@@ -516,7 +546,8 @@ class SideState:
         elig = self.roster_eligible()
         if not elig:
             return None, None
-        multi = len(cands) > 1
+        # 形態の候補が複数か (同じ形態のメガの前後のタイプを並べた候補は 1 つと数える。2026-10-09)
+        multi = len({sid for sid, _t in cands}) > 1
         counts: dict = {}
         for _i, p in roster_slots(self.party):
             if p.species_id:
@@ -527,6 +558,7 @@ class SideState:
             i = min(dups)[1]
             return i, self._form_by_slot_types(self.party[i], cands)
         typed = [(sid, t) for sid, t in cands if t]
+        multi_types = len({frozenset(t) for _sid, t in typed}) > 1
         if typed:
             for only_unconfirmed in (True, False):
                 hits = [(i, sid) for i, p in elig for sid, t in typed
@@ -534,7 +566,7 @@ class SideState:
                         (not only_unconfirmed or p.species_guess or not p.species_ja)]
                 if not hits:
                     continue
-                if not multi:
+                if not multi and not multi_types:
                     return hits[0][0], hits[0][1]
                 slots = {i for i, _ in hits}
                 if len(slots) == 1:
@@ -548,7 +580,7 @@ class SideState:
     @staticmethod
     def _form_by_slot_types(p, cands: list) -> Optional[str]:
         """形態の候補のうち、枠のタイプ (選出画面のアイコン) と図鑑タイプが一致するもの。候補が 1 つならそれ"""
-        if len(cands) == 1:
+        if len({sid for sid, _t in cands}) == 1:   # 形態が 1 つ (メガの前後のタイプを並べた候補を含む)
             return cands[0][0]
         hit = [sid for sid, t in cands if t and p.types and set(p.types) == set(t)]
         return hit[0] if len(hit) == 1 else None
@@ -633,8 +665,65 @@ class SideState:
             return same[0][0], same[0][1], "species"
         if len(same) > 1:
             return None, None, None
-        slot, form = self.match_slot([(f, _dex_types_ja_of(f)) for f in forms])
+        slot, form = self.match_slot(self._form_type_cands(forms))
         return slot, form, ("rule" if slot is not None else None)
+
+    @staticmethod
+    def _form_type_cands(forms: list) -> list:
+        """形態の候補 → match_slot の候補 [(形態の id, タイプの集合)]。各形態について、メガの前後 (mega_family) のタイプも
+        同じ形態の id で並べる (2026-10-09 段 2: 場の個体がメガ後 (gardevoirmega 等) でも、選出画面のタイプ (メガ前) の枠に
+        当てる。統合後の種族 id は場の個体の形態のまま)"""
+        out = []
+        for f in forms:
+            for g in (mega_family(f) or (f,)):
+                t = _dex_types_ja_of(g)
+                if t and (f, frozenset(t)) not in {(a, frozenset(b)) for a, b in out}:
+                    out.append((f, t))
+        return out or [(f, _dex_types_ja_of(f)) for f in forms]
+
+    def pending_hint(self, pm: PokemonState) -> list:
+        """対応待ちの個体 pm の「候補の枠」(純粋。2026-10-09 段 2、ユーザー判断)。自動の対応 (pending_target) が決まらないとき、
+        種が未確定・技未判明・非ひんしの枠のうち次のものを [{"slot": 枠の番号 (0 始まり), "ja": 推定の種 or None,
+        "types": 枠のタイプ, "source": 出所}] で返す。自動では統合しない (人が枠を指定する):
+        - "partial_type": タイプが 1 個以上重なるが完全には一致しない枠がちょうど 1 つのとき、その枠
+        - "watch_loose": 様子を見る画面の弱い読み (形状の照合が WATCH_TYPE_STRICT_HASH 超) が pm のタイプと一致した枠
+          (vision/extractors._reread_watch_opp_types が pm._watch_loose_slots に入れる。枠のタイプは訂正しない)"""
+        if self.pending_target(pm)[0] is not None:
+            return []
+        forms = list(pm.species_candidates or []) or ([pm.species_id] if pm.species_id else [])
+        sets = [t for _f, t in self._form_type_cands(forms) if t]
+        elig = {i: p for i, p in self.roster_eligible() if not ((p.species_ja or p.species_id) and not p.species_guess)}
+        from vision.type_reading import partial_match_slots
+        hits = partial_match_slots(sets, [(i, p.types) for i, p in elig.items()])
+        found = [(hits[0], "partial_type")] if len(hits) == 1 else []
+        for i in getattr(pm, "_watch_loose_slots", None) or []:
+            if i in elig and all(i != j for j, _s in found):
+                found.append((i, "watch_loose"))
+        return [{"slot": i, "ja": self.party[i].species_ja if self.party[i].species_guess else None,
+                 "types": list(self.party[i].types or []), "source": src} for i, src in found]
+
+    def assign_pending(self, src_idx: int, dst_idx: int) -> dict:
+        """人が対応待ちの個体 party[src_idx] の枠を dst_idx に指定して確定する (純粋。2026-10-09 段 2)。
+        戻り値 {"ok", "reason" (入れなかった理由), "record" (merge_pending_into の記録、basis = "manual")}。
+        枠が別の種で確定済み (推定でない・形態違いでもない) なら入れない。枠の推定・タイプは場の個体の種で置き換える"""
+        if not (PARTY_SIZE <= src_idx < len(self.party)) or not self.party[src_idx].pending:
+            return {"ok": False, "reason": "対応待ちの個体ではない", "record": None}
+        if not (0 <= dst_idx < min(len(self.party), PARTY_SIZE)) or self.party[dst_idx].pending:
+            return {"ok": False, "reason": MANUAL_REASON_OUT_OF_RANGE, "record": None}
+        pm, dst = self.party[src_idx], self.party[dst_idx]
+        forms = list(pm.species_candidates or []) or ([pm.species_id] if pm.species_id else [])
+        if (dst.species_ja or dst.species_id) and not dst.species_guess \
+                and not any(_same_family(dst.species_id, f) for f in forms) and dst.species_ja != pm.species_ja:
+            return {"ok": False, "reason": f"枠 {dst_idx + 1} は {dst.species_ja} で確定済み", "record": None}
+        form = None
+        if len(forms) == 1:
+            form = forms[0]
+        elif dst.types:
+            hit = [f for f, t in self._form_type_cands(forms) if t and set(t) == set(dst.types)]
+            form = hit[0] if len({h for h in hit}) == 1 else None
+        rec = self.merge_pending_into(src_idx, dst_idx, form)
+        rec["basis"] = "manual"
+        return {"ok": True, "reason": None, "record": rec}
 
     def merge_pending_into(self, src_idx: int, dst_idx: int, form: Optional[str]) -> dict:
         """対応待ちの個体 party[src_idx] を枠 party[dst_idx] へ移す (純粋)。観測した HP・技・状態・持ち物・特性・別名を
@@ -668,6 +757,8 @@ class SideState:
                 setattr(dst, attr, val)
         for attr in ("hp_uncertain", "hp_estimated", "item_consumed", "item_removed", "is_mega", "type_changed"):
             setattr(dst, attr, bool(getattr(src, attr) or getattr(dst, attr)))
+        if src.hp_percent is not None and getattr(src, "hp_source", None) is not None:
+            dst.hp_source = src.hp_source   # HP の出所 (fix/hp-estimate で足される欄。無い版では移さない)
         if any(src.boosts.values()):
             dst.boosts = dict(src.boosts)
         if src.volatiles:
@@ -748,6 +839,13 @@ class SideState:
             },
             "tailwind": self.tailwind,
         }
+        # 対応待ちの個体の「候補の枠」(2026-10-09 段 2。画面の相手欄と助言の opp_pending_note が使う。自動では統合しない)
+        for i, p in enumerate(self.party):
+            if p.pending and i >= PARTY_SIZE:
+                try:
+                    d["party"][i]["pending_hint"] = self.pending_hint(p)
+                except Exception:
+                    d["party"][i]["pending_hint"] = []
         return d
 
 
@@ -844,6 +942,17 @@ class BattleStateV2:
             self.log_event("system", f"対応待ちの {r.get('ja')} を枠 {r['merged_to']} に対応 "
                            f"(置き換えた枠: {r['replaced'].get('ja') or '未特定'})",
                            event_id="roster_pending_resolved", target=side_name, detail=r)
+        return res
+
+    def assign_pending(self, side_name: str, src_idx: int, dst_idx: int) -> dict:
+        """人が対応待ちの個体の枠を指定して確定する (SideState.assign_pending)。入れたら roster_pending_resolved のイベントを
+        残す (対戦ログの roster_change に merged_from / merged_to と basis manual)"""
+        res = self.side(side_name).assign_pending(src_idx, dst_idx)
+        if res["ok"]:
+            r = res["record"]
+            self.log_event("manual", f"対応待ちの {r.get('ja')} を枠 {r['merged_to'] + 1} に割り当て (手動、置き換えた枠: "
+                           f"{r['replaced'].get('ja') or '未特定'})", event_id="roster_pending_resolved", target=side_name,
+                           detail=r)
         return res
 
     def needs_reset_for_new_battle(self) -> bool:

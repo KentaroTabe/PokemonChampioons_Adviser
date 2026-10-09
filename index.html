@@ -151,7 +151,7 @@
         // ページの版と、この HTML が実装している機能 (2026-10-07: ブラウザがキャッシュの古い index.html を使った疑いを確かめる)。
         // 接続時に client_hello で送り、サーバーはディスクの index.html の CLIENT_HTML_VERSION と照合して対戦ログの client 行に残す。
         // ⚠ この HTML を変えたら CLIENT_HTML_VERSION を更新する (サーバーは正規表現でこの行を読む。形式を変えない)
-        const CLIENT_HTML_VERSION = "2026-10-09a";
+        const CLIENT_HTML_VERSION = "2026-10-09c";
         const CLIENT_FEATURES = ['client_hello', 'page_visibility', 'advice_shown_hidden', 'server_warning'];
         const emitHello = () => socket.emit('client_hello', {
             html_version: CLIENT_HTML_VERSION, features: CLIENT_FEATURES, visibility: document.visibilityState,
@@ -193,6 +193,14 @@
             const [id, ja] = val.split('|');
             socket.emit('set_species', {index: i, species_id: id, species_ja: ja});
             // 選択完了: 再描画の保留を解除し、確定を即座に反映させる
+            if (el && el.blur) el.blur();
+            releaseOppHold();
+        }
+
+        // 対応待ちの個体 (party の i 番目) を枠 slot (0 始まり) に割り当てる (2026-10-09。サーバーの set_species の assign_to)
+        function assignPending(i, slot, el) {
+            if (slot === '' || slot == null) return;
+            socket.emit('set_species', {index: i, assign_to: +slot});
             if (el && el.blur) el.blur();
             releaseOppHold();
         }
@@ -630,8 +638,25 @@
             pending.forEach(([i, p]) => {
                 const cands = (p.species_candidates || []).length > 1
                     ? ` 形態未定: ${p.species_candidates.join(' / ')}` : '';
+                // 候補の枠 (2026-10-09: タイプが 1 個だけ重なる枠が 1 つ。自動では統合しない) と、枠を指定して確定するプルダウン
+                const slotLabel = (j) => {
+                    const q = oppParty[j] || {};
+                    return `枠 ${j + 1} (${q.species_ja || (q.types || []).join('/') || '未特定'}${q.species_guess ? ' 推定' : ''})`;
+                };
+                const hint = (p.pending_hint || []).map(h => slotLabel(h.slot)
+                    + (h.source === 'watch_loose' ? ' [様子見画面の弱い読み]' : '')).join('、');
+                const hintHtml = hint ? `<div style="font-size:11px;color:#fc8">候補: ${hint}</div>` : '';
+                const hintSlots = (p.pending_hint || []).map(h => h.slot);
+                const slotOpts = oppParty.slice(0, 6).map((q, j) => [j, q])
+                    .filter(([j, q]) => !q.pending && !(q.species_ja && !q.species_guess && q.species_ja !== p.species_ja))
+                    .sort((a, b) => (hintSlots.includes(b[0]) ? 1 : 0) - (hintSlots.includes(a[0]) ? 1 : 0))
+                    .map(([j, q]) => `<option value="${j}">${hintSlots.includes(j) ? '★ ' : ''}${slotLabel(j)}</option>`).join('');
+                const assign = slotOpts ? `<select onchange="assignPending(${i}, this.value, this)"
+                    style="margin-left:6px;font-size:11px;background:#223;color:#cde;border:1px solid #446;border-radius:4px">
+                    <option value="">枠に割り当て…</option>${slotOpts}</select>` : '';
                 shown.push('<div style="border:1px dashed #fa6;border-radius:6px;padding:2px 4px;margin-bottom:4px">'
-                    + `<div style="font-size:11px;color:#fa6">対応待ち (6 枠のどれか未定。✏️で種族を確定すると枠に入ります)${cands}</div>`
+                    + `<div style="font-size:11px;color:#fa6">対応待ち (6 枠のどれか未定。✏️で種族を確定するか、枠を指定すると枠に入ります)${cands}${assign}</div>`
+                    + hintHtml
                     + renderMon(p, i, s.opponent.active_index, 'opp') + '</div>');
             });
             confirmed.forEach(([i, p]) => shown.push(renderMon(p, i, s.opponent.active_index, 'opp')));

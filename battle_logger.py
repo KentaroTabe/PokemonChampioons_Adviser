@@ -66,6 +66,13 @@
     終わった個体がいる) を足した。推定の的中率の集計は、この 2 値を分母から除く (match / mismatch だけで率を出す)
   manual_fix 行に、種の手動確定のとき "applied" (入れたか) と、入れなかったときの "reason"
   scene 行の相手の枠に "pending": true (対応待ちの個体) と "candidates" (形態が決まっていない種の候補)
+
+2026-10-09 タイプの読み直し (fix/type-recognition。欄・値を足すだけ):
+  roster_change 行に、相手枠のタイプを訂正した (選出画面・様子を見る画面の読みが安定して入っていたタイプと違った) とき
+    "types_from" / "types_to" / "reason": "type_reread" / "type_source" ("selection" / "watch")。訂正で取り消した推定は
+    from / from_ja / from_guess (取り消して種が無くなれば to は null、同じフレームで推定し直せば to にその種)。種の無い枠の
+    訂正も、from / to が null の行を 1 つ書く。人が対応待ちの個体の枠を指定した統合は basis "manual" の roster_change
+    (merged_from / merged_to つき)
 """
 from __future__ import annotations
 
@@ -574,6 +581,7 @@ class BattleLogger:
         self._guess_keys: set = set()
         self._guess_prob_of: dict = {}   # (slot, species) → 推定時の確率 (roster_change の from_prob)
         self._merge_seen: set = set()    # 処理済みの枠の統合・対応待ちの解消のイベント (ts, event, text)
+        self._reread_seen: set = set()   # 処理済みのタイプの訂正のイベント (ts, text)
         self._pending_open: dict = {}    # いまの対応待ちの個体 (opp_pending_of、key → 内容)。終了時に残れば unresolved
         self._fixes: list = []           # 追跡中の手入力の訂正 [{"fix_id", "key", "manual_value", ...}]
         self._dec: Optional[dict] = None   # 決定の追跡 {"advice_id", "best", "t_gen", "turn", "n_advice", "t_decided", ...}
@@ -826,6 +834,26 @@ class BattleLogger:
             out.append((e["event"], dict(e.get("detail") or {})))
         return out
 
+    def _new_type_rereads(self, state: dict) -> dict:
+        """このフレームで新しく出たタイプの訂正のイベント {枠: detail} (state の events から。同じ枠は最後のもの)"""
+        out = {}
+        for e in state.get("events", []) or []:
+            if e.get("event") != "type_reread" or (e.get("target") or "opponent") != "opponent":
+                continue
+            key = (e.get("ts"), e.get("text"))
+            if key in self._reread_seen:
+                continue
+            self._reread_seen.add(key)
+            det = dict(e.get("detail") or {})
+            if isinstance(det.get("slot"), int):
+                out[det["slot"]] = det
+        return out
+
+    @staticmethod
+    def _reread_fields(det: dict) -> dict:
+        return {"types_from": list(det.get("types_from") or []), "types_to": list(det.get("types_to") or []),
+                "reason": "type_reread", "type_source": det.get("source")}
+
     def _shift_slots(self, popped: int) -> None:
         """相手の枠 popped が party から除かれた (統合): 枠の番号で持っている追跡を詰め直す。その枠の推定は superseded"""
         self._opp_slots = shift_slot_keys(self._opp_slots, popped)
@@ -851,6 +879,8 @@ class BattleLogger:
             out["source_cleared"] = True
         if det.get("t_first_seen") is not None:
             out["t_first_seen"] = det.get("t_first_seen")
+        if det.get("basis") == "manual":
+            out["basis"] = "manual"   # 人が対応待ちの個体の枠を指定した (2026-10-09 段 2、vision.state.assign_pending)
         return out
 
     def _track_opponent(self, state: dict, scene: Optional[str], manual_species: bool) -> None:
@@ -871,6 +901,7 @@ class BattleLogger:
             else:
                 self._shift_slots(src)
         merged_to = {det["merged_to"]: (ev, det) for ev, det in merges if isinstance(det.get("merged_to"), int)}
+        rereads = self._new_type_rereads(state)
         cur = opp_slots_of(state)
         act = (state.get("opponent") or {}).get("active_index")
         written = set()
@@ -884,6 +915,8 @@ class BattleLogger:
                    "basis": roster_change_basis(after, i, act, scene, manual_species)}
             if i in merged_to:
                 row.update(self._merge_fields(*merged_to[i]))
+            if i in rereads:
+                row.update(self._reread_fields(rereads[i]))
             self._write(row)
             written.add(i)
         for i, (ev, det) in sorted(merged_to.items()):
@@ -899,6 +932,23 @@ class BattleLogger:
                    "to": after.get("species"), "to_ja": after.get("ja"), "to_guess": bool(after.get("guess")),
                    "basis": roster_change_basis(after, i, act, scene, manual_species)}
             row.update(self._merge_fields(ev, det))
+            self._write(row)
+            written.add(i)
+        for i, det in sorted(rereads.items()):
+            if i in written or i >= PARTY_SIZE:
+                continue
+            # 種が変わらなかった訂正 (推定の無い枠など): 置き換えの行は出ないので、訂正の行を 1 つ書く
+            before = self._opp_slots.get(i) or {}
+            after = cur.get(i) or {}
+            row = {"type": "roster_change", "slot": i, "scene": scene, "turn": state.get("turn"),
+                   "from": det.get("cancelled") or before.get("species"),
+                   "from_ja": det.get("cancelled_ja") or before.get("ja"),
+                   "from_guess": bool(det.get("cancelled")) or bool(before.get("guess")),
+                   "from_prob": self._guess_prob_of.get((i, det.get("cancelled") or before.get("species"))),
+                   "from_score": before.get("score"),
+                   "to": after.get("species"), "to_ja": after.get("ja"), "to_guess": bool(after.get("guess")),
+                   "basis": roster_change_basis(after, i, act, scene, manual_species)}
+            row.update(self._reread_fields(det))
             self._write(row)
         now = time.time()
         for i, s in cur.items():

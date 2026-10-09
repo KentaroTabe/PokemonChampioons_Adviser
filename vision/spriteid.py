@@ -241,21 +241,43 @@ def harvest_from_frame(frame_path, opp_index: int, species_id: str) -> bool:
 PRIOR_AUTO_ACCEPT = SELECTION_PRIOR_AUTO_ACCEPT   # 事前確率がこれ以上なら視覚照合なしで採る (値は champions_agent/config)
 
 
+def mixed_template_sources(methods) -> bool:
+    """候補の照合の方式 ("real" = 実キャプチャ / "dex" = 図鑑画像) が混在するか (純粋)"""
+    return len(set(methods)) > 1
+
+
 def identify_species(icon_crop, candidates: list,
-                     accept: float = 0.55, margin: float = 0.03) -> Optional[tuple]:
+                     accept: float = 0.55, margin: float = 0.03,
+                     allow_prior_accept: bool = True, detail: Optional[dict] = None) -> Optional[tuple]:
     """アイコン画像を候補種族のスプライトと照合して特定する。
 
     candidates: [(species_id, prior確率, 日本語名)] (advisor.infer の出力)
-    - 候補が実質1体 (prior >= SELECTION_PRIOR_AUTO_ACCEPT) なら使用率だけで確定
+    - 候補が実質1体 (prior >= SELECTION_PRIOR_AUTO_ACCEPT) なら使用率だけで確定。ただし allow_prior_accept=False
+      (タイプの読みがまだ安定していない枠) なら採用せず None (候補を出すだけ。2026-10-09: 事前確率 1.0 は「タイプを
+      正しく読めた確率」ではない。10/9 2 戦目に サーナイト [エスパー/フェアリー] を [ノーマル/フェアリー] と読み、候補 プクリン
+      だけで照合なしに採用した)
     - 複数候補はシルエット形状 (IoU + マスクdHash) で判別
+    - 暫定 (2026-10-09): 候補のうち実キャプチャのテンプレートがある種と図鑑画像だけの種が混在するときは、点数で採用しない
+      (None)。2 つの方式は式が違い (実キャプチャ: 色ヒストグラム込み / 図鑑画像: シルエットだけ)、点数の比較可能性が未検証で、
+      今回偏りが出た (10/9 2 戦目: カイリュー を、実キャプチャのある ボーマンダ と誤認)。恒久対応 (共通の方式か方式別の較正) は
+      未着手。全候補が同じ方式なら従来どおり
+    detail に dict を渡すと、None のときの理由を detail["reason"] に入れる ("prior_needs_stable_types" /
+    "mixed_template_sources" / "no_foreground" / "low_score" / "small_margin" / "no_template")
     戻り値: (species_id, 日本語名, スコア) or None (確信が持てない場合)
     """
+    def _why(reason: str):
+        if detail is not None:
+            detail["reason"] = reason
+        return None
+
     if not candidates:
         return None
 
-    # 使用率が支配的なら視覚照合なしで確定
+    # 使用率が支配的なら視覚照合なしで確定 (タイプの読みが安定した枠だけ)
     sid, prior, ja = candidates[0]
     if prior >= PRIOR_AUTO_ACCEPT:
+        if not allow_prior_accept:
+            return _why("prior_needs_stable_types")
         return (sid, ja, round(prior, 3))
 
     from advisor.dex import get_dex
@@ -263,13 +285,14 @@ def identify_species(icon_crop, candidates: list,
 
     fg = _extract_foreground(icon_crop)
     if fg is None:
-        return None
+        return _why("no_foreground")
     q_bgr, q_mask = fg
     q_hash = _mask_dhash(q_mask)
     q_hist = _hist(q_bgr, q_mask)
     real_templates = _load_real_templates()
 
     scored = []
+    methods = []
     for sid, prior, ja in candidates:
         sp = dex.species(sid)
         if sp is None:
@@ -285,6 +308,7 @@ def identify_species(icon_crop, candidates: list,
                 q_hist, _hist(t_bgr, t_mask), cv2.HISTCMP_CORREL)))
             v = 0.4 * iou + 0.3 * dhash_sim + 0.3 * hist_corr
             visual = max(visual or 0.0, v)
+        method = "real"
         if visual is None:
             # 図鑑スプライトへフォールバック (シルエット形状のみ)
             sprite = _load_sprite(sp["num"])
@@ -295,15 +319,19 @@ def identify_species(icon_crop, candidates: list,
             hamming = int(np.count_nonzero(q_hash != _mask_dhash(t_mask)))
             dhash_sim = 1.0 - hamming / q_hash.size
             visual = 0.6 * iou + 0.4 * dhash_sim
+            method = "dex"
         total = visual * (0.7 + 0.3 * min(prior * 2, 1.0))
         scored.append((total, visual, sid, ja))
+        methods.append(method)
 
     if not scored:
-        return None
+        return _why("no_template")
+    if mixed_template_sources(methods):
+        return _why("mixed_template_sources")
     scored.sort(reverse=True)
     total0, visual0, sid0, ja0 = scored[0]
     if visual0 < accept:
-        return None
+        return _why("low_score")
     if len(scored) >= 2 and total0 - scored[1][0] < margin:
-        return None
+        return _why("small_margin")
     return (sid0, ja0, round(visual0, 3))

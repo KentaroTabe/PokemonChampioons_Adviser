@@ -1312,6 +1312,18 @@ async def set_species(sid, data):
             _attach_candidates(st)
             await sio.emit('state_update', st, room=sid)
 
+        if data.get("assign_to") is not None:
+            # 対応待ちの個体を、人が指定した枠に割り当てる (2026-10-09 段 2。index = 対応待ちの個体の番号、assign_to = 枠の
+            # 番号 (0 始まり))。タイプが 1 個だけ重なる枠は自動で統合せず候補として出し、ここで人が確定する
+            res = pipeline.state.assign_pending("opponent", idx, int(data["assign_to"]))
+            if not res["ok"]:
+                await _skip(res["reason"])
+                return
+            print(f"[server] 対応待ちの割り当て: party[{idx}] -> slot{res['record']['merged_to']}")
+            st = pipeline.state.to_dict()
+            _attach_candidates(st)
+            await sio.emit('state_update', st, room=sid)
+            return
         if not species_id:
             r = pipeline.resolver.resolve_species(str(species_ja or ""), cutoff=MANUAL_SPECIES_RESOLVE_CUTOFF)
             if not r:
