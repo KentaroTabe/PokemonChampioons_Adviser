@@ -1196,7 +1196,8 @@ def _reject_my_hp(state: BattleStateV2, reason: str, source: str, hp_text: str,
 def _trace_my_hp(state: BattleStateV2, source: str, decision: str, reason: Optional[str] = None, *,
                  name_text: Optional[str] = None, hud_species: Optional[str] = None, hp_text: Optional[str] = None,
                  frac=None, split_guess: Optional[bool] = None, known_max: Optional[int] = None,
-                 bar: Optional[float] = None, extra: Optional[dict] = None) -> None:
+                 bar: Optional[float] = None, extra: Optional[dict] = None,
+                 ocr_method: Optional[str] = None) -> None:
     """自分の HP の読みの経過を 1 行残す (state.record_my_hp_trace。2026-10-09 fix/hp-paths、4/159 の取りこぼしの原因追跡用)。
     記録の失敗で抽出を止めない"""
     try:
@@ -1208,6 +1209,9 @@ def _trace_my_hp(state: BattleStateV2, source: str, decision: str, reason: Optio
                "split_guess": split_guess, "known_max": None if known_max is None else int(known_max),
                "bar": None if bar is None else round(float(bar), 3),
                "decision": decision, "reason": reason}
+        if ocr_method is not None:
+            # 分数の文字の読み方 ("direct" / "split"。2026-10-09 fix/hp-ocr-watch で追加した欄)
+            row["ocr_method"] = ocr_method
         if extra:
             row.update(extra)
         state.record_my_hp_trace(row)
@@ -1300,7 +1304,9 @@ def extract_field_hp(img, state: BattleStateV2) -> None:
         _trace_my_hp(state, "field", "skip_no_my_hud", f"my_bar_px={int(my_px)}", extra=gate)
         return
     my_hp = ocr.read_zone_text(img, zones.BATTLE["my_hp_text"], mode="panel",
-                               allowlist="0123456789/")
+                               allowlist="0123456789/", fraction=True)
+    hp_method = ocr.ocr_method(my_hp)   # "split" = 現在値と '/最大' を分けて読んだ (満タン付近の分母の読み落としの対処)
+    my_hp = str(my_hp)
     frac = ocr.parse_fraction(my_hp)
     split_guess = ocr.fraction_is_split_guess(my_hp)
     known = _expected_my_max(me) or \
@@ -1324,7 +1330,7 @@ def extract_field_hp(img, state: BattleStateV2) -> None:
             _reject_my_hp(state, "max_hp_not_in_team", "field", my_hp, frac)
             dec = "max_hp_not_in_team"
         elif cur <= mx:
-            _set_hp(state, "player", me, cur=cur, mx=mx, split_guess=split_guess)
+            _set_hp(state, "player", me, cur=cur, mx=mx, split_guess=split_guess or hp_method == "split")
             res = getattr(me, "_hp_set_result", None) or {}
             dec, reason = res.get("decision") or "no_value", res.get("reason")
             gate.update({k: res.get(k) for k in ("new", "stable_count", "since_commit")})
@@ -1336,7 +1342,7 @@ def extract_field_hp(img, state: BattleStateV2) -> None:
         dec = "fraction_unparsable"
     me._hp_set_result = None
     _trace_my_hp(state, "field", dec, reason, hp_text=my_hp, frac=frac, split_guess=split_guess,
-                 known_max=known, extra=gate)
+                 known_max=known, extra=gate, ocr_method=hp_method)
 
 
 _TYPE_EN2JA = None
@@ -1844,7 +1850,12 @@ def extract_my_hud(img, state: BattleStateV2, resolver, bar_zone: Optional[dict]
             hud_species = sp[0]
 
     my_hp = ocr.read_zone_text(img, zones.BATTLE["my_hp_text"], mode="panel",
-                               allowlist="0123456789/")
+                               allowlist="0123456789/", fraction=True)
+    # 読み方: "split" = ゾーン全体の読みが分数にならず、現在値と '/最大' を分けて読んだ (満タン付近で HP バーの塗りが
+    # 小さい分母とつながり '189/189' が '189' になる対処。2026-10-09 fix/hp-ocr-watch)。分けて読んだ分母は誤読 ('183' 等) が
+    # 混じるので、桁分割の推測と同じく最大 HP の決定 (実測採用の数え上げ・初回の多数決の票) には使わない
+    hp_method = ocr.ocr_method(my_hp)
+    my_hp = str(my_hp)
     frac = ocr.parse_fraction(my_hp)
     # バーの割合はバーの実範囲 (my_hp_bar_track) で測る。bar_zone は検証用 (修正前のゾーン my_hp_bar の挙動の再現)
     if bar_zone is None:
@@ -1852,6 +1863,7 @@ def extract_my_hud(img, state: BattleStateV2, resolver, bar_zone: Optional[dict]
     unusable = False   # 文字はあるが、分数が読めない / 読めたが捨てた (バー推定の条件 (d))
     bar = None
     split_guess = ocr.fraction_is_split_guess(my_hp)   # 桁分割で推測した分数か (最大 HP の多数決の票に入れない)
+    max_unreliable = split_guess or hp_method == "split"   # 最大 HP の決定に使わない読み
     known = None
     trace_dec, trace_reason = "no_text", None   # 読みの経過の記録 (state.my_hp_trace) の decision / reason
     me._hp_set_result = None
@@ -1896,7 +1908,7 @@ def extract_my_hud(img, state: BattleStateV2, resolver, bar_zone: Optional[dict]
                 # 種族が分かるなら図鑑の物理可能域に入る最大 HP だけ (2026-10-09: 4/159 の読み落ち '1595' の 15/95 が
                 # バー照合の許容内に入り、3 回で最大 HP 95 が採用される恐れ。KNOWN_ISSUES A1)
                 if bar_now is not None and cur <= mx and \
-                        not ocr.fraction_is_split_guess(my_hp) and \
+                        not max_unreliable and \
                         _plausible_max_hp(me.species_id, mx) and \
                         my_bar_agrees(cur, mx, bar_now):
                     counts[mx] = counts.get(mx, 0) + 1
@@ -1940,7 +1952,7 @@ def extract_my_hud(img, state: BattleStateV2, resolver, bar_zone: Optional[dict]
                 reject = "bar_mismatch"
                 cand = (cur, mx)
         if ok and cur <= mx:
-            _set_hp(state, "player", me, cur=cur, mx=mx, split_guess=split_guess)
+            _set_hp(state, "player", me, cur=cur, mx=mx, split_guess=max_unreliable)
         elif ok:
             reject = "cur_over_max"
             cand = (cur, mx)
@@ -1974,7 +1986,7 @@ def extract_my_hud(img, state: BattleStateV2, resolver, bar_zone: Optional[dict]
         extra = {k: set_res.get(k) for k in ("new", "stable_count", "since_commit")}
     _trace_my_hp(state, "hud", trace_dec, trace_reason, name_text=my_name, hud_species=hud_species, hp_text=my_hp,
                  frac=frac, split_guess=split_guess, known_max=known or _known_my_max(me),
-                 bar=bar, extra=extra)
+                 bar=bar, extra=extra, ocr_method=hp_method)
 
 
 def _known_my_max(me) -> Optional[int]:
@@ -2944,13 +2956,24 @@ def _extract_watch_side_columns(img, state: BattleStateV2, resolver) -> None:
                 rows_log.append({"row": i, "hp_text": hp_text, "pct": pct, "species": None, "method": None,
                                  "score": None, "written": "no_candidates" if pct is not None else "pct_unparsable"})
             continue
+        # 照合は種族アイコンだけの範囲 (zones の icon) で行う。行全体 (panel) だと地の色・タイプアイコン・HP の文字まで前景になり、
+        # 10/9 の 4 戦で全行が不一致だった (2026-10-09 fix/hp-ocr-watch)。採用の閾値 (accept 0.38 / margin 0.05) は変えていない
+        why: dict = {}
         try:
-            hit = identify_species_color(crop(img, z["panel"]), cands)
+            hit = identify_species_color(crop(img, z["icon"]), cands, detail=why)
         except Exception:
             hit = None
+            why = {"reason": "error"}
+        top = why.get("top") or []
         row_log = {"row": i, "hp_text": hp_text, "pct": pct, "species": hit[0] if hit else None,
                    "method": "color", "score": round(float(hit[2]), 3) if hit and len(hit) > 2 else None,
-                   "written": "no_match"}
+                   "written": "no_match",
+                   # 照合の材料 (2026-10-09 で追加した欄): 不一致の理由、1 位・2 位の種族と見た目のスコア、1 位と 2 位の差
+                   "match_reason": why.get("reason"),
+                   "top_species": top[0][0] if top else None, "top_score": top[0][1] if top else None,
+                   "second_species": top[1][0] if len(top) > 1 else None,
+                   "second_score": top[1][1] if len(top) > 1 else None,
+                   "margin": why.get("margin")}
         rows_log.append(row_log)
         if not hit:
             continue

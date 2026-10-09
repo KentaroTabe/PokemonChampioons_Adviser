@@ -1,0 +1,55 @@
+{
+ "row0_absol.png": {
+  "frame_size": [
+   1920,
+   1080
+  ],
+  "offset": [
+   1536,
+   230
+  ],
+  "row": 0,
+  "species": "absol",
+  "source": "debug_frames/frame_1791513648.png",
+  "memo": "2026-10-09 11:40:48 battle_20261009_113830 の様子を見る画面、右列の行 0: アブソル (HP の文字なし)"
+ },
+ "row4_raichu.png": {
+  "frame_size": [
+   1920,
+   1080
+  ],
+  "offset": [
+   1536,
+   731
+  ],
+  "row": 4,
+  "species": "raichu",
+  "source": "debug_frames/frame_1791513648.png",
+  "memo": "2026-10-09 11:40:48 battle_20261009_113830 の様子を見る画面、右列の行 4: ライチュウ 100% (カーソルの行、地に明るい斜めの帯)"
+ },
+ "row5_corviknight.png": {
+  "frame_size": [
+   1920,
+   1080
+  ],
+  "offset": [
+   1536,
+   856
+  ],
+  "row": 5,
+  "species": "corviknight",
+  "source": "debug_frames/frame_1791513648.png",
+  "memo": "2026-10-09 11:40:48 battle_20261009_113830 の様子を見る画面、右列の行 5: アーマーガア (HP の文字なし)"
+ },
+ "_sprites": {
+  "source": "images/templetes/<図鑑番号>.png (未コミットの図鑑スプライト) の写し",
+  "species": {
+   "absol": 359,
+   "pawmot": 923,
+   "volcarona": 637,
+   "meowscarada": 908,
+   "raichu": 26,
+   "corviknight": 823
+  }
+ }
+}

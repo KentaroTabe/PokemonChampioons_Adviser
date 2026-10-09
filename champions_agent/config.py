@@ -336,6 +336,22 @@ MY_HP_TRACE_LEN = 40
 MY_HP_TRACE_DUMP_STREAK = 20
 # 1 対戦で my_hp_trace の行を書く回数の上限
 MY_HP_TRACE_MAX_DUMPS = 5
+# 自分の HP の分数の文字の読み (vision.ocr.read_zone_text(fraction=True)、2026-10-09 fix/hp-ocr-watch。KNOWN_ISSUES A1 の
+# 「満タンのとき HUD の分数が最大 HP の数字だけに読まれる」): ゾーン全体の読みが 'a/b' の分数にならないとき、大きい現在値と
+# 小さい '/最大' に分けて読み直す (位置は vision.zones.MY_HP_TEXT_SPLIT)。
+# 白文字 (数字) の判定: 彩度 (0〜255) がこれ未満、かつ明度がこれを超える画素
+HP_TEXT_WHITE_SAT_MAX = 80
+HP_TEXT_WHITE_VAL_MIN = 160
+# 大きい数字の帯で「文字のある列」とみなす白画素の数の下限 (1 画素の粒を拾わない)
+HP_TEXT_SPLIT_COL_MIN_PIXELS = 2
+# 分母側の前処理: 彩度の高い画素 (HP バーの塗り) を暗くする。明度 × (1 - 強さ × max(0, 彩度 - 始点)) (彩度は 0〜1) のグレーにして白黒を反転
+HP_TEXT_DESAT_GAIN = 1.6
+HP_TEXT_DESAT_SAT0 = 0.25
+# 分母側の切り出しに足す余白 (画素、白) と、読むときの拡大率 (順に試し、3 桁が読めた時点で採用)
+HP_TEXT_DENOM_PAD = 16
+HP_TEXT_DENOM_SCALES = (3.0, 2.0)
+# 'a/b' を分数として認める最大値 b の下限 (Lv50 の最大 HP は実質 50 以上。vision.ocr.parse_fraction の桁分割の下限と同じ値)
+HP_FRACTION_MAX_MIN = 50
 # 様子見画面の右列 (相手の HP%): 交代の文言の無い、この値 (ポイント) を超える増加は書かずに棄却として記録する
 # (2026-10-09 fix/hp-paths。10/7 18:30 マニューラ 39% → 100% の原因を切り分けるため。回復技の上限を超える増加は別個体の値の疑い)
 WATCH_OPP_BIG_INCREASE = 60.0

@@ -94,21 +94,32 @@ def _dhash(bgr, mask):
 
 
 def identify_species_color(icon_crop, candidates: list,
-                           accept: float = 0.38, margin: float = 0.05) -> Optional[tuple]:
+                           accept: float = 0.38, margin: float = 0.05,
+                           detail: Optional[dict] = None) -> Optional[tuple]:
     """フルカラーのアイコン (バトルHUD等) を候補スプライトと色+形状で照合する。
 
     選出画面のシルエット調アイコンと違い、バトルHUDのアイコンは原色なので
     色ヒストグラムが有効。
     戻り値: (species_id, 日本語名, スコア) or None
+    detail に dict を渡すと、判定の材料を書き込む (記録用。判定は変えない。2026-10-09 fix/hp-ocr-watch):
+      reason: None (採用) / "no_candidates" / "no_foreground" / "no_template" / "low_score" / "small_margin"
+      top: [(species_id, visual, total), ...] 上位 2 件、margin: 1 位と 2 位の total の差 (候補が 1 件なら None)
     """
-    if not candidates:
+    def _why(reason):
+        if detail is not None:
+            detail["reason"] = reason
         return None
+
+    if detail is not None:
+        detail.update({"reason": None, "top": [], "margin": None})
+    if not candidates:
+        return _why("no_candidates")
     from advisor.dex import get_dex
     dex = get_dex()
 
     fg = _extract_foreground(icon_crop)
     if fg is None:
-        return None
+        return _why("no_foreground")
     q_bgr, q_mask = fg
     q_hist = _hist(q_bgr, q_mask)
     q_hash = _dhash(q_bgr, q_mask)
@@ -131,13 +142,16 @@ def identify_species_color(icon_crop, candidates: list,
         scored.append((total, visual, sid, ja))
 
     if not scored:
-        return None
+        return _why("no_template")
     scored.sort(reverse=True)
     total0, visual0, sid0, ja0 = scored[0]
+    if detail is not None:
+        detail["top"] = [(sid, round(v, 3), round(t, 3)) for t, v, sid, _ja in scored[:2]]
+        detail["margin"] = round(total0 - scored[1][0], 3) if len(scored) >= 2 else None
     if visual0 < accept:
-        return None
+        return _why("low_score")
     if len(scored) >= 2 and total0 - scored[1][0] < margin:
-        return None
+        return _why("small_margin")
     return (sid0, ja0, round(visual0, 3))
 
 

@@ -505,7 +505,8 @@ def _run_watch_right(st, texts: dict, hits: dict):
     """様子見画面の側柱の抽出を、右列の % の文字 (行 → 文字) と色照合の結果 (行 → (id, ja, score)) をモックして 1 回実行する"""
     from vision import extractors, spriteid
     rows = {id(z["hp_text"]): i for i, z in enumerate(zones.WATCH_OPP)}
-    panels = {id(z["panel"]): i for i, z in enumerate(zones.WATCH_OPP)}
+    # 色照合の切り出しは 2026-10-09 (fix/hp-ocr-watch) から種族アイコンだけの範囲 (icon)。どちらのゾーンでも行に対応させる
+    panels = {id(z[k]): i for i, z in enumerate(zones.WATCH_OPP) for k in ("panel", "icon")}
     orig = ocr.read_zone_text, spriteid.identify_species_color, extractors._reread_watch_opp_types, extractors.crop
     crops = []
 
@@ -513,7 +514,7 @@ def _run_watch_right(st, texts: dict, hits: dict):
         crops.append(panels.get(id(zone)))
         return zone
 
-    def fake_ident(zone, cands):
+    def fake_ident(zone, cands, **kw):
         return hits.get(panels.get(id(zone)))
 
     ocr.read_zone_text = lambda _img, zone, **kw: texts.get(rows.get(id(zone)), "")
