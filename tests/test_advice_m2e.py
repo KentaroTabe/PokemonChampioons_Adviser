@@ -397,6 +397,13 @@ def test_part_ranges_and_pool_rng():
     print("test_part_ranges_and_pool_rng OK")
 
 
+def _dry_json(text: str) -> dict:
+    """dry-run の標準出力から条件表の JSON を取り出す (本体では登録チームの補完の注記が JSON の前に出るので、最初の '{' の行から
+    '# コマンド列' の前まで。2026-10-09: 本体の CI で先頭から解析して失敗した。期待は変えていない)"""
+    head = text[:text.index("\n# コマンド列")]
+    return json.loads(head[head.index("\n{") + 1:] if "\n{" in head else head)
+
+
 def test_part_dry_run():
     """--part 2/2 の dry-run: 両条件のコマンドが --battles 300 --opp-offset 300、条件表に part と範囲、時間上限は按分 (5400)。
     --part は --prelim / --compare rl / --team general-pinned と併用できない"""
@@ -418,7 +425,7 @@ def test_part_dry_run():
                              "--out", str(Path(tmp) / "x")])
             text = buf.getvalue()
             assert rc == 0, text
-            doc = json.loads(text[:text.index("\n# コマンド列")])
+            doc = _dry_json(text)
             assert doc["part"]["k"] == 2 and doc["part"]["start"] == 300 and doc["part"]["end"] == 600, doc.get("part")
             assert doc["opponents"]["offset"] == 300 and doc["battles"] == 300 and doc["time_limit_sec"] == 5400
             assert doc["scoring_time"]["time_limit_total_sec"] == 10800 and doc["scoring_time"]["start_margin_sec"] == 1080
@@ -437,14 +444,14 @@ def test_part_dry_run():
             with redirect_stdout(buf):
                 P.main(["--compare", "scoring", "--dry-run", "--own-pool", "/pool.json", "--out", str(Path(tmp) / "z")])
             t2 = buf.getvalue()
-            d2 = json.loads(t2[:t2.index("\n# コマンド列")])
+            d2 = _dry_json(t2)
             assert d2["time_limit_sec"] == 10800 and "part" not in d2 and d2["opponents"]["offset"] == 0
             P.collect_facts = lambda *a, **k: _facts()
             buf = io.StringIO()
             with redirect_stdout(buf):
                 P.main(["--dry-run", "--out", str(Path(tmp) / "w")])
             t3 = buf.getvalue()
-            d3 = json.loads(t3[:t3.index("\n# コマンド列")])
+            d3 = _dry_json(t3)
             assert d3["time_limit_sec"] == 7200 and "scoring_time" not in d3 and "part" not in d3
     finally:
         P.collect_facts, P.make_pin, P.launch = orig
