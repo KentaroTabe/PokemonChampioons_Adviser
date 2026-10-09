@@ -417,6 +417,17 @@ P1_SCORING_TEAM_SHA16 = "fae570ac86ab02fd"
 # を読む経路 (get_my_build / get_my_moves ほか) が全種「未登録」を返す。一般的なチームの測定の子プロセス (両条件で共通) に立てる
 MY_TEAM_DISABLED_ENV = "ADVISOR_MY_TEAM_DISABLED"
 
+# --- 2026-09-04〜05 の信念つき探索アークの判定の再測定 (2026-10-09 ユーザー判断。シムの自チームの型の登録が 1 戦ずれていた不具合
+# docs/incidents/reports/2026-09-04-sim-team-registration-off-by-one.md の後始末)。起動は tools/arc_remeasure.py (scripts/arc_remeasure.sh)、
+# 集計は tools/arc_remeasure_summary.py。判定ごとの腕・seed・対戦数・当時の記録は tools/arc_remeasure.py の CATALOG に置く (過去の事実なので設定にしない)
+ARC_REMEASURE_OUT_PREFIX = "logs/arc_remeasure_"     # 出力先 = <prefix><YYYYMMDD_HHMM>/<判定>/<腕>.json|.log|.battles.jsonl
+ARC_REMEASURE_SEC_PER_BATTLE = 9.7   # 見積もりの秒/戦 (P1 の実測: 3 並列の各プロセスの経過 / 到達数)。並列が 3 未満なら過大側の見積もり
+ARC_REMEASURE_JOBS = 3               # 同時に回すプロセス数 (腕)。P1 と同じ 3 並列
+ARC_REMEASURE_DEADLINE = "06:30"     # この時刻までに終える (launchd の usage-update)。dry-run が終了見込みと比べる
+ARC_REMEASURE_FORMATS = {"mb": "gen9championsbssregmb", "mc": "gen9championsbssregmc"}   # 当時 (9/4〜05) は M-B
+ARC_REMEASURE_FORMAT_DEFAULT = "mb"
+ARC_REMEASURE_META_SNAPSHOT = 24     # 当時の META_PIN。起動前に現在の META_PIN と一致するか確かめる (違えば起動しない)
+
 # --- パーティ構築システム (docs/TEAM_BUILDING_IMPLEMENTATION.md §9 の決定値、2026-09-06) ---
 # 対応差 (候補 − 参照) の判定: 実用差 ε の帯に CI が収まれば「実用上同等」
 BUILD_EQUIV_EPS = 0.02

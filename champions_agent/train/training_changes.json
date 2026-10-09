@@ -2,6 +2,12 @@
  "_comment": "学習に影響する変更の記録。watch_training が推移グラフに赤い縦線として描画し、履歴表示にも差し込む。新しい変更を入れたら追記すること (at はローカル時刻 'YYYY-MM-DD HH:MM')。kind: net=ネット構成 / reward=報酬 / opponent=相手構成 / env=環境仕様 / eval=評価方法 / fix=不具合修正",
  "changes": [
   {
+   "at": "2026-10-09 21:35",
+   "kind": "eval",
+   "label": "再測定の準備: 2026-09-04〜05 のアークの advisor-as-player の判定 (advisor baseline / P9 中間 / P9 / P9') を正しい自チームの型で測り直す (起動は未定)",
+   "detail": "背景: docs/incidents/reports/2026-09-04-sim-team-registration-off-by-one.md (シムの自チームの型の登録が 1 戦ずれていた、d7869aff で修正)。2026-10-09 ユーザー判断で再測定を行う。◆対象: advisor-as-player (tools.check_advisor_player、--team-file なし) の 3 判定 = p9_300 (advisor baseline 9/4 20:05 を A に兼ねる P9 中間、各 300、判定不能) / p9_600 (P9、各 600、棄却) / p9b_1500 (P9'、各 1,500、棄却)。探索プレイヤー (tools.check_search_expert) の P6-a / P6-b / P7 / P7' / P8 / P10 は、自分側を battle.team の実数値から作り型の登録を通らないので対象外 (当時の版 8786537a でも同じ)。◆条件: 当時と同じ seed 20260904・対戦数・腕の引数 (K=0、sensor_q 0、workers 1、RL 加点 25、search_blend 0 / 40)・META_PIN=24・フォーマット M-B (gen9championsbssregmb)。当時の挙動に合わせて明示: 選出 teampreview、相手 heuristic 操縦 + heuristic 選出、採点方式 legacy。登録参照 (config/my_team.json) は既定で無効化 (今の登録は当時と違う)。変えられないもの: 助言エンジンのコード (5 週間ぶん) と RL モデル (当時のピンは無い。アーク中はライブの EMA) と venv (当時 python 3.9) → 『現行条件での再測定』。RL は起動時に scripts/pin_models.sh の新しいピン。◆道具: scripts/arc_remeasure.sh (tools/arc_remeasure.py、--dry-run で見積もり)、集計 tools/arc_remeasure_summary.py (当時の json から計算し直した判定と並べ、判定が変わったかと stats の team_reg_* を出す)。check_advisor_player に --battle-format を追加 (既定は従来どおり TRAINING_BATTLE_FORMAT)。◆見積もり: 9.7 秒/戦 (P1 の実測、3 並列) で 合計 4,800 戦、3 並列の割り付けで 4.85 時間 (p9_300 0.81 / p9_600 1.62 / p9b_1500 4.04 時間)。◆起動: (空欄。起動したら日時と出力先を追記)。採否の変更は再測定の結果を見て運用側が判断する"
+  },
+  {
    "at": "2026-10-02 19:45",
    "kind": "advisor",
    "label": "助言のダメージ計算に技・特性の効果表を統合 (特性 226 種類、連続技、確定急所、可変威力、条件つき技、天候で変わる命中、命中込みの期待値)",
