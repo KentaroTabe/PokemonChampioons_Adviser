@@ -281,6 +281,8 @@ class VisionPipeline:
         """1フレーム処理。戻り値: (state_dict, fired_events)"""
         if img is None:
             return self.state.to_dict(), []
+        # 対戦ログに出す自分の HP の読みの経過 (state.my_hp_trace_outbox) はフレームごと (2026-10-09 fix/hp-paths)
+        self.state.my_hp_trace_outbox = []
 
         result = scenes.classify(img)
         scene = result["scene"]
@@ -464,6 +466,12 @@ class VisionPipeline:
         conf = self.parser.confirm_end_hint()
         if conf:
             fired.append(conf)
+
+        # 対戦の終わり (勝敗 / 終了の確定) を見たら、自分の HP の読みの経過を 1 回だけ対戦ログに出す (2026-10-09 fix/hp-paths)。
+        # 終わりを見ずに次の対戦の選出に入ったときは reset_battle が出す
+        if (self.state.outcome or self.state.battle_ended) and not self.state.my_hp_trace_end_done:
+            self.state.dump_my_hp_trace("battle_end")
+            self.state.my_hp_trace_end_done = True
 
         return self.state.to_dict(), fired
 

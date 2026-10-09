@@ -15,8 +15,8 @@ from dataclasses import dataclass, field, asdict
 from functools import lru_cache
 from typing import Optional
 
-from champions_agent.config import (BSS_PICK_COUNT, PARTY_SIZE, SAME_NAME_FORM_SUFFIXES,
-                                    SELECTION_GUESS_REPLACE_MARGIN)
+from champions_agent.config import (BSS_PICK_COUNT, MY_HP_TRACE_DUMP_STREAK, MY_HP_TRACE_LEN, MY_HP_TRACE_MAX_DUMPS,
+                                    PARTY_SIZE, SAME_NAME_FORM_SUFFIXES, SELECTION_GUESS_REPLACE_MARGIN)
 
 STAT_KEYS = ("atk", "def", "spa", "spd", "spe", "acc", "eva")
 
@@ -34,10 +34,13 @@ MAJOR_STATUSES = ("poison", "toxic", "burn", "paralysis", "sleep", "freeze", "dr
 #   max_hp_not_in_team          自分: 基準なし・種族未特定 (または登録済み) で、チームの理論最大 HP の集合に無い
 #   cur_over_max                自分: 現在値が最大値を超える
 #   bar_mismatch                自分: 分数の割合とバーの塗りの割合の差が許容 (HP_BAR_MATCH_TOL) を超える
+#   watch_right_big_increase    相手: 様子見画面の右列の HP% が、交代の文言なしに WATCH_OPP_BIG_INCREASE を超えて増えた
+#                               (2026-10-09 fix/hp-paths。書かずに残す。row / species / score は右列の行と同定の結果)
 # 状態には側ごとに「最後に捨てた読み」1 件だけを持つ (同じ理由・同じ候補値・同じ枠の連続は 1 件にまとめ、n と t_first で残す)。
 # 件数は起動からの累計をモジュールに持つ (reset_battle で消えない。server の 5 秒統計の行に出す)
 HP_REJECT_REASONS = ("name_mismatch", "name_unreadable_big_change", "fraction_unparsable", "max_hp_mismatch",
-                     "max_hp_implausible", "max_hp_not_in_team", "cur_over_max", "bar_mismatch")
+                     "max_hp_implausible", "max_hp_not_in_team", "cur_over_max", "bar_mismatch",
+                     "watch_right_big_increase")
 HP_REJECT_COUNTS: dict = {}   # {(side, reason): 件数}
 
 
@@ -53,6 +56,27 @@ def merge_hp_reject(prev: Optional[dict], rec: dict) -> dict:
         out["n"] = 1
         out["t_first"] = rec.get("t")
     return out
+
+
+# --- 自分の HP の読みの経過の記録 (2026-10-09 fix/hp-paths。オオニューラ 4/159 の取りこぼしの原因追跡用) ---
+# extract_my_hud (source "hud") と extract_field_hp の自分側 (source "field") が、フレームごとに 1 行を state.my_hp_trace に足す
+# (直近 MY_HP_TRACE_LEN 件)。decision:
+#   commit / pending_stable     _set_hp に渡した読みを確定した / 安定待ちで保留した (pending の詳細は new / stable_count / since_commit)
+#   HP_REJECT_REASONS の自分側   読みを捨てた (理由は既存の棄却の記録と同じ名前)
+#   set_hp_*, max_split_guess, max_vote_mismatch, fainted_reread   _set_hp の中で捨てた (mon._hp_set_result)
+#   estimate                    分数は使えず、バー推定の値を _set_hp に渡した (reason に捨てた理由)
+#   skip_no_my_hud / no_text    自分の HUD が無い (my_hp_bar の画素が閾値以下) / HP の文字が読めない (どちらも数え上げに入れない)
+MY_HP_TRACE_ACCEPT = ("commit", "pending_stable")
+MY_HP_TRACE_NEUTRAL = ("skip_no_my_hud", "no_text")
+
+
+def my_hp_reject_streak(prev: int, decision: str) -> int:
+    """自分の HP の「確定も保留もしない読み」の連続数を更新する (純粋)。確定・保留で 0、HUD が無い・文字が無いフレームは数えない"""
+    if decision in MY_HP_TRACE_ACCEPT:
+        return 0
+    if decision in MY_HP_TRACE_NEUTRAL:
+        return int(prev)
+    return int(prev) + 1
 
 
 def format_hp_reject_counts(counts: dict) -> str:
@@ -907,6 +931,15 @@ class BattleStateV2:
         self.last_move: dict = {}
         # 側ごとの「最後に捨てた HP の読み」(record_hp_reject。理由の一覧は HP_REJECT_REASONS の注記)
         self.hp_reject: dict = {"player": None, "opponent": None}
+        # 自分の HP の読みの経過 (record_my_hp_trace、直近 MY_HP_TRACE_LEN 件。MY_HP_TRACE_ACCEPT の注記)
+        self.my_hp_trace: list = []
+        self.my_hp_reject_streak: int = 0       # 確定も保留もしない読みの連続数 (my_hp_reject_streak)
+        self.my_hp_trace_dumps: int = 0         # この対戦で対戦ログに出した回数 (上限 MY_HP_TRACE_MAX_DUMPS)
+        self.my_hp_trace_end_done: bool = False  # 対戦の終わりの分を出したか
+        # このフレームで対戦ログに出す my_hp_trace の行 (pipeline が毎フレームの始めに空にする。to_dict の my_hp_trace_dumps)
+        self.my_hp_trace_outbox: list = []
+        # 様子見画面の右列の読み (最新のフレームの分。[{row, hp_text, pct, species, method, score, written}])
+        self.watch_opp_rows: list = []
 
     # --- イベントログ ---
     def log_event(self, source: str, text: str, event_id: Optional[str] = None,
@@ -934,6 +967,31 @@ class BattleStateV2:
         key = (side, rec.get("reason"))
         HP_REJECT_COUNTS[key] = HP_REJECT_COUNTS.get(key, 0) + 1
         return merged
+
+    def record_my_hp_trace(self, row: dict) -> dict:
+        """自分の HP の読みの経過を 1 行足す (直近 MY_HP_TRACE_LEN 件)。棄却が MY_HP_TRACE_DUMP_STREAK 回続いたら
+        対戦ログに出す分を作る (dump_my_hp_trace)"""
+        row = dict(row)
+        row.setdefault("t", round(time.time(), 2))
+        row.setdefault("scene", self.scene)
+        self.my_hp_trace.append(row)
+        if len(self.my_hp_trace) > MY_HP_TRACE_LEN:
+            self.my_hp_trace = self.my_hp_trace[-MY_HP_TRACE_LEN:]
+        self.my_hp_reject_streak = my_hp_reject_streak(self.my_hp_reject_streak, row.get("decision"))
+        if self.my_hp_reject_streak >= MY_HP_TRACE_DUMP_STREAK:
+            self.dump_my_hp_trace("reject_streak")
+            self.my_hp_reject_streak = 0
+        return row
+
+    def dump_my_hp_trace(self, reason: str) -> Optional[dict]:
+        """いまの my_hp_trace を対戦ログに出す分 (outbox) に入れる。行が無い・この対戦の上限に達したら出さない (None)"""
+        if not self.my_hp_trace or self.my_hp_trace_dumps >= MY_HP_TRACE_MAX_DUMPS:
+            return None
+        self.my_hp_trace_dumps += 1
+        rec = {"reason": reason, "battle_seq": self.battle_seq, "n": self.my_hp_trace_dumps,
+               "rows": [dict(r) for r in self.my_hp_trace]}
+        self.my_hp_trace_outbox.append(rec)
+        return rec
 
     def side(self, name: str) -> SideState:
         return self.player if name == "player" else self.opponent
@@ -972,9 +1030,14 @@ class BattleStateV2:
         """新しい対戦の開始 (選出画面検知時など) に呼ぶ"""
         keep_rate = self.last_rate   # レートは対戦を跨ぐ情報なので保持
         next_seq = self.battle_seq + 1   # 世代番号も跨いで単調増加させる
+        # 前の対戦の自分の HP の読みの経過を、終わりの分として出していなければ出す (このフレームの to_dict で対戦ログへ)
+        if not self.my_hp_trace_end_done:
+            self.dump_my_hp_trace("battle_end")
+        outbox = list(self.my_hp_trace_outbox)
         self.__init__()
         self.last_rate = keep_rate
         self.battle_seq = next_seq
+        self.my_hp_trace_outbox = outbox
         # __init__ の再実行では宣言外の臨時属性が消えない。位置ベースの
         # ものは前の対戦の値が誤適用されるため明示的に破棄する
         # (交代メニュー由来の選出確定 index 集合など)
@@ -1060,4 +1123,7 @@ class BattleStateV2:
             "battle_seq": self.battle_seq,
             "last_move": dict(self.last_move),
             "hp_reject": {k: (dict(v) if v else None) for k, v in self.hp_reject.items()},
+            # 2026-10-09 fix/hp-paths: このフレームで対戦ログに出す自分の HP の読みの経過 (ふだんは空)・様子見画面の右列の読み
+            "my_hp_trace_dumps": [dict(d) for d in self.my_hp_trace_outbox],
+            "watch_opp_rows": [dict(r) for r in self.watch_opp_rows],
         }

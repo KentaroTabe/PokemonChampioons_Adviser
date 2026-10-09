@@ -1,0 +1,41 @@
+{
+ "opp_high_87.png": {
+  "frame_size": [
+   1920,
+   1080
+  ],
+  "offset": [
+   1459,
+   32
+  ],
+  "source": "debug_frames/frame_1791503077.png",
+  "pct_text": 87,
+  "memo": "相手 87% (10/9 08:44、% の文字は '87%')"
+ },
+ "opp_mid_58.png": {
+  "frame_size": [
+   1920,
+   1080
+  ],
+  "offset": [
+   1459,
+   32
+  ],
+  "source": "debug_frames/frame_1791452013.png",
+  "pct_text": 58,
+  "memo": "相手 58% (10/8 18:33、% の文字は '58%')"
+ },
+ "opp_low_13.png": {
+  "frame_size": [
+   1920,
+   1080
+  ],
+  "offset": [
+   1459,
+   32
+  ],
+  "source": "debug_frames/frame_1791451725.png",
+  "pct_text": 13,
+  "memo": "相手 13% (10/8 18:28、% の文字は '13%'。10/8 の調査の 13 → 18.1 の標本)"
+ }
+}

@@ -21,8 +21,10 @@ from vision.state import BattleStateV2, MoveSlot, PokemonState, adopt_selection_
 from vision.typeicons import classify_type_icon, classify_type_icon_detail, icon_std
 from vision import type_reading as TR
 from vision import my_hp_estimate
-from champions_agent.config import (HP_BAR_ESTIMATE_STABLE_FRAMES, HP_BAR_ESTIMATE_STABLE_TOL,
-                                    HP_BAR_MATCH_TOL, HP_REJECT_SPECIES_CUTOFF,
+from champions_agent.config import (FIELD_HP_OPP_BANNER_MIN, HP_BAR_ESTIMATE_STABLE_FRAMES, HP_BAR_ESTIMATE_STABLE_TOL,
+                                    HP_BAR_MATCH_TOL, HP_REJECT_SPECIES_CUTOFF, HP_SETTLE_LOW_PCT,
+                                    HP_SETTLE_LOW_READS, HP_SETTLE_MIN_SEC, HP_SETTLE_SAME_TOL,
+                                    MY_HUD_BAR_MIN_PIXELS, OPP_HP_BAR_SUBSTITUTE_DIFF, WATCH_OPP_BIG_INCREASE,
                                     MY_EXACT_RESOLVE_CUTOFF, MY_REGISTERED_MATCH_RATIO,
                                     MY_ROSTER_MATCH_RATIO, OPP_HP_UNVERIFIED_MAX_CHANGE,
                                     OPP_HUD_NAME_MATCH_MIN, PARTY_SIZE, TYPE_ICON_EMPTY_STD_MAX,
@@ -889,8 +891,63 @@ def _resolve_ability_validated(resolver, text: str, mon):
     return resolver.resolve_restricted(text, "abilities", legal)
 
 
+# _set_hp の確定判定 (2026-10-09 fix/hp-paths): 判定を純粋関数 hp_settle_step に切り出し、結果 (確定 / 保留 / 捨てた理由) を
+# mon._hp_set_result に残す (自分の HP の読みの経過の記録 state.my_hp_trace に extract 側が載せる。戻り値は従来どおり None)
+HP_SET_COMMIT = "commit"
+HP_SET_PENDING = "pending_stable"
+
+
+def hp_settle_step(old: Optional[float], last_read: Optional[float], new: float, stable_count: int,
+                   stable_since: float, now: float, same_tol: float = HP_SETTLE_SAME_TOL,
+                   min_sec: float = HP_SETTLE_MIN_SEC, low_pct: float = HP_SETTLE_LOW_PCT,
+                   low_reads: int = HP_SETTLE_LOW_READS) -> dict:
+    """HP の読み new を状態に確定してよいか (純粋。_set_hp の従来の安定条件をそのまま切り出したもの)。
+
+    old = 状態の現在の値 (未知なら None)、last_read = 前回の読み (実読みと推定が入れ替わったら None)、
+    stable_count / stable_since = 同じ値の読みの回数と、その読みが始まった時刻。
+    戻り値 {"decision": "commit" | "pending_stable", "reason", "stable_count", "stable_since", "first"}。
+    - 初回 (old が None): low_pct 以下は演出中の空バーの疑いで保留 (first_low)、それ以外は即反映 (first_read)
+    - 前の読みが無い・差が same_tol を超える: 数え直して保留 (no_prev_read / value_changed)
+    - 同じ値の読みが min_sec 未満: 保留 (wait_time)。low_pct 以下で low_reads 回に満たない: 保留 (low_needs_reads)
+    - それ以外は確定 (stable)"""
+    if old is None:
+        if new <= low_pct:
+            return {"decision": HP_SET_PENDING, "reason": "first_low", "stable_count": 1, "stable_since": now,
+                    "first": True}
+        return {"decision": HP_SET_COMMIT, "reason": "first_read", "stable_count": stable_count,
+                "stable_since": now, "first": True}
+    if last_read is None or abs(new - last_read) > same_tol:
+        return {"decision": HP_SET_PENDING, "reason": "no_prev_read" if last_read is None else "value_changed",
+                "stable_count": 1, "stable_since": now, "first": False}
+    count = int(stable_count) + 1
+    if now - stable_since < min_sec:
+        return {"decision": HP_SET_PENDING, "reason": "wait_time", "stable_count": count,
+                "stable_since": stable_since, "first": False}
+    if new <= low_pct and count < low_reads:
+        return {"decision": HP_SET_PENDING, "reason": "low_needs_reads", "stable_count": count,
+                "stable_since": stable_since, "first": False}
+    return {"decision": HP_SET_COMMIT, "reason": "stable", "stable_count": count, "stable_since": stable_since,
+            "first": False}
+
+
+def split_guess_max_base(expected: Optional[int], votes: dict, hp_max: Optional[int]) -> Optional[int]:
+    """桁分割で推測した分数 ('1595' → 15/95) を照らす最大 HP の基準 (純粋)。基準が無ければ None (その読みは使わない)。
+
+    基準 = 型登録の理論値・実測採用値 (expected) → 多数決で 2 票以上を得た値 → 過去に確定した最大 HP (50 以上) の順"""
+    if expected:
+        return int(expected)
+    if votes:
+        best, n = max(votes.items(), key=lambda kv: kv[1])
+        if n >= 2:
+            return int(best)
+    if hp_max and hp_max >= 50:
+        return int(hp_max)
+    return None
+
+
 def _set_hp(state: BattleStateV2, side_name: str, mon,
-            pct=None, cur=None, mx=None, estimated: bool = False, source: Optional[str] = None) -> None:
+            pct=None, cur=None, mx=None, estimated: bool = False, source: Optional[str] = None,
+            split_guess: bool = False) -> None:
     """HPを更新し、有意な変化をイベントログに記録する (ダメージ帰属用)。
 
     状態のhp_percent自体は常に最新読取で更新するが、イベント化は
@@ -903,22 +960,42 @@ def _set_hp(state: BattleStateV2, side_name: str, mon,
     hp_source) を立てたままにし、実読み (estimated=False) で確定したときだけ印を解除する (2026-10-09)。
     実読みと推定の読みが入れ替わったら、安定の数え直しから始める (推定の続きで実読みが 1 回で確定しないように。
     実読みの安定条件は従来の規則のまま)
+
+    split_guess=True は、分数が区切り '/' ではなく数字の並びを分けて推測したもの (vision.ocr.fraction_is_split_guess。
+    呼び出し側が読みの元の文字列から判定して渡す)。最大 HP の多数決の票に入れず、基準 (split_guess_max_base) と合うときだけ使う
+    (2026-10-09 fix/hp-paths: 基準の無い状態で '1595' → 15/95 を読み続けると最大 HP 95 が初回の読みで決まる恐れ。KNOWN_ISSUES A1)。
+
+    結果は mon._hp_set_result に残す ({"decision": "commit" | "pending_stable" | 捨てた理由, "reason", "new",
+    "stable_count", "since_commit"}。since_commit は前回の確定 (hp_read_ts) からの秒数)。戻り値は None のまま
     """
+    now = time.time()
+    last_commit_ts = getattr(mon, "hp_read_ts", None)
+
+    def result(decision: str, reason: Optional[str] = None, new_val=None, count=None) -> None:
+        mon._hp_set_result = {
+            "decision": decision, "reason": reason,
+            "new": None if new_val is None else round(float(new_val), 1),
+            "stable_count": count,
+            "since_commit": None if not last_commit_ts else round(now - float(last_commit_ts), 2)}
+
     # ひんし確定後のHP再表示は矛盾 (蘇生は存在しない)。別個体のバーを
     # 誤って帰属した読取なので棄却する (監査2026-07-24: リザードン
     # 「たおれた!」後に34%が記録された)。交代で別個体が出た場合は
     # そのmonへ書き込まれるためここには来ない
     if mon.status == "fainted" and ((pct or 0) > 3 or (cur or 0) > 3):
+        result("fainted_reread")
         return
 
     old = mon.hp_percent
     raw = None
     if estimated:
         if pct is None:
+            result("no_value")
             return
         new = round(float(pct), 1)
         raw = (int(cur), int(mx)) if (cur is not None and mx) else None
     elif cur is not None and mx:
+        expected = None
         # 自分側: 型登録済みの種族のみ理論最大HPで検証する。
         # 未登録種族 (チーム変更後にmy_team.json未更新) まで集合検証すると
         # 全読取が棄却されHPが取れなくなる (2026-07-23 監査で発見)
@@ -927,6 +1004,7 @@ def _set_hp(state: BattleStateV2, side_name: str, mon,
             expected = getattr(mon, "_my_max_adopted", None) or \
                 _expected_my_max(mon)
             if expected and mx != expected:
+                result("set_hp_max_mismatch")
                 return
             if expected is None:
                 # 理論値なし (能力ポイント未登録) の個体。従来は「登録済み
@@ -935,28 +1013,41 @@ def _set_hp(state: BattleStateV2, side_name: str, mon,
                 # 読みまで全棄却された (2026-08-25: watch取込後のマスカーニャで
                 # 153/153が棄却され続けた)。種族が判明していれば図鑑の物理
                 # 可能域で、未特定ならチーム集合で検証する
+                # (物理可能域に無い最大 HP は多数決の票にも入らない)
                 if mon.species_id is not None:
                     if not _plausible_max_hp(mon.species_id, mx):
+                        result("set_hp_max_implausible")
                         return
                 else:
                     legal = _my_legal_maxes()
                     if legal and mx not in legal:
+                        result("set_hp_max_not_in_team")
                         return
         # 最大HPは種族ごとの多数決で確定する (「28/167」→「28/67」のような
         # 桁落ち誤読が50以上のガードを通過して定着するのを防ぐ)
         votes = state.hp_max_votes.setdefault((side_name, mon.species_ja), {})
-        votes[mx] = votes.get(mx, 0) + 1
-        best_mx, n = max(votes.items(), key=lambda kv: kv[1])
-        if n >= 2 and mx != best_mx:
-            if cur <= best_mx:
-                mx = best_mx
-            else:
+        if split_guess:
+            # 桁分割で推測した分数は票に入れない。基準が無い・基準と合わなければ使わない
+            base = split_guess_max_base(expected, votes, mon.hp_max)
+            if base is None or mx != base:
+                result("max_split_guess", "no_base" if base is None else f"base={base}")
                 return
+        else:
+            votes[mx] = votes.get(mx, 0) + 1
+        if votes:
+            best_mx, n = max(votes.items(), key=lambda kv: kv[1])
+            if n >= 2 and mx != best_mx:
+                if cur <= best_mx:
+                    mx = best_mx
+                else:
+                    result("max_vote_mismatch", f"best={best_mx}")
+                    return
         new = round(cur / mx * 100, 1)
         raw = (cur, mx)
     elif pct is not None:
         new = float(pct)
     else:
+        result("no_value")
         return
 
     if side_name == "player" and not estimated:
@@ -986,41 +1077,32 @@ def _set_hp(state: BattleStateV2, side_name: str, mon,
     if old is not None and last_kind != kind:
         # 実読みと推定が入れ替わった: 前の読みとは別の観測として安定を数え直す
         last_read = None
-    if old is None:
-        # 0-3%の初回読みは演出中の空バーの疑いが強く、即反映しない
-        # (2026-08-21 第6回: 登場直後のガブリアスに0%が即コミットされ、
-        #  以後21%との往復が続いた)。本物のひんしは faint イベント/
-        #  HUDのゼロ読み裏付け経路 (_accept_zero_hp_read) が確定させる
-        if new <= 3.0:
-            mon._hp_stable_count = 1
-            mon._hp_stable_since = time.time()
-            return
-        # 初回は即反映 (アドバイスが値なしで止まらないように)
-        commit()
-        mon._hp_event_base = new
-        mon._hp_stable_since = time.time()
-        return
-    if last_read is None or abs(new - last_read) > 2.0:
-        mon._hp_stable_count = 1
-        mon._hp_stable_since = time.time()
-        return   # 1回だけの観測は状態にも反映しない (誤読の混入防止)
-    mon._hp_stable_count = getattr(mon, "_hp_stable_count", 1) + 1
-    # 時間安定条件: 気絶/被弾演出はHPバーが徐々に減るため、高頻度解析では
-    # 遷移中の値も2回連続で読めてしまう。同値が600ms以上続いた場合のみ
-    # 確定する (演出終了後の静止値だけが通る)
-    if time.time() - getattr(mon, "_hp_stable_since", 0.0) < 0.6:
-        return
-    # ほぼ0%は交代/メガシンカ演出中の空バー誤読が多いため、3回連続観測を
-    # 要求する (本物のひんし・瀕死残りなら低%表示が続くので3回目で確定する)。
-    # バー由来の読取は1.4%等の端数になるため、閾値は0%だけでなく3%まで広げる
-    # (実戦: メガメタグロス100%→1.x%→59%のフラップがイベント化した)
-    if new <= 3.0 and mon._hp_stable_count < 3:
+    # 確定の判定 (純粋、hp_settle_step):
+    # - 0-3%の初回読みは演出中の空バーの疑いが強く、即反映しない
+    #   (2026-08-21 第6回: 登場直後のガブリアスに0%が即コミットされ、以後21%との往復が続いた)。
+    #   本物のひんしは faint イベント/HUDのゼロ読み裏付け経路 (_accept_zero_hp_read) が確定させる
+    # - 初回は即反映 (アドバイスが値なしで止まらないように)
+    # - 1回だけの観測は状態にも反映しない (誤読の混入防止)
+    # - 時間安定条件: 気絶/被弾演出はHPバーが徐々に減るため、高頻度解析では遷移中の値も2回連続で読めてしまう。
+    #   同値が600ms以上続いた場合のみ確定する (演出終了後の静止値だけが通る)
+    # - ほぼ0%は交代/メガシンカ演出中の空バー誤読が多いため、3回連続観測を要求する (本物のひんし・瀕死残りなら
+    #   低%表示が続くので3回目で確定する)。バー由来の読取は1.4%等の端数になるため、閾値は0%だけでなく3%まで広げる
+    #   (実戦: メガメタグロス100%→1.x%→59%のフラップがイベント化した)
+    step = hp_settle_step(old, last_read, new, getattr(mon, "_hp_stable_count", 1),
+                          getattr(mon, "_hp_stable_since", 0.0), now)
+    mon._hp_stable_count = step["stable_count"]
+    mon._hp_stable_since = step["stable_since"]
+    result(step["decision"], step["reason"], new, step["stable_count"])
+    if step["decision"] != HP_SET_COMMIT:
         return
     commit()
+    if step["first"]:
+        mon._hp_event_base = new
+        return
     # ほぼ0%への低下イベントは、ひんしメッセージの裏付けがある場合のみ発火する
     # (交代アニメの空バーが3秒以上続くと3回連続確認をすり抜けた実績。
     #  状態値の更新自体は行い、誤りなら次の確定読取で戻る)
-    if new <= 3.0:
+    if new <= HP_SETTLE_LOW_PCT:
         last_faint = getattr(state, "last_faint", None)
         if not (last_faint and last_faint.get("side") == side_name
                 and time.time() - last_faint.get("ts", 0) < 20.0):
@@ -1111,12 +1193,54 @@ def _reject_my_hp(state: BattleStateV2, reason: str, source: str, hp_text: str,
         pass
 
 
+def _trace_my_hp(state: BattleStateV2, source: str, decision: str, reason: Optional[str] = None, *,
+                 name_text: Optional[str] = None, hud_species: Optional[str] = None, hp_text: Optional[str] = None,
+                 frac=None, split_guess: Optional[bool] = None, known_max: Optional[int] = None,
+                 bar: Optional[float] = None, extra: Optional[dict] = None) -> None:
+    """自分の HP の読みの経過を 1 行残す (state.record_my_hp_trace。2026-10-09 fix/hp-paths、4/159 の取りこぼしの原因追跡用)。
+    記録の失敗で抽出を止めない"""
+    try:
+        me = state.player.active()
+        row = {"source": source, "name_text": name_text or None, "hud_species": hud_species,
+               "active_species": me.species_ja if me is not None else None,
+               "hp_text": hp_text if hp_text else None,
+               "frac": [int(frac[0]), int(frac[1])] if frac else None,
+               "split_guess": split_guess, "known_max": None if known_max is None else int(known_max),
+               "bar": None if bar is None else round(float(bar), 3),
+               "decision": decision, "reason": reason}
+        if extra:
+            row.update(extra)
+        state.record_my_hp_trace(row)
+    except Exception:
+        pass
+
+
+def opp_bar_substitute(pct: Optional[float], bar: Optional[float],
+                       max_diff: float = OPP_HP_BAR_SUBSTITUTE_DIFF) -> tuple:
+    """相手の HP% の文字 pct とバーの割合 bar (opp_hp_bar_track で測った値) から、採る値と「バーで代用したか」を返す (純粋)。
+
+    文字とバー×100 の差が max_diff を超えれば文字の誤読とみなしてバーで代用し、文字が読めなければバーを使う (従来の規則のまま)。
+    戻り値 (値 or None, 代用したか)"""
+    if pct is not None and bar is not None and abs(pct - bar * 100) > max_diff:
+        return round(bar * 100, 1), True
+    if pct is None and bar is not None:
+        return round(bar * 100, 1), True
+    return (None if pct is None else float(pct)), False
+
+
 def extract_field_hp(img, state: BattleStateV2) -> None:
     """フィールドシーン (技アニメーション/メッセージ中) の軽量HP読取。
 
     ダメージはフィールドシーン中にHPバーへ反映されるため、コマンド画面待ちでは
     「どの技で何%減ったか」の対応付けができない。HUDバナーが見えている間だけ
     HPを読み続けることで、技イベントとHP変化イベントを時系列で対応付ける。
+
+    相手側と自分側の HUD の判定は別々に行う (2026-10-09 fix/hp-paths): 相手側は相手バナーの赤の割合
+    (FIELD_HP_OPP_BANNER_MIN)、自分側は自分の HP バーの画素数 (MY_HUD_BAR_MIN_PIXELS)。従来は相手バナーが無いと自分側も
+    読まずに抜けていたため、被弾後の場面が field のまま自分の HUD だけが出ていると自分の HP が反映されなかった
+    (10/8 オオニューラ 120/159 が 93 秒間 100%、10/9 オオニューラ 4/159 の取りこぼし。KNOWN_ISSUES A1)。
+    自分の HUD の経路 (extract_my_hud) は command / move_select / battle_hud の場面、この関数は field の場面でだけ
+    pipeline から呼ばれるので、同じフレームで両方が自分の HP を書くことはない。
     """
     from vision.scenes import _crimson_ratio, _hp_bar_pixels
     # 対戦終了後 (battle_end_rank済み) は読まない: リザルト画面の数値が
@@ -1125,23 +1249,16 @@ def extract_field_hp(img, state: BattleStateV2) -> None:
     # 次の対戦はbattle_hud抽出がbattle_activeを立て直すので自己復帰する
     if not state.battle_active:
         return
-    # HUDが表示されているかの軽量ゲート
-    if _crimson_ratio(crop(img, zones.BATTLE["opp_banner"])) < 0.15:
-        return
-
-    opp = state.opponent.active()
+    # 相手の HUD が表示されているかの軽量ゲート (相手側だけに掛ける)
+    banner = _crimson_ratio(crop(img, zones.BATTLE["opp_banner"]))
+    opp = state.opponent.active() if banner >= FIELD_HP_OPP_BANNER_MIN else None
     if opp is not None:
         hp_text = ocr.read_zone_text(img, zones.BATTLE["opp_hp_text"], mode="panel",
                                      allowlist="0123456789%")
         pct = ocr.parse_percent(hp_text)
-        bar = ocr.hp_bar_ratio(crop(img, zones.BATTLE["opp_hp_bar"]))
-        pct_from_bar = False   # 記録用: % の文字ではなくバーの割合で代用した読みか
-        if pct is not None and bar is not None and abs(pct - bar * 100) > 15:
-            pct = round(bar * 100, 1)
-            pct_from_bar = True
-        elif pct is None and bar is not None:
-            pct = round(bar * 100, 1)
-            pct_from_bar = True
+        # バーの割合はバーの実範囲 (opp_hp_bar_track) で測る (opp_hp_bar では +4〜9 ポイント過大。2026-10-09)
+        bar = ocr.hp_bar_ratio(crop(img, zones.BATTLE["opp_hp_bar_track"]))
+        pct, pct_from_bar = opp_bar_substitute(pct, bar)   # pct_from_bar は記録用: % の文字ではなくバーで代用した読みか
         if pct is not None:
             # HUD経路と同じ帰属ガード (2026-08-21 第6回: 演出中の空バーが
             # このパスから安定3回条件を満たし、21%のガブリアスへ0%を
@@ -1174,32 +1291,52 @@ def extract_field_hp(img, state: BattleStateV2) -> None:
                     pass
 
     me = state.player.active()
-    if me is not None and _hp_bar_pixels(crop(img, zones.BATTLE["my_hp_bar"])) > 30:
-        my_hp = ocr.read_zone_text(img, zones.BATTLE["my_hp_text"], mode="panel",
-                                   allowlist="0123456789/")
-        frac = ocr.parse_fraction(my_hp)
-        if frac and frac[1] and frac[1] >= 50:
-            cur, mx = frac
-            known = _expected_my_max(me) or \
-                (me.hp_max if me.hp_max and me.hp_max >= 50 else None)
-            legal = _my_legal_maxes()
-            try:
-                from advisor.my_team import has_build
-                registered = has_build(me.species_ja)
-            except Exception:
-                registered = False
-            if known and mx != known:
-                # 基準と食い違う読みは捨てる (桁落ちは現在値も壊れている)
-                _reject_my_hp(state, "max_hp_mismatch", "field", my_hp, frac)
-            elif known is None and registered and legal and mx not in legal:
-                # 登録済み種族なのに理論最大集合に無い読みは捨てる
-                _reject_my_hp(state, "max_hp_not_in_team", "field", my_hp, frac)
-            elif cur <= mx:
-                _set_hp(state, "player", me, cur=cur, mx=mx)
-            else:
-                _reject_my_hp(state, "cur_over_max", "field", my_hp, frac)
-        elif my_hp:
-            _reject_my_hp(state, "fraction_unparsable", "field", my_hp, frac)
+    if me is None:
+        return
+    # 自分の HUD の判定 (相手バナーの有無に関わらず読む)。判定の材料は読みの経過の記録に残す
+    my_px = _hp_bar_pixels(crop(img, zones.BATTLE["my_hp_bar"]))
+    gate = {"opp_banner": round(float(banner), 3), "my_bar_px": int(my_px)}
+    if my_px <= MY_HUD_BAR_MIN_PIXELS:
+        _trace_my_hp(state, "field", "skip_no_my_hud", f"my_bar_px={int(my_px)}", extra=gate)
+        return
+    my_hp = ocr.read_zone_text(img, zones.BATTLE["my_hp_text"], mode="panel",
+                               allowlist="0123456789/")
+    frac = ocr.parse_fraction(my_hp)
+    split_guess = ocr.fraction_is_split_guess(my_hp)
+    known = _expected_my_max(me) or \
+        (me.hp_max if me.hp_max and me.hp_max >= 50 else None)
+    me._hp_set_result = None
+    dec, reason = "no_text", None
+    if frac and frac[1] and frac[1] >= 50:
+        cur, mx = frac
+        legal = _my_legal_maxes()
+        try:
+            from advisor.my_team import has_build
+            registered = has_build(me.species_ja)
+        except Exception:
+            registered = False
+        if known and mx != known:
+            # 基準と食い違う読みは捨てる (桁落ちは現在値も壊れている)
+            _reject_my_hp(state, "max_hp_mismatch", "field", my_hp, frac)
+            dec, reason = "max_hp_mismatch", f"known={known}"
+        elif known is None and registered and legal and mx not in legal:
+            # 登録済み種族なのに理論最大集合に無い読みは捨てる
+            _reject_my_hp(state, "max_hp_not_in_team", "field", my_hp, frac)
+            dec = "max_hp_not_in_team"
+        elif cur <= mx:
+            _set_hp(state, "player", me, cur=cur, mx=mx, split_guess=split_guess)
+            res = getattr(me, "_hp_set_result", None) or {}
+            dec, reason = res.get("decision") or "no_value", res.get("reason")
+            gate.update({k: res.get(k) for k in ("new", "stable_count", "since_commit")})
+        else:
+            _reject_my_hp(state, "cur_over_max", "field", my_hp, frac)
+            dec = "cur_over_max"
+    elif my_hp:
+        _reject_my_hp(state, "fraction_unparsable", "field", my_hp, frac)
+        dec = "fraction_unparsable"
+    me._hp_set_result = None
+    _trace_my_hp(state, "field", dec, reason, hp_text=my_hp, frac=frac, split_guess=split_guess,
+                 known_max=known, extra=gate)
 
 
 _TYPE_EN2JA = None
@@ -1554,15 +1691,10 @@ def extract_battle_hud(img, state: BattleStateV2, resolver) -> None:
     hp_text = ocr.read_zone_text(img, zones.BATTLE["opp_hp_text"], mode="panel",
                                  allowlist="0123456789%")
     pct = ocr.parse_percent(hp_text)
-    bar = ocr.hp_bar_ratio(crop(img, zones.BATTLE["opp_hp_bar"]))
-    eff_pct = None
-    if pct is not None:
-        # OCRとバー残量が大きく食い違う場合 (「1%」->「19」等の誤読) はバーを信用する
-        eff_pct = round(bar * 100, 1) if (bar is not None and
-                                          abs(pct - bar * 100) > 15) \
-            else float(pct)
-    elif bar is not None:
-        eff_pct = round(bar * 100, 1)
+    # バーの割合はバーの実範囲 (opp_hp_bar_track) で測る (opp_hp_bar では +4〜9 ポイント過大。2026-10-09 fix/hp-paths)
+    bar = ocr.hp_bar_ratio(crop(img, zones.BATTLE["opp_hp_bar_track"]))
+    # OCRとバー残量が大きく食い違う場合 (「1%」->「19」等の誤読) はバーを信用する。文字が読めなければバー (opp_bar_substitute)
+    eff_pct, _from_bar = opp_bar_substitute(pct, bar)
     if eff_pct is not None:
         # HUD名が照合できないフレームでは、大きなHP変化を書き込まない
         # (交代見逃し中に別個体のHP%をactiveへ誤帰属した実戦事故の防止。
@@ -1719,12 +1851,17 @@ def extract_my_hud(img, state: BattleStateV2, resolver, bar_zone: Optional[dict]
         bar_zone = zones.BATTLE["my_hp_bar_track"]
     unusable = False   # 文字はあるが、分数が読めない / 読めたが捨てた (バー推定の条件 (d))
     bar = None
+    split_guess = ocr.fraction_is_split_guess(my_hp)   # 桁分割で推測した分数か (最大 HP の多数決の票に入れない)
+    known = None
+    trace_dec, trace_reason = "no_text", None   # 読みの経過の記録 (state.my_hp_trace) の decision / reason
+    me._hp_set_result = None
     # 最大HPが50未満の読みは誤読とみなす (Lv50の最大HPは実質50以上。
     # 選出画面の「0/3」進捗がこのゾーンに重なって読まれる事故も弾く)
     if not (frac and frac[1] and frac[1] >= 50):
         if my_hp:
             _reject_my_hp(state, "fraction_unparsable", "hud", my_hp, frac)
             unusable = True
+            trace_dec = "fraction_unparsable"
     else:
         cur, mx = frac
         # 最大HPは対戦中に変化しない (メガシンカでも不変)。基準値は
@@ -1803,18 +1940,41 @@ def extract_my_hud(img, state: BattleStateV2, resolver, bar_zone: Optional[dict]
                 reject = "bar_mismatch"
                 cand = (cur, mx)
         if ok and cur <= mx:
-            _set_hp(state, "player", me, cur=cur, mx=mx)
+            _set_hp(state, "player", me, cur=cur, mx=mx, split_guess=split_guess)
         elif ok:
             reject = "cur_over_max"
             cand = (cur, mx)
         if reject:
             _reject_my_hp(state, reject, "hud", my_hp, cand, bar)
             unusable = True
+            trace_dec = reject
+            if reject == "bar_mismatch" and bar is not None:
+                trace_reason = f"frac={cur / mx:.3f} bar={bar:.3f}"
+            elif reject == "max_hp_mismatch":
+                trace_reason = f"known={known}"
         # 過去に定着した誤った最大HPの掃除 (理論値と食い違えば読み直しに戻す)
         if known and me.hp_max and me.hp_max != known:
             me.hp_current, me.hp_max, me.hp_percent = None, None, None
 
-    _estimate_my_hp_from_bar(img, state, me, hud_species, unusable, bar, bar_zone)
+    set_res = getattr(me, "_hp_set_result", None)
+    if not unusable and set_res:
+        trace_dec, trace_reason = set_res["decision"], set_res.get("reason")
+    me._hp_set_result = None
+    estimated = _estimate_my_hp_from_bar(img, state, me, hud_species, unusable, bar, bar_zone)
+    extra = None
+    if estimated:
+        # 分数は使えず、バー推定の値を _set_hp に渡した (reason に分数を捨てた理由、est_* に推定の確定の判定)
+        est_res = getattr(me, "_hp_set_result", None) or {}
+        trace_reason = trace_dec if trace_reason is None else f"{trace_dec} ({trace_reason})"
+        trace_dec = "estimate"
+        extra = {"est_decision": est_res.get("decision"), "est_reason": est_res.get("reason"),
+                 "new": est_res.get("new"), "stable_count": est_res.get("stable_count"),
+                 "since_commit": est_res.get("since_commit")}
+    elif set_res:
+        extra = {k: set_res.get(k) for k in ("new", "stable_count", "since_commit")}
+    _trace_my_hp(state, "hud", trace_dec, trace_reason, name_text=my_name, hud_species=hud_species, hp_text=my_hp,
+                 frac=frac, split_guess=split_guess, known_max=known or _known_my_max(me),
+                 bar=bar, extra=extra)
 
 
 def _known_my_max(me) -> Optional[int]:
@@ -1824,14 +1984,15 @@ def _known_my_max(me) -> Optional[int]:
 
 
 def _estimate_my_hp_from_bar(img, state: BattleStateV2, me, hud_species: Optional[str], unusable: bool,
-                             bar: Optional[float], bar_zone: dict) -> None:
+                             bar: Optional[float], bar_zone: dict) -> bool:
     """自分の HP のバー推定 (2026-10-09 ユーザー判断、KNOWN_ISSUES A1 の (3))。条件と値の計算は vision.my_hp_estimate。
 
     分数が読めない (または捨てた) フレームで、HUD の名前が場の個体の種族に解決でき、最大 HP が既知なら、そのフレームの
     バーの割合 (my_hp_bar_track) を連続フレームの列に足す。末尾 HP_BAR_ESTIMATE_STABLE_FRAMES 件の差が
     HP_BAR_ESTIMATE_STABLE_TOL 以内なら、既知の最大 HP × バーの割合を推定値として _set_hp に渡す
     (確定の安定条件は _set_hp の従来の規則)。条件を満たさないフレームが来たら列を捨てて数え直す。
-    推定値が入っている間は、直前の棄却の記録 (state.hp_reject["player"]) に estimated_from_bar を添える"""
+    推定値が入っている間は、直前の棄却の記録 (state.hp_reject["player"]) に estimated_from_bar を添える。
+    戻り値: 推定値を _set_hp に渡したか (読みの経過の記録用。2026-10-09 fix/hp-paths)"""
     if unusable and bar is None:
         bar = ocr.hp_bar_ratio(crop(img, bar_zone))
     known = _known_my_max(me)
@@ -1840,12 +2001,12 @@ def _estimate_my_hp_from_bar(img, state: BattleStateV2, me, hud_species: Optiona
         known_max=known, fraction_unusable=unusable, fainted=me.status == "fainted", bar=bar)
     if why is not None:
         me._my_bar_track = []
-        return
+        return False
     track = my_hp_estimate.push_bar(getattr(me, "_my_bar_track", None), bar, HP_BAR_ESTIMATE_STABLE_FRAMES)
     me._my_bar_track = track
     rep = my_hp_estimate.stable_bar(track, HP_BAR_ESTIMATE_STABLE_FRAMES, HP_BAR_ESTIMATE_STABLE_TOL)
     if rep is None:
-        return
+        return False
     est = my_hp_estimate.bar_estimate(rep, known)
     _set_hp(state, "player", me, pct=est["pct"], cur=est["cur"], mx=est["max"],
             estimated=True, source=my_hp_estimate.HP_SOURCE_BAR)
@@ -1857,6 +2018,7 @@ def _estimate_my_hp_from_bar(img, state: BattleStateV2, me, hud_species: Optiona
             rej["estimate"] = [me.hp_current, me.hp_max]
             if est["faint_suspect"]:
                 rej["faint_suspect"] = True   # バーがほぼ 0: ひんしの疑い (確定は既存の経路)
+    return True
 
 
 # ==============================================================================
@@ -2749,7 +2911,7 @@ def _extract_watch_side_columns(img, state: BattleStateV2, resolver) -> None:
             continue
         if frac[0] > 0:
             mon._zero_read_count = 0
-        _set_hp(state, "player", mon, cur=frac[0], mx=frac[1])
+        _set_hp(state, "player", mon, cur=frac[0], mx=frac[1], split_guess=ocr.fraction_is_split_guess(hp_text))
         if frac[0] == 0 and mon.hp_current == 0:
             mon.status = "fainted"
 
@@ -2764,43 +2926,98 @@ def _extract_watch_side_columns(img, state: BattleStateV2, resolver) -> None:
     # 位置対応で書くとHPが別ポケモンへ入れ替わり続ける (2026-08-04監査:
     # ガルーラ/キラフロルのHPが0%↔100%で往復し「ひんし後の再表示」候補を
     # 量産した)。スプライト照合で行の主を特定できた場合のみ書き込む
+    # 行ごとの読み (行, % の文字, 同定した種族, 方式, スコア, 書いたか) は state.watch_opp_rows に残す
+    # (2026-10-09 fix/hp-paths: 10/7 マニューラ 39% → 100% の原因が同定の取り違えか OCR かを次のログで切り分けるため。
+    # 同定と閾値は変えていない)
     from vision.spriteid import identify_species_color
     cands = [(p.species_id, 0.5, p.species_ja)
              for p in state.opponent.party if p.species_id and p.species_ja]
     seen_idx: set = set()   # 1個体は1行のみ (誤同定の重複行でゼロ読み裏付けが
     #                         1フレーム内で複数回進むのを防ぐ)
+    rows_log: list = []
     for i, z in enumerate(zones.WATCH_OPP):
         hp_text = ocr.read_zone_text(img, z["hp_text"], mode="panel",
                                      allowlist="0123456789%")
         pct = ocr.parse_percent(hp_text)
         if pct is None or not cands:
+            if hp_text:
+                rows_log.append({"row": i, "hp_text": hp_text, "pct": pct, "species": None, "method": None,
+                                 "score": None, "written": "no_candidates" if pct is not None else "pct_unparsable"})
             continue
         try:
             hit = identify_species_color(crop(img, z["panel"]), cands)
         except Exception:
             hit = None
+        row_log = {"row": i, "hp_text": hp_text, "pct": pct, "species": hit[0] if hit else None,
+                   "method": "color", "score": round(float(hit[2]), 3) if hit and len(hit) > 2 else None,
+                   "written": "no_match"}
+        rows_log.append(row_log)
         if not hit:
             continue
         idx2 = state.opponent.find_by_species(hit[1])
-        if idx2 is not None:
-            if idx2 in seen_idx:
+        if idx2 is None:
+            row_log["written"] = "not_in_party"
+            continue
+        if idx2 in seen_idx:
+            row_log["written"] = "duplicate"
+            continue
+        seen_idx.add(idx2)
+        row_log["slot"] = idx2
+        mon2 = state.opponent.party[idx2]
+        if pct <= 3.0 and mon2.status != "fainted":
+            # 生存個体への突然の0-3%読みは裏付け必須 (HUD経路と同じ。
+            # 2026-08-21 第6回: 相手一覧の誤読0%への防御を追加)
+            if not _accept_zero_hp_read(state, mon2,
+                                        side_name="opponent"):
+                row_log["written"] = "zero_unconfirmed"
                 continue
-            seen_idx.add(idx2)
-            mon2 = state.opponent.party[idx2]
-            if pct <= 3.0 and mon2.status != "fainted":
-                # 生存個体への突然の0-3%読みは裏付け必須 (HUD経路と同じ。
-                # 2026-08-21 第6回: 相手一覧の誤読0%への防御を追加)
-                if not _accept_zero_hp_read(state, mon2,
-                                            side_name="opponent"):
-                    continue
-                mon2.hp_percent = float(pct)
-                mon2.hp_uncertain = False
-                if pct <= 0.5:
-                    mon2.status = "fainted"
-                continue
-            if pct > 3.0:
-                mon2._zero_read_count = 0
             mon2.hp_percent = float(pct)
+            mon2.hp_uncertain = False
+            if pct <= 0.5:
+                mon2.status = "fainted"
+            row_log["written"] = "zero"
+            continue
+        if watch_right_big_increase(mon2.hp_percent, float(pct),
+                                    _opp_switched_since(state, mon2, getattr(mon2, "hp_read_ts", None))):
+            # 交代の文言の無い +WATCH_OPP_BIG_INCREASE 超の増加は書かない (別個体の値の疑い)。棄却として残す
+            row_log["written"] = "watch_right_big_increase"
+            try:
+                state.record_hp_reject("opponent", {
+                    "reason": "watch_right_big_increase", "source": "watch_right", "name_text": None,
+                    "name_similarity": None, "hp_candidate": float(pct), "hp_text": hp_text,
+                    "hp_before": mon2.hp_percent, "row": i, "species": hit[0], "method": "color",
+                    "score": row_log["score"], "pct_from_bar": False, "bar_ratio": None, "slot": idx2})
+            except Exception:
+                pass
+            continue
+        if pct > 3.0:
+            mon2._zero_read_count = 0
+        mon2.hp_percent = float(pct)
+        row_log["written"] = "written"
+    state.watch_opp_rows = rows_log
+
+
+def watch_right_big_increase(old: Optional[float], new: float, switched: bool,
+                             limit: float = WATCH_OPP_BIG_INCREASE) -> bool:
+    """様子見画面の右列の HP% の書き込みを見送るべき大きな増加か (純粋)。
+    前の値が分かっていて、交代の文言が無く (switched=False)、増加が limit ポイントを超えるとき True"""
+    return old is not None and not switched and (new - float(old)) > limit
+
+
+def _opp_switched_since(state: BattleStateV2, mon, since: Optional[float]) -> bool:
+    """相手の交代の文言 (イベント switch_opponent) のうち、mon の名前を含むものが since 以降 (since が None なら記録の範囲内) に
+    あるか。様子見画面の右列の大きな増加の見送りの例外に使う"""
+    names = [n for n in (mon.species_ja, mon.display_name) if n]
+    if not names:
+        return False
+    for e in state.events[-100:]:
+        if "switch_opponent" not in (e.get("event") or ""):
+            continue
+        if since is not None and e.get("ts", 0) < since:
+            continue
+        if any(n in (e.get("text") or "") for n in names):
+            return True
+    return False
 
 
 def _family_type_sets(species_id) -> list:
