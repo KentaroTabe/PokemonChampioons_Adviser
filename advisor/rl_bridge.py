@@ -819,7 +819,17 @@ def encode_state(state: dict, my_spe_actual: Optional[float] = None) -> Optional
 
 
 def _legal_actions(state: dict) -> list:
-    """[(action_index, label, kind)] 合法手のみ"""
+    """[(action_index, label, kind)] 合法手のみ。
+
+    技の枠に legal=False (advisor.engine.rl_input_state: アンコール・こだわり・ちょうはつ・かなしばり・初手限定で選べない技。
+    2026-10-09 M2a) があればその技を除く。除いた結果、合法手が 0 になるときは従来の扱い (PP 0 だけを除く) に戻す"""
+    out = _legal_actions_impl(state, use_legal_flag=True)
+    if not out:
+        out = _legal_actions_impl(state, use_legal_flag=False)
+    return out
+
+
+def _legal_actions_impl(state: dict, use_legal_flag: bool) -> list:
     my = state.get("player") or {}
     mi = my.get("active_index")
     party = my.get("party", [])
@@ -842,6 +852,8 @@ def _legal_actions(state: dict) -> list:
             if not m.get("move_id"):
                 continue
             if m.get("pp") is not None and m["pp"] <= 0:
+                continue
+            if use_legal_flag and m.get("legal") is False:
                 continue
             name = m.get("name_ja") or m["move_id"]
             out.append((6 + i, name, "move"))

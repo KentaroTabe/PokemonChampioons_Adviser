@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 from typing import Optional
 
 from advisor.dex import get_dex, BOOST_MULT
@@ -216,6 +217,120 @@ def complete_moves_from_registration(observed: list, registered: list, max_moves
         seen.add(mid)
         free -= 1
     return slots
+
+
+def registered_moves_of(species_ja: Optional[str], resolver) -> list:
+    """登録の型の技 [(日本語名, move_id)] (config/my_team.json を読む。名前を id に引けない技は除く)"""
+    from advisor.my_team import get_my_moves
+    out = []
+    for ja in get_my_moves(species_ja):
+        mv_r = resolver.resolve(ja, "moves", cutoff=0.7)
+        if mv_r:
+            out.append((mv_r[0], mv_r[1]))
+    return out
+
+
+@dataclass
+class MoveLegality:
+    """場の自分の個体の技の枠 (登録で補完した後) と、それぞれの合法性 (legal_move_slots の戻り値。2026-10-09 M2a)。
+
+    直接の採点・探索 (_run_search)・終盤評価 (_run_endgame)・メガのタイミングの注記 (_mega_timing_note)・RL の合法手が
+    同じ結果を使う (M1a までは直接の採点だけが補完と合法性を見ていた)"""
+    slots: list                        # 補完後の技の枠 (dict。補った枠は from_registration)
+    reasons: list                      # slots と同じ並びの「選択自体ができない理由」(選べるなら None)
+    legality_unconfirmed: list         # 技の固定が分からず絞らなかった理由
+    encore_locked: Optional[str] = None
+    choice_locked: Optional[str] = None
+    disabled_ids: frozenset = frozenset()
+    volatiles: frozenset = frozenset()  # 小文字にした揮発状態
+    switch_only: bool = False
+
+    @property
+    def illegal_actions(self) -> list:
+        """選択自体ができない技 (候補から外し、理由だけ残す)。交代しか選べない決定では空 (技の候補を作らないため)"""
+        if self.switch_only:
+            return []
+        return [{"kind": "move", "id": s.get("move_id"), "name": s.get("name_ja") or s.get("move_id") or "不明な技",
+                 "legal": False, "reason": r}
+                for s, r in zip(self.slots, self.reasons) if r]
+
+    @property
+    def legal_move_ids(self) -> list:
+        """選べる技の id (枠の順、id の引けない枠は除く)。探索・終盤評価・メガの注記・RL の合法手が使う"""
+        return [s["move_id"] for s, r in zip(self.slots, self.reasons) if not r and s.get("move_id")]
+
+    @property
+    def illegal_move_ids(self) -> set:
+        return {s.get("move_id") for s, r in zip(self.slots, self.reasons) if r and s.get("move_id")}
+
+
+def legal_move_slots(state: dict, my_p: dict, *, item: Optional[str] = None, registered: Optional[list] = None,
+                     switch_only: bool = False) -> MoveLegality:
+    """技の補完と合法性の判定 (純粋。図鑑・技の効果表は読む。2026-10-09 M2a で evaluate_common から切り出した)。
+
+    item: 評価に使う持ち物 id (MonView.item。こだわりの判定)。registered: 登録の型の技 [(日本語名, move_id)]
+    (registered_moves_of。None なら補完しない)。switch_only (ひんし・交代先の選択) なら補完しない。
+    技の固定: ちょうはつ=変化技不可 / かなしばり=特定技不可 / アンコール=固定された技以外不可 / こだわり=直前の技以外不可。
+    固定する技 (アンコールを受けた時点の直前の技 = 状態の encore_move、無ければ last_move、こだわりは last_move) が今の
+    個体の技に無い (交代の取り逃しで前の個体の技が残っている等) ときは、分からないものとして絞らず、合法性が未確認の印を残す"""
+    dex = get_dex()
+    slots = list(my_p.get("moves") or [])
+    if len(slots) < 4 and not switch_only and registered:
+        slots = complete_moves_from_registration(slots, registered)
+    move_ids_now = [s.get("move_id") for s in slots if s.get("move_id")]
+    my_vols = frozenset(str(v).lower() for v in (my_p.get("volatiles") or []))
+    disabled_ids = frozenset(v.split("_", 1)[1] for v in my_vols if v.startswith("disable_"))
+    last_player_move = (state.get("last_move") or {}).get("player")
+    unconfirmed = []
+    encore_locked = None
+    if "encore" in my_vols:
+        cand = my_p.get("encore_move") or last_player_move
+        if cand and cand in move_ids_now:
+            encore_locked = cand
+        else:
+            unconfirmed.append("アンコール中だが固定された技が分からない")
+    # こだわりロック: こだわり系を持って技を使った後は、交代するまでその技しか選べない (last_move は交代・ひんしでクリアされる)
+    choice_locked = None
+    if item in CHOICE_ITEM_IDS and last_player_move:
+        if last_player_move in move_ids_now:
+            choice_locked = last_player_move
+        else:
+            unconfirmed.append("こだわり中だが直前の技が今の技に無い")
+    # であいがしら・ねこだまし (場に出た最初の行動でしか選べない) の制限: 場に出てから技を使ったか、または場に出た次の
+    # ターンを過ぎたか (行動できなかったターン = ひるみ・ねむり・まひ等でも初手の機会は過ぎる。2026-10-09 M1a)
+    acted_since_entry = has_acted_since_entry(last_player_move, move_ids_now) or \
+        first_turn_passed(my_p.get("entry_turn"), state.get("turn"))
+    from advisor import effects as _E
+    reasons = []
+    for slot in slots:
+        mid = slot.get("move_id")
+        mv = dex.move(mid)
+        reasons.append(illegal_move_reason(
+            mid, mv, slot.get("pp"),
+            first_turn_only_move=bool(mv) and _E.first_turn_only(_E.move_entry(mid)),
+            acted_since_entry=acted_since_entry, disabled_ids=disabled_ids,
+            encore_locked=encore_locked, choice_locked=choice_locked, taunted="taunt" in my_vols))
+    return MoveLegality(slots=slots, reasons=reasons, legality_unconfirmed=unconfirmed,
+                        encore_locked=encore_locked, choice_locked=choice_locked, disabled_ids=disabled_ids,
+                        volatiles=my_vols, switch_only=switch_only)
+
+
+def rl_input_state(state: dict, legality: MoveLegality) -> dict:
+    """RL (rl_bridge.policy_hint) に渡す状態 (純粋。入力は書き換えない)。場の自分の個体の技を補完後の枠にし、選べない枠に
+    legal=False を付ける (rl_bridge._legal_actions が確率を配らない。観測の技の並びは補完後の枠のまま)。
+    補完も選べない技も無ければ state をそのまま返す。交代しか選べない決定では技を書き換えない (M1a までと同じ)"""
+    if legality.switch_only:
+        return state
+    has_reg = any(s.get("from_registration") for s in legality.slots)
+    has_illegal = any(legality.reasons)
+    if not (has_reg or has_illegal):
+        return state
+    my_state = state["player"]
+    idx = my_state.get("active_index")
+    slots = [dict(s, legal=False) if r else s for s, r in zip(legality.slots, legality.reasons)]
+    party = list(my_state["party"])
+    party[idx] = dict(party[idx], moves=slots)
+    return dict(state, player=dict(my_state, party=party))
 
 
 def position_key_of(my_idx, my_species, my_fainted, opp_idx, opp_species, opp_fainted, locks: tuple,
@@ -636,63 +751,30 @@ def evaluate_common(state: dict, resolver=None) -> dict:
     # 技が画面から読めていない枠は、my_team 登録の型の技で補う (2026-08-18 接続テスト: 技選択画面を開くまで自分の技が
     # 不明のまま助言していた)。2026-10-09 M1a: 以前は 1 つも読めていないときだけ補っていたため、一部だけ読めたとき
     # (battle_20261009_112839 のセグレイブ) は登録の技が候補から欠けていた。読めた技・観測した PP (0 を含む) は上書きしない
-    # (complete_moves_from_registration)。補った技は PP 不明で、候補に「登録からの補完」の印を付ける
-    my_move_slots = list(my_p.get("moves") or [])
-    if len(my_move_slots) < 4 and not switch_only and resolver is not None:
+    # (complete_moves_from_registration)。補った技は PP 不明で、候補に「登録からの補完」の印を付ける。
+    # 技の固定 (2026-10-09 M1a、合法性は候補の生成時に決める: illegal_move_reason)。2026-10-09 M2a: 補完と合法性の判定を
+    # legal_move_slots に切り出し、探索・終盤評価・メガの注記・RL の合法手も同じ結果を使う
+    registered = None
+    if len(my_p.get("moves") or []) < 4 and not switch_only and resolver is not None:
         try:
-            from advisor.my_team import get_my_moves
-            registered = []
-            for ja in get_my_moves(my_p.get("species_ja")):
-                mv_r = resolver.resolve(ja, "moves", cutoff=0.7)
-                if mv_r:
-                    registered.append((mv_r[0], mv_r[1]))
-            my_move_slots = complete_moves_from_registration(my_move_slots, registered)
+            registered = registered_moves_of(my_p.get("species_ja"), resolver)
         except Exception:
-            pass
-    move_ids_now = [s.get("move_id") for s in my_move_slots if s.get("move_id")]
-    # 技の固定 (2026-10-09 M1a、合法性は候補の生成時に決める: illegal_move_reason)。
-    # ちょうはつ=変化技不可 / かなしばり=特定技不可 / アンコール=固定された技以外不可 / こだわり=直前の技以外不可。
-    # 固定する技 (アンコールを受けた時点の直前の技 = 状態の encore_move、無ければ last_move、こだわりは last_move) が今の
-    # 個体の技に無い (交代の取り逃しで前の個体の技が残っている等) ときは、分からないものとして絞らず、合法性が未確認の印を残す
-    my_vols = {str(v).lower() for v in (my_p.get("volatiles") or [])}
-    disabled_ids = {v.split("_", 1)[1] for v in my_vols
-                    if v.startswith("disable_")}
-    last_player_move = (state.get("last_move") or {}).get("player")
-    encore_locked = None
-    legality_unconfirmed = []
-    if "encore" in my_vols:
-        cand = my_p.get("encore_move") or last_player_move
-        if cand and cand in move_ids_now:
-            encore_locked = cand
-        else:
-            legality_unconfirmed.append("アンコール中だが固定された技が分からない")
-    # こだわりロック: こだわり系を持って技を使った後は、交代するまで
-    # その技しか選べない (last_move は交代・ひんしでクリアされる)
-    choice_locked = None
-    if my_view.item in CHOICE_ITEM_IDS and last_player_move:
-        if last_player_move in move_ids_now:
-            choice_locked = last_player_move
-        else:
-            legality_unconfirmed.append("こだわり中だが直前の技が今の技に無い")
-    # であいがしら・ねこだまし (場に出た最初の行動でしか選べない) の制限: 場に出てから技を使ったか、または場に出た次の
-    # ターンを過ぎたか (行動できなかったターン = ひるみ・ねむり・まひ等でも初手の機会は過ぎる。2026-10-09 M1a)
-    acted_since_entry = has_acted_since_entry(last_player_move, move_ids_now) or \
-        first_turn_passed(my_p.get("entry_turn"), state.get("turn"))
-    from advisor import effects as _E
-    illegal_actions = []      # 選択自体ができない行動 (候補から外し、理由だけ残す)
+            registered = None
+    legality = legal_move_slots(state, my_p, item=my_view.item, registered=registered, switch_only=switch_only)
+    my_move_slots = legality.slots
+    my_vols = legality.volatiles
+    disabled_ids = legality.disabled_ids
+    encore_locked = legality.encore_locked
+    choice_locked = legality.choice_locked
+    legality_unconfirmed = list(legality.legality_unconfirmed)
+    illegal_actions = legality.illegal_actions   # 選択自体ができない行動 (候補から外し、理由だけ残す)
     unevaluated_actions = []  # 選べるが効果を計算できない行動 (技データが無い)
     my_bench_cache = None     # 自分の損失 (move_self_cost) の繰り出し要求の判定に使う控え (必要になったときだけ作る)
-    for slot in ([] if switch_only else my_move_slots):
+    for slot, illegal in ([] if switch_only else zip(my_move_slots, legality.reasons)):
         mid = slot.get("move_id")
         mv = dex.move(mid)
         name = slot.get("name_ja") or mid or "不明な技"
-        illegal = illegal_move_reason(
-            mid, mv, slot.get("pp"),
-            first_turn_only_move=bool(mv) and _E.first_turn_only(_E.move_entry(mid)),
-            acted_since_entry=acted_since_entry, disabled_ids=disabled_ids,
-            encore_locked=encore_locked, choice_locked=choice_locked, taunted="taunt" in my_vols)
         if illegal:
-            illegal_actions.append({"kind": "move", "id": mid, "name": name, "legal": False, "reason": illegal})
             continue
         if mv is None:
             if mid:
@@ -965,7 +1047,7 @@ def evaluate_common(state: dict, resolver=None) -> dict:
         mega_note = "メガシンカが可能です (種族値+100)。攻撃するターンにメガシンカを推奨。"
         try:
             mega_note = _mega_timing_note(my_p, my_view, opp_view, my_field,
-                                          resolver) or mega_note
+                                          resolver, move_ids=legality.legal_move_ids) or mega_note
         except Exception:
             pass
     # 相手の場のポケモンがこの先メガシンカする見込み (使用率 DB の石の使用率 + 判明情報)
@@ -984,7 +1066,7 @@ def evaluate_common(state: dict, resolver=None) -> dict:
     wincon_sid = None
     opp_pending = opp_active_pending(opp_state)
     try:
-        endgame = _run_endgame(my_state, opp_state, resolver)
+        endgame = _run_endgame(my_state, opp_state, resolver, my_active_moves=legality.legal_move_ids)
         import re as _re
         m = _re.search(r"勝ち筋:\s*(\S+)\s*が", endgame or "")
         if m:
@@ -1000,7 +1082,7 @@ def evaluate_common(state: dict, resolver=None) -> dict:
         gtheory = _run_search(state, my_state, my_view, my_p,
                               opp_state, opp_view, resolver,
                               pool, my_field, opp_field,
-                              wincon_sid=wincon_sid)
+                              wincon_sid=wincon_sid, my_moves=legality.legal_move_ids)
     except Exception:
         import traceback
         traceback.print_exc()
@@ -1019,13 +1101,9 @@ def evaluate_common(state: dict, resolver=None) -> dict:
         # 画面から技が未読取のフレームでは、RLにも登録技フォールバックを
         # 見せる (state直参照のままだと合法手が「交代のみ」に縮退し、
         # RL確率が交代に集中→技画面を開いた瞬間に推奨が反転した。
-        # 2026-08-18 第3回: command画面 交代RL100% → move_select 剣舞RL70%)
-        rl_state = state
-        if any(s.get("from_registration") for s in my_move_slots):
-            rl_party = list(my_state["party"])
-            rl_party[my_active_idx] = dict(my_p, moves=my_move_slots)
-            rl_state = dict(state,
-                            player=dict(my_state, party=rl_party))
+        # 2026-08-18 第3回: command画面 交代RL100% → move_select 剣舞RL70%)。2026-10-09 M2a: 選べない技 (アンコール・
+        # こだわり・ちょうはつ・初手限定等) に確率を配らない (rl_input_state の legal=False)
+        rl_state = rl_input_state(state, legality)
         rl_hint = policy_hint(rl_state, my_spe_actual=_es2(my_view, my_field))
     except Exception:
         pass
@@ -1281,8 +1359,10 @@ def _opp_mega_forms(opp_p: dict, state: dict) -> dict:
         return {}
 
 
-def _mega_timing_note(my_p, my_view, opp_view, my_field, resolver):
-    """メガフォルムでの最大打点/被ダメを比較し、切るタイミングを定量提案"""
+def _mega_timing_note(my_p, my_view, opp_view, my_field, resolver, move_ids=None):
+    """メガフォルムでの最大打点/被ダメを比較し、切るタイミングを定量提案。
+    move_ids: 比べる技 (evaluate_common は legal_move_slots の選べる技 = 登録の補完込み・選べない技を除く。2026-10-09 M2a)。
+    None なら状態の技"""
     if opp_view is None:
         return None
     dex = get_dex()
@@ -1308,7 +1388,10 @@ def _mega_timing_note(my_p, my_view, opp_view, my_field, resolver):
     from dataclasses import replace as _replace
     mega_view = _replace(my_view, base=mega_sp["baseStats"],
                          types=mega_sp["types"])
-    moves = [m.get("move_id") for m in (my_p.get("moves") or []) if m.get("move_id")]
+    if move_ids is not None:
+        moves = list(move_ids)
+    else:
+        moves = [m.get("move_id") for m in (my_p.get("moves") or []) if m.get("move_id")]
     if not moves:
         return None
 
@@ -1334,8 +1417,10 @@ def _mega_timing_note(my_p, my_view, opp_view, my_field, resolver):
             "耐久/素早さ目的か、後続のために温存も選択肢")
 
 
-def _run_endgame(my_state, opp_state, resolver) -> str:
-    """残存メンバーの1v1行列から勝ち筋/負け筋ノートを作る。相手の場の個体が対応待ちなら保留 (結果なし。2026-10-09 ④)"""
+def _run_endgame(my_state, opp_state, resolver, my_active_moves=None) -> str:
+    """残存メンバーの1v1行列から勝ち筋/負け筋ノートを作る。相手の場の個体が対応待ちなら保留 (結果なし。2026-10-09 ④)。
+    my_active_moves: 自分の場の個体の技 (evaluate_common は legal_move_slots の選べる技 = 登録の補完込み・アンコール等で
+    選べない技を除く。2026-10-09 M2a)。None なら状態の技。控えの個体は状態の技 (固定は交代で解ける)"""
     from advisor.endgame import matchup_matrix, endgame_note
     if opp_active_pending(opp_state):
         return ""
@@ -1355,7 +1440,9 @@ def _run_endgame(my_state, opp_state, resolver) -> str:
             v = build_mon_view(p, resolver, side=side)
             if v is None:
                 continue
-            if side == "player":
+            if side == "player" and my_active_moves is not None and i == side_state.get("active_index"):
+                moves = list(my_active_moves)
+            elif side == "player":
                 moves = [m.get("move_id") for m in (p.get("moves") or [])
                          if m.get("move_id")]
             else:
@@ -1477,15 +1564,19 @@ def sim_bench(side_state: dict, side: str, resolver) -> list:
 
 
 def _run_search(state, my_state, my_view, my_p, opp_state, opp_view,
-                resolver, pool, my_field, opp_field, wincon_sid=None):
+                resolver, pool, my_field, opp_field, wincon_sid=None, my_moves=None):
     """状態辞書 -> SimSide を組み立てて同時手番探索を実行する。相手の場の個体が対応待ちなら、相手の控えを列挙できない
-    ので探索しない (相手が未判明のときと同じく None = 直接の採点だけ。2026-10-09 ④)"""
+    ので探索しない (相手が未判明のときと同じく None = 直接の採点だけ。2026-10-09 ④)。
+    my_moves: 自分の行動集合の技 (evaluate_common は legal_move_slots の選べる技 = 登録の補完込み・選べない技を除く。
+    2026-10-09 M2a)。None なら状態の技"""
     from advisor.search import SimSide, search
     if my_view is None or opp_view is None or opp_active_pending(opp_state):
         return None
 
-    my_moves = [m.get("move_id") for m in (my_p.get("moves") or [])
-                if m.get("move_id")]
+    if my_moves is None:
+        my_moves = [m.get("move_id") for m in (my_p.get("moves") or [])
+                    if m.get("move_id")]
+    my_moves = list(my_moves)
     if not my_moves:
         return None
 
