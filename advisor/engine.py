@@ -59,6 +59,10 @@ CHOICE_ITEM_IDS = {"choicescarf", "choiceband", "choicespecs"}
 # 交代の取り逃しでHPが古い可能性のある控えへの交代スコア減点
 # (2026-08-18: ひんしを取り逃した個体が100%のまま交代候補に推奨された)
 UNCERTAIN_SWITCH_PENALTY = 15.0
+# バー推定 (hp_source="bar") の控えを上の減点の対象から外すか。2026-10-09 ユーザー判断 B: 外さない (False)。
+# 3 フレームの差 0.03 以内は読取値の安定性であり真値からの誤差の保証ではない (同じ座標ずれは何フレーム読んでも安定する)。
+# 減点 15 が最適と確認されたわけではなく、既存の減点規則を暫定維持し、推定誤差と交代順位への影響を確認してから見直す
+UNCERTAIN_EXEMPT_BAR_ESTIMATE = False
 # 「行動前に倒される見込み」(素早さ負け or 相手のKO圏先制技) の局面で、
 # 先に動けない技のスコアに掛ける割引。ダメージ期待値はほぼ実現しないが、
 # 素早さ推定や相手の交代の可能性があるためゼロにはしない
@@ -828,10 +832,15 @@ def evaluate_common(state: dict, resolver=None) -> dict:
                   + f" / 交代後の打点 約{counter:.0f}%")
         if not survives:
             reason += " / 交代出しで倒される危険あり"
-        if p.get("hp_uncertain"):
+        # バー推定 (hp_source="bar"、2026-10-09) も hp_uncertain を立てる。既存の減点規則を維持し、バー推定の控えも
+        # 減点の対象にする (UNCERTAIN_EXEMPT_BAR_ESTIMATE の注記、ユーザー判断 B)。警告の文言だけ出所で分ける:
+        # バー推定は「バーからの概算」、交代の見逃しを検出した個体 (missed_switch で hp_source が None に戻る) は従来の文言
+        bar_estimate = p.get("hp_source") == "bar"
+        if p.get("hp_uncertain") and not (UNCERTAIN_EXEMPT_BAR_ESTIMATE and bar_estimate):
             # 交代を見逃した個体はHPが古い (ひんし済みの可能性すらある)
             score -= UNCERTAIN_SWITCH_PENALTY
-            reason += " / ⚠HP不明 (交代の見逃しあり。実際は瀕死の可能性)"
+            reason += (" / ⚠HP はバーからの概算" if bar_estimate
+                       else " / ⚠HP不明 (交代の見逃しあり。実際は瀕死の可能性)")
 
         actions.append({
             "kind": "switch",
@@ -955,6 +964,9 @@ def evaluate_common(state: dict, resolver=None) -> dict:
             "switch_only": switch_only,
             "my_remaining": my_state.get("remaining"),
             "opp_remaining": opp_state.get("remaining"),
+            # 自分の HP が推定値のときだけ印を足す (2026-10-09。記録だけで採点には使わない)
+            **({"my_hp_estimated": True, "my_hp_source": my_p.get("hp_source")}
+               if my_p.get("hp_estimated") else {}),
         },
     }
 

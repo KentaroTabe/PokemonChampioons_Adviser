@@ -281,6 +281,22 @@ def parse_fraction(text: str):
     return None
 
 
+def fraction_is_split_guess(text: str) -> bool:
+    """parse_fraction(text) の分数が、区切り '/' ではなく数字の並びを分けて推測したものか (純粋)。分数として読めなければ False。
+
+    '1595' → 15/95 (桁分割) や、'1' を区切りとみなした読みは True、'4/159' のように '/' で区切られた読みは False。
+    最大 HP の実測採用 (vision.extractors.extract_my_hud の MY_MAX_ADOPT_READS) の根拠にしないために使う (2026-10-09)"""
+    import re
+    if parse_fraction(text) is None:
+        return False
+    m = re.search(r"(\d+)\s*/\s*(\d+)", text)
+    if m:
+        cur, mx = int(m.group(1)), int(m.group(2))
+        if 0 < mx <= 999 and cur <= mx * 2:
+            return False
+    return True
+
+
 def parse_percent(text: str):
     """'79%' -> 79。読めなければ None"""
     import re

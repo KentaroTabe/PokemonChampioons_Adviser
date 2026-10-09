@@ -462,6 +462,9 @@
             let hp = '';
             if (p.hp_current != null) hp = ` ${p.hp_current}/${p.hp_max}`;
             else if (p.hp_percent != null) hp = ` ${p.hp_percent}%`;
+            // 自分の HP が推定値 (HUD の数字が読めず、バーの長さと最大 HP から概算。2026-10-09)
+            if (side === 'my' && hp && p.hp_estimated && p.status !== 'fainted')
+                hp += ` <span style="font-size:10px;color:#db9" title="${p.hp_source === 'bar' ? 'HP の数字が読めないため、バーの長さと最大 HP から概算した値' : '技のダメージからの推定値'}。数字が読めたら置き換わります">推定</span>`;
             let tags = (p.types || []).map(t => `<span class="tag">${t}</span>`).join('');
             if (p.status && STATUS_JA[p.status]) tags += `<span class="tag" style="background:#833">${STATUS_JA[p.status]}</span>`;
             if (p.is_mega) tags += '<span class="tag" style="background:#a3a">メガ</span>';
