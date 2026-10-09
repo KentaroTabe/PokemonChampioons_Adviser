@@ -783,7 +783,7 @@
                 } else {
                     requestAnimationFrame(() => {
                         socket.emit('advice_shown', Object.assign(payload, {t_shown: Date.now() / 1000, hidden: false}));
-                        warnBand.style.display = 'none';   // 見える状態で表示できたので server_warning の帯を消す
+                        warnBand.style.display = 'none';   // 見える状態で表示できたので server_warning の警告バーを消す
                     });
                 }
             }

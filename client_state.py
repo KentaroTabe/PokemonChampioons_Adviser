@@ -22,8 +22,8 @@ VIS_HIDDEN, VIS_VISIBLE, VIS_UNKNOWN = "hidden", "visible", "unknown"
 SOURCE_PAGE_VISIBILITY = "page_visibility"
 SOURCE_CLIENT_HELLO = "client_hello"
 DISPLAY_HIDDEN_WARNING = ("助言ページが隠れたまま助言を受け取っています (表示通知が {n} 件続けて hidden)。"
-                          "ブラウザの窓をゲーム画面に完全には覆われない位置に置いてください "
-                          "(macOS の Chrome は完全に覆われた窓を hidden 扱いにし、送信も 1〜2 fps に落ちます)")
+                          "ブラウザのウィンドウをゲーム画面に完全には覆われない位置に置いてください "
+                          "(macOS の Chrome は完全に覆われたウィンドウを hidden 扱いにし、送信も 1〜2 fps に落ちます)")
 
 
 def parse_html_version(text: Optional[str]) -> Optional[str]:
@@ -135,7 +135,7 @@ class ClientRegistry:
 
 class HiddenDisplayWatch:
     """表示通知 (advice_shown) の hidden=true が同じ対戦で warn_count 件続いたら、その連続につき 1 回だけ知らせる。
-    hidden=false で連続が切れ (ページの帯もそこで消える)、次に続いたらまた知らせる。対戦 (battle_key) が変わると数え直す"""
+    hidden=false で連続が切れ (ページの警告バーもそこで消える)、次に続いたらまた知らせる。対戦 (battle_key) が変わると数え直す"""
 
     def __init__(self, warn_count: int):
         self.warn_count = max(1, int(warn_count))
