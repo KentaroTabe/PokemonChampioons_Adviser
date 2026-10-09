@@ -176,7 +176,12 @@ SIMPLE_EVENTS = [
      "action": "volatile", "key": "perishsong", "value": True},
 
     # --- メガシンカ ---
-    {"id": "mega_evolve", "keywords": [["メガシンカ", "めかしんか"]], "action": "mega"},
+    # 成立の文言「<個体>は メガ<種族>に メガシンカした!」の「メガシンカした」だけで発火する。2026-10-09 M2a: 以前は語
+    # 「メガシンカ」だけで発火し、command / move_select の「メガシンカ」ボタンの文字 (「ックス0622メガシンカ」= 名前の末尾 +
+    # HP + ボタン) で is_mega / mega_used が立っていた (battle_202610*.jsonl の発火 64 件中 18 件がボタンの文字で、
+    # 場面は command 6 / move_select 5 / field 5 / battle_hud 2: 場面の誤分類があるので場面ではなく文言の形で判定する)。
+    # OCR の「シン力した」は loose_key で「しんかした」になる
+    {"id": "mega_evolve", "keywords": [["メガシンカした", "めかしんかした"]], "action": "mega"},
     # --- ねばねばネットの被弾 (2026-08-31 第11回: 「〜はねばねばネットに
     #     ひっかかった!」が技使用 move_*_stickyweb として誤発火し、設置側の
     #     状態を乱した)。被弾側の陣営にネットが存在する確認として扱う ---
