@@ -416,8 +416,9 @@ P1_TEAM_DEFAULT = {"rl": "registered", "scoring": "general"}
 # 実験専用の構築プール (--team general)。P1_SCORING_POOL_FILE = 既定のプールファイル (REPO からの相対 or 絶対。None なら --own-pool が要る)、
 # P1_SCORING_POOL_SHA16 = 期待する本文の sha16 (None なら照合せず注意だけ出す。プールを固定したらここに書く)。
 # 生成の既定: 件数 P1_SCORING_POOL_N (= 構築の相手プールと同じ BUILD_POOL_TOP_N 相当の 200、合法性の検査の前)、seed P1_SCORING_POOL_SEED
-P1_SCORING_POOL_FILE = None
-P1_SCORING_POOL_SHA16 = None
+# 2026-10-09 固定: tools/scoring_pool.py で使用率 snapshot 61 から 200 件を合成し M-C で validate (除外 0)。M2e の別名の表で未対応 0
+P1_SCORING_POOL_FILE = "logs/usefulness/pools/scoring_pool_61_20261009.json"
+P1_SCORING_POOL_SHA16 = "c7a32f8897d71375"
 P1_SCORING_POOL_N = 200
 P1_SCORING_POOL_SEED = 20261009
 # 採点方式の比較で --team registered のときの登録チームの本文の sha16 (2026-10-09 の登録)。違えば起動しない。
