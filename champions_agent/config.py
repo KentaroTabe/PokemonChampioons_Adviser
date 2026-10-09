@@ -314,6 +314,31 @@ HP_REJECT_SPECIES_CUTOFF = 0.8
 # その最大と最小の差が許容以内なら、既知の最大 HP とバーの割合から概算を入れる (推定の印つき。実測が来れば置き換える)
 HP_BAR_ESTIMATE_STABLE_FRAMES = 3
 HP_BAR_ESTIMATE_STABLE_TOL = 0.03
+# HUD の有無の判定 (vision/extractors.extract_field_hp。2026-10-09 fix/hp-paths で直書きから移しただけで、値は変えていない):
+# 相手バナー (zones の opp_banner) の赤の割合がこれ以上なら相手の HUD がある (相手側を読む)
+FIELD_HP_OPP_BANNER_MIN = 0.15
+# 自分の HP バー (zones の my_hp_bar) の色 (緑/黄/赤) の画素数がこれを超えれば自分の HUD がある (自分側を読む)
+MY_HUD_BAR_MIN_PIXELS = 30
+# 相手の HP: % の文字とバーの割合 (×100) の差がこれ (ポイント) を超えれば、文字の誤読とみなしてバーで代用する (値は従来どおり)
+OPP_HP_BAR_SUBSTITUTE_DIFF = 15.0
+# HP の確定の安定条件 (vision/extractors._set_hp → hp_settle_step。2026-10-09 fix/hp-paths で直書きから移しただけで、値は変えていない):
+# 前の読みとの差がこれ (ポイント) 以内なら同じ値の読みとして数える
+HP_SETTLE_SAME_TOL = 2.0
+# 同じ値の読みがこの秒数以上続いたら確定する (被弾・ひんしの演出中の遷移値を確定しない)
+HP_SETTLE_MIN_SEC = 0.6
+# この % 以下の読みは演出中の空バーの疑いが強い: 初回の読みは即反映せず、確定には HP_SETTLE_LOW_READS 回の同じ読みを要る
+HP_SETTLE_LOW_PCT = 3.0
+HP_SETTLE_LOW_READS = 3
+# 自分の HP の読みの経過の記録 (state.my_hp_trace、2026-10-09 fix/hp-paths。4/159 の取りこぼしの原因追跡用):
+# 直近この件数を状態に持つ (環状)
+MY_HP_TRACE_LEN = 40
+# 自分の HP の棄却 (確定も保留もしない読み) がこの回数続いたら、対戦ログに my_hp_trace の行を 1 行書く (対戦の終わりにも書く)
+MY_HP_TRACE_DUMP_STREAK = 20
+# 1 対戦で my_hp_trace の行を書く回数の上限
+MY_HP_TRACE_MAX_DUMPS = 5
+# 様子見画面の右列 (相手の HP%): 交代の文言の無い、この値 (ポイント) を超える増加は書かずに棄却として記録する
+# (2026-10-09 fix/hp-paths。10/7 18:30 マニューラ 39% → 100% の原因を切り分けるため。回復技の上限を超える増加は別個体の値の疑い)
+WATCH_OPP_BIG_INCREASE = 60.0
 
 # --- 行動助言の RL 加点と影の計算 (docs/USEFULNESS_VERIFICATION_PLAN_1007.md §2 advice_variant・§4、2026-10-07) ---
 # RL の行動確率の加点の重み (advisor.engine: score += 重み × 確率) の既定値。evaluate(rl_blend_weight=...) で渡さないときに使う。

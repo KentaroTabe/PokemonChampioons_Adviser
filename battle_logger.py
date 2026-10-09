@@ -81,6 +81,19 @@
   scene 行の hp_reject.player に、推定値を入れた後は "estimated_from_bar": true と "estimate": [現在, 最大]
     (直前の棄却が推定で埋まった印)、バーがほぼ 0 のときは "faint_suspect": true (ひんしの疑い。確定ではない)
   advice 行に、自分の場の個体の HP が推定値のときだけ "context": {"my_hp_estimated": true, "my_hp_source": ...}
+
+2026-10-09 HP の取り込み経路の記録 (fix/hp-paths。行と欄を足すだけ。既存の欄の意味は変えない):
+  {"type": "my_hp_trace", "reason": "reject_streak"|"battle_end", "battle_seq", "n", "rows": [...]} 自分の HP の読みの経過
+    (vision.state の my_hp_trace、直近 MY_HP_TRACE_LEN 件)。自分の HP の棄却が MY_HP_TRACE_DUMP_STREAK 回続いたときと、
+    対戦の終わりに書く (1 対戦で最大 MY_HP_TRACE_MAX_DUMPS 行)。rows の各行は {t, scene, source ("hud"/"field"), name_text,
+    hud_species, active_species, hp_text, frac, split_guess, known_max, bar, decision, reason} と、_set_hp に渡した読みの
+    new / stable_count / since_commit、field 経路の HUD の判定の opp_banner / my_bar_px、バー推定の est_decision / est_reason。
+    scene 行の state には載せない
+  scene 行の state の個体 (両側) に "hp_read_ts" (HP を最後に実際に読んで確定した時刻)。助言の行の state と digest には足さない
+  scene 行 (scene が watch のとき) の state に "watch_opp_rows": 様子見画面の右列の行ごとの読み [{row, hp_text, pct,
+    species (色照合で同定した種族 id), method ("color"), score, written (書いたか / 書かなかった理由), slot}]
+  hp_reject.opponent の reason に "watch_right_big_increase" (様子見画面の右列で、交代の文言なしに WATCH_OPP_BIG_INCREASE を
+    超えて増えた読み。書かずに残す。row / species / method / score / hp_before つき)
 """
 from __future__ import annotations
 
@@ -480,11 +493,16 @@ def scene_row_state(state: dict) -> dict:
     d = _compact_state(state)
     d["hp_reject"] = state.get("hp_reject") or {"player": None, "opponent": None}
     # HP が推定値の個体に印 (2026-10-09。_compact_state の個体と同じ並び)
+    # HP を最後に実際に読んで確定した時刻 hp_read_ts (2026-10-09 fix/hp-paths。digest を変えないよう scene 行だけ)
     for side in ("player", "opponent"):
         for row, p in zip(d[side]["party"], (state.get(side) or {}).get("party") or []):
             if p.get("hp_estimated"):
                 row["hp_estimated"] = True
                 row["hp_source"] = p.get("hp_source")
+            row["hp_read_ts"] = p.get("hp_read_ts")
+    # 様子見画面の右列の行ごとの読み (2026-10-09 fix/hp-paths。scene が watch のときだけ)
+    if state.get("scene") == SCENE_WATCH:
+        d["watch_opp_rows"] = [dict(r) for r in (state.get("watch_opp_rows") or [])]
     return d
 
 
@@ -596,6 +614,7 @@ class BattleLogger:
         self._advice_seq = 0        # 助言 ID の連番 (ファイル内で一意)
         self._advice_files: dict = {}   # 助言 ID → その助言を書いた対戦ログ (表示の行を助言の対戦に帰属させる。2026-10-06)
         self._shown: dict = {}          # 助言 ID → 表示時刻 (ブラウザの時計。hidden でないもの)。decision 行に添える
+        self._trace_written: set = set()  # 書いた my_hp_trace の分 (battle_seq, n, reason)
 
     def _reset_tracking(self) -> None:
         """段 0 の追跡 (1 対戦ぶん) を初期化する"""
@@ -1106,6 +1125,9 @@ class BattleLogger:
             if self._last_seq is None:
                 self._last_seq = seq   # 起動直後は基準を記録するだけ (回転しない)
             elif seq != self._last_seq:
+                # 前の対戦の自分の HP の読みの経過 (reset_battle が出した分) は、前の対戦のファイルに書いてから閉じる
+                # (前の対戦のファイルが開いていなければ書かない: 次の対戦のファイルに混ぜない)
+                self._write_my_hp_traces(state, self._last_seq, write=self._file is not None)
                 self._last_seq = seq
                 self._finalize(state.get("outcome"))
 
@@ -1194,6 +1216,9 @@ class BattleLogger:
                 except Exception:
                     pass
 
+        # 自分の HP の読みの経過 (2026-10-09 fix/hp-paths。このフレームで state が出した分)
+        self._write_my_hp_traces(state, None)
+
         # 段 0 (2026-10-07): 相手の枠の置き換え・推定・場に出た種、手入力の訂正の上書き、決定の確認 (記録だけ。失敗で止めない)
         try:
             self._track_opponent(state, scene, manual_species)
@@ -1228,6 +1253,25 @@ class BattleLogger:
                 if p.get("status") == "fainted"),
             sum(1 for _i, p in roster_slots(state.get("opponent", {}).get("party"))   # 対応待ちは数えない
                 if p.get("status") == "fainted"))
+
+    def _write_my_hp_traces(self, state: dict, only_seq, write: bool = True) -> None:
+        """state の my_hp_trace_dumps (このフレームで出した自分の HP の読みの経過) を my_hp_trace 行として書く。
+        only_seq を渡したら、その対戦の分だけを書く (前の対戦のファイルを閉じる前)。同じ分は 1 回だけ書く。
+        write=False なら書かずに書いた扱いにする"""
+        try:
+            for dmp in state.get("my_hp_trace_dumps") or []:
+                key = (dmp.get("battle_seq"), dmp.get("n"), dmp.get("reason"))
+                if key in self._trace_written:
+                    continue
+                if only_seq is not None and dmp.get("battle_seq") != only_seq:
+                    continue
+                self._trace_written.add(key)
+                if not write:
+                    continue
+                self._write({"type": "my_hp_trace", "reason": dmp.get("reason"), "battle_seq": dmp.get("battle_seq"),
+                             "n": dmp.get("n"), "rows": list(dmp.get("rows") or [])})
+        except Exception as e:      # 記録の失敗で対戦ログを止めない
+            print(f"[battle_log] 自分の HP の読みの経過の記録に失敗: {e}")
 
     def on_advice(self, advice: dict, kind: str, state: Optional[dict] = None) -> str:
         """助言の記録。advice に advice_id / t_gen を書き込み (ブラウザが表示の確認に使う)、助言が見た簡約状態とその digest、

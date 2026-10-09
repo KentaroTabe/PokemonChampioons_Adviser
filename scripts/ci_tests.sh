@@ -132,6 +132,7 @@ TESTS=(
   test_client_state
   test_hp_intake
   test_hp_bar_estimate
+  test_hp_paths
   test_roster_retention
   test_type_recognition
   test_roster_cap
