@@ -33,6 +33,7 @@ from advisor.engine import OFFENSIVE_EV, build_mon_view, evaluate
 from advisor.transition import SimSide
 from champions_agent import config as C
 from tests.test_advice_m1a import _Patch
+from tools import usefulness_p1 as P1
 from tests.test_advice_m2c import _inp, _mv, _view
 from tests.test_scoring_transition import _Hint, _capture_inputs, _mon, _state, resolver
 
@@ -703,6 +704,37 @@ def test_prelim_correspondence():
     print("test_prelim_correspondence OK")
 
 
+def test_pool_expected_sha16_fixed():
+    """期待 sha16 を固定したとき: 一致するプールは起動前検査 OK (注意なし)、違うプールは NG"""
+    import tempfile
+    from pathlib import Path
+    from tests.test_usefulness_p1 import _facts
+    from tools import scoring_pool as SP
+    from tools import usefulness_p1 as P
+    from champions_agent.config import P1_SEED
+    with tempfile.TemporaryDirectory() as d:
+        doc = SP.pool_doc([_TEAM_A, _TEAM_B], ["ta", "tb"], snapshot_id=61, battle_format=C.TRAINING_BATTLE_FORMAT, seed=1,
+                          n_requested=2, n_generated=2, excluded=[], db_path="/db")
+        pf = Path(d) / "pool.json"
+        pf.write_text(json.dumps(doc), encoding="utf-8")
+        old = P.P1_SCORING_POOL_SHA16
+        try:
+            for expected, ok in ((doc["sha16"], True), ("0000000000000000", False)):
+                P.P1_SCORING_POOL_SHA16 = expected
+                team = P.pool_team_facts(pf, P1_SEED, [])
+                design = P.plan_scoring()
+                g = P.build_conditions(design, _facts(team=team), 50, True, P1_SEED, 1, "split.json", 7200,
+                                       str(Path(d) / "out"), {c: ["py"] for c in design["conditions"]}, {}, None,
+                                       team_source="general")
+                errs = P.preflight_errors(g)
+                assert (errs == []) is ok, (expected, errs)
+                if ok:
+                    assert not any("期待 sha16" in w for w in P.preflight_warnings(g))
+        finally:
+            P.P1_SCORING_POOL_SHA16 = old
+    print("test_pool_expected_sha16_fixed OK")
+
+
 def main():
     test_unevaluated_interval_continue_and_fallback()
     test_eps_zero_unchanged()
@@ -725,7 +757,15 @@ def main():
     test_verdict_own_correspondence()
     test_pool_doc_and_check()
     test_own_pool_teambuilder_correspondence()
-    test_usefulness_p1_pool_and_pinned()
+    # config で P1_SCORING_POOL_SHA16 を固定 (2026-10-09、c7a32f8897d71375) したので、模擬のプールの検査は「期待が未固定」の
+    # 条件で行う (このテストはその分岐を確かめている)。固定時の挙動は test_pool_expected_sha16_fixed で確かめる
+    _old_sha = P1.P1_SCORING_POOL_SHA16
+    P1.P1_SCORING_POOL_SHA16 = None
+    try:
+        test_usefulness_p1_pool_and_pinned()
+    finally:
+        P1.P1_SCORING_POOL_SHA16 = _old_sha
+    test_pool_expected_sha16_fixed()
     test_prelim_correspondence()
     print("ALL OK")
 
