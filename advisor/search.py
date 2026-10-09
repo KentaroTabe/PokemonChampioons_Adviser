@@ -7,6 +7,9 @@
 - 行動ごとに 期待値 (相手の行動分布で加重) と 保証値 (相手最善=ミニマックス)
   を算出し、期待値と保証値が乖離する行動には択リスクを付ける
 
+1 ターンの解決 (simulate_turn) は共通の遷移 advisor/transition.py (resolve_turn) に委譲する (2026-10-09 M1b)。
+対応している効果と未対応の効果は transition.py の冒頭の表を参照。
+
 簡略化 (v1):
 - 追加効果 (怯み/能力低下/状態異常付与) は未シミュレート
 - ダメージロールは {min, avg, max} の3群 (重み 0.25/0.5/0.25) — foul play方式
@@ -15,11 +18,17 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from typing import Optional
 
-from advisor.damage import MonView, FieldView, _is_grounded, calc_damage
-from advisor.dex import get_dex
+from advisor.damage import FieldView
+# 1 ターンの解決は共通の遷移 (advisor/transition.py、docs/ADVICE_ACCURACY_PLAN_1009.md §2.3) に移した。
+# 下の名前は既存の呼び出し側 (endgame / tools / tests) のための再公開
+from advisor.transition import (  # noqa: F401
+    HAZARD_MOVES, HEAL_MOVES, PROTECT_MOVES, SETUP_MOVES, STATUS_MOVES, SUCKER_MOVES, Action, SimSide, TurnResult,
+    apply_switch as _apply_switch, best_bench as _best_bench, dmg_frac as _dmg_frac, hazard_frac as _hazard_frac,
+    is_attack_action as _is_attack_action, mega_evolve as _mega_evolve, priority as _priority, resolve_turn,
+    speed as _speed)
 from champions_agent.config import SEARCH_OPP_MEGA_MIN_PROB
 
 ROLL_GROUPS = ((0.25, "min"), (0.5, "avg"), (0.25, "max"))
@@ -47,106 +56,6 @@ def dynamic_risk_weight(position: float) -> float:
     t = min(1.0, max(0.0, (position - lo) / (hi - lo)))
     return w_min + t * (w_max - w_min)
 
-# --- 補助技の効果モデル (探索で「効果ゼロの技」にしないため) ---
-PROTECT_MOVES = {"protect", "detect", "banefulbunker", "spikyshield",
-                 "burningbulwark", "silktrap"}
-HEAL_MOVES = {"recover": 0.5, "roost": 0.5, "slackoff": 0.5,
-              "softboiled": 0.5, "milkdrink": 0.5, "shoreup": 0.5,
-              "moonlight": 0.5, "morningsun": 0.5, "synthesis": 0.5,
-              "strengthsap": 0.4, "junglehealing": 0.25, "lifedew": 0.25}
-SETUP_MOVES = {
-    "swordsdance": {"atk": 2}, "nastyplot": {"spa": 2},
-    "dragondance": {"atk": 1, "spe": 1}, "calmmind": {"spa": 1, "spd": 1},
-    "bulkup": {"atk": 1, "def": 1}, "irondefense": {"def": 2},
-    "quiverdance": {"spa": 1, "spd": 1, "spe": 1},
-    "shellsmash": {"atk": 2, "spa": 2, "spe": 2, "def": -1, "spd": -1},
-    "agility": {"spe": 2}, "howl": {"atk": 1}, "curse": {"atk": 1, "def": 1},
-    "victorydance": {"atk": 1, "def": 1, "spe": 1},
-}
-STATUS_MOVES = {"willowisp": "burn", "thunderwave": "paralysis",
-                "toxic": "toxic", "spore": "sleep", "sleeppowder": "sleep",
-                "hypnosis": "sleep", "darkvoid": "sleep", "glare": "paralysis",
-                "nuzzle": "paralysis", "yawn": "sleep"}
-HAZARD_MOVES = {"stealthrock"}
-# ふいうち系: 相手が「攻撃技を選んでいて、まだ動いていない」場合のみ成功
-SUCKER_MOVES = {"suckerpunch", "thunderclap"}
-
-
-def _is_attack_action(act: "Action") -> bool:
-    """その行動が攻撃技か (ふいうち系の成功判定用)"""
-    if act.kind != "move" or not act.move_id:
-        return False
-    if act.move_id in PROTECT_MOVES or act.move_id in HEAL_MOVES or \
-            act.move_id in SETUP_MOVES or act.move_id in STATUS_MOVES or \
-            act.move_id in HAZARD_MOVES:
-        return False
-    mv = get_dex().move(act.move_id)
-    return bool(mv and mv.get("category") != "Status" and mv.get("power"))
-
-
-@dataclass
-class SimSide:
-    """探索用の軽量な陣営状態"""
-    active: MonView
-    active_hp: float                  # 0..1
-    bench: list = field(default_factory=list)   # [(MonView, hp_frac)]
-    stealth_rock: bool = False
-    # 1 試合 1 回の資源 (メガシンカ): 場のポケモンがこの先メガシンカする姿の確率 {mega_sid: p} (advisor.gimmick)。
-    # 権利を消費済みなら mega_used。交代すると新しい場のポケモンの分は不明 (空) にする
-    mega_forms: dict = field(default_factory=dict)
-    mega_used: bool = False
-
-    def alive_count(self) -> int:
-        return (1 if self.active_hp > 0 else 0) + \
-            sum(1 for _, hp in self.bench if hp > 0)
-
-
-@dataclass
-class Action:
-    kind: str                 # "move" | "switch"
-    move_id: Optional[str] = None
-    bench_index: Optional[int] = None
-    label: str = ""
-    prob: float = 1.0         # 相手側: 行動分布の重み
-    mega: bool = False        # 技と同時にメガシンカする (相手側: 事前分布で分岐)
-
-
-def _hazard_frac(mon: MonView, side: SimSide) -> float:
-    if not side.stealth_rock:
-        return 0.0
-    mult = get_dex().effectiveness("Rock", mon.types)
-    return 0.125 * mult
-
-
-def _priority(move_id: Optional[str], view: Optional[MonView] = None,
-              fieldv: Optional[FieldView] = None) -> int:
-    """技の優先度 (特性補正込み: いたずらごころ=変化技+1 等。フィールド込み: グラススライダーはグラスフィールドで
-    接地した使用者なら +1。表は advisor/data/field_effects.json の priority)"""
-    from advisor.dex import field_effects
-    mv = get_dex().move(move_id) if move_id else None
-    if not mv:
-        return 0
-    pri = mv.get("priority", 0)
-    ab = (view.ability or "") if view is not None else ""
-    if ab == "prankster" and (mv.get("category") or "") == "Status":
-        pri += 1
-    elif ab == "galewings" and (mv.get("type") or "") == "Flying" \
-            and view is not None and view.hp_frac >= 0.999:
-        pri += 1
-    spec = (field_effects().get("priority") or {}).get(move_id or "")
-    if spec and fieldv is not None:
-        cur = fieldv.terrain if spec.get("kind") == "terrain" else fieldv.weather
-        if cur and (spec.get("cond") == "any" or spec.get("cond") == cur):
-            if spec.get("grounded") != "user" or view is None or _is_grounded(view):
-                pri += int(spec.get("delta", 0))
-    return pri
-
-
-def _speed(view: MonView, fieldv: Optional[FieldView] = None) -> float:
-    """実効素早さ (すいすい/ようりょくそ等の特性込み)"""
-    from advisor.damage import effective_speed
-    return effective_speed(view, fieldv)
-
 
 def static_eval(me: SimSide, opp: SimSide) -> float:
     """盤面の静的評価 [-1, 1]。生存HP合計の差 + 数的優位ボーナス"""
@@ -164,46 +73,6 @@ def static_eval(me: SimSide, opp: SimSide) -> float:
     hp_diff = total(me) - total(opp)
     count_diff = n_me - n_opp
     return max(-1.0, min(1.0, hp_diff * 0.22 + count_diff * 0.18))
-
-
-def _dmg_frac(attacker: MonView, defender: MonView, def_hp: float,
-              move_id: str, fieldv: Optional[FieldView], roll: str) -> float:
-    """与ダメージ (防御側最大HP比 0..1)"""
-    try:
-        d = calc_damage(replace(attacker), replace(defender, hp_frac=def_hp),
-                        move_id, fieldv)
-    except Exception:
-        return 0.0
-    return max(0.0, d[roll] / 100.0)
-
-
-def _best_bench(side: SimSide, opp: SimSide) -> Optional[int]:
-    """ひんし時の後続 (静的評価最大の1体に固定)"""
-    best, best_v = None, -9.9
-    for i, (view, hp) in enumerate(side.bench):
-        if hp <= 0:
-            continue
-        v = hp - _hazard_frac(view, side)
-        if v > best_v:
-            best, best_v = i, v
-    return best
-
-
-def _apply_switch(side: SimSide, idx: int) -> SimSide:
-    view, hp = side.bench[idx]
-    hp = max(0.0, hp - _hazard_frac(view, side))
-    new_bench = list(side.bench)
-    new_bench[idx] = (side.active, side.active_hp)
-    return replace(side, active=view, active_hp=hp, bench=new_bench, mega_forms={})
-
-
-def _mega_evolve(side: SimSide) -> SimSide:
-    """場のポケモンを最も確からしいメガ後の姿にし、権利を消費する (HP 割合・ランク・状態異常は保つ)"""
-    from advisor.gimmick import mega_view
-    if not side.mega_forms or side.mega_used:
-        return side
-    form = max(side.mega_forms, key=lambda k: (side.mega_forms[k], k))
-    return replace(side, active=mega_view(side.active, form), mega_forms={}, mega_used=True)
 
 
 def opp_mega_split(acts: list, side: SimSide, min_prob: float = SEARCH_OPP_MEGA_MIN_PROB) -> list:
@@ -227,88 +96,10 @@ def opp_mega_split(acts: list, side: SimSide, min_prob: float = SEARCH_OPP_MEGA_
 def simulate_turn(me: SimSide, opp: SimSide, my_act: Action, opp_act: Action,
                   my_field: Optional[FieldView], opp_field: Optional[FieldView],
                   roll: str) -> tuple:
-    """1ターンを解決し (me', opp') を返す (副作用なし)"""
-    me = replace(me, bench=list(me.bench))
-    opp = replace(opp, bench=list(opp.bench))
-
-    # 交代は攻撃より先に解決
-    if my_act.kind == "switch":
-        me = _apply_switch(me, my_act.bench_index)
-    if opp_act.kind == "switch":
-        opp = _apply_switch(opp, opp_act.bench_index)
-    # メガシンカ (1 試合 1 回) は技の解決前に姿を変える
-    if opp_act.kind == "move" and opp_act.mega:
-        opp = _mega_evolve(opp)
-    if my_act.kind == "move" and my_act.mega:
-        me = _mega_evolve(me)
-
-    movers = []
-    if my_act.kind == "move" and me.active_hp > 0:
-        movers.append(("me", my_act.move_id,
-                       _priority(my_act.move_id, me.active, my_field or opp_field),
-                       _speed(me.active, my_field)))
-    if opp_act.kind == "move" and opp.active_hp > 0:
-        movers.append(("opp", opp_act.move_id,
-                       _priority(opp_act.move_id, opp.active, my_field or opp_field),
-                       _speed(opp.active, my_field)))
-    trick_room = bool(my_field and my_field.trick_room)
-    movers.sort(key=lambda m: (-m[2], m[3] if trick_room else -m[3]))
-
-    protected = {"me": False, "opp": False}
-    moved: set = set()
-    fieldv = my_field or opp_field
-    psychic_terrain = bool(fieldv and fieldv.terrain == "psychic")
-    for who, move_id, _pri, _spe in movers:
-        atk_side, def_side = ("me", "opp") if who == "me" else ("opp", "me")
-        atk = me if who == "me" else opp
-        dfn = opp if who == "me" else me
-        if atk.active_hp <= 0:
-            continue
-        moved.add(who)
-
-        # サイコフィールド: 接地している相手を対象にした優先度 > 0 の技は不発 (自分対象の積み/回復/まもるは通る)
-        if psychic_terrain and _pri > 0 and move_id not in PROTECT_MOVES and move_id not in HEAL_MOVES \
-                and move_id not in SETUP_MOVES and _is_grounded(dfn.active):
-            continue
-
-        # ふいうち系: 相手が攻撃技を選んでいて未行動の場合のみ成功する
-        if move_id in SUCKER_MOVES:
-            def_act = opp_act if who == "me" else my_act
-            if def_side in moved or not _is_attack_action(def_act):
-                continue   # 失敗 (交代/変化技/相手行動済み)
-
-        # --- 補助技の効果 ---
-        if move_id in PROTECT_MOVES:
-            protected[atk_side] = True
-            continue
-        if move_id in HEAL_MOVES:
-            healed = min(1.0, atk.active_hp + HEAL_MOVES[move_id])
-            atk = replace(atk, active_hp=healed)
-        elif move_id in SETUP_MOVES:
-            boosts = dict(atk.active.boosts or {})
-            for k, d in SETUP_MOVES[move_id].items():
-                boosts[k] = max(-6, min(6, (boosts.get(k) or 0) + d))
-            atk = replace(atk, active=replace(atk.active, boosts=boosts))
-        elif move_id in HAZARD_MOVES:
-            dfn = replace(dfn, stealth_rock=True)
-        elif move_id in STATUS_MOVES:
-            if dfn.active.status is None and not protected[def_side]:
-                dfn = replace(dfn,
-                              active=replace(dfn.active,
-                                             status=STATUS_MOVES[move_id]))
-        else:
-            # --- 攻撃技 ---
-            if not protected[def_side]:
-                dmg = _dmg_frac(replace(atk.active, hp_frac=atk.active_hp),
-                                dfn.active, dfn.active_hp, move_id,
-                                my_field if who == "me" else opp_field, roll)
-                dfn = replace(dfn, active_hp=max(0.0, dfn.active_hp - dmg))
-                if dfn.active_hp <= 0:
-                    nxt = _best_bench(dfn, atk)
-                    if nxt is not None:
-                        dfn = _apply_switch(dfn, nxt)
-        me, opp = (atk, dfn) if who == "me" else (dfn, atk)
-    return me, opp
+    """1ターンを解決し (me', opp') を返す (副作用なし)。互換の入口: 解決は共通の遷移 advisor.transition.resolve_turn
+    (結果の詳細 (ひんし・繰り出し要求・未対応の効果) が要る呼び出し側は resolve_turn を直接使う)"""
+    r = resolve_turn(me, opp, my_act, opp_act, my_field, opp_field, roll)
+    return r.me, r.opp
 
 
 def _my_actions(me: SimSide, my_moves: list) -> list:

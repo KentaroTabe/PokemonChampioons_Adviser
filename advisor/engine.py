@@ -681,6 +681,7 @@ def evaluate_common(state: dict, resolver=None) -> dict:
     from advisor import effects as _E
     illegal_actions = []      # 選択自体ができない行動 (候補から外し、理由だけ残す)
     unevaluated_actions = []  # 選べるが効果を計算できない行動 (技データが無い)
+    my_bench_cache = None     # 自分の損失 (move_self_cost) の繰り出し要求の判定に使う控え (必要になったときだけ作る)
     for slot in ([] if switch_only else my_move_slots):
         mid = slot.get("move_id")
         mv = dex.move(mid)
@@ -706,6 +707,7 @@ def evaluate_common(state: dict, resolver=None) -> dict:
         score = 0.0
         act_discount = False   # 行動前に倒される見込み (RLブレンド後に割引)
         may_fail = None        # 選べるが条件次第で不発になる理由 (選択自体が不可の illegal_actions とは別。2026-10-09 M1a)
+        self_cost = None       # 技が出た分岐での自分の損失 (自滅・HP の消費・反動。2026-10-09 M1b、move_self_cost)
 
         if mv["category"] == "Status" or not mv["power"]:
             desc, base_score = STATUS_MOVE_VALUE.get(mid, ("補助技", 8))
@@ -837,6 +839,23 @@ def evaluate_common(state: dict, resolver=None) -> dict:
             reason_parts.insert(0, f"{dmg_txt} {eff_txt}")
             reason_parts += d["notes"]
 
+            # 自分の損失 (自滅・HP の消費・反動、2026-10-09 M1b): 共通の遷移で「技が出た分岐」を解決し、候補の self_cost と
+            # 理由に残す。スコアは変えない (計画書 §3.0: 共通尺度の順位づけが整うまで任意の減点を足さない)。
+            # 行動前に倒される見込み (act_discount) の分岐では技が出ないので、与ダメージ 0・自滅もしない。既存の ×0.25 の割引
+            # (rescore_actions) はこの分岐の「与ダメージがほぼ実現しない」意味のままで、自滅の損失を「撃ってから倒される」扱いで
+            # 重ねない (self_cost は技が出た分岐の損失として before_ko_risk の印つきで残す)
+            from advisor.transition import self_cost_kind
+            if self_cost_kind(mid):
+                if my_bench_cache is None:
+                    my_bench_cache = sim_bench(my_state, "player", resolver)
+                tgt_view = opp_view if opp_view is not None else dummy
+                self_cost = move_self_cost(my_view, my_bench_cache, tgt_view,
+                                           opp_view.hp_frac if opp_view is not None else 1.0,
+                                           mid, my_field, d["avg"] / 100.0, act_discount)
+                sc_txt = self_cost_text(self_cost) if self_cost else ""
+                if sc_txt:
+                    reason_parts.append(sc_txt)
+
         action = {
             "kind": "move",
             "id": mid,
@@ -848,6 +867,9 @@ def evaluate_common(state: dict, resolver=None) -> dict:
             action["act_discount"] = True
         if may_fail:
             action["may_fail"] = may_fail
+        if self_cost:
+            # advice 行に残る欄 (M1b で足すのはこの欄だけ。既存の欄の意味は変えない)
+            action["self_cost"] = self_cost
         if slot.get("from_registration"):
             # 画面で読めていない枠を登録の型で補った技 (2026-10-09 M1a)
             action["from_registration"] = True
@@ -1394,6 +1416,66 @@ def _hp_frac_of(p: dict) -> float:
     return 1.0
 
 
+def move_self_cost(my_view: MonView, my_bench: list, target_view: MonView, target_hp: float, move_id: str,
+                   fieldv: Optional[FieldView], damage_frac: float, before_ko_risk: bool) -> Optional[dict]:
+    """技を出した分岐での自分の損失を共通の遷移 (advisor.transition.resolve_move) で解決する (純粋。2026-10-09 M1b)。
+
+    自滅・HP の消費・反動のある技だけ {"kind", "faints", "hp_loss_frac", "requires_switch", "before_ko_risk"} を返し、他は None。
+    damage_frac は直接の採点が計算した与ダメージ (平均、対象の最大 HP 比)。before_ko_risk は「行動前に倒される見込み」
+    (act_discount) の印: その分岐では技が出ず、与ダメージ 0・自滅も HP の消費も起きない (損失は技が出た分岐のもの)。
+    しめりけ等で技が出ないときは損失 0 (faints=False) で返す。スコアは変えない (計画書 §3.0)
+    """
+    from advisor.transition import SimSide, resolve_move, self_cost_kind, self_cost_of
+    kind = self_cost_kind(move_id)
+    if not kind:
+        return None
+    me = SimSide(active=my_view, active_hp=my_view.hp_frac, bench=list(my_bench or []))
+    tgt = SimSide(active=target_view, active_hp=target_hp)
+    mr = resolve_move(me, tgt, move_id, fieldv, "avg", damage=damage_frac)
+    out = {"kind": kind, **self_cost_of(me, mr.user), "before_ko_risk": bool(before_ko_risk)}
+    if not mr.executed:
+        out["not_executed"] = next((d for _w, k, d in mr.events if k == "fail"), "fail")
+    return out
+
+
+def self_cost_text(sc: dict) -> str:
+    """自分の損失 (move_self_cost) の理由の文言。損失が無ければ空"""
+    if sc.get("not_executed") == "damp":
+        return "しめりけで不発 (自分の損失なし)"
+    loss = float(sc.get("hp_loss_frac") or 0.0)
+    if not sc.get("faints") and loss <= 0:
+        return ""
+    if sc.get("faints"):
+        cause = {"selfko": "自分はひんし", "half_hp": "HP を 1/2 失って自分はひんし",
+                 "half_hp_on_damage": "HP を 1/2 失って自分はひんし", "recoil": "反動で自分はひんし"}[sc["kind"]]
+        txt = cause + (" (控えを出す)" if sc.get("requires_switch") else " (控えなし)")
+    else:
+        txt = ("反動 " if sc["kind"] == "recoil" else "自分の HP ") + f"−{loss * 100:.0f}%"
+    if sc.get("before_ko_risk"):
+        txt = "撃てれば" + txt + " / 先に倒されれば不発で自分の損失も無い"
+    return txt
+
+
+def sim_bench(side_state: dict, side: str, resolver) -> list:
+    """遷移・探索用の控え [(MonView, hp_frac)] (場の個体・ひんしを除く。自分側は選出済みの 3 体に限る: 未選出は交代できない)。
+    探索 (_run_search) と直接の採点の自分の損失 (move_self_cost) が同じ控えを使う"""
+    bench = []
+    active_idx = side_state.get("active_index")
+    allowed = None
+    if side == "player":
+        from advisor.party import battle_party_indices
+        allowed = battle_party_indices(side_state)
+    for i, p in _side_members(side_state, side):
+        if i == active_idx or p.get("status") == "fainted":
+            continue
+        if allowed is not None and i not in allowed:
+            continue
+        v = build_mon_view(p, resolver, side=side)
+        if v is not None:
+            bench.append((v, _hp_frac_of(p)))
+    return bench[:4]
+
+
 def _run_search(state, my_state, my_view, my_p, opp_state, opp_view,
                 resolver, pool, my_field, opp_field, wincon_sid=None):
     """状態辞書 -> SimSide を組み立てて同時手番探索を実行する。相手の場の個体が対応待ちなら、相手の控えを列挙できない
@@ -1408,22 +1490,7 @@ def _run_search(state, my_state, my_view, my_p, opp_state, opp_view,
         return None
 
     def bench_of(side_state, side):
-        bench = []
-        active_idx = side_state.get("active_index")
-        # 自分側は選出済みの3体に限る (未選出は交代できない)
-        allowed = None
-        if side == "player":
-            from advisor.party import battle_party_indices
-            allowed = battle_party_indices(side_state)
-        for i, p in _side_members(side_state, side):
-            if i == active_idx or p.get("status") == "fainted":
-                continue
-            if allowed is not None and i not in allowed:
-                continue
-            v = build_mon_view(p, resolver, side=side)
-            if v is not None:
-                bench.append((v, _hp_frac_of(p)))
-        return bench[:4]
+        return sim_bench(side_state, side, resolver)
 
     me = SimSide(active=my_view, active_hp=_hp_frac_of(my_p),
                  bench=bench_of(my_state, "player"),

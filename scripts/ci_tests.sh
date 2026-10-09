@@ -25,6 +25,7 @@ TESTS=(
   test_meta_axis_guard
   test_advice_replay
   test_advice_m1a
+  test_transition
   test_anchor_pool
   test_battle_active
   test_battle_outcome_infer
