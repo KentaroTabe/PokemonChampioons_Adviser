@@ -7,7 +7,8 @@
 重みは evaluate の引数で渡す (2026-10-07: 環境変数 RL_BLEND_WEIGHT は書かない。起動時の既定値の供給源としてだけ読まれる)。
 探索プレイヤー (check_search_expert) と同じ固定軸 (META_PIN) と相手列で測る。
 自チーム: --team-file (固定) / --own-pool FILE (実験専用の構築プール、tools.scoring_pool。Random(相手 seed + 1) で対戦ごとに引く。
-2026-10-09 M2d) / どちらも無ければ RankedTeambuilder (META_PIN の構築プール、同じ seed の取り方)。
+2026-10-09 M2d。--opp-offset があれば抽選も同じ数だけ先に進める: 2026-10-09 M2e、2 夜分割) / どちらも無ければ RankedTeambuilder
+(META_PIN の構築プール、同じ seed の取り方)。
 """
 from __future__ import annotations
 
@@ -76,6 +77,16 @@ class _PoolSource:
     def __init__(self, texts: list, rng: random.Random):
         self.teams = list(texts)
         self.rng = rng
+
+
+def pool_rng(seed: int, texts: list, skip: int = 0) -> random.Random:
+    """実験専用の構築プールの抽選の rng (2026-10-09 M2e)。Random(seed) で、先に skip 回 (= --opp-offset) だけ引いて捨てる。
+    同じ seed で最初から引いた列の skip 番目以降と同じ列になる (2 夜分割の part k が、事前に固定した 600 対戦の列の続きの自チームを
+    引く)。skip = 0 なら従来と同じ"""
+    rng = random.Random(seed)
+    for _ in range(max(0, int(skip))):
+        rng.choice(texts)
+    return rng
 
 
 def resolve_rl_blend(rl_blend: float | None, no_rl_blend: bool, default: float) -> float:
@@ -153,8 +164,10 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
             raise SystemExit(f"--own-pool が不正: {e}")
         own_pool_info = {"path": str(own_pool), "sha16": pool_doc.get("sha16"), "n": len(pool_texts),
                          "snapshot_id": (pool_doc.get("conditions") or {}).get("snapshot_id"),
-                         "battle_format": (pool_doc.get("conditions") or {}).get("battle_format")}
-        own_tb = _remembering_teambuilder(_PoolSource(pool_texts, random.Random(opp_seed + 1)))
+                         "battle_format": (pool_doc.get("conditions") or {}).get("battle_format"),
+                         "skipped": int(opp_offset)}
+        # 抽選の位置を相手列と同じ offset だけ進める (2026-10-09 M2e: 2 夜分割の part k の自チームを、同じ seed の列の続きにする)
+        own_tb = _remembering_teambuilder(_PoolSource(pool_texts, pool_rng(opp_seed + 1, pool_texts, opp_offset)))
     else:
         own_tb = _remembering_teambuilder(RankedTeambuilder(
             rng=random.Random(opp_seed + 1) if opp_seed is not None else None,

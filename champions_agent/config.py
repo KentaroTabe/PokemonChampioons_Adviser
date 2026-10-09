@@ -423,6 +423,14 @@ P1_SCORING_POOL_SEED = 20261009
 # 採点方式の比較で --team registered のときの登録チームの本文の sha16 (2026-10-09 の登録)。違えば起動しない。
 # RL の比較の記録 (P1_TEAM_SHA16) とは別に持つ
 P1_SCORING_TEAM_SHA16 = "fae570ac86ab02fd"
+# 採点方式の比較 (--compare scoring) に限った時間上限と開始条件 (2026-10-09 M2e、レビューの推奨。RL の比較の P1_TIME_LIMIT_SEC /
+# P1_ABORT_SEC_PER_BATTLE は変えない)。P1_SCORING_TIME_LIMIT_SEC = 600 戦 (P1_FINAL_BATTLES) / 条件の全体の上限 (180 分。超えたら
+# 未完了で採否を出さない)。予備測定の後の本番の開始可否: 最も遅い条件の秒/戦 × P1_FINAL_BATTLES + P1_SCORING_START_MARGIN_SEC
+# ≤ P1_SCORING_TIME_LIMIT_SEC (余裕は上限の 10%。予備の 50 戦の秒/戦のばらつきと起動・終了の処理の分)。
+# --part k/n (2 夜分割) の各 part の上限は全体の上限を対戦数で按分した値 (P1_SCORING_TIME_LIMIT_SEC × part の対戦数 / P1_FINAL_BATTLES、
+# 切り上げ)。全 part の合計が全体の上限を超えない
+P1_SCORING_TIME_LIMIT_SEC = 10800
+P1_SCORING_START_MARGIN_SEC = 1080
 # 登録参照の無効化 (advisor.my_team.registration_disabled) の環境変数の名前。値が空・0・false・no 以外なら、登録 (config/my_team.json)
 # を読む経路 (get_my_build / get_my_moves ほか) が全種「未登録」を返す。一般的なチームの測定の子プロセス (両条件で共通) に立てる
 MY_TEAM_DISABLED_ENV = "ADVISOR_MY_TEAM_DISABLED"

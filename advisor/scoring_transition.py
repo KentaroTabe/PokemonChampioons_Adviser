@@ -32,6 +32,12 @@ T は共通の遷移 advisor.transition.resolve_turn_branches (行動順・同�
 - 本採点と感度の分離: 感度 (楽観側の HP・持ち物) は config.TRANSITION_SENSITIVITY_ENABLED で切れる。感度の予算超過は感度を省略する
   だけで退避ではない (退避は本採点の予算超過だけ)。transition_stats の main / sens / elapsed_total_ms に分けて残す。
 
+2026-10-09 M2e で足したこと: 遷移の分岐のうち状態を作れない分岐 (ふきとばし・ほえる で相手の未判明の個体を引き出した分岐。
+TurnResult.unevaluated) は V を評価せず、その確率を候補ごとの未評価の質量 δ_a に回す。候補 a の未評価の質量は
+m_a = ε + (1 − ε) δ_a、q は評価した分岐だけで正規化した期待値、区間は [(1 − m_a) q + m_a V_MIN, (1 − m_a) q + m_a V_MAX]
+(δ_a = 0 なら M2d と同じ)。第一候補の下限が他の全候補の上限を上回らなければ退避 (ε > 0 なら "opp_unevaluated_ambiguous"、
+分岐の未評価だけなら "unevaluated_ambiguous")。
+
 継続方策 (対戦の仕様ではなく評価のための仮定): ひんし後の繰り出し先と交代技の繰り出し先は transition.best_bench、2 ターン目以降は
 V の後続の対面 (1 回の撃ち合い) で近似する。
 """
@@ -255,6 +261,7 @@ def _score_core(inp: TransitionInputs, t0: float, deadline: float, budget: float
     n_total = 0
     reserves = {"me": int(inp.vctx.my_unknown or 0), "opp": int(inp.vctx.opp_unknown or 0)}
     unevaluated: dict = {}     # 応手の番号 → (効果, 技)
+    branch_unevaluated: dict = {}   # 未評価の分岐 (M2e): "効果:技" → 技
     for cand in inp.candidates:
         per_resp = []
         n_br = 0
@@ -262,13 +269,14 @@ def _score_core(inp: TransitionInputs, t0: float, deadline: float, budget: float
             me2 = apply_switch(inp.me, cand.action.bench_index) if cand.action.kind == "switch" else inp.me
             v = value(me2, inp.opp, inp.vctx)
             st = {"skip": 0.0, "ko": 0.0, "faint": 1.0 if me2.active_hp <= 0 else 0.0, "win": 0.0, "lose": 0.0}
-            per_resp.append((None, 1.0, v, None, st))
+            per_resp.append((None, 1.0, v, None, st, 0.0))
             n_br = 1
         else:
             for ri, (p_o, oa) in enumerate(inp.responses):
                 brs = resolve_turn_branches(inp.me, inp.opp, cand.action, oa, inp.my_field, inp.opp_field,
                                             damage_fn=inp.damage_fn, reserves=reserves)
                 e = 0.0
+                u = 0.0            # 未評価の分岐の確率 (M2e: 未判明の個体を引き出した分岐 等)
                 st = {"skip": 0.0, "ko": 0.0, "faint": 0.0, "win": 0.0, "lose": 0.0}
                 skip_resp = False
                 for p_b, res in brs:
@@ -284,6 +292,12 @@ def _score_core(inp: TransitionInputs, t0: float, deadline: float, budget: float
                             break
                         # 判明技の未対応の効果 (2026-10-09 M2c): 記録だけで続行せず、その決定を legacy に退避する
                         return _fallback(f"opp_unsupported:{eff}:{src}", t0, candidate=cand.id, response=oa.label)
+                    if res.unevaluated:
+                        # 状態を作れない分岐 (M2e): V を評価せず、候補の未評価の質量に回す
+                        u += p_b
+                        for _w, eff, src in res.unevaluated:
+                            branch_unevaluated.setdefault(f"{eff}:{src}", src)
+                        continue
                     e += p_b * value(res.me, res.opp, inp.vctx, res.winner)
                     if cand.kind == "move" and any(w == "me" and k == "skip" and d == "fainted_before_acting"
                                                    for w, k, d in res.events):
@@ -298,45 +312,62 @@ def _score_core(inp: TransitionInputs, t0: float, deadline: float, budget: float
                         st["lose"] += p_b
                 n_br += len(brs)
                 if not skip_resp:
-                    per_resp.append((ri, p_o, e, oa.label, st))
+                    per_resp.append((ri, p_o, e, oa.label, st, u))
                 if time.perf_counter() > deadline:
                     return _fallback("budget", t0, candidate=cand.id, budget_ms=budget)
         n_total += n_br
         rows.append((cand, per_resp, n_br))
     eps = sum(inp.responses[ri][0] for ri in unevaluated) if (unevaluated and inp.responses) else 0.0
     une_info = None
-    if unevaluated:
+    if unevaluated or branch_unevaluated:
         une_info = {"eps": round(eps, 6),
-                    "moves": sorted({m for _e, m in unevaluated.values()}),
-                    "effects": sorted({f"{e}:{m}" for e, m in unevaluated.values()})}
+                    "moves": sorted({m for _e, m in unevaluated.values()} | set(branch_unevaluated.values())),
+                    "effects": sorted({f"{e}:{m}" for e, m in unevaluated.values()} | set(branch_unevaluated))}
+    amb_reason = "opp_unevaluated_ambiguous" if unevaluated else "unevaluated_ambiguous"
     out = []
+    deltas = {}
     for cand, per_resp, n_br in rows:
         kept = [r for r in per_resp if r[0] is None or r[0] not in unevaluated]
         if not kept:
             return _fallback("opp_unevaluated_ambiguous", t0, candidate=cand.id, unevaluated=une_info)
-        tot = sum(p for _i, p, _e, _l, _s in kept)
+        tot = sum(p for _i, p, _e, _l, _s, _u in kept)
         norm = 1.0 if not unevaluated else (tot or 1.0)
-        q = sum(p * e for _i, p, e, _l, _s in kept) / norm
-        worst = min(kept, key=lambda t: t[2])
-        agg = {k: sum(p * s[k] for _i, p, _e, _l, s in kept) / norm for k in ("skip", "ko", "faint", "win", "lose")}
+        # 未評価の分岐の質量 δ (M2e): 評価した分岐だけで q を正規化する。δ = 0 なら M2d までと同じ計算
+        delta = min(1.0, max(0.0, sum(p * u for _i, p, _e, _l, _s, u in kept) / norm))
+        ev_mass = 1.0 - delta
+        if ev_mass <= 1e-12:
+            return _fallback(amb_reason, t0, candidate=cand.id, unevaluated=une_info)
+        deltas[(cand.kind, cand.id)] = delta
+        q = sum(p * e for _i, p, e, _l, _s, _u in kept) / norm / ev_mass
+        # 最悪の応手: 応手ごとの評価した分岐の条件つき期待値 (未評価だけの応手は除く。u = 0 なら M2d までと同じ)
+        ev_resp = [t for t in kept if 1.0 - t[5] > 1e-12] or kept
+        worst = min(ev_resp, key=lambda t: t[2] / max(1e-12, 1.0 - t[5]))
+        agg = {k: sum(p * s[k] for _i, p, _e, _l, s, _u in kept) / norm / ev_mass
+               for k in ("skip", "ko", "faint", "win", "lose")}
         br = {"n": n_br, "p_ko_before_act": round(agg["skip"], 4), "p_ko": round(agg["ko"], 4),
               "p_faint": round(agg["faint"], 4)}
         if agg["win"] > 0 or agg["lose"] > 0:
             br["p_win_now"] = round(agg["win"], 4)
             br["p_lose_now"] = round(agg["lose"], 4)
-        out.append((cand, q, worst[2], worst[3], br))
+        if delta > 0:
+            br["p_unevaluated"] = round(delta, 4)
+        out.append((cand, q, worst[2] / max(1e-12, 1.0 - worst[5]), worst[3], br))
     # 並べ替えは丸める前の Q (同じ Q は候補の順 = 技の枠の順 → 交代の順のまま)
     out.sort(key=lambda t: -round(t[1], 9))      # 浮動小数の誤差で同じ Q の順が入れ替わらないように 9 桁で比べる
     intervals = None
-    if unevaluated:
-        intervals = {(c.kind, c.id): ((1.0 - eps) * q + eps * V_MIN, (1.0 - eps) * q + eps * V_MAX) for c, q, *_r in out}
+    if unevaluated or any(d > 0 for d in deltas.values()):
+        intervals = {}
+        for c, q, *_r in out:
+            m = eps + (1.0 - eps) * deltas.get((c.kind, c.id), 0.0)
+            intervals[(c.kind, c.id)] = ((1.0 - m) * q + m * V_MIN, (1.0 - m) * q + m * V_MAX)
         if len(out) > 1:
             lo_best = intervals[(out[0][0].kind, out[0][0].id)][0]
             hi_other = max(intervals[(c.kind, c.id)][1] for c, *_r in out[1:])
             if not lo_best > hi_other:
-                return _fallback("opp_unevaluated_ambiguous", t0, unevaluated=dict(
+                return _fallback(amb_reason, t0, unevaluated=dict(
                     une_info, best=out[0][0].id, best_lo=round(lo_best, 4), other_hi=round(hi_other, 4)))
-    return {"ok": True, "ranked": out, "n_branches": n_total, "unevaluated": une_info, "intervals": intervals}
+    return {"ok": True, "ranked": out, "n_branches": n_total, "unevaluated": une_info, "intervals": intervals,
+            "deltas": deltas}
 
 
 def _best_id(core: dict) -> Optional[tuple]:
@@ -422,6 +453,7 @@ def score(inp: TransitionInputs, budget_ms: Optional[float] = None, sensitivity:
             sens[name] = r
     actions = []
     intervals = core.get("intervals") or {}
+    deltas = core.get("deltas") or {}
     une = core.get("unevaluated")
     for cand, q, qw, wl, br in core["ranked"]:
         a = _action_dict(inp, cand, q, qw, wl, br)
@@ -429,8 +461,14 @@ def score(inp: TransitionInputs, budget_ms: Optional[float] = None, sensitivity:
             a["q_hp_opt"] = round(q_opt[(cand.kind, cand.id)], 4)
         if (cand.kind, cand.id) in intervals:
             lo, hi = intervals[(cand.kind, cand.id)]
+            m = (hi - lo) / (V_MAX - V_MIN)        # この候補の未評価の質量 (応手の ε + 分岐の未評価。M2e)
             a["q_lo"], a["q_hi"], a["eps_unevaluated"] = round(lo, 4), round(hi, 4), une["eps"]
-            a["reason"] += f" / 未評価の応手 {une['eps']:.0%} ({', '.join(une['moves'])}): Q の区間 {lo:+.3f}〜{hi:+.3f}"
+            if deltas.get((cand.kind, cand.id), 0.0) > 0:
+                a["unevaluated_mass"] = round(m, 4)
+                a["reason"] += f" / 未評価 {m:.0%} (応手 {une['eps']:.0%} + 分岐、{', '.join(une['moves'])}): " \
+                               f"Q の区間 {lo:+.3f}〜{hi:+.3f}"
+            else:
+                a["reason"] += f" / 未評価の応手 {une['eps']:.0%} ({', '.join(une['moves'])}): Q の区間 {lo:+.3f}〜{hi:+.3f}"
         actions.append(a)
     elapsed_total = round((time.perf_counter() - t0) * 1000, 1)
     has_alts = bool(inp.item_alts) or inp.hp_alt is not None

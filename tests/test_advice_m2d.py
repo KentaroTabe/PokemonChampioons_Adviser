@@ -496,9 +496,10 @@ def test_reference_set_pure():
     assert AP.team_text_sha16(text) and AP.team_text_sha16(None) is None
     rec = AP.correspondence_record({"own_team_sha16": "s1", "ref_checked": 3, "ref_mismatch": 0})
     assert rec["own_team_sha16"] == "s1" and rec["ref_check"]["n"] == 3 and rec["ref_check"]["mismatch"] == 0
-    # 助言の図鑑に無い種 (フォルム違い) は参照していないので不一致に数えない
+    # 助言の図鑑に無い種は参照していないので不一致に数えない (2026-10-09 M2e: indeedeef は別名の表で図鑑を引けるようになったので、
+    # 図鑑に無い種の例を架空の id に替えた。期待 (None・ref_unbuilt 1・不一致なし) は変えていない)
     corr: dict = {}
-    assert AP.check_reference(corr, {"species_id": "indeedeef", "species_ja": "イエッサン"}, text, resolver) is None
+    assert AP.check_reference(corr, {"species_id": "notindexmon", "species_ja": "notindexmon"}, text, resolver) is None
     assert corr.get("ref_unbuilt") == 1 and "ref_mismatch" not in corr
     print("test_reference_set_pure OK")
 

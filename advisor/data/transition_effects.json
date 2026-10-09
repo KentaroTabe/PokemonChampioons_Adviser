@@ -45,5 +45,11 @@
  "substitute_frac": {"num": 1, "den": 4},
  "substitute_bypass_flags": ["bypasssub"],
  "substitute_bypass_ability_effect": "ignore_screens_substitute",
- "endure_moves": ["endure"]
+ "endure_moves": ["endure"],
+ "_comment_m2e": "2026-10-09 M2e (くろいきり・ふきとばし・ほえる、両陣営)。clear_all_boosts_moves = 場の全個体の能力ランクを 0 に戻す技 (くろいきり。対象は場全体: まもる・みがわり・対象のひんしに関係なく出る)。force_switch は技の効果表 (move_effects.json の force_switch) の変化技 (ふきとばし・ほえる) に適用する: 命中は技の値 (true = 必中)、まもるは技の印 protect が無ければ貫通、みがわりは bypasssub で貫通、マジックミラーは跳ね返し (未対応の印)、おうごんのからだ (変化技の無効)・ぼうおん (音技)・かぜのり (wind の技を無効にして攻撃 +1) は失敗、force_switch_block_effect の特性 (きゅうばん・ばんけん。かたやぶりで無視) と force_switch_block_volatiles (ねをはる) は失敗、対象の陣営に交代できる控え (生存) が無ければ失敗。成功したら対象の控え (生存) と未判明の残りから均等に 1 体を引き出す (未判明の残りを引いた分岐は未評価)。引き出された個体は着地時の設置技を受け、引っ込んだ個体の能力ランクは 0 に戻る。wind_immune_abilities = wind の印の技を無効にする特性と、そのとき上がる能力。ぼうじん (overcoat) は粉の技だけを防ぐので ふきとばし・ほえる には効かない (Showdown の data/abilities.ts overcoat は onTryHit で powder の技だけ)。攻撃技の強制交代 (ドラゴンテール・ともえなげ) は今回の範囲外 (従来どおり強制交代を解決しない)",
+ "source_m2e": ["pokemon-showdown/data/moves.ts haze (target all、flags bypasssub、onHitField で全員の clearBoosts)", "pokemon-showdown/data/moves.ts whirlwind / roar (accuracy true、priority -6、flags reflectable / bypasssub (protect なし)、roar は sound、whirlwind は wind、forceSwitch)", "pokemon-showdown/sim/battle-actions.ts moveHit (forceSwitch: hitResult = canSwitch(target.side) = 生存した控えの数) / forceSwitch (target.hp > 0 かつ source.hp > 0 かつ canSwitch のとき DragOut を runEvent、成功なら forceSwitchFlag) / dragIn (getRandomSwitchable = 生存した控えから均等に 1 体、switchIn)", "pokemon-showdown/data/abilities.ts suctioncups / guarddog (onDragOut で null、breakable)、goodasgold (変化技の onTryHit で null)、windrider (wind の技の onTryHit で 攻撃 +1 して null)、soundproof (sound の技)、magicbounce (reflectable を跳ね返す)", "pokemon-showdown/data/moves.ts ingrain (condition の onDragOut で null)", "pokemon-showdown/sim/pokemon.ts clearVolatile (交代で引っ込んだ個体の能力ランクは 0 に戻る)"],
+ "clear_all_boosts_moves": ["haze"],
+ "force_switch_block_effect": "no_force_switch",
+ "force_switch_block_volatiles": ["ingrain"],
+ "wind_immune_abilities": {"windrider": {"atk": 1}}
 }
