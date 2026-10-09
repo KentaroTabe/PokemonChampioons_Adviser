@@ -1306,7 +1306,7 @@ def resolve_turn_branches(me: SimSide, opp: SimSide, my_act: Action, opp_act: Ac
       対戦を終える (その後の行動はしない)。片方だけ 0 なら相手の勝ち (end_reason "wipe")。両方 0 なら最後にひんしになった個体の陣営の
       勝ち (end_reason "last_faint"): Showdown の checkWin は全陣営の残りが 0 のとき faintQueue の最後に処理した個体の陣営を勝ちにする
       (sim/battle.ts checkWin: this.win(faintData.target.side)、gen 5 以降)。自滅技 (useMoveInner で使用者を先に faint) は使用者の
-      負け、反動・いのちのたま (ダメージの後) は使用者の勝ち。**実機 (チャンピオンズ) との一致は未確認** (Showdown のコードだけが根拠)。
+      負け、反動・いのちのたま (ダメージの後) は使用者の勝ち。実機 (チャンピオンズ) でも同じ (2026-10-09 開発者の確認: 自滅技は使用側の負け、反動技は使用側の勝ち)。
     - アンコール・ちょうはつ: 後から動く対象は、アンコールなら固定技に替えて行動する (行動順は替える前の技のまま。チャンピオンズの
       優先度の付け替えは近似しない)、ちょうはつなら変化技が失敗する。こらえる: 後に行動する者が居なければ失敗。
       ターンの終わりにこらえる (endure) は消える。
