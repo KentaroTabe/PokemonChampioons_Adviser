@@ -66,6 +66,14 @@
     終わった個体がいる) を足した。推定の的中率の集計は、この 2 値を分母から除く (match / mismatch だけで率を出す)
   manual_fix 行に、種の手動確定のとき "applied" (入れたか) と、入れなかったときの "reason"
   scene 行の相手の枠に "pending": true (対応待ちの個体) と "candidates" (形態が決まっていない種の候補)
+
+2026-10-09 自分の HP のバー推定 (vision.my_hp_estimate。欄を足すだけ。既存の欄の意味は変えない):
+  hp 行に、推定値の変化のときだけ "source": "bar" と "estimated": true (detail にも同じ欄)
+  scene 行の state の個体に、HP が推定値のときだけ "hp_estimated": true と "hp_source" ("bar" / 技イベント由来は null)。
+    助言の行の state と state_id の digest には足さない (scene 行だけ)
+  scene 行の hp_reject.player に、推定値を入れた後は "estimated_from_bar": true と "estimate": [現在, 最大]
+    (直前の棄却が推定で埋まった印)、バーがほぼ 0 のときは "faint_suspect": true (ひんしの疑い。確定ではない)
+  advice 行に、自分の場の個体の HP が推定値のときだけ "context": {"my_hp_estimated": true, "my_hp_source": ...}
 """
 from __future__ import annotations
 
@@ -464,7 +472,24 @@ def scene_row_state(state: dict) -> dict:
     hp_reject は scene 行にだけ載せる (助言の行の state と state_id の digest は _compact_state のままで変えない)"""
     d = _compact_state(state)
     d["hp_reject"] = state.get("hp_reject") or {"player": None, "opponent": None}
+    # HP が推定値の個体に印 (2026-10-09。_compact_state の個体と同じ並び)
+    for side in ("player", "opponent"):
+        for row, p in zip(d[side]["party"], (state.get(side) or {}).get("party") or []):
+            if p.get("hp_estimated"):
+                row["hp_estimated"] = True
+                row["hp_source"] = p.get("hp_source")
     return d
+
+
+def my_hp_context_of(state: Optional[dict]) -> dict:
+    """advice 行の context (純粋): 自分の場の個体の HP が推定値なら {"my_hp_estimated": True, "my_hp_source": 出所}、
+    推定でなければ {} (2026-10-09。採点には使わない記録だけの欄)"""
+    sd = (state or {}).get("player") or {}
+    idx, party = sd.get("active_index"), sd.get("party") or []
+    p = party[idx] if isinstance(idx, int) and 0 <= idx < len(party) else None
+    if not p or not p.get("hp_estimated"):
+        return {}
+    return {"my_hp_estimated": True, "my_hp_source": p.get("hp_source")}
 
 
 EXPERIMENT_MARK = Path("logs") / ".experiment_package"   # 候補 Package の試用中はここに package_id
@@ -1087,12 +1112,16 @@ class BattleLogger:
                 continue
             if e.get("source") == "hp":
                 self._hp_seen_ts = e["ts"]
-                self._write({"type": "hp", "turn": state.get("turn"),
-                             "text": e["text"], "detail": e.get("detail")})
-                # 勝敗推定用: HP0%到達の側を覚えておく
                 det = e.get("detail") or {}
+                row = {"type": "hp", "turn": state.get("turn"), "text": e["text"], "detail": e.get("detail")}
+                if det.get("estimated"):
+                    # バー推定の値の変化 (2026-10-09): 出所と推定の印
+                    row["source"] = det.get("source")
+                    row["estimated"] = True
+                self._write(row)
+                # 勝敗推定用: HP0%到達の側を覚えておく (バー推定の値は数えない: 推定だけでひんしを確定しない)
                 if det.get("to") is not None and det["to"] <= OUTCOME_ZERO_HP_PCT \
-                        and det.get("side"):
+                        and det.get("side") and not det.get("estimated"):
                     self._last_zero = (det["side"], e["ts"])
             elif e.get("source") == "manual":
                 self._hp_seen_ts = e["ts"]
@@ -1188,6 +1217,13 @@ class BattleLogger:
         if state is not None:
             try:
                 rec["hp_stale"] = hp_stale_of(state, time.time())
+            except Exception:
+                pass
+            # 自分の HP が推定値 (バー推定) のときだけ context を残す (2026-10-09)
+            try:
+                ctx = my_hp_context_of(state)
+                if ctx:
+                    rec["context"] = ctx
             except Exception:
                 pass
         self._write(rec)

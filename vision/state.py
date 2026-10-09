@@ -183,6 +183,10 @@ class PokemonState:
     # 期待ダメージで推定した値かどうか (実読みが来れば False に戻る)
     hp_read_ts: Optional[float] = None
     hp_estimated: bool = False
+    # 推定値の出所 (2026-10-09): "bar" = 自分の HUD の分数が読めない間に、既知の最大 HP × バーの割合で入れた概算
+    # (vision.my_hp_estimate。hp_estimated / hp_uncertain も True)。実読みで更新されると None に戻る。
+    # 技イベント由来の推定 (vision.events、既定 OFF) は従来どおり hp_estimated だけを立て、ここは None のまま
+    hp_source: Optional[str] = None
 
     # 状態
     status: Optional[str] = None        # MAJOR_STATUSES のいずれか / 'fainted' / None
@@ -668,6 +672,8 @@ class SideState:
                 setattr(dst, attr, val)
         for attr in ("hp_uncertain", "hp_estimated", "item_consumed", "item_removed", "is_mega", "type_changed"):
             setattr(dst, attr, bool(getattr(src, attr) or getattr(dst, attr)))
+        if src.hp_estimated:
+            dst.hp_source = src.hp_source   # 推定値の出所も推定の印と一緒に移す (2026-10-09)
         if any(src.boosts.values()):
             dst.boosts = dict(src.boosts)
         if src.volatiles:
@@ -877,7 +883,7 @@ class BattleStateV2:
             mon = PokemonState()
             for k in ("species_ja", "species_id", "display_name", "gender",
                       "types", "hp_percent", "hp_current", "hp_max",
-                      "hp_uncertain", "hp_read_ts", "hp_estimated",
+                      "hp_uncertain", "hp_read_ts", "hp_estimated", "hp_source",
                       "status", "volatiles", "boosts", "ability_ja",
                       "ability_id", "item_ja", "item_id", "item_consumed",
                       "revealed_moves", "aliases", "is_mega", "is_active",

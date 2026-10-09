@@ -292,6 +292,11 @@ OPP_HUD_NAME_MATCH_MIN = 0.5
 OPP_HP_UNVERIFIED_MAX_CHANGE = 15.0
 # 捨てた読みの名前が「別の種族名と読めた」かを調べるときの、図鑑の種族名への解決の閾値 (記録の分類にだけ使う。採否は変えない)
 HP_REJECT_SPECIES_CUTOFF = 0.8
+# 自分の HP のバー推定 (vision.my_hp_estimate、2026-10-09 ユーザー判断。KNOWN_ISSUES A1 の (3) 分母の OCR 落ち):
+# 分数が読めない (または照合で捨てた) フレームが続くとき、バーの割合 (my_hp_bar_track) が連続でこの枚数そろい、
+# その最大と最小の差が許容以内なら、既知の最大 HP とバーの割合から概算を入れる (推定の印つき。実測が来れば置き換える)
+HP_BAR_ESTIMATE_STABLE_FRAMES = 3
+HP_BAR_ESTIMATE_STABLE_TOL = 0.03
 
 # --- 行動助言の RL 加点と影の計算 (docs/USEFULNESS_VERIFICATION_PLAN_1007.md §2 advice_variant・§4、2026-10-07) ---
 # RL の行動確率の加点の重み (advisor.engine: score += 重み × 確率) の既定値。evaluate(rl_blend_weight=...) で渡さないときに使う。
