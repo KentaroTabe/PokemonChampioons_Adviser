@@ -185,6 +185,12 @@ def battle_to_state(battle, resolver=None) -> Optional[dict]:
             trick_room = True
     own_vals = list(battle.team.values())
     opp_vals = list(battle.opponent_team.values())
+    opp_side = _side_state(opp_vals, opp_active, False, battle.opponent_side_conditions, resolver)
+    # 相手の選出数 (シミュレータの対戦は BSS の 3 体選出)。opponent_team は場に出た個体だけなので remaining は「判明した生存数」で、
+    # 未判明の残りが分からない。transition 方式の局面評価 (advisor.scoring_transition) が未判明の残りを数えるのに使う
+    # (legacy の採点はこの欄を読まない。2026-10-09 M2b)
+    from champions_agent.config import BSS_PICK_COUNT
+    opp_side["team_size"] = BSS_PICK_COUNT
     return {
         "scene": "command",
         "turn": battle.turn,
@@ -194,8 +200,7 @@ def battle_to_state(battle, resolver=None) -> Optional[dict]:
                       "opponent": any("mega" in (p.species or "") for p in opp_vals)},
         "player": _side_state(own_vals, active, True, battle.side_conditions,
                               resolver, available),
-        "opponent": _side_state(opp_vals, opp_active, False,
-                                battle.opponent_side_conditions, resolver),
+        "opponent": opp_side,
     }
 
 
@@ -301,6 +306,20 @@ def _state_summary(battle) -> dict:
             "can_mega": bool(getattr(battle, "can_mega_evolve", False))}
 
 
+def _count_scoring(stats: dict, advice: Optional[dict]) -> None:
+    """transition 方式の決定数と退避 (scoring_fallback) の件数を stats に数える (純粋な集計。legacy では何も足さない)。
+    退避の理由は「unsupported:効果:技」までと、それ以外は「:」の前で分類する"""
+    if not advice or advice.get("scoring_mode") != "transition":
+        return
+    stats["scoring_transition"] = stats.get("scoring_transition", 0) + 1
+    fb = advice.get("scoring_fallback")
+    if fb:
+        parts = str(fb).split(":")
+        key = ":".join(parts[:3]) if parts[0] == "unsupported" else parts[0]
+        stats["scoring_fallback"] = stats.get("scoring_fallback", 0) + 1
+        stats[f"scoring_fallback:{key}"] = stats.get(f"scoring_fallback:{key}", 0) + 1
+
+
 def make_advisor_player(team_source=None, stats: Optional[dict] = None,
                         latencies: Optional[list] = None,
                         pick_policy: str = "advisor", selection_model_path=None,
@@ -341,7 +360,9 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
                 self._register_team()
                 state = battle_to_state(battle, resolver)
                 if state:
+                    # 採点方式は config.ADVICE_SCORING_MODE (環境変数 ADVICE_SCORING_MODE で上書き。2026-10-09 M2b)
                     advice = evaluate(state, resolver, rl_blend_weight=rl_blend_weight)
+                    _count_scoring(stats, advice)
                     adv2, followed = apply_action_noise(advice, action_noise, rng)
                     d = choose_from_advice(battle, adv2)
                     if not followed:

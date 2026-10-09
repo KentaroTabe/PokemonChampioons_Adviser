@@ -399,6 +399,11 @@ P1_BELIEF_K = 0
 P1_SELECTION_MODEL = "champions_agent/train/checkpoints/selection_model.pt"   # 実機と同じ配備版を明示 (3 条件で共通)
 P1_TEAM_SHA16 = "9a02fe6e61788a5a"  # 登録チームの本文 (advisor.versions と同じ計算) の sha16。違えば起動しない
 P1_OUT_ROOT = "logs/usefulness"
+# 採点方式の対応比較 (2026-10-09 M2b 設計判断 11。tools/usefulness_p1 --compare scoring): 条件 scoring:legacy (基準) /
+# scoring:transition。両条件とも RL 加点の重みは既定の P1_BASELINE_WEIGHT (transition は加点を使わない)、方式は子プロセスの
+# 環境変数 ADVICE_SCORING_MODE で渡す。相手列・分割・ピン・登録チームは RL の比較と同じ
+P1_SCORING_MODES = ("legacy", "transition")
+P1_SCORING_BASELINE = "legacy"
 
 # --- パーティ構築システム (docs/TEAM_BUILDING_IMPLEMENTATION.md §9 の決定値、2026-09-06) ---
 # 対応差 (候補 − 参照) の判定: 実用差 ε の帯に CI が収まれば「実用上同等」
@@ -1244,3 +1249,55 @@ SCENE_SAMPLES_ANY_FRAME_PREFIXES = ("frame_", "sel_", "fc_")
 # ターンカウント (コマンド画面への復帰) に従うので、取りこぼすと長めに残る (選べない技を推すより安全側)
 MOVE_LOCK_ENCORE_TURNS = 3
 MOVE_LOCK_TAUNT_TURNS = 3
+
+# --- 操縦提案の精度改善 M2b (2026-10-09、docs/ADVICE_ACCURACY_PLAN_1009.md 段 B・§8.4。運用側の設計判断 1〜11) ---
+# 採点方式: "legacy" = 現行の採点 (既定) / "transition" = 共通の遷移 (advisor.transition) と局面評価 V (advisor.valuation) の
+# Q(a) = E[V(T(state, a, 相手の応手, 分岐))] (advisor.scoring_transition)。両方式は evaluate_common の入力 (MonView・合法手・
+# 補完した技・相手の型の仮定・控え) を共有し、採点だけを置き換える。採否は legacy を対照にした 600 戦の対応比較 (§4.3) で決めるので、
+# それまで既定は legacy。環境変数 ADVICE_SCORING_MODE で上書きできる (測定の子プロセス・advisor-as-player が引き継ぐ)。
+# 読めない値は警告して legacy にする
+ADVICE_SCORING_MODES = ("legacy", "transition")
+
+
+def _advice_scoring_mode_from_env() -> str:
+    raw = (os.environ.get("ADVICE_SCORING_MODE") or "").strip().lower()
+    if not raw:
+        return "legacy"
+    if raw not in ADVICE_SCORING_MODES:
+        print(f"[config] ADVICE_SCORING_MODE={raw!r} は {ADVICE_SCORING_MODES} に無いので legacy を使う")
+        return "legacy"
+    return raw
+
+
+ADVICE_SCORING_MODE = _advice_scoring_mode_from_env()
+# 局面評価 V (advisor.valuation、値域 [-1, 1]。較正前なので「勝率」と呼ばない)。式は valuation.py の docstring:
+#   終了: 自分の選出が全滅 = -1、相手の選出 (判明分 + 未判明の残数) が全滅 = +1
+#   残存戦力 M = (Σ自分 v(個体) − Σ相手 v(個体)) / VALUATION_TEAM_SIZE、v = 生存 VALUATION_ALIVE_SHARE + (1 − 同) × HP
+#   後続の対面 C = (P(自分が先に倒す) × v(相手の場) − P(相手が先に倒す) × v(自分の場)) / VALUATION_TEAM_SIZE (場の個体の実技で 1 回の撃ち合い)
+#   V = clip(VALUATION_SCALE × (M + VALUATION_MATCHUP_WEIGHT × C), ±VALUATION_NONTERMINAL_MAX)
+# 値の根拠 (すべて暫定。600 戦の方式比較の前に較正しない):
+# - TEAM_SIZE = 選出数 BSS_PICK_COUNT (3。1 体の価値が M の 1/3)
+# - ALIVE_SHARE 0.5 = 「倒した・倒された」と「削った HP」を半々に見る。HP 1% を削る価値は 1 体を倒す価値の 1/200
+# - MATCHUP_WEIGHT 0.5 = 次の撃ち合いの見込みは相手の交代・型の誤りで外れるので、確定した残存戦力の半分の重み。1 未満なので
+#   V は HP について単調 (自分の HP が減ると M の減少が C の変化を必ず上回る)
+# - SCALE 0.9 / NONTERMINAL_MAX 0.99 = 終了していない局面を ±1 (勝敗の端) と区別する
+VALUATION_TEAM_SIZE = BSS_PICK_COUNT
+VALUATION_ALIVE_SHARE = 0.5
+VALUATION_MATCHUP_WEIGHT = 0.5
+VALUATION_SCALE = 0.9
+VALUATION_NONTERMINAL_MAX = 0.99
+# 相手の応手の最小モデル (計画書 段 B-5、設計判断 5)。判明技は「所持が確定した」だけで使用確率 100% ではない。
+# 行動確率は固定した簡易方策: 交代は OPP_SWITCH_PROB (判明している控えに等分、控えが判明していなければ 0 にして技へ配り直す)、
+# 技は 1 − OPP_SWITCH_PROB を「相手にとっての期待ダメージ (命中込み、自分の残り HP で頭打ち) の高い順」に OPP_MOVE_RANK_DECAY の
+# 等比で配り、所持の事前分布 (判明技 = 1、推定技 = 使用率) を掛けて正規化する。根拠 (暫定): OPP_SWITCH_PROB 0.1 は
+# tools/dmg_compare の相手の交代確率 (DMG_COMPARE_SWITCH_PROB) と同じ値 (探索の 0.15 は流用しない)。RANK_DECAY 0.5 は
+# 「最善の技を半分、残りを順に半分ずつ」の仮置き。期待値と最悪応手 (悲観側) を両方残し、順位は期待値 (混合比は方式比較で決める)
+OPP_SWITCH_PROB = 0.1
+OPP_MOVE_RANK_DECAY = 0.5
+# transition 方式の計算予算 (設計判断 10・作業の規約): 遷移の採点にかかった時間がこれを超えたら、その決定は legacy に退避する
+# (scoring_fallback = "budget")。legacy の evaluate は 1 回 50〜130 ms (M1b の計測)、上限は 300 ms (3 倍の目安と同じ桁)
+TRANSITION_BUDGET_MS = 300.0
+# ダメージ乱数の代表点: calc_damage の最小〜最大を等間隔に TRANSITION_ROLL_POINTS 点 (Showdown の整数 16 通りの近似。calc_damage は
+# 最小・最大・平均しか返さないので、16 通りを最小〜最大の等間隔で置く) とし、倒せる / 倒せない の 2 分岐に集約する (分岐の数を減らす。
+# 倒せない側は平均ダメージ)。連続技は 1 発ごとの平均ダメージで回数を分岐する (1 発ごとの乱数は分岐しない)
+TRANSITION_ROLL_POINTS = 16

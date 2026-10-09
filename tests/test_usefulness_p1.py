@@ -237,6 +237,50 @@ def test_main_dry_run_and_guard():
     print("test_main_dry_run_and_guard OK")
 
 
+def test_scoring_compare_dry_run():
+    """採点方式の比較 (2026-10-09 M2b 設計判断 11): --compare scoring で条件 scoring:legacy (基準) / scoring:transition の
+    2 つ。重みは両方とも既定 (P1_BASELINE_WEIGHT)、方式は条件ごとの環境変数 ADVICE_SCORING_MODE。ファイル名は「:」を「_」に。
+    dry-run の起動前検査は RL の比較と同じ項目で通る (測定は起動しない)"""
+    from champions_agent.config import P1_BASELINE_WEIGHT
+    d = P.plan_scoring()
+    assert d["conditions"] == ["scoring:legacy", "scoring:transition"] and d["baseline"] == "scoring:legacy", d
+    assert d["k"] == 1 and abs(d["z"] - 1.959964) < 1e-5 and d["factor"] == "scoring"
+    assert d["cond_env"] == {"scoring:legacy": {"ADVICE_SCORING_MODE": "legacy"},
+                             "scoring:transition": {"ADVICE_SCORING_MODE": "transition"}}
+    assert set(d["cond_weight"].values()) == {float(P1_BASELINE_WEIGHT)}
+    cmd = " ".join(P.build_command(P1_BASELINE_WEIGHT, Path("/out"), Path("/t"), Path("/s"), 1, 1, 600, Path("/m"), "/p",
+                                   python="py", cond="scoring:transition"))
+    assert "--json /out/scoring_transition.json" in cmd and "--battle-log /out/scoring_transition.battles.jsonl" in cmd, cmd
+    assert "--candidate-id p1_scoring_transition" in cmd and f"--rl-blend {P1_BASELINE_WEIGHT:g}" in cmd
+    # RL の比較の条件名・ファイル名は変わらない
+    assert P.cond_file("rl25") == "rl25" and "--json /out/rl25.json" in " ".join(
+        P.build_command(25.0, Path("/out"), Path("/t"), Path("/s"), 1, 1, 600, Path("/m"), "/p"))
+    orig = (P.collect_facts, P.registered_team_text, P.make_pin, P.launch)
+
+    def _no(*a, **k):
+        raise AssertionError("呼ばれてはいけない")
+    try:
+        P.registered_team_text = lambda: "team text"
+        P.make_pin, P.launch = _no, _no
+        P.collect_facts = lambda *a, **k: _facts()
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "p1_scoring"
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = P.main(["--compare", "scoring", "--prelim", "--dry-run", "--out", str(out)])
+            text = buf.getvalue()
+            assert rc == 0, text
+            assert not out.exists()
+            doc = json.loads(text[:text.index("\n# コマンド列")])
+            assert doc["factor"] == "scoring" and set(doc["commands"]) == {"scoring:legacy", "scoring:transition"}
+            assert doc["cond_env"]["scoring:transition"] == {"ADVICE_SCORING_MODE": "transition"} and doc["k"] == 1
+            assert "scoring:transition: ADVICE_SCORING_MODE=transition " in text and "起動前の検査: OK" in text, text
+            assert P.preflight_errors(doc) == []
+    finally:
+        P.collect_facts, P.registered_team_text, P.make_pin, P.launch = orig
+    print("test_scoring_compare_dry_run OK")
+
+
 def main():
     test_plan()
     test_battles_and_out_dir()
@@ -247,6 +291,7 @@ def main():
     test_progress_finalize_prelim()
     test_embedding_source_and_copy()
     test_main_dry_run_and_guard()
+    test_scoring_compare_dry_run()
 
 
 if __name__ == "__main__":
