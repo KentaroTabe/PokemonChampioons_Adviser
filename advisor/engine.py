@@ -548,23 +548,35 @@ def opponent_move_pool(opp_state: dict, opp_view: MonView, resolver) -> list:
 # メインの評価
 # ==============================================================================
 def evaluate(state: dict, resolver=None,
-             rl_blend_weight: Optional[float] = None) -> dict:
+             rl_blend_weight: Optional[float] = None, scoring_mode: Optional[str] = None) -> dict:
     """状態辞書から行動候補のランキングを生成する。
 
     rl_blend_weight: RL の行動確率の加点の重み (score += 重み × 確率)。None なら既定値
     (RL_BLEND_DEFAULT = config RL_BLEND_WEIGHT_DEFAULT、起動時の環境変数 RL_BLEND_WEIGHT があればその値)。
+    scoring_mode: 採点方式 "legacy" / "transition" (2026-10-09 M2b)。None なら config.ADVICE_SCORING_MODE (既定 legacy、
+    環境変数 ADVICE_SCORING_MODE で上書き)。
     採点は 2 段: evaluate_common (加点より前の共通部分) → finish_evaluation (加点以降)。
     影の計算 (advisor.shadow) は共通部分を使い回し、重みだけ変えて加点以降を再計算する。
     """
-    return finish_evaluation(evaluate_common(state, resolver), rl_blend_weight)
+    return finish_evaluation(evaluate_common(state, resolver, scoring_mode=scoring_mode), rl_blend_weight)
 
 
-def evaluate_common(state: dict, resolver=None) -> dict:
+def resolve_scoring_mode(scoring_mode: Optional[str] = None) -> str:
+    """採点方式 (引数 → config.ADVICE_SCORING_MODE の順。読めない値は legacy)"""
+    from champions_agent import config as _cfg
+    m = (scoring_mode or getattr(_cfg, "ADVICE_SCORING_MODE", "legacy") or "legacy").strip().lower()
+    return m if m in getattr(_cfg, "ADVICE_SCORING_MODES", ("legacy", "transition")) else "legacy"
+
+
+def evaluate_common(state: dict, resolver=None, scoring_mode: Optional[str] = None) -> dict:
     """採点の共通部分 (RL 加点より前): ダメージ・採点の基礎・詰み筋・同時手番探索・SEARCH_BLEND・rl_hint の取得まで。
 
     戻り値: 評価できなければ {"ok": False, "reason"} (evaluate の戻り値と同じ)。評価できれば
     {"ok": True, "actions": 加点前の行動 (並べ替え済み), "rl_hint", "move_type_mult", 表示用の注記, 後段の判定に使う旗,
      "context": 影の計算の層別用の局面の要約} — finish_evaluation の入力。
+    scoring_mode が transition (resolve_scoring_mode) なら、同じ入力 (MonView・合法手・補完した技・相手の型の仮定・控え) から
+    advisor.scoring_transition の採点も計算して "transition" に残す (2026-10-09 M2b)。legacy の行動 ("actions") は両方式で
+    計算する (退避先と、self_cost 等の欄の写し元)。"scoring_mode" / "scoring_fallback" (退避の理由、無ければ None) も残す。
     """
     dex = get_dex()
     my_state = state["player"]
@@ -1108,10 +1120,38 @@ def evaluate_common(state: dict, resolver=None) -> dict:
     except Exception:
         pass
 
+    # 採点方式 (2026-10-09 M2b): transition なら同じ入力から遷移 + 局面評価で採点する。作れない・未対応・予算超過は legacy に退避
+    scoring_mode = resolve_scoring_mode(scoring_mode)
+    transition = None
+    scoring_fallback = None
+    if scoring_mode == "transition":
+        try:
+            from advisor import scoring_transition as ST
+            inp, why = ST.build_inputs(
+                state, resolver, my_view=my_view, opp_view=opp_view, opp_p=opp_p, pool=pool,
+                legal_move_ids=[] if switch_only else legality.legal_move_ids, my_field=my_field, opp_field=opp_field,
+                my_ctx=my_ctx, opp_ctx=opp_ctx, my_fainted=my_fainted, pivot_pending=pivot_pending,
+                i_am_faster=i_am_faster, legacy_actions=actions, rl_hint=rl_hint, opp_pending=opp_pending)
+            if inp is None:
+                scoring_fallback = why
+            else:
+                transition = ST.score(inp)
+                transition["notes"] = list(inp.notes)
+                if not transition.get("ok"):
+                    scoring_fallback = transition.get("fallback") or "unknown"
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            scoring_fallback = f"error:{type(e).__name__}"
+            transition = None
+
     return {
         "ok": True,
         "actions": actions,
         "rl_hint": rl_hint,
+        "scoring_mode": scoring_mode,
+        "transition": transition,
+        "scoring_fallback": scoring_fallback,
         "move_type_mult": move_type_mult,
         "threats": threats,
         "speed_note": speed_note,
@@ -1249,8 +1289,17 @@ def finish_evaluation(common: dict, rl_blend_weight: Optional[float] = None) -> 
     if not common.get("ok"):
         return common
     weight = RL_BLEND_DEFAULT if rl_blend_weight is None else float(rl_blend_weight)
-    actions = rescore_actions(common["actions"], common.get("rl_hint"),
-                              common.get("move_type_mult") or {}, weight)
+    scoring_mode = common.get("scoring_mode") or "legacy"
+    tr = common.get("transition")
+    if scoring_mode == "transition" and tr and tr.get("ok"):
+        # transition 方式 (2026-10-09 M2b): Q のスコアをそのまま使う。RL 加点・行動前 KO の ×0.25・最善交代 +2 は適用しない
+        # (遷移で扱った利益・損失と重なるため。RL の確率は各行動の rl_prob に残っている)
+        actions = [dict(a) for a in tr["actions"]]
+        scoring_used = "transition"
+    else:
+        actions = rescore_actions(common["actions"], common.get("rl_hint"),
+                                  common.get("move_type_mult") or {}, weight)
+        scoring_used = "legacy"
     speed_note = common["speed_note"]
     encore_locked = common["encore_locked"]
     choice_locked = common["choice_locked"]
@@ -1311,6 +1360,14 @@ def finish_evaluation(common: dict, rl_blend_weight: Optional[float] = None) -> 
         "unevaluated_actions": list(common.get("unevaluated_actions") or []),
         "legality_unconfirmed": list(common.get("legality_unconfirmed") or []),
         "position_key": common.get("position_key"),
+        # 採点方式 (2026-10-09 M2b。advice 行に残る)。legacy では scoring_mode だけ (鍵の追加だけで採点の値は変えない)。
+        # transition では 実際に使った方式 (scoring_used)・退避の理由 (scoring_fallback、退避しなければ None)・遷移の統計も残す。
+        # 退避率 = scoring_mode が transition の行のうち scoring_fallback がある割合
+        "scoring_mode": scoring_mode,
+        **({"scoring_used": scoring_used, "scoring_fallback": common.get("scoring_fallback"),
+            "transition_stats": {k: tr.get(k) for k in ("elapsed_ms", "n_branches", "responses", "opp_unmodeled",
+                                                         "notes", "fallback", "candidate") if k in tr} if tr else None}
+           if scoring_mode == "transition" else {}),
         "best": actions[0] if actions else None,
     }
 

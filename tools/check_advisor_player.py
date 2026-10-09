@@ -16,6 +16,7 @@ import random
 import time
 from pathlib import Path
 
+from champions_agent import config as _CFG
 from champions_agent.config import TRAINING_BATTLE_FORMAT
 
 
@@ -192,6 +193,8 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
             "opp_pilot": opp_pilot, "opp_pick_policy": opp_pick_policy,
             "models_dir": os.environ.get("CHAMPIONS_MODELS_DIR"),
             "rl_blend": rl_blend_weight,
+            # 採点方式 (2026-10-09 M2b。環境変数 ADVICE_SCORING_MODE → config)。transition の退避の件数は stats の scoring_fallback*
+            "advice_scoring_mode": _CFG.ADVICE_SCORING_MODE,
             "opp_seed": opp_seed, "meta_snapshot": meta_pin,
             "latency_p50_ms": round(p50, 1), "latency_p95_ms": round(p95, 1),
             "stats": {k: v for k, v in stats.items()

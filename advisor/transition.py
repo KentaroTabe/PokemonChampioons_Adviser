@@ -36,6 +36,28 @@ advisor.damage はダメージ計算、ここは行動順・HP 変化・消費�
 
 ひんしの順序: 自滅技は Showdown と同じく使用者のひんしがダメージより先 (faint は TryMove の直後)。反動・HP の消費は
 ダメージの後。どちらも技の後にまとめてひんしを判定し、繰り出しはターンの終わり。
+
+上の表は resolve_turn (単一分岐、roll 指定。探索 search が使う) の範囲で、2026-10-09 M2b でも変えていない。
+M2b の分岐つきの解決 resolve_turn_branches (transition 方式の採点 advisor.scoring_transition が使う) は、同じ解決順で
+resolve_move(full=True) (= _resolve_move_full) を使い、次を追加で解決する (数値は data/transition_effects.json の *_m2b の欄):
+
+| 効果 | resolve_turn_branches / full での扱い | Showdown の根拠 |
+|---|---|---|
+| 同速 | 両方の順を speed_tie_prob (0.5) ずつ | sim/battle.ts (同速は乱数) |
+| まひ・ねむり・こおり | まひは 1/8 で行動しない分岐 (チャンピオンズ)。ねむり・こおりはこのターン行動しない (残りターンは状態に無い) | data/mods/champions/conditions.ts par |
+| 命中 | 当たる / 外れる の分岐 (ノーガード・きょけんとつげきの後は必中) | battle-actions.ts hitStepAccuracy |
+| ダメージ乱数 | 最小〜最大の等間隔 16 点で 倒せる / 倒せない の 2 分岐 (各群の平均) | modifyDamage (乱数 85〜100) |
+| 連続技 | 回数の分岐 ([2, 5] は 35/35/15/15、スキルリンク 5)。multiaccuracy (トリプルアクセル) は 1 発ごとの命中で打ち切り、威力 1:2:3。1 発ごとの平均ダメージ (乱数は分岐しない) | hitStepMoveHitLoop |
+| 外れたときの反動 (crash) | 最大 HP の 1/2 (切り捨て)。マジックガードは防ぐ | moves.ts highjumpkick onMoveFail |
+| きあいのタスキ・がんじょう | HP 満タンからの一撃を HP 1 で耐える (タスキは消費、がんじょうはかたやぶりで無視)。連続技は 2 発目で倒れる | items.ts focussash / abilities.ts sturdy (onDamage) |
+| ばけのかわ・アイスフェイス | 初撃 (アイスフェイスは物理) を 0 にしてフォルムチェンジ。ばけのかわは最大 HP の 1/8 を失う | abilities.ts disguise / iceface |
+| 吸収・いのちのたま・ゴツゴツメット・さめはだ・てつのトゲ | 与えた HP × 割合 (四捨五入) の回復 / 最大 HP の 1/10 / 接触 1 発ごとに攻撃側の 1/6・1/8 | battle.ts drain / items.ts / abilities.ts |
+| 壁・ねばねばネット・まきびし・あくび | 陣営の screens / sticky_web (着地時 素早さ -1) / spikes / ねむけ (volatiles "yawn"。ねむりは次のターンの終わり) | moves.ts |
+| 自分の能力変化・確定 (100%) の追加効果・ひるみ | インファイト等の self_boosts、相手の能力変化・状態異常 (100% のもの)、ひるみは相手がまだ行動していないときの分岐 | moves.ts secondary / self |
+| 交代技 | 当たったら使用者はその場で控え (継続方策 best_bench) を出し、後から動く相手の技はその個体が受ける | moves.ts selfSwitch |
+| きょけんとつげき | 使用者は次の行動まで受けるダメージ 2 倍・必中 (volatiles "glaiverush") | moves.ts glaiverush |
+| 表に無い変化技 (アンコール・みがわり・こらえる・ちょうはつ 等)・selfdestruct "ifHit"・いのちのたま以外の自傷の持ち物 | 未対応 (unsupported。自分の候補に出たら transition 方式は legacy に退避) | |
+| 確率つきの追加効果 (ひるみ以外)・急所・ターン終了時の効果・天候/フィールドの変化 | 未対応 (印は付けない。段 D) | |
 """
 from __future__ import annotations
 
@@ -98,6 +120,15 @@ class SimSide:
     # 権利を消費済みなら mega_used。交代すると新しい場のポケモンの分は不明 (空) にする
     mega_forms: dict = field(default_factory=dict)
     mega_used: bool = False
+    # 以下は M2b (resolve_turn_branches / full の効果解決) が使う欄。既定値のままなら従来の遷移 (resolve_turn) と同じ結果になる
+    # (探索 search は設定しない)。screens: この陣営の壁 {"reflect", "light_screen", "aurora_veil": bool}。None は「渡された
+    # FieldView の壁をそのまま使う」(従来)。spikes: まきびしの層 (0〜3)。sticky_web: ねばねばネット。tailwind: おいかぜ (素早さ 2 倍)。
+    # volatiles: 場の個体の揮発状態 ("yawn" = ねむけ、"glaiverush" = きょけんとつげきの後)。交代で消える
+    screens: Optional[dict] = None
+    spikes: int = 0
+    sticky_web: bool = False
+    tailwind: bool = False
+    volatiles: frozenset = frozenset()
 
     def alive_count(self) -> int:
         return (1 if self.active_hp > 0 else 0) + \
@@ -136,6 +167,8 @@ class TurnResult:
     fainted: dict = field(default_factory=lambda: {"me": False, "opp": False})      # このターンに場の個体がひんし
     requires_switch: dict = field(default_factory=lambda: {"me": False, "opp": False})  # ひんし後の繰り出し要求
     unsupported: list = field(default_factory=list)   # [(who, effect, source)]
+    # 未対応の効果を「どちらの行動から生じたか」で分けたもの (M2b の退避の判定用。resolve_turn_branches だけが埋める)
+    unsupported_by: dict = field(default_factory=lambda: {"me": [], "opp": []})
 
 
 def is_attack_action(act: Action) -> bool:
@@ -151,10 +184,15 @@ def is_attack_action(act: Action) -> bool:
 
 
 def hazard_frac(mon: MonView, side: SimSide) -> float:
-    if not side.stealth_rock:
-        return 0.0
-    mult = get_dex().effectiveness("Rock", mon.types)
-    return 0.125 * mult
+    """着地時の設置技のダメージ (最大 HP 比)。ステルスロック + まきびし (M2b、接地している個体だけ。spikes が 0 なら従来どおり)"""
+    out = 0.0
+    if side.stealth_rock:
+        mult = get_dex().effectiveness("Rock", mon.types)
+        out += 0.125 * mult
+    if side.spikes and _is_grounded(mon):
+        table = transition_effects().get("spikes_frac") or [0, 0.125, 1 / 6, 0.25]
+        out += float(table[max(0, min(len(table) - 1, int(side.spikes)))])
+    return out
 
 
 def priority(move_id: Optional[str], view: Optional[MonView] = None,
@@ -211,11 +249,17 @@ def best_bench(side: SimSide, opp: SimSide) -> Optional[int]:
 
 
 def apply_switch(side: SimSide, idx: int) -> SimSide:
+    """交代 (着地時の設置技を受ける)。M2b: ねばねばネットは接地した個体の素早さ -1 (sticky_web が False なら従来どおり)、
+    場の揮発状態 (volatiles) は交代で消える"""
     view, hp = side.bench[idx]
     hp = max(0.0, hp - hazard_frac(view, side))
+    if side.sticky_web and hp > 0 and _is_grounded(view):
+        boosts = dict(view.boosts or {})
+        boosts["spe"] = max(-6, (boosts.get("spe") or 0) - 1)
+        view = replace(view, boosts=boosts)
     new_bench = list(side.bench)
     new_bench[idx] = (side.active, side.active_hp)
-    return replace(side, active=view, active_hp=hp, bench=new_bench, mega_forms={})
+    return replace(side, active=view, active_hp=hp, bench=new_bench, mega_forms={}, volatiles=frozenset())
 
 
 def mega_evolve(side: SimSide) -> SimSide:
@@ -294,13 +338,21 @@ def _damp_blocks(move_id: str, user: SimSide, target: SimSide) -> bool:
 
 
 def resolve_move(user: SimSide, target: SimSide, move_id: str, fieldv: Optional[FieldView], roll: str = "avg", *,
-                 target_protected: bool = False, damage: Optional[float] = None) -> MoveResult:
+                 target_protected: bool = False, damage: Optional[float] = None, full: bool = False, hit: bool = True,
+                 hit_damages: Optional[list] = None) -> MoveResult:
     """技 1 回の効果を解決する (純粋)。行動順・ふいうち・サイコフィールドの判定は呼び出し側 (resolve_turn) が済ませる。
 
     damage: 与ダメージ (対象の最大 HP 比) を呼び出し側が計算済みならその値 (直接の採点が文脈 ctx 込みで計算した値を渡す)。
         None なら advisor.damage で roll の値を計算する。
     使用者がこの時点でひんしなら何もしない (呼び出し側が行動前のひんしを除いている前提だが、念のため)。
+    full: True なら M2b の効果解決 (_resolve_move_full: 命中の外れ・連続技の 1 発ごと・耐える効果・吸収・いのちのたま・接触ダメージ・
+        外れたときの反動・壁・ねばねばネット・まきびし・あくび・自分の能力変化・確定の追加効果)。hit = 命中したか (分岐は呼び出し側)、
+        hit_damages = 1 発ごとの与ダメージ (対象の最大 HP 比、きょけんとつげきの 2 倍まで込み)。False (既定) は M1b までと同じ
     """
+    if full:
+        return _resolve_move_full(user, target, move_id, fieldv, target_protected=target_protected, hit=hit,
+                                  hit_damages=hit_damages if hit_damages is not None else
+                                  (None if damage is None else [float(damage)]))
     from advisor import effects as E
     events: list = []
     unsupported: list = []
@@ -535,6 +587,681 @@ def resolve_turn(me: SimSide, opp: SimSide, my_act: Action, opp_act: Action,
                 res.requires_switch[lbl] = True
                 side = apply_switch(side, nxt)
                 ev.append((lbl, "replace", side.active.species_id))
+                if lbl == "me":
+                    me = side
+                else:
+                    opp = side
+    res.me, res.opp = me, opp
+    return res
+
+
+# ==================================================================== M2b: full の効果解決と分岐つきの 1 ターン
+# docs/ADVICE_ACCURACY_PLAN_1009.md 段 B-1 / B-3 / B-4 と段 C の前倒し (壁・設置・積み・あくび の 1 ターンの状態変化)。
+# 従来の resolve_turn (単一分岐、roll 指定) は変えない (探索 search の結果を変えないため)。分岐つきの解決は resolve_turn_branches。
+def _frac_of(key: str, default: tuple) -> tuple:
+    v = transition_effects().get(key)
+    if isinstance(v, dict):
+        return int(v.get("num", default[0])), int(v.get("den", default[1]))
+    if isinstance(v, (list, tuple)) and len(v) == 2:
+        return int(v[0]), int(v[1])
+    return default
+
+
+def floor_hp_frac(view: MonView, num: int, den: int) -> float:
+    """Showdown の this.damage(baseMaxhp × num / den) の量 (clampIntRange: 切り捨て、最低 1) を最大 HP 比で"""
+    mhp = max(1, int(view.max_hp()))
+    return max(1, (mhp * int(num)) // int(den)) / mhp
+
+
+def _one_hp(view: MonView) -> float:
+    return 1.0 / max(1, int(view.max_hp()))
+
+
+def _ignores_target_ability(view: MonView) -> bool:
+    """かたやぶり系 (相手の特性の breakable を無視): がんじょう・ばけのかわ・アイスフェイスを無視する"""
+    _k, misc = _ability_kinds(view.ability)
+    return "ignore_target_ability" in misc
+
+
+def _magic_guard(view: MonView) -> bool:
+    _k, misc = _ability_kinds(view.ability)
+    return "no_indirect_damage" in misc
+
+
+def _status_immune(view: MonView, status: str, move_id: Optional[str] = None) -> bool:
+    """状態異常にならないか: タイプ (ほのお = やけど 等)、でんじは の じめん、特性の status_immune (スイートベール = ねむり 等)"""
+    from advisor import effects as E
+    te = transition_effects()
+    types = set(view.types or ())
+    if types & set((te.get("status_type_immunity") or {}).get(status) or ()):
+        return True
+    if move_id and move_id in (te.get("type_immunity_status_moves") or ()):
+        mv = get_dex().move(move_id) or {}
+        if mv.get("type") and get_dex().effectiveness(mv["type"], list(types)) == 0:
+            return True
+    code = (te.get("status_codes") or {}).get(status)
+    for f in E.ability_formulas(view.ability):
+        if f.get("kind") == "status_immune" and code and code in (f.get("status") or ()):
+            return True
+    return False
+
+
+def _flinch_immune(view: MonView) -> bool:
+    """ひるまない: せいしんりょく (status_immune の volatile flinch)、りんぷん (追加効果を受けない)、おんみつマント"""
+    from advisor import effects as E
+    if (view.item or "") in (transition_effects().get("flinch_block_items") or ()):
+        return True
+    for f in E.ability_formulas(view.ability):
+        if f.get("kind") == "status_immune" and "flinch" in (f.get("volatile") or ()):
+            return True
+        if f.get("kind") == "misc" and f.get("effect") == "no_secondary_taken":
+            return True
+    return False
+
+
+def _no_secondary_taken(view: MonView) -> bool:
+    _k, misc = _ability_kinds(view.ability)
+    return "no_secondary_taken" in misc or (view.item or "") in (transition_effects().get("flinch_block_items") or ())
+
+
+def _form_change(view: MonView, species_id: str) -> MonView:
+    """フォルムチェンジ (ばけのかわ → ばけたすがた 等)。種族値・タイプを新しい姿から引く。HP 割合・ランク・持ち物は保つ"""
+    sp = get_dex().species(species_id)
+    if not sp:
+        return replace(view, species_id=species_id)
+    return replace(view, species_id=species_id, base=dict(sp["baseStats"]), types=list(sp["types"]))
+
+
+def _apply_boosts(view: MonView, delta: dict) -> MonView:
+    boosts = dict(view.boosts or {})
+    for k, d in (delta or {}).items():
+        boosts[k] = max(-6, min(6, (boosts.get(k) or 0) + int(d)))
+    return replace(view, boosts=boosts)
+
+
+def _resolve_move_full(user: SimSide, target: SimSide, move_id: str, fieldv: Optional[FieldView], *,
+                       target_protected: bool, hit: bool, hit_damages: Optional[list]) -> MoveResult:
+    """技 1 回の解決 (M2b の full)。命中・乱数・連続技の回数は呼び出し側 (move_outcomes) が分岐して hit / hit_damages で渡す。
+
+    M1b (resolve_move の既定) との違い: 外れ (hit=False) と外れたときの反動 (crash)、1 発ごとの解決 (連続技)、きあいのタスキ・
+    がんじょう (HP 満タンからの一撃を HP 1 で耐える。タスキは消費)、ばけのかわ (初撃を 0 にして ばけたすがた、最大 HP の 1/8 を失う)・
+    アイスフェイス (物理の初撃を 0)、吸収 (与えた HP × 割合、四捨五入)、いのちのたま (最大 HP の 1/10)、ゴツゴツメット・さめはだ・
+    てつのトゲ (接触 1 発ごとに攻撃側の最大 HP の 1/6・1/8)、壁 (この陣営の screens)、ねばねばネット・まきびし、あくび (ねむけ。
+    ねむりは次のターンの終わり)、かわらわり系の壁の解除、自分の能力変化 (インファイト 等)、確定 (100%) の追加効果 (相手の能力変化・
+    状態異常)、ひるみ (確率を印で返し、分岐は呼び出し側)、交代技 (印を返し、繰り出しは呼び出し側)、きょけんとつげき (次の行動まで
+    受けるダメージ 2 倍・必中)。未対応のまま残るのは、表に無い変化技 (effect_unmodeled)、selfdestruct "ifHit"、いのちのたま以外の
+    自傷の持ち物"""
+    from advisor import effects as E
+    te = transition_effects()
+    events: list = []
+    unsupported: list = []
+    faint_order: list = []
+
+    def faint(who: str):
+        if who not in faint_order:
+            faint_order.append(who)
+
+    if user.active_hp <= 0:
+        return MoveResult(user, target, False, 0.0, [("user", "skip", "fainted")], [], [])
+    entry = E.move_entry(move_id)
+    mv = get_dex().move(move_id) or {}
+    category = mv.get("category") or entry.get("category")
+
+    # --- 自分・場を対象にする技 (相手がひんしでも出る) ---
+    if move_id in PROTECT_MOVES:
+        events.append(("user", "protect", move_id))
+        return MoveResult(user, target, True, 0.0, events, unsupported, faint_order)
+    if move_id in HEAL_MOVES:
+        user = replace(user, active_hp=min(1.0, user.active_hp + HEAL_MOVES[move_id]))
+        events.append(("user", "heal", move_id))
+        return MoveResult(user, target, True, 0.0, events, unsupported, faint_order)
+    setup = SETUP_MOVES.get(move_id) or (entry.get("setup_boosts") if entry.get("target") == "self" else None)
+    if setup:
+        user = replace(user, active=_apply_boosts(user.active, setup))
+        events.append(("user", "boost", move_id))
+        return MoveResult(user, target, True, 0.0, events, unsupported, faint_order)
+    screen_key = (te.get("screen_moves") or {}).get(move_id)
+    if screen_key:
+        cur = dict(user.screens or {})
+        if cur.get(screen_key):
+            events.append(("user", "fail", "already_active"))
+        else:
+            cur[screen_key] = True
+            user = replace(user, screens=cur)
+            events.append(("user", "screen", screen_key))
+        return MoveResult(user, target, True, 0.0, events, unsupported, faint_order)
+    if move_id in HAZARD_MOVES or move_id in ("stickyweb", "spikes"):
+        if move_id == "stickyweb":
+            ok = not target.sticky_web
+            target = replace(target, sticky_web=True) if ok else target
+        elif move_id == "spikes":
+            ok = target.spikes < 3
+            target = replace(target, spikes=target.spikes + 1) if ok else target
+        else:
+            ok = not target.stealth_rock
+            target = replace(target, stealth_rock=True) if ok else target
+        events.append(("target", "hazard", move_id) if ok else ("user", "fail", "already_active"))
+        return MoveResult(user, target, True, 0.0, events, unsupported, faint_order)
+
+    # --- 相手を対象にする技: 対象がひんしなら失敗、しめりけ ---
+    if target.active_hp <= 0:
+        events.append(("user", "fail", "no_target"))
+        return MoveResult(user, target, False, 0.0, events, unsupported, faint_order)
+    if _damp_blocks(move_id, user, target):
+        events.append(("user", "fail", "damp"))
+        return MoveResult(user, target, False, 0.0, events, unsupported, faint_order)
+
+    drowsy = move_id in (te.get("drowsy_moves") or ())
+    if drowsy or move_id in STATUS_MOVES:
+        if target_protected:
+            events.append(("target", "protected", move_id))
+        elif not hit:
+            events.append(("user", "miss", move_id))
+        elif drowsy:
+            if target.active.status is None and "yawn" not in target.volatiles \
+                    and not _status_immune(target.active, "sleep", move_id):
+                target = replace(target, volatiles=target.volatiles | {"yawn"})
+                events.append(("target", "drowsy", move_id))
+            else:
+                events.append(("user", "fail", "yawn"))
+        else:
+            st = STATUS_MOVES[move_id]
+            if target.active.status is None and not _status_immune(target.active, st, move_id):
+                target = replace(target, active=replace(target.active, status=st))
+                events.append(("target", "status", st))
+            else:
+                events.append(("user", "fail", "status"))
+        return MoveResult(user, target, True, 0.0, events, unsupported, faint_order)
+    if category == "Status":
+        unsupported.append(("user", "effect_unmodeled", move_id))
+        return MoveResult(user, target, True, 0.0, events, unsupported, faint_order)
+
+    # --- 攻撃技 ---
+    kind = self_cost_kind(move_id)
+    sd = entry.get("selfdestruct")
+    if sd and sd != "always":
+        unsupported.append(("user", "selfko_ifhit", move_id))
+    user_before = user
+    if kind == "selfko":
+        user = replace(user, active_hp=0.0)
+        events.append(("user", "selfko", move_id))
+        faint("user")
+    dealt = 0.0
+    landed = 0
+    mold = _ignores_target_ability(user_before.active)
+    if target_protected:
+        events.append(("target", "protected", move_id))
+    elif not hit:
+        events.append(("user", "miss", move_id))
+        if entry.get("crash") and user.active_hp > 0 and not _magic_guard(user_before.active):
+            loss = floor_hp_frac(user_before.active, *_frac_of("crash_frac", (1, 2)))
+            user = replace(user, active_hp=max(0.0, user.active_hp - loss))
+            events.append(("user", "crash", round(loss, 6)))
+            if user.active_hp <= _EPS:
+                user = replace(user, active_hp=0.0)
+                faint("user")
+    else:
+        if move_id in (te.get("screen_break_moves") or ()) and target.screens and any(target.screens.values()):
+            target = replace(target, screens={})
+            events.append(("target", "screens_broken", move_id))
+        if hit_damages is None:
+            dmg0 = dmg_frac(replace(user_before.active, hp_frac=user_before.active_hp), target.active,
+                            target.active_hp, move_id, fieldv, "avg")
+            if "glaiverush" in target.volatiles:
+                dmg0 *= 2.0
+            hit_damages = [dmg0]
+        contact = "contact" in (entry.get("flags") or ())
+        _tk, tmisc = _ability_kinds(target.active.ability)
+        disguise = te.get("disguise_species") or {}
+        iceface = te.get("iceface_species") or {}
+        for i, dmg in enumerate(hit_damages):
+            if target.active_hp <= 0 or (i > 0 and user.active_hp <= 0):
+                break
+            dmg = max(0.0, float(dmg))
+            tv = target.active
+            if dmg > 0 and not mold and tv.species_id in disguise:
+                # ばけのかわ: この一撃は 0、ばけたすがたになって最大 HP の 1/8 を失う (onDamage → onUpdate)
+                target = replace(target, active=_form_change(tv, disguise[tv.species_id]))
+                loss = floor_hp_frac(tv, *_frac_of("disguise_self_damage", (1, 8)))
+                target = replace(target, active_hp=max(0.0, target.active_hp - loss))
+                events.append(("target", "disguise", round(loss, 6)))
+                landed += 1
+                if target.active_hp <= _EPS:
+                    target = replace(target, active_hp=0.0)
+                    faint("target")
+            elif dmg > 0 and not mold and category == "Physical" and tv.species_id in iceface:
+                target = replace(target, active=_form_change(tv, iceface[tv.species_id]))
+                events.append(("target", "iceface", None))
+                landed += 1
+            else:
+                hp = target.active_hp
+                take = min(dmg, hp)
+                if dmg > 0 and dmg >= hp - _EPS and hp >= 1.0 - 1e-6:
+                    # HP 満タンからの一撃: きあいのタスキ (消費)・がんじょう (かたやぶりで無視) は HP 1 で耐える
+                    if (tv.item or "") in (te.get("survive_one_hit_items") or ()):
+                        take = hp - _one_hp(tv)
+                        target = replace(target, active=replace(tv, item=None))
+                        events.append(("target", "survive", tv.item))
+                    elif "survive_ohko_at_full_hp" in tmisc and not mold:
+                        take = hp - _one_hp(tv)
+                        events.append(("target", "survive", tv.ability))
+                landed += 1
+                if take > 0:
+                    target = replace(target, active_hp=max(0.0, hp - take))
+                    dealt += take
+                    events.append(("target", "damage", round(take, 6)))
+                    ratio = entry.get("drain")
+                    if ratio and user.active_hp > 0:
+                        t_mhp = max(1, int(tv.max_hp()))
+                        u_mhp = max(1, int(user_before.active.max_hp()))
+                        heal = _round_half_up(take * t_mhp * float(ratio)) / u_mhp
+                        if heal > 0:
+                            user = replace(user, active_hp=min(1.0, user.active_hp + heal))
+                            events.append(("user", "drain", round(heal, 6)))
+                if target.active_hp <= _EPS:
+                    target = replace(target, active_hp=0.0)
+                    faint("target")
+            # 接触ダメージ (1 発ごと。onDamagingHit): ゴツゴツメット 1/6、さめはだ・てつのトゲ 1/8 (攻撃側の最大 HP)。マジックガードは防ぐ
+            if contact and user.active_hp > 0 and not _magic_guard(user_before.active):
+                cdf = te.get("contact_damage_frac") or {}
+                frac = cdf.get(tv.item or "") or cdf.get(tv.ability or "")
+                if frac:
+                    loss = floor_hp_frac(user_before.active, int(frac[0]), int(frac[1]))
+                    user = replace(user, active_hp=max(0.0, user.active_hp - loss))
+                    events.append(("user", "contact_damage", round(loss, 6)))
+                    if user.active_hp <= _EPS:
+                        user = replace(user, active_hp=0.0)
+                        faint("user")
+        if entry.get("multihit"):
+            events.append(("target", "hits", landed))
+
+    # --- 自分の HP の消費・反動 (ダメージの後。M1b と同じ規則) ---
+    ukinds, umisc = _ability_kinds(user_before.active.ability)
+    loss = 0.0
+    if kind == "half_hp":
+        if "no_indirect_damage" in umisc:
+            events.append(("user", "hp_cost_blocked", user_before.active.ability))
+        else:
+            loss = _half_hp_cost_frac(user_before.active)
+            events.append(("user", "hp_cost", round(loss, 6)))
+    elif kind == "half_hp_on_damage" and dealt > 0:
+        if "recoil_none" in ukinds:
+            events.append(("user", "recoil_blocked", user_before.active.ability))
+        else:
+            loss = _half_hp_cost_frac(user_before.active)
+            events.append(("user", "hp_cost", round(loss, 6)))
+    elif kind == "recoil" and dealt > 0:
+        if "recoil_none" in ukinds:
+            events.append(("user", "recoil_blocked", user_before.active.ability))
+        else:
+            loss = _recoil_frac(user_before.active, target.active, dealt, float(entry.get("recoil") or 0.0))
+            events.append(("user", "recoil", round(loss, 6)))
+    # いのちのたま: 当たったら最大 HP の 1/10 (onAfterMoveSecondarySelf)。マジックガードは防ぐ
+    if landed > 0 and (user_before.active.item or "") == "lifeorb" and "no_indirect_damage" not in umisc:
+        lo = floor_hp_frac(user_before.active, *_frac_of("life_orb_frac", (1, 10)))
+        loss += lo
+        events.append(("user", "life_orb", round(lo, 6)))
+    if loss > 0 and user.active_hp > 0:
+        user = replace(user, active_hp=max(0.0, user.active_hp - loss))
+        if user.active_hp <= _EPS:
+            user = replace(user, active_hp=0.0)
+            faint("user")
+
+    # --- 当たった後の効果 ---
+    if landed > 0 and user.active_hp > 0 and entry.get("self_boosts"):
+        user = replace(user, active=_apply_boosts(user.active, entry["self_boosts"]))
+        events.append(("user", "self_boost", move_id))
+    sec = entry.get("secondary") or {}
+    if landed > 0 and target.active_hp > 0 and sec and not _no_secondary_taken(target.active):
+        chance = float(sec.get("chance") or 100)
+        if chance >= 100:
+            # 確定の追加効果だけ解決する (確率つきの能力変化・状態異常は段 D。ひるみは下の印で分岐する)
+            if sec.get("target_boosts"):
+                target = replace(target, active=_apply_boosts(target.active, sec["target_boosts"]))
+                events.append(("target", "boost", move_id))
+            codes = {v: k for k, v in (te.get("status_codes") or {}).items()}
+            st = codes.get(sec.get("status") or "")
+            if st and target.active.status is None and not _status_immune(target.active, st):
+                target = replace(target, active=replace(target.active, status=st))
+                events.append(("target", "status", st))
+            if sec.get("self_boosts") and user.active_hp > 0:
+                user = replace(user, active=_apply_boosts(user.active, sec["self_boosts"]))
+                events.append(("user", "self_boost", move_id))
+        if sec.get("volatile") == "flinch" and not _flinch_immune(target.active):
+            events.append(("target", "flinch_chance", min(1.0, chance / 100.0)))
+    if move_id in (te.get("glaive_rush_moves") or ()) and user.active_hp > 0:
+        user = replace(user, volatiles=user.volatiles | {"glaiverush"})
+        events.append(("user", "glaiverush", None))
+    if entry.get("self_switch") and landed > 0 and user.active_hp > 0:
+        events.append(("user", "pivot", move_id))
+    if dealt > 0 and (user_before.active.item or "") in (te.get("self_damage_items") or ()) \
+            and (user_before.active.item or "") != "lifeorb":
+        unsupported.append(("user", "self_damage_item", user_before.active.item))
+    return MoveResult(user, target, True, dealt, events, unsupported, faint_order)
+
+
+def field_against(fieldv: Optional[FieldView], defender: SimSide) -> Optional[FieldView]:
+    """攻撃側から見た FieldView (壁は防御側の陣営のもの)。defender.screens が None なら渡された値のまま (従来)"""
+    if defender.screens is None:
+        return fieldv
+    f = fieldv or FieldView()
+    s = defender.screens
+    return replace(f, reflect=bool(s.get("reflect")), light_screen=bool(s.get("light_screen")),
+                   aurora_veil=bool(s.get("aurora_veil")))
+
+
+def side_speed(side: SimSide, fieldv: Optional[FieldView]) -> float:
+    """陣営の場の個体の実効素早さ (おいかぜで 2 倍)"""
+    s = speed(side.active, fieldv)
+    return s * 2 if side.tailwind else s
+
+
+def default_damage_fn(att_view: MonView, att_hp: float, def_view: MonView, def_hp: float, move_id: str,
+                      fieldv: Optional[FieldView]) -> Optional[dict]:
+    """分岐の解決が使うダメージ計算 (calc_damage の戻り値。計算できなければ None)。直接の採点は文脈込み・キャッシュつきの関数を渡す"""
+    try:
+        return calc_damage(replace(att_view, hp_frac=att_hp), replace(def_view, hp_frac=def_hp), move_id, fieldv)
+    except Exception:
+        return None
+
+
+def roll_split(dmin: float, dmax: float, hp: float, points: int) -> list:
+    """ダメージ乱数の代表点 (最大 HP 比): 最小〜最大を等間隔に points 点置き (Showdown の整数 16 通りの近似)、残り HP 以上 (倒せる) と
+    未満 (倒せない) の 2 分岐 [(確率, その群の平均ダメージ)] に集約する。どちらか一方だけなら 1 分岐"""
+    n = max(1, int(points))
+    rolls = [dmin + (dmax - dmin) * k / (n - 1) for k in range(n)] if n > 1 else [(dmin + dmax) / 2.0]
+    ko = [r for r in rolls if r >= hp - _EPS]
+    non = [r for r in rolls if r < hp - _EPS]
+    if ko and non:
+        return [(len(ko) / n, sum(ko) / len(ko)), (len(non) / n, sum(non) / len(non))]
+    return [(1.0, sum(rolls) / len(rolls))]
+
+
+def multihit_counts(entry: dict, view: MonView) -> list:
+    """連続技の回数の分布 [(回数, 確率)] (multiaccuracy 以外)。[2, 5] は 35/35/15/15 (スキルリンク = 5、いかさまダイス = 4〜5)"""
+    mh = entry.get("multihit")
+    if isinstance(mh, int):
+        return [(mh, 1.0)]
+    if isinstance(mh, (list, tuple)) and len(mh) == 2:
+        lo, hi = int(mh[0]), int(mh[1])
+        kinds, _misc = _ability_kinds(view.ability)
+        if "multihit_max" in kinds:
+            return [(hi, 1.0)]
+        if (lo, hi) == (2, 5):
+            key = "multihit_loaded_dice_2_5" if (view.item or "") == "loadeddice" else "multihit_2_5"
+            return [(int(c), float(p)) for c, p in (transition_effects().get(key) or [[2, 0.35], [3, 0.35], [4, 0.15], [5, 0.15]])]
+        return [(c, 1.0 / (hi - lo + 1)) for c in range(lo, hi + 1)]
+    return [(1, 1.0)]
+
+
+def _status_move_accuracy(move_id: str, user: SimSide, target: SimSide) -> float:
+    """相手を対象にする変化技の命中 (0..1)。ノーガード・きょけんとつげきの後は必中"""
+    from advisor import effects as E
+    if "glaiverush" in target.volatiles:
+        return 1.0
+    ukinds, _um = _ability_kinds(user.active.ability)
+    tkinds, _tm = _ability_kinds(target.active.ability)
+    if "no_miss" in ukinds or "no_miss" in tkinds:
+        return 1.0
+    acc = E.move_entry(move_id).get("accuracy")
+    if acc is None or acc is True:
+        return 1.0
+    return max(0.0, min(1.0, float(acc) / 100.0))
+
+
+def move_outcomes(user: SimSide, target: SimSide, move_id: str, fieldv: Optional[FieldView], *,
+                  target_protected: bool = False, damage_fn=None, roll_points: int = 16) -> list:
+    """技 1 回の分岐 [(確率, MoveResult)] (純粋。確率の合計は 1)。命中 (当たる / 外れる)、ダメージ乱数 (倒せる / 倒せない の 2 群)、
+    連続技の回数 (multiaccuracy は 1 発ごとの命中で打ち切り。威力が回数で上がる技 (トリプルアクセル) は 1 発目 : 2 発目 : 3 発目 =
+    1 : 2 : 3)。連続技は 1 発ごとの平均ダメージで、乱数は分岐しない。fieldv は防御側の壁込み (field_against)"""
+    from advisor import effects as E
+    damage_fn = damage_fn or default_damage_fn
+    entry = E.move_entry(move_id)
+    mv = get_dex().move(move_id) or {}
+    category = mv.get("category") or entry.get("category")
+
+    def full(**kw):
+        return resolve_move(user, target, move_id, fieldv, full=True, target_protected=target_protected, **kw)
+
+    if user.active_hp <= 0:
+        return [(1.0, full())]
+    is_attack = category != "Status" and bool(mv.get("power") or entry.get("variable_power") or entry.get("fixed_damage"))
+    if not is_attack:
+        te = transition_effects()
+        if (move_id in STATUS_MOVES or move_id in (te.get("drowsy_moves") or ())) and target.active_hp > 0 \
+                and not target_protected and not _damp_blocks(move_id, user, target):
+            acc = _status_move_accuracy(move_id, user, target)
+            if acc < 1.0:
+                return [(acc, full(hit=True)), (1.0 - acc, full(hit=False))]
+        return [(1.0, full())]
+    if target.active_hp <= 0 or target_protected or _damp_blocks(move_id, user, target):
+        return [(1.0, full(hit_damages=[0.0]))]
+    dmg_target = target
+    if move_id in (transition_effects().get("screen_break_moves") or ()) and target.screens:
+        dmg_target = replace(target, screens={})
+    d = damage_fn(user.active, user.active_hp, target.active, target.active_hp, move_id,
+                  field_against(fieldv, dmg_target))
+    if not d:
+        return [(1.0, full(hit_damages=[0.0]))]
+    glaive = 2.0 if "glaiverush" in target.volatiles else 1.0
+    acc_pct = d.get("accuracy")
+    acc = 1.0 if (acc_pct is None or glaive > 1.0) else max(0.0, min(1.0, float(acc_pct) / 100.0))
+    outs = []
+    mh = entry.get("multihit")
+    if mh:
+        hits_noacc = float(d.get("hits") or 1.0) or 1.0
+        unit = float(d["avg"]) / 100.0 / hits_noacc * glaive
+        varpow = entry.get("variable_power") == "hit_count"
+
+        def per(k):
+            return [unit * (j if varpow else 1) for j in range(1, k + 1)]
+
+        if entry.get("multiaccuracy"):
+            n = int(mh if isinstance(mh, int) else mh[-1])
+            for k in range(1, n + 1):
+                pk = (acc ** k) * ((1.0 - acc) if k < n else 1.0)
+                outs.append((pk, full(hit=True, hit_damages=per(k))))
+        else:
+            for c, pc in multihit_counts(entry, user.active):
+                outs.append((acc * pc, full(hit=True, hit_damages=per(c))))
+    else:
+        for pr, dmg in roll_split(float(d["min"]) / 100.0 * glaive, float(d["max"]) / 100.0 * glaive,
+                                  target.active_hp, roll_points):
+            outs.append((acc * pr, full(hit=True, hit_damages=[dmg])))
+    if acc < 1.0:
+        outs.append((1.0 - acc, full(hit=False)))
+    return [(p, r) for p, r in outs if p > 1e-12]
+
+
+@dataclass
+class _Branch:
+    """分岐の途中の状態 (resolve_turn_branches の内部)"""
+    p: float
+    me: SimSide
+    opp: SimSide
+    events: list
+    acted: dict
+    fainted: dict
+    unsupported: list
+    unsupported_by: dict
+    protected: dict
+    moved: frozenset = frozenset()
+    flinched: frozenset = frozenset()
+
+    def fork(self, mult: float) -> "_Branch":
+        return _Branch(self.p * mult, self.me, self.opp, list(self.events), dict(self.acted), dict(self.fainted),
+                       list(self.unsupported), {k: list(v) for k, v in self.unsupported_by.items()},
+                       dict(self.protected), self.moved, self.flinched)
+
+    def side(self, who: str) -> SimSide:
+        return self.me if who == "me" else self.opp
+
+    def set_side(self, who: str, s: SimSide) -> None:
+        if who == "me":
+            self.me = s
+        else:
+            self.opp = s
+
+
+def resolve_turn_branches(me: SimSide, opp: SimSide, my_act: Action, opp_act: Action,
+                          my_field: Optional[FieldView], opp_field: Optional[FieldView], *,
+                          damage_fn=None, roll_points: Optional[int] = None) -> list:
+    """1 ターンを分岐つきで解決する (純粋。入力は書き換えない)。戻り値 [(確率, TurnResult)]、確率の合計は 1。
+
+    分岐: 行動順 (優先度 → 素早さ (おいかぜ・トリックルーム込み)、同速は speed_tie_prob で両方の順)、まひの行動不能 (1/8、
+    チャンピオンズ)、命中 (当たる / 外れる)、ダメージ乱数 (倒せる / 倒せない)、連続技の回数、ひるみ (相手がまだ行動していないときだけ)。
+    ねむり・こおりの個体はこのターン行動しない (残りターンは状態に無い)。解決の順序は resolve_turn と同じ (交代 → メガ → 技 → 技ごとの
+    ひんし判定 → ターンの終わりの繰り出し)。行動前にひんしの個体は行動しない (与ダメージ 0、自滅も HP の消費も無し)。
+    交代技 (とんぼがえり 等) が当たったら、使用者はその場で控えを出す。ひんし後の繰り出しと交代技の繰り出し先は継続方策
+    best_bench (静的評価が最良の 1 体。対戦の仕様ではなく評価のための仮定) で決める。
+    damage_fn(att_view, att_hp, def_view, def_hp, move_id, field) -> calc_damage の戻り値 (既定は default_damage_fn)"""
+    from champions_agent.config import TRANSITION_ROLL_POINTS
+    damage_fn = damage_fn or default_damage_fn
+    points = int(roll_points or TRANSITION_ROLL_POINTS)
+    te = transition_effects()
+    me = replace(me, bench=list(me.bench))
+    opp = replace(opp, bench=list(opp.bench))
+    ev: list = []
+    if my_act.kind == "switch":
+        me = apply_switch(me, my_act.bench_index)
+        ev.append(("me", "switch", me.active.species_id))
+    if opp_act.kind == "switch":
+        opp = apply_switch(opp, opp_act.bench_index)
+        ev.append(("opp", "switch", opp.active.species_id))
+    if opp_act.kind == "move" and opp_act.mega:
+        opp = mega_evolve(opp)
+    if my_act.kind == "move" and my_act.mega:
+        me = mega_evolve(me)
+    fieldv = my_field or opp_field
+    movers = []
+    if my_act.kind == "move" and me.active_hp > 0:
+        movers.append(("me", my_act.move_id, priority(my_act.move_id, me.active, fieldv), side_speed(me, my_field)))
+    if opp_act.kind == "move" and opp.active_hp > 0:
+        movers.append(("opp", opp_act.move_id, priority(opp_act.move_id, opp.active, fieldv), side_speed(opp, my_field)))
+    trick_room = bool(my_field and my_field.trick_room)
+    movers.sort(key=lambda m: (-m[2], m[3] if trick_room else -m[3]))
+    orders = [(1.0, movers)]
+    if len(movers) == 2 and movers[0][2] == movers[1][2] and movers[0][3] == movers[1][3]:
+        pt = float(te.get("speed_tie_prob", 0.5))
+        orders = [(pt, movers), (1.0 - pt, [movers[1], movers[0]])]
+    acts = {"me": my_act, "opp": opp_act}
+    fields = {"me": my_field, "opp": opp_field}
+    out: list = []
+    for p_ord, order in orders:
+        events = list(ev)
+        if len(orders) > 1:
+            events.append((order[0][0], "speed_tie_first", None))
+        br = _Branch(p_ord, me, opp, events, {"me": False, "opp": False}, {"me": False, "opp": False}, [],
+                     {"me": [], "opp": []}, {"me": False, "opp": False})
+        _run_branch(br, order, 0, acts, fields, damage_fn, points, out)
+    return out
+
+
+def _run_branch(br: _Branch, order: list, i: int, acts: dict, fields: dict, damage_fn, points: int, out: list) -> None:
+    if i >= len(order):
+        out.append((br.p, _finish_branch(br)))
+        return
+    who = order[i][0]
+    atk = br.side(who)
+    if atk.active_hp <= 0:
+        # 行動前にひんし: 行動しない (与ダメージ 0、自滅も HP の消費も起きない)
+        br.events.append((who, "skip", "fainted_before_acting"))
+        _run_branch(br, order, i + 1, acts, fields, damage_fn, points, out)
+        return
+    if who in br.flinched:
+        br.events.append((who, "skip", "flinch"))
+        br.moved = br.moved | {who}
+        _run_branch(br, order, i + 1, acts, fields, damage_fn, points, out)
+        return
+    st = atk.active.status
+    if st in ("sleep", "freeze"):
+        br.events.append((who, "skip", st))
+        br.moved = br.moved | {who}
+        _run_branch(br, order, i + 1, acts, fields, damage_fn, points, out)
+        return
+    if st == "paralysis":
+        num, den = _frac_of("paralysis_full_para", (1, 8))
+        pp = num / den
+        b2 = br.fork(pp)
+        b2.events.append((who, "skip", "paralysis"))
+        b2.moved = b2.moved | {who}
+        _run_branch(b2, order, i + 1, acts, fields, damage_fn, points, out)
+        br = br.fork(1.0 - pp)
+    _act_branch(br, order, i, acts, fields, damage_fn, points, out)
+
+
+def _act_branch(br: _Branch, order: list, i: int, acts: dict, fields: dict, damage_fn, points: int, out: list) -> None:
+    who, move_id, pri, _spe = order[i]
+    def_side = "opp" if who == "me" else "me"
+    atk, dfn = br.side(who), br.side(def_side)
+    br.moved = br.moved | {who}
+    br.acted[who] = True
+    fieldv = fields["me"] or fields["opp"]
+    if fieldv is not None and fieldv.terrain == "psychic" and pri > 0 and move_id not in PROTECT_MOVES \
+            and move_id not in HEAL_MOVES and move_id not in SETUP_MOVES and _is_grounded(dfn.active):
+        br.events.append((who, "fail", "psychic_terrain"))
+        _run_branch(br, order, i + 1, acts, fields, damage_fn, points, out)
+        return
+    if move_id in SUCKER_MOVES:
+        def_act = acts[def_side]
+        if def_side in br.moved or not is_attack_action(def_act):
+            br.events.append((who, "fail", "sucker"))
+            _run_branch(br, order, i + 1, acts, fields, damage_fn, points, out)
+            return
+    br.events.append((who, "move", move_id))
+    label = {"user": who, "target": def_side}
+    for p_o, mr in move_outcomes(atk, dfn, move_id, fields[who], target_protected=br.protected[def_side],
+                                 damage_fn=damage_fn, roll_points=points):
+        nb = br.fork(p_o)
+        if move_id in PROTECT_MOVES and mr.executed:
+            nb.protected[who] = True
+        nb.events.extend((label[w], k, d) for w, k, d in mr.events)
+        marks = [(label[w], k, s) for w, k, s in mr.unsupported]
+        nb.unsupported.extend(marks)
+        nb.unsupported_by[who].extend(marks)
+        for w in mr.faint_order:
+            lbl = label[w]
+            if not nb.fainted[lbl]:
+                nb.fainted[lbl] = True
+                nb.events.append((lbl, "faint", None))
+        nb.set_side(who, mr.user)
+        nb.set_side(def_side, mr.target)
+        # 交代技: 当たったら使用者はその場で控えを出す (繰り出し先は継続方策 best_bench)
+        if any(w == "user" and k == "pivot" for w, k, _d in mr.events):
+            s = nb.side(who)
+            nxt = best_bench(s, nb.side(def_side))
+            if nxt is not None and s.active_hp > 0:
+                s = apply_switch(s, nxt)
+                nb.set_side(who, s)
+                nb.events.append((who, "pivot_switch", s.active.species_id))
+        chance = next((float(d) for w, k, d in mr.events if w == "target" and k == "flinch_chance"), 0.0)
+        later = any(m[0] == def_side for m in order[i + 1:])
+        if chance > 0 and later and def_side not in nb.moved and nb.side(def_side).active_hp > 0:
+            if chance >= 1.0:
+                nb.flinched = nb.flinched | {def_side}
+                _run_branch(nb, order, i + 1, acts, fields, damage_fn, points, out)
+            else:
+                f1 = nb.fork(chance)
+                f1.flinched = f1.flinched | {def_side}
+                _run_branch(f1, order, i + 1, acts, fields, damage_fn, points, out)
+                _run_branch(nb.fork(1.0 - chance), order, i + 1, acts, fields, damage_fn, points, out)
+        else:
+            _run_branch(nb, order, i + 1, acts, fields, damage_fn, points, out)
+
+
+def _finish_branch(br: _Branch) -> TurnResult:
+    """ターンの終わり: このターンにひんしになった陣営は控え (継続方策 best_bench) を繰り出す (行動はしない)"""
+    res = TurnResult(me=br.me, opp=br.opp, events=br.events, acted=br.acted, fainted=br.fainted,
+                     unsupported=br.unsupported, unsupported_by=br.unsupported_by)
+    me, opp = br.me, br.opp
+    for lbl in ("me", "opp"):
+        side = me if lbl == "me" else opp
+        if res.fainted[lbl] and side.active_hp <= 0:
+            nxt = best_bench(side, opp if lbl == "me" else me)
+            if nxt is not None:
+                res.requires_switch[lbl] = True
+                side = apply_switch(side, nxt)
+                res.events.append((lbl, "replace", side.active.species_id))
                 if lbl == "me":
                     me = side
                 else:

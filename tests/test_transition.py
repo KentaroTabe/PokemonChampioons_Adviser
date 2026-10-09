@@ -321,6 +321,183 @@ def test_engine_self_cost_half_hp_and_recoil():
     print("test_engine_self_cost_half_hp_and_recoil OK")
 
 
+# ==============================================================================
+# M2b 段 1: 分岐つきの解決 (resolve_turn_branches / move_outcomes) と耐える効果 (2026-10-09)
+# 根拠 (ローカルの Showdown): sim/battle.ts (同速は乱数)、data/mods/champions/conditions.ts par (1/8 で行動不能)、
+# data/items.ts focussash・data/abilities.ts sturdy / disguise (onDamage)、data/moves.ts highjumpkick (onMoveFail: baseMaxhp / 2)・
+# steelbeam (onMoveFail でも Math.round(maxhp / 2))、sim/battle.ts spreadDamage (clampIntRange = 切り捨て・最低 1)
+# ==============================================================================
+def _br_sum(brs):
+    return sum(p for p, _r in brs)
+
+
+def _p_where(brs, pred):
+    return sum(p for p, r in brs if pred(r))
+
+
+def _has(r, who, kind):
+    return any(w == who and k == kind for w, k, _d in r.events)
+
+
+def test_branches_speed_tie_and_purity():
+    """同速 (同じ個体・同じ配分): 両方の順が 0.5 ずつ。確率の合計は 1。入力の状態は書き換えない"""
+    me = SimSide(_view("garchomp"), 1.0, bench=[(_view("clefable"), 1.0)])
+    opp = SimSide(_view("garchomp"), 1.0)
+    snap = (me.active_hp, list(me.bench), opp.active_hp, dict(me.active.boosts))
+    brs = T.resolve_turn_branches(me, opp, _mv("dragonclaw"), _mv("dragonclaw"), None, None)
+    assert abs(_br_sum(brs) - 1.0) < 1e-9
+    p_me_first = _p_where(brs, lambda r: next(w for w, k, _d in r.events if k == "move") == "me")
+    assert abs(p_me_first - 0.5) < 1e-9, p_me_first
+    assert (me.active_hp, list(me.bench), opp.active_hp, dict(me.active.boosts)) == snap
+    # 素早さが違えば分岐しない (旧 resolve_turn の「同速は自分が先」は残したまま)
+    fast = SimSide(_view("garchomp", ev={"atk": 252, "spa": 252, "spe": 252}), 1.0)
+    slow = SimSide(_view("garchomp", ev={"atk": 252, "spa": 252, "spe": 0}), 1.0)
+    brs2 = T.resolve_turn_branches(fast, slow, _mv("dragonclaw"), _mv("dragonclaw"), None, None)
+    assert all(next(w for w, k, _d in r.events if k == "move") == "me" for _p, r in brs2)
+    print("test_branches_speed_tie_and_purity OK")
+
+
+def test_branches_paralysis_full_para():
+    """まひ: 1/8 で行動しない分岐 (チャンピオンズ)。行動しなかった分岐では与ダメージ 0"""
+    me = SimSide(replace(_view("garchomp"), status="paralysis"), 1.0)
+    opp = SimSide(_view("clefable"), 1.0)
+    brs = T.resolve_turn_branches(me, opp, _mv("earthquake"), _mv("calmmind"), None, None)
+    p_skip = _p_where(brs, lambda r: any(w == "me" and k == "skip" and d == "paralysis" for w, k, d in r.events))
+    assert abs(p_skip - 1 / 8) < 1e-9, p_skip
+    assert all(r.opp.active_hp == 1.0 for p, r in brs if not r.acted["me"])
+    assert abs(_br_sum(brs) - 1.0) < 1e-9
+    print("test_branches_paralysis_full_para OK")
+
+
+def test_branches_miss_crash_and_steelbeam():
+    """命中: とびひざげり (90) は 0.1 で外れ、外れた分岐は与ダメージ 0 で使用者が最大 HP の 1/2 (切り捨て) を失う。
+    てっていこうせん (95) は外れても HP の 1/2 (四捨五入) を失う。当たった分岐で反動 crash は無い"""
+    user_v, foe_v = _view("lopunny"), _view("garchomp")
+    outs = T.move_outcomes(SimSide(user_v, 1.0), SimSide(foe_v, 1.0), "highjumpkick", None)
+    miss = [(p, r) for p, r in outs if any(k == "miss" for _w, k, _d in r.events)]
+    assert len(miss) == 1 and abs(miss[0][0] - 0.1) < 1e-9, outs
+    mr = miss[0][1]
+    mhp = user_v.max_hp()
+    assert mr.dealt == 0.0 and mr.target.active_hp == 1.0
+    assert abs(mr.user.active_hp - (1.0 - (mhp // 2) / mhp)) < 1e-9, mr.user.active_hp
+    assert all(not any(k == "crash" for _w, k, _d in r.events) and r.user.active_hp == 1.0
+               for p, r in outs if r.dealt > 0)
+    assert abs(sum(p for p, _r in outs) - 1.0) < 1e-9
+    arch = _view("archaludon")
+    outs2 = T.move_outcomes(SimSide(arch, 1.0), SimSide(_view("garchomp"), 1.0), "steelbeam", None)
+    miss2 = [r for p, r in outs2 if any(k == "miss" for _w, k, _d in r.events)]
+    assert len(miss2) == 1 and miss2[0].dealt == 0.0
+    assert abs(miss2[0].user.active_hp - (1.0 - _half(arch))) < 1e-9          # 外れても失う
+    assert abs(sum(p for p, r in outs2 if r.dealt == 0.0) - 0.05) < 1e-9
+    print("test_branches_miss_crash_and_steelbeam OK")
+
+
+def test_focus_sash_and_sturdy():
+    """きあいのタスキ: HP 満タンからの一撃は HP 1 で耐えて消費。連続技は 2 発目で倒れる。がんじょうは満タンのときだけ"""
+    foe = _view("heatran", item="focussash")
+    outs = T.move_outcomes(SimSide(_view("garchomp"), 1.0), SimSide(foe, 1.0), "earthquake", None)
+    one = 1.0 / foe.max_hp()
+    for p, r in outs:
+        assert abs(r.target.active_hp - one) < 1e-9 and r.target.active.item is None, (r.target.active_hp, r.events)
+        assert ("target", "survive", "focussash") in r.events and not r.faint_order
+    # 連続技 (ロックブラスト 2〜5 回、攻撃 +6 で 1 発が最大 HP を超える): 1 発目は HP 1 で耐え、2 発目で倒れる
+    strong = replace(_view("garchomp"), boosts={"atk": 6})
+    rb = T.move_outcomes(SimSide(strong, 1.0), SimSide(replace(_view("charizard"), item="focussash"), 1.0),
+                         "rockblast", None)
+    assert any(r.dealt > 0 for _p, r in rb)
+    for p, r in rb:
+        if r.dealt > 0:
+            assert ("target", "survive", "focussash") in r.events and r.target.active_hp == 0.0, r.events
+            assert "target" in r.faint_order and ("target", "hits", 2) in r.events, r.events
+    # 1 発では倒れない量 (攻撃 ±0、1 発 約 52%) ならタスキは発動せず、2 発の合計で倒れる
+    rb0 = T.move_outcomes(SimSide(_view("garchomp"), 1.0), SimSide(replace(_view("charizard"), item="focussash"), 1.0),
+                          "rockblast", None)
+    assert all(not any(k == "survive" for _w, k, _d in r.events) for _p, r in rb0)
+    # がんじょう: 満タンなら耐える、HP 99% なら倒れる
+    st = _view("aggron", ability="sturdy")
+    full = T.move_outcomes(SimSide(_view("garchomp"), 1.0), SimSide(st, 1.0), "earthquake", None)
+    assert all(abs(r.target.active_hp - 1.0 / st.max_hp()) < 1e-9 for p, r in full)
+    hurt = T.move_outcomes(SimSide(_view("garchomp"), 1.0), SimSide(st, 0.99), "earthquake", None)
+    assert all(r.target.active_hp == 0.0 for p, r in hurt)
+    # かたやぶりは がんじょう を無視する (タスキは無視しない)
+    mb = T.move_outcomes(SimSide(_view("garchomp", ability="moldbreaker"), 1.0), SimSide(st, 1.0), "earthquake", None)
+    assert all(r.target.active_hp == 0.0 for p, r in mb)
+    print("test_focus_sash_and_sturdy OK")
+
+
+def test_disguise():
+    """ばけのかわ: 初撃は 0 で ばけたすがた になり、最大 HP の 1/8 (切り捨て) を失う。連続技の 2 発目以降は通る"""
+    mim = _view("mimikyu", ability="disguise")
+    loss = (mim.max_hp() // 8) / mim.max_hp()
+    outs = T.move_outcomes(SimSide(_view("garchomp"), 1.0), SimSide(mim, 1.0), "earthquake", None)
+    for p, r in outs:
+        assert r.dealt == 0.0 and r.target.active.species_id == "mimikyubusted"
+        assert abs(r.target.active_hp - (1.0 - loss)) < 1e-9, r.target.active_hp
+    # 2 発目以降 (ロックブラスト) はダメージが入る
+    rb = T.move_outcomes(SimSide(_view("garchomp"), 1.0), SimSide(mim, 1.0), "rockblast", None)
+    assert all(r.dealt > 0 for p, r in rb if any(k == "disguise" for _w, k, _d in r.events))
+    # かたやぶりは無視する
+    mb = T.move_outcomes(SimSide(_view("garchomp", ability="moldbreaker"), 1.0), SimSide(mim, 1.0), "earthquake", None)
+    assert all(r.dealt > 0 and r.target.active.species_id == "mimikyu" for p, r in mb)
+    print("test_disguise OK")
+
+
+def test_branches_fainted_before_acting():
+    """(c) 先に倒された分岐では、攻撃も HP の消費も発生しない: 遅い ペロリーム (HP 5%) の ミストバースト・
+    遅い ブリジュラス (HP 10%) の てっていこうせん は、先に倒されたら自滅も HP の消費も無く、相手は無傷"""
+    me = SimSide(_view("slurpuff"), 0.05, bench=[(_view("lopunny"), 1.0)])
+    opp = SimSide(_view("ninetales"), 1.0)
+    brs = T.resolve_turn_branches(me, opp, _mv("mistyexplosion"), _mv("flamethrower"), None, None)
+    assert abs(_br_sum(brs) - 1.0) < 1e-9
+    for p, r in brs:
+        assert not _has(r, "me", "selfko") and r.opp.active_hp == 1.0, r.events
+        assert ("me", "skip", "fainted_before_acting") in r.events and r.acted["me"] is False
+        assert r.me.active.species_id == "lopunny" and r.requires_switch["me"]
+    me2 = SimSide(_view("archaludon"), 0.10, bench=[(_view("lopunny"), 1.0)])
+    brs2 = T.resolve_turn_branches(me2, SimSide(_view("garchomp"), 1.0), _mv("steelbeam"), _mv("earthquake"), None, None)
+    for p, r in brs2:
+        assert not _has(r, "me", "hp_cost") and r.opp.active_hp == 1.0, r.events
+    print("test_branches_fainted_before_acting OK")
+
+
+def test_branches_pivot_and_fakeout():
+    """交代技: 先に動いた とんぼがえり が当たったら、その場で控え (best_bench) を出し、後から動く相手の技はその個体が受ける。
+    ねこだまし (ひるみ 100%): 先に当たれば相手は行動しない"""
+    me = SimSide(_view("weavile"), 1.0, bench=[(_view("corviknight"), 1.0)])
+    opp = SimSide(_view("snorlax"), 1.0)
+    brs = T.resolve_turn_branches(me, opp, _mv("uturn"), _mv("bodyslam"), None, None)
+    for p, r in brs:
+        assert r.me.active.species_id == "corviknight" and r.me.active_hp < 1.0, (r.me.active.species_id, r.events)
+        assert dict((v.species_id, hp) for v, hp in r.me.bench)["weavile"] == 1.0
+    fo = T.resolve_turn_branches(SimSide(_view("weavile"), 1.0), SimSide(_view("snorlax"), 1.0),
+                                 _mv("fakeout"), _mv("bodyslam"), None, None)
+    for p, r in fo:
+        assert r.me.active_hp == 1.0 and ("opp", "skip", "flinch") in r.events, r.events
+    print("test_branches_pivot_and_fakeout OK")
+
+
+def test_full_status_effects():
+    """段 C の前倒し (1 ターンの状態変化): ひかりのかべ (陣営の screens、以降の特殊技が半減)、ねばねばネット (着地時 素早さ -1)、
+    あくび (ねむけ。即ねむりにしない)、スイートベールはねむけを防ぐ"""
+    me = SimSide(_view("slurpuff"), 1.0, screens={})
+    opp = SimSide(_view("ninetales"), 1.0, screens={}, bench=[(_view("garchomp"), 1.0)])
+    r = T.resolve_move(me, opp, "lightscreen", None, full=True)
+    assert r.user.screens == {"light_screen": True} and r.executed
+    f = T.field_against(None, r.user)
+    assert f.light_screen and not f.reflect
+    r2 = T.resolve_move(me, opp, "stickyweb", None, full=True)
+    sw = T.apply_switch(r2.target, 0)
+    assert r2.target.sticky_web and sw.active.boosts.get("spe") == -1
+    r3 = T.resolve_move(me, opp, "yawn", None, full=True)
+    assert "yawn" in r3.target.volatiles and r3.target.active.status is None
+    r4 = T.resolve_move(SimSide(_view("ninetales"), 1.0), SimSide(_view("slurpuff", ability="sweetveil"), 1.0),
+                        "yawn", None, full=True)
+    assert "yawn" not in r4.target.volatiles
+    # 旧 resolve_move (full=False) の あくび は従来どおり即ねむり (探索の結果を変えない)
+    assert T.resolve_move(me, opp, "yawn", None).target.active.status == "sleep"
+    print("test_full_status_effects OK")
+
+
 if __name__ == "__main__":
     test_selfko_kos_target_and_user()
     test_selfko_even_if_immune_or_protected()
@@ -333,4 +510,12 @@ if __name__ == "__main__":
     test_engine_self_cost_112839()
     test_engine_self_cost_before_ko_risk()
     test_engine_self_cost_half_hp_and_recoil()
+    test_branches_speed_tie_and_purity()
+    test_branches_paralysis_full_para()
+    test_branches_miss_crash_and_steelbeam()
+    test_focus_sash_and_sturdy()
+    test_disguise()
+    test_branches_fainted_before_acting()
+    test_branches_pivot_and_fakeout()
+    test_full_status_effects()
     print("ALL OK")

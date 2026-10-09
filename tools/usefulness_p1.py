@@ -1,6 +1,7 @@
 """有用性検証 P1: RL の行動確率の加点 0 / ×5 / ×25 の対応比較を起動する (docs/USEFULNESS_VERIFICATION_PLAN_1007.md §0.5・§4、2026-10-09)。
 
     python -m tools.usefulness_p1 --prelim --dry-run          # 条件表とコマンド列を出すだけ (起動しない・ピンを作らない)
+    python -m tools.usefulness_p1 --compare scoring --prelim --dry-run   # 採点方式 scoring:legacy / scoring:transition (M2b)
     python -m tools.usefulness_p1 --prelim                     # 予備 50 戦 / 条件 (秒/戦の見積もり)
     python -m tools.usefulness_p1                              # 本番 600 戦 / 条件
     python -m tools.usefulness_verdict --out <出力 dir>        # 集計と §0.5 の 3 値判定
@@ -14,6 +15,9 @@
 環境変数: CHAMPIONS_MODELS_DIR = ピン (相手の rl は config.MODELS_DIR を読むので --models-dir だけでは届かない)、スレッド数 1 の一式
 (tools.team_build.racing.child_env と同じ)。
 時間上限 (P1_TIME_LIMIT_SEC) を過ぎたら 3 プロセスを止めて incomplete: true (採否は出さない)。
+--compare scoring (2026-10-09 M2b 設計判断 11): 条件は採点方式 scoring:legacy (基準) / scoring:transition の 2 つ。重みは両方とも
+既定 (P1_BASELINE_WEIGHT)、方式は条件ごとの環境変数 ADVICE_SCORING_MODE (条件表の cond_env) で子プロセスに渡す。ファイル名は
+条件名の「:」を「_」にしたもの (scoring_legacy.json 等)。集計 (tools.usefulness_verdict) はまだ重みの条件 (rl<W>) しか読まない。
 開始時刻の注意 (ツールでは強制しない): launchd の track-progress (毎日 21:50、17〜34 分) の後に始め、06:30 の usage-update の前に終える。
 
 純粋な部分 (条件表・コマンド・環境・進捗・終了時の更新) は tests/test_usefulness_p1.py で確かめる。
@@ -34,13 +38,15 @@ from champions_agent.config import (
     BUILD_FOLD_ADAPT, BUILD_FOLD_EVAL, BUILD_FOLD_VALIDATE, P1_ABORT_SEC_PER_BATTLE, P1_ALPHA, P1_BASELINE_WEIGHT, P1_BELIEF_K,
     P1_FINAL_BATTLES, P1_INTERIM_BATTLES, P1_MDE, P1_OPP_OFFSET, P1_OPP_PICK_POLICY, P1_OPP_PILOT, P1_OUT_ROOT, P1_PICK_POLICY,
     P1_PRELIM_BATTLES, P1_PROGRESS_SEC, P1_SEED, P1_SELECTION_MODEL, P1_SPLIT_FILE, P1_SPLIT_SEALED_ID, P1_SPLIT_TIER,
-    P1_TEAM_SHA16, P1_TERMINATE_GRACE_SEC, P1_TIME_LIMIT_SEC, P1_WEIGHTS, SHOWDOWN_PORT, TRAINING_BATTLE_FORMAT)
+    P1_SCORING_BASELINE, P1_SCORING_MODES, P1_TEAM_SHA16, P1_TERMINATE_GRACE_SEC, P1_TIME_LIMIT_SEC, P1_WEIGHTS, SHOWDOWN_PORT,
+    TRAINING_BATTLE_FORMAT)
 from tools.usefulness_verdict import cond_name, corrected_z
 
 REPO = Path(__file__).resolve().parent.parent
 FOLD_LABELS = {BUILD_FOLD_ADAPT: "A", BUILD_FOLD_EVAL: "B", BUILD_FOLD_VALIDATE: "V"}
 # 経路に効く環境変数 (設定されていれば条件表に残す)
-PATH_ENV_VARS = ("RL_ADVICE_STYLE", "RL_POLICY_SOURCE", "RL_BLEND_WEIGHT", "SELECTION_FEATURES", "SHOWDOWN_PORT")
+PATH_ENV_VARS = ("RL_ADVICE_STYLE", "RL_POLICY_SOURCE", "RL_BLEND_WEIGHT", "SELECTION_FEATURES", "SHOWDOWN_PORT",
+                 "ADVICE_SCORING_MODE")
 SCHEDULE_NOTE = "launchd の track-progress (毎日 21:50、17〜34 分) が終わってから始め、06:30 の usage-update の前に終える"
 PIN_PLANNED = "(起動時に scripts/pin_models.sh で作成)"
 CKPT_DIR = REPO / "champions_agent" / "train" / "checkpoints"
@@ -62,6 +68,32 @@ def plan(weights: Sequence[float] = P1_WEIGHTS, baseline: float = P1_BASELINE_WE
             "z": corrected_z(k, alpha)}
 
 
+def scoring_cond_name(mode: str) -> str:
+    """採点方式 → 条件名 (legacy → scoring:legacy)"""
+    return f"scoring:{mode}"
+
+
+def cond_file(cond: str) -> str:
+    """条件名 → ファイル名の部分 (「:」を「_」に。rl<W> はそのまま)"""
+    return str(cond).replace(":", "_")
+
+
+def plan_scoring(modes: Sequence[str] = P1_SCORING_MODES, baseline: str = P1_SCORING_BASELINE,
+                 alpha: float = P1_ALPHA, weight: float = P1_BASELINE_WEIGHT) -> dict:
+    """採点方式の比較の設計 (純粋。2026-10-09 M2b)。条件ごとの RL 加点の重み (cond_weight) と環境変数 (cond_env) を持つ"""
+    names = [scoring_cond_name(m) for m in modes]
+    base = scoring_cond_name(baseline)
+    if base not in names:
+        raise ValueError(f"基準 {baseline} が方式 {list(modes)} に無い")
+    comps = [{"cond": scoring_cond_name(m), "mode": m, "vs": base} for m in modes if m != baseline]
+    k = len(comps)
+    return {"factor": "scoring", "modes": list(modes), "weights": [float(weight)] * len(names), "conditions": names,
+            "baseline_weight": float(weight), "baseline": base, "comparisons": comps, "k": k, "alpha": float(alpha),
+            "level": 1.0 - float(alpha) / max(1, k), "z": corrected_z(k, alpha),
+            "cond_weight": {c: float(weight) for c in names},
+            "cond_env": {scoring_cond_name(m): {"ADVICE_SCORING_MODE": m} for m in modes}}
+
+
 def resolve_battles(battles: Optional[int], prelim: bool) -> int:
     """この測定の対戦数 (純粋): 明示があればそれ、無ければ予備 P1_PRELIM_BATTLES / 本番 P1_FINAL_BATTLES"""
     if battles is not None:
@@ -77,9 +109,9 @@ def default_out_dir(now: float, prelim: bool, root: Path = REPO / P1_OUT_ROOT) -
 
 def build_command(weight: float, out_dir: Path, team_file: Path, split_file: Path, fold: int, seed: int, battles: int,
                   selection_model: Path, pin_dir: str, python: str = sys.executable, offset: int = P1_OPP_OFFSET,
-                  tier: str = P1_SPLIT_TIER) -> list:
-    """1 条件の tools.check_advisor_player のコマンド (純粋)"""
-    c = cond_name(weight)
+                  tier: str = P1_SPLIT_TIER, cond: Optional[str] = None) -> list:
+    """1 条件の tools.check_advisor_player のコマンド (純粋)。cond (条件名) が無ければ重みの条件名 rl<W>"""
+    c = cond_file(cond or cond_name(weight))
     return [python, "-m", "tools.check_advisor_player",
             "--battles", str(int(battles)), "--opp-seed", str(int(seed)), "--opp-offset", str(int(offset)),
             "--opp-split", f"{split_file}:{tier}:{int(fold)}",
@@ -114,9 +146,14 @@ def build_conditions(design: dict, facts: dict, battles: int, prelim: bool, seed
     team.setdefault("expected_sha16", P1_TEAM_SHA16)
     team["match"] = (team.get("sha16") == team.get("expected_sha16")) if team.get("sha16") else False
     split = f.get("split") or {}
+    factor = design.get("factor", "rl")
+    purpose = ("採点方式 legacy (基準) / transition (2026-10-09 M2b) の対応比較 (シミュレータ条件。OCR を通らない。実戦の有用性とは"
+               "分けて評価する)" if factor == "scoring" else
+               "RL の行動確率の加点 0 / ×5 / ×25 の対応比較 (シミュレータ条件。OCR を通らない。実戦の有用性とは分けて評価する)")
     return {
         "experiment": "P1",
-        "purpose": "RL の行動確率の加点 0 / ×5 / ×25 の対応比較 (シミュレータ条件。OCR を通らない。実戦の有用性とは分けて評価する)",
+        "factor": factor,
+        "purpose": purpose,
         "plan_doc": "docs/USEFULNESS_VERIFICATION_PLAN_1007.md §0.5・§4",
         "prelim": bool(prelim),
         "weights": design["weights"], "baseline_weight": design["baseline_weight"], "baseline": design["baseline"],
@@ -139,6 +176,8 @@ def build_conditions(design: dict, facts: dict, battles: int, prelim: bool, seed
                       "pilot": P1_OPP_PILOT, "pick_policy": P1_OPP_PICK_POLICY, "battle_format": TRAINING_BATTLE_FORMAT},
         "advisor": dict(f.get("advisor") or {}, pick_policy=P1_PICK_POLICY, belief_k=P1_BELIEF_K, skip_random=True),
         "env": env_record(env),
+        # 条件ごとの環境変数 (採点方式の比較で ADVICE_SCORING_MODE を渡す。RL の比較では空)
+        "cond_env": dict(design.get("cond_env") or {}),
         "commands": commands,
         "out_dir": str(out_dir),
         "schedule_note": SCHEDULE_NOTE,
@@ -521,10 +560,12 @@ def launch(cond: dict, out_dir: Path, env: dict, battles: int, time_limit_sec: i
     """3 プロセスを並列に起動し、進捗を出し、時間上限で止める。終了後の条件表を返す (書き込みは呼び出し側)"""
     procs, logs = {}, {}
     t0 = time.time()
+    cond_env = cond.get("cond_env") or {}
     for c, cmd in cond["commands"].items():
-        lf = (out_dir / f"{c}.log").open("a", encoding="utf-8")
+        lf = (out_dir / f"{cond_file(c)}.log").open("a", encoding="utf-8")
         logs[c] = lf
-        procs[c] = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT, cwd=str(REPO), env=env)
+        env_c = dict(env, **(cond_env.get(c) or {}))
+        procs[c] = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT, cwd=str(REPO), env=env_c)
         print(f"[p1] 起動 {c} pid {procs[c].pid}")
     timed_out = False
     next_report = t0 + P1_PROGRESS_SEC
@@ -533,7 +574,7 @@ def launch(cond: dict, out_dir: Path, env: dict, battles: int, time_limit_sec: i
             time.sleep(1.0)
             now = time.time()
             if now >= next_report:
-                counts = {c: _count_lines(out_dir / f"{c}.battles.jsonl") for c in procs}
+                counts = {c: _count_lines(out_dir / f"{cond_file(c)}.battles.jsonl") for c in procs}
                 print(progress_line(now - t0, counts), flush=True)
                 next_report = now + P1_PROGRESS_SEC
             if now - t0 > time_limit_sec:
@@ -557,7 +598,7 @@ def launch(cond: dict, out_dir: Path, env: dict, battles: int, time_limit_sec: i
     for lf in logs.values():
         lf.close()
     elapsed = time.time() - t0
-    reached = {c: _count_lines(out_dir / f"{c}.battles.jsonl") for c in procs}
+    reached = {c: _count_lines(out_dir / f"{cond_file(c)}.battles.jsonl") for c in procs}
     rcs = {c: p.returncode for c, p in procs.items()}
     print(progress_line(elapsed, reached))
     return finalize(cond, reached, elapsed, timed_out, rcs, battles)
@@ -575,13 +616,15 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--pin-dir", default=None, help="RL のピン dir (既定: 起動時に scripts/pin_models.sh で作る)")
     ap.add_argument("--time-limit-sec", type=int, default=P1_TIME_LIMIT_SEC, help="時間上限 (超えたら止めて未完了)")
     ap.add_argument("--dry-run", action="store_true", help="条件表とコマンド列を出すだけ (起動しない・ピンを作らない)")
+    ap.add_argument("--compare", choices=("rl", "scoring"), default="rl",
+                    help="比べる条件: rl = RL 加点の重み 0 / 5 / 25 (既定)、scoring = 採点方式 legacy / transition (2026-10-09 M2b)")
     args = ap.parse_args(argv)
 
     now = time.time()
     battles = resolve_battles(args.battles, args.prelim)
     out_dir = Path(args.out).resolve() if args.out else default_out_dir(now, args.prelim)
     split_file, selection_model = _abs(args.split), _abs(args.selection_model)
-    design = plan()
+    design = plan_scoring() if args.compare == "scoring" else plan()
     notes: list = []
     if args.prelim and battles != P1_PRELIM_BATTLES:
         notes.append(f"予備測定だが対戦数は --battles {battles} を使った")
@@ -596,8 +639,12 @@ def main(argv: Optional[list] = None) -> int:
         pin_s = str(pin_now) if pin_now is not None else pin_for_cmd
         notes_now = list(notes)
         facts = collect_facts(team_text, selection_model, split_file, args.fold, pin_now, notes_now)
-        cmds = {cond_name(w): build_command(w, out_dir, team_file, split_file, args.fold, args.seed, battles, selection_model, pin_s)
-                for w in design["weights"]}
+        if design.get("factor") == "scoring":
+            cmds = {c: build_command(design["cond_weight"][c], out_dir, team_file, split_file, args.fold, args.seed, battles,
+                                     selection_model, pin_s, cond=c) for c in design["conditions"]}
+        else:
+            cmds = {cond_name(w): build_command(w, out_dir, team_file, split_file, args.fold, args.seed, battles,
+                                                selection_model, pin_s) for w in design["weights"]}
         env = child_environment(pin_s)
         return build_conditions(design, facts, battles, args.prelim, args.seed, args.fold, str(split_file),
                                 args.time_limit_sec, str(out_dir), cmds, env, started_at, notes_now)
@@ -607,7 +654,8 @@ def main(argv: Optional[list] = None) -> int:
         print(json.dumps(cond, ensure_ascii=False, indent=1))
         print("\n# コマンド列 (環境: CHAMPIONS_MODELS_DIR = ピン、スレッド数 1)")
         for c, cmd in cond["commands"].items():
-            print(f"{c}: " + " ".join(cmd))
+            extra = " ".join(f"{k}={v}" for k, v in ((cond.get("cond_env") or {}).get(c) or {}).items())
+            print(f"{c}: " + (extra + " " if extra else "") + " ".join(cmd))
         errs, warns = preflight_errors(cond), preflight_warnings(cond)
         for w in warns:
             print(f"[注意] {w}")
@@ -616,7 +664,7 @@ def main(argv: Optional[list] = None) -> int:
         print(f"[dry-run] 起動していない。起動前の検査: {'OK' if not errs else 'NG (' + str(len(errs)) + ' 件)'} / 開始時刻: {SCHEDULE_NOTE}")
         return 0 if not errs else 3
 
-    out_has_results = out_dir.exists() and any(out_dir.glob("rl*.json*"))
+    out_has_results = out_dir.exists() and (any(out_dir.glob("rl*.json*")) or any(out_dir.glob("scoring_*.json*")))
     # ピンを作る前に、ピンに依らない検査 (登録チーム・選出モデル・分割・Showdown・出力先) を通す
     pre = assemble(pin_dir, None)
     errs = [e for e in preflight_errors(pre, out_has_results) if not (pin_dir is None and e.startswith("RL の checkpoint"))]
