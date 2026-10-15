@@ -16,6 +16,9 @@
 - 保存フレームには決定画面がほとんど無い (10/6〜7 の 179 枚で助言 1 件) ため、--battle-logs を渡すと助言は対戦ログの
   advice 行の局面 (同じ局面を --repeat 回) で計算し、保存フレームはフレーム処理 (OCR 等) の負荷として巡回して流す。
 - 対戦ログ (logs/) には書かない (行は手元のリストに集めて件数だけ出す)。
+- 採点方式の比較 (2026-10-16 実機の受入、docs/ADVICE_ACCURACY_PLAN_1009.md §8.22 の「負荷」): --compare-scoring で、影の計算は OFF の
+  まま採点方式 legacy / transition を交互 (L→T→T→L を --rounds 回) に同じ録画で再生し、方式ごとの遅延・処理率 (proc_rate =
+  処理 / 送信)・破棄を比べる。方式は advisor.service.Advisor.advise(scoring_mode=...) で渡す (server と同じ経路、環境変数は変えない)。
 """
 from __future__ import annotations
 
@@ -53,6 +56,7 @@ def run_summary(latency_ms: list, advise_ms: list, proc_ms: list, n_sent: int, n
     over = sum(1 for x in latency_ms if x > deadline_sec * 1000.0)
     out = {"latency": percentiles(latency_ms), "advise": percentiles(advise_ms), "frame_proc": percentiles(proc_ms),
            "n_sent": n_sent, "n_processed": len(proc_ms), "n_dropped": n_dropped,
+           "proc_rate": (round(len(proc_ms) / n_sent, 4) if n_sent else None),
            "over_deadline": over, "over_deadline_rate": (round(over / len(latency_ms), 4) if latency_ms else None)}
     if shadow_stats is not None:
         st = shadow_stats
@@ -81,6 +85,11 @@ def advice_key(state: dict) -> str:
         ], ensure_ascii=False)
     except Exception:
         return ""
+
+
+def abba_order(a, b, rounds: int) -> list:
+    """順序の偏り (温まり・熱) を均す並び a→b→b→a を rounds 回 (純粋)"""
+    return [a, b, b, a] * max(1, int(rounds))
 
 
 def _parse_when(s: Optional[str]) -> Optional[float]:
@@ -167,8 +176,9 @@ def load_advice_states(paths: list, resolver=None) -> list:
 
 
 async def simulate(encoded: list, interval: float, repeat: int, shadow_on: bool,
-                   deadline_sec: float = SHADOW_DEADLINE_SEC, advice_states: Optional[list] = None) -> dict:
-    """サーバーの受信 → 処理 → 助言 の流れを模して 1 回再生する。
+                   deadline_sec: float = SHADOW_DEADLINE_SEC, advice_states: Optional[list] = None,
+                   scoring_mode: Optional[str] = None) -> dict:
+    """サーバーの受信 → 処理 → 助言 の流れを模して 1 回再生する。scoring_mode = 採点方式 (None = config.ADVICE_SCORING_MODE)。
     advice_states があれば、助言は保存フレームの認識結果ではなく対戦ログの局面で計算する (保存フレームは約 10 秒間隔で
     決定画面がほとんど無いため。フレーム処理の負荷は保存フレームを巡回して掛ける)"""
     import cv2
@@ -204,9 +214,10 @@ async def simulate(encoded: list, interval: float, repeat: int, shadow_on: bool,
                 st["last_key"], st["last_time"] = key, now
                 t_a = time.perf_counter()
                 if worker is None:
-                    advice = await loop.run_in_executor(None, advisor.advise, state)
+                    advice = await loop.run_in_executor(None, lambda: advisor.advise(state, scoring_mode=scoring_mode))
                 else:
-                    advice = await loop.run_in_executor(None, lambda: advisor.advise(state, keep_common=True))
+                    advice = await loop.run_in_executor(
+                        None, lambda: advisor.advise(state, keep_common=True, scoring_mode=scoring_mode))
                 t_emit = time.perf_counter()
                 advise_ms.append((t_emit - t_a) * 1000.0)
                 latency_ms.append((t_emit - t_arr) * 1000.0)
@@ -258,13 +269,41 @@ def _fmt(label: str, s: dict) -> str:
     line = (f"[{label}] 助言 {lat['n']} 件 遅延 p50 {lat['p50']} / p95 {lat['p95']} / max {lat['max']} ms "
             f"(期限 {SHADOW_DEADLINE_SEC:g} 秒超過 {s['over_deadline']} = {s['over_deadline_rate']}) / 助言の計算 p50 {adv['p50']} "
             f"p95 {adv['p95']} ms / フレーム処理 p50 {fp['p50']} p95 {fp['p95']} ms / 送信 {s['n_sent']} 処理 {s['n_processed']} "
-            f"破棄 {s['n_dropped']}")
+            f"破棄 {s['n_dropped']} (処理率 {s.get('proc_rate')})")
     sh = s.get("shadow")
     if sh:
         line += (f"\n    影の計算: 投入 {sh['submitted']} 計算 {sh['done']} (第一候補の変化 {sh['changed']}) / 待機中の破棄 "
                  f"{sh['dropped_pending'] or 0} / 実行中の中止 {sh['aborted_running'] or 0} / 期限に間に合わない率 "
                  f"{sh['deadline_miss_rate']}")
     return line
+
+
+def _compare_scoring(args, encoded: list, paths: list, states: Optional[list]) -> None:
+    """採点方式の比較 (影の計算 OFF、legacy / transition を交互)。方式ごとに遅延・処理率・破棄を並べる"""
+    from champions_agent.config import ADVICE_SCORING_MODES
+    a, b = ADVICE_SCORING_MODES[0], ADVICE_SCORING_MODES[1]
+    if args.warmup > 0:
+        for m in (a, b):
+            w = asyncio.run(simulate(encoded[:args.warmup], args.interval, args.repeat, False,
+                                     advice_states=(states[:args.warmup] if states else None), scoring_mode=m))
+            print(f"(ウォームアップ {m} {args.warmup}: 助言 {w['latency']['n']} 件、結果は使わない)")
+    results = []
+    for m in abba_order(a, b, args.rounds):
+        s = asyncio.run(simulate(encoded, args.interval, args.repeat, False, advice_states=states, scoring_mode=m))
+        print(_fmt(m, s))
+        results.append({"scoring_mode": m, **s})
+    agg = {}
+    for m in (a, b):
+        rs = [r for r in results if r["scoring_mode"] == m]
+        agg[m] = {k: [r["latency"][k] for r in rs] for k in ("p50", "p95", "max")}
+        agg[m].update(over_deadline_rate=[r["over_deadline_rate"] for r in rs], proc_rate=[r["proc_rate"] for r in rs],
+                      n_dropped=[r["n_dropped"] for r in rs])
+    print("まとめ (回ごと):", json.dumps(agg, ensure_ascii=False))
+    if args.json:
+        Path(args.json).write_text(json.dumps({"frames": [p.name for p in paths], "repeat": args.repeat, "interval": args.interval,
+                                               "compare": "scoring", "runs": results, "agg": agg},
+                                              ensure_ascii=False, indent=1), encoding="utf-8")
+        print(f"保存: {args.json}")
 
 
 def main() -> None:
@@ -281,6 +320,8 @@ def main() -> None:
     ap.add_argument("--battle-logs", nargs="*", default=None,
                     help="対戦ログ (jsonl)。指定すると助言はその advice 行の局面で計算し、保存フレームはフレーム処理の負荷に使う")
     ap.add_argument("--json", default=None, help="結果の保存先 (logs/ 以外を推奨)")
+    ap.add_argument("--compare-scoring", action="store_true",
+                    help="影の計算は OFF のまま、採点方式 legacy / transition を交互に再生して比べる (実機の受入の負荷)")
     args = ap.parse_args()
 
     paths = select_frame_paths(Path(args.frames_dir), _parse_when(args.since), _parse_when(args.until),
@@ -296,6 +337,9 @@ def main() -> None:
     print(f"フレーム {len(encoded)} 枚 ({paths[0].name} 〜 {paths[-1].name}) × {args.repeat} 回 / 間隔 {args.interval} 秒")
     from vision import ocr
     ocr.preload()
+    if args.compare_scoring:
+        _compare_scoring(args, encoded, paths, states)
+        return
     if args.warmup > 0:
         # OCR・RL のモデル読み込み・dex 等の初回の費用を測定から外す (結果は捨てる)
         w = asyncio.run(simulate(encoded[:args.warmup], args.interval, args.repeat, True,

@@ -1444,3 +1444,23 @@ DIAG_SCENES_CLOSE_Q = 0.02
 DIAG_SCENES_CLOSE_LEGACY = 5.0
 DIAG_SCENES_ENDGAME_REMAINING = 2
 DIAG_SCENES_TIE_Q = 0.001
+# 実機の受入 (2026-10-16、docs/ADVICE_ACCURACY_PLAN_1009.md §8.22 の受入条件 (運用上の基準)。tools/real_accept)。
+# 実戦ログの advice 行の局面を両方式 (legacy / transition) で再生し、正しさ・退避・evaluate の所要時間を測る。
+# 決定開始 → 有効な助言の表示の遅延は、実戦ログの decision 行・scene 行・display 行から「その接続テストで使った方式」について集計する
+# (再生の時間と混ぜない)。勝率の証明には使わない。値は §8.22 の初期案:
+# - VIOLATIONS_MAX 0: 不合法な第一候補・未選出への交代・個体や形態の取り違え
+# - LATENCY_P95_SEC 3.0: 決定開始 → 有効な助言の前面表示の p95。LATENCY_DELTA_SEC 0.5: legacy より増える分の上限
+#   (実戦ログに両方式が無ければ判定不能。再生の evaluate の所要時間の差は参考として同じ上限と並べる)
+# - DISPLAY_IN_TIME_MIN 0.95: 前面の全対象決定のうち、既存の期限 (DISPLAY_DEADLINE_SEC = 決定監査の期限 DECISION_AUDIT_LATE_SEC) 内に
+#   有効な助言が表示された割合の下限
+# - FALLBACK_BUDGET_MAX 0.03 / FALLBACK_ALL_MAX 0.20: transition の退避率 (予算超過 / 全理由) の上限 (超えたら原因確認し切替保留)
+# - STALE_HP_SEC: 助言時点で場の HP が最後に読めてからの秒数 (advice 行の hp_stale) がこれを超えたら「古い局面」として有効な助言に
+#   数えず別に集計する。HP の不確かさの扱い (HP_RANGE_STALE_SEC、およそ 1 ターン) と同じ値
+REAL_ACCEPT_VIOLATIONS_MAX = 0
+REAL_ACCEPT_LATENCY_P95_SEC = 3.0
+REAL_ACCEPT_LATENCY_DELTA_SEC = 0.5
+REAL_ACCEPT_DISPLAY_IN_TIME_MIN = 0.95
+REAL_ACCEPT_DISPLAY_DEADLINE_SEC = DECISION_AUDIT_LATE_SEC
+REAL_ACCEPT_FALLBACK_BUDGET_MAX = 0.03
+REAL_ACCEPT_FALLBACK_ALL_MAX = 0.20
+REAL_ACCEPT_STALE_HP_SEC = HP_RANGE_STALE_SEC

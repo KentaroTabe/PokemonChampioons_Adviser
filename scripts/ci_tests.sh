@@ -162,6 +162,7 @@ TESTS=(
   test_sim_mega_form
   test_sim_revive_select
   test_diag_scenes
+  test_real_accept
 )
 
 fail=0

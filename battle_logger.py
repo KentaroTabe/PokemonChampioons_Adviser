@@ -105,6 +105,11 @@
   scene 行の state の自分の個体に "hp_source": "cur_only" (現在値だけの読みで確定した HP。推定の印 hp_estimated は付けない)
   my_hp_trace の rows の decision が commit / pending_stable で reason が "cur_only (<捨てた理由>)" の行と、その行の欄
     "cur_only": [現在値, 既知の最大 HP]
+2026-10-16 実機の受入 (docs/ADVICE_ACCURACY_PLAN_1009.md §8.22。欄を足すだけ。既存の欄の意味は変えない):
+  version 行に "scoring_mode" (この server が使う採点方式 = config.ADVICE_SCORING_MODE) と "scoring_mode_env"
+    (環境変数 ADVICE_SCORING_MODE の生の値。無ければ null)。version_id の digest には入れない
+  advice 行 (kind = battle) に "scoring_mode" (設定された方式)・"scoring_used" (実際に使った方式。評価できなければ null)・
+    "fallback_reason" (transition の退避理由、退避していなければ null) を必ず書く (scoring_fields_of)
 """
 from __future__ import annotations
 
@@ -555,6 +560,34 @@ def my_hp_context_of(state: Optional[dict]) -> dict:
     return {"my_hp_estimated": True, "my_hp_source": p.get("hp_source")}
 
 
+def scoring_mode_info() -> dict:
+    """この server が使う採点方式 (純粋に近い: config と環境変数を読むだけ)。{"scoring_mode", "scoring_mode_env"}。
+    scoring_mode は config.ADVICE_SCORING_MODE (起動時の環境変数 ADVICE_SCORING_MODE、読めない値・空は legacy)"""
+    import os
+    from champions_agent import config as _cfg
+    raw = os.environ.get("ADVICE_SCORING_MODE")
+    return {"scoring_mode": getattr(_cfg, "ADVICE_SCORING_MODE", "legacy"), "scoring_mode_env": raw if raw else None}
+
+
+def scoring_mode_banner(info: Optional[dict] = None) -> str:
+    """起動ログの 1 行 (純粋。info = scoring_mode_info の戻り値、None なら今の値)"""
+    i = info if info is not None else scoring_mode_info()
+    env = i.get("scoring_mode_env")
+    src = f"環境変数 ADVICE_SCORING_MODE={env}" if env else "環境変数 ADVICE_SCORING_MODE なし = 既定"
+    return f"採点方式: {i.get('scoring_mode')} ({src})"
+
+
+def scoring_fields_of(advice: Optional[dict], configured: Optional[str] = None) -> dict:
+    """battle の advice 行に必ず書く採点方式の欄 (純粋)。{"scoring_mode", "scoring_used", "fallback_reason"}。
+    scoring_mode = 助言の scoring_mode (無ければ configured = server の設定)、scoring_used = 実際に使った方式 (transition の
+    scoring_used、legacy は scoring_mode。評価できなかった助言は null)、fallback_reason = transition の退避理由 (scoring_fallback、
+    退避していなければ null)"""
+    a = advice or {}
+    mode = a.get("scoring_mode") or configured
+    used = a.get("scoring_used") or (a.get("scoring_mode") if a.get("ok", True) and a.get("scoring_mode") else None)
+    return {"scoring_mode": mode, "scoring_used": used, "fallback_reason": a.get("scoring_fallback")}
+
+
 EXPERIMENT_MARK = Path("logs") / ".experiment_package"   # 候補 Package の試用中はここに package_id
 
 
@@ -708,7 +741,8 @@ class BattleLogger:
         try:
             from advisor.versions import runtime_versions
             self._version = runtime_versions(refresh=True)
-            self._write({"type": "version", **self._version})
+            # 採点方式 (2026-10-16 実機の受入): version_id の digest の外に足すだけ
+            self._write({"type": "version", **self._version, **scoring_mode_info()})
         except Exception as e:
             print(f"[battle_log] 版の記録に失敗: {e}")
             self._version = None
@@ -1327,6 +1361,12 @@ class BattleLogger:
         slim = {k: v for k, v in advice.items() if k not in ("text",)}
         rec = {"type": "advice", "kind": kind, "advice": slim, "advice_id": aid,
                "version_id": (self._version or {}).get("version_id")}
+        if kind == "battle":
+            # 使った採点方式と退避理由 (2026-10-16 実機の受入。欄を足すだけ)
+            try:
+                rec.update(scoring_fields_of(advice, scoring_mode_info()["scoring_mode"]))
+            except Exception:
+                rec.update({"scoring_mode": None, "scoring_used": None, "fallback_reason": None})
         if state is not None:
             try:
                 compact = _compact_state(state)

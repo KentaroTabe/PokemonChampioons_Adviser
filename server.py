@@ -50,7 +50,7 @@ def should_advise_selection(state: dict) -> bool:
             and not state.get("outcome")
             and not state.get("battle_active"))
 from advisor.service import Advisor
-from battle_logger import BattleLogger
+from battle_logger import BattleLogger, scoring_mode_banner
 
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
 app = FastAPI()
@@ -139,6 +139,8 @@ _display_watch = HiddenDisplayWatch(DISPLAY_HIDDEN_WARN_COUNT)
 # 配信する index.html (tools/frontend_server がリポジトリのルートを配信する)。ページの CLIENT_HTML_VERSION と照合する
 INDEX_HTML = Path(__file__).resolve().parent / "index.html"
 print(f"[server] 配信する index.html の版: {served_html_version(INDEX_HTML)}")
+# 採点方式 (2026-10-16 実機の受入: 接続テストで使った方式を起動ログにも残す。対戦ログは version 行・advice 行)
+print(f"[server] {scoring_mode_banner()}")
 _busy = False
 _pending_frame = None      # 処理中に届いた最新フレーム (sid, data)
 _last_state_json = ""
