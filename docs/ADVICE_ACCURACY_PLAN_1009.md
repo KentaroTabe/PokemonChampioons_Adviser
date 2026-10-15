@@ -582,3 +582,11 @@ k本なら水準1−0.05/k、推定差≥0.05かつ区間下限>0で採用候補
 - 修正: 要求の種類 normal_switch / forced_switch / revive_select を区別し turns[] に request_kind を記録。蘇生先は要求の side.pokemon の合法なひんし個体から固定規則 (1 体なら確定、複数なら自分の選出順で先。採点方式は参照しない) で選ぶ。通常交代・強制交代のひんし除外は維持。受入監査に revive_select (違反ではない、件数のみ)。蘇生要求・退避・唯一の合法手のときだけ request (available_moves・候補・実行行動) を記録。
 - 確認: holdout の 2 局面を合成の要求で再現 (legacy 2 体 → skeledirge、transition 1 体 → salamencemega 確定)、実対戦 3 戦で蘇生先の HP が戻る・ランダム退避 0 (委託先)。運用側: test_sim_revive_select (9) ほか関連 7 本緑、CI 相当 失敗 0、修正後のコードで transition 条件 6 戦 (holdout 層 offset 900、診断用) の受入監査すべて 0・request_kind が通常 60 / 強制交代 10 で記録。
 - SIM_INPUTS_VERSION は据え置き (上げるなら test_sim_mega_form の版の固定も変える。判断待ち)。相手側 (bench) にパーモットがいるときの退避は未確認・範囲外。
+
+### 8.27 実機の受入の道具 (2026-10-16、feat/real-accept-tools をマージ)
+
+- `tools/real_accept.py`: 実戦ログの advice 行の局面を advice_replay と同じ間引きで決定点にし、同じ入力で legacy / transition の両方を evaluate。検査 = 合法性 (技・PP・ひんし・move_locks・交代先の自分/ひんし/未選出)、個体・形態、古い局面 (hp_stale > 30 秒などは別集計)、第一候補の一致、退避 (予算超過は別)、所要時間。表示の遅延 (決定開始 → 有効な助言の表示) は実戦ログの decision/scene/display 行から、その接続テストで使った方式について別表。閾値は config の REAL_ACCEPT_* (§8.22 の値)。出力 logs/real_accept/<日時>/。
+- 記録: version 行に scoring_mode / scoring_mode_env、battle の advice 行に scoring_mode / scoring_used / fallback_reason (欄の追加のみ)。server は起動時に方式を 1 行出す。操作パネルに「採点方式 (アドバイザー)」(uvicorn の環境変数を ps で実測)。`tools/shadow_load_check --compare-scoring` (影の計算 OFF で両方式を L→T→T→L で再生、処理率の欄)。
+- 実データ (10/15 の 1 本 + 10/9 の 6 本、advice 172 行 → 決定点 80、有効 73 / 古い局面 7、運用側で再実行 04:26): 正しさの違反 legacy 0 / transition 0。第一候補の一致 54/73 (10/15 は 20/22、10/9 は 34/51)。transition の退避 8/73 (11%、予算超過 0。委託先の実行では 1/73)。evaluate の所要時間 legacy p50 494 / p95 1,274 ms、transition p50 563 / p95 1,587 ms、同じ決定での差 p50 51 / p95 293 ms、p95 の差 +0.31 秒 (≤ 0.5 の参考値)。表示の遅延 (全部 legacy): p95 3.06 秒で基準 3.0 を僅かに超える (10/15 だけなら 2.41 秒、10/9 は 3.06 秒)、期限 10 秒内 65/66。legacy 比の増分と負荷は判定不能 (transition の実戦ログが無い)。記録の欄は 0/7 (追加前のログ)。
+- 環境変数の受け渡し: シェル起動 (`ADVICE_SCORING_MODE=transition bash scripts/start_connection_test.sh`) は渡る。launchd (操作パネルの開始・daily-deploy) と deploy.sh の再起動は渡らず legacy に戻る (コードを読んでの判断)。渡し方は判断待ち (A: deploy.sh が動作中の uvicorn の値を引き継ぐ / B: パネルの開始ボタンで方式を選ぶ / C: 追跡しないローカル設定ファイル)。
+- 未確認: 再生の legacy の evaluate p50 が約 490 ms で M1b の計測 (50〜130 ms) より遅い (原因未調査)。transition で動かした接続テストのログでは未試行。10/9 のログには move_locks が無く技の固定は照合できない。録画再生の煙試験 (8 枚 ×2) は小さすぎて判定に使えない。
