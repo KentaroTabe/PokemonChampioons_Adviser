@@ -17,9 +17,13 @@
 cd "$(dirname "$0")/.." || exit 1
 mkdir -p logs
 . scripts/lib/ports.sh
+. scripts/advice_env.sh
 load_ports
 
 echo "=== 接続テスト開始準備 ==="
+# 採点方式の設定 (config/advice.local.env → 環境変数 → legacy) を何も起動しないうちに検査する。
+# 実際に uvicorn へ渡すのは下の deploy.sh / start_all_nohup.sh (同じ scripts/advice_env.sh で決め直す)
+advice_env_resolve || exit 1
 date +%s > logs/.connection_test_start
 TRAINING_MODE=continuous
 [ -f config/training.env ] && . config/training.env

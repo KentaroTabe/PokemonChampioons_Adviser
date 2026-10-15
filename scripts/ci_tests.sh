@@ -114,6 +114,7 @@ TESTS=(
   test_party_improvements
   test_real_opponents
   test_control_panel
+  test_advice_mode
   test_team_build_regression
   test_track_progress
   test_selection_experiment

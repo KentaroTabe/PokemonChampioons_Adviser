@@ -6,6 +6,7 @@
 cd "$(dirname "$0")/.." || exit 1
 mkdir -p logs
 . scripts/lib/ports.sh
+. scripts/advice_env.sh
 load_ports
 
 set -- $(choose_port "$ADVISOR_PORT_DEFAULT" "$ADVISOR_PORT" "$ADVISOR_PATTERN")
@@ -17,8 +18,12 @@ case "$ADV_STATE" in
     if [ "$ADVISOR_PORT" != "$ADVISOR_PORT_DEFAULT" ]; then
       echo "アドバイザー: $ADVISOR_PORT_DEFAULT は別のプロセスが使用中 [$(port_owner "$ADVISOR_PORT_DEFAULT")] → $ADVISOR_PORT を使う"
     fi
-    nohup bash -c "source .venv/bin/activate && PYTHONUNBUFFERED=1 DEBUG_DUMP_FRAMES=1 RL_ADVICE_STYLE=balance uvicorn server:app_asgi --host 0.0.0.0 --port $ADVISOR_PORT" \
-      > logs/server_nohup.log 2>&1 & disown
+    # 採点方式 (config/advice.local.env → 環境変数 → legacy、scripts/advice_env.sh)。不正なら起動しない。
+    # export は uvicorn を起こすサブシェルの中だけ (この後で起こす学習ループには渡さない)
+    advice_env_resolve || exit 1
+    ( advice_env_export
+      nohup bash -c "source .venv/bin/activate && PYTHONUNBUFFERED=1 DEBUG_DUMP_FRAMES=1 RL_ADVICE_STYLE=balance uvicorn server:app_asgi --host 0.0.0.0 --port $ADVISOR_PORT" \
+        > logs/server_nohup.log 2>&1 & disown )
     echo "アドバイザー($ADVISOR_PORT): 起動";;
 esac
 

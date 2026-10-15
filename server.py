@@ -50,7 +50,13 @@ def should_advise_selection(state: dict) -> bool:
             and not state.get("outcome")
             and not state.get("battle_active"))
 from advisor.service import Advisor
-from battle_logger import BattleLogger, scoring_mode_banner
+from battle_logger import BattleLogger
+from tools.advice_mode import server_startup_check
+
+# 採点方式の検査 (2026-10-16 方式 C)。環境変数 ADVICE_SCORING_MODE が使えない値なら重い初期化の前に止める
+# (config は警告して legacy にするが、実機では黙って legacy で動かさない)。実効値は環境変数だけで決まり、
+# config/advice.local.env は表示 (設定値との食い違いの警告) にだけ使う
+_SCORING_STARTUP_LINE = server_startup_check()
 
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
 app = FastAPI()
@@ -139,8 +145,9 @@ _display_watch = HiddenDisplayWatch(DISPLAY_HIDDEN_WARN_COUNT)
 # 配信する index.html (tools/frontend_server がリポジトリのルートを配信する)。ページの CLIENT_HTML_VERSION と照合する
 INDEX_HTML = Path(__file__).resolve().parent / "index.html"
 print(f"[server] 配信する index.html の版: {served_html_version(INDEX_HTML)}")
-# 採点方式 (2026-10-16 実機の受入: 接続テストで使った方式を起動ログにも残す。対戦ログは version 行・advice 行)
-print(f"[server] {scoring_mode_banner()}")
+# 採点方式 (2026-10-16 実機の受入: 接続テストで使った方式を起動ログにも残す。対戦ログは version 行・advice 行)。
+# 1 行に 実効値・設定元 (file / env / default)・設定値 (config/advice.local.env) を出す (2026-10-16 方式 C)
+print(f"[server] {_SCORING_STARTUP_LINE}")
 _busy = False
 _pending_frame = None      # 処理中に届いた最新フレーム (sid, data)
 _last_state_json = ""

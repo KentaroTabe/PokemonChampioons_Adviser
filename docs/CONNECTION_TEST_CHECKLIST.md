@@ -674,6 +674,35 @@ churn 6→1-2件、選出picked一致、ヒステリシス動作。
       hidden 扱いにし、送信が 1〜2 fps に落ちる (10/7 の試験運転は表示の報告が全部 hidden)。表示の報告が 3 件続けて hidden に
       なると、助言ページの上部に警告バーが出る (見える状態で助言を表示すると消える)
 
+### 採点方式を変えて試験する (2026-10-16、方式 C: 追跡しないローカル設定ファイル)
+
+アドバイザーの採点方式 (`legacy` 既定 / `transition`) は `config/advice.local.env` (追跡しない。例は
+`config/advice.local.env.example`) で決める。読むのは起動スクリプトの共通の読み込み `scripts/advice_env.sh` だけで、
+`start_connection_test.sh` / `start_all_nohup.sh` / `start_servers.sh` / `deploy.sh` が uvicorn を起こす前に通す。
+操作パネルの「接続テスト開始」「更新の反映」と launchd の daily-deploy (毎朝 5:00 の `deploy.sh --force`) もこれを通るので、
+シェルの環境変数が渡らない経路でも同じ値で再起動される。規則は `tools/advice_mode.py`:
+
+- ファイルも環境変数 `ADVICE_SCORING_MODE` も無し → `legacy` (設定元 `default`)。ファイルだけ → 設定元 `file`。環境変数だけ → `env`
+- ファイルと環境変数が両方あって値が違う、使えない値、`ADVICE_SCORING_MODE` 以外の鍵 → **エラーで起動しない**
+  (deploy.sh はアドバイザーを止める前に中止するので、稼働中のプロセスはそのまま残る)
+- `champions_agent/config.py` と測定の子プロセス (usefulness_p1 の check_advisor_player、arc_remeasure、学習) はこのファイルを
+  読まない (条件ごとの環境変数で明示する)。ファイルを置いたまま測定を回しても測定の条件は変わらない
+
+正式な試験の手順:
+
+- [ ] `config/advice.local.env` に 1 行 `ADVICE_SCORING_MODE=transition` を書く
+      (`cp config/advice.local.env.example config/advice.local.env` して値を書き換えてもよい)
+- [ ] 再起動する: 操作パネルの「接続テスト開始」(アドバイザーが動いていれば中で deploy.sh が再起動する) か
+      `bash scripts/start_connection_test.sh`。テスト中でなければ「更新の反映」でもよい
+- [ ] 操作パネルの「採点方式 (アドバイザー)」で **設定値 = 実効値 = transition、設定元 file** を確かめる
+      (設定値と実効値が違うと警告バーと「設定値と実効値が違う (再起動していない)」が出る)
+- [ ] 起動ログ (`logs/server_nohup.log`) の
+      `[server] 採点方式: 実効値 transition / 設定元 file / 設定値 transition (config/advice.local.env)` を確かめる (⚠ が無いこと)
+- [ ] 1 戦目の対戦ログ (`logs/battles/*.jsonl`) の version 行で `"scoring_mode": "transition"`・`"scoring_mode_source": "file"`
+      を確かめる (advice 行の `scoring_mode` / `scoring_used` / `fallback_reason` も同じ方式で書かれる)
+- [ ] 終わったらファイルを `ADVICE_SCORING_MODE=legacy` に戻すか削除して、再起動 (「更新の反映」等) する。
+      **戻さないと翌朝の daily-deploy の再起動後も transition のまま動く**。パネルで 設定値 = 実効値 = legacy を確かめる
+
 ## 1. 追従テスト (今回のメイン): 全操作をアドバイス通りに行う
 
 1決定 = 1テストケースとして扱う。人間の判断を混ぜないことで、
