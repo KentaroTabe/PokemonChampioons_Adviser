@@ -97,6 +97,14 @@
     top_species / top_score / second_species / second_score (照合の 1 位・2 位と見た目のスコア), margin (1 位と 2 位の差)}]
   hp_reject.opponent の reason に "watch_right_big_increase" (様子見画面の右列で、交代の文言なしに WATCH_OPP_BIG_INCREASE を
     超えて増えた読み。書かずに残す。row / species / method / score / hp_before つき)
+2026-10-15 (fix/ct-1015。欄を足すだけ。既存の欄の意味は変えない):
+  scene 行の watch_opp_rows の各行に "candidates" (色照合の候補の種族 id。選出済みと判明した個体が BSS_PICK_COUNT 体以上なら
+    その個体だけ) と、written の値 "watch_right_duplicate_value" (元の HP が無い枠へ、別の枠が既に持つ値を書かなかった)
+  hp_reject.opponent の reason に "watch_right_duplicate_value" (上の見送り。dup_slot / dup_species = 同じ値を持つ枠と種族)
+  hp_reject.player に "cur_only": [現在値, 既知の最大 HP] (分母の読みが外れて捨てた読みのうち、現在値だけを読んで使ったもの)
+  scene 行の state の自分の個体に "hp_source": "cur_only" (現在値だけの読みで確定した HP。推定の印 hp_estimated は付けない)
+  my_hp_trace の rows の decision が commit / pending_stable で reason が "cur_only (<捨てた理由>)" の行と、その行の欄
+    "cur_only": [現在値, 既知の最大 HP]
 """
 from __future__ import annotations
 
@@ -501,6 +509,9 @@ def scene_row_state(state: dict) -> dict:
         for row, p in zip(d[side]["party"], (state.get(side) or {}).get("party") or []):
             if p.get("hp_estimated"):
                 row["hp_estimated"] = True
+                row["hp_source"] = p.get("hp_source")
+            elif p.get("hp_source"):
+                # 実読みの出所の印 (現在値だけの読み "cur_only"。2026-10-15 で追加。推定の印は付けない)
                 row["hp_source"] = p.get("hp_source")
             row["hp_read_ts"] = p.get("hp_read_ts")
     # 様子見画面の右列の行ごとの読み (2026-10-09 fix/hp-paths。scene が watch のときだけ)

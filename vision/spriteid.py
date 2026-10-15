@@ -26,8 +26,34 @@ _sprite_cache: dict = {}
 _real_cache: Optional[dict] = None
 
 
-def _load_sprite(num: int):
-    """図鑑番号のスプライトを正規化して返す (bgr, mask) or None"""
+def mega_sprite_stem(species_id: Optional[str], num: int) -> Optional[str]:
+    """メガ形態の種族 id のスプライトのファイル名 (拡張子なし) (純粋)。メガ形態でなければ None。
+    置き場の形態違いの名前 ('412-sandy' 等) に合わせて、dragonitemega → '149-mega'、charizardmegax → '6-mega-x'"""
+    import re
+    m = re.match(r"^.+mega([xyz]?)$", species_id or "")
+    if not m:
+        return None
+    return f"{num}-mega" + (f"-{m.group(1)}" if m.group(1) else "")
+
+
+def sprite_variants(species_id: Optional[str], num: int) -> list:
+    """照合に使う図鑑スプライト [(bgr, mask)] (2026-10-15)。メガ形態の種族 id なら、置き場にメガ形態のスプライト
+    (mega_sprite_stem) があればそれを先に、図鑑番号のスプライト (通常形態の見た目) を後に並べる。図鑑番号はメガの前後で同じ
+    (dragonitemega も 149) なので、従来はメガ後の個体も通常形態の見た目だけで照合していた。メガ形態のファイルが無ければ従来どおり"""
+    out = []
+    stem = mega_sprite_stem(species_id, num)
+    if stem:
+        mega = _load_sprite(stem)
+        if mega is not None:
+            out.append(mega)
+    base = _load_sprite(num)
+    if base is not None:
+        out.append(base)
+    return out
+
+
+def _load_sprite(num):
+    """図鑑番号 (または形態違いのファイル名 '149-mega' 等) のスプライトを正規化して返す (bgr, mask) or None"""
     if num in _sprite_cache:
         return _sprite_cache[num]
     path = TEMPLATE_DIR / f"{num}.png"
@@ -129,15 +155,17 @@ def identify_species_color(icon_crop, candidates: list,
         sp = dex.species(sid)
         if sp is None:
             continue
-        sprite = _load_sprite(sp["num"])
-        if sprite is None:
+        sprites = sprite_variants(sid, sp["num"])
+        if not sprites:
             continue
-        t_bgr, t_mask = sprite
-        hist_corr = max(0.0, float(cv2.compareHist(q_hist, _hist(t_bgr, t_mask),
-                                                    cv2.HISTCMP_CORREL)))
-        hamming = int(np.count_nonzero(q_hash != _dhash(t_bgr, t_mask)))
-        dhash_sim = 1.0 - hamming / q_hash.size
-        visual = 0.6 * hist_corr + 0.4 * dhash_sim
+        # メガ形態のスプライトがあれば、通常形態との良い方を採る (2026-10-15。式と閾値は従来どおり)
+        visual = 0.0
+        for t_bgr, t_mask in sprites:
+            hist_corr = max(0.0, float(cv2.compareHist(q_hist, _hist(t_bgr, t_mask),
+                                                        cv2.HISTCMP_CORREL)))
+            hamming = int(np.count_nonzero(q_hash != _dhash(t_bgr, t_mask)))
+            dhash_sim = 1.0 - hamming / q_hash.size
+            visual = max(visual, 0.6 * hist_corr + 0.4 * dhash_sim)
         total = visual * (0.8 + 0.2 * min(prior * 2, 1.0))
         scored.append((total, visual, sid, ja))
 

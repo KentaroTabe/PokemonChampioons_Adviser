@@ -20,6 +20,9 @@ from champions_agent.config import HP_BAR_ESTIMATE_STABLE_FRAMES, HP_BAR_ESTIMAT
 
 # 推定値の出所 (PokemonState.hp_source)
 HP_SOURCE_BAR = "bar"
+# 現在値だけの読み (2026-10-15、vision.extractors.my_cur_only_candidate): 分母の読みが外れたが、現在値と既知の最大 HP が
+# バーと整合したので、最大 HP は既知の値を使って入れた実測。推定の印 (hp_estimated / hp_uncertain) は立てない
+HP_SOURCE_CUR_ONLY = "cur_only"
 
 # 推定を入れない理由 (estimate_block_reason の戻り値。テストと調査用)
 BLOCK_NO_SPECIES = "species_unknown"       # 場の個体の種族が未特定
