@@ -346,19 +346,66 @@ def correspondence_record(corr: Optional[dict]) -> dict:
                           "first_mismatch": c.get("first_mismatch")}}
 
 
-def mega_used_of(battle, own_vals: list, opp_vals: list) -> dict:
+def _battle_events(battle):
+    """poke-env の対戦の記録 (終わったターンの observations と今のターンの current_observation) の events を古い順に (純粋)"""
+    obs = getattr(battle, "observations", None) or {}
+    cur = getattr(battle, "current_observation", None) or getattr(battle, "_current_observation", None)
+    seq = [obs[k] for k in sorted(obs)] if isinstance(obs, dict) else []
+    if cur is not None and not any(o is cur for o in seq):
+        seq.append(cur)
+    for o in seq:
+        for ev in (getattr(o, "events", None) or []):
+            ev = list(ev or [])
+            while ev and ev[0] == "":            # poke-env の split_message は先頭が空
+                ev = ev[1:]
+            if ev:
+                yield ev
+
+
+def mega_forms_seen(battle) -> dict:
+    """対戦の記録から、メガシンカした個体の {"p1: 名前": メガ形態の種族 id} (純粋。2026-10-15 M3c)。
+    poke-env は detailschange / -mega の後も個体の species を基本種のまま持つ (forme_change / mega_evolve が species を書き換えない。
+    自分の個体は次の要求の details で、相手の個体は交代で出し直したときの details でメガ形態になる)。そのあいだの決定で
+    メガ後の個体を基本種の種族値・タイプで評価しないよう、記録から形態を引く。
+    detailschange の種族がメガ形態 (advisor.gimmick.is_mega_form) ならそれ、無ければ -mega の石から (gimmick.stone_form_of)"""
+    from advisor.gimmick import _toid, stone_form_of
+    out: dict = {}
+    for ev in _battle_events(battle):
+        if len(ev) < 3:
+            continue
+        kind, who = str(ev[0]), _norm_ident(ev[1])
+        if kind == "detailschange":
+            sid = _toid(str(ev[2]).split(",")[0])
+            if is_mega_form(sid):
+                out[who] = sid
+        elif kind == "-mega" and who not in out:
+            base = _toid(ev[2])
+            stone = _toid(ev[3]) if len(ev) > 3 else None
+            form = stone_form_of(base, item_id=stone) if base else None
+            if form:
+                out[who] = form
+    return out
+
+
+def mega_used_of(battle, own_vals: list, opp_vals: list, forms: Optional[dict] = None) -> dict:
     """各陣営がメガシンカの権利を使ったか (純粋)。poke-env の記録 (-mega のイベントで立つ battle.used_mega_evolve /
-    opponent_used_mega_evolve) か、個体の種族がメガ形態 (advisor.gimmick.is_mega_form: 石の表のメガ後の種族 id) になったかで決める。
+    opponent_used_mega_evolve) か、個体の種族がメガ形態 (advisor.gimmick.is_mega_form: 石の表のメガ後の種族 id) になったか、
+    記録からメガ形態が分かった個体 (forms = mega_forms_seen の値、"p1: 名前" → id) が居るかで決める。
     2026-10-15 M3c: 以前は種族 id に "mega" を含むかの部分一致で、meganium (メガニウム) / yanmega (メガヤンマ) を出した陣営が
     対戦の最初から使用済みになっていた (docs/ADVICE_DIAG_40_20261015.md §7)"""
+    role = getattr(battle, "player_role", None)
+    seen = {k[:2] for k in (forms or {})}
+    opp_role = {"p1": "p2", "p2": "p1"}.get(role)
     return {"player": bool(getattr(battle, "used_mega_evolve", False))
-            or any(is_mega_form(p.species or "") for p in own_vals),
+            or any(is_mega_form(p.species or "") for p in own_vals) or (role in seen),
             "opponent": bool(getattr(battle, "opponent_used_mega_evolve", False))
-            or any(is_mega_form(p.species or "") for p in opp_vals)}
+            or any(is_mega_form(p.species or "") for p in opp_vals) or (opp_role in seen)}
 
 
-def _mon_entry(p, own: bool, resolver, active: bool, available=None, picked: bool = True) -> dict:
-    sid = p.species or ""
+def _mon_entry(p, own: bool, resolver, active: bool, available=None, picked: bool = True,
+               species_override: Optional[str] = None) -> dict:
+    """species_override: 対戦の記録から分かったメガ形態の種族 id (mega_forms_seen)。poke-env の species が基本種のままのときに使う"""
+    sid = species_override or p.species or ""
     status = p.status
     st = _STATUS_MAP.get(getattr(status, "name", str(status)).upper()) \
         if status is not None else None
@@ -405,16 +452,17 @@ def _mon_entry(p, own: bool, resolver, active: bool, available=None, picked: boo
 
 
 def _side_state(team_values, active, own: bool, side_conditions, resolver,
-                available=None, picked_mask=None) -> dict:
+                available=None, picked_mask=None, species_overrides=None) -> dict:
     """picked_mask: 自分側の個体ごとの選出の印 (team_values と同じ並び)。None なら全個体を選出扱い (従来どおり)。
-    remaining は選出した個体のうちの生存数"""
+    remaining は選出した個体のうちの生存数。species_overrides: 個体ごとのメガ形態の種族 id (同じ並び、無ければ None。2026-10-15 M3c)"""
     party, active_index = [], None
     mask = list(picked_mask) if picked_mask is not None else [True] * len(team_values)
+    over = list(species_overrides) if species_overrides is not None else [None] * len(team_values)
     for i, p in enumerate(team_values):
         is_active = p is active
         if is_active:
             active_index = i
-        party.append(_mon_entry(p, own, resolver, is_active, available, picked=mask[i]))
+        party.append(_mon_entry(p, own, resolver, is_active, available, picked=mask[i], species_override=over[i]))
     names = _names(side_conditions)
     counts = {getattr(k, "name", str(k)).upper(): v
               for k, v in (side_conditions or {}).items()}
@@ -554,6 +602,14 @@ def switchable_check(battle, state: Optional[dict]) -> Optional[dict]:
     return {"ok": exp == avail, "state": exp, "poke_env": avail}
 
 
+def _form_override(key, p, forms: dict) -> Optional[str]:
+    """記録のメガ形態 (forms、"p1: 名前" → id) が poke-env の species と違えばその id、同じか無ければ None (純粋)"""
+    form = forms.get(_norm_ident(key))
+    if not form or form == (getattr(p, "species", None) or ""):
+        return None
+    return form
+
+
 def battle_to_state(battle, resolver=None) -> Optional[dict]:
     """poke-env Battle -> 助言エンジンの状態辞書"""
     active = battle.active_pokemon
@@ -572,7 +628,12 @@ def battle_to_state(battle, resolver=None) -> Optional[dict]:
             trick_room = True
     own_vals = list(battle.team.values())
     opp_vals = list(battle.opponent_team.values())
-    opp_side = _side_state(opp_vals, opp_active, False, battle.opponent_side_conditions, resolver)
+    # メガ後の個体の形態 (2026-10-15 M3c): poke-env の species が基本種のままでも、記録の detailschange / -mega からメガ形態にする
+    forms = mega_forms_seen(battle)
+    own_over = [_form_override(k, p, forms) for k, p in battle.team.items()]
+    opp_over = [_form_override(k, p, forms) for k, p in battle.opponent_team.items()]
+    opp_side = _side_state(opp_vals, opp_active, False, battle.opponent_side_conditions, resolver,
+                           species_overrides=opp_over)
     # 相手の選出数 (シミュレータの対戦は BSS の 3 体選出)。opponent_team は場に出た個体だけなので remaining は「判明した生存数」で、
     # 未判明の残りが分からない。transition 方式の局面評価 (advisor.scoring_transition) が未判明の残りを数えるのに使う
     # (legacy の採点はこの欄を読まない。2026-10-09 M2b)
@@ -584,13 +645,13 @@ def battle_to_state(battle, resolver=None) -> Optional[dict]:
     # (登録の補完で選べない技を戻さない)、交代先は legal_switch_indices で示す。要求が無ければ従来どおり (選べる技に絞る)
     leg = sim_legality(battle)
     player = _side_state(own_vals, active, True, battle.side_conditions, resolver,
-                         None if leg["known"] else available, picked_mask=picked_mask)
+                         None if leg["known"] else available, picked_mask=picked_mask, species_overrides=own_over)
     state = {
         "scene": "command",
         "turn": battle.turn,
         "field": {"weather": weather, "terrain": terrain,
                   "trick_room": trick_room},
-        "mega_used": mega_used_of(battle, own_vals, opp_vals),
+        "mega_used": mega_used_of(battle, own_vals, opp_vals, forms),
         "player": player,
         "opponent": opp_side,
     }

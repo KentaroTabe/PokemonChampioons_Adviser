@@ -1,6 +1,6 @@
 """シミュレータの入力の誤り 2 件の修正 (2026-10-15 M3c、docs/ADVICE_DIAG_40_20261015.md §7) のテスト。
 
-(1) メガ形態の判定: advisor-as-player (champions_agent.env.advisor_player) が種族 id に "mega" を含むかの部分一致で is_mega と
+(1) メガ形態の判定 (追加: メガ後の個体の形態は対戦の記録の detailschange / -mega から): advisor-as-player (champions_agent.env.advisor_player) が種族 id に "mega" を含むかの部分一致で is_mega と
     mega_used を決めており、meganium (メガニウム) / yanmega (メガヤンマ) がメガ前からメガ扱い、その陣営の mega_used が対戦の
     最初から True だった。advisor.gimmick.is_mega_form (石の表のメガ後の種族 id) と poke-env のメガの記録に統一した。
 (2) tools.check_advisor_player --models-dir: 以前は rl_bridge にしか効かず、相手の操縦 (rl) と選出の埋め込みは import 時の
@@ -174,6 +174,78 @@ def test_opp_policy_info():
     print("test_opp_policy_info OK")
 
 
+def _real_battle():
+    from poke_env.battle import Battle
+    b = Battle("battle-mega-2", "me", logging.getLogger("test_sim_mega_form"), gen=9)
+    b.player_role = "p1"
+    return b
+
+
+def _party(st, side):
+    return [(m["species_id"], m["is_mega"]) for m in st[side]["party"]]
+
+
+def test_opponent_mega_form_from_events():
+    """相手のメガ後: poke-env の species は基本種のまま (detailschange / -mega は species を書き換えない) でも、状態の species_id は
+    メガ形態・is_mega = True・形態の解決 (gimmick.resolve_form) の種族値がメガのもの。メガ前は基本種"""
+    from advisor.dex import get_dex
+    from advisor.gimmick import resolve_form
+    b = _real_battle()
+    b.parse_message(["", "switch", "p1a: Garchomp", "Garchomp, L50, F", "100/100"])
+    b.parse_message(["", "switch", "p2a: Lopunny", "Lopunny, L50, F", "100/100"])
+    st = AP.battle_to_state(b, resolver)
+    assert _party(st, "opponent") == [("lopunny", False)], _party(st, "opponent")
+    assert resolve_form(st["opponent"]["party"][0]).species == "lopunny"
+    assert st["mega_used"] == {"player": False, "opponent": False}
+    b.parse_message(["", "detailschange", "p2a: Lopunny", "Lopunny-Mega, L50, F"])
+    b.parse_message(["", "-mega", "p2a: Lopunny", "Lopunny", "Lopunnite"])
+    assert b.opponent_active_pokemon.species == "lopunny"        # poke-env 側は基本種のまま (この修正の前提)
+    st = AP.battle_to_state(b, resolver)
+    assert _party(st, "opponent") == [("lopunnymega", True)], _party(st, "opponent")
+    form = resolve_form(st["opponent"]["party"][0])
+    dex = get_dex()
+    assert form.species == "lopunnymega" and form.is_mega
+    assert dex.species(form.species)["baseStats"] == dex.species("lopunnymega")["baseStats"] != dex.species("lopunny")["baseStats"]
+    assert st["mega_used"] == {"player": False, "opponent": True}
+    # ターンをまたいでも (終わったターンの observations に入っても) 引ける
+    b.parse_message(["", "turn", "2"])
+    st = AP.battle_to_state(b, resolver)
+    assert _party(st, "opponent") == [("lopunnymega", True)], _party(st, "opponent")
+    # 交代で出し直すと poke-env の species もメガ形態 (details)。上書きは要らず同じ結果
+    b.parse_message(["", "switch", "p2a: Meganium", "Meganium, L50, F", "100/100"])
+    b.parse_message(["", "switch", "p2a: Lopunny", "Lopunny-Mega, L50, F", "80/100"])
+    st = AP.battle_to_state(b, resolver)
+    assert ("lopunnymega", True) in _party(st, "opponent") and ("meganium", False) in _party(st, "opponent"), _party(st, "opponent")
+    print("test_opponent_mega_form_from_events OK")
+
+
+def test_own_mega_form_from_events_and_stone():
+    """自分のメガ後 (次の要求の details が来る前の決定) も記録からメガ形態。detailschange が無く -mega だけなら石から
+    (charizardite x → charizardmegax)"""
+    b = _real_battle()
+    b.parse_message(["", "switch", "p1a: Charizard", "Charizard, L50, F", "100/100"])
+    b.parse_message(["", "switch", "p2a: Yanmega", "Yanmega, L50, F", "100/100"])
+    st = AP.battle_to_state(b, resolver)
+    assert _party(st, "player") == [("charizard", False)] and _party(st, "opponent") == [("yanmega", False)]
+    b.parse_message(["", "-mega", "p1a: Charizard", "Charizard", "Charizardite X"])
+    st = AP.battle_to_state(b, resolver)
+    assert _party(st, "player") == [("charizardmegax", True)], _party(st, "player")
+    assert _party(st, "opponent") == [("yanmega", False)]
+    assert st["mega_used"] == {"player": True, "opponent": False}, st["mega_used"]
+    print("test_own_mega_form_from_events_and_stone OK")
+
+
+def test_mega_forms_seen_pure():
+    """記録 (終わったターン + 今のターン) から {"p1: 名前": メガ形態}。メガ形態でない detailschange は数えない"""
+    obs = {1: NS(events=[["", "detailschange", "p2a: Lopunny", "Lopunny-Mega, L50, F"]]),
+           2: NS(events=[["", "detailschange", "p1a: Zygarde", "Zygarde-Complete, L50"]])}
+    cur = NS(events=[["", "-mega", "p1a: Charizard", "Charizard", "Charizardite Y"]])
+    b = NS(observations=obs, current_observation=cur, player_role="p1")
+    assert AP.mega_forms_seen(b) == {"p2: Lopunny": "lopunnymega", "p1: Charizard": "charizardmegay"}, AP.mega_forms_seen(b)
+    assert AP.mega_forms_seen(NS()) == {}
+    print("test_mega_forms_seen_pure OK")
+
+
 if __name__ == "__main__":
     test_mon_entry_mega_form()
     test_battle_to_state_meganium_not_mega()
@@ -183,3 +255,6 @@ if __name__ == "__main__":
     test_models_dir_env_pure()
     test_models_dir_subprocess()
     test_opp_policy_info()
+    test_opponent_mega_form_from_events()
+    test_own_mega_form_from_events_and_stone()
+    test_mega_forms_seen_pure()
