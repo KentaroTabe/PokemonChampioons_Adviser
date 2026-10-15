@@ -46,6 +46,19 @@
     範囲の先頭、自チームの抽選も check_advisor_player が同じ数だけ進める)。各 part の時間上限は全体の上限の按分。条件表の part に
     範囲を残し、tools.usefulness_verdict に全 part の出力を渡して結合し、最終判定は 1 回だけ出す (各 part に両条件が揃い、範囲が
     重複しないことを検査)。予備測定 (--prelim) と旧固定プール (--team general-pinned、抽選を進められない) には使えない。
+2026-10-15 レビュー (封印 holdout 層での 1 回の確認、docs/ADVICE_ACCURACY_PLAN_1009.md §8.22):
+  - --tier search|holdout (既定 search = 従来どおり fold B)。holdout は --seed の明示が要る (search の P1_SEED とは別)。fold は使わない
+    (--opp-split は FILE:holdout、条件表の opponents に fold / fold_label を出さず tier holdout と n_teams_in_tier)。相手列は
+    holdout 層の全 id を seed で並べた列 (opponent_sequence)。purpose に「封印 holdout 層での 1 回の確認」。--prelim は不可、--part は可
+    (分割しても判定は 1 回)。既定の出力先は p1_holdout_<YYYYMMDD_HHMM>。
+  - 起動前検査 (holdout): 各条件のコマンドの --opp-split / --opp-seed / --opp-offset / --battles から check_advisor_player と同じ
+    相手列を作り、全件が holdout 層の id で本文があり、search / selection 層と重ならないこと。開封履歴 (holdout_usage.jsonl、
+    tools.team_build.holdout.USAGE_LOG。--holdout-usage-log で替えられる) に、同じ封印 id (分割の sealed_id) で候補の鍵
+    (比較の条件名を + でつないだもの @ git commit の先頭 8 桁、例 scoring:transition@cc0c8029) の方式名 (「@」より前) が一致する行が
+    あれば、commit が違っても「使用済み」で起動しない (同じ方式で commit を変えて測り直すのも止める)。例外は 2 夜分割の別の part
+    (同じ seed・同じ分割数・違う k) の行だけで、同じ 1 回の確認の続きとして許す。
+    本番の起動時 (検査を通った後・子プロセスの起動前) に 1 行追記する: {sealed_id, candidate_key, run_id = 出力 dir 名, at, purpose,
+    part, seed, kind}。dry-run では追記しない。
 開始時刻の注意 (ツールでは強制しない): launchd の track-progress (毎日 21:50、17〜34 分) の後に始め、06:30 の usage-update の前に終える。
 
 純粋な部分 (条件表・コマンド・環境・進捗・終了時の更新) は tests/test_usefulness_p1.py で確かめる。
@@ -70,10 +83,13 @@ from champions_agent.config import (
     P1_SCORING_TEAM_SHA16, P1_SCORING_TIME_LIMIT_SEC, P1_TEAM_DEFAULT,
     P1_TEAM_SHA16, P1_TEAM_SOURCES, P1_TERMINATE_GRACE_SEC, P1_TIME_LIMIT_SEC, P1_WEIGHTS, MY_TEAM_DISABLED_ENV, SHOWDOWN_PORT,
     SIM_ACCEPT_LIMITS, SIM_INPUTS_VERSION, TRAINING_BATTLE_FORMAT, TRANSITION_SENSITIVITY_ENV)
-from tools.usefulness_verdict import TEAM_LABELS, cond_file, cond_name, corrected_z
+from tools.usefulness_verdict import HOLDOUT_TIER, TEAM_LABELS, cond_file, cond_name, corrected_z, holdout_banner
 
 REPO = Path(__file__).resolve().parent.parent
 FOLD_LABELS = {BUILD_FOLD_ADAPT: "A", BUILD_FOLD_EVAL: "B", BUILD_FOLD_VALIDATE: "V"}
+# 相手の層 (2026-10-15 レビュー): search = fold で選ぶ方式の比較用 (従来)、holdout = 封印 holdout 層での 1 回の確認
+TIERS = (P1_SPLIT_TIER, HOLDOUT_TIER)
+HOLDOUT_USAGE_KIND = "usefulness_p1"
 # 経路に効く環境変数 (設定されていれば条件表に残す)
 PATH_ENV_VARS = ("RL_ADVICE_STYLE", "RL_POLICY_SOURCE", "RL_BLEND_WEIGHT", "SELECTION_FEATURES", "SHOWDOWN_PORT",
                  "ADVICE_SCORING_MODE")
@@ -167,10 +183,12 @@ def resolve_battles(battles: Optional[int], prelim: bool) -> int:
     return int(P1_PRELIM_BATTLES if prelim else P1_FINAL_BATTLES)
 
 
-def default_out_dir(now: float, prelim: bool, root: Path = REPO / P1_OUT_ROOT, part: Optional[tuple] = None) -> Path:
-    """既定の出力先 (純粋): logs/usefulness/p1_<YYYYMMDD_HHMM> (予備は p1_prelim_...、part k/n は末尾に _part<k>of<n>)"""
+def default_out_dir(now: float, prelim: bool, root: Path = REPO / P1_OUT_ROOT, part: Optional[tuple] = None,
+                    tier: str = P1_SPLIT_TIER) -> Path:
+    """既定の出力先 (純粋): logs/usefulness/p1_<YYYYMMDD_HHMM> (予備は p1_prelim_...、封印 holdout 層は p1_holdout_...、
+    part k/n は末尾に _part<k>of<n>)"""
     stamp = time.strftime("%Y%m%d_%H%M", time.localtime(now))
-    name = f"p1_prelim_{stamp}" if prelim else f"p1_{stamp}"
+    name = f"p1_prelim_{stamp}" if prelim else (f"p1_holdout_{stamp}" if tier == HOLDOUT_TIER else f"p1_{stamp}")
     if part:
         name += f"_part{int(part[0])}of{int(part[1])}"
     return Path(root) / name
@@ -218,24 +236,130 @@ def resolve_time_limit(time_limit_sec: Optional[int], compare: str, part_battles
     return limit
 
 
-def build_command(weight: float, out_dir: Path, team_file: Optional[Path], split_file: Path, fold: int, seed: int, battles: int,
-                  selection_model: Path, pin_dir: str, python: str = sys.executable, offset: int = P1_OPP_OFFSET,
+def build_command(weight: float, out_dir: Path, team_file: Optional[Path], split_file: Path, fold: Optional[int], seed: int,
+                  battles: int, selection_model: Path, pin_dir: str, python: str = sys.executable, offset: int = P1_OPP_OFFSET,
                   tier: str = P1_SPLIT_TIER, cond: Optional[str] = None, own_pool: Optional[Path] = None) -> list:
     """1 条件の tools.check_advisor_player のコマンド (純粋)。cond (条件名) が無ければ重みの条件名 rl<W>。
     team_file が None (一般的なチーム) なら --team-file を渡さない。own_pool (実験専用の構築プール、2026-10-09 M2d) があれば
-    --own-pool で渡す (無ければ check_advisor_player の既定 = RankedTeambuilder)"""
+    --own-pool で渡す (無ければ check_advisor_player の既定 = RankedTeambuilder)。
+    fold が None (封印 holdout 層、2026-10-15) なら --opp-split は FILE:TIER (fold なし = 層の全 id)"""
     c = cond_file(cond or cond_name(weight))
     team_args = ["--team-file", str(team_file)] if team_file is not None else []
     if own_pool is not None:
         team_args += ["--own-pool", str(own_pool)]
+    split_arg = f"{split_file}:{tier}" if fold is None else f"{split_file}:{tier}:{int(fold)}"
     return [python, "-m", "tools.check_advisor_player",
             "--battles", str(int(battles)), "--opp-seed", str(int(seed)), "--opp-offset", str(int(offset)),
-            "--opp-split", f"{split_file}:{tier}:{int(fold)}",
+            "--opp-split", split_arg,
             "--opp-pilot", P1_OPP_PILOT, "--opp-pick-policy", P1_OPP_PICK_POLICY, "--pick-policy", P1_PICK_POLICY,
             *team_args, "--selection-model", str(selection_model), "--models-dir", str(pin_dir),
             "--rl-blend", f"{float(weight):g}", "--skip-random", "--belief-k", str(P1_BELIEF_K),
             "--json", str(Path(out_dir) / f"{c}.json"), "--battle-log", str(Path(out_dir) / f"{c}.battles.jsonl"),
             "--candidate-id", f"p1_{c}"]
+
+
+def command_opponent_spec(cmd: Sequence[str]) -> dict:
+    """check_advisor_player のコマンド → 相手列の指定 {split_file, tier, fold, seed, offset, battles} (純粋。2026-10-15)。
+    --opp-split FILE:TIER[:FOLD] の読み方は check_advisor_player と同じ (TIER の既定 selection、FOLD の既定 None)"""
+    args = list(cmd)
+
+    def val(flag):
+        return args[args.index(flag) + 1] if flag in args and args.index(flag) + 1 < len(args) else None
+    split = val("--opp-split")
+    parts = split.split(":") if split else []
+    return {"split_file": parts[0] if parts else None, "tier": parts[1] if len(parts) > 1 else ("selection" if parts else None),
+            "fold": int(parts[2]) if len(parts) > 2 else None,
+            "seed": int(val("--opp-seed")) if val("--opp-seed") is not None else None,
+            "offset": int(val("--opp-offset") or 0), "battles": int(val("--battles") or 0)}
+
+
+def planned_opponent_ids(doc: dict, spec: dict) -> list:
+    """コマンドの相手列の指定 (command_opponent_spec) → check_advisor_player が作るのと同じ相手列 (純粋)。
+    check_advisor_player は不合法な構築を飛ばす余裕を持たせて 2 × (offset + n) + 層の件数 の長さの列を作る (全件を返す)"""
+    from tools.team_build.opponents import opponent_sequence, tier_ids
+    ids = tier_ids(doc, spec["tier"], spec["fold"])
+    return opponent_sequence(ids, 2 * (int(spec["offset"]) + int(spec["battles"])) + len(ids), spec["seed"] or 0)
+
+
+def opponent_tier_check(seq: Sequence[str], doc: dict, head: int, tier: str = HOLDOUT_TIER) -> dict:
+    """相手列が全件 tier 層 (既定 holdout) に属するかの検査 (純粋。2026-10-15)。seq = 実際の相手列 (planned_opponent_ids)、
+    head = 先頭から実際に使う件数 (offset + 対戦数。不合法を飛ばすとその先も使うので、層の検査は seq の全件で行う)。
+    層に無い id・本文 (texts) の無い id・他の層 (search / selection) と重なる id があれば reasons に"""
+    from tools.team_build.opponents import tier_ids
+    layer = set(tier_ids(doc, tier))
+    others = set()
+    for t, v in (doc.get("tiers") or {}).items():
+        if t != tier:
+            others |= set(v or [])
+    texts = doc.get("texts") or {}
+    seq = list(seq)
+    outside = sorted({x for x in seq if x not in layer})
+    no_text = sorted({x for x in seq if x not in texts})
+    overlap = sorted(layer & others)
+    used = seq[:int(head)]
+    reasons = []
+    if not layer:
+        reasons.append(f"{tier} 層が空")
+    if len(seq) < int(head):
+        reasons.append(f"相手列が {len(seq)} 件しか無い (必要 {int(head)} 件)")
+    if outside:
+        reasons.append(f"相手列に {tier} 層に無い id が {len(outside)} 種 ({', '.join(outside[:5])})")
+    if no_text:
+        reasons.append(f"相手列に本文 (texts) の無い id が {len(no_text)} 種 ({', '.join(no_text[:5])})")
+    if overlap:
+        reasons.append(f"{tier} 層の id が他の層と重なる: {len(overlap)} 種 ({', '.join(overlap[:5])})")
+    return {"tier": tier, "n_tier_ids": len(layer), "n_checked": len(seq), "head": int(head),
+            "n_unique_in_head": len(set(used)), "outside": outside, "no_text": no_text, "overlap": overlap, "reasons": reasons}
+
+
+def holdout_candidate_key(design: dict, git_commit: Optional[str]) -> Optional[str]:
+    """開封履歴の候補の鍵 (純粋。2026-10-15): 比較の条件名を + でつないだもの @ git commit の先頭 8 桁
+    (例 scoring:transition@cc0c8029)。commit が無ければ None (開封履歴を確かめられない)"""
+    conds = [c.get("cond") for c in (design.get("comparisons") or []) if c.get("cond")]
+    if not conds or not git_commit:
+        return None
+    return f"{'+'.join(conds)}@{str(git_commit)[:8]}"
+
+
+def holdout_usage_check(rows: Sequence[dict], sealed_id: Optional[str], candidate_key: Optional[str],
+                        part: Optional[dict] = None, seed: Optional[int] = None) -> dict:
+    """開封履歴 (holdout_usage.jsonl の行) の判定 (純粋。2026-10-15)。同じ封印 id で、候補の鍵の方式名 (「@」より前、例
+    scoring:transition) が一致する行があれば commit が違っても「使用済み」(reasons。同じ方式で commit を変えて測り直すのも止める)。
+    例外は 2 夜分割の別の part (行の part の n が同じで k が違い、seed が同じ) の行だけで、同じ 1 回の確認の続きとして許す
+    (continued_parts)"""
+    reasons = []
+    if not sealed_id:
+        reasons.append("分割の封印 id (sealed_id) が読めず、開封履歴を確かめられない")
+    if not candidate_key:
+        reasons.append("候補の鍵 (比較の条件 @ git commit) が作れず、開封履歴を確かめられない")
+    same, cont = [], []
+    if sealed_id and candidate_key:
+        method = candidate_key.split("@", 1)[0]
+        for r in rows:
+            if r.get("sealed_id") != sealed_id:
+                continue
+            if str(r.get("candidate_key") or "").split("@", 1)[0] != method:
+                continue
+            rp = r.get("part") if isinstance(r.get("part"), dict) else None
+            if (part is not None and rp is not None and int(rp.get("n", -1)) == int(part.get("n", -2))
+                    and int(rp.get("k", -1)) != int(part.get("k", -1)) and r.get("seed") == seed):
+                cont.append(r)
+            else:
+                same.append(r)
+    if same:
+        reasons.append(f"封印 holdout {sealed_id} は方式 {candidate_key.split('@', 1)[0]} に使用済み (前回: "
+                       f"{same[-1].get('candidate_key')} {same[-1].get('run_id')} {same[-1].get('at')})。"
+                       "同じ holdout で同じ方式を測り直さない (commit が違っても)")
+    return {"sealed_id": sealed_id, "candidate_key": candidate_key, "used_before": same, "continued_parts": cont,
+            "reasons": reasons}
+
+
+def holdout_usage_row(sealed_id: str, candidate_key: str, run_id: str, at: str, purpose: str,
+                      part: Optional[dict] = None, seed: Optional[int] = None) -> dict:
+    """開封履歴に追記する 1 行 (純粋。2026-10-15)。tools.team_build.holdout の行 (sealed_id / candidate_key / run_id / at) に
+    purpose・part・seed・kind を足す (verdict は起動時には無いので書かない)"""
+    return {"sealed_id": sealed_id, "candidate_key": candidate_key, "run_id": run_id, "at": at, "purpose": purpose,
+            "part": ({"k": int(part["k"]), "n": int(part["n"])} if part else None), "seed": seed, "kind": HOLDOUT_USAGE_KIND}
 
 
 def child_environment(pin_dir: str, base: Optional[dict] = None, team_source: str = "registered",
@@ -315,11 +439,13 @@ def team_note(team: dict) -> str:
 def build_conditions(design: dict, facts: dict, battles: int, prelim: bool, seed: int, fold: int, split_file: str,
                      time_limit_sec: int, out_dir: str, commands: dict, env: dict, started_at: Optional[str],
                      notes: Sequence[str] = (), team_source: str = "registered", offset: int = P1_OPP_OFFSET,
-                     part: Optional[dict] = None) -> dict:
+                     part: Optional[dict] = None, tier: str = P1_SPLIT_TIER) -> dict:
     """条件表 (純粋)。facts = collect_facts の結果 (取得できない項目は None)。notes = 取得できなかった理由など。
     team_source = 自チームの出所 (general / registered)。RL の比較で registered (既定) なら従来と同じ条件表。
     2026-10-09 M2e: offset = 相手列の offset (part の範囲の先頭)、part = part_record (2 夜分割)。採点方式の比較には
-    時間上限と開始条件 (scoring_time) を足す"""
+    時間上限と開始条件 (scoring_time) を足す。
+    2026-10-15: tier holdout (封印 holdout 層での 1 回の確認) なら opponents に fold / fold_label を出さず tier holdout と
+    n_teams_in_tier を、purpose に holdout の 1 行を、holdout_check に facts の holdout (相手列の層の検査と開封履歴) を書く"""
     f = facts or {}
     split = f.get("split") or {}
     factor = design.get("factor", "rl")
@@ -344,6 +470,22 @@ def build_conditions(design: dict, facts: dict, battles: int, prelim: bool, seed
                                  "start_rule": "最も遅い条件の秒/戦 × final_battles + start_margin_sec ≤ time_limit_total_sec"}
     if part is not None:
         extra["part"] = dict(part)
+    holdout = tier == HOLDOUT_TIER
+    opponents = {"split_file": str(split_file), "split_sha16": split.get("sha16"), "sealed_id": split.get("sealed_id"),
+                 "sealed_id_expected": P1_SPLIT_SEALED_ID, "run_id": split.get("run_id")}
+    if holdout:
+        opponents.update(tier=HOLDOUT_TIER, n_teams_in_tier=split.get("n_teams_in_tier"))
+    else:
+        opponents.update(tier=P1_SPLIT_TIER, fold=int(fold), fold_label=FOLD_LABELS.get(int(fold)),
+                         n_teams_in_fold=split.get("n_teams_in_fold"))
+    opponents.update(seed=int(seed), offset=int(offset), pilot=P1_OPP_PILOT, pick_policy=P1_OPP_PICK_POLICY,
+                     battle_format=TRAINING_BATTLE_FORMAT)
+    if holdout:
+        banner = holdout_banner({"opponents": opponents})
+        purpose += f"。{banner}"
+        notes.append(f"相手: {banner}。fold は使わない (層の全 id を seed {int(seed)} で並べた列)。"
+                     f"開封履歴の候補の鍵 {(f.get('holdout') or {}).get('candidate_key')}")
+        extra["holdout_check"] = dict(f.get("holdout") or {}, required=True, banner=banner)
     return {**extra,
         "experiment": "P1",
         "factor": factor,
@@ -363,11 +505,7 @@ def build_conditions(design: dict, facts: dict, battles: int, prelim: bool, seed
         "season_pin": f.get("season_pin"),
         "usage_db": f.get("usage_db"),
         "real_bank": f.get("real_bank"),
-        "opponents": {"split_file": str(split_file), "split_sha16": split.get("sha16"), "sealed_id": split.get("sealed_id"),
-                      "sealed_id_expected": P1_SPLIT_SEALED_ID, "run_id": split.get("run_id"),
-                      "tier": P1_SPLIT_TIER, "fold": int(fold), "fold_label": FOLD_LABELS.get(int(fold)),
-                      "n_teams_in_fold": split.get("n_teams_in_fold"), "seed": int(seed), "offset": int(offset),
-                      "pilot": P1_OPP_PILOT, "pick_policy": P1_OPP_PICK_POLICY, "battle_format": TRAINING_BATTLE_FORMAT},
+        "opponents": opponents,
         "advisor": dict(f.get("advisor") or {}, pick_policy=P1_PICK_POLICY, belief_k=P1_BELIEF_K, skip_random=True),
         "env": env_record(env),
         # 条件ごとの環境変数 (採点方式の比較で ADVICE_SCORING_MODE を渡す。RL の比較では空)
@@ -445,6 +583,28 @@ def preflight_errors(cond: dict, out_has_results: bool = False) -> list:
         errs.append(f"Showdown がポート {sd.get('port')} で待ち受けていない (bash scripts/ensure_showdown.sh {sd.get('port')})")
     if out_has_results:
         errs.append(f"出力先に前の結果がある ({cond.get('out_dir')})。別の --out を指定する")
+    opp = cond.get("opponents") or {}
+    if opp.get("tier") == HOLDOUT_TIER:
+        # 封印 holdout 層 (2026-10-15): 予備測定は不可、層が空でない、相手列が全件 holdout 層、開封履歴に同じ組が無い
+        if cond.get("prelim"):
+            errs.append("封印 holdout 層は 1 回だけ測る (--prelim は使えない)")
+        if not opp.get("n_teams_in_tier"):
+            errs.append(f"分割ファイルの holdout 層が空か読めない ({opp.get('split_file')})")
+        hc = cond.get("holdout_check")
+        if not isinstance(hc, dict):
+            errs.append("相手列の層の検査と開封履歴の確認 (holdout_check) が条件表に無い")
+        else:
+            seq = hc.get("sequence_check")
+            if not isinstance(seq, dict) or not seq:
+                errs.append("相手列の層の検査 (holdout_check.sequence_check) が無い")
+            else:
+                for c, r in seq.items():
+                    for x in (r or {}).get("reasons") or []:
+                        errs.append(f"相手列の層の検査 NG ({c}): {x}")
+            for x in hc.get("errors") or []:
+                errs.append(f"holdout の確認ができない: {x}")
+            for x in hc.get("reasons") or []:
+                errs.append(f"開封履歴: {x}")
     return errs
 
 
@@ -454,7 +614,12 @@ def preflight_warnings(cond: dict) -> list:
     opp = cond.get("opponents") or {}
     if opp.get("sealed_id") and opp.get("sealed_id") != opp.get("sealed_id_expected"):
         warns.append(f"分割の封印 id {opp.get('sealed_id')} が期待 {opp.get('sealed_id_expected')} と違う")
-    if opp.get("fold_label") != "B":
+    if opp.get("tier") == HOLDOUT_TIER:
+        hc = cond.get("holdout_check") or {}
+        for r in hc.get("continued_parts") or []:
+            warns.append(f"開封履歴に同じ 1 回の確認の別の part {(r.get('part') or {}).get('k')}/{(r.get('part') or {}).get('n')} "
+                         f"の行がある ({r.get('run_id')} {r.get('at')}): 続きとして測る")
+    elif opp.get("fold_label") != "B":
         warns.append(f"fold {opp.get('fold')} は B (方式の比較用、§0.4) ではない")
     emb = (cond.get("selection_model") or {}).get("embedding") or {}
     if emb and emb.get("matches_production") is False:
@@ -722,14 +887,15 @@ def prelim_correspondence(prelim_dir: Optional[Path]) -> Optional[dict]:
     return {"dir": str(d), "n": n, "reasons": reasons}
 
 
-def collect_facts(team_text: Optional[str], selection_model: Path, split_file: Path, fold: int, pin_dir: Optional[Path],
+def collect_facts(team_text: Optional[str], selection_model: Path, split_file: Path, fold: Optional[int], pin_dir: Optional[Path],
                   notes: list, team_source: str = "registered", seed: Optional[int] = None,
                   own_pool: Optional[Path] = None, showdown_dir: Optional[Path] = None,
-                  prelim_dir: Optional[Path] = None) -> dict:
+                  prelim_dir: Optional[Path] = None, tier: str = P1_SPLIT_TIER) -> dict:
     """条件表の材料を集める。取れない項目は None にして notes に理由を足す (例外で落とさない)。
     team_source general なら自チームは実験専用の構築プール (pool_team_facts、2026-10-09 M2d)、general-pinned なら旧固定プール
     (ranked_team_facts)、registered なら登録チームの本文。showdown_dir (既定 REPO/pokemon-showdown) は版とルールの記録に、
-    prelim_dir (予備測定の出力) があれば対応の確認 (prelim_check) に使う"""
+    prelim_dir (予備測定の出力) があれば対応の確認 (prelim_check) に使う。tier holdout (2026-10-15) なら分割の件数は
+    holdout 層の全 id (n_teams_in_tier。fold は使わない)"""
     from advisor.versions import sha256_text
     facts: dict = {}
     # 自チーム
@@ -834,12 +1000,17 @@ def collect_facts(team_text: Optional[str], selection_model: Path, split_file: P
         facts["real_bank"] = None
         notes.append(f"real_bank: 読めない ({e!r})")
     # 分割ファイル
-    split = {"sha16": _sha16(split_file), "sealed_id": None, "run_id": None, "n_teams_in_fold": None}
+    holdout = tier == HOLDOUT_TIER
+    split = ({"sha16": _sha16(split_file), "sealed_id": None, "run_id": None, "n_teams_in_tier": None} if holdout else
+             {"sha16": _sha16(split_file), "sealed_id": None, "run_id": None, "n_teams_in_fold": None})
     try:
         from tools.team_build.opponents import load_split, tier_ids
         doc = load_split(split_file)
-        split.update(sealed_id=doc.get("sealed_id"), run_id=doc.get("run_id"),
-                     n_teams_in_fold=len(tier_ids(doc, P1_SPLIT_TIER, int(fold))))
+        split.update(sealed_id=doc.get("sealed_id"), run_id=doc.get("run_id"))
+        if holdout:
+            split["n_teams_in_tier"] = len(tier_ids(doc, HOLDOUT_TIER))
+        else:
+            split["n_teams_in_fold"] = len(tier_ids(doc, P1_SPLIT_TIER, int(fold)))
     except Exception as e:
         notes.append(f"split: 読めない ({split_file}: {e!r})")
     facts["split"] = split
@@ -893,6 +1064,69 @@ def registered_team_text() -> Optional[str]:
         return text or None
     except Exception:
         return None
+
+
+def default_usage_log() -> Path:
+    """開封履歴の既定 (tools.team_build.holdout.USAGE_LOG = REPO/logs/build_search/holdout_usage.jsonl)"""
+    from tools.team_build.holdout import USAGE_LOG
+    return Path(USAGE_LOG)
+
+
+def read_usage_rows(path: Path) -> tuple:
+    """開封履歴の行を読む → (行の list, 読めない理由 or None)。ファイルが無ければ空 (まだ誰も開けていない)"""
+    p = Path(path)
+    if not p.exists():
+        return [], None
+    try:
+        return [json.loads(ln) for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()], None
+    except (OSError, ValueError) as e:
+        return [], f"開封履歴 {p} が読めない ({e!r})"
+
+
+def holdout_facts(commands: dict, split_file: Path, design: dict, git_commit: Optional[str], usage_log: Path,
+                  part: Optional[dict], seed: int) -> dict:
+    """封印 holdout 層の確認の材料 (副作用: 分割ファイルと開封履歴の読み取り。2026-10-15)。
+    sequence_check = 条件ごとのコマンドから作った相手列の層の検査 (opponent_tier_check)、開封履歴の判定 (holdout_usage_check)、
+    errors = 読めなかった理由"""
+    from tools.team_build.opponents import load_split
+    out: dict = {"usage_log": str(usage_log), "errors": [], "sequence_check": {}, "appended": None}
+    docs: dict = {}
+    sealed_id = None
+    try:
+        sealed_id = load_split(split_file).get("sealed_id")
+    except Exception as e:
+        out["errors"].append(f"分割ファイル {split_file} が読めない ({e!r})")
+    for c, cmd in (commands or {}).items():
+        spec = command_opponent_spec(cmd)
+        try:
+            sf = spec["split_file"]
+            if sf not in docs:
+                docs[sf] = load_split(Path(sf))
+            doc = docs[sf]
+            if doc.get("sealed_id") != sealed_id:
+                out["errors"].append(f"{c}: コマンドの分割ファイル {sf} の封印 id {doc.get('sealed_id')} が {sealed_id} と違う")
+            seq = planned_opponent_ids(doc, spec)
+            out["sequence_check"][c] = dict(opponent_tier_check(seq, doc, spec["offset"] + spec["battles"]),
+                                            spec_tier=spec["tier"], spec_fold=spec["fold"], seed=spec["seed"],
+                                            offset=spec["offset"], battles=spec["battles"])
+        except Exception as e:
+            out["sequence_check"][c] = {"reasons": [f"相手列を作れない ({e!r})"]}
+    key = holdout_candidate_key(design, git_commit)
+    rows, err = read_usage_rows(usage_log)
+    if err:
+        out["errors"].append(err)
+    out.update(holdout_usage_check(rows, sealed_id, key, part=part, seed=seed))
+    out["note"] = ("開封履歴は本番の起動時 (起動前検査の後・子プロセスの起動前) に 1 行追記する。dry-run では追記しない。"
+                   "同じ封印 id と候補の鍵の組があれば起動しない")
+    return out
+
+
+def append_usage_row(usage_log: Path, row: dict) -> None:
+    """開封履歴に 1 行追記する (副作用。本番の起動時だけ)"""
+    p = Path(usage_log)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 def copy_selection_aux(pin_dir: Path, src_dir: Path = None) -> list:
@@ -987,9 +1221,15 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--out", default=None, help="出力先 (既定 logs/usefulness/p1_<YYYYMMDD_HHMM>、予備は p1_prelim_...)")
     ap.add_argument("--battles", type=int, default=None, help=f"対戦数 / 条件 (既定 {P1_FINAL_BATTLES}、--prelim は {P1_PRELIM_BATTLES})")
     ap.add_argument("--prelim", action="store_true", help=f"予備測定 ({P1_PRELIM_BATTLES} 戦。秒/戦を見積もって本番の目安を出す)")
-    ap.add_argument("--seed", type=int, default=P1_SEED, help="相手列の seed")
+    ap.add_argument("--seed", type=int, default=None,
+                    help=f"相手列の seed (既定 {P1_SEED}。--tier holdout では明示が要り、search の {P1_SEED} とは別の値)")
     ap.add_argument("--split", default=P1_SPLIT_FILE, help="opponent_families.json (分割ファイル)")
-    ap.add_argument("--fold", type=int, default=BUILD_FOLD_EVAL, help="search の fold (既定 B = 方式の比較用)")
+    ap.add_argument("--tier", choices=TIERS, default=P1_SPLIT_TIER,
+                    help="相手の層: search = fold で選ぶ方式の比較用 (既定) / holdout = 封印 holdout 層での 1 回の確認 "
+                         "(fold なし・--seed 必須・--prelim 不可。2026-10-15)")
+    ap.add_argument("--fold", type=int, default=None, help=f"search の fold (既定 {BUILD_FOLD_EVAL} = B、方式の比較用。holdout では使わない)")
+    ap.add_argument("--holdout-usage-log", default=None,
+                    help="封印 holdout の開封履歴 (既定 tools.team_build.holdout.USAGE_LOG = logs/build_search/holdout_usage.jsonl)")
     ap.add_argument("--selection-model", default=P1_SELECTION_MODEL, help="選出モデル (3 条件で共通)")
     ap.add_argument("--pin-dir", default=None, help="RL のピン dir (既定: 起動時に scripts/pin_models.sh で作る)")
     ap.add_argument("--time-limit-sec", type=int, default=None,
@@ -1033,6 +1273,27 @@ def main(argv: Optional[list] = None) -> int:
             for b in bad:
                 print(f"[p1] {b}")
             return 2
+    # 相手の層 (2026-10-15): holdout は fold を使わず、seed を明示 (search の P1_SEED とは別)、予備測定は不可
+    tier = args.tier
+    holdout = tier == HOLDOUT_TIER
+    if holdout:
+        bad = []
+        if args.seed is None:
+            bad.append(f"--tier holdout は --seed の明示が要る (search の {P1_SEED} とは別の値)")
+        elif int(args.seed) == int(P1_SEED):
+            bad.append(f"--tier holdout の --seed {args.seed} が search の seed {P1_SEED} と同じ")
+        if args.prelim:
+            bad.append("--tier holdout は 1 回だけ測る (--prelim は使えない)")
+        if args.fold is not None:
+            bad.append("--tier holdout は fold を使わない (--fold を外す)")
+        if bad:
+            for b in bad:
+                print(f"[p1] {b}")
+            return 2
+    seed = int(args.seed) if args.seed is not None else int(P1_SEED)
+    fold: Optional[int] = None if holdout else (int(args.fold) if args.fold is not None else int(BUILD_FOLD_EVAL))
+    usage_log: Optional[Path] = ((Path(args.holdout_usage_log).resolve() if args.holdout_usage_log else default_usage_log())
+                                 if holdout else None)
     own_pool: Optional[Path] = _abs(args.own_pool).resolve() if (args.own_pool and team_source == "general") else None
     showdown_dir: Optional[Path] = Path(args.showdown_dir).resolve() if args.showdown_dir else None
     prelim_dir: Optional[Path] = Path(args.prelim_dir).resolve() if args.prelim_dir else None
@@ -1041,7 +1302,7 @@ def main(argv: Optional[list] = None) -> int:
     battles = part_rec["battles"] if part_rec else resolve_battles(args.battles, args.prelim)
     offset = part_rec["opp_offset"] if part_rec else P1_OPP_OFFSET
     time_limit = resolve_time_limit(args.time_limit_sec, args.compare, part_rec["battles"] if part_rec else None)
-    out_dir = Path(args.out).resolve() if args.out else default_out_dir(now, args.prelim, part=part)
+    out_dir = Path(args.out).resolve() if args.out else default_out_dir(now, args.prelim, part=part, tier=tier)
     split_file, selection_model = _abs(args.split), _abs(args.selection_model)
     design = plan_scoring() if args.compare == "scoring" else plan()
     # 採点方式の比較では感度 (楽観側の HP・持ち物) を切る (2026-10-09 M2d、レビュー 3。全条件で共通の環境)
@@ -1060,20 +1321,24 @@ def main(argv: Optional[list] = None) -> int:
     def assemble(pin_now: Optional[Path], started_at: Optional[str]) -> dict:
         pin_s = str(pin_now) if pin_now is not None else pin_for_cmd
         notes_now = list(notes)
-        facts = collect_facts(team_text, selection_model, split_file, args.fold, pin_now, notes_now,
-                              team_source=team_source, seed=args.seed, own_pool=own_pool, showdown_dir=showdown_dir,
-                              prelim_dir=prelim_dir)
+        facts = collect_facts(team_text, selection_model, split_file, fold, pin_now, notes_now,
+                              team_source=team_source, seed=seed, own_pool=own_pool, showdown_dir=showdown_dir,
+                              prelim_dir=prelim_dir, tier=tier)
         if design.get("factor") == "scoring":
-            cmds = {c: build_command(design["cond_weight"][c], out_dir, team_file, split_file, args.fold, args.seed, battles,
-                                     selection_model, pin_s, cond=c, own_pool=own_pool, offset=offset)
+            cmds = {c: build_command(design["cond_weight"][c], out_dir, team_file, split_file, fold, seed, battles,
+                                     selection_model, pin_s, cond=c, own_pool=own_pool, offset=offset, tier=tier)
                     for c in design["conditions"]}
         else:
-            cmds = {cond_name(w): build_command(w, out_dir, team_file, split_file, args.fold, args.seed, battles,
-                                                selection_model, pin_s, own_pool=own_pool) for w in design["weights"]}
+            cmds = {cond_name(w): build_command(w, out_dir, team_file, split_file, fold, seed, battles,
+                                                selection_model, pin_s, own_pool=own_pool, tier=tier) for w in design["weights"]}
+        if holdout:
+            # 封印 holdout 層 (2026-10-15): 実際のコマンドから作る相手列の層の検査と開封履歴の確認
+            facts = dict(facts, holdout=holdout_facts(cmds, split_file, design, (facts.get("git") or {}).get("commit"),
+                                                      usage_log, part_rec, seed))
         env = child_environment(pin_s, team_source=team_source, sensitivity_off=sens_off)
-        return build_conditions(design, facts, battles, args.prelim, args.seed, args.fold, str(split_file),
+        return build_conditions(design, facts, battles, args.prelim, seed, fold, str(split_file),
                                 time_limit, str(out_dir), cmds, env, started_at, notes_now, team_source=team_source,
-                                offset=offset, part=part_rec)
+                                offset=offset, part=part_rec, tier=tier)
 
     if args.dry_run:
         cond = assemble(pin_dir, None)
@@ -1117,6 +1382,20 @@ def main(argv: Optional[list] = None) -> int:
         for e in errs:
             print(f"[起動前の検査 NG] {e}")
         return 2
+    if holdout:
+        # 封印 holdout 層 (2026-10-15): 検査を通ったら子プロセスの起動前に開封履歴へ 1 行追記する (追記できなければ起動しない)
+        hc = cond.get("holdout_check") or {}
+        row = holdout_usage_row(hc.get("sealed_id"), hc.get("candidate_key"), out_dir.name, started_at, cond.get("purpose"),
+                                part=part_rec, seed=seed)
+        try:
+            append_usage_row(usage_log, row)
+        except OSError as e:
+            _write_json(out_dir / "conditions.json", dict(cond, incomplete=True,
+                                                          incomplete_reasons=[f"開封履歴 {usage_log} に追記できない ({e!r})"]))
+            print(f"[起動前の検査 NG] 開封履歴 {usage_log} に追記できない ({e!r})")
+            return 2
+        cond = dict(cond, holdout_check=dict(hc, appended=row))
+        print(f"[p1] 開封履歴 {usage_log} に追記: {hc.get('sealed_id')} / {hc.get('candidate_key')} / {out_dir.name}")
     _write_json(out_dir / "conditions.json", cond)
     print(f"[p1] 条件表 {out_dir / 'conditions.json'} / {battles} 戦 × {len(cond['commands'])} 条件 / 開始 {started_at}")
     print(f"[p1] 注意: {SCHEDULE_NOTE}")

@@ -421,6 +421,239 @@ def test_main_team_source():
     print("test_main_team_source OK")
 
 
+HOLD_SEED = 20261015
+
+
+def _split_doc(n_hold=40) -> dict:
+    """封印 holdout 層を持つ分割の例 (search 33 を fold B に、selection 2、holdout n_hold。本文は全 id にある)"""
+    search = [f"t{i}" for i in range(33)]
+    hold = [f"h{i}" for i in range(n_hold)]
+    sel = ["s0", "s1"]
+    return {"sealed_id": "sealedX", "run_id": "improve_x", "tiers": {"search": search, "selection": sel, "holdout": hold},
+            "search_folds": [[], search, []], "families": [], "texts": {x: f"text {x}" for x in search + sel + hold}}
+
+
+def _holdout_cmds(split: Path, offset=0, battles=600) -> dict:
+    d = P.plan_scoring()
+    return {c: P.build_command(d["cond_weight"][c], Path("/out"), None, split, None, HOLD_SEED, battles, Path("/sel.pt"), "/pin",
+                               python="py", cond=c, offset=offset, tier="holdout") for c in d["conditions"]}
+
+
+def test_holdout_command_and_conditions():
+    """--tier holdout (2026-10-15): --opp-split は FILE:holdout (fold なし)。条件表は tier holdout と n_teams_in_tier、
+    fold / fold_label / n_teams_in_fold を出さない。purpose に「封印 holdout 層での 1 回の確認」。search の条件表は従来どおり"""
+    cmd = _holdout_cmds(Path("/s.json"))["scoring:transition"]
+    s = " ".join(cmd)
+    assert "--opp-split /s.json:holdout " in s and "--opp-seed 20261015" in s, s
+    spec = P.command_opponent_spec(cmd)
+    assert spec == {"split_file": "/s.json", "tier": "holdout", "fold": None, "seed": HOLD_SEED, "offset": 0, "battles": 600}, spec
+    assert P.command_opponent_spec(P.build_command(5.0, Path("/o"), None, Path("/s"), 1, 7, 50, Path("/m"), "/p"))["fold"] == 1
+    d = P.plan_scoring()
+    f = _facts(team=_ranked_team())
+    f["split"] = {"sha16": "cccc", "sealed_id": "sealedX", "run_id": "improve_x", "n_teams_in_tier": 40}
+    f["holdout"] = {"sealed_id": "sealedX", "candidate_key": "scoring:transition@abc", "sequence_check": {}, "reasons": []}
+    env = P.child_environment("/pin", base={}, team_source="general", sensitivity_off=True)
+    c = P.build_conditions(d, f, 600, False, HOLD_SEED, None, "/s.json", 10800, "/out", _holdout_cmds(Path("/s.json")), env,
+                           None, [], team_source="general", tier="holdout")
+    opp = c["opponents"]
+    assert opp["tier"] == "holdout" and opp["n_teams_in_tier"] == 40 and opp["seed"] == HOLD_SEED, opp
+    assert not ({"fold", "fold_label", "n_teams_in_fold"} & set(opp)), opp
+    assert "封印 holdout 層 (40 構築) での 1 回の確認、search の結果とは合算しない" in c["purpose"], c["purpose"]
+    assert c["holdout_check"]["required"] is True and c["holdout_check"]["candidate_key"] == "scoring:transition@abc"
+    assert c["k"] == 1 and c["accept_check"]["required"] is True and c["env"]["TRANSITION_SENSITIVITY"] == "0"
+    json.dumps(c)
+    # search (既定) は従来どおり fold B、holdout_check は無い
+    cs = _scoring_cond("general", _facts(team=_ranked_team()))
+    assert cs["opponents"]["tier"] == "search" and cs["opponents"]["fold_label"] == "B" and "holdout_check" not in cs
+    assert "n_teams_in_tier" not in cs["opponents"] and "封印 holdout" not in cs["purpose"]
+    # 既定の出力先
+    import time
+    t = time.mktime((2026, 10, 16, 22, 15, 0, 0, 0, -1))
+    assert P.default_out_dir(t, False, Path("/r"), tier="holdout") == Path("/r/p1_holdout_20261016_2215")
+    assert P.default_out_dir(t, False, Path("/r"), part=(1, 2), tier="holdout") == Path("/r/p1_holdout_20261016_2215_part1of2")
+    print("test_holdout_command_and_conditions OK")
+
+
+def test_holdout_sequence_tier_check():
+    """起動前検査の相手列の層の検査: コマンドから check_advisor_player と同じ相手列を作り、全件が holdout 層・本文あり・
+    他の層と重ならないこと。holdout に無い id を混ぜると NG"""
+    from tools.team_build.opponents import opponent_sequence
+    doc = _split_doc()
+    with tempfile.TemporaryDirectory() as tmp:
+        split = Path(tmp) / "opponent_families.json"
+        split.write_text(json.dumps(doc), encoding="utf-8")
+        spec = P.command_opponent_spec(_holdout_cmds(split)["scoring:legacy"])
+        seq = P.planned_opponent_ids(doc, spec)
+        assert seq == opponent_sequence(doc["tiers"]["holdout"], 2 * 600 + 40, HOLD_SEED) and len(seq) == 1240
+        r = P.opponent_tier_check(seq, doc, 600)
+        assert r["reasons"] == [] and r["n_unique_in_head"] == 40 and r["n_tier_ids"] == 40, r
+        # holdout に無い id (search の t3) を混ぜると NG
+        bad = list(seq)
+        bad[17] = "t3"
+        r = P.opponent_tier_check(bad, doc, 600)
+        assert r["outside"] == ["t3"] and any("holdout 層に無い" in x for x in r["reasons"]), r
+        # 本文の無い id / 他の層との重なり / 列の不足も NG
+        d2 = json.loads(json.dumps(doc))
+        del d2["texts"]["h5"]
+        assert any("本文" in x for x in P.opponent_tier_check(seq, d2, 600)["reasons"])
+        d3 = json.loads(json.dumps(doc))
+        d3["tiers"]["search"].append("h0")
+        assert any("重なる" in x for x in P.opponent_tier_check(seq, d3, 600)["reasons"])
+        assert any("しか無い" in x for x in P.opponent_tier_check(seq[:10], doc, 600)["reasons"])
+        # holdout_facts: コマンドの層が search (取り違え) なら NG になる
+        design = P.plan_scoring()
+        hf = P.holdout_facts(_holdout_cmds(split), split, design, "abcdef0123", Path(tmp) / "usage.jsonl", None, HOLD_SEED)
+        assert hf["errors"] == [] and all(not v["reasons"] for v in hf["sequence_check"].values()), hf
+        assert hf["candidate_key"] == "scoring:transition@abcdef01" and hf["sealed_id"] == "sealedX"
+        wrong = {c: [x.replace(":holdout", ":search:1") if x.endswith(":holdout") else x for x in cmd]
+                 for c, cmd in _holdout_cmds(split).items()}
+        hw = P.holdout_facts(wrong, split, design, "abcdef0123", Path(tmp) / "usage.jsonl", None, HOLD_SEED)
+        assert all(any("holdout 層に無い" in x for x in v["reasons"]) for v in hw["sequence_check"].values()), hw
+        cond = {"opponents": {"tier": "holdout", "n_teams_in_tier": 40}, "holdout_check": hw, "team": {"source": "ranked",
+                "meta_snapshot_id": 1}}
+        assert any("相手列の層の検査 NG" in e for e in P.preflight_errors(cond))
+        # 1 部分 (part 2/2、offset 300、300 戦) でも同じ列の範囲を検査する
+        hp = P.holdout_facts(_holdout_cmds(split, offset=300, battles=300), split, design, "abc", Path(tmp) / "u.jsonl",
+                             {"k": 2, "n": 2}, HOLD_SEED)
+        assert all(v["head"] == 600 and not v["reasons"] for v in hp["sequence_check"].values()), hp
+    print("test_holdout_sequence_tier_check OK")
+
+
+def test_holdout_usage_check():
+    """開封履歴: 同じ封印 id で方式名 (鍵の「@」より前) が一致する行があれば commit が違っても使用済み (NG)。
+    例外は別の part (同じ n・違う k・同じ seed) の行だけで、続きとして許す (commit が違っても)。封印 id か鍵が無ければ
+    確かめられない (NG)"""
+    key = "scoring:transition@abc12345"
+    assert P.holdout_candidate_key(P.plan_scoring(), "abc1234567890") == key
+    assert P.holdout_candidate_key(P.plan_scoring(), None) is None
+    assert P.holdout_candidate_key(P.plan(), "abc12345") == "rl0+rl5@abc12345"
+    rows = [{"sealed_id": "other", "candidate_key": key, "run_id": "x"},
+            {"sealed_id": "sealedX", "candidate_key": "L00_INC:selection_model_n9000.pt", "run_id": "y"}]
+    r = P.holdout_usage_check(rows, "sealedX", key)
+    assert r["reasons"] == [] and r["used_before"] == [] and r["continued_parts"] == [], r
+    used = rows + [{"sealed_id": "sealedX", "candidate_key": key, "run_id": "p1_holdout_1", "at": "t"}]
+    r = P.holdout_usage_check(used, "sealedX", key)
+    assert len(r["used_before"]) == 1 and any("使用済み" in x for x in r["reasons"]), r
+    # 同じ方式で commit だけ違う行も使用済み (commit を変えて測り直さない)
+    sim = rows + [{"sealed_id": "sealedX", "candidate_key": "scoring:transition@ffffffff", "run_id": "z", "at": "t2"}]
+    r = P.holdout_usage_check(sim, "sealedX", key)
+    assert len(r["used_before"]) == 1 and any("使用済み" in x and "ffffffff" in x for x in r["reasons"]), r
+    # 方式名が違う行 (前方一致だけの別方式・別の封印 id) は使用済みにしない
+    other = rows + [{"sealed_id": "sealedX", "candidate_key": "scoring:transition2@abc12345", "run_id": "w"},
+                    {"sealed_id": "other", "candidate_key": "scoring:transition@ffffffff", "run_id": "v"}]
+    assert P.holdout_usage_check(other, "sealedX", key)["reasons"] == []
+    # 2 夜分割: part 1/2 の行があっても part 2/2 (同じ seed) は続き。part 1/2 の測り直し・seed 違い・part なしは使用済み
+    p1row = P.holdout_usage_row("sealedX", key, "p1_holdout_a_part1of2", "t", "purpose", part={"k": 1, "n": 2}, seed=HOLD_SEED)
+    assert p1row["part"] == {"k": 1, "n": 2} and p1row["kind"] == "usefulness_p1" and p1row["run_id"] == "p1_holdout_a_part1of2"
+    r = P.holdout_usage_check([p1row], "sealedX", key, part={"k": 2, "n": 2}, seed=HOLD_SEED)
+    assert r["reasons"] == [] and len(r["continued_parts"]) == 1, r
+    assert P.holdout_usage_check([p1row], "sealedX", key, part={"k": 1, "n": 2}, seed=HOLD_SEED)["reasons"]
+    assert P.holdout_usage_check([p1row], "sealedX", key, part={"k": 2, "n": 2}, seed=1)["reasons"]
+    assert P.holdout_usage_check([p1row], "sealedX", key)["reasons"]
+    # 別の part の続きは commit が違っても通る。commit 違いの同じ part は使用済み
+    p1row_old = dict(p1row, candidate_key="scoring:transition@ffffffff")
+    r = P.holdout_usage_check([p1row_old], "sealedX", key, part={"k": 2, "n": 2}, seed=HOLD_SEED)
+    assert r["reasons"] == [] and len(r["continued_parts"]) == 1, r
+    assert P.holdout_usage_check([p1row_old], "sealedX", key, part={"k": 1, "n": 2}, seed=HOLD_SEED)["reasons"]
+    # 封印 id / 鍵が無い
+    assert any("封印 id" in x for x in P.holdout_usage_check([], None, key)["reasons"])
+    assert any("候補の鍵" in x for x in P.holdout_usage_check([], "sealedX", None)["reasons"])
+    # preflight: commit 違いの行でも使用済み → NG。別の part の続きは注意だけ。fold の注意は出さない
+    cond = {"opponents": {"tier": "holdout", "n_teams_in_tier": 40}, "team": {"source": "ranked", "meta_snapshot_id": 1},
+            "holdout_check": dict(P.holdout_usage_check(sim, "sealedX", key),
+                                  sequence_check={"scoring:legacy": {"reasons": []}}, errors=[])}
+    errs = P.preflight_errors(cond)
+    assert any("開封履歴" in e and "使用済み" in e for e in errs), errs
+    assert not any("fold" in w for w in P.preflight_warnings(cond))
+    cont = dict(cond, holdout_check=dict(P.holdout_usage_check([p1row_old], "sealedX", key, part={"k": 2, "n": 2},
+                                                               seed=HOLD_SEED),
+                                         sequence_check={"scoring:legacy": {"reasons": []}}, errors=[]))
+    assert not any("開封履歴" in e for e in P.preflight_errors(cont))
+    assert any("別の part" in w for w in P.preflight_warnings(cont))
+    print("test_holdout_usage_check OK")
+
+
+def test_main_holdout():
+    """main --tier holdout: --seed の明示が要る (search の seed と同じは不可)・--prelim / --fold は不可。dry-run は開封履歴に
+    追記しない。開封履歴に同じ組があれば dry-run は 3、本番は 2 (ピンを作らない・起動しない)。本番の起動時に 1 行追記する"""
+    orig = (P.collect_facts, P.registered_team_text, P.make_pin, P.launch)
+
+    def _no(*a, **k):
+        raise AssertionError("呼ばれてはいけない")
+
+    def _collect(*a, **k):
+        f = _facts(team=_ranked_team())
+        f["git"] = {"commit": "abcdef0123456789", "dirty_files": []}
+        f["split"] = {"sha16": "cccc", "sealed_id": "sealedX", "run_id": "improve_x", "n_teams_in_tier": 40}
+        assert k.get("tier") == "holdout" and a[3] is None, (a, k)      # fold は渡さない
+        return f
+    try:
+        P.make_pin, P.launch, P.registered_team_text = _no, _no, _no
+        P.collect_facts = _collect
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            split = tmp / "opponent_families.json"
+            split.write_text(json.dumps(_split_doc()), encoding="utf-8")
+            usage = tmp / "holdout_usage.jsonl"
+            out = tmp / "p1_holdout"
+            base = ["--tier", "holdout", "--compare", "scoring", "--split", str(split), "--holdout-usage-log", str(usage),
+                    "--out", str(out), "--pin-dir", str(tmp / "pin")]
+            with redirect_stdout(io.StringIO()):
+                assert P.main(base + ["--dry-run"]) == 2                                   # --seed なし
+                assert P.main(base + ["--seed", str(P1_SEED), "--dry-run"]) == 2            # search と同じ seed
+                assert P.main(base + ["--seed", str(HOLD_SEED), "--prelim", "--dry-run"]) == 2
+                assert P.main(base + ["--seed", str(HOLD_SEED), "--fold", "1", "--dry-run"]) == 2
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = P.main(base + ["--seed", str(HOLD_SEED), "--dry-run"])
+            text = buf.getvalue()
+            assert rc == 0 and "起動前の検査: OK" in text, text
+            doc = json.loads(text[:text.index("\n# コマンド列")])
+            assert doc["opponents"]["tier"] == "holdout" and "fold" not in doc["opponents"]
+            assert all(f"--opp-split {split}:holdout " in " ".join(c) for c in doc["commands"].values())
+            assert doc["holdout_check"]["candidate_key"] == "scoring:transition@abcdef01" and doc["holdout_check"]["appended"] is None
+            assert not usage.exists() and not out.exists()                                # dry-run は追記しない
+            # 使用済み → dry-run 3 (追記しない)、本番 2 (make_pin / launch は呼ばない)
+            used = {"sealed_id": "sealedX", "candidate_key": "scoring:transition@abcdef01", "run_id": "p1_holdout_old", "at": "t"}
+            usage.write_text(json.dumps(used) + "\n", encoding="utf-8")
+            with redirect_stdout(io.StringIO()):
+                assert P.main(base + ["--seed", str(HOLD_SEED), "--dry-run"]) == 3
+                assert P.main(base + ["--seed", str(HOLD_SEED)]) == 2
+            assert usage.read_text(encoding="utf-8").count("\n") == 1 and not out.exists()
+            # 同じ方式で commit が違う行でも使用済み (dry-run 3、本番 2)
+            usage.write_text(json.dumps(dict(used, candidate_key="scoring:transition@0000aaaa")) + "\n", encoding="utf-8")
+            with redirect_stdout(io.StringIO()):
+                assert P.main(base + ["--seed", str(HOLD_SEED), "--dry-run"]) == 3
+                assert P.main(base + ["--seed", str(HOLD_SEED)]) == 2
+            assert usage.read_text(encoding="utf-8").count("\n") == 1 and not out.exists()
+            # 本番: 検査を通ったら起動前に 1 行追記 (run_id = 出力 dir 名)、条件表に appended
+            usage.unlink()
+            seen = {}
+
+            def _launch(cond, out_dir, env, battles, time_limit):
+                seen["cond"] = cond
+                assert usage.exists(), "子プロセスの起動前に追記されていない"
+                return P.finalize(cond, {c: battles for c in cond["commands"]}, 1.0, False, {c: 0 for c in cond["commands"]},
+                                  battles)
+            P.launch = _launch
+            with redirect_stdout(io.StringIO()):
+                assert P.main(base + ["--seed", str(HOLD_SEED)]) == 0
+            rows = [json.loads(x) for x in usage.read_text(encoding="utf-8").splitlines()]
+            assert len(rows) == 1 and rows[0]["sealed_id"] == "sealedX" and rows[0]["run_id"] == "p1_holdout", rows
+            assert rows[0]["candidate_key"] == "scoring:transition@abcdef01" and "封印 holdout 層" in rows[0]["purpose"]
+            final = json.loads((out / "conditions.json").read_text(encoding="utf-8"))
+            assert final["holdout_check"]["appended"]["run_id"] == "p1_holdout" and seen["cond"]["opponents"]["tier"] == "holdout"
+            # 2 回目は使用済みで起動しない
+            P.launch = _no
+            out2 = tmp / "p1_holdout2"
+            with redirect_stdout(io.StringIO()):
+                assert P.main([x if x != str(out) else str(out2) for x in base] + ["--seed", str(HOLD_SEED)]) == 2
+            assert not out2.exists()
+    finally:
+        P.collect_facts, P.registered_team_text, P.make_pin, P.launch = orig
+    print("test_main_holdout OK")
+
+
 def main():
     test_plan()
     test_battles_and_out_dir()
@@ -434,6 +667,10 @@ def main():
     test_scoring_compare_dry_run()
     test_team_source_general_and_registered()
     test_main_team_source()
+    test_holdout_command_and_conditions()
+    test_holdout_sequence_tier_check()
+    test_holdout_usage_check()
+    test_main_holdout()
 
 
 if __name__ == "__main__":

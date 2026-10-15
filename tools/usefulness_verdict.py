@@ -27,6 +27,10 @@ n が最終対戦数に満たない、または条件表が incomplete: true な
 比較の条件 (seed・fold・分割・自チームのプール・比較の設計・最終対戦数・git と Showdown の commit) が全 part で同じ。満たさなければ
 比較条件の不成立 (invalid)。範囲の抜け・part の未完了は対戦数の不足として中間確認 (interim)。全 part の所要秒の合計が採点比較の
 全体の上限 (条件表の scoring_time.time_limit_total_sec) を超えたら未完了。
+封印 holdout 層での確認 (2026-10-15 レビュー、usefulness_p1 --tier holdout。条件表の opponents.tier が holdout): 報告に
+「封印 holdout 層 (N 構築) での 1 回の確認、search の結果とは合算しない」と出し、fold の表示を出さない。事後の検査として、
+条件表の分割ファイルを読み直し (sha16 が条件表と一致すること)、battles.jsonl の相手 id が全件 holdout 層に属することを確かめる。
+満たさなければ比較条件の不成立 (invalid)。判定は §0.5 のまま (k は条件表の比較の本数)。
 
 純粋な部分 (corrected_z / decide / compare / wilson / align / build_verdict / render) は tests/test_usefulness_verdict.py で確かめる。
 """
@@ -54,6 +58,13 @@ MODE_INVALID = "invalid"
 # 自チームの出所 (条件表の team.source) の表示名
 TEAM_LABELS = {"ranked": "一般的なチーム", "registered": "最新の登録チーム",
                "pool": "一般的なチーム (実験専用の構築プール)"}
+# 封印 holdout 層での確認 (2026-10-15 レビュー。usefulness_p1 --tier holdout の条件表の opponents.tier)
+HOLDOUT_TIER = "holdout"
+
+
+def is_holdout(conditions: Optional[dict]) -> bool:
+    """条件表が封印 holdout 層での確認か (純粋)"""
+    return ((conditions or {}).get("opponents") or {}).get("tier") == HOLDOUT_TIER
 
 
 # ------------------------------------------------------------------ 純粋
@@ -257,6 +268,35 @@ def correspondence_check(opp_ids_by_cond: Optional[dict], conds: Sequence[str], 
     return reasons
 
 
+def holdout_banner(conditions: Optional[dict]) -> str:
+    """封印 holdout 層での確認の 1 行 (純粋。usefulness_p1 の条件表の purpose と報告で同じ文言)"""
+    n = ((conditions or {}).get("opponents") or {}).get("n_teams_in_tier")
+    return f"封印 holdout 層 ({n if n is not None else '?'} 構築) での 1 回の確認、search の結果とは合算しない"
+
+
+def holdout_tier_check(opp_ids_by_cond: Optional[dict], conds: Sequence[str], holdout_ids: Optional[Sequence[str]]) -> tuple:
+    """相手 id が全件 holdout 層に属するかの事後の検査 (純粋。2026-10-15)。opp_ids_by_cond = 条件名 → battles.jsonl の
+    opponent_team_id の列 (記録された全件を見る)。holdout_ids が None (分割ファイルが読めない) なら確かめられないので不成立。
+    戻り値 (成り立たない理由の list, 要約)"""
+    ids = opp_ids_by_cond or {}
+    if holdout_ids is None:
+        return ["holdout 層の id を読めず、相手 id が holdout 層に属することを確かめられない"], {"checked": 0, "outside": {}}
+    hs = set(holdout_ids)
+    outside: dict = {}
+    checked = 0
+    for c in conds:
+        for x in ids.get(c) or []:
+            checked += 1
+            if x not in hs:
+                outside.setdefault(c, {})
+                outside[c][str(x)] = outside[c].get(str(x), 0) + 1
+    reasons = []
+    if outside:
+        reasons.append(f"holdout 層に無い相手 id の対戦: "
+                       + ", ".join(f"{c} {sum(v.values())} 件 ({', '.join(sorted(v)[:5])})" for c, v in outside.items()))
+    return reasons, {"checked": checked, "outside": outside, "n_holdout_ids": len(hs)}
+
+
 def build_verdict(conditions: dict, outcomes_by_cond: dict, weights: Sequence[float] = P1_WEIGHTS,
                   baseline_weight: float = P1_BASELINE_WEIGHT, final_battles: int = P1_FINAL_BATTLES,
                   mde: float = P1_MDE, alpha: float = P1_ALPHA, sources: Optional[dict] = None,
@@ -382,6 +422,13 @@ def condition_summary(conditions: dict) -> list:
         design = ("比較 / 基準 / k", f"{others} − {base} / {base} / {c.get('k')} (RL 加点の重みは両条件とも ×{c.get('baseline_weight')})")
     else:
         design = ("重み / 基準 / k", f"{c.get('weights')} / ×{c.get('baseline_weight')} / {c.get('k')}")
+    if is_holdout(c):
+        # 封印 holdout 層 (2026-10-15): fold は使わないので表示しない
+        opp_row = ("相手", f"封印 holdout 層 ({opp.get('n_teams_in_tier')} 構築) seed={opp.get('seed')} offset={opp.get('offset')} "
+                          f"操縦={opp.get('pilot')}/{opp.get('pick_policy')} 封印 id={opp.get('sealed_id')}")
+    else:
+        opp_row = ("相手", f"{opp.get('tier')} fold {opp.get('fold_label')} seed={opp.get('seed')} offset={opp.get('offset')} "
+                          f"操縦={opp.get('pilot')}/{opp.get('pick_policy')} 封印 id={opp.get('sealed_id')}")
     return [
         ("実験", f"{c.get('experiment', '-')}{' (予備)' if c.get('prelim') else ''}"),
         ("開始", str(c.get("started_at") or "-")),
@@ -390,8 +437,7 @@ def condition_summary(conditions: dict) -> list:
         team_summary(team),
         ("選出モデル", f"{sel.get('path')} sha16={sel.get('sha16')}"),
         ("RL checkpoint", f"{rl.get('file')} sha16={rl.get('sha16')} pin={rl.get('pin_dir')}"),
-        ("相手", f"{opp.get('tier')} fold {opp.get('fold_label')} seed={opp.get('seed')} offset={opp.get('offset')} "
-                 f"操縦={opp.get('pilot')}/{opp.get('pick_policy')} 封印 id={opp.get('sealed_id')}"),
+        opp_row,
         ("git", f"{git.get('commit')}"),
         ("未完了", str(c.get("incomplete"))),
     ]
@@ -401,6 +447,8 @@ def render(verdict: dict, conditions: Optional[dict] = None) -> str:
     """verdict.md / 標準出力の本文 (純粋)"""
     v = verdict
     lines = ["# P1 対応比較の集計", ""]
+    if is_holdout(conditions):
+        lines += [f"**{holdout_banner(conditions)}**", ""]
     if conditions is not None:
         lines += ["## 条件表の要約", "", "| 項目 | 値 |", "|---|---|"]
         lines += [f"| {k} | {val} |" for k, val in condition_summary(conditions)]
@@ -458,6 +506,11 @@ def render(verdict: dict, conditions: Optional[dict] = None) -> str:
                       f"助言の図鑑に無い個体を含む対戦 {oc['unbuilt_battles'] or 0}"]
     if v["opponent_mismatches"] is not None:
         lines += ["", f"相手 id の条件間の食い違い: {v['opponent_mismatches']} 件"]
+    if v.get("holdout") is not None:
+        h = v["holdout"]
+        n_out = sum(sum(x.values()) for x in (h.get("outside") or {}).values())
+        lines += ["", f"相手 id の層の検査 (封印 holdout 層 {h.get('n_holdout_ids', '-')} 構築): 検査 {h.get('checked', 0)} 件 / "
+                      f"層の外 {n_out} 件 / 分割ファイルの sha16 {h.get('split_sha16_now') or '-'} (条件表 {h.get('split_sha16') or '-'})"]
     if v["notes"]:
         lines += ["", "### 注記", ""] + [f"- {x}" for x in v["notes"]]
     return "\n".join(lines) + "\n"
@@ -466,7 +519,8 @@ def render(verdict: dict, conditions: Optional[dict] = None) -> str:
 # 2 夜分割の part の間で同じでなければならない条件表の項目 (2026-10-09 M2e。merge_parts)
 PART_SAME_KEYS = (("factor",), ("baseline",), ("comparisons",), ("final_battles",), ("opponents", "seed"),
                   ("opponents", "tier"), ("opponents", "fold"), ("opponents", "split_sha16"), ("team", "source"),
-                  ("team", "sha16"), ("git", "commit"), ("showdown", "commit"), ("scoring_time", "time_limit_total_sec"))
+                  ("team", "sha16"), ("git", "commit"), ("showdown", "commit"), ("scoring_time", "time_limit_total_sec"),
+                  ("holdout_check", "candidate_key"))
 
 
 def _dig(d: Optional[dict], path: tuple):
@@ -660,6 +714,39 @@ ACCEPT_MISSING_NOTE = ("条件表に受入監査の指定 (accept_check.required
                        "未選出の候補・ランダム退避・入力の版は未確認")
 
 
+def holdout_post_check(conditions: dict, opp_ids_by_cond: Optional[dict], conds: Sequence[str]) -> tuple:
+    """封印 holdout 層での確認の事後の検査 (副作用: 分割ファイルの読み取り。2026-10-15)。条件表の分割ファイルを読み直し、
+    sha16 が条件表の split_sha16 と一致することと、相手 id が全件 holdout 層に属すること (holdout_tier_check) を確かめる。
+    戻り値 (成り立たない理由の list, 要約)"""
+    from advisor.versions import sha256_file
+    opp = (conditions or {}).get("opponents") or {}
+    sf = opp.get("split_file")
+    path = Path(sf) if sf else None
+    if path is not None and not path.is_absolute():
+        path = Path(__file__).resolve().parent.parent / path
+    reasons, holdout_ids, sha_now = [], None, None
+    if path is None:
+        reasons.append("条件表に分割ファイル (opponents.split_file) が無い")
+    else:
+        sha_now = sha256_file(path)
+        if sha_now is None:
+            reasons.append(f"分割ファイル {path} が読めない")
+        elif opp.get("split_sha16") and sha_now != opp.get("split_sha16"):
+            reasons.append(f"分割ファイル {path} の sha16 {sha_now} が条件表の {opp.get('split_sha16')} と違う")
+        else:
+            try:
+                from tools.team_build.opponents import load_split, tier_ids
+                holdout_ids = tier_ids(load_split(path), HOLDOUT_TIER)
+            except Exception as e:
+                reasons.append(f"分割ファイル {path} の holdout 層が読めない ({e!r})")
+    tier_reasons, summary = holdout_tier_check(opp_ids_by_cond, conds, holdout_ids)
+    if holdout_ids is not None:
+        reasons += tier_reasons
+    summary.update(split_file=str(path) if path else None, split_sha16=opp.get("split_sha16"), split_sha16_now=sha_now,
+                   banner=holdout_banner(conditions))
+    return reasons, summary
+
+
 def load_part(out_dir: Path) -> dict:
     """1 part の出力 dir → merge_parts の入力 (採点方式の比較の条件で読む)"""
     cpath = out_dir / "conditions.json"
@@ -689,11 +776,15 @@ def run_merged(out_dirs: Sequence[Path], merged_out: Path) -> dict:
     acc_req = accept_required(conditions)
     versions = {f"{c} (part {p['conditions'].get('part', {}).get('k')})": (p.get("versions") or {}).get(c)
                 for p in parts for c in conds} if acc_req else None
+    # 封印 holdout 層 (2026-10-15): 相手 id が全件 holdout 層に属することを事後にも確かめる
+    ho_reasons, ho_summary = holdout_post_check(conditions, m["opp_ids"], conds) if is_holdout(conditions) else ([], None)
     v = build_verdict(conditions, m["outcomes"], tuple(conditions.get("weights") or P1_WEIGHTS),
                       float(conditions.get("baseline_weight", P1_BASELINE_WEIGHT)), final_battles, mde, alpha, m["sources"],
                       m["opp_ids"], m["elapsed"], baseline_cond=base_c, compare_conds=other_c, scoring_stats=sstats,
-                      own_records_by_cond=own_recs, extra_invalid=m["invalid"],
+                      own_records_by_cond=own_recs, extra_invalid=list(m["invalid"]) + ho_reasons,
                       accept_records_by_cond=m["records"] if acc_req else None, inputs_versions=versions)
+    if ho_summary is not None:
+        v["holdout"] = ho_summary
     v["notes"] = list(m["notes"]) + list(v["notes"])
     if not acc_req:
         v["notes"].append(ACCEPT_MISSING_NOTE)
@@ -744,9 +835,16 @@ def run(out_dir: Path) -> dict:
     for c in outcomes:
         if elapsed.get(c) is None and conditions.get("elapsed_sec") is not None:
             elapsed[c] = conditions["elapsed_sec"]
+    # 封印 holdout 層 (2026-10-15): 相手 id が全件 holdout 層に属することを事後にも確かめる
+    ho_reasons, ho_summary = [], None
+    if is_holdout(conditions):
+        conds_all = ([base_c] + other_c) if scoring else [cond_name(w) for w in weights]
+        ho_reasons, ho_summary = holdout_post_check(conditions, opp_ids, conds_all)
     v = build_verdict(conditions, outcomes, weights, baseline, final_battles, mde, alpha, sources, opp_ids, elapsed,
                       baseline_cond=base_c, compare_conds=other_c, scoring_stats=sstats, own_records_by_cond=own_recs,
-                      accept_records_by_cond=acc_recs, inputs_versions=versions)
+                      accept_records_by_cond=acc_recs, inputs_versions=versions, extra_invalid=ho_reasons)
+    if ho_summary is not None:
+        v["holdout"] = ho_summary
     if acc_recs is None:
         v["notes"].append(ACCEPT_MISSING_NOTE)
     if scoring and own_recs is None:
