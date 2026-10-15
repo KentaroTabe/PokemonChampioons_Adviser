@@ -105,12 +105,15 @@ class BattleRecorder:
         self._picks[tag] = list(species_order)
 
     def on_decision(self, battle, state_summary: Optional[dict], advice: Optional[dict],
-                    executed: Optional[dict], followed: Optional[bool] = None) -> None:
+                    executed: Optional[dict], followed: Optional[bool] = None, diag: Optional[dict] = None) -> None:
+        """diag: 診断用の記録 (champions_agent.env.advisor_player.diag_record。既定オフ、あるときだけ欄 "diag" を足す。2026-10-15)"""
         tag = getattr(battle, "battle_tag", None) or id(battle)
         self._t0.setdefault(tag, time.time())
         rec = {"turn": getattr(battle, "turn", None), "state_before": state_summary,
                "advisor_recommendation": _slim_advice(advice), "executed_action": executed,
                "followed": followed}
+        if diag is not None:
+            rec["diag"] = diag
         self._turns.setdefault(tag, []).append(rec)
 
     def on_end(self, battle, opponent_team_id: Optional[str] = None,

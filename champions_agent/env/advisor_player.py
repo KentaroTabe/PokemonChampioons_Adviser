@@ -344,7 +344,7 @@ def correspondence_record(corr: Optional[dict]) -> dict:
                           "first_mismatch": c.get("first_mismatch")}}
 
 
-def _mon_entry(p, own: bool, resolver, active: bool, available=None) -> dict:
+def _mon_entry(p, own: bool, resolver, active: bool, available=None, picked: bool = True) -> dict:
     sid = p.species or ""
     status = p.status
     st = _STATUS_MAP.get(getattr(status, "name", str(status)).upper()) \
@@ -371,7 +371,9 @@ def _mon_entry(p, own: bool, resolver, active: bool, available=None) -> dict:
         if getattr(p, "max_hp", None):
             entry["hp_max"] = p.max_hp
             entry["hp_current"] = p.current_hp
-        entry["is_picked"] = True
+        # 選出の印 (2026-10-15): 選出した個体だけ True。未選出の個体は party に残すが交代候補・残数・終盤評価に入れない
+        # (advisor.party.battle_party_indices。以前は全個体に True を付け、未選出の個体が交代候補・残存戦力に入っていた)
+        entry["is_picked"] = bool(picked)
         moves = list((p.moves or {}).values())
         if active and available is not None:
             moves = [m for m in moves if m.id in available] or moves
@@ -390,13 +392,16 @@ def _mon_entry(p, own: bool, resolver, active: bool, available=None) -> dict:
 
 
 def _side_state(team_values, active, own: bool, side_conditions, resolver,
-                available=None) -> dict:
+                available=None, picked_mask=None) -> dict:
+    """picked_mask: 自分側の個体ごとの選出の印 (team_values と同じ並び)。None なら全個体を選出扱い (従来どおり)。
+    remaining は選出した個体のうちの生存数"""
     party, active_index = [], None
+    mask = list(picked_mask) if picked_mask is not None else [True] * len(team_values)
     for i, p in enumerate(team_values):
         is_active = p is active
         if is_active:
             active_index = i
-        party.append(_mon_entry(p, own, resolver, is_active, available))
+        party.append(_mon_entry(p, own, resolver, is_active, available, picked=mask[i]))
     names = _names(side_conditions)
     counts = {getattr(k, "name", str(k)).upper(): v
               for k, v in (side_conditions or {}).items()}
@@ -411,8 +416,48 @@ def _side_state(team_values, active, own: bool, side_conditions, resolver,
                     "light_screen": "LIGHT_SCREEN" in names,
                     "aurora_veil": "AURORA_VEIL" in names},
         "party": party,
-        "remaining": sum(1 for p in team_values if not p.fainted),
+        "remaining": sum(1 for p, m in zip(team_values, mask) if m and not p.fainted),
     }
+
+
+def _norm_ident(ident) -> str:
+    """poke-env の個体の識別子を "p1: 名前" に揃える ("p1a: 名前" → "p1: 名前"。純粋)"""
+    s = str(ident or "")
+    if len(s) > 3 and s[2] != ":" and s[3] == ":":
+        s = s[:2] + s[3:]
+    return s
+
+
+def picked_mask_of(battle) -> Optional[list]:
+    """自分の各個体 (battle.team の並び) が選出した個体か (純粋)。分からなければ None (呼び出し側は全個体を選出扱い)。
+
+    BSS (6 体から 3 体) のシミュレータは、チームプレビューの後の要求 (request) の side.pokemon に選出した個体だけを入れる
+    (チームプレビュー中の要求は 6 体)。poke-env の battle.team はプレビューで作った 6 体を消さずに持ち続けるので、
+    battle.team から選出を知ることはできない。最後の要求 (battle.last_request) の side.pokemon の ident で決める。
+    プレビュー中の要求・要求が無い・ident が team の鍵に 1 つも当たらないときは None"""
+    req = getattr(battle, "last_request", None) or getattr(battle, "_last_request", None) or {}
+    if not isinstance(req, dict) or req.get("teamPreview"):
+        return None
+    side = req.get("side") or {}
+    idents = {_norm_ident(m.get("ident")) for m in (side.get("pokemon") or []) if isinstance(m, dict) and m.get("ident")}
+    if not idents:
+        return None
+    keys = [_norm_ident(k) for k in (getattr(battle, "team", None) or {}).keys()]
+    mask = [k in idents for k in keys]
+    return mask if any(mask) else None
+
+
+def switchable_check(battle, state: Optional[dict]) -> Optional[dict]:
+    """状態辞書の「交代できる個体」(選出・生存・場にいない) と poke-env の available_switches の比較 (純粋。診断用)。
+    available_switches が空 (とらわれ・交代の要求でない場面) なら比べない (None)。戻り値 {"ok", "state", "poke_env"}"""
+    avail = sorted(str(getattr(p, "species", "")) for p in (getattr(battle, "available_switches", None) or []))
+    if not avail or not state:
+        return None
+    me = state.get("player") or {}
+    idx = me.get("active_index")
+    exp = sorted(str(p.get("species_id")) for i, p in enumerate(me.get("party") or [])
+                 if i != idx and p.get("is_picked") and p.get("status") != "fainted")
+    return {"ok": exp == avail, "state": exp, "poke_env": avail}
 
 
 def battle_to_state(battle, resolver=None) -> Optional[dict]:
@@ -439,6 +484,8 @@ def battle_to_state(battle, resolver=None) -> Optional[dict]:
     # (legacy の採点はこの欄を読まない。2026-10-09 M2b)
     from champions_agent.config import BSS_PICK_COUNT
     opp_side["team_size"] = BSS_PICK_COUNT
+    # 選出の印 (2026-10-15): 最後の要求に入っている個体 (BSS では選出した 3 体) だけを選出扱いにする (picked_mask_of)
+    picked_mask = picked_mask_of(battle)
     return {
         "scene": "command",
         "turn": battle.turn,
@@ -447,7 +494,7 @@ def battle_to_state(battle, resolver=None) -> Optional[dict]:
         "mega_used": {"player": any("mega" in (p.species or "") for p in own_vals),
                       "opponent": any("mega" in (p.species or "") for p in opp_vals)},
         "player": _side_state(own_vals, active, True, battle.side_conditions,
-                              resolver, available),
+                              resolver, available, picked_mask=picked_mask),
         "opponent": opp_side,
     }
 
@@ -479,21 +526,124 @@ def rule_pick_order(battle, resolver=None, use_registered: bool = True) -> Optio
 
 def choose_from_advice(battle, advice: dict) -> Optional[dict]:
     """助言の best を poke-env の行動に写す。選べなければ None"""
+    return choose_with_trace(battle, advice)[0]
+
+
+def choose_with_trace(battle, advice: dict) -> tuple:
+    """choose_from_advice と同じ選び方で、(行動, 飛ばした候補 [{"kind","id","why"}]) を返す (純粋。2026-10-15 診断用)。
+    why: move_unavailable (選べない技: PP 0・固定等) / switch_fainted / switch_not_picked (最後の要求に居ない = 未選出) /
+    switch_unavailable (とらわれ・交代の場面でない等) / no_kind"""
     if not advice or not advice.get("ok"):
-        return None
+        return None, []
     cands = [advice.get("best")] + list(advice.get("actions") or [])
     available = {m.id: m for m in (battle.available_moves or [])}
     switchable = {p.species: p for p in (battle.available_switches or [])}
+    skipped, seen = [], set()
     for a in cands:
         if not a:
             continue
         if a.get("kind") == "move" and a.get("id") in available:
             return {"kind": "move", "move": available[a["id"]],
-                    "mega": bool(battle.can_mega_evolve), "pokemon": None}
+                    "mega": bool(battle.can_mega_evolve), "pokemon": None}, skipped
         if a.get("kind") == "switch" and a.get("id") in switchable:
             return {"kind": "switch", "move": None, "mega": False,
-                    "pokemon": switchable[a["id"]]}
-    return None
+                    "pokemon": switchable[a["id"]]}, skipped
+        key = (a.get("kind"), a.get("id"))
+        if key in seen:
+            continue
+        seen.add(key)
+        skipped.append({"kind": a.get("kind"), "id": a.get("id"), "why": _skip_reason(battle, a)})
+    return None, skipped
+
+
+def _skip_reason(battle, a: dict) -> str:
+    if a.get("kind") == "move":
+        return "move_unavailable"
+    if a.get("kind") != "switch":
+        return "no_kind"
+    mons = [p for p in (getattr(battle, "team", None) or {}).values() if getattr(p, "species", None) == a.get("id")]
+    if mons and all(getattr(p, "fainted", False) for p in mons):
+        return "switch_fainted"
+    mask = picked_mask_of(battle)
+    if mask is not None and mons:
+        team = list((getattr(battle, "team", None) or {}).values())
+        if not any(mask[i] for i, p in enumerate(team) if p in mons):
+            return "switch_not_picked"
+    return "switch_unavailable"
+
+
+# ------------------------------------------------------------------ 診断用の記録 (2026-10-15、段 3)
+# 決定ごとに採点入力 (evaluate に渡した state 辞書そのもの)・合法手・出力 (記録する条件の方式。ADVICE_DIAG_BOTH=1 ならもう一方の
+# 方式も)・退避理由・実行行動と飛ばした候補を BattleRecorder の turns[].diag に残す。既定はオフ (make_advisor_player の
+# diag_log、または環境変数 ADVICE_DIAG_LOG=1)。保存した state を replay_diag に渡すと同じ順位と点が再現できる
+# (同じ登録チーム・RL のピン・使用率スナップショット・設定のもとで。transition の予算超過の退避は時間で決まるので再現しないことがある)
+def _env_flag(name: str) -> bool:
+    import os
+    return (os.environ.get(name) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def diag_log_enabled(flag: Optional[bool] = None) -> bool:
+    from champions_agent import config as _cfg
+    return bool(flag) if flag is not None else _env_flag(_cfg.ADVICE_DIAG_LOG_ENV)
+
+
+def diag_both_enabled() -> bool:
+    from champions_agent import config as _cfg
+    return _env_flag(_cfg.ADVICE_DIAG_BOTH_ENV)
+
+
+def _jsonable(x):
+    """JSON に書ける形に直す (round-trip。書けない値は文字列)"""
+    import json
+    return json.loads(json.dumps(x, ensure_ascii=False, default=str))
+
+
+def ranking_of(advice: Optional[dict]) -> list:
+    """助言の行動の順位 [{"kind","id","score"}] (全候補。純粋)"""
+    return [{"kind": a.get("kind"), "id": a.get("id"), "score": a.get("score")}
+            for a in ((advice or {}).get("actions") or [])]
+
+
+def legal_of(battle) -> dict:
+    """poke-env が示した合法手 (純粋)"""
+    return {"moves": [m.id for m in (getattr(battle, "available_moves", None) or [])],
+            "switches": [p.species for p in (getattr(battle, "available_switches", None) or [])],
+            "can_mega": bool(getattr(battle, "can_mega_evolve", False)),
+            "force_switch": bool(getattr(battle, "force_switch", False)),
+            "trapped": bool(getattr(battle, "trapped", False))}
+
+
+def _advice_out(advice: Optional[dict]) -> Optional[dict]:
+    if not advice:
+        return None
+    return {"ok": advice.get("ok"), "reason": advice.get("reason"),
+            "scoring_mode": advice.get("scoring_mode"), "scoring_used": advice.get("scoring_used"),
+            "scoring_fallback": advice.get("scoring_fallback"), "transition_stats": advice.get("transition_stats"),
+            "actions": ranking_of(advice), "illegal_actions": advice.get("illegal_actions"),
+            "best": {k: (advice.get("best") or {}).get(k) for k in ("kind", "id", "score")}}
+
+
+def diag_record(state: Optional[dict], advice: Optional[dict], battle, executed: Optional[dict], skipped: list,
+                followed: Optional[bool], rl_blend_weight: Optional[float], other: Optional[dict] = None,
+                error: Optional[str] = None) -> dict:
+    """1 決定の診断の記録 (JSON に書ける形)。state は evaluate に渡した辞書そのもの"""
+    rec = {"state": state, "rl_blend_weight": rl_blend_weight,
+           "scoring_mode": (advice or {}).get("scoring_mode"),
+           "legal": legal_of(battle), "advice": _advice_out(advice),
+           "executed": executed, "skipped": list(skipped or []), "followed": followed,
+           "switchable_check": switchable_check(battle, state)}
+    if other is not None:
+        rec["other_mode"] = _advice_out(other)
+    if error:
+        rec["error"] = error
+    return _jsonable(rec)
+
+
+def replay_diag(diag: dict, resolver=None) -> dict:
+    """保存した診断の記録の state を同じ方式・重みで evaluate に渡し直す (再生)"""
+    from advisor.engine import evaluate
+    return evaluate(diag["state"], resolver, rl_blend_weight=diag.get("rl_blend_weight"),
+                    scoring_mode=diag.get("scoring_mode"))
 
 
 def pick_order_from_perm(perm, n: int) -> str:
@@ -607,7 +757,7 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
                         pick_noise: float = 0.0, action_noise: float = 0.0,
                         rng=None, recorder=None,
                         opp_source=None, selection_plan: Optional[dict] = None, family_of: Optional[dict] = None,
-                        rl_blend_weight: Optional[float] = None,
+                        rl_blend_weight: Optional[float] = None, diag_log: Optional[bool] = None,
                         **player_kwargs):
     """助言エンジンで戦う poke-env Player を作る (操縦はアドバイザー: 選出も行動も実戦の助言と同じ経路)。
 
@@ -620,6 +770,8 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
     selection_plan / family_of: 構築の選出計画 (plan.json の dict) と 相手 team_id → 系統 id。pick_policy advisor のとき
         計画を選出モデルの初期値にする (plan_prior)。相手の系統は opp_source.last_id から引く
     rl_blend_weight: 助言の RL 加点の重み (evaluate の引数で渡す。None = 既定値。2026-10-07: 環境変数で渡さない)
+    diag_log: 診断用の記録 (diag_record) を recorder の turns[].diag に残すか。None なら環境変数 ADVICE_DIAG_LOG
+        (config.ADVICE_DIAG_LOG_ENV)。ADVICE_DIAG_BOTH=1 ならもう一方の採点方式の出力も残す (2026-10-15)
 
     team_source: 自分側の型登録に使う Teambuilder。text_for_battle(k) (k 番目の対戦で出したチームテキスト) と
         texts (出した順の本文) を持つものを推奨 (2026-10-09)。無ければ従来どおり last_text (対戦 k の時点で
@@ -636,15 +788,25 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
     rng = rng or random.Random(0)
     # 対戦ごとの対応の確認の記録 (battle_tag → {own_team_sha16, ref_checked, ref_mismatch, ...}。2026-10-09 M2d)
     corr_by_tag: dict = {}
+    diag_on = diag_log_enabled(diag_log) and recorder is not None
+    diag_both = diag_on and diag_both_enabled()
 
     class _AdvisorPlayer(Player):
         def choose_move(self, battle):
             t0 = time.perf_counter()
             advice, followed, d = None, True, None
+            state_snap, skipped, diag_err = None, [], None
             try:
                 text = self._register_team(battle)
                 state = battle_to_state(battle, resolver)
                 if state:
+                    if diag_on:
+                        state_snap = _jsonable(state)          # evaluate に渡す前の写し (再生の入力)
+                    # 選出の印と poke-env の交代先の照合 (2026-10-15。食い違いの件数だけ数える)
+                    chk = switchable_check(battle, state)
+                    if chk is not None and not chk["ok"]:
+                        stats["switchable_mismatch"] = stats.get("switchable_mismatch", 0) + 1
+                        stats["last_switchable_mismatch"] = chk
                     # 採点方式は config.ADVICE_SCORING_MODE (環境変数 ADVICE_SCORING_MODE で上書き。2026-10-09 M2b)
                     advice = evaluate(state, resolver, rl_blend_weight=rl_blend_weight)
                     _count_scoring(stats, advice)
@@ -662,21 +824,35 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
                         stats["ref_error"] = stats.get("ref_error", 0) + 1
                         stats["last_ref_error"] = repr(e)
                     adv2, followed = apply_action_noise(advice, action_noise, rng)
-                    d = choose_from_advice(battle, adv2)
+                    d, skipped = choose_with_trace(battle, adv2)
                     if not followed:
                         stats["deviated"] = stats.get("deviated", 0) + 1
             except Exception as e:
                 stats["error"] = stats.get("error", 0) + 1
                 stats["last_error"] = repr(e)
+                diag_err = repr(e)
                 d = None
             if recorder is not None:
                 try:
                     executed = None if d is None else {
                         "kind": d["kind"],
                         "id": (d["move"].id if d["kind"] == "move" else d["pokemon"].species)}
-                    recorder.on_decision(battle, _state_summary(battle), advice, executed, followed)
-                except Exception:
-                    pass
+                    diag = None
+                    if diag_on:
+                        other = None
+                        if diag_both and state_snap is not None and advice and advice.get("scoring_mode"):
+                            other_mode = "legacy" if advice.get("scoring_mode") == "transition" else "transition"
+                            try:
+                                other = evaluate(_jsonable(state_snap), resolver, rl_blend_weight=rl_blend_weight,
+                                                 scoring_mode=other_mode)
+                            except Exception as e:
+                                other = {"ok": False, "reason": f"error:{e!r}", "scoring_mode": other_mode}
+                        diag = diag_record(state_snap, advice, battle, executed, skipped, followed,
+                                           rl_blend_weight, other=other, error=diag_err)
+                    recorder.on_decision(battle, _state_summary(battle), advice, executed, followed, diag=diag)
+                except Exception as e:
+                    stats["decision_record_error"] = stats.get("decision_record_error", 0) + 1
+                    stats["last_decision_record_error"] = repr(e)
             if latencies is not None:
                 latencies.append((time.perf_counter() - t0) * 1000.0)
             if d is None:
@@ -698,6 +874,8 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
             text = register_team_for_battle(team_source, k, species, resolver, stats)
             corr = self._corr(battle)
             corr["own_team_sha16"] = team_text_sha16(text)
+            if diag_on:
+                corr["_team_text"] = text
             corr["battle_index"] = k
             return text
 
@@ -769,7 +947,12 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
                     else:
                         opp_id = getattr(opp_source, "last_id", None)
                     tag = getattr(battle, "battle_tag", None) or id(battle)
-                    recorder.on_end(battle, opponent_team_id=opp_id, extra=correspondence_record(corr_by_tag.pop(tag, None)))
+                    corr = corr_by_tag.pop(tag, None)
+                    extra = correspondence_record(corr)
+                    if diag_on:
+                        # 再生に要る自チームの本文 (型の登録の元。register_team_text に渡し直す)
+                        extra["diag_own_team_text"] = (corr or {}).get("_team_text")
+                    recorder.on_end(battle, opponent_team_id=opp_id, extra=extra)
                 except Exception as e:
                     stats["record_error"] = stats.get("record_error", 0) + 1
                     stats["last_record_error"] = repr(e)

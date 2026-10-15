@@ -1392,3 +1392,8 @@ def _transition_sensitivity_from_env() -> bool:
 
 
 TRANSITION_SENSITIVITY_ENABLED = _transition_sensitivity_from_env()
+# 診断用の記録 (2026-10-15、採点方式の比較の診断 段 3): advisor-as-player の対戦記録 (battles.jsonl の turns[].diag) に、決定ごとの
+# 採点入力 (state)・合法手・出力・退避理由・実行行動を残す。既定はオフ (1 にすると有効。make_advisor_player の diag_log 引数でも可)。
+# ADVICE_DIAG_BOTH_ENV=1 のときだけ、記録する条件の方式に加えてもう一方の採点方式も計算して残す (行動の選択には使わない)
+ADVICE_DIAG_LOG_ENV = "ADVICE_DIAG_LOG"
+ADVICE_DIAG_BOTH_ENV = "ADVICE_DIAG_BOTH"
