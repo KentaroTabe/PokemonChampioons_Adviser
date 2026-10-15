@@ -606,3 +606,10 @@ k本なら水準1−0.05/k、推定差≥0.05かつ区間下限>0で採用候補
 - 490 ms の切り分け (実測): 時間の 99% は探索 (simulate_turn、所要時間との相関 0.93)。主因 1 = 使用率 DB による相手の技候補 (6 件。DB を無いことにすると 1〜2 件で p50 476 → 133 ms)。主因 2 = M2a (登録で補った技を全経路で共有) から、画面で技が読めない局面でも探索が走るようになった (M1b のコードを本体データで動かすと探索 0 回・0.9 ms)。RL の葉評価は −11%、感度は legacy に効かない。M1b の 52 ms は当時の条件の記録が無く再現できず (推定: DB の無い作業場所か探索の走らない局面)。
 - 設定方式 C: tools/advice_mode.py (規則 1 箇所) + scripts/advice_env.sh を start_connection_test / start_all_nohup / start_servers / deploy に接続。deploy.sh は pkill の前に検査し不正なら止めずに中止。値は uvicorn を起こすサブシェルだけに export (学習・測定の子プロセスには渡さない、config.py はファイルを読まない)。server は起動時に検証し起動ログに「実効値 / 設定元 / 設定値」、version 行に scoring_mode_source、パネルは設定値・実効値・設定元と食い違いの警告。砂場 (ダミーの uvicorn、PATH だけの環境) で各経路の受け渡しを実測。常駐の再起動は未実施 (運用側)。手順は docs/CONNECTION_TEST_CHECKLIST.md §0。範囲外の修正: start_servers.sh の `$ADVISOR_PORT。` (bash 3.2 + UTF-8 で unbound variable) を直した。start_all_nohup.sh 57 行目の `$TRAINING_MODE、` も同じ崩れ (落ちない、未修正)。
 - 判断待ち: display_rows の既定 unrecorded_mode を "legacy" から unknown に変える (既存テスト test_display_rows の期待値の変更)。対象群の規模 (2 回以上・合計 100 決定程度) の検査は未実装。
+
+### 8.30 録画の両方式再生 (2026-10-16 09 時台、tools.shadow_load_check --compare-scoring、影の計算 OFF)
+
+- 条件: 10/15 の対戦ログの局面 56 件 × 3 回 (助言の計算)、保存フレーム 155 枚から 168 枚/回を 10 fps (間隔 0.1 秒) で送信、ウォームアップ 10、順序 L→T→T→L を 2 周 (各方式 4 回)。学習・測定の run なし。結果 scratchpad/shadow/result.json (本体の logs/ には置かない)。
+- 処理率 (処理 / 送信): legacy 0.280 / 0.310 / 0.244 / 0.327 (平均 0.290)、transition 0.310 / 0.304 / 0.292 / 0.310 (平均 0.304)。transition は legacy 比で悪化なし (基準: 10% 以上悪化しない → 満たす)。処理率 0.3 前後は両方式に共通 (10 fps に対して約 3 fps しか処理できない既存の特性)。
+- 遅延 (フレーム受信 → 助言) p95: legacy 919 / 842 / 1,604 / 921 ms (平均 1,072)、transition 902 / 823 / 1,273 / 867 ms (平均 966)。期限 3 秒の超過は両方式 0。助言の計算 p95: legacy 481〜1,235 ms、transition 541〜563 ms。
+- 判定: 負荷の項目は満たす。残るのは実機の表示までの遅延の増分 (transition 明示の接続テスト群で測る)。
