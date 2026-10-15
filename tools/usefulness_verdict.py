@@ -504,6 +504,13 @@ def render(verdict: dict, conditions: Optional[dict] = None) -> str:
         lines += ["", f"自チームの対応 (送った本文の sha16 の条件間の一致・参照した型の一致): 食い違い {oc['hash_mismatch']} 件 / "
                       f"参照の不一致 {oc['ref_mismatch_battles'] or 0} / 確認できない {oc['unverifiable'] or 0} / "
                       f"助言の図鑑に無い個体を含む対戦 {oc['unbuilt_battles'] or 0}"]
+    if v.get("accept_audit") is not None:
+        # 受入監査の違反でない件数の表示 (2026-10-16 E-holdout-1: 蘇生先の選択は違反に数えない)
+        from champions_agent.env.sim_accept import INFO_LABELS
+        per = v["accept_audit"].get("per_condition") or {}
+        for k, label in INFO_LABELS.items():
+            lines += ["", f"{label} (受入の違反ではない): " +
+                      (" / ".join(f"{c} {int((t or {}).get(k) or 0)} 件" for c, t in per.items()) or "-")]
     if v["opponent_mismatches"] is not None:
         lines += ["", f"相手 id の条件間の食い違い: {v['opponent_mismatches']} 件"]
     if v.get("holdout") is not None:

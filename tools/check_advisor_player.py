@@ -520,7 +520,8 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
     print(f"勝率: {player.n_won_battles / n_battles:.2f}")
     print(f"助言レイテンシ: p50 {p50:.0f}ms / p95 {p95:.0f}ms ({len(lat)}決定)")
     print(f"意思決定: 助言{stats.get('decide', 0)} / フォールバック{stats.get('fallback', 0)} "
-          f"({stats.get('fallback', 0) / max(1, n_dec):.0%}) / 例外{stats.get('error', 0)}")
+          f"({stats.get('fallback', 0) / max(1, n_dec):.0%}) / 例外{stats.get('error', 0)} / "
+          f"蘇生先の選択{stats.get('revive_select', 0)}")
     if stats.get("last_error"):
         print(f"直近の例外: {stats['last_error']}")
     print(f"受入監査: {sim_accept_summary(stats)}")
@@ -560,6 +561,9 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
             # 飛ばし・ランダム退避・選出不明の件数。champions_agent.env.sim_accept)
             "inputs_version": SIM_INPUTS_VERSION,
             "accept": sim_accept_summary(stats),
+            # 2026-10-16 E-holdout-1: さいきのいのり の蘇生先を固定規則で選んだ決定数 (助言の決定 decide には数えない。
+            # stats の revive_select / accept:revive_select と同じ値)
+            "revive_select": int(stats.get("revive_select", 0)),
             "opp_seed": opp_seed, "meta_snapshot": meta_pin, "battle_format": battle_format,
             "latency_p50_ms": round(p50, 1), "latency_p95_ms": round(p95, 1),
             "stats": {k: v for k, v in stats.items()

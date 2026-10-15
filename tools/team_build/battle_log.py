@@ -106,9 +106,13 @@ class BattleRecorder:
 
     def on_decision(self, battle, state_summary: Optional[dict], advice: Optional[dict],
                     executed: Optional[dict], followed: Optional[bool] = None, diag: Optional[dict] = None,
-                    accept: Optional[dict] = None) -> None:
+                    accept: Optional[dict] = None, request_kind: Optional[str] = None,
+                    request: Optional[dict] = None) -> None:
         """diag: 診断用の記録 (champions_agent.env.advisor_player.diag_record。既定オフ、あるときだけ欄 "diag" を足す。2026-10-15)。
-        accept: 受入監査の印 (champions_agent.env.sim_accept.raised。立った印があるときだけ欄 "accept" を足す。2026-10-15 M3a)"""
+        accept: 受入監査の印 (champions_agent.env.sim_accept.raised。立った印があるときだけ欄 "accept" を足す。2026-10-15 M3a)。
+        request_kind: 要求の種類 (normal_switch / forced_switch / revive_select。渡されたら欄 "request_kind")。request: 要求の中身
+        (champions_agent.env.advisor_player.request_record。蘇生要求と助言から行動を作れなかった決定だけ。あるときだけ欄 "request"。
+        2026-10-16 E-holdout-1。どちらも欄の追加だけで、既存の記録の読み手に影響しない)"""
         tag = getattr(battle, "battle_tag", None) or id(battle)
         self._t0.setdefault(tag, time.time())
         rec = {"turn": getattr(battle, "turn", None), "state_before": state_summary,
@@ -118,6 +122,10 @@ class BattleRecorder:
             rec["diag"] = diag
         if accept:
             rec["accept"] = dict(accept)
+        if request_kind is not None:
+            rec["request_kind"] = request_kind
+        if request is not None:
+            rec["request"] = request
         self._turns.setdefault(tag, []).append(rec)
 
     def on_end(self, battle, opponent_team_id: Optional[str] = None,

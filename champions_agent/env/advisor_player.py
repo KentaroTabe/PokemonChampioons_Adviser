@@ -772,15 +772,109 @@ def choose_with_trace(battle, advice: dict) -> tuple:
 
 
 def only_legal_action(battle) -> Optional[dict]:
-    """poke-env の合法手 (available_moves + available_switches) がちょうど 1 つならその行動 (choose_with_trace と同じ形)、
-    それ以外は None (純粋。2026-10-15 M3a: 助言から行動を作れないときのランダム行動の代わり。わるあがき・反動等)"""
-    moves = list(getattr(battle, "available_moves", None) or [])
-    switches = list(getattr(battle, "available_switches", None) or [])
+    """合法手 (legal_options: 通常は poke-env の available_moves + available_switches、蘇生要求は蘇生先) がちょうど 1 つなら
+    その行動 (choose_with_trace と同じ形)、それ以外は None (純粋。2026-10-15 M3a: 助言から行動を作れないときのランダム行動の
+    代わり。わるあがき・反動等)。
+    2026-10-16 (E-holdout-1): 蘇生要求では poke-env 0.10.0 の available_switches が空になる (Showdown は reviving の印を
+    場の個体 = さいきのいのり の使い手に付け、poke-env は「印があって場にいない個体」を蘇生先にするので 1 体も入らない。
+    要求に active が無いので available_moves も空) ため、蘇生先を要求から数える"""
+    moves, switches = legal_options(battle)
     if len(moves) + len(switches) != 1:
         return None
     if moves:
         return {"kind": "move", "move": moves[0], "mega": False, "pokemon": None}
     return {"kind": "switch", "move": None, "mega": False, "pokemon": switches[0]}
+
+
+# ------------------------------------------------------------------ 要求の種類と蘇生先の選択 (2026-10-16 E-holdout-1)
+# さいきのいのり の成功後、Showdown は「蘇生する個体を選ぶ」交代の要求 (forceSwitch、場の個体に reviving の印) を出す。
+# 助言 (evaluate) はひんしの個体を交代候補から外す (通常交代・強制交代では正しい) ので、この要求では候補が空になる。
+# 蘇生先は助言を通さず、要求の合法なひんし個体から両方式共通の固定規則 (自分の選出順で先) で選ぶ (採点方式を参照しない)
+REQ_NORMAL = "normal_switch"      # 通常の決定 (技・通常の交代)
+REQ_FORCED = "forced_switch"      # 強制交代 (ひんし後の繰り出し・交代技の後: 要求の forceSwitch)
+REQ_REVIVE = "revive_select"      # 蘇生先の選択 (さいきのいのり: 要求の side.pokemon に reviving の印 + forceSwitch)
+
+
+def _is_reviving_request(battle) -> bool:
+    req = _request_of(battle)
+    side = req.get("side") or {}
+    return bool(getattr(battle, "reviving", False)) or any(
+        isinstance(m, dict) and m.get("reviving") for m in (side.get("pokemon") or []))
+
+
+def request_kind(battle) -> str:
+    """この決定の要求の種類 (純粋): REQ_REVIVE / REQ_FORCED / REQ_NORMAL。
+    蘇生は reviving の印と forceSwitch の両方があるときだけ (印だけの要求は Showdown の仕様上出ないが、出ても技を選べる要求を
+    蘇生扱いにしない)"""
+    leg = sim_legality(battle)
+    if leg["force_switch"] and _is_reviving_request(battle):
+        return REQ_REVIVE
+    if leg["force_switch"]:
+        return REQ_FORCED
+    return REQ_NORMAL
+
+
+def _cond_fainted(cond) -> bool:
+    """要求の condition ("0 fnt" 等) がひんしか (純粋)"""
+    return "fnt" in str(cond or "").split()
+
+
+def revive_candidates(battle) -> list:
+    """蘇生要求の合法な蘇生先 [(battle.team の鍵, Pokemon)] (battle.team の並び。純粋)。
+    Showdown の合法性 (side.ts chooseSwitch: 蘇生先は自分の側のひんしの個体) どおり、要求の side.pokemon (BSS では選出した
+    3 体) のうち condition がひんしで場にいない個体。蘇生要求でなければ空"""
+    if request_kind(battle) != REQ_REVIVE:
+        return []
+    side = _request_of(battle).get("side") or {}
+    fainted = {_norm_ident(m.get("ident")) for m in (side.get("pokemon") or [])
+               if isinstance(m, dict) and m.get("ident") and _cond_fainted(m.get("condition")) and not m.get("active")}
+    return [(k, p) for k, p in (getattr(battle, "team", None) or {}).items() if _norm_ident(k) in fainted]
+
+
+def revive_target(candidates: list, pick_order: Optional[list]) -> tuple:
+    """蘇生先の固定規則 (純粋): (Pokemon か None, 規則)。candidates = revive_candidates の戻り値、pick_order = 選出画面で
+    選んだ順の battle.team の鍵 (teampreview の /team の順)。
+    1 体なら確定 ("single")。複数なら自分の選出順で先の個体 ("pick_order")。選出順が分からない・候補が選出順に無いときは
+    battle.team の並びで先 ("team_order"。測定では起きない想定)。候補が無ければ (None, None)"""
+    if not candidates:
+        return None, None
+    if len(candidates) == 1:
+        return candidates[0][1], "single"
+    rank = {_norm_ident(k): i for i, k in enumerate(pick_order or [])}
+    if rank and all(_norm_ident(k) in rank for k, _p in candidates):
+        return min(candidates, key=lambda kp: rank[_norm_ident(kp[0])])[1], "pick_order"
+    return candidates[0][1], "team_order"
+
+
+def legal_options(battle) -> tuple:
+    """この決定の合法手 (技の list, 交代先の list) (純粋)。蘇生要求なら ([], 蘇生先)、それ以外は poke-env の
+    available_moves / available_switches"""
+    if request_kind(battle) == REQ_REVIVE:
+        return [], [p for _k, p in revive_candidates(battle)]
+    return (list(getattr(battle, "available_moves", None) or []),
+            list(getattr(battle, "available_switches", None) or []))
+
+
+def pick_order_keys(battle, order: Optional[str]) -> list:
+    """teampreview の /team 文字列 → 選んだ順の battle.team の鍵 (純粋。範囲外の番号は捨てる)"""
+    keys = list((getattr(battle, "team", None) or {}).keys())
+    out = []
+    for c in str(order or "").replace("/team", "").strip():
+        if c.isdigit() and 0 <= int(c) - 1 < len(keys):
+            out.append(keys[int(c) - 1])
+    return out
+
+
+def request_record(battle, kind: str, executed: Optional[dict], rule: Optional[str] = None) -> dict:
+    """決定の記録 (turns[].request) に残す要求の中身 (純粋。蘇生要求と、助言から行動を作れなかった決定だけに付ける)"""
+    rec = {"kind": kind,
+           "available_moves": [m.id for m in (getattr(battle, "available_moves", None) or [])],
+           "available_switches": [p.species for p in (getattr(battle, "available_switches", None) or [])],
+           "revive_candidates": [getattr(p, "species", None) for _k, p in revive_candidates(battle)],
+           "executed": executed}
+    if rule is not None:
+        rec["revive_rule"] = rule
+    return rec
 
 
 def _skip_reason(battle, a: dict) -> str:
@@ -1024,8 +1118,10 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
             advice, adv2, followed, d = None, None, True, None
             state_snap, skipped, diag_err = None, [], None
             chk, leg, picked_species = None, {"known": False, "moves": [], "switches": []}, None
+            kind, revive_rule = REQ_NORMAL, None
             try:
                 leg = sim_legality(battle)
+                kind = request_kind(battle)
                 mask = picked_mask_of(battle)
                 if mask is not None:
                     picked_species = [getattr(p, "species", None)
@@ -1037,44 +1133,57 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
             except Exception as e:
                 stats["legality_error"] = stats.get("legality_error", 0) + 1
                 stats["last_legality_error"] = repr(e)
-            try:
-                text = self._register_team(battle)
-                state = battle_to_state(battle, resolver)
-                if state:
-                    if diag_on:
-                        state_snap = _jsonable(state)          # evaluate に渡す前の写し (再生の入力)
-                    # 選出の印と poke-env の交代先の照合 (2026-10-15。食い違いの件数だけ数える。要求が無く照合できない決定も数える)
-                    chk = switchable_check(battle, state)
-                    if chk is not None and chk.get("status") == "unknown":
-                        stats["switchable_unknown"] = stats.get("switchable_unknown", 0) + 1
-                    elif chk is not None and not chk["ok"]:
-                        stats["switchable_mismatch"] = stats.get("switchable_mismatch", 0) + 1
-                        stats["last_switchable_mismatch"] = chk
-                    # 採点方式は config.ADVICE_SCORING_MODE (環境変数 ADVICE_SCORING_MODE で上書き。2026-10-09 M2b)
-                    advice = evaluate(state, resolver, rl_blend_weight=rl_blend_weight)
-                    _count_scoring(stats, advice)
-                    try:
-                        me = state["player"]
-                        p_act = me["party"][me["active_index"]] if me.get("active_index") is not None else None
-                        ok = check_reference(self._corr(battle), p_act, text, resolver)
-                        if ok is None and p_act:
-                            stats["ref_unbuilt"] = stats.get("ref_unbuilt", 0) + 1
-                        if ok is not None:
-                            stats["ref_checked"] = stats.get("ref_checked", 0) + 1
-                            if not ok:
-                                stats["ref_mismatch"] = stats.get("ref_mismatch", 0) + 1
-                    except Exception as e:
-                        stats["ref_error"] = stats.get("ref_error", 0) + 1
-                        stats["last_ref_error"] = repr(e)
-                    adv2, followed = apply_action_noise(advice, action_noise, rng)
-                    d, skipped = choose_with_trace(battle, adv2)
-                    if not followed:
-                        stats["deviated"] = stats.get("deviated", 0) + 1
-            except Exception as e:
-                stats["error"] = stats.get("error", 0) + 1
-                stats["last_error"] = repr(e)
-                diag_err = repr(e)
-                d = None
+            if kind == REQ_REVIVE:
+                # 蘇生先の選択 (2026-10-16 E-holdout-1): 助言を通さず、要求の合法なひんし個体から固定規則で選ぶ
+                try:
+                    target, revive_rule = revive_target(revive_candidates(battle), self._corr(battle).get("pick_order"))
+                    if target is not None:
+                        d = {"kind": "switch", "move": None, "mega": False, "pokemon": target}
+                except Exception as e:
+                    stats["revive_error"] = stats.get("revive_error", 0) + 1
+                    stats["last_revive_error"] = repr(e)
+                    diag_err = repr(e)
+                    d = None
+            else:
+                try:
+                    text = self._register_team(battle)
+                    state = battle_to_state(battle, resolver)
+                    if state:
+                        if diag_on:
+                            state_snap = _jsonable(state)          # evaluate に渡す前の写し (再生の入力)
+                        # 選出の印と poke-env の交代先の照合 (2026-10-15。食い違いの件数だけ数える。要求が無く照合できない決定も数える)
+                        chk = switchable_check(battle, state)
+                        if chk is not None and chk.get("status") == "unknown":
+                            stats["switchable_unknown"] = stats.get("switchable_unknown", 0) + 1
+                        elif chk is not None and not chk["ok"]:
+                            stats["switchable_mismatch"] = stats.get("switchable_mismatch", 0) + 1
+                            stats["last_switchable_mismatch"] = chk
+                        # 採点方式は config.ADVICE_SCORING_MODE (環境変数 ADVICE_SCORING_MODE で上書き。2026-10-09 M2b)
+                        advice = evaluate(state, resolver, rl_blend_weight=rl_blend_weight)
+                        _count_scoring(stats, advice)
+                        try:
+                            me = state["player"]
+                            p_act = me["party"][me["active_index"]] if me.get("active_index") is not None else None
+                            ok = check_reference(self._corr(battle), p_act, text, resolver)
+                            if ok is None and p_act:
+                                stats["ref_unbuilt"] = stats.get("ref_unbuilt", 0) + 1
+                            if ok is not None:
+                                stats["ref_checked"] = stats.get("ref_checked", 0) + 1
+                                if not ok:
+                                    stats["ref_mismatch"] = stats.get("ref_mismatch", 0) + 1
+                        except Exception as e:
+                            stats["ref_error"] = stats.get("ref_error", 0) + 1
+                            stats["last_ref_error"] = repr(e)
+                        adv2, followed = apply_action_noise(advice, action_noise, rng)
+                        d, skipped = choose_with_trace(battle, adv2)
+                        if not followed:
+                            stats["deviated"] = stats.get("deviated", 0) + 1
+                except Exception as e:
+                    stats["error"] = stats.get("error", 0) + 1
+                    stats["last_error"] = repr(e)
+                    diag_err = repr(e)
+                    d = None
+            revived = kind == REQ_REVIVE and d is not None
             forced = False
             if d is None:
                 # 助言から行動を作れなくても、合法手が 1 つだけならそれを実行する (わるあがき・反動等。ランダムではない)
@@ -1084,7 +1193,8 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
             flags = {}
             try:
                 flags = SA.decision_flags(advice, adv2, skipped, leg.get("moves"), leg.get("switches"),
-                                          bool(leg.get("known")), picked_species, random_fallback=d is None, forced=forced)
+                                          bool(leg.get("known")), picked_species, random_fallback=d is None, forced=forced,
+                                          revive_select=revived)
                 if chk is not None and chk.get("status") == "unknown":
                     flags["switch_info_unknown"] = True
                 SA.add_flags(stats, flags, SA.STATS_PREFIX)
@@ -1109,8 +1219,16 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
                                 other = {"ok": False, "reason": f"error:{e!r}", "scoring_mode": other_mode}
                         diag = diag_record(state_snap, advice, battle, executed, skipped, followed,
                                            rl_blend_weight, other=other, error=diag_err)
+                    # 要求の中身 (2026-10-16 E-holdout-1): 蘇生要求と、助言から行動を作れなかった決定 (ランダム退避・唯一の
+                    # 合法手) だけに残す (通常の決定には足さない)
+                    req_rec = None
+                    if kind == REQ_REVIVE or forced or d is None:
+                        try:
+                            req_rec = request_record(battle, kind, executed, revive_rule)
+                        except Exception as e:
+                            req_rec = {"kind": kind, "error": repr(e)}
                     recorder.on_decision(battle, _state_summary(battle), advice, executed, followed, diag=diag,
-                                         accept=SA.raised(flags) or None)
+                                         accept=SA.raised(flags) or None, request_kind=kind, request=req_rec)
                 except Exception as e:
                     stats["decision_record_error"] = stats.get("decision_record_error", 0) + 1
                     stats["last_decision_record_error"] = repr(e)
@@ -1119,6 +1237,10 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
             if d is None:
                 stats["fallback"] = stats.get("fallback", 0) + 1
                 return self.choose_random_move(battle)
+            if revived:
+                # 蘇生先の選択 (助言の決定ではないので decide / switch に数えない)
+                stats["revive_select"] = stats.get("revive_select", 0) + 1
+                return self.create_order(d["pokemon"])
             if forced:
                 stats["forced_single"] = stats.get("forced_single", 0) + 1
             else:
@@ -1150,6 +1272,12 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
         def teampreview(self, battle):
             self._register_team(battle)
             order = self._pick(battle)
+            # 選出順 (蘇生先の固定規則 revive_target が使う。2026-10-16 E-holdout-1)
+            try:
+                self._corr(battle)["pick_order"] = pick_order_keys(battle, order)
+            except Exception as e:
+                stats["pick_order_error"] = stats.get("pick_order_error", 0) + 1
+                stats["last_pick_order_error"] = repr(e)
             if recorder is not None:
                 try:
                     mons = list(battle.team.values())
