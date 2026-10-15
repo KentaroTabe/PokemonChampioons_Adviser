@@ -36,11 +36,13 @@ MAJOR_STATUSES = ("poison", "toxic", "burn", "paralysis", "sleep", "freeze", "dr
 #   bar_mismatch                自分: 分数の割合とバーの塗りの割合の差が許容 (HP_BAR_MATCH_TOL) を超える
 #   watch_right_big_increase    相手: 様子見画面の右列の HP% が、交代の文言なしに WATCH_OPP_BIG_INCREASE を超えて増えた
 #                               (2026-10-09 fix/hp-paths。書かずに残す。row / species / score は右列の行と同定の結果)
+#   watch_right_duplicate_value 相手: 様子見画面の右列で、元の HP が無い枠へ書く値を別の枠が既に持つ (別個体の値の疑い。
+#                               2026-10-15。書かずに残す。dup_slot / dup_species は同じ値を持つ枠)
 # 状態には側ごとに「最後に捨てた読み」1 件だけを持つ (同じ理由・同じ候補値・同じ枠の連続は 1 件にまとめ、n と t_first で残す)。
 # 件数は起動からの累計をモジュールに持つ (reset_battle で消えない。server の 5 秒統計の行に出す)
 HP_REJECT_REASONS = ("name_mismatch", "name_unreadable_big_change", "fraction_unparsable", "max_hp_mismatch",
                      "max_hp_implausible", "max_hp_not_in_team", "cur_over_max", "bar_mismatch",
-                     "watch_right_big_increase")
+                     "watch_right_big_increase", "watch_right_duplicate_value")
 HP_REJECT_COUNTS: dict = {}   # {(side, reason): 件数}
 
 

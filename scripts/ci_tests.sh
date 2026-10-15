@@ -145,6 +145,8 @@ TESTS=(
   test_hp_paths
   test_hp_fraction_ocr
   test_watch_opp_color
+  test_watch_right_candidates
+  test_hp_low_digits
   test_roster_retention
   test_type_recognition
   test_roster_cap

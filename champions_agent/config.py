@@ -350,11 +350,23 @@ HP_TEXT_DESAT_SAT0 = 0.25
 # 分母側の切り出しに足す余白 (画素、白) と、読むときの拡大率 (順に試し、3 桁が読めた時点で採用)
 HP_TEXT_DENOM_PAD = 16
 HP_TEXT_DENOM_SCALES = (3.0, 2.0)
+# 現在値の並べ読み (vision.ocr.read_current_tiled、2026-10-15。KNOWN_ISSUES A1「自分の HP が 1 桁のとき分数を誤読」):
+# Apple Vision は 1 桁の数字だけの切り出し ('7') を読めない (frame_1792026768 の 7/137 で空)。現在値の切り出しを横に
+# この枚数並べて読み、同じ並びの繰り返し ('77') なら 1 枚分を現在値とする。並べるあいだの白の幅 (画素)、上下左右の白の余白
+# (画素)、読む倍率 (順に試し、繰り返しが読めた時点で採用)
+HP_TEXT_CUR_TILE_COPIES = 2
+HP_TEXT_CUR_TILE_GAP = 12
+HP_TEXT_CUR_TILE_PAD = 16
+HP_TEXT_CUR_TILE_SCALES = (1.5, 2.0)
 # 'a/b' を分数として認める最大値 b の下限 (Lv50 の最大 HP は実質 50 以上。vision.ocr.parse_fraction の桁分割の下限と同じ値)
 HP_FRACTION_MAX_MIN = 50
 # 様子見画面の右列 (相手の HP%): 交代の文言の無い、この値 (ポイント) を超える増加は書かずに棄却として記録する
 # (2026-10-09 fix/hp-paths。10/7 18:30 マニューラ 39% → 100% の原因を切り分けるため。回復技の上限を超える増加は別個体の値の疑い)
 WATCH_OPP_BIG_INCREASE = 60.0
+# 様子見画面の右列: 元の HP が無い枠へ書く値が、別の枠の既知の HP% とこの差 (ポイント) 以内なら、別個体の値の疑いとして書かずに
+# 棄却 (watch_right_duplicate_value) として記録する (2026-10-15。10/15 10:16 試験: メガカイリューの 87% の行をミミロップ (選出外) と
+# 同定し、HP の無かったミミロップの枠に 87 を書いた)。右列の % は整数で読むので、0.5 は「同じ値」の意味
+WATCH_OPP_DUPLICATE_VALUE_TOL = 0.5
 
 # --- 行動助言の RL 加点と影の計算 (docs/USEFULNESS_VERIFICATION_PLAN_1007.md §2 advice_variant・§4、2026-10-07) ---
 # RL の行動確率の加点の重み (advisor.engine: score += 重み × 確率) の既定値。evaluate(rl_blend_weight=...) で渡さないときに使う。
