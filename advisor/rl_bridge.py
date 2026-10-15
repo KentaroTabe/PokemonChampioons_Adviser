@@ -838,10 +838,15 @@ def _legal_actions_impl(state: dict, use_legal_flag: bool) -> list:
     # 交代は選出済みの3体に限る (未選出への交代提案の防止)
     from advisor.party import battle_party_indices
     allowed = battle_party_indices(my)
+    # 実行環境の「今交代できる個体」(2026-10-15 M3a、シミュレータだけ。とらわれ等で交代できなければ確率を配らない)
+    from advisor.engine import legal_switch_filter
+    switchable = legal_switch_filter(my)
     for j, p in enumerate(party[:6]):
         if j == mi or not p.get("species_id") or p.get("status") == "fainted":
             continue
         if allowed is not None and j not in allowed:
+            continue
+        if switchable is not None and j not in switchable:
             continue
         out.append((j, f"交代:{p.get('species_ja') or p['species_id']}", "switch"))
     if own:

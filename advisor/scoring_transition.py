@@ -849,14 +849,29 @@ def build_inputs(state: dict, resolver, *, my_view: MonView, opp_view: Optional[
             leg = next((a for a in legacy_actions if a.get("kind") == "move" and a.get("id") == mid), None)
             name = (leg or {}).get("name") or mv.get("name") or mid
             cands.append(Candidate("move", mid, name, Action("move", move_id=mid, label=mid), "move"))
+    # 交代の候補は「今交代できる個体」だけ (2026-10-15 M3a: 実行環境の legal_switch_indices。とらわれ等。無ければ制限なし)。
+    # 控え (bench = 残存戦力) は選出した生存の個体のまま
+    from advisor.engine import legal_switch_filter
+    switchable = legal_switch_filter(my_state)
     for j, ((v, _hp), (i, p)) in enumerate(zip(bench, bench_meta)):
+        if switchable is not None and i not in switchable:
+            continue
         sid = p.get("species_id") or f"slot{i}"
         name = p.get("species_ja") or p.get("display_name") or f"{i}番"
         cands.append(Candidate("switch", sid, name, Action("switch", bench_index=j, label=f"交代:{name}"),
                                switch_mode, party_index=i))
     mode = None
+    # 交代技の後の繰り出しで、相手がこのターンに行動済みか (2026-10-15 M3a: 実行環境が分かるときだけ状態の pivot_opp_acted に
+    # 入る。シミュレータはこのターンの記録から決める)。無ければ従来どおり素早さの見込み (i_am_faster) で決める
+    opp_acted = state.get("pivot_opp_acted")
     if my_fainted:
         notes.append("ひんし後の繰り出し: 相手は行動しない (繰り出しの候補どうしを V で比べる)")
+    elif pivot_pending and opp_acted is not None:
+        if opp_acted:
+            notes.append("交代技の後の繰り出し: 相手はこのターンに行動済み (技を受けない)")
+        else:
+            mode = "no_switch"
+            notes.append("交代技の後の繰り出し: 相手はこのターンにまだ行動していない (技を受ける)")
     elif pivot_pending:
         # 交代技の後の繰り出し先の選択: 自分が先に動いた (相手がまだ行動していない) なら相手の技を受ける (交代はしない)。
         # 相手が先に動いた後なら相手は行動しない

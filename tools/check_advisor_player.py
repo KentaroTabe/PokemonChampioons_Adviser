@@ -28,7 +28,8 @@ from pathlib import Path
 from typing import Optional
 
 from champions_agent import config as _CFG
-from champions_agent.config import TRAINING_BATTLE_FORMAT
+from champions_agent.config import SIM_INPUTS_VERSION, TRAINING_BATTLE_FORMAT
+from champions_agent.env.sim_accept import summary_from_stats as sim_accept_summary
 
 
 def _constant_teambuilder(text: str):
@@ -462,6 +463,7 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
           f"({stats.get('fallback', 0) / max(1, n_dec):.0%}) / 例外{stats.get('error', 0)}")
     if stats.get("last_error"):
         print(f"直近の例外: {stats['last_error']}")
+    print(f"受入監査: {sim_accept_summary(stats)}")
     if json_out:
         Path(json_out).parent.mkdir(parents=True, exist_ok=True)
         Path(json_out).write_text(json.dumps({
@@ -490,6 +492,10 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
             "opp_team_legality": ({"battle_format": opp_legality.battle_format, "checked": opp_legality.n_checked,
                                    "sec": round(opp_legality.sec, 1)} if opp_legality is not None else None),
             "transition_timing": transition_timing(stats),
+            # 2026-10-15 M3a: 状態変換の版 (修正前の結果を混ぜないための印) と受入監査 (第一候補の合法性・未選出の候補・説明できない
+            # 飛ばし・ランダム退避・選出不明の件数。champions_agent.env.sim_accept)
+            "inputs_version": SIM_INPUTS_VERSION,
+            "accept": sim_accept_summary(stats),
             "opp_seed": opp_seed, "meta_snapshot": meta_pin, "battle_format": battle_format,
             "latency_p50_ms": round(p50, 1), "latency_p95_ms": round(p95, 1),
             "stats": {k: v for k, v in stats.items()

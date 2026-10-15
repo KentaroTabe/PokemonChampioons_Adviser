@@ -156,6 +156,7 @@ TESTS=(
   test_advisor_team_validate
   test_diag_scoring_compare
   test_sim_picked_roster
+  test_sim_legal_inputs
 )
 
 fail=0

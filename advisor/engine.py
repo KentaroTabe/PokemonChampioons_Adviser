@@ -298,6 +298,20 @@ def registered_moves_of_mon(p: Optional[dict], resolver) -> list:
     return []
 
 
+# 実行環境 (シミュレータ) の合法手で選べない行動の理由の既定値 (2026-10-15 M3a。個別の理由は状態の move_block_reasons /
+# switch_block_reason)
+SIM_MOVE_BLOCKED_REASON = "simulator: 選べない技"
+SIM_SWITCH_BLOCKED_REASON = "simulator: 交代できない"
+
+
+def legal_switch_filter(my_state: dict) -> Optional[frozenset]:
+    """実行環境の「今交代できる個体」の party index の集合 (純粋。2026-10-15 M3a)。状態の "legal_switch_indices" が無ければ None
+    (制限なし = 従来どおり。実機の状態には無い)。選出した控え (残存戦力: battle_party_indices) とは別で、こちらは交代候補だけを絞る
+    (とらわれ・交代技の後の要求で選べる個体)"""
+    idx = (my_state or {}).get("legal_switch_indices")
+    return None if idx is None else frozenset(int(i) for i in idx)
+
+
 @dataclass
 class MoveLegality:
     """場の自分の個体の技の枠 (登録で補完した後) と、それぞれの合法性 (legal_move_slots の戻り値。2026-10-09 M2a)。
@@ -340,10 +354,17 @@ def legal_move_slots(state: dict, my_p: dict, *, item: Optional[str] = None, reg
     (registered_moves_of。None なら補完しない)。switch_only (ひんし・交代先の選択) なら補完しない。
     技の固定: ちょうはつ=変化技不可 / かなしばり=特定技不可 / アンコール=固定された技以外不可 / こだわり=直前の技以外不可。
     固定する技 (アンコールを受けた時点の直前の技 = 状態の encore_move、無ければ last_move、こだわりは last_move) が今の
-    個体の技に無い (交代の取り逃しで前の個体の技が残っている等) ときは、分からないものとして絞らず、合法性が未確認の印を残す"""
+    個体の技に無い (交代の取り逃しで前の個体の技が残っている等) ときは、分からないものとして絞らず、合法性が未確認の印を残す。
+
+    実行環境の合法手 (2026-10-15 M3a、シミュレータ = advisor-as-player が入れる。実機の状態には無い): 場の個体に
+    "legal_move_ids" (選べる技の id の list) があれば、それを正とする。登録の技で補完しない (選べない技を補完で復活させない)、
+    list にある技は選べる、無い技は選べない (理由は "move_block_reasons" の値、無ければこの関数の判定、それも無ければ
+    SIM_MOVE_BLOCKED_REASON)"""
     dex = get_dex()
     slots = list(my_p.get("moves") or [])
-    if len(slots) < 4 and not switch_only and registered:
+    sim_legal = my_p.get("legal_move_ids")
+    sim_legal = None if sim_legal is None else frozenset(sim_legal)
+    if len(slots) < 4 and not switch_only and registered and sim_legal is None:
         slots = complete_moves_from_registration(slots, registered)
     move_ids_now = [s.get("move_id") for s in slots if s.get("move_id")]
     my_vols = frozenset(str(v).lower() for v in (my_p.get("volatiles") or []))
@@ -378,6 +399,11 @@ def legal_move_slots(state: dict, my_p: dict, *, item: Optional[str] = None, reg
             first_turn_only_move=bool(mv) and _E.first_turn_only(_E.move_entry(mid)),
             acted_since_entry=acted_since_entry, disabled_ids=disabled_ids,
             encore_locked=encore_locked, choice_locked=choice_locked, taunted="taunt" in my_vols))
+    if sim_legal is not None:
+        blocked = dict(my_p.get("move_block_reasons") or {})
+        reasons = [None if s.get("move_id") in sim_legal
+                   else (blocked.get(s.get("move_id")) or r or SIM_MOVE_BLOCKED_REASON)
+                   for s, r in zip(slots, reasons)]
     return MoveLegality(slots=slots, reasons=reasons, legality_unconfirmed=unconfirmed,
                         encore_locked=encore_locked, choice_locked=choice_locked, disabled_ids=disabled_ids,
                         volatiles=my_vols, switch_only=switch_only)
@@ -1044,10 +1070,18 @@ def evaluate_common(state: dict, resolver=None, scoring_mode: Optional[str] = No
     # ------------------------------------------------------------------
     from advisor.party import battle_party_indices
     _allowed = battle_party_indices(my_state)
+    # 実行環境の「今交代できる個体」(2026-10-15 M3a、シミュレータだけ): 選出した生存の控えでも、とらわれ等で今交代できない個体は
+    # 候補から外して illegal_actions に理由を残す (残存戦力の扱いは変えない)
+    _switchable = legal_switch_filter(my_state)
     for i, p in enumerate(my_state["party"]):
         if i == my_active_idx or p.get("status") == "fainted":
             continue
         if _allowed is not None and i not in _allowed:
+            continue
+        if _switchable is not None and i not in _switchable:
+            illegal_actions.append({"kind": "switch", "id": p.get("species_id") or f"slot{i}",
+                                    "name": p.get("species_ja") or p.get("display_name") or f"{i}番", "legal": False,
+                                    "reason": my_state.get("switch_block_reason") or SIM_SWITCH_BLOCKED_REASON})
             continue
         cand = build_mon_view(p, resolver, side="player")
         if cand is None or opp_view is None:

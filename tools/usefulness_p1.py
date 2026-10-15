@@ -69,7 +69,7 @@ from champions_agent.config import (
     P1_SCORING_BASELINE, P1_SCORING_MODES, P1_SCORING_POOL_FILE, P1_SCORING_POOL_SHA16, P1_SCORING_START_MARGIN_SEC,
     P1_SCORING_TEAM_SHA16, P1_SCORING_TIME_LIMIT_SEC, P1_TEAM_DEFAULT,
     P1_TEAM_SHA16, P1_TEAM_SOURCES, P1_TERMINATE_GRACE_SEC, P1_TIME_LIMIT_SEC, P1_WEIGHTS, MY_TEAM_DISABLED_ENV, SHOWDOWN_PORT,
-    TRAINING_BATTLE_FORMAT, TRANSITION_SENSITIVITY_ENV)
+    SIM_ACCEPT_LIMITS, SIM_INPUTS_VERSION, TRAINING_BATTLE_FORMAT, TRANSITION_SENSITIVITY_ENV)
 from tools.usefulness_verdict import TEAM_LABELS, cond_file, cond_name, corrected_z
 
 REPO = Path(__file__).resolve().parent.parent
@@ -96,7 +96,15 @@ PINNED_NOTE = "旧固定プール上の比較 (META_PIN / POOL_PIN の 7 月の�
 OWN_CHECK = {"required": True,
              "items": ["(a) 対戦 i の送った自チームの本文の sha16 (battles.jsonl の own_team_sha16) が条件間で一致",
                        "(b) 各条件で助言が参照した自分の場の個体の型 (配分・性格・持ち物・技。メガ後も) が送った型と一致 (ref_check.mismatch = 0)",
-                       "(c) 確認できない対戦 (own_team_sha16 / ref_check が無い・検査 0 件) が無い"]}
+                       "(c) 確認できない対戦 (own_team_sha16 / ref_check が無い・検査 0 件) が無い",
+                       "(e) 対戦中に選出が分からず全個体を選出扱いにした決定 (accept.picked_unknown、入力不成立) を含む対戦が無い"]}
+# 測定の受入監査 (2026-10-15 M3a。条件表の accept_check。tools/usefulness_verdict が全比較 (RL・採点方式) で読む)
+ACCEPT_CHECK = {"required": True, "inputs_version": SIM_INPUTS_VERSION, "limits": dict(SIM_ACCEPT_LIMITS),
+                "items": ["(a) 第一候補が poke-env の合法手に含まれる (best_illegal)",
+                          "(b) 候補に未選出の個体への交代が無い (unpicked_candidate)",
+                          "(c) 第一候補を説明できない理由で飛ばしていない (skip_unexplained)",
+                          "(d) ランダム行動への退避が無い (random_fallback)",
+                          "全条件の結果の inputs_version が今の版で揃っている"]}
 
 
 # ------------------------------------------------------------------ 純粋
@@ -325,7 +333,7 @@ def build_conditions(design: dict, facts: dict, battles: int, prelim: bool, seed
         if team.get("pinned"):
             purpose += f" ({PINNED_NOTE})"
         notes.append(team_note(team))
-    extra = {}
+    extra = {"accept_check": dict(ACCEPT_CHECK)}
     if factor == "scoring":
         # 2026-10-09 M2d: 自チームの対応の検査 (verdict が読む) と、予備測定の対応の確認 (facts の prelim_check)
         extra["own_check"] = dict(OWN_CHECK)

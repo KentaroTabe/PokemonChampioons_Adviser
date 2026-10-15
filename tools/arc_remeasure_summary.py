@@ -8,6 +8,9 @@
 判定の読み方 (decide): 推定 ≥ mde かつ CI 下限 > 0 → 採用。中間 (final でない) で推定 ≥ mde だが CI 下限 ≤ 0 → 判定不能
 (2026-09-04 22:10 の P9 中間と同じ読み)。それ以外 → 棄却。
 対戦数を上書きした煙試験 (manifest の smoke) は「煙試験」と表示し、判定には使わない。
+受入 (2026-10-15 M3a): 再測定の json の accept (champions_agent.env.sim_accept) が上限を超えた腕を含む判定は、再測定の判定を
+「受入不成立」にして判定の変化を出さない。accept の無い json (修正前の版) は「受入監査なし」と表示する。再測定の腕の
+inputs_version が今の版でない・腕の間で違うときは警告を出す。
 純粋な部分は tests/test_arc_remeasure.py で確かめる。
 """
 from __future__ import annotations
@@ -19,12 +22,14 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from champions_agent.env.sim_accept import accept_violations, version_warnings
 from tools.arc_remeasure import ALIASES, CATALOG, VERDICT_ORDER
 from tools.team_proposal import paired_verdict
 
 REPO = Path(__file__).resolve().parent.parent
 Z95 = 1.96
 ADOPT, INCONCLUSIVE, REJECT, UNTESTABLE = "採用", "判定不能", "棄却", "検定不能"
+ACCEPT_FAILED = "受入不成立"     # 再測定の受入監査を満たさない (2026-10-15 M3a)
 
 
 # ------------------------------------------------------------------ 純粋
@@ -58,6 +63,13 @@ def reg_signals(doc: Optional[dict]) -> dict:
     return out
 
 
+def accept_problems(doc: Optional[dict]) -> Optional[list]:
+    """再測定の json の受入の検査 (純粋)。accept の欄が無ければ None (修正前の版: 検査できない)、あれば上限を超えた項目の理由"""
+    if not doc or "accept" not in doc:
+        return None
+    return accept_violations(doc.get("accept"))
+
+
 def arm_row(verdict: str, arm: str, old: Optional[dict], new: Optional[dict]) -> dict:
     """腕の当時と再測定の比較 (純粋)。差の SE は独立な 2 標本 (Showdown の乱数は対戦ごとに違うので対応させない)"""
     def wr(d):
@@ -72,7 +84,8 @@ def arm_row(verdict: str, arm: str, old: Optional[dict], new: Optional[dict]) ->
             "new_n": (new or {}).get("n_battles"), "new_wr": n, "diff": diff, "se": se,
             "search_blend": (new or old or {}).get("search_blend"),
             "battle_format": (new or {}).get("battle_format"), "meta_snapshot": (new or {}).get("meta_snapshot"),
-            "models_dir": (new or {}).get("models_dir"), "reg_signals": reg_signals(new)}
+            "models_dir": (new or {}).get("models_dir"), "reg_signals": reg_signals(new),
+            "inputs_version": (new or {}).get("inputs_version"), "accept_problems": accept_problems(new)}
 
 
 def verdict_row(verdict: str, old: dict, new: dict, smoke: bool) -> dict:
@@ -80,12 +93,20 @@ def verdict_row(verdict: str, old: dict, new: dict, smoke: bool) -> dict:
     entry = CATALOG[verdict]
     po = paired(old.get("B"), old.get("A"), entry["mde"], entry["final"])
     pn = paired(new.get("B"), new.get("A"), entry["mde"], entry["final"])
+    problems = [f"{a}: {x}" for a in ("A", "B") for x in (accept_problems(new.get(a)) or [])]
+    if problems:
+        pn = dict(pn, verdict=ACCEPT_FAILED)
+    present = {a: d for a, d in new.items() if d}
+    warnings = version_warnings({a: d.get("inputs_version") for a, d in present.items()}) \
+        if any("inputs_version" in d for d in present.values()) else []
     changed = None
-    if not smoke and pn["verdict"] != UNTESTABLE and po["verdict"] != UNTESTABLE:
+    if not smoke and pn["verdict"] not in (UNTESTABLE, ACCEPT_FAILED) and po["verdict"] != UNTESTABLE:
         changed = pn["verdict"] != po["verdict"]
     return {"verdict": verdict, "label": entry["label"], "rule": entry["rule"], "mde": entry["mde"],
             "final": entry["final"], "old_recorded": entry["old_verdict"], "old": po, "new": pn,
-            "smoke": smoke, "changed": changed}
+            "smoke": smoke, "changed": changed, "accept_problems": problems,
+            "accept_audited": all(accept_problems(new.get(a)) is not None for a in ("A", "B") if new.get(a)),
+            "version_warnings": warnings}
 
 
 def build_summary(out_docs: dict, old_docs: dict, smoke: bool) -> dict:
@@ -130,6 +151,12 @@ def render(summary: dict) -> str:
                      f"→ {n['verdict']}")
         ch = "—" if v["changed"] is None else ("変わった" if v["changed"] else "変わらない")
         lines.append(f"   判定: {ch}")
+        if v.get("accept_problems"):
+            lines.append("   受入不成立 (再測定の判定は出さない): " + " / ".join(v["accept_problems"]))
+        elif not v.get("accept_audited", True):
+            lines.append("   受入監査なし (再測定の json に accept が無い: 修正前の版の可能性)")
+        for w in v.get("version_warnings") or []:
+            lines.append(f"   警告: {w}")
     if summary["baseline"]:
         b = summary["baseline"]
         lines.append(f"advisor baseline (p9_300/A): 当時 {_f(b['old_wr'])} → 再測定 {_f(b['new_wr'])}")
