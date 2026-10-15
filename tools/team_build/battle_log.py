@@ -105,8 +105,10 @@ class BattleRecorder:
         self._picks[tag] = list(species_order)
 
     def on_decision(self, battle, state_summary: Optional[dict], advice: Optional[dict],
-                    executed: Optional[dict], followed: Optional[bool] = None, diag: Optional[dict] = None) -> None:
-        """diag: 診断用の記録 (champions_agent.env.advisor_player.diag_record。既定オフ、あるときだけ欄 "diag" を足す。2026-10-15)"""
+                    executed: Optional[dict], followed: Optional[bool] = None, diag: Optional[dict] = None,
+                    accept: Optional[dict] = None) -> None:
+        """diag: 診断用の記録 (champions_agent.env.advisor_player.diag_record。既定オフ、あるときだけ欄 "diag" を足す。2026-10-15)。
+        accept: 受入監査の印 (champions_agent.env.sim_accept.raised。立った印があるときだけ欄 "accept" を足す。2026-10-15 M3a)"""
         tag = getattr(battle, "battle_tag", None) or id(battle)
         self._t0.setdefault(tag, time.time())
         rec = {"turn": getattr(battle, "turn", None), "state_before": state_summary,
@@ -114,6 +116,8 @@ class BattleRecorder:
                "followed": followed}
         if diag is not None:
             rec["diag"] = diag
+        if accept:
+            rec["accept"] = dict(accept)
         self._turns.setdefault(tag, []).append(rec)
 
     def on_end(self, battle, opponent_team_id: Optional[str] = None,

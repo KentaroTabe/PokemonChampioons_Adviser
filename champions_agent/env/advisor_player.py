@@ -19,6 +19,7 @@ from typing import Optional
 
 from advisor.ev_infer import _nature_mult
 from advisor.infer import species_ja_name
+from champions_agent.env import sim_accept as SA
 from champions_agent.env.search_expert import (
     _STATUS_MAP, _WEATHER_MAP, _TERRAIN_MAP, _names)
 
@@ -447,16 +448,97 @@ def picked_mask_of(battle) -> Optional[list]:
     return mask if any(mask) else None
 
 
-def switchable_check(battle, state: Optional[dict]) -> Optional[dict]:
-    """状態辞書の「交代できる個体」(選出・生存・場にいない) と poke-env の available_switches の比較 (純粋。診断用)。
-    available_switches が空 (とらわれ・交代の要求でない場面) なら比べない (None)。戻り値 {"ok", "state", "poke_env"}"""
-    avail = sorted(str(getattr(p, "species", "")) for p in (getattr(battle, "available_switches", None) or []))
-    if not avail or not state:
+def _request_of(battle) -> dict:
+    req = getattr(battle, "last_request", None) or getattr(battle, "_last_request", None) or {}
+    return req if isinstance(req, dict) else {}
+
+
+def _to_id(x) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(x or "").lower())
+
+
+# シミュレータの合法手で選べない理由 (状態の move_block_reasons / switch_block_reason。advisor.engine が illegal_actions に写す)
+SIM_REASON_DISABLED = "simulator: disabled (要求で選べない技: PP 0・かなしばり・こだわり・ちょうはつ等)"
+SIM_REASON_LOCKED = "simulator: locked (要求に無い技: げきりん・反動等で技が固定)"
+SIM_REASON_TRAPPED = "simulator: trapped (とらわれ: 交代できない)"
+SIM_REASON_NO_SWITCH = "simulator: 要求に交代先が無い"
+
+
+def sim_legality(battle) -> dict:
+    """poke-env が示したこの決定の合法手 (純粋。2026-10-15 M3a)。
+
+    known: 対戦中の要求 (last_request。チームプレビュー・待機でない) があるか。無ければ他の欄は参考 (状態には入れない)。
+    force_switch: 要求の forceSwitch (交代技の後・ひんし後の繰り出し: 交代しか選べない)。trapped / maybe_trapped: 要求の
+    active[0] の trapped / maybeTrapped (poke-env の battle.trapped も見る)。moves / switches: available_moves の id /
+    available_switches の種族 id。request_moves: 要求の active[0].moves の {技 id: disabled か}"""
+    req = _request_of(battle)
+    side = req.get("side") or {}
+    known = bool(req) and not req.get("teamPreview") and not req.get("wait") and bool(side.get("pokemon"))
+    def _any(x):
+        return any(x) if isinstance(x, (list, tuple)) else bool(x)
+    force_switch = _any(getattr(battle, "force_switch", False)) or _any(req.get("forceSwitch"))
+    acts = req.get("active")
+    act = acts[0] if isinstance(acts, list) and acts and isinstance(acts[0], dict) else {}
+    req_moves = {}
+    for m in act.get("moves") or []:
+        if isinstance(m, dict):
+            mid = _to_id(m.get("id") or m.get("move"))
+            if mid:
+                req_moves[mid] = bool(m.get("disabled"))
+    return {"known": known, "force_switch": force_switch,
+            "trapped": bool(getattr(battle, "trapped", False)) or bool(act.get("trapped")),
+            "maybe_trapped": bool(act.get("maybeTrapped")),
+            "moves": [m.id for m in (getattr(battle, "available_moves", None) or [])],
+            "switches": [p.species for p in (getattr(battle, "available_switches", None) or [])],
+            "request_moves": req_moves}
+
+
+def opp_acted_this_turn(battle) -> Optional[bool]:
+    """このターンに相手が行動したか (純粋。2026-10-15 M3a、交代技の後の繰り出しの局面評価用)。poke-env の今のターンの記録
+    (current_observation.events) の技 (move)・行動不能 (cant)・交代 (switch) を見る。自分の技 (交代技) の記録がまだ無い・
+    記録が読めない・自分の側が分からないときは None (呼び出し側は素早さの見込みに戻る)"""
+    obs = getattr(battle, "current_observation", None) or getattr(battle, "_current_observation", None)
+    events = getattr(obs, "events", None)
+    role = getattr(battle, "player_role", None)
+    if events is None or role not in ("p1", "p2"):
         return None
+    opp = "p2" if role == "p1" else "p1"
+    me_moved, opp_acted = False, False
+    for ev in events:
+        ev = list(ev or [])
+        while ev and ev[0] == "":            # poke-env の split_message は先頭が空 ("|move|..." を split)
+            ev = ev[1:]
+        if len(ev) < 2:
+            continue
+        kind, who = str(ev[0]), str(ev[1])
+        if kind == "move" and who.startswith(role):
+            me_moved = True
+        if kind in ("move", "cant", "switch") and who.startswith(opp):
+            opp_acted = True
+    return opp_acted if me_moved else None
+
+
+def switchable_check(battle, state: Optional[dict]) -> Optional[dict]:
+    """状態辞書の「交代できる個体」(選出・生存・場にいない、状態に実行環境の交代先 legal_switch_indices があればその中) と
+    poke-env の available_switches の比較 (純粋。診断用)。state が無ければ None。
+
+    available_switches が空のときは 2 つを分ける (2026-10-15 M3a): 要求が無い (情報未取得) なら {"ok": None, "status": "unknown"}
+    (照合できない。件数に数える)、要求がある (とらわれ・控えが全滅等の既知の空集合) なら状態の交代先も空かを検査する
+    ({"ok", "status": "known_empty", "state", "poke_env"})。空でなければ従来どおり {"ok", "state", "poke_env"}"""
+    if not state:
+        return None
+    avail = sorted(str(getattr(p, "species", "")) for p in (getattr(battle, "available_switches", None) or []))
     me = state.get("player") or {}
     idx = me.get("active_index")
+    legal_idx = me.get("legal_switch_indices")
+    legal_idx = None if legal_idx is None else set(legal_idx)
     exp = sorted(str(p.get("species_id")) for i, p in enumerate(me.get("party") or [])
-                 if i != idx and p.get("is_picked") and p.get("status") != "fainted")
+                 if i != idx and p.get("is_picked") and p.get("status") != "fainted"
+                 and (legal_idx is None or i in legal_idx))
+    if not avail:
+        if not sim_legality(battle)["known"]:
+            return {"ok": None, "status": "unknown", "state": exp, "poke_env": avail}
+        return {"ok": not exp, "status": "known_empty", "state": exp, "poke_env": avail}
     return {"ok": exp == avail, "state": exp, "poke_env": avail}
 
 
@@ -486,17 +568,78 @@ def battle_to_state(battle, resolver=None) -> Optional[dict]:
     opp_side["team_size"] = BSS_PICK_COUNT
     # 選出の印 (2026-10-15): 最後の要求に入っている個体 (BSS では選出した 3 体) だけを選出扱いにする (picked_mask_of)
     picked_mask = picked_mask_of(battle)
-    return {
+    # シミュレータの合法手 (2026-10-15 M3a): 要求があれば、場の個体の技は全部残して選べる技を legal_move_ids で示し
+    # (登録の補完で選べない技を戻さない)、交代先は legal_switch_indices で示す。要求が無ければ従来どおり (選べる技に絞る)
+    leg = sim_legality(battle)
+    player = _side_state(own_vals, active, True, battle.side_conditions, resolver,
+                         None if leg["known"] else available, picked_mask=picked_mask)
+    state = {
         "scene": "command",
         "turn": battle.turn,
         "field": {"weather": weather, "terrain": terrain,
                   "trick_room": trick_room},
         "mega_used": {"player": any("mega" in (p.species or "") for p in own_vals),
                       "opponent": any("mega" in (p.species or "") for p in opp_vals)},
-        "player": _side_state(own_vals, active, True, battle.side_conditions,
-                              resolver, available, picked_mask=picked_mask),
+        "player": player,
         "opponent": opp_side,
     }
+    if leg["known"]:
+        apply_sim_legality(state, leg, own_vals, active, resolver, opp_acted=opp_acted_this_turn(battle))
+    return state
+
+
+def apply_sim_legality(state: dict, leg: dict, own_vals: list, active, resolver=None,
+                       opp_acted: Optional[bool] = None) -> None:
+    """シミュレータの合法手 (sim_legality の戻り値、known のとき) を状態辞書に入れる (state を書き換える。2026-10-15 M3a)。
+
+    - 交代しか選べない要求 (forceSwitch) で場の個体が生存: pending_pivot_switch = True (交代技の後の繰り出し。助言は交代だけを
+      候補にする。advisor.engine の pivot_pending)。相手がこのターンに行動済みか分かれば pivot_opp_acted (transition の繰り出しで
+      相手の技を受けるか)。ひんし後の繰り出しは場の個体の status = fainted で既に交代だけになる
+    - 場の個体: legal_move_ids = 選べる技 (forceSwitch なら空)、move_block_reasons = 選べない技の理由 (要求で disabled / 要求に
+      無い = 固定)。選べる技が状態の技に無ければ (わるあがき等) 枠を足す
+    - 交代: legal_switch_indices = available_switches の party index (状態の「選出・生存・場にいない」と違うときだけ。
+      とらわれなら空)。とらわれ・交代先なしなら switch_block_reason。
+      選出した控え (is_picked、残存戦力) はそのまま"""
+    me = state["player"]
+    party = me["party"]
+    ai = me.get("active_index")
+    act = party[ai] if ai is not None and 0 <= ai < len(party) else None
+    if leg["force_switch"] and act is not None and act.get("status") != "fainted":
+        state["pending_pivot_switch"] = True
+        if opp_acted is not None:
+            state["pivot_opp_acted"] = bool(opp_acted)
+    if act is not None:
+        legal = [] if leg["force_switch"] else list(leg["moves"])
+        have = {m.get("move_id") for m in act.get("moves") or []}
+        for mid in legal:
+            if mid not in have:
+                act["moves"].append({"move_id": mid, "name_ja": (resolver.ja_of("moves", mid) if resolver else None) or mid,
+                                     "pp": None, "max_pp": None, "from_simulator": True})
+        act["legal_move_ids"] = legal
+        req_moves = leg.get("request_moves") or {}
+        blocked = {}
+        for m in act.get("moves") or []:
+            mid = m.get("move_id")
+            if mid in legal:
+                continue
+            if leg["force_switch"]:
+                blocked[mid] = "simulator: 交代先を選ぶ要求 (技は選べない)"
+            elif req_moves.get(mid):
+                blocked[mid] = SIM_REASON_DISABLED
+            else:
+                blocked[mid] = SIM_REASON_LOCKED
+        act["move_block_reasons"] = blocked
+    switch_species = set(leg["switches"])
+    legal_idx = [i for i, p in enumerate(own_vals) if p is not active and getattr(p, "species", None) in switch_species]
+    # 状態の「交代できる個体」(選出・生存・場にいない) と同じなら入れない (余計な欄を足さない。食い違い = とらわれ・選出の印の
+    # 誤り等のときだけ、実行環境の交代先で候補を絞る)
+    base_idx = [i for i, p in enumerate(party) if i != ai and p.get("is_picked") and p.get("status") != "fainted"]
+    if set(legal_idx) != set(base_idx):
+        me["legal_switch_indices"] = legal_idx
+    if leg["trapped"]:
+        me["switch_block_reason"] = SIM_REASON_TRAPPED
+    elif not switch_species:
+        me["switch_block_reason"] = SIM_REASON_NO_SWITCH
 
 
 def preview_to_state(battle, resolver=None) -> Optional[dict]:
@@ -554,6 +697,18 @@ def choose_with_trace(battle, advice: dict) -> tuple:
         seen.add(key)
         skipped.append({"kind": a.get("kind"), "id": a.get("id"), "why": _skip_reason(battle, a)})
     return None, skipped
+
+
+def only_legal_action(battle) -> Optional[dict]:
+    """poke-env の合法手 (available_moves + available_switches) がちょうど 1 つならその行動 (choose_with_trace と同じ形)、
+    それ以外は None (純粋。2026-10-15 M3a: 助言から行動を作れないときのランダム行動の代わり。わるあがき・反動等)"""
+    moves = list(getattr(battle, "available_moves", None) or [])
+    switches = list(getattr(battle, "available_switches", None) or [])
+    if len(moves) + len(switches) != 1:
+        return None
+    if moves:
+        return {"kind": "move", "move": moves[0], "mega": False, "pokemon": None}
+    return {"kind": "switch", "move": None, "mega": False, "pokemon": switches[0]}
 
 
 def _skip_reason(battle, a: dict) -> str:
@@ -794,17 +949,33 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
     class _AdvisorPlayer(Player):
         def choose_move(self, battle):
             t0 = time.perf_counter()
-            advice, followed, d = None, True, None
+            advice, adv2, followed, d = None, None, True, None
             state_snap, skipped, diag_err = None, [], None
+            chk, leg, picked_species = None, {"known": False, "moves": [], "switches": []}, None
+            try:
+                leg = sim_legality(battle)
+                mask = picked_mask_of(battle)
+                if mask is not None:
+                    picked_species = [getattr(p, "species", None)
+                                      for p, m in zip((getattr(battle, "team", None) or {}).values(), mask) if m]
+                else:
+                    # 対戦中に選出が分からない: battle_to_state は全個体を選出扱いにする。測定では入力不成立として数える
+                    # (2026-10-15 M3a。usefulness_verdict の own_check が件数 > 0 なら正式判定を出さない)
+                    stats["picked_unknown"] = stats.get("picked_unknown", 0) + 1
+            except Exception as e:
+                stats["legality_error"] = stats.get("legality_error", 0) + 1
+                stats["last_legality_error"] = repr(e)
             try:
                 text = self._register_team(battle)
                 state = battle_to_state(battle, resolver)
                 if state:
                     if diag_on:
                         state_snap = _jsonable(state)          # evaluate に渡す前の写し (再生の入力)
-                    # 選出の印と poke-env の交代先の照合 (2026-10-15。食い違いの件数だけ数える)
+                    # 選出の印と poke-env の交代先の照合 (2026-10-15。食い違いの件数だけ数える。要求が無く照合できない決定も数える)
                     chk = switchable_check(battle, state)
-                    if chk is not None and not chk["ok"]:
+                    if chk is not None and chk.get("status") == "unknown":
+                        stats["switchable_unknown"] = stats.get("switchable_unknown", 0) + 1
+                    elif chk is not None and not chk["ok"]:
                         stats["switchable_mismatch"] = stats.get("switchable_mismatch", 0) + 1
                         stats["last_switchable_mismatch"] = chk
                     # 採点方式は config.ADVICE_SCORING_MODE (環境変数 ADVICE_SCORING_MODE で上書き。2026-10-09 M2b)
@@ -832,6 +1003,23 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
                 stats["last_error"] = repr(e)
                 diag_err = repr(e)
                 d = None
+            forced = False
+            if d is None:
+                # 助言から行動を作れなくても、合法手が 1 つだけならそれを実行する (わるあがき・反動等。ランダムではない)
+                d = only_legal_action(battle)
+                forced = d is not None
+            # 受入監査 (2026-10-15 M3a): 決定ごとの軽い印を stats (accept:<項目>) と対戦ごとの記録 (accept) に数える
+            flags = {}
+            try:
+                flags = SA.decision_flags(advice, adv2, skipped, leg.get("moves"), leg.get("switches"),
+                                          bool(leg.get("known")), picked_species, random_fallback=d is None, forced=forced)
+                if chk is not None and chk.get("status") == "unknown":
+                    flags["switch_info_unknown"] = True
+                SA.add_flags(stats, flags, SA.STATS_PREFIX)
+                SA.add_flags(self._corr(battle).setdefault("accept", {}), flags)
+            except Exception as e:
+                stats["accept_error"] = stats.get("accept_error", 0) + 1
+                stats["last_accept_error"] = repr(e)
             if recorder is not None:
                 try:
                     executed = None if d is None else {
@@ -849,7 +1037,8 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
                                 other = {"ok": False, "reason": f"error:{e!r}", "scoring_mode": other_mode}
                         diag = diag_record(state_snap, advice, battle, executed, skipped, followed,
                                            rl_blend_weight, other=other, error=diag_err)
-                    recorder.on_decision(battle, _state_summary(battle), advice, executed, followed, diag=diag)
+                    recorder.on_decision(battle, _state_summary(battle), advice, executed, followed, diag=diag,
+                                         accept=SA.raised(flags) or None)
                 except Exception as e:
                     stats["decision_record_error"] = stats.get("decision_record_error", 0) + 1
                     stats["last_decision_record_error"] = repr(e)
@@ -858,7 +1047,10 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
             if d is None:
                 stats["fallback"] = stats.get("fallback", 0) + 1
                 return self.choose_random_move(battle)
-            stats["decide"] = stats.get("decide", 0) + 1
+            if forced:
+                stats["forced_single"] = stats.get("forced_single", 0) + 1
+            else:
+                stats["decide"] = stats.get("decide", 0) + 1
             stats[d["kind"]] = stats.get(d["kind"], 0) + 1
             if d["kind"] == "move":
                 return self.create_order(d["move"], mega=d["mega"])
@@ -949,6 +1141,9 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
                     tag = getattr(battle, "battle_tag", None) or id(battle)
                     corr = corr_by_tag.pop(tag, None)
                     extra = correspondence_record(corr)
+                    # 受入監査の対戦ごとの件数 (2026-10-15 M3a。usefulness_verdict / racing が読む)
+                    extra["accept"] = dict({k: int(((corr or {}).get("accept") or {}).get(k) or 0) for k in SA.COUNT_KEYS},
+                                           inputs_version=SA.SIM_INPUTS_VERSION)
                     if diag_on:
                         # 再生に要る自チームの本文 (型の登録の元。register_team_text に渡し直す)
                         extra["diag_own_team_text"] = (corr or {}).get("_team_text")

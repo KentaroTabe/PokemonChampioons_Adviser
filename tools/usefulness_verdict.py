@@ -108,10 +108,11 @@ def own_correspondence_check(records_by_cond: Optional[dict], conds: Sequence[st
     対戦 i (先頭 n 戦) について (a) 送った自チームの本文の sha16 (own_team_sha16) が条件間で一致、(b) 各条件で助言が参照した型と
     送った型の不一致 (ref_check.mismatch) が 0、(c) 確認できない対戦 (own_team_sha16 が無い・ref_check が無いか検査 0 件) が無い、
     (d) 助言が評価できない個体 (図鑑に無い種、ref_check.unbuilt) を含む対戦が無い (2026-10-09 M2e、レビュー: 両条件で同じ
-    評価不能が起きても比較が正しくなるわけではない)。
+    評価不能が起きても比較が正しくなるわけではない)、(e) 対戦中に選出が分からず全個体を選出扱いにした決定 (入力不成立、
+    accept.picked_unknown) を含む対戦が無い (2026-10-15 M3a。accept の欄が無い記録 = 修正前は数えない: 受入監査の検査が別に見る)。
     戻り値 (成り立たない理由の list, 要約)。理由が空なら成立"""
     recs = records_by_cond or {}
-    unverifiable, ref_bad, unbuilt = {}, {}, {}
+    unverifiable, ref_bad, unbuilt, picked_unknown = {}, {}, {}, {}
     unbuilt_species: dict = {}
     hash_mismatch = 0
     for c in conds:
@@ -128,6 +129,9 @@ def own_correspondence_check(records_by_cond: Optional[dict], conds: Sequence[st
                 unbuilt[c] = unbuilt.get(c, 0) + 1
                 for sid in rc.get("unbuilt_species") or []:
                     unbuilt_species[str(sid)] = unbuilt_species.get(str(sid), 0) + 1
+            acc = r.get("accept") if isinstance(r.get("accept"), dict) else None
+            if acc is not None and int(acc.get("picked_unknown") or 0) > 0:
+                picked_unknown[c] = picked_unknown.get(c, 0) + 1
     for i in range(n):
         shas = {(list(recs.get(c) or [])[i].get("own_team_sha16") if i < len(recs.get(c) or []) else None) for c in conds}
         shas.discard(None)
@@ -143,9 +147,35 @@ def own_correspondence_check(records_by_cond: Optional[dict], conds: Sequence[st
     if unbuilt:
         sp = ", ".join(f"{k} {v}" for k, v in sorted(unbuilt_species.items(), key=lambda kv: (-kv[1], kv[0]))) or "種の記録なし"
         reasons.append(f"助言が評価できない個体 (図鑑に無い種) を含む対戦: {unbuilt} (種: {sp})")
+    if picked_unknown:
+        reasons.append(f"選出が分からず全個体を選出扱いにした決定 (入力不成立) を含む対戦: {picked_unknown}")
     summary = {"n": n, "hash_mismatch": hash_mismatch, "ref_mismatch_battles": ref_bad, "unverifiable": unverifiable,
-               "unbuilt_battles": unbuilt, "unbuilt_species": unbuilt_species}
+               "unbuilt_battles": unbuilt, "unbuilt_species": unbuilt_species, "picked_unknown_battles": picked_unknown}
     return reasons, summary
+
+
+def accept_audit_check(records_by_cond: Optional[dict], conds: Sequence[str], n: int,
+                       versions: Optional[dict] = None, limits: Optional[dict] = None) -> tuple:
+    """測定の受入監査の検査 (純粋。2026-10-15 M3a、champions_agent.env.sim_accept)。records_by_cond = 条件名 → battles.jsonl の
+    記録の列 (先頭 n 戦を見る)。各条件で (a) 第一候補が不合法 0、(b) 候補に未選出の個体 0、(c) 説明できない飛ばし 0、
+    (d) ランダム退避 0、(e) 選出不明 0 (上限は config.SIM_ACCEPT_LIMITS)、受入監査の欄 (accept) の無い対戦が無い。
+    versions = 名前 → 結果の inputs_version (条件 / part ごと)。今の版 (config.SIM_INPUTS_VERSION) でない・違う版が混ざれば不成立。
+    戻り値 (成り立たない理由の list, 要約)"""
+    from champions_agent.env.sim_accept import accept_violations, sum_battle_accept, version_warnings
+    recs = records_by_cond or {}
+    reasons, per = [], {}
+    for c in conds:
+        rows = list(recs.get(c) or [])[:n]
+        tot = sum_battle_accept(rows)
+        per[c] = tot
+        if len(rows) < n:
+            reasons.append(f"{c}: 受入監査を確かめる対戦記録が {len(rows)} / {n} 件しか無い")
+        if tot["battles_missing"]:
+            reasons.append(f"{c}: 受入監査の欄 (accept) の無い対戦 {tot['battles_missing']} 件 (修正前の版の記録の可能性)")
+        reasons += accept_violations(tot, limits, label=c)
+    if versions is not None:
+        reasons += version_warnings(versions)
+    return reasons, {"n": n, "per_condition": per, "versions": dict(versions or {})}
 
 
 def corrected_z(k: int, alpha: float = P1_ALPHA) -> float:
@@ -233,12 +263,15 @@ def build_verdict(conditions: dict, outcomes_by_cond: dict, weights: Sequence[fl
                   opp_ids_by_cond: Optional[dict] = None, elapsed_by_cond: Optional[dict] = None,
                   baseline_cond: Optional[str] = None, compare_conds: Optional[Sequence[str]] = None,
                   scoring_stats: Optional[dict] = None, own_records_by_cond: Optional[dict] = None,
-                  extra_invalid: Sequence[str] = ()) -> dict:
+                  extra_invalid: Sequence[str] = (), accept_records_by_cond: Optional[dict] = None,
+                  inputs_versions: Optional[dict] = None) -> dict:
     """集計 (純粋)。conditions = 条件表 (incomplete を見る)。outcomes_by_cond = 条件名 → 勝敗列 (1/0)。
     baseline_cond / compare_conds (採点方式の比較: scoring:legacy / [scoring:transition]) を渡せばその条件名で比べる
     (無ければ重みの条件 rl<W>)。scoring_stats (条件名 → scoring_fallback_summary) があれば結果に残す。
     own_records_by_cond (条件名 → battles.jsonl の記録。2026-10-09 M2d) を渡せば自チームの対応 (own_correspondence_check) も
-    確かめ、成り立たなければ比較条件の不成立 (invalid)。渡さなければ確かめない (RL の比較・M2d より前の条件表)"""
+    確かめ、成り立たなければ比較条件の不成立 (invalid)。渡さなければ確かめない (RL の比較・M2d より前の条件表)。
+    accept_records_by_cond (条件名 → battles.jsonl の記録。2026-10-15 M3a) を渡せば受入監査 (accept_audit_check、inputs_versions =
+    名前 → 結果の版) も確かめ、成り立たなければ invalid。渡さなければ確かめない (2026-10-15 より前の条件表)"""
     if baseline_cond is not None:
         base = baseline_cond
         others = [c for c in (compare_conds or []) if c != base]
@@ -269,6 +302,10 @@ def build_verdict(conditions: dict, outcomes_by_cond: dict, weights: Sequence[fl
     if own_records_by_cond is not None and not missing:
         own_reasons, own_summary = own_correspondence_check(own_records_by_cond, [base] + others, n)
         invalid_reasons = invalid_reasons + own_reasons
+    accept_summary = None
+    if accept_records_by_cond is not None and not missing:
+        acc_reasons, accept_summary = accept_audit_check(accept_records_by_cond, [base] + others, n, inputs_versions)
+        invalid_reasons = invalid_reasons + acc_reasons
     # 2 夜分割の結合の検査 (2026-10-09 M2e、merge_parts) で成り立たなかった理由
     invalid_reasons = invalid_reasons + list(extra_invalid or [])
     if invalid_reasons:
@@ -303,6 +340,8 @@ def build_verdict(conditions: dict, outcomes_by_cond: dict, weights: Sequence[fl
         out["scoring_stats"] = dict(scoring_stats)
     if own_summary is not None:
         out["own_correspondence"] = own_summary
+    if accept_summary is not None:
+        out["accept_audit"] = accept_summary
     return out
 
 
@@ -597,6 +636,30 @@ def load_records_conds(out_dir: Path, conds: Sequence[str]) -> dict:
     return out
 
 
+def load_versions_conds(out_dir: Path, conds: Sequence[str]) -> dict:
+    """条件名 → 結果 JSON の inputs_version (2026-10-15 M3a)。JSON が無ければ battles.jsonl の accept.inputs_version (全対戦で
+    1 つならそれ、混ざれば "mixed:..."、無ければ None)"""
+    out = {}
+    for c in conds:
+        doc = _read_json(out_dir / f"{cond_file(c)}.json")
+        if doc is not None:
+            out[c] = doc.get("inputs_version")
+            continue
+        vs = {((r.get("accept") or {}).get("inputs_version") if isinstance(r.get("accept"), dict) else None)
+              for r in _read_jsonl(out_dir / f"{cond_file(c)}.battles.jsonl")}
+        out[c] = (next(iter(vs)) if len(vs) == 1 else ("mixed:" + ",".join(sorted(str(v) for v in vs)) if vs else None))
+    return out
+
+
+def accept_required(conditions: dict) -> bool:
+    """条件表が受入監査を指定しているか (usefulness_p1 が 2026-10-15 M3a から書く accept_check.required)"""
+    return bool((conditions.get("accept_check") or {}).get("required"))
+
+
+ACCEPT_MISSING_NOTE = ("条件表に受入監査の指定 (accept_check.required) が無い (2026-10-15 より前の条件表): 第一候補の合法性・"
+                       "未選出の候補・ランダム退避・入力の版は未確認")
+
+
 def load_part(out_dir: Path) -> dict:
     """1 part の出力 dir → merge_parts の入力 (採点方式の比較の条件で読む)"""
     cpath = out_dir / "conditions.json"
@@ -606,6 +669,7 @@ def load_part(out_dir: Path) -> dict:
     outcomes, sources, opp_ids, elapsed = load_outcomes_conds(out_dir, conds)
     return {"dir": str(out_dir), "conditions": conditions, "outcomes": outcomes, "sources": sources, "opp_ids": opp_ids,
             "elapsed": elapsed, "records": load_records_conds(out_dir, conds), "conds": conds,
+            "versions": load_versions_conds(out_dir, conds),
             "sstats": {c: scoring_fallback_summary(_read_json(out_dir / f"{cond_file(c)}.json")) for c in conds}}
 
 
@@ -622,11 +686,17 @@ def run_merged(out_dirs: Sequence[Path], merged_out: Path) -> dict:
     # 退避率は part ごとの json の stats を足し合わせない (part ごとに残す。決定単位の集計は別の道具)
     sstats = {f"{c} (part {p['conditions'].get('part', {}).get('k')})": p["sstats"].get(c) for p in parts for c in conds}
     own_recs = m["records"] if (conditions.get("own_check") or {}).get("required") else None
+    acc_req = accept_required(conditions)
+    versions = {f"{c} (part {p['conditions'].get('part', {}).get('k')})": (p.get("versions") or {}).get(c)
+                for p in parts for c in conds} if acc_req else None
     v = build_verdict(conditions, m["outcomes"], tuple(conditions.get("weights") or P1_WEIGHTS),
                       float(conditions.get("baseline_weight", P1_BASELINE_WEIGHT)), final_battles, mde, alpha, m["sources"],
                       m["opp_ids"], m["elapsed"], baseline_cond=base_c, compare_conds=other_c, scoring_stats=sstats,
-                      own_records_by_cond=own_recs, extra_invalid=m["invalid"])
+                      own_records_by_cond=own_recs, extra_invalid=m["invalid"],
+                      accept_records_by_cond=m["records"] if acc_req else None, inputs_versions=versions)
     v["notes"] = list(m["notes"]) + list(v["notes"])
+    if not acc_req:
+        v["notes"].append(ACCEPT_MISSING_NOTE)
     v["parts"] = conditions.get("parts")
     text = render(v, conditions)
     merged_out.mkdir(parents=True, exist_ok=True)
@@ -664,12 +734,21 @@ def run(out_dir: Path) -> dict:
             own_recs = load_records_conds(out_dir, [base_c] + other_c)
     else:
         outcomes, sources, opp_ids, elapsed = load_outcomes(out_dir, weights)
+    # 受入監査 (2026-10-15 M3a): 条件表が指定していれば battles.jsonl の accept と結果の版を確かめる
+    acc_recs, versions = None, None
+    if accept_required(conditions):
+        conds_all = ([base_c] + other_c) if scoring else [cond_name(w) for w in weights]
+        acc_recs = load_records_conds(out_dir, conds_all)
+        versions = load_versions_conds(out_dir, conds_all)
     # 時間上限で止めた等で rl<W>.json に経過秒が無ければ、条件表の所要秒で代用する (並列なので全条件で同じ)
     for c in outcomes:
         if elapsed.get(c) is None and conditions.get("elapsed_sec") is not None:
             elapsed[c] = conditions["elapsed_sec"]
     v = build_verdict(conditions, outcomes, weights, baseline, final_battles, mde, alpha, sources, opp_ids, elapsed,
-                      baseline_cond=base_c, compare_conds=other_c, scoring_stats=sstats, own_records_by_cond=own_recs)
+                      baseline_cond=base_c, compare_conds=other_c, scoring_stats=sstats, own_records_by_cond=own_recs,
+                      accept_records_by_cond=acc_recs, inputs_versions=versions)
+    if acc_recs is None:
+        v["notes"].append(ACCEPT_MISSING_NOTE)
     if scoring and own_recs is None:
         v["notes"].append("条件表に自チームの対応の検査の指定 (own_check.required) が無い (M2d より前の条件表): 自チームの型の対応は未確認")
     if isinstance(conditions.get("part"), dict):
