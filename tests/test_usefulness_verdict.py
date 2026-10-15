@@ -308,6 +308,147 @@ def test_run_scoring_reads_files():
     print("test_run_scoring_reads_files OK")
 
 
+def _holdout_split(d: Path) -> tuple:
+    """封印 holdout 層を持つ分割ファイル (search 33 / holdout 40) を d に書く → (パス, sha16, holdout の id)"""
+    from advisor.versions import sha256_file
+    hold = [f"h{i}" for i in range(40)]
+    doc = {"sealed_id": "sealedX", "tiers": {"search": [f"t{i}" for i in range(33)], "selection": ["s0"], "holdout": hold},
+           "search_folds": [[], [f"t{i}" for i in range(33)], []], "texts": {}}
+    p = d / "opponent_families.json"
+    p.write_text(json.dumps(doc), encoding="utf-8")
+    return p, sha256_file(p), hold
+
+
+def _holdout_conditions(split_file, split_sha) -> dict:
+    """tools.usefulness_p1 --tier holdout --compare scoring の条件表の該当部分"""
+    c = _scoring_conditions()
+    c["opponents"] = {"split_file": str(split_file), "split_sha16": split_sha, "sealed_id": "sealedX", "tier": "holdout",
+                      "n_teams_in_tier": 40, "seed": 20261015, "offset": 0, "pilot": "rl", "pick_policy": "rule"}
+    c["holdout_check"] = {"required": True, "candidate_key": "scoring:transition@abc"}
+    return c
+
+
+def test_holdout_tier_check_and_render():
+    """封印 holdout 層 (2026-10-15): 相手 id が全件 holdout 層に属するかの事後の検査 (純粋) と、報告の表示
+    (「封印 holdout 層 (40 構築) での 1 回の確認、search の結果とは合算しない」、fold を出さない)"""
+    hold = [f"h{i}" for i in range(40)]
+    ids = {SC_BASE: [hold[i % 40] for i in range(600)], SC_TR: [hold[i % 40] for i in range(600)]}
+    r, s = V.holdout_tier_check(ids, [SC_BASE, SC_TR], hold)
+    assert r == [] and s["checked"] == 1200 and s["outside"] == {}, (r, s)
+    # holdout に無い id (search の t3) を 1 件混ぜると不成立
+    bad = {c: list(v) for c, v in ids.items()}
+    bad[SC_TR][7] = "t3"
+    r, s = V.holdout_tier_check(bad, [SC_BASE, SC_TR], hold)
+    assert len(r) == 1 and "holdout 層に無い" in r[0] and s["outside"] == {SC_TR: {"t3": 1}}, (r, s)
+    # holdout 層が読めなければ確かめられない (不成立)
+    r, _s = V.holdout_tier_check(ids, [SC_BASE, SC_TR], None)
+    assert r and "確かめられない" in r[0]
+    # 表示: holdout は banner を出し、相手の行に fold を出さない。search は従来どおり fold を出す
+    c = _holdout_conditions("/s.json", "x")
+    assert V.is_holdout(c) and not V.is_holdout(_scoring_conditions())
+    assert V.holdout_banner(c) == "封印 holdout 層 (40 構築) での 1 回の確認、search の結果とは合算しない"
+    rows = dict(V.condition_summary(c))
+    assert "封印 holdout 層 (40 構築)" in rows["相手"] and "fold" not in rows["相手"], rows["相手"]
+    v = V.build_verdict(c, {SC_BASE: [1] * 600, SC_TR: [1] * 600}, final_battles=600, opp_ids_by_cond=ids,
+                        baseline_cond=SC_BASE, compare_conds=[SC_TR])
+    text = V.render(v, c)
+    assert V.holdout_banner(c) in text and "fold" not in text, text
+    s_c = dict(_scoring_conditions(), opponents={"tier": "search", "fold_label": "B", "fold": 1})
+    assert "fold B" in dict(V.condition_summary(s_c))["相手"]
+    assert "封印 holdout" not in V.render(v, s_c)
+    print("test_holdout_tier_check_and_render OK")
+
+
+def test_run_holdout_post_check():
+    """run: 条件表の tier が holdout なら、分割ファイルを読み直して相手 id が全件 holdout 層に属することを確かめる。
+    違えば invalid。分割ファイルの sha16 が条件表と違っても invalid。合っていれば §0.5 のまま判定する (k = 1)"""
+    base, cond = _pair(166, 130, 150, 154)
+    outs = {SC_BASE: cond, SC_TR: base}
+
+    def write(out: Path, ids_tr) -> None:
+        for c in (SC_BASE, SC_TR):
+            f = V.cond_file(c)
+            (out / f"{f}.json").write_text(json.dumps({"outcomes": outs[c], "elapsed_s": 3000.0, "stats": {}}),
+                                           encoding="utf-8")
+            with (out / f"{f}.battles.jsonl").open("w", encoding="utf-8") as fh:
+                for i, w in enumerate(outs[c]):
+                    oid = ids_tr[i] if c == SC_TR else f"h{i % 40}"
+                    fh.write(json.dumps({"won": bool(w), "opponent_team_id": oid}) + "\n")
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        split, sha, hold = _holdout_split(root)
+        out = root / "p1_holdout"
+        out.mkdir()
+        (out / "conditions.json").write_text(json.dumps(_holdout_conditions(split, sha)), encoding="utf-8")
+        good = [f"h{i % 40}" for i in range(600)]
+        write(out, good)
+        v = V.run(out)
+        assert v["mode"] == V.MODE_FINAL and v["k"] == 1 and v["comparisons"][0]["decision"] == V.ADOPT, v
+        assert v["holdout"]["checked"] == 1200 and v["holdout"]["outside"] == {}, v["holdout"]
+        md = (out / "verdict.md").read_text(encoding="utf-8")
+        assert "封印 holdout 層 (40 構築) での 1 回の確認、search の結果とは合算しない" in md and "fold" not in md, md
+        assert "相手 id の層の検査" in md
+        # 両条件で同じ search の id を混ぜる (条件間の対応は成り立つ) → holdout 層の事後検査だけで invalid
+        mixed = list(good)
+        mixed[10] = "t5"
+        write(out, mixed)
+        jl = out / "scoring_legacy.battles.jsonl"
+        rows = [json.loads(x) for x in jl.read_text(encoding="utf-8").splitlines()]
+        rows[10]["opponent_team_id"] = "t5"
+        jl.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+        v = V.run(out)
+        assert v["mode"] == V.MODE_INVALID and v["opponent_mismatches"] == 0, v
+        assert any("holdout 層に無い" in x for x in v["invalid_reasons"]), v["invalid_reasons"]
+        # 分割ファイルの sha16 が条件表と違う → invalid
+        write(out, good)
+        (out / "conditions.json").write_text(json.dumps(_holdout_conditions(split, "0000000000000000")), encoding="utf-8")
+        v = V.run(out)
+        assert v["mode"] == V.MODE_INVALID and any("sha16" in x for x in v["invalid_reasons"]), v["invalid_reasons"]
+        # 分割ファイルが無い → invalid
+        (out / "conditions.json").write_text(json.dumps(_holdout_conditions(root / "none.json", sha)), encoding="utf-8")
+        assert V.run(out)["mode"] == V.MODE_INVALID
+    print("test_run_holdout_post_check OK")
+
+
+def test_run_merged_holdout_post_check():
+    """2 夜分割 (--tier holdout --part k/2) の結合でも、相手 id が全件 holdout 層に属することを確かめる (1 回の判定)"""
+    import io
+    from contextlib import redirect_stdout
+    base, cond = _pair(166, 130, 150, 154)
+    outs = {SC_BASE: cond, SC_TR: base}
+
+    def write_part(root: Path, k: int, split, sha, bad_at=None) -> Path:
+        out = root / f"part{k}"
+        out.mkdir(parents=True)
+        start, end = (k - 1) * 300, k * 300
+        c = _holdout_conditions(split, sha)
+        c["opponents"]["offset"] = start
+        c["part"] = {"k": k, "n": 2, "start": start, "end": end, "battles": 300, "total_battles": 600, "opp_offset": start}
+        (out / "conditions.json").write_text(json.dumps(c), encoding="utf-8")
+        for cn in (SC_BASE, SC_TR):
+            f = V.cond_file(cn)
+            seg = outs[cn][start:end]
+            (out / f"{f}.json").write_text(json.dumps({"outcomes": seg, "elapsed_s": 1500.0, "stats": {}}), encoding="utf-8")
+            with (out / f"{f}.battles.jsonl").open("w", encoding="utf-8") as fh:
+                for i, w in enumerate(seg):
+                    oid = "t1" if bad_at is not None and i == bad_at else f"h{(start + i) % 40}"
+                    fh.write(json.dumps({"won": bool(w), "opponent_team_id": oid}) + "\n")
+        return out
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        split, sha, _hold = _holdout_split(root)
+        p1, p2 = write_part(root / "a", 1, split, sha), write_part(root / "a", 2, split, sha)
+        with redirect_stdout(io.StringIO()):
+            v = V.run_merged([p1, p2], root / "merged")
+        assert v["mode"] == V.MODE_FINAL and v["n_used"] == 600 and v["holdout"]["checked"] == 1200, v
+        assert "封印 holdout 層 (40 構築)" in (root / "merged" / "verdict.md").read_text(encoding="utf-8")
+        p2b = write_part(root / "b", 2, split, sha, bad_at=3)
+        with redirect_stdout(io.StringIO()):
+            vb = V.run_merged([p1, p2b], root / "merged_b")
+        assert vb["mode"] == V.MODE_INVALID and any("holdout 層に無い" in x for x in vb["invalid_reasons"]), vb
+    print("test_run_merged_holdout_post_check OK")
+
+
 def main():
     test_corrected_z_by_k()
     test_decide_boundaries()
@@ -321,6 +462,9 @@ def main():
     test_scoring_verdict_final_interim_invalid()
     test_scoring_fallback_summary_and_team_rows()
     test_run_scoring_reads_files()
+    test_holdout_tier_check_and_render()
+    test_run_holdout_post_check()
+    test_run_merged_holdout_post_check()
 
 
 if __name__ == "__main__":
