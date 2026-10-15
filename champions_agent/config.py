@@ -1420,3 +1420,25 @@ SIM_INPUTS_VERSION = "picked-legal-1015"
 # random_fallback = ランダム行動への退避 / picked_unknown = 対戦中に選出が分からず全個体を選出扱いにした (入力不成立)
 SIM_ACCEPT_LIMITS = {"best_illegal": 0, "unpicked_candidate": 0, "skip_unexplained": 0, "random_fallback": 0,
                      "picked_unknown": 0}
+# 40 局面の診断 (2026-10-15 M3b、tools/diag_scenes)。診断の読み方の閾値で、採点には使わない (すべて暫定):
+# - SEED: 区分内の無作為抽出の seed。QUOTAS: 区分ごとの件数 (A = 両方式の第一候補が異なる、B = transition が退避、C = 一致)
+# - BIG_BUDGET_MS: 再現性の再採点で transition の予算を事実上外す値 (予算超過の退避は時間依存なので順位の再現性と分ける)
+# - PROB: transition の分岐の確率 (先に倒される p_ko_before_act・交代先が倒される p_faint) を「起きる見込み」とみなす下限。
+#   legacy の前提 (×0.25 の割引の有無・「交代出しで倒される危険あり」) は二値なので、半分以上で起きる側に寄せる
+# - KO_GAP: legacy の倒せる見込み (0 / 0.5 / 1 × 命中) と transition の行動できた分岐の倒す確率 (p_ko / (1 − p_ko_before_act)) の
+#   差がこれ以上なら遷移の食い違い
+# - UNEVAL_MAIN: 第一候補どうしの未評価の質量 (応手の ε・分岐の未評価) がこれ以上なら主因を「退避・未評価」とする
+# - CLOSE_Q / CLOSE_LEGACY: 区分 C の 1 位と 2 位の差がこれ未満なら「僅差」(transition は Q、legacy は点数)
+# - ENDGAME_REMAINING: 区分 A の「終盤」= 自分と相手の残りがどちらもこの数以下
+# - TIE_Q: 区分 A で transition の Q(a_T) − Q(a_L) がこれ未満なら同点 (候補の並びの順で第一候補が決まる) として判断保留
+DIAG_SCENES_SEED = 20261015
+DIAG_SCENES_QUOTAS = {"A_attack_switch": 8, "A_status": 8, "A_sacrifice_endgame": 8,
+                      "B_budget": 3, "B_unevaluated": 3, "B_own_unsupported": 2, "C_agree": 8}
+DIAG_SCENES_BIG_BUDGET_MS = 1.0e7
+DIAG_SCENES_PROB = 0.5
+DIAG_SCENES_KO_GAP = 0.5
+DIAG_SCENES_UNEVAL_MAIN = 0.25
+DIAG_SCENES_CLOSE_Q = 0.02
+DIAG_SCENES_CLOSE_LEGACY = 5.0
+DIAG_SCENES_ENDGAME_REMAINING = 2
+DIAG_SCENES_TIE_Q = 0.001

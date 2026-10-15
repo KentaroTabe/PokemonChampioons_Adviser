@@ -159,6 +159,7 @@ TESTS=(
   test_diag_scoring_compare
   test_sim_picked_roster
   test_sim_legal_inputs
+  test_diag_scenes
 )
 
 fail=0
