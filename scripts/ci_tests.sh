@@ -154,6 +154,8 @@ TESTS=(
   test_usefulness_verdict
   test_arc_remeasure
   test_advisor_team_validate
+  test_diag_scoring_compare
+  test_sim_picked_roster
 )
 
 fail=0
