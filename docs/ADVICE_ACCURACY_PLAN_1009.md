@@ -561,3 +561,9 @@ k本なら水準1−0.05/k、推定差≥0.05かつ区間下限>0で採用候補
 - `tools/usefulness_verdict`: holdout のとき「封印 holdout 層 (40 構築) での 1 回の確認、search の結果とは合算しない」を表示、fold の表示なし、分割ファイルの sha16 と battles.jsonl の相手 id の層を事後検査 (外れれば invalid)。判定は §0.5 のまま (k = 1)。
 - dry-run (`--tier holdout --compare scoring --seed 20261015 --dry-run`): 検査 OK、holdout 40 構築、相手列 1,240 件で層の外 0、開封履歴 (16 行) に sealed_id e80afbea9a925dc8 の行なし。テスト test_usefulness_p1 (16) / test_usefulness_verdict (15) 緑。
 - 起動はユーザー (日次定点 21:50〜22:25 を避ける。見込み 40 分、上限 180 分)。終了後に verdict を 1 回だけ実行し、正式記録 docs/USEFULNESS_P2_HOLDOUT_<日付>.md を書く。
+
+### 8.24 holdout での確認の結果 (2026-10-16 01:24〜02:03、正式記録 docs/USEFULNESS_P2_HOLDOUT_20261016.md)
+
+- **比較条件の不成立** (受入監査: ランダム行動への退避が両条件 1 件ずつ、上限 0)。参考値 transition − legacy = +0.022 [−0.024, +0.067] (n = 600)。受入を除いても §0.5 では判定不能。search 層の +0.057 は holdout 層で確認できなかった。
+- 退避の原因は両方とも パーモット の さいきのいのり 成功後の蘇生先の選択 (poke-env の reviving 要求) で、助言が候補を返さない (ひんしの個体を交代候補から外すため)。方式によらず起きる測定入力の問題。KNOWN_ISSUES E-holdout-1。
+- 既定は legacy のまま。holdout 層はこの方式について開封済み (開封履歴に追記、道具は再測定を止める)。次の判断 (再測定の可否、受入の事後評価、実機の受入へ進むか) は開発者・レビュワー待ち。
