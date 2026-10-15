@@ -110,6 +110,9 @@
     (環境変数 ADVICE_SCORING_MODE の生の値。無ければ null)。version_id の digest には入れない
   advice 行 (kind = battle) に "scoring_mode" (設定された方式)・"scoring_used" (実際に使った方式。評価できなければ null)・
     "fallback_reason" (transition の退避理由、退避していなければ null) を必ず書く (scoring_fields_of)
+2026-10-16 採点方式の設定 (方式 C、tools/advice_mode.py。欄を足すだけ):
+  version 行に "scoring_mode_source" (設定元: "file" = config/advice.local.env / "env" = 環境変数 / "default" = どちらも無し
+    = legacy。scripts/advice_env.sh が渡す ADVICE_SCORING_MODE_SOURCE、無ければ環境変数 ADVICE_SCORING_MODE の有無で env / default)
 """
 from __future__ import annotations
 
@@ -569,6 +572,13 @@ def scoring_mode_info() -> dict:
     return {"scoring_mode": getattr(_cfg, "ADVICE_SCORING_MODE", "legacy"), "scoring_mode_env": raw if raw else None}
 
 
+def scoring_mode_source() -> str:
+    """この server の採点方式の設定元 (file / env / default。2026-10-16 方式 C、tools.advice_mode.source_of_env)"""
+    import os
+    from tools.advice_mode import source_of_env
+    return source_of_env(os.environ)
+
+
 def scoring_mode_banner(info: Optional[dict] = None) -> str:
     """起動ログの 1 行 (純粋。info = scoring_mode_info の戻り値、None なら今の値)"""
     i = info if info is not None else scoring_mode_info()
@@ -742,7 +752,8 @@ class BattleLogger:
             from advisor.versions import runtime_versions
             self._version = runtime_versions(refresh=True)
             # 採点方式 (2026-10-16 実機の受入): version_id の digest の外に足すだけ
-            self._write({"type": "version", **self._version, **scoring_mode_info()})
+            self._write({"type": "version", **self._version, **scoring_mode_info(),
+                         "scoring_mode_source": scoring_mode_source()})
         except Exception as e:
             print(f"[battle_log] 版の記録に失敗: {e}")
             self._version = None

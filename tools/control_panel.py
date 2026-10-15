@@ -36,6 +36,7 @@ from typing import Optional
 from urllib.parse import urlparse
 
 from champions_agent.config import ADVICE_SCORING_MODES, BUILD_SMOKE_CANARY_BATTLES
+from tools.advice_mode import LOCAL_FILE_REL, SOURCES, file_view, mismatch, read_local_text
 from tools.analyze_battles import MIN_BATTLE_SCENES, _parse_battle
 
 REPO = Path(__file__).resolve().parent.parent
@@ -48,6 +49,7 @@ PORTS_LIB = REPO / "scripts" / "lib" / "ports.sh"
 _SHELL_ASSIGN_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)="([^"]*)"\s*(?:#.*)?$')
 _SHELL_VAR_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
 _SCORING_ENV_RE = re.compile(r"(?:^|\s)ADVICE_SCORING_MODE=(\S*)")
+_SCORING_SOURCE_RE = re.compile(r"(?:^|\s)ADVICE_SCORING_MODE_SOURCE=(\S*)")
 
 
 def shell_assignments(text: str) -> dict:
@@ -201,6 +203,34 @@ def scoring_mode_from_ps(text: str, modes: tuple = ADVICE_SCORING_MODES) -> Opti
     if v not in modes:
         return {"mode": "legacy", "env": raw, "source": "invalid"}
     return {"mode": v, "env": raw, "source": "env"}
+
+
+def scoring_config_view(file_text: Optional[str], ps_text: str, running: Optional[dict],
+                        file_error: Optional[str] = None) -> dict:
+    """採点方式の設定値・実効値・設定元 (純粋。2026-10-16 方式 C)。file_text = config/advice.local.env の内容 (無ければ None)、
+    ps_text = アドバイザーの ps eww の出力 (停止中・読めなければ空)、running = scoring_mode_from_ps の戻り値。
+    {"file": tools.advice_mode.file_view, "running_source": advice_env.sh が渡した設定元 (file / env / default。
+    advice_env.sh を通さない起動・停止中は None), "mismatch": 設定値と稼働中の実効値が違う (再起動していない等)}。
+    file_error = ファイルを開けなかったときの理由 (読めない設定として扱う)"""
+    view = file_view(file_text)
+    if file_error:
+        view = {**view, "exists": True, "mode": None, "configured": None, "error": file_error}
+    m = _SCORING_SOURCE_RE.search(ps_text or "")
+    src = m.group(1) if m else None
+    return {"file": view, "running_source": src if src in SOURCES else None,
+            "mismatch": mismatch(view, (running or {}).get("mode"))}
+
+
+def scoring_config_warnings(cfg: dict) -> list:
+    """採点方式の設定の警告 (純粋)"""
+    out = []
+    f = cfg["file"]
+    if f.get("error"):
+        out.append(f"採点方式の設定ファイルが読めません: {f['error']} (このままでは接続テスト開始・更新の反映がエラーで止まります)")
+    elif cfg.get("mismatch"):
+        out.append(f"採点方式の設定値 ({f['configured']}) と稼働中のアドバイザーの実効値が違います。"
+                   "反映するには「更新の反映」か「接続テスト開始」で再起動してください")
+    return out
 
 
 # ------------------------------------------------------------------ 実測 (ファイル)
@@ -415,14 +445,25 @@ class Panel:
         ip = probe.lan_ip()
         # アドバイザーが使っている採点方式 (2026-10-16 実機の受入。プロセスの環境変数を実測。読めなければ None)
         scoring = None
+        ps_text = ""
         penv = getattr(probe, "process_env", None)
         if advisor["state"] == "ours" and advisor.get("pid") and penv is not None:
-            scoring = scoring_mode_from_ps(penv(advisor["pid"]))
+            ps_text = penv(advisor["pid"])
+            scoring = scoring_mode_from_ps(ps_text)
+        # 設定値 (config/advice.local.env) と設定元 (2026-10-16 方式 C)。食い違いは警告にも出す
+        file_text, file_error = None, None
+        try:
+            file_text = read_local_text(root / LOCAL_FILE_REL)
+        except OSError as e:
+            file_error = f"{LOCAL_FILE_REL}: {e}"
+        scoring_config = scoring_config_view(file_text, ps_text, scoring, file_error)
+        warnings += scoring_config_warnings(scoring_config)
         return {
             "now": time.time(),
             "processes": {"advisor": advisor, "frontend": frontend, "showdown": showdown,
                           "training": training, "measuring": measuring},
             "scoring": scoring,
+            "scoring_config": scoring_config,
             # フロントの URL は自分たちが待ち受けているときだけ (停止中に既定ポートを出すと別のプロセスを指してしまう)
             "urls": {"frontend": (f"http://{ip}:{frontend['port']}" if frontend["state"] == "ours" else None),
                      "frontend_local": (f"http://localhost:{frontend['port']}" if frontend["state"] == "ours" else None)},
@@ -502,6 +543,20 @@ function scoringText(sc, adv) {
   const src = sc.source === 'env' ? '環境変数' : sc.source === 'invalid' ? `環境変数の値 ${esc(sc.env)} は無効 → 既定` : '既定';
   return `${esc(sc.mode)} (${src})`;
 }
+const SOURCE_JA = {file: 'file (設定ファイル)', env: 'env (起動時の環境変数)', default: 'default (どちらも無し = legacy)'};
+function scoringRows(sc, cfg, adv) {
+  const f = (cfg || {}).file || {};
+  const conf = f.error ? `<span class="badge warn">読めない</span> ${esc(f.error)}`
+    : f.mode ? `${esc(f.mode)} (${esc(f.path)})` : `未設定 = legacy (${esc(f.path)} ${f.exists ? 'に鍵なし' : 'なし'})`;
+  const run = scoringText(sc, adv);
+  const srcTxt = adv.state !== 'ours' ? '-' : (cfg && cfg.running_source) ? esc(SOURCE_JA[cfg.running_source] || cfg.running_source)
+    : sc ? '記録なし (advice_env.sh を通さない起動)' : '不明';
+  const mis = cfg && cfg.mismatch;
+  return `<div class="row"><span>採点方式 (アドバイザー)</span>${mis ? '<span class="badge warn">設定値と実効値が違う (再起動していない)</span>' : '<span></span>'}</div>`
+    + `<div class="row"><span>　設定値 (ファイル)</span><span>${conf}</span></div>`
+    + `<div class="row"><span>　実効値 (稼働中)</span>${mis ? `<span class="badge warn">${run}</span>` : `<span>${run}</span>`}</div>`
+    + `<div class="row"><span>　設定元</span><span>${srcTxt}</span></div>`;
+}
 function render(st) {
   $('clock').textContent = new Date(st.now * 1000).toLocaleTimeString('ja-JP');
   $('warnings').innerHTML = (st.warnings || []).map((w) => `<div class="warnbox">⚠ ${esc(w)}</div>`).join('');
@@ -509,7 +564,7 @@ function render(st) {
   $('procs').innerHTML = svc('アドバイザー', p.advisor) + svc('フロントエンド', p.frontend) + svc('Showdown', p.showdown)
     + `<div class="row"><span>学習ループ</span>${badge(p.training, '稼働中', '停止中')}</div>`
     + `<div class="row"><span>構築の測定 run</span>${badge(!p.measuring, 'なし', '実行中', 'warn')}</div>`
-    + `<div class="row"><span>採点方式 (アドバイザー)</span><span>${scoringText(st.scoring, p.advisor)}</span></div>`;
+    + scoringRows(st.scoring, st.scoring_config, p.advisor);
   $('urls').innerHTML = st.urls.frontend
     ? `フロントエンド: <a href="${st.urls.frontend}" target="_blank">${st.urls.frontend}</a> `
       + `(このMac: <a href="${st.urls.frontend_local}" target="_blank">${st.urls.frontend_local}</a>)`
