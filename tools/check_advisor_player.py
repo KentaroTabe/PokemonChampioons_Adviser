@@ -14,6 +14,8 @@ validate-team で検査し、不合法なら飛ばして次を引く (2026-10-09
 own_team_skip_reasons と opp_team_skipped / opp_team_skip_reasons。draw_legal の説明)。
 Showdown がチームを拒否した (popup) ときと、--stall-sec (既定 config ADVISOR_PLAYER_STALL_SEC) 秒 Showdown から何も届かないときは
 黙って待たずに異常終了する (終了コード config ADVISOR_PLAYER_EXIT_TEAM_REJECTED / ADVISOR_PLAYER_EXIT_STALLED。BattleGuard)。
+--models-dir DIR は、プロジェクトのモジュールを import する前に環境変数 CHAMPIONS_MODELS_DIR を同じ値にする (apply_models_dir_env。
+rl_bridge・相手の操縦 (rl)・選出モデルと埋め込みが同じピンを読む)。--print-models-dir で各モジュールが読む dir を表示して終わる。
 """
 from __future__ import annotations
 
@@ -22,14 +24,53 @@ import asyncio
 import json
 import os
 import random
+import sys
 import threading
 import time
 from pathlib import Path
 from typing import Optional
 
-from champions_agent import config as _CFG
-from champions_agent.config import SIM_INPUTS_VERSION, TRAINING_BATTLE_FORMAT
-from champions_agent.env.sim_accept import summary_from_stats as sim_accept_summary
+# ------------------------------------------------------------------ --models-dir と環境変数 (2026-10-15 M3c)
+# config.MODELS_DIR (相手の操縦 rl の ModelPlayer / BattlePolicy、選出モデル・埋め込みのピン) と advisor.rl_bridge.CKPT_DIR は
+# import 時に環境変数 CHAMPIONS_MODELS_DIR を読む。以前は main() で環境変数を設定していたが、この時点で config は import 済みで、
+# --models-dir は rl_bridge にしか効かなかった (相手の操縦と選出の埋め込みは既定の dir。docs/ADVICE_DIAG_40_20261015.md §7)。
+# 直接起動 (python -m) のときは、下の import より前に引数から環境変数を設定する。
+MODELS_DIR_ENV = "CHAMPIONS_MODELS_DIR"
+
+
+def models_dir_env(argv: list, environ: dict) -> tuple:
+    """引数の --models-dir → (環境変数に入れる値 (resolve 済み、無ければ None), 警告 (無ければ None)) (純粋)。
+    既に環境変数があって値が違えば、引数を優先して警告を返す"""
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--models-dir", default=None)
+    ns, _rest = pre.parse_known_args(list(argv))
+    if not ns.models_dir:
+        return None, None
+    value = str(Path(ns.models_dir).resolve())
+    cur = environ.get(MODELS_DIR_ENV)
+    warn = None
+    if cur and str(Path(cur).resolve()) != value:
+        warn = f"環境変数 {MODELS_DIR_ENV}={cur} と --models-dir {value} が違う。引数を優先する"
+    return value, warn
+
+
+def apply_models_dir_env(argv: list, environ=None) -> Optional[str]:
+    """--models-dir があれば環境変数 CHAMPIONS_MODELS_DIR を同じ値にする (environ を書き換える。警告は stderr)。設定した値を返す"""
+    environ = os.environ if environ is None else environ
+    value, warn = models_dir_env(argv, environ)
+    if warn:
+        print(f"[check_advisor_player] ⚠ {warn}", file=sys.stderr)
+    if value is not None:
+        environ[MODELS_DIR_ENV] = value
+    return value
+
+
+if __name__ == "__main__":
+    apply_models_dir_env(sys.argv[1:])
+
+from champions_agent import config as _CFG  # noqa: E402 (--models-dir の環境変数を先に設定するため)
+from champions_agent.config import SIM_INPUTS_VERSION, TRAINING_BATTLE_FORMAT  # noqa: E402
+from champions_agent.env.sim_accept import summary_from_stats as sim_accept_summary  # noqa: E402
 
 
 def _constant_teambuilder(text: str):
@@ -303,6 +344,25 @@ def resolve_rl_blend(rl_blend: float | None, no_rl_blend: bool, default: float) 
     return float(default) if rl_blend is None else float(rl_blend)
 
 
+def opp_policy_info(bench) -> Optional[dict]:
+    """相手の操縦者が学習済み方策 (ModelPlayer の BattlePolicy) を読んだか (純粋)。方策を持たない操縦者 (heuristic) は None"""
+    pol = getattr(bench, "policy", None)
+    if pol is None:
+        return None
+    mp = getattr(pol, "model_path", None)
+    return {"model_path": str(mp) if mp is not None else None, "loaded": getattr(pol, "model", None) is not None,
+            "stats": dict(getattr(pol, "stats", None) or {})}
+
+
+def models_dir_report() -> dict:
+    """各モジュールが読む models dir (import して確かめる。--print-models-dir 用)"""
+    from advisor import rl_bridge
+    from champions_agent.agent import policy_battle, selection_model
+    return {"env": os.environ.get(MODELS_DIR_ENV), "config": str(_CFG.MODELS_DIR),
+            "rl_bridge": str(rl_bridge.CKPT_DIR), "policy_battle": str(policy_battle.MODELS_DIR),
+            "selection_model_emb": str(selection_model.EMB_PIN_PATH.parent)}
+
+
 async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
               skip_random: bool, belief_k: int | None, sensor_q: float | None,
               workers: int | None, no_rl_blend: bool,
@@ -477,6 +537,10 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
             "pick_noise": pick_noise, "action_noise": action_noise,
             "opp_pilot": opp_pilot, "opp_pick_policy": opp_pick_policy,
             "models_dir": os.environ.get("CHAMPIONS_MODELS_DIR"),
+            # 2026-10-15 M3c: 実際に読んだ dir (config.MODELS_DIR = 相手の操縦 rl・選出モデルのピン) と相手の操縦の方策の読み込み
+            # (loaded = False ならランダム合法手。stats の random_fallback がその手数)
+            "config_models_dir": str(_CFG.MODELS_DIR),
+            "opp_pilot_policy": opp_policy_info(bench),
             "rl_blend": rl_blend_weight,
             # 採点方式 (2026-10-09 M2b。環境変数 ADVICE_SCORING_MODE → config)。transition の退避の件数は stats の scoring_fallback*
             "advice_scoring_mode": _CFG.ADVICE_SCORING_MODE,
@@ -549,7 +613,9 @@ def main() -> None:
     ap.add_argument("--pick-noise", type=float, default=0.0, help="STRESS: 選出を乱択する確率")
     ap.add_argument("--action-noise", type=float, default=0.0, help="STRESS: 2位の手を選ぶ確率")
     ap.add_argument("--models-dir", default=None,
-                    help="行動方策 (RL) のピン dir。CHAMPIONS_MODELS_DIR に設定してから読み込む")
+                    help="RL のピン dir。import の前に CHAMPIONS_MODELS_DIR を同じ値にする (rl_bridge・相手の操縦 rl・選出モデル)")
+    ap.add_argument("--print-models-dir", action="store_true",
+                    help="各モジュールが読む models dir を JSON で表示して終わる (対戦しない)")
     ap.add_argument("--candidate-id", default=None, help="対戦記録に付ける候補 id")
     ap.add_argument("--opp-offset", type=int, default=0,
                     help="相手列の開始位置 (racing の追加測定で同じ相手列の続きを使う)")
@@ -563,8 +629,15 @@ def main() -> None:
                     help="自分側を実験専用の構築プール (tools.scoring_pool のファイル) から Random(相手 seed + 1) で対戦ごとに引く")
     args = ap.parse_args()
     if args.models_dir:
-        # rl_bridge は import 時に CHAMPIONS_MODELS_DIR を読むので、run (内部で import) の前に設定する
-        os.environ["CHAMPIONS_MODELS_DIR"] = str(Path(args.models_dir).resolve())
+        # 環境変数は import の前に設定済み (apply_models_dir_env)。main() を import して呼ぶなど、設定が間に合わず config が
+        # 別の dir を読んでいたら測定条件が崩れるので止める
+        want = Path(args.models_dir).resolve()
+        if os.environ.get(MODELS_DIR_ENV) != str(want) or Path(_CFG.MODELS_DIR).resolve() != want:
+            raise SystemExit(f"--models-dir {want} が config.MODELS_DIR ({_CFG.MODELS_DIR}) に届いていない。"
+                             f"python -m tools.check_advisor_player で起動するか、環境変数 {MODELS_DIR_ENV} を設定してから起動する")
+    if args.print_models_dir:
+        print(json.dumps(models_dir_report(), ensure_ascii=False))
+        return
     asyncio.run(run(args.battles, args.opp_seed, args.json, args.skip_random,
                     args.belief_k, args.sensor_q, args.workers, args.no_rl_blend,
                     search_blend=args.search_blend, team_file=args.team_file,

@@ -1412,8 +1412,10 @@ ADVICE_DIAG_BOTH_ENV = "ADVICE_DIAG_BOTH"
 # シミュレータ (advisor-as-player) の入力の版と測定の受入監査 (2026-10-15 M3a)。
 # SIM_INPUTS_VERSION: 状態変換 (champions_agent.env.advisor_player.battle_to_state) の版。選出の印 (未選出の個体を評価に含めない、
 # 38142ad2) と、シミュレータの合法手 (交代技の後の繰り出し・技の固定・とらわれ) を入力に入れた版。check_advisor_player が結果 JSON の
-# inputs_version に書き、racing・usefulness_verdict・arc_remeasure_summary が版の違う結果を混ぜない・混ぜたら警告する
-SIM_INPUTS_VERSION = "picked-legal-1015"
+# inputs_version に書き、racing・usefulness_verdict・arc_remeasure_summary が版の違う結果を混ぜない・混ぜたら警告する。
+# picked-legal-mega-1015 (2026-10-15 M3c): メガ形態の判定を部分一致 ("mega" in 種族 id) から advisor.gimmick.is_mega_form に
+# (meganium / yanmega をメガ扱いしない)、mega_used を poke-env のメガの記録で決める (champions_agent.env.advisor_player.mega_used_of)
+SIM_INPUTS_VERSION = "picked-legal-mega-1015"
 # 受入監査の上限 (決定ごとの軽い監査 accept の件数。全部 0 が既定。満たさなければ正式判定・順位判定を出さない):
 # best_illegal = 第一候補が poke-env の合法手に無い / unpicked_candidate = 候補に未選出の個体への交代 /
 # skip_unexplained = 第一候補を飛ばし、理由を説明できない (状態にシミュレータの合法手が入っていたのに飛ばした) /
