@@ -535,3 +535,9 @@ k本なら水準1−0.05/k、推定差≥0.05かつ区間下限>0で採用候補
 - 見つかった入力の誤り (M3c で修正): advisor_player が "mega" in 種族 id の部分一致で is_mega / mega_used を決め、meganium (メガニウム)・yanmega がメガ扱い (10/13 の P1 で各条件 12/600 戦)。`check_advisor_player --models-dir` は rl_bridge にしか効かない (P1 は環境変数で渡すので影響なし)。
 - 次: M3c のマージ → 速度確認 (予備 50 戦) → 版を固定して P2 (夜)。V の重みの調整は P2 の後の判断 (この診断の結果から、次の改善は V の較正・評価期間の延長 (段 C) が本線)。
 
+### 8.20 M3c と予備確認 3 回目 (2026-10-15 13:04、p1_prelim_20261015_1304)
+
+- **M3c (6581a1a1 + 587c4eda)**: メガ判定を is_mega_form に統一 (meganium / yanmega の誤判定)、mega_used は実際のメガ、`check_advisor_player --models-dir` で環境変数も設定、**相手のメガ後の個体を記録 (detailschange / -mega) からメガ形態で評価** (poke-env は species が基本種のまま。実対戦 3 戦で上書き 8 件)。SIM_INPUTS_VERSION = picked-legal-mega-1015。残る判断待ち: encoders.py 等 (RL の観測) の "mega" の部分一致は学習と合わせる必要があるため未変更。CI 139 本 OK。
+- **予備確認 3 回目** (修正版、一般的なチーム、2 × 50 戦、3 分): 対応の検査すべて 0、受入監査 (不合法 / 未選出 / 説明できない飛ばし / ランダム退避 / 選出不明) 0、版 picked-legal-mega-1015。秒/戦 legacy 3.3 / transition 3.6 (負荷が無い昼間。600 戦で 37 分の見込み。夜の日次定点と重なる時間帯では前回 15.7 秒/戦)。退避 14.8% (ソークビーム? → soak 36 / ねがいごと 22 / 未評価 15)。勝率 (参考、n = 50) 両方 0.460。
+- **版の固定**: feature/team-build の HEAD (M3c まで) で P2 を取り直す。条件は 10/13 と同じ (プール sha16 c7a32f8897d71375、fold B、seed 20261009、RL のピン、感度オフ、上限 180 分、600 戦、最終判定 1 回、受入監査と版の検査を verdict に要求)。
+
