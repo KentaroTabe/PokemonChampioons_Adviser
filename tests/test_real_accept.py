@@ -389,6 +389,237 @@ def test_shadow_load_check_compare():
     print("test_shadow_load_check_compare OK")
 
 
+# ------------------------------------------------------------------ 2026-10-16 レビューの 3 点と遅延の判定規則
+def test_display_after_decision():
+    """レビュワーの例: 開始 10 / 決定 12 / 表示 13 は遅延 3 秒・期限内にしない (決定後の表示として別に数え、分母には残す)"""
+    recs = [
+        {"type": "scene", "scene": SCENE_COMMAND, "t": 10.0},
+        _adv_rec("b-1", 10.5),
+        {"type": "scene", "scene": SCENE_FIELD, "t": 12.0},
+        {"type": "decision", "advice_id": "b-1", "turn": 1, "t_gen": 10.5, "t_shown": 13.0, "t_decided": 12.0},
+        {"type": "display", "advice_id": "b-1", "t_shown": 13.0, "t": 13.0},
+        # 期限 (1 秒) を過ぎたが決定より前の表示: 遅延は数えるが期限内ではない
+        {"type": "scene", "scene": SCENE_COMMAND, "t": 20.0},
+        _adv_rec("b-2", 20.2),
+        {"type": "display", "advice_id": "b-2", "t_shown": 21.5, "t": 21.5},
+        {"type": "scene", "scene": SCENE_FIELD, "t": 22.0},
+        {"type": "decision", "advice_id": "b-2", "turn": 2, "t_gen": 20.2, "t_shown": 21.5, "t_decided": 22.0},
+        # 決定の時刻ちょうどの表示は決定前に数える。期限 (開始 + 1 秒) 内
+        {"type": "scene", "scene": SCENE_COMMAND, "t": 30.0},
+        _adv_rec("b-3", 30.2),
+        {"type": "display", "advice_id": "b-3", "t_shown": 30.8, "t": 30.8},
+        {"type": "scene", "scene": SCENE_FIELD, "t": 30.8},
+        {"type": "decision", "advice_id": "b-3", "turn": 3, "t_gen": 30.2, "t_shown": 30.8, "t_decided": 30.8},
+    ]
+    rows = RA.display_rows(recs, deadline_sec=10.0, stale_hp_sec=30.0)
+    r0 = rows[0]
+    assert r0["status"] == "after_decision" and r0["latency"] is None and r0["in_time"] is False, r0
+    s = RA.summarize_display(rows[:1])["legacy"]
+    assert s["n_front"] == 1 and s["n_in_time"] == 0 and s["in_time_rate"] == 0.0 and s["latency_ms"]["n"] == 0, s
+    assert s["status"]["after_decision"] == 1
+    rows1 = RA.display_rows(recs, deadline_sec=1.0, stale_hp_sec=30.0)
+    assert rows1[1]["status"] == "shown" and rows1[1]["latency"] == 1.5 and rows1[1]["in_time"] is False, rows1[1]
+    assert rows1[2]["status"] == "shown" and rows1[2]["latency"] == 0.8 and rows1[2]["in_time"] is True, rows1[2]
+    print("test_display_after_decision OK")
+
+
+def test_display_mode_from_version():
+    """レビュワーの例: version 行が transition で advice 行が無い決定は transition の分母に残す。記録が無ければ方式不明"""
+    recs = [
+        {"type": "version", "version_id": "v1", "scoring_mode": "transition"},
+        {"type": "scene", "scene": SCENE_COMMAND, "t": 10.0},
+        {"type": "scene", "scene": SCENE_FIELD, "t": 12.0},
+        {"type": "decision", "advice_id": None, "turn": 1, "t_gen": None, "t_shown": None, "t_decided": 12.0},
+        # advice 行の記録 (legacy) が version 行 (transition) と食い違う: version 行を採り、食い違いとして数える
+        {"type": "scene", "scene": SCENE_COMMAND, "t": 20.0},
+        _adv_rec("c-2", 20.5, mode="legacy"),
+        {"type": "display", "advice_id": "c-2", "t_shown": 20.6, "t": 20.6},
+        {"type": "scene", "scene": SCENE_FIELD, "t": 21.0},
+        {"type": "decision", "advice_id": "c-2", "turn": 2, "t_gen": 20.5, "t_shown": 20.6, "t_decided": 21.0},
+    ]
+    rows = RA.display_rows(recs, deadline_sec=10.0, stale_hp_sec=30.0, unrecorded_mode=RA.UNKNOWN_MODE)
+    assert rows[0]["mode"] == "transition" and rows[0]["mode_source"] == "version" and rows[0]["status"] == "no_advice", rows[0]
+    assert rows[1]["mode"] == "transition" and rows[1]["mode_mismatch"] is True, rows[1]
+    s = RA.summarize_display(rows)
+    assert set(s) == {"transition"} and s["transition"]["n"] == 2 and s["transition"]["n_front"] == 2
+    assert s["transition"]["in_time_rate"] == 0.5 and s["transition"]["n_mode_mismatch"] == 1
+    # version 行にも advice 行にも記録が無ければ方式不明 (legacy に寄せない)
+    old = [r for r in recs if r.get("type") != "version"]
+    ai = next(i for i, r in enumerate(old) if r.get("type") == "advice")
+    old[ai] = _adv_rec("c-2", 20.5)
+    rows2 = RA.display_rows(old, deadline_sec=10.0, stale_hp_sec=30.0, unrecorded_mode=RA.UNKNOWN_MODE)
+    assert [r["mode"] for r in rows2] == [RA.UNKNOWN_MODE, RA.UNKNOWN_MODE] and not any(r["mode_recorded"] for r in rows2)
+    assert "legacy" not in RA.summarize_display(rows2)
+    # version 行に記録が無く advice 行にあればそれを採る
+    old[ai] = _adv_rec("c-2", 20.5, mode="transition")
+    rows3 = RA.display_rows(old, deadline_sec=10.0, stale_hp_sec=30.0, unrecorded_mode=RA.UNKNOWN_MODE)
+    assert rows3[1]["mode"] == "transition" and rows3[1]["mode_source"] == "advice" and rows3[0]["mode"] == RA.UNKNOWN_MODE
+    # 単体: decision_mode
+    assert RA.decision_mode({"scoring_mode": "legacy"}, None) == \
+        {"mode": "legacy", "recorded": True, "source": "version", "mismatch": False, "advice_mode": None}
+    assert RA.decision_mode(None, {"advice": {}})["mode"] == RA.UNKNOWN_MODE
+    # 途中で version 行が変われば、その後の決定は新しい設定
+    recs4 = recs[:4] + [{"type": "version", "version_id": "v2", "scoring_mode": "legacy"}] + recs[4:]
+    rows4 = RA.display_rows(recs4, deadline_sec=10.0, stale_hp_sec=30.0, unrecorded_mode=RA.UNKNOWN_MODE)
+    assert [r["mode"] for r in rows4] == ["transition", "legacy"] and rows4[1]["mode_mismatch"] is False
+    print("test_display_mode_from_version OK")
+
+
+def test_check_best_detail():
+    c = _compact()
+    r = RA.check_best(_adv("move", "expandingforce"), c, {"player": {}, "last_move": {}}, detail=True, **CK)
+    assert r["violations"] == [] and r["unconfirmed"] == []
+    ck = r["checks"]
+    assert all(ck[k] == "ok" for k in ("best", "move_owned", "move_pp", "move_fainted", "move_lock", "move_taunt",
+                                       "move_disable", "candidate_picked", "active_identity")), ck
+    assert all(ck[k] is None for k in ("switch_party", "switch_form", "switch_self", "switch_fainted", "switch_picked"))
+    # 既定 (detail なし) は従来の形のまま
+    assert set(RA.check_best(_adv("move", "expandingforce"), c, **CK)) == {"violations", "unconfirmed"}
+    # move_locks の欄が無い行: 技の固定・かなしばりは照合できない (変化技なら ちょうはつ も)
+    ck = RA.check_best(_adv("move", "encore"), c, None, detail=True, **CK)["checks"]
+    assert ck["move_lock"] == "unknown" and ck["move_disable"] == "unknown" and ck["move_taunt"] == "unknown"
+    ck = RA.check_best(_adv("move", "expandingforce"), c, None, detail=True, **CK)["checks"]
+    assert ck["move_taunt"] == "ok"                       # 変化技でなければ ちょうはつ に関係なく合法
+    # アンコールの対象が分からない
+    enc_unknown = {"player": {"volatiles": ["encore"]}, "turn": 3, "last_move": {}}
+    r = RA.check_best(_adv("move", "expandingforce"), c, enc_unknown, detail=True, **CK)
+    assert r["checks"]["move_lock"] == "unknown" and r["unconfirmed"] == ["lock_unknown"]
+    # PP・HP が読めていない / 登録からの補完
+    cu = _compact(party=[_mon("indeedee", (("expandingforce", None),), hp=None), _mon("blastoise", hp=None)])
+    ck = RA.check_best(_adv("move", "encore"), cu, {}, registered=["encore"], detail=True, **CK)["checks"]
+    assert ck["move_owned"] == "unknown" and ck["move_pp"] == "unknown" and ck["move_fainted"] == "unknown", ck
+    ck = RA.check_best(_adv("switch", "blastoise"), cu, {}, detail=True, **CK)["checks"]
+    assert ck["switch_fainted"] == "unknown" and ck["switch_party"] == "ok" and ck["switch_picked"] == "ok", ck
+    # 違反は ng
+    ck = RA.check_best(_adv("switch", "garchomp"), c, {}, detail=True, **CK)["checks"]
+    assert ck["switch_picked"] == "ng" and ck["candidate_picked"] == "ng"
+    # 選出が分からない
+    cs = _compact(party=[_mon("indeedee", (("expandingforce", 16),), picked=False), _mon("garchomp", picked=False)])
+    ck = RA.check_best(_adv("switch", "garchomp"), cs, {}, detail=True, **CK)["checks"]
+    assert ck["switch_picked"] == "unknown" and ck["candidate_picked"] == "unknown"
+    ck = RA.check_best({"ok": False}, c, {}, detail=True, **CK)["checks"]
+    assert ck["best"] == "unknown"
+    print("test_check_best_detail OK")
+
+
+def test_correctness_unknown_not_ok():
+    """レビュワーの例: lock_unknown だけの入力を「正しさを満たす」にしない"""
+    item = "正しさ: 違反 (有効な決定、再生)"
+    ds = [_dec(legacy=_res(unconf=["lock_unknown"]), transition=_res(unconf=["lock_unknown"]))]
+    s = RA.summarize(ds)
+    assert s["modes"]["legacy"]["valid"]["n_unknown_decisions"] == 1
+    rows = {r["item"] + "|" + r["mode"]: r for r in RA.acceptance(s, {}, {"n_logs": 1, "n_logs_ok": 1})}
+    r = rows[item + "|legacy"]
+    assert r["status"] == RA.PARTIAL and r["status"] != RA.OK and r["value"] == 0, r
+    assert "照合できた範囲で違反 0" in r["note"] and "技の固定の対象の技が分からない" in r["note"], r["note"]
+    # checks に判定不能があれば同じ (unconfirmed が空でも)
+    ck = {k: None for k in RA.CHECK_LABELS} | {"best": "ok", "move_pp": "unknown"}
+    s2 = RA.summarize([_dec(legacy=dict(_res(), checks=ck), transition=dict(_res(), checks=dict(ck, move_pp="ok")))])
+    rows2 = {r["item"] + "|" + r["mode"]: r for r in RA.acceptance(s2, {}, {"n_logs": 1, "n_logs_ok": 1})}
+    assert rows2[item + "|legacy"]["status"] == RA.PARTIAL and "技の PP" in rows2[item + "|legacy"]["note"]
+    assert rows2[item + "|transition"]["status"] == RA.OK                 # 全検査が照合できて違反 0
+    assert s2["modes"]["legacy"]["valid"]["checks"]["move_pp"] == {"ok": 0, "ng": 0, "unknown": 1}
+    # 違反があれば判定不能が残っても 満たさない
+    s3 = RA.summarize([_dec(legacy=_res(viol=["move_not_owned"], unconf=["lock_unknown"]), transition=_res())])
+    rows3 = {r["item"] + "|" + r["mode"]: r for r in RA.acceptance(s3, {}, {"n_logs": 1, "n_logs_ok": 1})}
+    assert rows3[item + "|legacy"]["status"] == RA.NG
+    print("test_correctness_unknown_not_ok OK")
+
+
+def _dblock(p95_ms, n=10, log=None):
+    return {"n": n, "n_front": n, "n_mode_unrecorded": 0, "n_mode_mismatch": 0, "mode_sources": {"version": n, "advice": 0},
+            "status": {k: 0 for k in RA.DISPLAY_STATUS_LABELS} | {"shown": n},
+            "latency_ms": {"n": n, "p50": 500.0, "p95": p95_ms, "max": p95_ms},
+            "gen_to_shown_ms": {"n": n, "p50": 5.0, "p95": 10.0, "max": 12.0}, "n_in_time": n, "in_time_rate": 1.0}
+
+
+def test_latency_rule():
+    """遅延: 各回と合算の両方に基準を当て、1 回でも超えたら合算で隠さない。版・設定が揃わなければ判定不能"""
+    s = RA.summarize([_dec(legacy=_res(), transition=_res())])
+    item = "遅延: 決定開始 → 有効な助言の表示の p95 (実戦ログ)"
+    per = "遅延: 決定開始 → 有効な助言の表示の p95 (実戦ログ、回ごと)"
+    agg = dict(_dblock(2800.0, 20), by_log={"a.jsonl": _dblock(3200.0), "b.jsonl": _dblock(2000.0)})
+    ok_cons = {"ok": True, "notes": [], "values": {}}
+    grp = {"target_fixed": True, "by_mode": {"transition": ok_cons}, "delta": ok_cons}
+    rows = {r["item"] + "|" + r["mode"]: r for r in RA.acceptance(s, {"transition": agg}, {"n_logs": 2, "n_logs_ok": 2}, group=grp)}
+    a = rows[item + "|transition"]
+    assert a["status"] == RA.NG and a["value"] == 2.8 and a["note"].startswith("合算。" + RA.PENDING_NOTE), a
+    assert "a.jsonl 3.20 秒" in a["note"]
+    assert rows[per + "|transition / a.jsonl"]["status"] == RA.NG and rows[per + "|transition / b.jsonl"]["status"] == RA.OK
+    # 全回が基準内で版・設定が揃えば 満たす
+    agg_ok = dict(_dblock(2800.0, 20), by_log={"a.jsonl": _dblock(2900.0), "b.jsonl": _dblock(2000.0)})
+    rows = {r["item"] + "|" + r["mode"]: r for r in RA.acceptance(s, {"transition": agg_ok}, {"n_logs": 2, "n_logs_ok": 2}, group=grp)}
+    assert rows[item + "|transition"]["status"] == RA.OK
+    # 版・設定が揃わなければ判定不能 (超えた回が無いとき)。超えた回があれば未達のまま
+    bad = {"ok": False, "notes": ["version_id が揃わない (v1 / v2)"], "values": {}}
+    grp_bad = {"target_fixed": False, "by_mode": {"transition": bad}, "delta": bad}
+    rows = {r["item"] + "|" + r["mode"]: r for r in RA.acceptance(s, {"transition": agg_ok}, {"n_logs": 2, "n_logs_ok": 2},
+                                                                     group=grp_bad)}
+    r = rows[item + "|transition"]
+    assert r["status"] == RA.UNKNOWN and "version_id が揃わない" in r["note"] and "事前に固定していない" in r["note"], r
+    rows = {r["item"] + "|" + r["mode"]: r for r in RA.acceptance(s, {"transition": agg}, {"n_logs": 2, "n_logs_ok": 2},
+                                                                     group=grp_bad)}
+    assert rows[item + "|transition"]["status"] == RA.NG
+    # 増分: 両方式があっても版が揃わなければ判定不能。再生の差は参考値と明記
+    disp2 = {"legacy": dict(_dblock(2000.0), by_log={}), "transition": dict(_dblock(2200.0), by_log={})}
+    rows = {r["item"] + "|" + r["mode"]: r for r in RA.acceptance(s, disp2, {"n_logs": 2, "n_logs_ok": 2},
+                                                                     group=dict(grp, delta=bad))}
+    d = rows["遅延: legacy より増える分 (実戦ログの p95 の差)|transition"]
+    assert d["status"] == RA.UNKNOWN and "実機の表示の増分の代わりにしない" in d["note"], d
+    # 方式不明の行は「不明」として別行
+    rows = {r["item"] + "|" + r["mode"]: r for r in RA.acceptance(s, {RA.UNKNOWN_MODE: dict(_dblock(2000.0), by_log={})},
+                                                                     {"n_logs": 1, "n_logs_ok": 0})}
+    assert rows[item + "|不明"]["status"] == RA.OK and "方式不明" in rows[item + "|不明"]["note"]
+    print("test_latency_rule OK")
+
+
+def test_versions_and_consistency():
+    recs = [{"type": "version", "version_id": "v1", "scoring_mode": "transition"},
+            {"type": "client", "served_commit": "abc123"}, {"type": "client", "served_commit": "abc123"}]
+    v = RA.log_versions(recs)
+    assert v == {"version_id": ["v1"], "scoring_mode": ["transition"], "served_commit": ["abc123"],
+                 "served_commit_source": "client"}, v
+    v2 = RA.log_versions([{"type": "version", "version_id": "v1", "scoring_mode": "transition", "served_commit": "def"}])
+    assert v2["served_commit"] == ["def"] and v2["served_commit_source"] == "version"
+    li = lambda n, x: {"name": n, "versions": x}
+    assert RA.target_consistency([li("a", v), li("b", v)])["ok"] is True
+    c = RA.target_consistency([li("a", v), li("b", dict(v, version_id=["v2"]))])
+    assert c["ok"] is False and any("version_id が揃わない" in n for n in c["notes"])
+    c = RA.target_consistency([li("a", v), li("b", dict(v, scoring_mode=[]))])
+    assert c["ok"] is False and any("scoring_mode の記録なし 1 本" in n for n in c["notes"])
+    # 増分の照合は方式を除く欄だけ
+    assert RA.target_consistency([li("a", v), li("b", dict(v, scoring_mode=["legacy"]))],
+                                 fields=("served_commit", "version_id"))["ok"] is True
+    assert RA.target_consistency([])["ok"] is False
+    print("test_versions_and_consistency OK")
+
+
+def test_render_markdown_new_sections():
+    s = RA.summarize([_dec(legacy=dict(_res(unconf=["lock_unknown"]), checks={"best": "ok", "move_lock": "unknown"}),
+                           transition=_res())])
+    disp = {"legacy": dict(_dblock(3200.0), by_log={"a.jsonl": _dblock(3200.0)}),
+            RA.UNKNOWN_MODE: dict(_dblock(1000.0), by_log={"b.jsonl": _dblock(1000.0)})}
+    cons = {"ok": False, "notes": ["scoring_mode の記録なし 1 本 (b.jsonl)"], "values": {}}
+    grp = {"target_fixed": True, "by_mode": {"legacy": {"ok": True, "notes": [], "values": {}}, RA.UNKNOWN_MODE: cons},
+           "delta": cons}
+    acc = RA.acceptance(s, disp, {"n_logs": 2, "n_logs_ok": 1}, group=grp)
+    result = {"conditions": {"at": "2026-10-16 12:00", "code": {"commit": "abc", "dirty": False, "engine": "/x/engine.py"},
+                             "modes": list(RA.MODES), "rl_blend_weight": 25.0, "rl_style": "balance", "transition_budget_ms": 300.0,
+                             "transition_sensitivity": True, "gap_sec": 8.0, "stale_hp_sec": 30.0, "n_advice_rows": 10,
+                             "target": {"fixed": True, "by_mode": grp["by_mode"], "delta": cons},
+                             "logs": [{"name": "a.jsonl", "n_advice_rows": 10, "n_decisions": 6, "n_decision_rows": 5,
+                                       "modes_used": {"legacy": 10}, "has_move_locks": True,
+                                       "versions": {"version_id": ["v1"], "scoring_mode": ["legacy"], "served_commit": ["c1"],
+                                                    "served_commit_source": "client"}}]},
+              "summary": s, "display": disp, "display_all": _dblock(3100.0), "acceptance": acc,
+              "profile": {"legacy": "ncalls tottime\n"}}
+    md = RA.render_markdown(result)
+    assert RA.PARTIAL in md and RA.PENDING_NOTE in md and "検査ごとの照合" in md and "| 技の固定 (アンコール / こだわり) | 0 / 0 / 1 |" in md
+    assert "不明 / b.jsonl" in md and "全体 (方式を問わない、参考)" in md and "事前に決めた接続テスト群" in md
+    assert "c1 (client 行)" in md and "evaluate の内訳" in md
+    print("test_render_markdown_new_sections OK")
+
+
 def main() -> None:
     test_thin_and_rows()
     test_decision_open_time()
@@ -401,6 +632,13 @@ def main() -> None:
     test_logger_scoring_fields()
     test_control_panel_scoring()
     test_shadow_load_check_compare()
+    test_display_after_decision()
+    test_display_mode_from_version()
+    test_check_best_detail()
+    test_correctness_unknown_not_ok()
+    test_latency_rule()
+    test_versions_and_consistency()
+    test_render_markdown_new_sections()
     print("\nALL OK")
 
 

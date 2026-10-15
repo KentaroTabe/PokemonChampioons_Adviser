@@ -1466,3 +1466,10 @@ REAL_ACCEPT_DISPLAY_DEADLINE_SEC = DECISION_AUDIT_LATE_SEC
 REAL_ACCEPT_FALLBACK_BUDGET_MAX = 0.03
 REAL_ACCEPT_FALLBACK_ALL_MAX = 0.20
 REAL_ACCEPT_STALE_HP_SEC = HP_RANGE_STALE_SEC
+# 遅延の判定規則 (2026-10-16 レビュー): 対象は事前に決めた接続テスト群 (tools.real_accept --target)。LATENCY_P95_SEC は各回 (ログごと)
+# と合算の両方に適用し、どれか 1 回でも超えたら合算で隠さず「未達 (原因確認まで保留)」。対象群は同じ版・設定 (version 行の
+# served_commit / version_id / scoring_mode) であることを検査し、揃わなければ判定不能 (超えた回があれば未達のまま)。
+# 表示は 表示時刻 ≤ min(決定開始 + DISPLAY_DEADLINE_SEC, 決定時刻) のとき期限内、決定の後の表示は「決定後の表示」として別に数える
+# (遅延の分布にも期限内にも入れない、分母には残す)。
+# PROFILE_TOP: --profile で evaluate の内訳 (cProfile の累積時間の上位) を出す行数
+REAL_ACCEPT_PROFILE_TOP = 30
