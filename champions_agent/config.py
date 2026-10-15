@@ -1415,7 +1415,9 @@ ADVICE_DIAG_BOTH_ENV = "ADVICE_DIAG_BOTH"
 # inputs_version に書き、racing・usefulness_verdict・arc_remeasure_summary が版の違う結果を混ぜない・混ぜたら警告する。
 # picked-legal-mega-1015 (2026-10-15 M3c): メガ形態の判定を部分一致 ("mega" in 種族 id) から advisor.gimmick.is_mega_form に
 # (meganium / yanmega をメガ扱いしない)、mega_used を poke-env のメガの記録で決める (champions_agent.env.advisor_player.mega_used_of)
-SIM_INPUTS_VERSION = "picked-legal-mega-1015"
+# picked-legal-mega-revive-1016 (2026-10-16 E-holdout-1): さいきのいのり の蘇生先の選択 (要求の種類の区別、蘇生先は要求の合法な
+# ひんし個体から固定規則で選ぶ) で合法手の解釈と実行行動が変わった (レビュー 10/16 で版の更新を承認)
+SIM_INPUTS_VERSION = "picked-legal-mega-revive-1016"
 # 受入監査の上限 (決定ごとの軽い監査 accept の件数。全部 0 が既定。満たさなければ正式判定・順位判定を出さない):
 # best_illegal = 第一候補が poke-env の合法手に無い / unpicked_candidate = 候補に未選出の個体への交代 /
 # skip_unexplained = 第一候補を飛ばし、理由を説明できない (状態にシミュレータの合法手が入っていたのに飛ばした) /

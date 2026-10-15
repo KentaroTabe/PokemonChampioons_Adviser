@@ -117,7 +117,8 @@ def test_mega_used_real_poke_env_battle():
 
 
 def test_inputs_version():
-    assert SIM_INPUTS_VERSION == "picked-legal-mega-1015", SIM_INPUTS_VERSION
+    # 2026-10-16 E-holdout-1 (蘇生先の選択) で版を更新 (レビュー承認)
+    assert SIM_INPUTS_VERSION == "picked-legal-mega-revive-1016", SIM_INPUTS_VERSION
     print("test_inputs_version OK")
 
 
