@@ -18,6 +18,7 @@ import time
 from typing import Optional
 
 from advisor.ev_infer import _nature_mult
+from advisor.gimmick import is_mega_form
 from advisor.infer import species_ja_name
 from champions_agent.env import sim_accept as SA
 from champions_agent.env.search_expert import (
@@ -345,6 +346,17 @@ def correspondence_record(corr: Optional[dict]) -> dict:
                           "first_mismatch": c.get("first_mismatch")}}
 
 
+def mega_used_of(battle, own_vals: list, opp_vals: list) -> dict:
+    """各陣営がメガシンカの権利を使ったか (純粋)。poke-env の記録 (-mega のイベントで立つ battle.used_mega_evolve /
+    opponent_used_mega_evolve) か、個体の種族がメガ形態 (advisor.gimmick.is_mega_form: 石の表のメガ後の種族 id) になったかで決める。
+    2026-10-15 M3c: 以前は種族 id に "mega" を含むかの部分一致で、meganium (メガニウム) / yanmega (メガヤンマ) を出した陣営が
+    対戦の最初から使用済みになっていた (docs/ADVICE_DIAG_40_20261015.md §7)"""
+    return {"player": bool(getattr(battle, "used_mega_evolve", False))
+            or any(is_mega_form(p.species or "") for p in own_vals),
+            "opponent": bool(getattr(battle, "opponent_used_mega_evolve", False))
+            or any(is_mega_form(p.species or "") for p in opp_vals)}
+
+
 def _mon_entry(p, own: bool, resolver, active: bool, available=None, picked: bool = True) -> dict:
     sid = p.species or ""
     status = p.status
@@ -363,7 +375,7 @@ def _mon_entry(p, own: bool, resolver, active: bool, available=None, picked: boo
         "boosts": dict(p.boosts or {}),
         "ability_id": p.ability or None,
         "item_id": item,
-        "is_mega": "mega" in sid,
+        "is_mega": is_mega_form(sid),
         "is_active": active,
         "moves": [],
         "revealed_moves": [],
@@ -578,8 +590,7 @@ def battle_to_state(battle, resolver=None) -> Optional[dict]:
         "turn": battle.turn,
         "field": {"weather": weather, "terrain": terrain,
                   "trick_room": trick_room},
-        "mega_used": {"player": any("mega" in (p.species or "") for p in own_vals),
-                      "opponent": any("mega" in (p.species or "") for p in opp_vals)},
+        "mega_used": mega_used_of(battle, own_vals, opp_vals),
         "player": player,
         "opponent": opp_side,
     }
