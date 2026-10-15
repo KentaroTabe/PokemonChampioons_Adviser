@@ -11,6 +11,8 @@
 - picked_unknown: 対戦中に選出が分からず (picked_mask_of が None)、全個体を選出扱いにした (入力不成立)
 - forced_single: 助言から行動を作れなかったが、合法手が 1 つだけだったのでそれを実行した (ランダムではない。わるあがき・反動等)
 - switch_info_unknown: 交代先の照合 (switchable_check) で実行環境の要求が無く照合できなかった
+- revive_select: さいきのいのり の蘇生先の選択 (要求の種類 revive_select) を固定規則 (1 体なら確定、複数なら自分の選出順で先) で
+  実行した (2026-10-16 E-holdout-1)。助言を通さない決定で、random_fallback にも skip_* にも数えない。違反ではない (件数だけ残す)
 
 受入 (accept_violations): best_illegal / unpicked_candidate / skip_unexplained / random_fallback / picked_unknown が
 config.SIM_ACCEPT_LIMITS 以下。満たさなければ正式判定 (usefulness_verdict)・順位判定 (racing)・判定 (arc_remeasure_summary) を
@@ -23,11 +25,13 @@ from typing import Iterable, Optional
 from champions_agent.config import SIM_ACCEPT_LIMITS, SIM_INPUTS_VERSION
 
 ACCEPT_KEYS = ("best_illegal", "unpicked_candidate", "skip_unexplained", "random_fallback", "picked_unknown")
-COUNT_KEYS = ("decisions",) + ACCEPT_KEYS + ("skip_explained", "forced_single", "switch_info_unknown")
+COUNT_KEYS = ("decisions",) + ACCEPT_KEYS + ("skip_explained", "forced_single", "switch_info_unknown", "revive_select")
 STATS_PREFIX = "accept:"
 LABELS = {"best_illegal": "第一候補が不合法", "unpicked_candidate": "候補に未選出の個体",
           "skip_unexplained": "説明できない第一候補の飛ばし", "random_fallback": "ランダム行動への退避",
           "picked_unknown": "選出が分からない決定 (入力不成立)"}
+# 違反ではないが表示する項目 (usefulness_verdict の表示)
+INFO_LABELS = {"revive_select": "蘇生先の選択 (さいきのいのり、固定規則)"}
 
 
 def _key(a: Optional[dict]) -> Optional[tuple]:
@@ -36,11 +40,12 @@ def _key(a: Optional[dict]) -> Optional[tuple]:
 
 def decision_flags(advice: Optional[dict], advice_exec: Optional[dict], skipped: list, legal_moves: Iterable,
                    legal_switches: Iterable, legal_known: bool, picked_species: Optional[Iterable],
-                   random_fallback: bool, forced: bool = False) -> dict:
+                   random_fallback: bool, forced: bool = False, revive_select: bool = False) -> dict:
     """1 決定の監査の印 (純粋)。advice = 助言 (evaluate の戻り値)、advice_exec = 実行に使った助言 (STRESS の行動ノイズで best を
     差し替えたもの。無ければ advice)、skipped = choose_with_trace が飛ばした候補、legal_moves / legal_switches = poke-env の合法手
     (技の id / 交代先の種族 id)、legal_known = 状態にシミュレータの合法手を入れたか、picked_species = 選出した個体の種族 id
-    (分からなければ None)。戻り値は COUNT_KEYS の bool (decisions は常に True)"""
+    (分からなければ None)。revive_select = 蘇生先を固定規則で選んだ (助言なし)。戻り値は COUNT_KEYS の bool (decisions は常に
+    True)"""
     adv = advice if (advice and advice.get("ok")) else None
     best = (adv or {}).get("best")
     moves, switches = set(legal_moves or ()), set(legal_switches or ())
@@ -62,6 +67,7 @@ def decision_flags(advice: Optional[dict], advice_exec: Optional[dict], skipped:
         flags["skip_explained" if not legal_known else "skip_unexplained"] = True
     flags["random_fallback"] = bool(random_fallback)
     flags["forced_single"] = bool(forced)
+    flags["revive_select"] = bool(revive_select)
     return flags
 
 
