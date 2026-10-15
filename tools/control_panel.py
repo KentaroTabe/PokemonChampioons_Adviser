@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
-from champions_agent.config import BUILD_SMOKE_CANARY_BATTLES
+from champions_agent.config import ADVICE_SCORING_MODES, BUILD_SMOKE_CANARY_BATTLES
 from tools.analyze_battles import MIN_BATTLE_SCENES, _parse_battle
 
 REPO = Path(__file__).resolve().parent.parent
@@ -47,6 +47,7 @@ ADVISOR_PATTERN = "uvicorn server:app_asgi"      # scripts/lib/ports.sh と同�
 PORTS_LIB = REPO / "scripts" / "lib" / "ports.sh"
 _SHELL_ASSIGN_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)="([^"]*)"\s*(?:#.*)?$')
 _SHELL_VAR_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
+_SCORING_ENV_RE = re.compile(r"(?:^|\s)ADVICE_SCORING_MODE=(\S*)")
 
 
 def shell_assignments(text: str) -> dict:
@@ -170,6 +171,10 @@ class Probe:
     def lan_ip(self) -> str:
         return _run(["ipconfig", "getifaddr", "en0"]).strip() or "localhost"
 
+    def process_env(self, pid: int) -> str:
+        """プロセスのコマンドと環境変数 (ps eww。自分のユーザーのプロセスだけ読める)"""
+        return _run(["ps", "eww", "-o", "command=", "-p", str(int(pid))])
+
 
 def service_state(probe: Probe, last_port: int, default_port: int, pattern: str) -> dict:
     """前回使ったポート → 既定ポートの順に「自分たちのコマンドが待ち受けているか」を見る (scripts/lib/ports.sh の choose_port と同じ順)。
@@ -180,6 +185,22 @@ def service_state(probe: Probe, last_port: int, default_port: int, pattern: str)
             return {"state": "ours", "port": p, "pid": ln["pid"]}
     ln = probe.listener(default_port)
     return {"state": "foreign" if ln else "free", "port": default_port, "pid": (ln or {}).get("pid")}
+
+
+def scoring_mode_from_ps(text: str, modes: tuple = ADVICE_SCORING_MODES) -> Optional[dict]:
+    """ps eww の出力 (コマンド + 環境変数) から、アドバイザーが使う採点方式 (純粋。2026-10-16 実機の受入)。
+    {"mode", "env" (環境変数の生の値 or None), "source": env / default (変数なし = 既定 legacy) / invalid (読めない値 → legacy)}。
+    出力が空 (プロセスが読めない) なら None。判定の規則は champions_agent.config._advice_scoring_mode_from_env と同じ"""
+    if not (text or "").strip():
+        return None
+    m = _SCORING_ENV_RE.search(text)
+    raw = m.group(1) if m else None
+    v = (raw or "").strip().lower()
+    if not v:
+        return {"mode": "legacy", "env": raw, "source": "default"}
+    if v not in modes:
+        return {"mode": "legacy", "env": raw, "source": "invalid"}
+    return {"mode": v, "env": raw, "source": "env"}
 
 
 # ------------------------------------------------------------------ 実測 (ファイル)
@@ -392,10 +413,16 @@ class Panel:
         if marker is not None and advisor["state"] != "ours":
             warnings.append("接続テストの開始マーカーがあるのにアドバイザーが動いていません (終了処理を実行するか、開始し直してください)")
         ip = probe.lan_ip()
+        # アドバイザーが使っている採点方式 (2026-10-16 実機の受入。プロセスの環境変数を実測。読めなければ None)
+        scoring = None
+        penv = getattr(probe, "process_env", None)
+        if advisor["state"] == "ours" and advisor.get("pid") and penv is not None:
+            scoring = scoring_mode_from_ps(penv(advisor["pid"]))
         return {
             "now": time.time(),
             "processes": {"advisor": advisor, "frontend": frontend, "showdown": showdown,
                           "training": training, "measuring": measuring},
+            "scoring": scoring,
             # フロントの URL は自分たちが待ち受けているときだけ (停止中に既定ポートを出すと別のプロセスを指してしまう)
             "urls": {"frontend": (f"http://{ip}:{frontend['port']}" if frontend["state"] == "ours" else None),
                      "frontend_local": (f"http://localhost:{frontend['port']}" if frontend["state"] == "ours" else None)},
@@ -469,13 +496,20 @@ function svc(name, s) {
   const txt = s.state === 'ours' ? `稼働中 (${s.port}, pid ${s.pid})` : s.state === 'foreign' ? `別のプロセスが ${s.port} を使用中` : `停止 (${s.port})`;
   return `<div class="row"><span>${name}</span>${badge(s.state === 'ours', txt, txt, s.state === 'foreign' ? 'warn' : 'off')}</div>`;
 }
+function scoringText(sc, adv) {
+  if (adv.state !== 'ours') return '- (停止中)';
+  if (!sc) return '不明 (プロセスの環境変数を読めない)';
+  const src = sc.source === 'env' ? '環境変数' : sc.source === 'invalid' ? `環境変数の値 ${esc(sc.env)} は無効 → 既定` : '既定';
+  return `${esc(sc.mode)} (${src})`;
+}
 function render(st) {
   $('clock').textContent = new Date(st.now * 1000).toLocaleTimeString('ja-JP');
   $('warnings').innerHTML = (st.warnings || []).map((w) => `<div class="warnbox">⚠ ${esc(w)}</div>`).join('');
   const p = st.processes;
   $('procs').innerHTML = svc('アドバイザー', p.advisor) + svc('フロントエンド', p.frontend) + svc('Showdown', p.showdown)
     + `<div class="row"><span>学習ループ</span>${badge(p.training, '稼働中', '停止中')}</div>`
-    + `<div class="row"><span>構築の測定 run</span>${badge(!p.measuring, 'なし', '実行中', 'warn')}</div>`;
+    + `<div class="row"><span>構築の測定 run</span>${badge(!p.measuring, 'なし', '実行中', 'warn')}</div>`
+    + `<div class="row"><span>採点方式 (アドバイザー)</span><span>${scoringText(st.scoring, p.advisor)}</span></div>`;
   $('urls').innerHTML = st.urls.frontend
     ? `フロントエンド: <a href="${st.urls.frontend}" target="_blank">${st.urls.frontend}</a> `
       + `(このMac: <a href="${st.urls.frontend_local}" target="_blank">${st.urls.frontend_local}</a>)`
