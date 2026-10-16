@@ -299,11 +299,13 @@ def test_evaluate_split_matches_reference_on_fixtures():
             # (docs/ADVICE_ACCURACY_PLAN_1009.md 段 A-2・A-4) で足した合法性の欄と据え置きの局面の鍵。鍵の追加だけ
             # scoring_mode は 2026-10-09 M2b (計画書 §8.4、設計判断 1「advice 行に scoring_mode を残す」) で足した採点方式の印。
             # 既定 (legacy) では値 "legacy" の鍵の追加だけで、actions (順位・点・理由) は上の参照実装と一致したまま
+            # search_skipped は 2026-10-16 (計画書 §8.31、レビュー: 表示用探索を省略したら択評価・起点注意が出ないことを記録)
+            # で足した印。鍵の追加だけで、採点の値は変えていない
             assert set(d0) == {"ok", "actions", "threats", "speed_note", "mega_note", "opp_inference", "opp_moves_note",
                                "opp_spread_note", "gtheory", "endgame_note", "sacrifice_note", "rl_hint", "best",
                                "opp_pending", "opp_pending_note",
                                "illegal_actions", "unevaluated_actions", "legality_unconfirmed", "position_key",
-                               "scoring_mode"}, set(d0)
+                               "scoring_mode", "search_skipped"}, set(d0)
             assert d0["scoring_mode"] == "legacy", d0["scoring_mode"]
     print("test_evaluate_split_matches_reference_on_fixtures OK")
 

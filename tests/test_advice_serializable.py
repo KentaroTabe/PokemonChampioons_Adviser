@@ -30,8 +30,14 @@ def test_search_result_serializable():
 def test_advise_full_serializable():
     from tests.test_advisor import make_state  # 既存のテスト状態を流用
     from advisor.service import Advisor
+    from champions_agent import config as C
     adv = Advisor()
-    result = adv.advise(make_state())
+    # 探索の結果 (gtheory) を含めて確かめるので表示用の探索を実行する設定にする (2026-10-16 から既定は省略)
+    saved, C.ADVICE_DISPLAY_SEARCH = C.ADVICE_DISPLAY_SEARCH, "on"
+    try:
+        result = adv.advise(make_state())
+    finally:
+        C.ADVICE_DISPLAY_SEARCH = saved
     json.dumps(result)
     print("test_advise_full_serializable OK")
 

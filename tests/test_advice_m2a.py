@@ -100,7 +100,8 @@ def test_encore_shared_by_search_endgame_rl_mega():
     st["player"]["party"][0]["item_ja"] = "メガストーン"
     st["player"]["party"][0]["item_id"] = "megastone"
     with _Capture() as cap:
-        adv = evaluate(copy.deepcopy(st), resolver, rl_blend_weight=0)
+        # 探索の行動集合を見るので表示用の探索を実行する (2026-10-16 から既定は省略)
+        adv = evaluate(copy.deepcopy(st), resolver, rl_blend_weight=0, display_search=True)
     assert {a["id"] for a in adv["actions"] if a["kind"] == "move"} == {"mysticalfire"}
     assert _search_moves(adv) == {"mysticalfire"}, _search_moves(adv)
     assert cap.seen["mega_moves"] == ["mysticalfire"], cap.seen
@@ -128,7 +129,7 @@ def test_registration_completion_enters_search():
               ability_id="thermalexchange")
     opp = _mon("ninetales", "キュウコン", ["ほのお"], revealed_moves=["ウェザーボール"])
     with _Patch(moves={"セグレイブ": ["きょけんとつげき", "つららおとし", "じしん", "かわらわり"]}), _Capture() as cap:
-        adv = evaluate(_state(my, opp), resolver, rl_blend_weight=0)
+        adv = evaluate(_state(my, opp), resolver, rl_blend_weight=0, display_search=True)     # 探索の行動集合を見る
     assert _search_moves(adv) == {"glaiverush", "iciclecrash", "brickbreak", "earthquake"}, _search_moves(adv)
     assert cap.seen["endgame_my"]["セグレイブ"] == ["glaiverush", "iciclecrash", "brickbreak", "earthquake"]
     rl_slots = cap.seen["rl_state"]["player"]["party"][0]["moves"]

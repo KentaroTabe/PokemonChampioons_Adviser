@@ -1,6 +1,7 @@
 """実機の受入の道具 (2026-10-16、docs/ADVICE_ACCURACY_PLAN_1009.md §8.22・§8.25): 実戦ログの同じ局面を両方式で再生する。
 
     python -m tools.real_accept [--target LOG ... | --logs N | --log PATH ...] [--out DIR] [--gap-sec S] [--dry-run] [--profile]
+                                [--compare-search]
 
 実戦ログ (logs/battles/*.jsonl) の advice 行 (kind = battle、確定前 provisional を除く。state が助言エンジンの入力) を、
 tools.advice_replay と同じ規則 (DECISION_GAP_SEC の間引き) で決定点にし、復元した状態 (tools.advice_replay.compact_to_engine_state、
@@ -40,13 +41,21 @@ advisor.engine.evaluate(..., scoring_mode=...) に通す。図鑑・resolver・�
     (served_commit は version 行に無ければ client 行から取る)。再生の evaluate の増分は参考値のまま
   - --profile: evaluate の内訳 (cProfile の累積時間の上位 REAL_ACCEPT_PROFILE_TOP 行) を方式ごとに出す (採点は変えない)
 
+2026-10-16 表示用の探索の切り替え (config.ADVICE_DISPLAY_SEARCH、既定 off。計画書 §8.29 のレビュー):
+  - 通常の再生は evaluate の既定 (config の設定) で動く。条件に display_search (設定値) を残す
+  - --compare-search: 通常の受入の代わりに、同じ決定点 (固定局面) を両方式それぞれで表示用の探索 on / off の 2 通りに evaluate し、
+    候補・得点・順位・第一候補の合法性 (check_best) が一致するかを決定ごとに照合する (compare_search_pair)。不一致の件数と例、
+    所要時間 (on / off の p50 / p95)、transition の退避率 (on / off)、探索を省略した決定の件数 (= 択評価・起点注意なし) を表にする。
+    不一致が 1 件でもあれば「満たさない」(summarize_search_compare)。出力は result.json と report.md (同じ出力先の規則)
+
 出力: logs/real_accept/<日時>/result.json と report.md (条件・正しさの違反・一致率・退避・所要時間・古い局面・受入条件との照合)。
 受入条件 (champions_agent.config の REAL_ACCEPT_*) との照合は 満たす / 満たさない / 判定不能。10 fps の録画再生での処理率
 (負荷) はこの道具では測らない (tools.shadow_load_check --compare-scoring)。
 
 純粋な部分 (thin_by_gap / stale_reasons / check_best / decision_mode / display_rows / summarize / log_versions /
 target_consistency / acceptance / render_markdown) は
-tests/test_real_accept.py でテストする。
+tests/test_real_accept.py でテストする。--compare-search の純粋な部分 (rank_signature / compare_search_pair /
+summarize_search_compare / render_search_compare_markdown) は tests/test_display_search_gate.py でテストする。
 """
 from __future__ import annotations
 
@@ -833,7 +842,8 @@ def render_markdown(result: dict) -> str:
          "## 条件", "",
          f"- コード: {c['code'].get('commit') or '-'}{' (未コミットの変更あり)' if c['code'].get('dirty') else ''} / エンジン {c['code'].get('engine')}",
          f"- 方式: {' / '.join(c['modes'])} (RL 加点の重み {c['rl_blend_weight']}、RL_ADVICE_STYLE {c['rl_style']}、transition の予算 "
-         f"{c['transition_budget_ms']} ms、感度 {'あり' if c['transition_sensitivity'] else 'なし'})、据え置き・安定化ゲートは通さない",
+         f"{c['transition_budget_ms']} ms、感度 {'あり' if c['transition_sensitivity'] else 'なし'})、据え置き・安定化ゲートは通さない"
+         + (f"、表示用の探索 {c['display_search']} (ADVICE_DISPLAY_SEARCH)" if c.get("display_search") else ""),
          f"- 間引き {c['gap_sec']} 秒、古い局面 = hp_stale > {c['stale_hp_sec']} 秒 または解決側の場面の後",
          f"- 決定数: advice 行 (battle、確定) {c['n_advice_rows']} → 決定点 {s['n']} (有効 {s['n_valid']} / 古い局面 {s['n_stale']})"]
     tg = c.get("target")
@@ -940,6 +950,164 @@ def render_markdown(result: dict) -> str:
         L += ["", "## evaluate の内訳 (--profile、cProfile の累積時間の上位)", ""]
         for mode, txt in prof.items():
             L += [f"### {mode}", "", "```", txt.rstrip(), "```", ""]
+    return "\n".join(L) + "\n"
+
+
+# ------------------------------------------------------------------ 純粋: 表示用の探索 on / off の照合 (--compare-search、2026-10-16)
+SEARCH_STATES = ("on", "off")                # 表示用の探索を実行する / 省略する (evaluate の display_search = True / False)
+SEARCH_DIFF_LABELS = {
+    "error": "どちらかが例外",
+    "ok": "評価できたか (ok) が違う",
+    "candidates": "候補の集合が違う",
+    "scores": "同じ候補の得点が違う",
+    "order": "候補の並び (順位) が違う",
+    "best": "第一候補が違う",
+    "legality": "第一候補の合法性 (check_best の違反・検査の結果) が違う",
+    "fallback": "transition の退避 (使った方式・理由) が違う",
+}
+
+
+def rank_signature(adv: Optional[dict]) -> Optional[dict]:
+    """evaluate の戻り値のうち、表示用の探索 on / off で一致すべき部分 (純粋): 評価できたか・候補の並び [(種類, id, 名前, 得点)]・
+    第一候補・使った方式・退避の理由。理由の文 (reason) と表示の注記は照合しない"""
+    if adv is None:
+        return None
+    acts = [(a.get("kind"), a.get("id"), a.get("name"), a.get("score")) for a in (adv.get("actions") or [])]
+    used = adv.get("scoring_used") or (adv.get("scoring_mode") if adv.get("ok") else None)
+    return {"ok": bool(adv.get("ok")), "actions": acts, "best": _key(adv.get("best")), "scoring_used": used,
+            "fallback": adv.get("scoring_fallback")}
+
+
+def compare_search_pair(on: dict, off: dict) -> list:
+    """1 決定・1 方式の探索 on / off の照合 (純粋)。on / off = {"sig": rank_signature の戻り値, "violations": check_best の違反,
+    "checks": check_best の検査の結果 (任意), "error": 例外の文 or None}。戻り値は食い違いの種類 (SEARCH_DIFF_LABELS の鍵) の列で、
+    空なら一致 (得点は同じ値、順位は同じ並び)"""
+    if on.get("error") or off.get("error") or on.get("sig") is None or off.get("sig") is None:
+        same_err = (on.get("error") or None) == (off.get("error") or None) and on.get("sig") is None and off.get("sig") is None
+        return [] if same_err else ["error"]
+    a, b = on["sig"], off["sig"]
+    out = []
+    if a["ok"] != b["ok"]:
+        out.append("ok")
+    ka = [(x[0], x[1]) for x in a["actions"]]
+    kb = [(x[0], x[1]) for x in b["actions"]]
+    if set(ka) != set(kb):
+        out.append("candidates")
+    sa = {(x[0], x[1]): (x[2], x[3]) for x in a["actions"]}
+    sb = {(x[0], x[1]): (x[2], x[3]) for x in b["actions"]}
+    if any(sa[k] != sb[k] for k in set(sa) & set(sb)):
+        out.append("scores")
+    if ka != kb:
+        out.append("order")
+    if a["best"] != b["best"]:
+        out.append("best")
+    if sorted(on.get("violations") or []) != sorted(off.get("violations") or []) or \
+            (on.get("checks") or {}) != (off.get("checks") or {}):
+        out.append("legality")
+    if (a.get("scoring_used"), a.get("fallback")) != (b.get("scoring_used"), b.get("fallback")):
+        out.append("fallback")
+    return out
+
+
+def summarize_search_compare(rows: list, examples_per_key: int = EXAMPLES_PER_KEY) -> dict:
+    """--compare-search の集計 (純粋)。rows の各要素: {"log", "advice_id", "turn", "stale", "modes": {方式: {"on": 結果, "off": 結果,
+    "diffs": compare_search_pair の戻り値}}}、結果 = {"elapsed_ms", "search_skipped", "sig", "violations", "checks", "error"}。
+    方式ごとに 照合した決定数・不一致の決定数・種類別の件数と例・所要時間 (on / off の p50 / p95 と同じ決定の差 off − on)・
+    transition の退避率 (on / off、予算超過は別)・探索を省略した決定の件数 (off で search_skipped = True = 択評価・起点注意なし) を出し、
+    判定は 不一致 0 なら 満たす、1 件でもあれば 満たさない、照合した決定が無ければ 判定不能"""
+    out = {"n": len(rows), "modes": {}}
+    for mode in MODES:
+        rs = [r for r in rows if (r.get("modes") or {}).get(mode)]
+        by = {k: 0 for k in SEARCH_DIFF_LABELS}
+        ex = []
+        n_mis = 0
+        el = {st: [] for st in SEARCH_STATES}
+        delta = []
+        skipped = {st: 0 for st in SEARCH_STATES}
+        fb = {st: {"n": 0, "n_fallback": 0, "n_budget": 0} for st in SEARCH_STATES}
+        for r in rs:
+            m = r["modes"][mode]
+            diffs = m.get("diffs") or []
+            if diffs:
+                n_mis += 1
+                for k in diffs:
+                    by[k] = by.get(k, 0) + 1
+                if len(ex) < examples_per_key:
+                    ex.append({"log": r.get("log"), "advice_id": r.get("advice_id"), "turn": r.get("turn"), "diffs": diffs,
+                               **{st: {"best": (m[st].get("sig") or {}).get("best"),
+                                       "top": [list(x) for x in ((m[st].get("sig") or {}).get("actions") or [])[:3]],
+                                       "fallback": (m[st].get("sig") or {}).get("fallback"), "error": m[st].get("error")}
+                                  for st in SEARCH_STATES}})
+            for st in SEARCH_STATES:
+                x = m.get(st) or {}
+                if x.get("elapsed_ms") is not None:
+                    el[st].append(float(x["elapsed_ms"]))
+                if x.get("search_skipped"):
+                    skipped[st] += 1
+                sig = x.get("sig") or {}
+                if mode == "transition" and not x.get("error") and sig.get("ok"):
+                    fb[st]["n"] += 1
+                    if sig.get("fallback"):
+                        fb[st]["n_fallback"] += 1
+                        fb[st]["n_budget"] += _reason_key(sig["fallback"]) == BUDGET_REASON
+            if all((m.get(st) or {}).get("elapsed_ms") is not None for st in SEARCH_STATES):
+                delta.append(float(m["off"]["elapsed_ms"]) - float(m["on"]["elapsed_ms"]))
+        for st in SEARCH_STATES:
+            fb[st]["rate"] = _rate(fb[st]["n_fallback"], fb[st]["n"])
+            fb[st]["budget_rate"] = _rate(fb[st]["n_budget"], fb[st]["n"])
+        status = UNKNOWN if not rs else (OK if n_mis == 0 else NG)
+        out["modes"][mode] = {"n": len(rs), "n_mismatch": n_mis, "by_kind": by, "examples": ex, "status": status,
+                              "elapsed_ms": {st: percentiles(el[st]) for st in SEARCH_STATES},
+                              "elapsed_delta_ms": percentiles(delta), "n_search_skipped": skipped,
+                              "fallback": fb if mode == "transition" else None}
+    sts = [mo["status"] for mo in out["modes"].values()]
+    out["status"] = NG if NG in sts else (UNKNOWN if UNKNOWN in sts or not sts else OK)
+    out["n_mismatch"] = sum(mo["n_mismatch"] for mo in out["modes"].values())
+    return out
+
+
+def render_search_compare_markdown(result: dict) -> str:
+    """--compare-search の report.md (純粋)"""
+    c, sm = result["conditions"], result["summary"]
+    L = [f"# 表示用の探索 on / off の照合: 実戦ログの同一局面 ({c['at']})", "",
+         "表示用の探索 (advisor.engine._run_search、択評価・起点注意) を省略しても、候補・得点・順位・第一候補の合法性が変わらないことを"
+         "決定ごとに確かめる。不一致が 1 件でもあれば 満たさない。", "",
+         "## 条件", "",
+         f"- コード: {c['code'].get('commit') or '-'}{' (未コミットの変更あり)' if c['code'].get('dirty') else ''} / エンジン {c['code'].get('engine')}",
+         f"- 方式: {' / '.join(c['modes'])} (RL 加点の重み {c['rl_blend_weight']}、transition の予算 {c['transition_budget_ms']} ms、"
+         f"感度 {'あり' if c['transition_sensitivity'] else 'なし'})、探索の重み (SEARCH_BLEND) {c['search_blend']}、"
+         f"設定 ADVICE_DISPLAY_SEARCH = {c['display_search']}",
+         f"- 決定点 {sm['n']} (間引き {c['gap_sec']} 秒、古い局面も含む全決定点)。決定ごとに 方式 × on / off の 4 通りを、"
+         "決定ごとに順番を逆にして evaluate する (キャッシュの偏りを均す)",
+         "- ログ: " + ", ".join(f"{lg['name']} ({lg['n_decisions']})" for lg in c["logs"]), "",
+         "## 照合の結果", "", "| 方式 | 照合した決定 | 不一致の決定 | 判定 | 種類別 |", "|---|---|---|---|---|"]
+    for mode, mo in sm["modes"].items():
+        kinds = ", ".join(f"{SEARCH_DIFF_LABELS.get(k, k)} {v}" for k, v in mo["by_kind"].items() if v) or "-"
+        L.append(f"| {mode} | {mo['n']} | {mo['n_mismatch']} | {mo['status']} | {kinds} |")
+    L.append(f"| 総合 | {sm['n']} | {sm['n_mismatch']} | {sm['status']} | |")
+    L += ["", "## 所要時間 (evaluate、全決定点)", "", "| 方式 | 探索 on | 探索 off | 差 (同じ決定の off − on) |", "|---|---|---|---|"]
+    for mode, mo in sm["modes"].items():
+        L.append(f"| {mode} | {_pct_txt(mo['elapsed_ms']['on'])} | {_pct_txt(mo['elapsed_ms']['off'])} | "
+                 f"{_pct_txt(mo['elapsed_delta_ms'])} |")
+    L += ["", "## transition の退避率", "", "| 探索 | 評価 | 退避 (全理由) | 予算超過 |", "|---|---|---|---|"]
+    fbs = (sm["modes"].get("transition") or {}).get("fallback") or {}
+    for st in SEARCH_STATES:
+        f = fbs.get(st) or {}
+        L.append(f"| {st} | {f.get('n', 0)} | {f.get('n_fallback', 0)} ({_fmt(f.get('rate'))}) | "
+                 f"{f.get('n_budget', 0)} ({_fmt(f.get('budget_rate'))}) |")
+    L += ["", "## 探索を省略した決定 (択評価・起点注意なし)", "", "| 方式 | 探索 on で省略 | 探索 off で省略 |", "|---|---|---|"]
+    for mode, mo in sm["modes"].items():
+        L.append(f"| {mode} | {mo['n_search_skipped']['on']} | {mo['n_search_skipped']['off']} |")
+    L += ["", "探索 off で省略した決定では、助言の表示に「🎲 択評価」と「⚠ 起点注意」が出ない (advice の gtheory = null、"
+          "search_skipped = true)。探索の重み > 0 の設定では省略を認めないので、off でも省略 0 になる。"]
+    exs = [(mode, e) for mode, mo in sm["modes"].items() for e in mo["examples"]]
+    if exs:
+        L += ["", "## 不一致の例", ""]
+        for mode, e in exs:
+            L.append(f"- {mode} {e['log']} {e['advice_id']} (ターン {e.get('turn')}): "
+                     + ", ".join(SEARCH_DIFF_LABELS.get(k, k) for k in e["diffs"])
+                     + f" / on {e['on']['best']} {e['on']['top']} 退避 {e['on']['fallback']}"
+                     + f" / off {e['off']['best']} {e['off']['top']} 退避 {e['off']['fallback']}")
     return "\n".join(L) + "\n"
 
 
@@ -1063,9 +1231,92 @@ def profile_evaluate(states: list, resolver, mode: str, top: int = REAL_ACCEPT_P
     return "\n".join(ln for ln in lines[i:] if ln.strip()) + "\n"
 
 
-def run(paths: list, out_dir: Optional[Path], gap_sec: float = DECISION_GAP_SEC, dry_run: bool = False,
-        target_fixed: bool = False, profile: bool = False) -> dict:
-    """target_fixed = 対象のログを事前に決めた接続テスト群として渡したか (--target)。profile = evaluate の内訳も出す"""
+def replay_search_pair(state: dict, resolver, order: tuple) -> dict:
+    """1 決定点を order (方式, 探索 on / off) の順に evaluate する (副作用: エンジン)。
+    {方式: {"on" / "off": (戻り値 or None, 所要 ms, エラー)}}"""
+    from advisor.engine import evaluate
+    out: dict = {}
+    for mode, st in order:
+        s = copy.deepcopy(state)
+        t0 = time.perf_counter()
+        try:
+            adv = evaluate(s, resolver, scoring_mode=mode, display_search=(st == "on"))
+            err = None
+        except Exception as e:
+            adv, err = None, f"{type(e).__name__}: {e}"
+        out.setdefault(mode, {})[st] = (adv, round((time.perf_counter() - t0) * 1000.0, 1), err)
+    return out
+
+
+def run_compare_search(logs: list, out_dir: Optional[Path], gap_sec: float, target_fixed: bool) -> dict:
+    """--compare-search の本体 (副作用: エンジン・出力)。logs = _load_logs の戻り値"""
+    from vision.normalize import NameResolver
+    import advisor.engine as E
+    from champions_agent import config as C
+    resolver = NameResolver()
+    ck = _checker_kwargs()
+    combos = tuple((m, st) for m in MODES for st in SEARCH_STATES)
+    first = next((lg["decisions"][0] for lg in logs if lg["decisions"]), None)
+    if first is not None:      # 初回の読み込み (図鑑・RL・使用率) を所要時間から外す
+        replay_search_pair(_engine_state(first, resolver), resolver, combos)
+    n_dec = sum(lg["n_decisions"] for lg in logs)
+    rows = []
+    i = 0
+    for lg in logs:
+        timeline = scene_timeline(lg["records"])
+        for row in lg["decisions"]:
+            compact = row["state"]
+            try:
+                st = _engine_state(row, resolver)
+            except Exception as e:
+                print(f"  復元できない: {lg['name']} {row.get('advice_id')}: {e}")
+                continue
+            reg = _registered_ids(st, resolver)
+            order = combos if i % 2 == 0 else tuple(reversed(combos))
+            i += 1
+            res = replay_search_pair(st, resolver, order)
+            d = {"log": lg["name"], "advice_id": row.get("advice_id"), "t": row.get("t"), "turn": row.get("turn"),
+                 "active": _active_label(compact),
+                 "stale": stale_reasons(row, scene_before(timeline, float(row.get("t") or 0.0))), "modes": {}}
+            for mode, pair in res.items():
+                m = {}
+                for stt, (adv, ms, err) in pair.items():
+                    x = {"elapsed_ms": ms, "error": err, "sig": None, "violations": [], "checks": {},
+                         "search_skipped": None}
+                    if adv is not None and not err:
+                        x["sig"] = rank_signature(adv)
+                        x["search_skipped"] = adv.get("search_skipped")
+                        if adv.get("ok"):
+                            chk = check_best(adv, compact, row.get("move_locks"), reg, detail=True, **ck)
+                            x["violations"], x["checks"] = chk["violations"], chk["checks"]
+                    m[stt] = x
+                m["diffs"] = compare_search_pair(m["on"], m["off"])
+                d["modes"][mode] = m
+            rows.append(d)
+            if i % 20 == 0:
+                print(f"  {i} / {n_dec}")
+    summary = summarize_search_compare(rows)
+    result = {
+        "conditions": {"at": time.strftime("%Y-%m-%d %H:%M"), "code": _code_info(), "modes": list(MODES),
+                       "rl_blend_weight": E.RL_BLEND_DEFAULT, "transition_budget_ms": C.TRANSITION_BUDGET_MS,
+                       "transition_sensitivity": C.TRANSITION_SENSITIVITY_ENABLED, "search_blend": E.SEARCH_BLEND,
+                       "display_search": C.ADVICE_DISPLAY_SEARCH, "gap_sec": gap_sec, "target_fixed": target_fixed,
+                       "logs": [{k: v for k, v in lg.items() if k not in ("records", "rows", "decisions", "path")}
+                                for lg in logs]},
+        "summary": summary, "decisions": rows,
+    }
+    out_dir = Path(out_dir) if out_dir else OUT_DIR / time.strftime("%Y%m%d_%H%M%S")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+    md = render_search_compare_markdown(result)
+    (out_dir / "report.md").write_text(md, encoding="utf-8")
+    print(md)
+    print(f"保存: {out_dir}")
+    return result
+
+
+def _load_logs(paths: list, gap_sec: float) -> list:
+    """対象のログを読み、決定点に間引く (副作用: 読み込み・表示)"""
     logs = []
     for p in paths:
         recs = load_records(p)
@@ -1086,11 +1337,22 @@ def run(paths: list, out_dir: Optional[Path], gap_sec: float = DECISION_GAP_SEC,
     for lg in logs:
         print(f"  {lg['name']}: advice {lg['n_advice_rows']} → 決定点 {lg['n_decisions']} / decision 行 {lg['n_decision_rows']} / "
               f"方式 {lg['modes_used']} / move_locks {'あり' if lg['has_move_locks'] else 'なし'}")
+    return logs
+
+
+def run(paths: list, out_dir: Optional[Path], gap_sec: float = DECISION_GAP_SEC, dry_run: bool = False,
+        target_fixed: bool = False, profile: bool = False, compare_search: bool = False) -> dict:
+    """target_fixed = 対象のログを事前に決めた接続テスト群として渡したか (--target)。profile = evaluate の内訳も出す。
+    compare_search = 通常の受入の代わりに表示用の探索 on / off の照合をする (run_compare_search)"""
+    logs = _load_logs(paths, gap_sec)
+    n_dec = sum(lg["n_decisions"] for lg in logs)
     if dry_run:
         print("(dry-run: 再生しない、何も書かない)")
         return {"dry_run": True, "logs": [{k: v for k, v in lg.items() if k not in ("records", "rows", "decisions", "path")}
                                           for lg in logs]}
 
+    if compare_search:
+        return run_compare_search(logs, out_dir, gap_sec, target_fixed)
     from vision.normalize import NameResolver
     from advisor.engine import RL_BLEND_DEFAULT
     from champions_agent import config as C
@@ -1163,6 +1425,7 @@ def run(paths: list, out_dir: Optional[Path], gap_sec: float = DECISION_GAP_SEC,
         "conditions": {"at": time.strftime("%Y-%m-%d %H:%M"), "code": _code_info(), "modes": list(MODES),
                        "rl_blend_weight": RL_BLEND_DEFAULT, "rl_style": os.environ.get("RL_ADVICE_STYLE", "balance"),
                        "transition_budget_ms": C.TRANSITION_BUDGET_MS, "transition_sensitivity": C.TRANSITION_SENSITIVITY_ENABLED,
+                       "display_search": getattr(C, "ADVICE_DISPLAY_SEARCH", None),
                        "gap_sec": gap_sec, "stale_hp_sec": REAL_ACCEPT_STALE_HP_SEC,
                        "display_deadline_sec": REAL_ACCEPT_DISPLAY_DEADLINE_SEC,
                        "n_advice_rows": sum(lg["n_advice_rows"] for lg in logs),
@@ -1195,6 +1458,8 @@ def main() -> None:
     ap.add_argument("--dry-run", action="store_true", help="対象のログと決定点の数だけ出す (再生しない・書かない)")
     ap.add_argument("--profile", action="store_true",
                     help=f"evaluate の内訳 (cProfile の累積時間の上位 {REAL_ACCEPT_PROFILE_TOP} 行) を方式ごとに出す (採点は変えない)")
+    ap.add_argument("--compare-search", action="store_true",
+                    help="通常の受入の代わりに、両方式それぞれで表示用の探索 on / off の候補・得点・順位・第一候補の合法性の一致を照合する")
     args = ap.parse_args()
     if args.target:
         paths = [Path(p) for p in args.target]
@@ -1206,7 +1471,7 @@ def main() -> None:
     if missing or not paths:
         raise SystemExit(f"対戦ログが無い: {missing or LOG_DIR}")
     run(paths, Path(args.out) if args.out else None, args.gap_sec, args.dry_run, target_fixed=bool(args.target),
-        profile=args.profile)
+        profile=args.profile, compare_search=args.compare_search)
 
 
 if __name__ == "__main__":

@@ -1335,6 +1335,57 @@ def _advice_scoring_mode_from_env() -> str:
 
 
 ADVICE_SCORING_MODE = _advice_scoring_mode_from_env()
+# 探索の推奨値を行動スコアへ統合する重み (P9、事前登録 2026-09-04 20:30。advisor.engine.SEARCH_BLEND の初期値)。
+# score += 重み × (rec_a − max_rec)。0 で無効 (択評価は表示のみ)。2026-09-04 の判定で 0 に戻した値 (2026-10-16 に engine.py から移した。値は同じ)
+ADVICE_SEARCH_BLEND = 0.0
+# 表示用の探索 (2026-10-16 レビュー、docs/ADVICE_ACCURACY_PLAN_1009.md §8.29): advisor.engine._run_search (同時手番探索) は
+# 探索の重み 0 では順位に使われず、表示 (advisor.service の「🎲 択評価」と「起点注意 (setup_bait)」) だけに使われるが、実戦ログの再生で
+# evaluate の時間の 99% を占める。"on" = 従来どおり実行 / "off" = 省略 (既定。択評価・起点注意は出ない。advice の gtheory = None、
+# search_skipped = True)。環境変数 ADVICE_DISPLAY_SEARCH で上書きする。探索を採点に混ぜる設定 (探索の重み > 0) では省略を認めない
+# (resolve_display_search が警告を 1 回出して on として扱う)。読めない値は警告して既定 (off) にする
+ADVICE_DISPLAY_SEARCH_ENV = "ADVICE_DISPLAY_SEARCH"
+ADVICE_DISPLAY_SEARCH_VALUES = ("on", "off")
+ADVICE_DISPLAY_SEARCH_DEFAULT = "off"
+
+
+def _advice_display_search_from_env() -> str:
+    raw = (os.environ.get(ADVICE_DISPLAY_SEARCH_ENV) or "").strip().lower()
+    if not raw:
+        return ADVICE_DISPLAY_SEARCH_DEFAULT
+    if raw not in ADVICE_DISPLAY_SEARCH_VALUES:
+        print(f"[config] {ADVICE_DISPLAY_SEARCH_ENV}={raw!r} は {ADVICE_DISPLAY_SEARCH_VALUES} に無いので "
+              f"{ADVICE_DISPLAY_SEARCH_DEFAULT} を使う")
+        return ADVICE_DISPLAY_SEARCH_DEFAULT
+    return raw
+
+
+ADVICE_DISPLAY_SEARCH = _advice_display_search_from_env()
+
+
+def display_search_decision(setting: str, display_search, search_blend: float) -> tuple:
+    """表示用の探索を実行するか (純粋)。戻り値 (実行するか, 探索の重みのために強制したか)。
+    display_search: 呼び出し側の指定 (True / False、None なら setting = ADVICE_DISPLAY_SEARCH の "on" / "off" に従う)。
+    search_blend > 0 (探索を採点に混ぜる) なら指定にかかわらず実行する (省略を認めない)"""
+    want = (str(setting or "").strip().lower() == "on") if display_search is None else bool(display_search)
+    if not want and float(search_blend or 0.0) > 0:
+        return True, True
+    return want, False
+
+
+_DISPLAY_SEARCH_FORCED_WARNED = False
+
+
+def resolve_display_search(display_search=None, search_blend=None) -> bool:
+    """表示用の探索を実行するか (display_search_decision に今の設定を渡す)。search_blend が None なら ADVICE_SEARCH_BLEND
+    (advisor.engine は実行時の engine.SEARCH_BLEND を渡す)。探索の重み > 0 で省略を指定されたら、警告を 1 回だけ出して実行する"""
+    global _DISPLAY_SEARCH_FORCED_WARNED
+    blend = ADVICE_SEARCH_BLEND if search_blend is None else search_blend
+    run, forced = display_search_decision(ADVICE_DISPLAY_SEARCH, display_search, blend)
+    if forced and not _DISPLAY_SEARCH_FORCED_WARNED:
+        _DISPLAY_SEARCH_FORCED_WARNED = True
+        print(f"[config] 表示用の探索の省略 ({ADVICE_DISPLAY_SEARCH_ENV}=off または display_search=False) は、探索の重み "
+              f"{blend} > 0 (探索を採点に混ぜる) では認めないので、探索を実行する")
+    return run
 # 局面評価 V (advisor.valuation、値域 [-1, 1]。較正前なので「勝率」と呼ばない)。式は valuation.py の docstring:
 #   終了: 自分の選出が全滅 = -1、相手の選出 (判明分 + 未判明の残数) が全滅 = +1
 #   残存戦力 M = (Σ自分 v(個体) − Σ相手 v(個体)) / VALUATION_TEAM_SIZE、v = 生存 VALUATION_ALIVE_SHARE + (1 − 同) × HP

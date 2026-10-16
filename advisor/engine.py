@@ -17,7 +17,7 @@ from typing import Optional
 from advisor.dex import get_dex, BOOST_MULT
 from advisor.damage import MonView, FieldView, _is_grounded, calc_damage
 from advisor.sets import get_predictor
-from champions_agent.config import RL_BLEND_WEIGHT_DEFAULT
+from champions_agent.config import ADVICE_SEARCH_BLEND, RL_BLEND_WEIGHT_DEFAULT
 
 # 画面の相性ヒント -> タイプ倍率
 HINT_MULT = {
@@ -467,8 +467,10 @@ SENSOR_HP_DELTA = 0.25
 # 子プロセスへ渡せないため逐次に落ちる。1=逐次
 SEARCH_WORKERS = 1
 # 探索の推奨値を行動スコアへ統合する重み (P9、事前登録 2026-09-04 20:30)。
-# score += SEARCH_BLEND × (rec_a − max_rec)。0 で無効 (従来: 択評価は表示のみ)
-SEARCH_BLEND = 0.0
+# score += SEARCH_BLEND × (rec_a − max_rec)。0 で無効 (従来: 択評価は表示のみ)。初期値は config.ADVICE_SEARCH_BLEND (2026-10-16 に
+# ここのハードコードから移した。値は同じ 0.0)。測定の道具 (check_advisor_player / diag_scenes) は実行時にこの属性を書き換える。
+# 0 より大きいと表示用の探索の省略 (config.ADVICE_DISPLAY_SEARCH=off) を認めない (evaluate_common が探索を実行する)
+SEARCH_BLEND = ADVICE_SEARCH_BLEND
 
 
 def _rl_blend_default_from_env() -> float:
@@ -643,17 +645,28 @@ def opponent_move_pool(opp_state: dict, opp_view: MonView, resolver) -> list:
 # メインの評価
 # ==============================================================================
 def evaluate(state: dict, resolver=None,
-             rl_blend_weight: Optional[float] = None, scoring_mode: Optional[str] = None) -> dict:
+             rl_blend_weight: Optional[float] = None, scoring_mode: Optional[str] = None,
+             display_search: Optional[bool] = None) -> dict:
     """状態辞書から行動候補のランキングを生成する。
 
     rl_blend_weight: RL の行動確率の加点の重み (score += 重み × 確率)。None なら既定値
     (RL_BLEND_DEFAULT = config RL_BLEND_WEIGHT_DEFAULT、起動時の環境変数 RL_BLEND_WEIGHT があればその値)。
     scoring_mode: 採点方式 "legacy" / "transition" (2026-10-09 M2b)。None なら config.ADVICE_SCORING_MODE (既定 legacy、
     環境変数 ADVICE_SCORING_MODE で上書き)。
+    display_search: 表示用の探索 (_run_search。択評価・起点注意) を実行するか (2026-10-16)。None なら config.ADVICE_DISPLAY_SEARCH
+    (既定 off)。SEARCH_BLEND > 0 なら指定にかかわらず実行する (resolve_display_search)。候補・得点・順位は変わらない
+    (SEARCH_BLEND = 0 では探索の結果を採点に使わないため)。
     採点は 2 段: evaluate_common (加点より前の共通部分) → finish_evaluation (加点以降)。
     影の計算 (advisor.shadow) は共通部分を使い回し、重みだけ変えて加点以降を再計算する。
     """
-    return finish_evaluation(evaluate_common(state, resolver, scoring_mode=scoring_mode), rl_blend_weight)
+    return finish_evaluation(evaluate_common(state, resolver, scoring_mode=scoring_mode, display_search=display_search),
+                             rl_blend_weight)
+
+
+def resolve_display_search(display_search: Optional[bool] = None) -> bool:
+    """表示用の探索を実行するか (引数 → config.ADVICE_DISPLAY_SEARCH。今の SEARCH_BLEND > 0 なら常に実行)"""
+    from champions_agent import config as _cfg
+    return _cfg.resolve_display_search(display_search, SEARCH_BLEND)
 
 
 def resolve_scoring_mode(scoring_mode: Optional[str] = None) -> str:
@@ -663,7 +676,8 @@ def resolve_scoring_mode(scoring_mode: Optional[str] = None) -> str:
     return m if m in getattr(_cfg, "ADVICE_SCORING_MODES", ("legacy", "transition")) else "legacy"
 
 
-def evaluate_common(state: dict, resolver=None, scoring_mode: Optional[str] = None) -> dict:
+def evaluate_common(state: dict, resolver=None, scoring_mode: Optional[str] = None,
+                    display_search: Optional[bool] = None) -> dict:
     """採点の共通部分 (RL 加点より前): ダメージ・採点の基礎・詰み筋・同時手番探索・SEARCH_BLEND・rl_hint の取得まで。
 
     戻り値: 評価できなければ {"ok": False, "reason"} (evaluate の戻り値と同じ)。評価できれば
@@ -672,6 +686,9 @@ def evaluate_common(state: dict, resolver=None, scoring_mode: Optional[str] = No
     scoring_mode が transition (resolve_scoring_mode) なら、同じ入力 (MonView・合法手・補完した技・相手の型の仮定・控え) から
     advisor.scoring_transition の採点も計算して "transition" に残す (2026-10-09 M2b)。legacy の行動 ("actions") は両方式で
     計算する (退避先と、self_cost 等の欄の写し元)。"scoring_mode" / "scoring_fallback" (退避の理由、無ければ None) も残す。
+    display_search (2026-10-16): 表示用の探索 (_run_search) を実行するか (resolve_display_search)。省略したら "gtheory" = None、
+    "search_skipped" = True (択評価・起点注意なし)。実行したら search_skipped = False (探索が None を返した・失敗した場合も含む)。
+    遷移 (transition の採点) と simulate_turn は探索と独立なので、省略しても候補・得点・順位は変わらない。
     """
     dex = get_dex()
     my_state = state["player"]
@@ -1191,16 +1208,19 @@ def evaluate_common(state: dict, resolver=None, scoring_mode: Optional[str] = No
     except Exception:
         pass
 
-    # 同時手番探索 (択の利得行列 + 2手読み)。失敗しても本体は返す
+    # 同時手番探索 (択の利得行列 + 2手読み)。失敗しても本体は返す。SEARCH_BLEND = 0 では表示 (択評価・起点注意) だけに使うので、
+    # 表示用の探索を省略する設定 (config.ADVICE_DISPLAY_SEARCH=off、既定) では実行しない (2026-10-16。SEARCH_BLEND > 0 なら常に実行)
     gtheory = None
-    try:
-        gtheory = _run_search(state, my_state, my_view, my_p,
-                              opp_state, opp_view, resolver,
-                              pool, my_field, opp_field,
-                              wincon_sid=wincon_sid, my_moves=legality.legal_move_ids)
-    except Exception:
-        import traceback
-        traceback.print_exc()
+    search_skipped = not resolve_display_search(display_search)
+    if not search_skipped:
+        try:
+            gtheory = _run_search(state, my_state, my_view, my_p,
+                                  opp_state, opp_view, resolver,
+                                  pool, my_field, opp_field,
+                                  wincon_sid=wincon_sid, my_moves=legality.legal_move_ids)
+        except Exception:
+            import traceback
+            traceback.print_exc()
 
     # P9: 探索の推奨値 (最善からの差) をスコアへ統合する。既定 0 で無効
     if SEARCH_BLEND > 0 and gtheory and gtheory.get("actions"):
@@ -1264,6 +1284,8 @@ def evaluate_common(state: dict, resolver=None, scoring_mode: Optional[str] = No
         "opp_moves_note": opp_moves_note,
         "opp_spread_note": opp_spread_note,
         "gtheory": gtheory,
+        # 表示用の探索を省略した (2026-10-16。True なら gtheory = None で択評価・起点注意は出ない)
+        "search_skipped": search_skipped,
         "endgame": endgame,
         # 相手の場の個体が対応待ち: 終盤評価・探索を保留した印 (advice 行にそのまま残る。2026-10-09 ④)
         "opp_pending": opp_pending,
@@ -1453,6 +1475,8 @@ def finish_evaluation(common: dict, rl_blend_weight: Optional[float] = None) -> 
         "opp_moves_note": common["opp_moves_note"],
         "opp_spread_note": common["opp_spread_note"],
         "gtheory": common["gtheory"],
+        # 表示用の探索を省略した (2026-10-16。advice 行にそのまま残る。True なら択評価・起点注意なし)
+        "search_skipped": bool(common.get("search_skipped")),
         "endgame_note": endgame,
         "sacrifice_note": sacrifice_note,
         # 相手の場の個体が対応待ち: 終盤評価・探索を保留した (2026-10-09 ④。advice 行にそのまま残る)

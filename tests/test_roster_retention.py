@@ -393,7 +393,7 @@ def test_engine_holds_roster_evaluation_while_opp_pending():
     d = _advice_state(st)
     assert engine.opp_active_pending(d["opponent"]) is True
     assert engine._run_endgame(d["player"], d["opponent"], None) == ""
-    adv = engine.evaluate(d)
+    adv = engine.evaluate(d, display_search=True)     # 表示用の探索を実行する設定でも保留する (2026-10-16 から既定は省略)
     assert adv["ok"] and adv["opp_pending"] is True and adv["opp_pending_note"], adv.get("opp_pending")
     assert adv["endgame_note"] == "" and adv["gtheory"] is None
     common = engine.evaluate_common(d, None)
@@ -404,7 +404,7 @@ def test_engine_holds_roster_evaluation_while_opp_pending():
     assert len(st.resolve_pending("opponent")) == 1 and len(opp.party) == PARTY_SIZE
     d2 = _advice_state(st)
     assert engine.opp_active_pending(d2["opponent"]) is False
-    adv2 = engine.evaluate(d2)
+    adv2 = engine.evaluate(d2, display_search=True)
     assert adv2["ok"] and adv2["opp_pending"] is False and adv2["opp_pending_note"] is None
     assert engine.evaluate_common(d2, None)["context"]["opp_hp_pct"] == 30.0
     assert adv2["gtheory"] is not None, "対応が決まったら探索は従来どおり走る"

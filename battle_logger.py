@@ -113,6 +113,10 @@
 2026-10-16 採点方式の設定 (方式 C、tools/advice_mode.py。欄を足すだけ):
   version 行に "scoring_mode_source" (設定元: "file" = config/advice.local.env / "env" = 環境変数 / "default" = どちらも無し
     = legacy。scripts/advice_env.sh が渡す ADVICE_SCORING_MODE_SOURCE、無ければ環境変数 ADVICE_SCORING_MODE の有無で env / default)
+2026-10-16 表示用の探索の切り替え (config.ADVICE_DISPLAY_SEARCH、既定 off。欄を足すだけ):
+  version 行に "display_search" (この server の設定 "on" / "off" = config.ADVICE_DISPLAY_SEARCH。version_id の digest には入れない)
+  advice 行 (kind = battle) に "search_skipped" を必ず書く (search_skipped_of): true = 表示用の探索を省略した (択評価・起点注意なし、
+    advice.gtheory = null) / false = 実行した / null = 評価できなかった・記録の無い助言
 """
 from __future__ import annotations
 
@@ -587,6 +591,19 @@ def scoring_mode_banner(info: Optional[dict] = None) -> str:
     return f"採点方式: {i.get('scoring_mode')} ({src})"
 
 
+def display_search_info() -> dict:
+    """この server の表示用の探索の設定 (config.ADVICE_DISPLAY_SEARCH、"on" / "off")。version 行に足す"""
+    from champions_agent import config as _cfg
+    return {"display_search": getattr(_cfg, "ADVICE_DISPLAY_SEARCH", None)}
+
+
+def search_skipped_of(advice: Optional[dict]) -> Optional[bool]:
+    """battle の advice 行に必ず書く search_skipped (純粋)。助言の search_skipped (advisor.engine)。評価できなかった助言・欄の無い
+    助言は None"""
+    v = (advice or {}).get("search_skipped")
+    return None if v is None else bool(v)
+
+
 def scoring_fields_of(advice: Optional[dict], configured: Optional[str] = None) -> dict:
     """battle の advice 行に必ず書く採点方式の欄 (純粋)。{"scoring_mode", "scoring_used", "fallback_reason"}。
     scoring_mode = 助言の scoring_mode (無ければ configured = server の設定)、scoring_used = 実際に使った方式 (transition の
@@ -753,7 +770,7 @@ class BattleLogger:
             self._version = runtime_versions(refresh=True)
             # 採点方式 (2026-10-16 実機の受入): version_id の digest の外に足すだけ
             self._write({"type": "version", **self._version, **scoring_mode_info(),
-                         "scoring_mode_source": scoring_mode_source()})
+                         "scoring_mode_source": scoring_mode_source(), **display_search_info()})
         except Exception as e:
             print(f"[battle_log] 版の記録に失敗: {e}")
             self._version = None
@@ -1378,6 +1395,8 @@ class BattleLogger:
                 rec.update(scoring_fields_of(advice, scoring_mode_info()["scoring_mode"]))
             except Exception:
                 rec.update({"scoring_mode": None, "scoring_used": None, "fallback_reason": None})
+            # 表示用の探索を省略したか (2026-10-16。true なら択評価・起点注意なし。欄を足すだけ)
+            rec["search_skipped"] = search_skipped_of(advice)
         if state is not None:
             try:
                 compact = _compact_state(state)
