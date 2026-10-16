@@ -54,7 +54,7 @@ fi
 TRAINING_MODE=continuous
 [ -f config/training.env ] && . config/training.env
 if pgrep -f train_forever >/dev/null; then echo "学習ループ: 稼働中"
-elif [ "$TRAINING_MODE" != "continuous" ]; then echo "学習ループ: 停止中 (TRAINING_MODE=$TRAINING_MODE、自動起動しない)"
+elif [ "$TRAINING_MODE" != "continuous" ]; then echo "学習ループ: 停止中 (TRAINING_MODE=${TRAINING_MODE}、自動起動しない)"
 else
   nohup bash champions_agent/scripts/train_forever.sh \
     > champions_agent/train/logs/train_forever_nohup.log 2>&1 & disown

@@ -206,9 +206,10 @@ def test_display_rows():
     assert rows[0]["latency"] == 0.6 and rows[0]["in_time"] is True and rows[0]["gen_to_shown"] == 0.1
     assert rows[1]["latency"] is None and rows[1]["in_time"] is False          # 前の助言が残っていただけ = 遅延 0 にしない
     assert rows[5]["latency"] == 11.0 and rows[5]["in_time"] is False
-    assert rows[0]["mode"] == "legacy" and rows[0]["mode_recorded"] is False and rows[4]["mode"] == "transition"
+    # 2026-10-16 レビュー: 記録が無い決定は方式不明 (legacy と推定しない)。既定の変更に合わせて期待値を変更
+    assert rows[0]["mode"] == RA.UNKNOWN_MODE and rows[0]["mode_recorded"] is False and rows[4]["mode"] == "transition"
     s = RA.summarize_display(rows)
-    lg = s["legacy"]
+    lg = s[RA.UNKNOWN_MODE]
     assert lg["n"] == 5 and lg["n_front"] == 4 and lg["n_in_time"] == 1 and lg["in_time_rate"] == 0.25, lg
     assert lg["status"]["hidden"] == 1 and lg["latency_ms"]["n"] == 2 and lg["n_mode_unrecorded"] == 5
     assert s["transition"]["status"]["no_open"] == 1 and s["transition"]["in_time_rate"] == 0.0
@@ -414,7 +415,7 @@ def test_display_after_decision():
     rows = RA.display_rows(recs, deadline_sec=10.0, stale_hp_sec=30.0)
     r0 = rows[0]
     assert r0["status"] == "after_decision" and r0["latency"] is None and r0["in_time"] is False, r0
-    s = RA.summarize_display(rows[:1])["legacy"]
+    s = RA.summarize_display(rows[:1])[RA.UNKNOWN_MODE]       # 記録なし = 方式不明 (2026-10-16 レビュー)
     assert s["n_front"] == 1 and s["n_in_time"] == 0 and s["in_time_rate"] == 0.0 and s["latency_ms"]["n"] == 0, s
     assert s["status"]["after_decision"] == 1
     rows1 = RA.display_rows(recs, deadline_sec=1.0, stale_hp_sec=30.0)

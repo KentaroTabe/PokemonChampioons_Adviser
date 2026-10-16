@@ -432,7 +432,7 @@ def decision_mode(version: Optional[dict], adv_rec: Optional[dict], unrecorded_m
 
 
 def display_rows(records: list, deadline_sec: float = REAL_ACCEPT_DISPLAY_DEADLINE_SEC,
-                 stale_hp_sec: float = REAL_ACCEPT_STALE_HP_SEC, unrecorded_mode: Optional[str] = "legacy") -> list:
+                 stale_hp_sec: float = REAL_ACCEPT_STALE_HP_SEC, unrecorded_mode: Optional[str] = UNKNOWN_MODE) -> list:
     """decision 行ごとの「決定開始 → 有効な助言の表示」(純粋)。戻り値の各行:
     {"advice_id", "turn", "mode", "mode_recorded", "mode_source", "mode_mismatch", "t_open", "t_decided",
      "status" (DISPLAY_STATUS_LABELS の鍵), "latency" (秒、status = shown のときだけ),
@@ -440,7 +440,7 @@ def display_rows(records: list, deadline_sec: float = REAL_ACCEPT_DISPLAY_DEADLI
     表示の時刻はサーバーの受信時刻 (display 行の t。無ければ t_shown。tools.decision_audit と同じ)。
     決定 (t_decided) の後に表示されたものは status = after_decision (遅延の分布にも期限内にも入れない、分母には残す)。
     方式は decision_mode (直前の version 行 → advice 行)。どちらにも記録が無い決定は unrecorded_mode
-    (既定 legacy は従来の互換。run() は UNKNOWN_MODE を渡す = 方式不明)"""
+    (既定 UNKNOWN_MODE = 方式不明。記録が無いものを legacy と推定する互換は残さない。2026-10-16 レビュー)"""
     timeline = scene_timeline(records)
     disp = _display_index(records)
     advs = [r for r in records if r.get("type") == "advice" and r.get("kind") == "battle" and r.get("advice_id")]
