@@ -164,6 +164,7 @@ TESTS=(
   test_sim_revive_select
   test_diag_scenes
   test_real_accept
+  test_display_search_gate
 )
 
 fail=0
