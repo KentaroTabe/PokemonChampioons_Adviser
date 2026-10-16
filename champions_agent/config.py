@@ -1524,3 +1524,11 @@ REAL_ACCEPT_STALE_HP_SEC = HP_RANGE_STALE_SEC
 # (遅延の分布にも期限内にも入れない、分母には残す)。
 # PROFILE_TOP: --profile で evaluate の内訳 (cProfile の累積時間の上位) を出す行数
 REAL_ACCEPT_PROFILE_TOP = 30
+
+# transition の処理時間の内訳の計測 (tools/transition_profile.py、2026-10-16 レビュー、計画書 §8.33)。
+# REPEAT: 決定ごと・感度 on / off ごとに evaluate を繰り返す回数 (中央値を使う)。TOP: 遅い局面として内訳を出す件数
+# (全処理時間 elapsed_total_ms の上位)。SENS_DOMINANT_SHARE: 遅い局面 (全処理時間が p95 以上の決定) の evaluate の時間のうち
+# 感度 (sens.elapsed_ms) が占める割合がこれ以上なら「感度が主因」と判定する (実機で感度を省略する案の前提)
+TRANSITION_PROFILE_REPEAT = 3
+TRANSITION_PROFILE_TOP = 10
+TRANSITION_PROFILE_SENS_DOMINANT_SHARE = 0.5

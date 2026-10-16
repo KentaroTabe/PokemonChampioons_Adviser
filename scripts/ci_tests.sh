@@ -165,6 +165,7 @@ TESTS=(
   test_diag_scenes
   test_real_accept
   test_display_search_gate
+  test_transition_profile
 )
 
 fail=0
