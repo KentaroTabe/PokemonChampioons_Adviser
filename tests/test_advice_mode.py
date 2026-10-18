@@ -6,6 +6,9 @@
 - champions_agent/config.py はファイルを読まない (環境変数だけが効く)。測定の道具・学習はこの設定を参照しない
 - 起動スクリプトの写し (uvicorn・lsof・pkill 等をダミーに差し替えた砂場) で、値が uvicorn に届くこと・不正なら起動しないこと・
   deploy.sh は不正なら止める前に中止すること・同じスクリプトが起こす学習ループには渡らないこと (常駐は起動しない)
+- 2026-10-18 transition の感度 (TRANSITION_SENSITIVITY、値 0 / 1): 解決の規則 (無ければ 0 = 実機の既定 off、ファイル 1 で on、
+  矛盾・不正値はエラー)、CLI --resolve --sensitivity、起動ログ・操作パネルの設定値・実効値・設定元、4 本の起動スクリプトで
+  uvicorn に同じ値と設定元が届き、学習ループには渡らないこと
 
     python -m tests.test_advice_mode
 """
@@ -196,8 +199,11 @@ class Sandbox:
         self.calls = td / "calls.txt"
         rec = f'echo "$(basename "$0") $*" >> "{self.calls}"'
         envdump = 'env | grep "^ADVICE_SCORING_MODE" | sort > "{out}.tmp"; mv "{out}.tmp" "{out}"'
+        # 感度 (2026-10-18) は別のファイルに書く (既存の照合の対象 = ADVICE_SCORING_MODE* はそのまま)
+        sensdump = 'env | grep "^TRANSITION_SENSITIVITY" | sort > "{out}.tmp"; mv "{out}.tmp" "{out}"'
         stubs = {
-            "uvicorn": rec + "\n" + envdump.format(out=td / "uvicorn_env.txt"),
+            "uvicorn": (rec + "\n" + sensdump.format(out=td / "uvicorn_sens.txt") + "\n"
+                        + envdump.format(out=td / "uvicorn_env.txt")),
             "pkill": rec,
             "pgrep": rec + "\nexit 1",
             "node": rec,
@@ -218,7 +224,8 @@ class Sandbox:
         venv.mkdir(parents=True)
         (venv / "activate").write_text(f'export PATH="{self.bin}:$PATH"\n', encoding="utf-8")
         tf = td / "champions_agent" / "scripts" / "train_forever.sh"
-        tf.write_text(STUB.format(body=envdump.format(out=td / "train_env.txt")), encoding="utf-8")
+        tf.write_text(STUB.format(body=sensdump.format(out=td / "train_sens.txt") + "\n" + envdump.format(out=td / "train_env.txt")),
+                      encoding="utf-8")
 
     def write_local(self, text: str) -> None:
         (self.root / "config" / "advice.local.env").write_text(text, encoding="utf-8")
@@ -228,7 +235,8 @@ class Sandbox:
         if minimal:
             e = {"PATH": f"{self.bin}:/usr/bin:/bin:/usr/sbin:/sbin"}
         else:
-            e = {k: v for k, v in os.environ.items() if not k.startswith("ADVICE_SCORING_MODE")}
+            e = {k: v for k, v in os.environ.items()
+                 if not k.startswith("ADVICE_SCORING_MODE") and not k.startswith("TRANSITION_SENSITIVITY")}
             e["PATH"] = f"{self.bin}:{e.get('PATH', '/usr/bin:/bin')}"
         e["ADVICE_ENV_PYTHON"] = sys.executable
         e["PYTHONPATH"] = str(REPO)
@@ -394,6 +402,189 @@ def test_control_panel_scoring_config():
     print("test_control_panel_scoring_config OK")
 
 
+# ------------------------------------------------------------------ transition の感度 (2026-10-18)
+def test_sensitivity_resolve_rules():
+    r = AM.resolve_sensitivity
+    assert r(None, None) == {"value": "0", "source": "default", "file_value": None, "env_value": None}   # 実機の既定 off
+    assert r("ADVICE_SCORING_MODE=transition\n", None)["value"] == "0"
+    assert r("TRANSITION_SENSITIVITY=\n", None)["source"] == "default"
+    assert r("TRANSITION_SENSITIVITY=1\n", None) == {"value": "1", "source": "file", "file_value": "1", "env_value": None}
+    assert r("TRANSITION_SENSITIVITY='0'\n", None)["source"] == "file"
+    assert r(None, "1") == {"value": "1", "source": "env", "file_value": None, "env_value": "1"}
+    assert r(None, " 0 ")["value"] == "0"
+    assert r("TRANSITION_SENSITIVITY=1\n", "1")["source"] == "file"                         # 一致 → 続行
+    e = _err(r, "TRANSITION_SENSITIVITY=1\n", "0")
+    assert "矛盾" in e and "TRANSITION_SENSITIVITY" in e, e
+    assert "矛盾" in _err(r, "TRANSITION_SENSITIVITY=0\n", "1")
+    for bad in ("on", "true", "2", "yes", "1 # 試験"):
+        assert "使えない値" in _err(r, f"TRANSITION_SENSITIVITY={bad}\n", None), bad
+        assert "環境変数" in _err(r, None, bad), bad
+    assert "2 回" in _err(r, "TRANSITION_SENSITIVITY=1\nTRANSITION_SENSITIVITY=1\n", None)
+    # 採点方式と同じファイルに書ける。採点方式の解決は感度の鍵があっても変わらない
+    both = "ADVICE_SCORING_MODE=transition\nTRANSITION_SENSITIVITY=1\n"
+    assert AM.resolve(both, None)["mode"] == "transition" and r(both, None)["value"] == "1"
+    assert "認めない鍵" in _err(r, "TRANSITION_SENSITIVITY_SOURCE=file\n", None)
+    print("test_sensitivity_resolve_rules OK")
+
+
+def test_sensitivity_cli():
+    py = sys.executable
+    with tempfile.TemporaryDirectory() as td:
+        f = Path(td) / "a.env"
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith("ADVICE_SCORING_MODE") and not k.startswith("TRANSITION_SENSITIVITY")}
+        env["PYTHONPATH"] = str(REPO)
+        run = lambda e, *extra: subprocess.run([py, "-m", "tools.advice_mode", "--resolve", *extra, "--file", str(f)],
+                                               cwd=str(REPO), env=e, capture_output=True, text=True)
+        out = run(env, "--sensitivity")
+        assert out.returncode == 0 and out.stdout.splitlines() == [
+            "ADVICE_SCORING_MODE=legacy", "ADVICE_SCORING_MODE_SOURCE=default",
+            "TRANSITION_SENSITIVITY=0", "TRANSITION_SENSITIVITY_SOURCE=default"], out
+        assert len(run(env).stdout.splitlines()) == 2                                       # 従来の出力は 2 行のまま
+        f.write_text("TRANSITION_SENSITIVITY=1\n", encoding="utf-8")
+        assert run(env, "--sensitivity").stdout.splitlines()[-2:] == ["TRANSITION_SENSITIVITY=1",
+                                                                      "TRANSITION_SENSITIVITY_SOURCE=file"]
+        bad = run(dict(env, TRANSITION_SENSITIVITY="0"), "--sensitivity")
+        assert bad.returncode == 2 and "矛盾" in bad.stderr and "=" not in bad.stdout, bad
+        f.write_text("TRANSITION_SENSITIVITY=on\n", encoding="utf-8")
+        bad2 = run(env, "--sensitivity")
+        assert bad2.returncode == 2 and "使えない値" in bad2.stderr, bad2
+    print("test_sensitivity_cli OK")
+
+
+def test_sensitivity_views_and_startup():
+    v_none = AM.sens_file_view(None)
+    assert v_none == {"path": "config/advice.local.env", "exists": False, "value": None, "configured": "0", "error": None}
+    v_on = AM.sens_file_view("TRANSITION_SENSITIVITY=1\n")
+    assert v_on["value"] == v_on["configured"] == "1"
+    v_bad = AM.sens_file_view("TRANSITION_SENSITIVITY=2\n")
+    assert v_bad["configured"] is None and v_bad["error"]
+    assert AM.sens_source_of_env({}) is None
+    assert AM.sens_source_of_env({"TRANSITION_SENSITIVITY": "0"}) == "env"
+    assert AM.sens_source_of_env({"TRANSITION_SENSITIVITY": "0", "TRANSITION_SENSITIVITY_SOURCE": "default"}) == "default"
+    assert AM.sens_onoff("1") == "on" and AM.sens_onoff(False) == "off" and AM.sens_onoff(None) is None
+    line = AM.sens_startup_line(False, "default", v_none)
+    assert "実効値 off / 設定元 default" in line and "未設定 = 0" in line and "⚠" not in line, line
+    assert "⚠" in AM.sens_startup_line(True, None, v_none)          # advice_env.sh を通さない起動 (config の既定 = on)
+    assert "⚠" not in AM.sens_startup_line(True, "file", v_on)
+    assert "読めない" in AM.sens_startup_line(False, "default", v_bad)
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "advice.local.env"
+        assert "設定元 default" in AM.sens_startup_check({"TRANSITION_SENSITIVITY_SOURCE": "default"}, p)
+    print("test_sensitivity_views_and_startup OK")
+
+
+def test_sensitivity_start_scripts():
+    """4 本の起動スクリプトで uvicorn に同じ値・設定元が届く。学習ループには渡らない。矛盾・不正値は起動しない"""
+    want_default = {"TRANSITION_SENSITIVITY": "0", "TRANSITION_SENSITIVITY_SOURCE": "default"}
+    want_file = {"TRANSITION_SENSITIVITY": "1", "TRANSITION_SENSITIVITY_SOURCE": "file"}
+    runs = (("start_all_nohup.sh", (), {}), ("start_connection_test.sh", (), {}), ("start_servers.sh", (), {}),
+            ("deploy.sh", ("--force",), {"advisor_running": True, "minimal": True}))
+    for script, args, opt in runs:
+        for local, extra, want in ((None, {}, want_default), ("TRANSITION_SENSITIVITY=1\n", {}, want_file),
+                                   ("ADVICE_SCORING_MODE=transition\nTRANSITION_SENSITIVITY=1\n",
+                                    {"TRANSITION_SENSITIVITY": "1"}, want_file),
+                                   (None, {"TRANSITION_SENSITIVITY": "1"},
+                                    {"TRANSITION_SENSITIVITY": "1", "TRANSITION_SENSITIVITY_SOURCE": "env"})):
+            def case(td):
+                sb = Sandbox(td, advisor_running=opt.get("advisor_running", False),
+                             training_mode="continuous" if script == "start_all_nohup.sh" else "on_demand")
+                if local is not None:
+                    sb.write_local(local)
+                out = sb.run(script, *args, env=sb.env(extra, minimal=opt.get("minimal", False)))
+                if script != "start_servers.sh":
+                    assert out.returncode == 0, (script, out.stdout, out.stderr)
+                assert sb.received().get("ADVICE_SCORING_MODE"), (script, out.stdout, out.stderr)
+                got = sb.received("uvicorn_sens.txt", wait=2.0)
+                assert got == want, (script, local, extra, got, out.stdout)
+                if script == "start_all_nohup.sh":
+                    assert sb.received("train_env.txt") == {} and (td / "train_env.txt").exists()   # 学習ループが動いた
+                    # 実機用に決めた値 (ファイル・既定) と設定元は学習ループに持ち込まない。起動したシェルが自分で export した
+                    # 環境変数はそのまま継承される (advice_env.sh が足したものではない)
+                    assert (td / "train_sens.txt").exists()
+                    assert sb.received("train_sens.txt", wait=2.0) == dict(extra), (td / "train_sens.txt").read_text()
+            _sandbox_case(case)
+
+        def case_bad(td):
+            sb = Sandbox(td, advisor_running=opt.get("advisor_running", False))
+            sb.write_local("TRANSITION_SENSITIVITY=1\n")
+            out = sb.run(script, *args, env=sb.env({"TRANSITION_SENSITIVITY": "0"}, minimal=opt.get("minimal", False)))
+            assert out.returncode != 0 and not sb.called("uvicorn"), (script, out.stdout, out.stderr)
+            assert "矛盾" in out.stderr, (script, out.stderr)
+            if script == "deploy.sh":
+                assert not sb.called("pkill")                                                # 止める前に中止
+        _sandbox_case(case_bad)
+
+        def case_invalid(td):
+            sb = Sandbox(td, advisor_running=opt.get("advisor_running", False))
+            sb.write_local("TRANSITION_SENSITIVITY=on\n")
+            out = sb.run(script, *args, env=sb.env(minimal=opt.get("minimal", False)))
+            assert out.returncode != 0 and not sb.called("uvicorn") and "使えない値" in out.stderr, (script, out.stderr)
+        _sandbox_case(case_invalid)
+    print("test_sensitivity_start_scripts OK")
+
+
+def test_control_panel_sensitivity():
+    ps_file = "uvicorn server:app_asgi TRANSITION_SENSITIVITY=1 TRANSITION_SENSITIVITY_SOURCE=file"
+    assert CP.sensitivity_from_ps(ps_file) == {"enabled": True, "env": "1", "source": "file"}
+    assert CP.sensitivity_from_ps("uvicorn server:app_asgi TRANSITION_SENSITIVITY=0 TRANSITION_SENSITIVITY_SOURCE=default") == \
+        {"enabled": False, "env": "0", "source": "default"}
+    assert CP.sensitivity_from_ps("uvicorn server:app_asgi PATH=/bin") == {"enabled": True, "env": None, "source": None}
+    assert CP.sensitivity_from_ps("") is None
+    v = CP.sensitivity_config_view("TRANSITION_SENSITIVITY=1\n", ps_file)
+    assert v["file"]["configured"] == "1" and v["running"]["source"] == "file" and not v["mismatch"]
+    assert CP.sensitivity_config_warnings(v) == []
+    # ファイルを書き換えたが再起動していない / advice_env.sh を通さずに起動した (config の既定 = on) → 食い違い
+    v2 = CP.sensitivity_config_view(None, "uvicorn server:app_asgi PATH=/bin")
+    assert v2["mismatch"] and "再起動" in CP.sensitivity_config_warnings(v2)[0]
+    assert not CP.sensitivity_config_view(None, "")["mismatch"]                             # 停止中
+    v3 = CP.sensitivity_config_view("TRANSITION_SENSITIVITY=x\n", ps_file)
+    assert v3["file"]["error"] and not v3["mismatch"] and CP.sensitivity_config_warnings(v3) == []
+
+    class Probe:
+        def listener(self, port):
+            return {"pid": 11, "command": "python uvicorn server:app_asgi --port 8000"} if port == 8000 else None
+
+        def pgrep(self, pattern):
+            return []
+
+        def lan_ip(self):
+            return "localhost"
+
+        def process_env(self, pid):
+            return "python uvicorn server:app_asgi TRANSITION_SENSITIVITY=0 TRANSITION_SENSITIVITY_SOURCE=default"
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "logs").mkdir()
+        (root / "config").mkdir()
+        s = CP.Settings(port=0, bind="127.0.0.1", poll_sec=1.0, tail_lines=10, path_prefix="", server_log_tail_bytes=1024,
+                        advisor_port=8000, frontend_port=3000, showdown_port=8100, smoke_battles=20)
+        st = CP.Panel(root, s, probe=Probe()).status()
+        sc = st["sensitivity_config"]
+        assert sc["running"] == {"enabled": False, "env": "0", "source": "default"} and not sc["mismatch"], sc
+        assert not any("感度" in w for w in st["warnings"]), st["warnings"]
+        (root / "config" / "advice.local.env").write_text("TRANSITION_SENSITIVITY=1\n", encoding="utf-8")
+        st = CP.Panel(root, s, probe=Probe()).status()
+        assert st["sensitivity_config"]["mismatch"] and any("感度の設定値 (on)" in w for w in st["warnings"])
+    page = CP.render_page(s, CP.ACTIONS)
+    assert "transition の感度 (アドバイザー)" in page and "sensRows" in page
+    print("test_control_panel_sensitivity OK")
+
+
+def test_config_default_unchanged():
+    """config.TRANSITION_SENSITIVITY_ENABLED の既定 (環境変数なし = 計算する) は変えない (測定の子プロセス・診断ツール・テストは従来どおり)"""
+    probe = "import champions_agent.config as c\nprint(c.TRANSITION_SENSITIVITY_ENABLED)\n"
+    base = {k: v for k, v in os.environ.items() if not k.startswith("TRANSITION_SENSITIVITY")}
+    for env_val, want in ((None, "True"), ("0", "False"), ("1", "True")):
+        e = dict(base) if env_val is None else dict(base, TRANSITION_SENSITIVITY=env_val)
+        out = subprocess.run([sys.executable, "-c", probe], cwd=str(REPO), env=e, capture_output=True, text=True)
+        assert out.returncode == 0 and out.stdout.strip().splitlines()[-1] == want, (env_val, out.stdout, out.stderr)
+    from champions_agent.config import transition_sensitivity_from_value as tv
+    assert tv(None) and tv("") and tv("1") and not tv("0") and not tv(" OFF ") and not tv("false")
+    print("test_config_default_unchanged OK")
+
+
 if __name__ == "__main__":
     test_resolve_rules()
     test_quoted_and_commented_value()
@@ -408,4 +599,10 @@ if __name__ == "__main__":
     test_deploy_like_launchd()
     test_start_connection_test_and_start_servers()
     test_control_panel_scoring_config()
+    test_sensitivity_resolve_rules()
+    test_sensitivity_cli()
+    test_sensitivity_views_and_startup()
+    test_sensitivity_start_scripts()
+    test_control_panel_sensitivity()
+    test_config_default_unchanged()
     print("ALL OK")

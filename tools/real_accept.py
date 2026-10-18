@@ -1,7 +1,7 @@
 """実機の受入の道具 (2026-10-16、docs/ADVICE_ACCURACY_PLAN_1009.md §8.22・§8.25): 実戦ログの同じ局面を両方式で再生する。
 
     python -m tools.real_accept [--target LOG ... | --logs N | --log PATH ...] [--out DIR] [--gap-sec S] [--dry-run] [--profile]
-                                [--compare-search]
+                                [--compare-search | --compare-sensitivity]
 
 実戦ログ (logs/battles/*.jsonl) の advice 行 (kind = battle、確定前 provisional を除く。state が助言エンジンの入力) を、
 tools.advice_replay と同じ規則 (DECISION_GAP_SEC の間引き) で決定点にし、復元した状態 (tools.advice_replay.compact_to_engine_state、
@@ -48,6 +48,13 @@ advisor.engine.evaluate(..., scoring_mode=...) に通す。図鑑・resolver・�
     所要時間 (on / off の p50 / p95)、transition の退避率 (on / off)、探索を省略した決定の件数 (= 択評価・起点注意なし) を表にする。
     不一致が 1 件でもあれば「満たさない」(summarize_search_compare)。出力は result.json と report.md (同じ出力先の規則)
 
+2026-10-18 transition の感度の実機の既定 off (scripts/advice_env.sh が TRANSITION_SENSITIVITY=0 を export。レビュー 2026-10-18):
+  - --compare-sensitivity: 通常の受入の代わりに、同じ決定点を transition で感度 on / off (config.TRANSITION_SENSITIVITY_ENABLED を
+    一時的に切り替える) の 2 通りに evaluate し、本採点の候補・得点 (表示の得点と Q / Q_worst)・順位・第一候補の合法性 (check_best)・
+    退避の理由が一致するかを決定ごとに照合する (compare_sensitivity_pair)。legacy は感度を使わないので照合しない。
+    不一致が 1 件でもあれば「満たさない」(summarize_sensitivity_compare)。所要時間 (on / off) と感度の状態
+    (battle_logger.sensitivity_fields_of の sensitivity_status) の件数も出す。出力は result.json と report.md
+
 出力: logs/real_accept/<日時>/result.json と report.md (条件・正しさの違反・一致率・退避・所要時間・古い局面・受入条件との照合)。
 受入条件 (champions_agent.config の REAL_ACCEPT_*) との照合は 満たす / 満たさない / 判定不能。10 fps の録画再生での処理率
 (負荷) はこの道具では測らない (tools.shadow_load_check --compare-scoring)。
@@ -56,6 +63,8 @@ advisor.engine.evaluate(..., scoring_mode=...) に通す。図鑑・resolver・�
 target_consistency / acceptance / render_markdown) は
 tests/test_real_accept.py でテストする。--compare-search の純粋な部分 (rank_signature / compare_search_pair /
 summarize_search_compare / render_search_compare_markdown) は tests/test_display_search_gate.py でテストする。
+--compare-sensitivity の純粋な部分 (q_signature / compare_sensitivity_pair / summarize_sensitivity_compare /
+render_sensitivity_compare_markdown) は tests/test_sensitivity_off.py でテストする。
 """
 from __future__ import annotations
 
@@ -1111,6 +1120,110 @@ def render_search_compare_markdown(result: dict) -> str:
     return "\n".join(L) + "\n"
 
 
+# ------------------------------------------------------------------ 純粋: transition の感度 on / off の照合 (--compare-sensitivity、2026-10-18)
+SENS_STATES = SEARCH_STATES                  # 感度を計算する / しない (config.TRANSITION_SENSITIVITY_ENABLED = True / False)
+SENS_MODE = "transition"                     # 感度を使うのは transition だけ
+SENS_DIFF_LABELS = {**SEARCH_DIFF_LABELS, "q": "同じ候補の Q / Q_worst (本採点の値) が違う"}
+
+
+def q_signature(adv: Optional[dict]) -> Optional[list]:
+    """transition の本採点の値 [(種類, id, q, q_worst)] (純粋。transition で評価していない・退避した助言は None)"""
+    if adv is None or not adv.get("ok") or adv.get("scoring_used") != SENS_MODE:
+        return None
+    return [(a.get("kind"), a.get("id"), a.get("q"), a.get("q_worst")) for a in (adv.get("actions") or [])]
+
+
+def compare_sensitivity_pair(on: dict, off: dict) -> list:
+    """1 決定の感度 on / off の照合 (純粋)。on / off = compare_search_pair と同じ形 + "q" (q_signature の戻り値)。
+    戻り値は食い違いの種類 (SENS_DIFF_LABELS の鍵) の列で、空なら一致"""
+    out = compare_search_pair(on, off)
+    if "error" not in out and on.get("q") != off.get("q"):
+        out.append("q")
+    return out
+
+
+def summarize_sensitivity_compare(rows: list, examples_per_key: int = EXAMPLES_PER_KEY) -> dict:
+    """--compare-sensitivity の集計 (純粋)。rows の各要素: {"log", "advice_id", "turn", "on": 結果, "off": 結果, "diffs":
+    compare_sensitivity_pair の戻り値}、結果 = {"elapsed_ms", "sig", "q", "violations", "checks", "error", "sens_status"}。
+    照合した決定数・不一致の決定数・種類別の件数と例・所要時間 (on / off と差 off − on)・退避率 (on / off)・感度の状態の件数を出し、
+    判定は 不一致 0 なら 満たす、1 件でもあれば 満たさない、照合した決定が無ければ 判定不能"""
+    by = {k: 0 for k in SENS_DIFF_LABELS}
+    ex = []
+    n_mis = 0
+    el = {st: [] for st in SENS_STATES}
+    delta = []
+    fb = {st: {"n": 0, "n_fallback": 0, "n_budget": 0} for st in SENS_STATES}
+    status = {st: {} for st in SENS_STATES}
+    for r in rows:
+        diffs = r.get("diffs") or []
+        if diffs:
+            n_mis += 1
+            for k in diffs:
+                by[k] = by.get(k, 0) + 1
+            if len(ex) < examples_per_key:
+                ex.append({"log": r.get("log"), "advice_id": r.get("advice_id"), "turn": r.get("turn"), "diffs": diffs,
+                           **{st: {"best": ((r.get(st) or {}).get("sig") or {}).get("best"),
+                                   "top": [list(x) for x in (((r.get(st) or {}).get("sig") or {}).get("actions") or [])[:3]],
+                                   "fallback": ((r.get(st) or {}).get("sig") or {}).get("fallback"),
+                                   "error": (r.get(st) or {}).get("error")} for st in SENS_STATES}})
+        for st in SENS_STATES:
+            x = r.get(st) or {}
+            if x.get("elapsed_ms") is not None:
+                el[st].append(float(x["elapsed_ms"]))
+            sig = x.get("sig") or {}
+            if not x.get("error") and sig.get("ok"):
+                fb[st]["n"] += 1
+                if sig.get("fallback"):
+                    fb[st]["n_fallback"] += 1
+                    fb[st]["n_budget"] += _reason_key(sig["fallback"]) == BUDGET_REASON
+            k = str(x.get("sens_status"))
+            status[st][k] = status[st].get(k, 0) + 1
+        if all((r.get(st) or {}).get("elapsed_ms") is not None for st in SENS_STATES):
+            delta.append(float(r["off"]["elapsed_ms"]) - float(r["on"]["elapsed_ms"]))
+    for st in SENS_STATES:
+        fb[st]["rate"] = _rate(fb[st]["n_fallback"], fb[st]["n"])
+        fb[st]["budget_rate"] = _rate(fb[st]["n_budget"], fb[st]["n"])
+    return {"n": len(rows), "n_mismatch": n_mis, "by_kind": by, "examples": ex,
+            "status": UNKNOWN if not rows else (OK if n_mis == 0 else NG),
+            "elapsed_ms": {st: percentiles(el[st]) for st in SENS_STATES}, "elapsed_delta_ms": percentiles(delta),
+            "fallback": fb, "sens_status": status}
+
+
+def render_sensitivity_compare_markdown(result: dict) -> str:
+    """--compare-sensitivity の report.md (純粋)"""
+    c, sm = result["conditions"], result["summary"]
+    kinds = ", ".join(f"{SENS_DIFF_LABELS.get(k, k)} {v}" for k, v in sm["by_kind"].items() if v) or "-"
+    L = [f"# transition の感度 on / off の照合: 実戦ログの同一局面 ({c['at']})", "",
+         "感度 (楽観側の HP・スカーフ / タスキの有無の仮説、順位には使わない) を計算しなくても、本採点の候補・得点・Q・順位・"
+         "第一候補の合法性・退避の理由が変わらないことを決定ごとに確かめる。不一致が 1 件でもあれば 満たさない。", "",
+         "## 条件", "",
+         f"- コード: {c['code'].get('commit') or '-'}{' (未コミットの変更あり)' if c['code'].get('dirty') else ''} / エンジン {c['code'].get('engine')}",
+         f"- 方式: transition (予算 {c['transition_budget_ms']} ms)、設定 TRANSITION_SENSITIVITY_ENABLED = {c['transition_sensitivity']} "
+         f"(照合では on / off を切り替える)、ADVICE_DISPLAY_SEARCH = {c.get('display_search')}",
+         f"- 決定点 {sm['n']} (間引き {c['gap_sec']} 秒、古い局面も含む全決定点)。決定ごとに on / off の順番を交互にする",
+         "- ログ: " + ", ".join(f"{lg['name']} ({lg['n_decisions']})" for lg in c["logs"]), "",
+         "## 照合の結果", "", "| 照合した決定 | 不一致の決定 | 判定 | 種類別 |", "|---|---|---|---|",
+         f"| {sm['n']} | {sm['n_mismatch']} | {sm['status']} | {kinds} |", "",
+         "## 所要時間 (evaluate、全決定点)", "", "| 感度 on | 感度 off | 差 (同じ決定の off − on) |", "|---|---|---|",
+         f"| {_pct_txt(sm['elapsed_ms']['on'])} | {_pct_txt(sm['elapsed_ms']['off'])} | {_pct_txt(sm['elapsed_delta_ms'])} |", "",
+         "## 退避率", "", "| 感度 | 評価 | 退避 (全理由) | 予算超過 |", "|---|---|---|---|"]
+    for st in SENS_STATES:
+        f = sm["fallback"].get(st) or {}
+        L.append(f"| {st} | {f.get('n', 0)} | {f.get('n_fallback', 0)} ({_fmt(f.get('rate'))}) | "
+                 f"{f.get('n_budget', 0)} ({_fmt(f.get('budget_rate'))}) |")
+    L += ["", "## 感度の状態 (advice 行の sensitivity_status と同じ分類)", "", "| 感度 | 状態の件数 |", "|---|---|"]
+    for st in SENS_STATES:
+        L.append(f"| {st} | " + ", ".join(f"{k} {v}" for k, v in sorted(sm["sens_status"][st].items())) + " |")
+    if sm["examples"]:
+        L += ["", "## 不一致の例", ""]
+        for e in sm["examples"]:
+            L.append(f"- {e['log']} {e['advice_id']} (ターン {e.get('turn')}): "
+                     + ", ".join(SENS_DIFF_LABELS.get(k, k) for k in e["diffs"])
+                     + f" / on {e['on']['best']} {e['on']['top']} 退避 {e['on']['fallback']}"
+                     + f" / off {e['off']['best']} {e['off']['top']} 退避 {e['off']['fallback']}")
+    return "\n".join(L) + "\n"
+
+
 # ------------------------------------------------------------------ 副作用あり: 読み込み・再生・出力
 def load_records(path: Path) -> list:
     out = []
@@ -1315,6 +1428,92 @@ def run_compare_search(logs: list, out_dir: Optional[Path], gap_sec: float, targ
     return result
 
 
+def replay_sensitivity_pair(state: dict, resolver, order: tuple) -> dict:
+    """1 決定点を transition で order (感度 on / off) の順に evaluate する (副作用: エンジン、config.TRANSITION_SENSITIVITY_ENABLED を
+    一時的に切り替えて戻す)。{"on" / "off": (戻り値 or None, 所要 ms, エラー)}"""
+    from advisor.engine import evaluate
+    from champions_agent import config as C
+    out: dict = {}
+    orig = C.TRANSITION_SENSITIVITY_ENABLED
+    try:
+        for st in order:
+            C.TRANSITION_SENSITIVITY_ENABLED = (st == "on")
+            s = copy.deepcopy(state)
+            t0 = time.perf_counter()
+            try:
+                adv = evaluate(s, resolver, scoring_mode=SENS_MODE)
+                err = None
+            except Exception as e:
+                adv, err = None, f"{type(e).__name__}: {e}"
+            out[st] = (adv, round((time.perf_counter() - t0) * 1000.0, 1), err)
+    finally:
+        C.TRANSITION_SENSITIVITY_ENABLED = orig
+    return out
+
+
+def run_compare_sensitivity(logs: list, out_dir: Optional[Path], gap_sec: float, target_fixed: bool) -> dict:
+    """--compare-sensitivity の本体 (副作用: エンジン・出力)。logs = _load_logs の戻り値"""
+    from vision.normalize import NameResolver
+    from battle_logger import sensitivity_fields_of
+    from champions_agent import config as C
+    resolver = NameResolver()
+    ck = _checker_kwargs()
+    first = next((lg["decisions"][0] for lg in logs if lg["decisions"]), None)
+    if first is not None:      # 初回の読み込み (図鑑・RL・使用率) を所要時間から外す
+        replay_sensitivity_pair(_engine_state(first, resolver), resolver, SENS_STATES)
+    n_dec = sum(lg["n_decisions"] for lg in logs)
+    rows = []
+    i = 0
+    for lg in logs:
+        for row in lg["decisions"]:
+            compact = row["state"]
+            try:
+                st = _engine_state(row, resolver)
+            except Exception as e:
+                print(f"  復元できない: {lg['name']} {row.get('advice_id')}: {e}")
+                continue
+            reg = _registered_ids(st, resolver)
+            order = SENS_STATES if i % 2 == 0 else tuple(reversed(SENS_STATES))
+            i += 1
+            res = replay_sensitivity_pair(st, resolver, order)
+            d = {"log": lg["name"], "advice_id": row.get("advice_id"), "t": row.get("t"), "turn": row.get("turn"),
+                 "active": _active_label(compact)}
+            for stt, (adv, ms, err) in res.items():
+                x = {"elapsed_ms": ms, "error": err, "sig": None, "q": None, "violations": [], "checks": {},
+                     "sens_status": None}
+                if adv is not None and not err:
+                    x["sig"] = rank_signature(adv)
+                    x["q"] = q_signature(adv)
+                    x["sens_status"] = sensitivity_fields_of(adv)["sensitivity_status"]
+                    if adv.get("ok"):
+                        chk = check_best(adv, compact, row.get("move_locks"), reg, detail=True, **ck)
+                        x["violations"], x["checks"] = chk["violations"], chk["checks"]
+                d[stt] = x
+            d["diffs"] = compare_sensitivity_pair(d["on"], d["off"])
+            rows.append(d)
+            if i % 20 == 0:
+                print(f"  {i} / {n_dec}")
+    summary = summarize_sensitivity_compare(rows)
+    result = {
+        "conditions": {"at": time.strftime("%Y-%m-%d %H:%M"), "code": _code_info(), "mode": SENS_MODE,
+                       "transition_budget_ms": C.TRANSITION_BUDGET_MS,
+                       "transition_sensitivity": C.TRANSITION_SENSITIVITY_ENABLED,
+                       "display_search": getattr(C, "ADVICE_DISPLAY_SEARCH", None), "gap_sec": gap_sec,
+                       "target_fixed": target_fixed,
+                       "logs": [{k: v for k, v in lg.items() if k not in ("records", "rows", "decisions", "path")}
+                                for lg in logs]},
+        "summary": summary, "decisions": rows,
+    }
+    out_dir = Path(out_dir) if out_dir else OUT_DIR / time.strftime("%Y%m%d_%H%M%S")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+    md = render_sensitivity_compare_markdown(result)
+    (out_dir / "report.md").write_text(md, encoding="utf-8")
+    print(md)
+    print(f"保存: {out_dir}")
+    return result
+
+
 def _load_logs(paths: list, gap_sec: float) -> list:
     """対象のログを読み、決定点に間引く (副作用: 読み込み・表示)"""
     logs = []
@@ -1341,7 +1540,8 @@ def _load_logs(paths: list, gap_sec: float) -> list:
 
 
 def run(paths: list, out_dir: Optional[Path], gap_sec: float = DECISION_GAP_SEC, dry_run: bool = False,
-        target_fixed: bool = False, profile: bool = False, compare_search: bool = False) -> dict:
+        target_fixed: bool = False, profile: bool = False, compare_search: bool = False,
+        compare_sensitivity: bool = False) -> dict:
     """target_fixed = 対象のログを事前に決めた接続テスト群として渡したか (--target)。profile = evaluate の内訳も出す。
     compare_search = 通常の受入の代わりに表示用の探索 on / off の照合をする (run_compare_search)"""
     logs = _load_logs(paths, gap_sec)
@@ -1353,6 +1553,8 @@ def run(paths: list, out_dir: Optional[Path], gap_sec: float = DECISION_GAP_SEC,
 
     if compare_search:
         return run_compare_search(logs, out_dir, gap_sec, target_fixed)
+    if compare_sensitivity:
+        return run_compare_sensitivity(logs, out_dir, gap_sec, target_fixed)
     from vision.normalize import NameResolver
     from advisor.engine import RL_BLEND_DEFAULT
     from champions_agent import config as C
@@ -1458,8 +1660,11 @@ def main() -> None:
     ap.add_argument("--dry-run", action="store_true", help="対象のログと決定点の数だけ出す (再生しない・書かない)")
     ap.add_argument("--profile", action="store_true",
                     help=f"evaluate の内訳 (cProfile の累積時間の上位 {REAL_ACCEPT_PROFILE_TOP} 行) を方式ごとに出す (採点は変えない)")
-    ap.add_argument("--compare-search", action="store_true",
+    cg = ap.add_mutually_exclusive_group()
+    cg.add_argument("--compare-search", action="store_true",
                     help="通常の受入の代わりに、両方式それぞれで表示用の探索 on / off の候補・得点・順位・第一候補の合法性の一致を照合する")
+    cg.add_argument("--compare-sensitivity", action="store_true",
+                    help="通常の受入の代わりに、transition で感度 on / off の本採点の候補・得点・Q・順位・第一候補の合法性・退避の一致を照合する")
     args = ap.parse_args()
     if args.target:
         paths = [Path(p) for p in args.target]
@@ -1471,7 +1676,7 @@ def main() -> None:
     if missing or not paths:
         raise SystemExit(f"対戦ログが無い: {missing or LOG_DIR}")
     run(paths, Path(args.out) if args.out else None, args.gap_sec, args.dry_run, target_fixed=bool(args.target),
-        profile=args.profile, compare_search=args.compare_search)
+        profile=args.profile, compare_search=args.compare_search, compare_sensitivity=args.compare_sensitivity)
 
 
 if __name__ == "__main__":

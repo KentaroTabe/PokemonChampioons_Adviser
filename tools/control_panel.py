@@ -35,8 +35,8 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
-from champions_agent.config import ADVICE_SCORING_MODES, BUILD_SMOKE_CANARY_BATTLES
-from tools.advice_mode import LOCAL_FILE_REL, SOURCES, file_view, mismatch, read_local_text
+from champions_agent.config import ADVICE_SCORING_MODES, BUILD_SMOKE_CANARY_BATTLES, transition_sensitivity_from_value
+from tools.advice_mode import (LOCAL_FILE_REL, SOURCES, file_view, mismatch, read_local_text, sens_file_view, sens_onoff)
 from tools.analyze_battles import MIN_BATTLE_SCENES, _parse_battle
 
 REPO = Path(__file__).resolve().parent.parent
@@ -50,6 +50,8 @@ _SHELL_ASSIGN_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)="([^"]*)"\s*(?:#.*)?$'
 _SHELL_VAR_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
 _SCORING_ENV_RE = re.compile(r"(?:^|\s)ADVICE_SCORING_MODE=(\S*)")
 _SCORING_SOURCE_RE = re.compile(r"(?:^|\s)ADVICE_SCORING_MODE_SOURCE=(\S*)")
+_SENS_ENV_RE = re.compile(r"(?:^|\s)TRANSITION_SENSITIVITY=(\S*)")
+_SENS_SOURCE_RE = re.compile(r"(?:^|\s)TRANSITION_SENSITIVITY_SOURCE=(\S*)")
 
 
 def shell_assignments(text: str) -> dict:
@@ -219,6 +221,43 @@ def scoring_config_view(file_text: Optional[str], ps_text: str, running: Optiona
     src = m.group(1) if m else None
     return {"file": view, "running_source": src if src in SOURCES else None,
             "mismatch": mismatch(view, (running or {}).get("mode"))}
+
+
+def sensitivity_from_ps(text: str) -> Optional[dict]:
+    """ps eww の出力から、アドバイザーの transition の感度の実効値と設定元 (純粋。2026-10-18)。{"enabled" (bool),
+    "env" (環境変数 TRANSITION_SENSITIVITY の生の値 or None), "source" (advice_env.sh が渡した file / env / default。通さない起動は
+    環境変数があれば env、無ければ None = config の既定 (計算する))}。出力が空 (プロセスが読めない) なら None。
+    実効値の規則は champions_agent.config.transition_sensitivity_from_value と同じ"""
+    if not (text or "").strip():
+        return None
+    m = _SENS_ENV_RE.search(text)
+    raw = m.group(1) if m else None
+    ms = _SENS_SOURCE_RE.search(text)
+    src = ms.group(1) if ms else None
+    if src not in SOURCES:
+        src = "env" if (raw or "").strip() else None
+    return {"enabled": transition_sensitivity_from_value(raw), "env": raw, "source": src}
+
+
+def sensitivity_config_view(file_text: Optional[str], ps_text: str, file_error: Optional[str] = None) -> dict:
+    """transition の感度の設定値 (ファイル)・実効値 (稼働中)・設定元 (純粋。2026-10-18)。{"file": tools.advice_mode.sens_file_view,
+    "running": sensitivity_from_ps の戻り値 (停止中・読めなければ None), "mismatch": 設定値 (advice_env.sh を通したときの値) と
+    稼働中の実効値が違う}"""
+    view = sens_file_view(file_text)
+    if file_error:
+        view = {**view, "exists": True, "value": None, "configured": None, "error": file_error}
+    run = sensitivity_from_ps(ps_text)
+    mis = bool(run) and view.get("configured") is not None and sens_onoff(view["configured"]) != sens_onoff(run["enabled"])
+    return {"file": view, "running": run, "mismatch": mis}
+
+
+def sensitivity_config_warnings(cfg: dict) -> list:
+    """transition の感度の設定の警告 (純粋。設定ファイルが読めないときは採点方式の警告に出るので重ねない)"""
+    f = cfg["file"]
+    if not f.get("error") and cfg.get("mismatch"):
+        return [f"transition の感度の設定値 ({sens_onoff(f['configured'])}) と稼働中のアドバイザーの実効値が違います。"
+                "反映するには「更新の反映」か「接続テスト開始」で再起動してください"]
+    return []
 
 
 def scoring_config_warnings(cfg: dict) -> list:
@@ -458,12 +497,16 @@ class Panel:
             file_error = f"{LOCAL_FILE_REL}: {e}"
         scoring_config = scoring_config_view(file_text, ps_text, scoring, file_error)
         warnings += scoring_config_warnings(scoring_config)
+        # transition の感度 (2026-10-18): 設定値・実効値・設定元
+        sensitivity_config = sensitivity_config_view(file_text, ps_text, file_error)
+        warnings += sensitivity_config_warnings(sensitivity_config)
         return {
             "now": time.time(),
             "processes": {"advisor": advisor, "frontend": frontend, "showdown": showdown,
                           "training": training, "measuring": measuring},
             "scoring": scoring,
             "scoring_config": scoring_config,
+            "sensitivity_config": sensitivity_config,
             # フロントの URL は自分たちが待ち受けているときだけ (停止中に既定ポートを出すと別のプロセスを指してしまう)
             "urls": {"frontend": (f"http://{ip}:{frontend['port']}" if frontend["state"] == "ours" else None),
                      "frontend_local": (f"http://localhost:{frontend['port']}" if frontend["state"] == "ours" else None)},
@@ -557,6 +600,23 @@ function scoringRows(sc, cfg, adv) {
     + `<div class="row"><span>　実効値 (稼働中)</span>${mis ? `<span class="badge warn">${run}</span>` : `<span>${run}</span>`}</div>`
     + `<div class="row"><span>　設定元</span><span>${srcTxt}</span></div>`;
 }
+const SENS_SOURCE_JA = {file: 'file (設定ファイル)', env: 'env (起動時の環境変数)', default: 'default (どちらも無し = off)'};
+function sensRows(cfg, adv) {
+  const f = (cfg || {}).file || {};
+  const onoff = (v) => (v === '1' || v === true) ? 'on' : 'off';
+  const conf = f.error ? `<span class="badge warn">読めない</span>`
+    : f.value ? `${onoff(f.value)} (${esc(f.path)})` : `未設定 = off (${esc(f.path)} ${f.exists ? 'に鍵なし' : 'なし'})`;
+  const r = (cfg || {}).running;
+  const run = adv.state !== 'ours' ? '- (停止中)' : !r ? '不明 (プロセスの環境変数を読めない)'
+    : `${onoff(r.enabled)}${r.env != null ? ` (TRANSITION_SENSITIVITY=${esc(r.env)})` : ' (環境変数なし = config の既定)'}`;
+  const srcTxt = adv.state !== 'ours' ? '-' : !r ? '不明' : r.source ? esc(SENS_SOURCE_JA[r.source] || r.source)
+    : '記録なし (advice_env.sh を通さない起動)';
+  const mis = cfg && cfg.mismatch;
+  return `<div class="row"><span>transition の感度 (アドバイザー)</span>${mis ? '<span class="badge warn">設定値と実効値が違う (再起動していない)</span>' : '<span></span>'}</div>`
+    + `<div class="row"><span>　設定値 (ファイル)</span><span>${conf}</span></div>`
+    + `<div class="row"><span>　実効値 (稼働中)</span>${mis ? `<span class="badge warn">${run}</span>` : `<span>${run}</span>`}</div>`
+    + `<div class="row"><span>　設定元</span><span>${srcTxt}</span></div>`;
+}
 function render(st) {
   $('clock').textContent = new Date(st.now * 1000).toLocaleTimeString('ja-JP');
   $('warnings').innerHTML = (st.warnings || []).map((w) => `<div class="warnbox">⚠ ${esc(w)}</div>`).join('');
@@ -564,7 +624,8 @@ function render(st) {
   $('procs').innerHTML = svc('アドバイザー', p.advisor) + svc('フロントエンド', p.frontend) + svc('Showdown', p.showdown)
     + `<div class="row"><span>学習ループ</span>${badge(p.training, '稼働中', '停止中')}</div>`
     + `<div class="row"><span>構築の測定 run</span>${badge(!p.measuring, 'なし', '実行中', 'warn')}</div>`
-    + scoringRows(st.scoring, st.scoring_config, p.advisor);
+    + scoringRows(st.scoring, st.scoring_config, p.advisor)
+    + sensRows(st.sensitivity_config, p.advisor);
   $('urls').innerHTML = st.urls.frontend
     ? `フロントエンド: <a href="${st.urls.frontend}" target="_blank">${st.urls.frontend}</a> `
       + `(このMac: <a href="${st.urls.frontend_local}" target="_blank">${st.urls.frontend_local}</a>)`

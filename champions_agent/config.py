@@ -1447,11 +1447,17 @@ TRANSITION_SENSITIVITY_ITEMS = (("scarf", "choicescarf"), ("sash", "focussash"))
 TRANSITION_SENSITIVITY_ENV = "TRANSITION_SENSITIVITY"
 
 
-def _transition_sensitivity_from_env() -> bool:
-    raw = (os.environ.get(TRANSITION_SENSITIVITY_ENV) or "").strip().lower()
-    if not raw:
+def transition_sensitivity_from_value(raw) -> bool:
+    """環境変数 TRANSITION_SENSITIVITY の生の値 → 感度を計算するか (純粋。未設定・空は計算する、0 / false / no / off は計算しない)。
+    操作パネル (稼働中のプロセスの環境変数の表示) も同じ規則で読む"""
+    v = (raw or "").strip().lower()
+    if not v:
         return True
-    return raw not in ("0", "false", "no", "off")
+    return v not in ("0", "false", "no", "off")
+
+
+def _transition_sensitivity_from_env() -> bool:
+    return transition_sensitivity_from_value(os.environ.get(TRANSITION_SENSITIVITY_ENV))
 
 
 TRANSITION_SENSITIVITY_ENABLED = _transition_sensitivity_from_env()

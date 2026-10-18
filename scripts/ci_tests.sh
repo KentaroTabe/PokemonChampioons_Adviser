@@ -166,6 +166,7 @@ TESTS=(
   test_real_accept
   test_display_search_gate
   test_transition_profile
+  test_sensitivity_off
 )
 
 fail=0

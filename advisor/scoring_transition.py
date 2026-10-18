@@ -377,6 +377,11 @@ def _best_id(core: dict) -> Optional[tuple]:
     return (c.kind, c.id)
 
 
+# 感度の仮説を計算しない (該当しない) 理由 (build_inputs の item_alts。予算での省略 "budget" とは別。2026-10-18 記録の区別に使う)
+SENS_ITEM_KNOWN, SENS_NOT_FULL_HP = "item_known", "not_full_hp"
+SENS_NOT_APPLICABLE = (SENS_ITEM_KNOWN, SENS_NOT_FULL_HP)
+
+
 def sensitivity_enabled() -> bool:
     """感度 (楽観側の HP・スカーフ / タスキの有無) を計算するか (config.TRANSITION_SENSITIVITY_ENABLED を呼ぶたびに読む)"""
     return bool(C.TRANSITION_SENSITIVITY_ENABLED)
@@ -889,10 +894,10 @@ def build_inputs(state: dict, resolver, *, my_view: MonView, opp_view: Optional[
         observed = opp_p.get("item_id")
         for name, item in C.TRANSITION_SENSITIVITY_ITEMS:
             if observed or opp_p.get("item_consumed") or opp_p.get("item_removed"):
-                item_alts.append((name, None, "item_known"))
+                item_alts.append((name, None, SENS_ITEM_KNOWN))
                 continue
             if item == "focussash" and opp.active_hp < 1.0 - 1e-6:
-                item_alts.append((name, None, "not_full_hp"))
+                item_alts.append((name, None, SENS_NOT_FULL_HP))
                 continue
             has = opp.active.item == item
             alt_view = _r(opp.active, item=None if has else item)
