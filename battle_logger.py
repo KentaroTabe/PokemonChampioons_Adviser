@@ -117,6 +117,17 @@
   version 行に "display_search" (この server の設定 "on" / "off" = config.ADVICE_DISPLAY_SEARCH。version_id の digest には入れない)
   advice 行 (kind = battle) に "search_skipped" を必ず書く (search_skipped_of): true = 表示用の探索を省略した (択評価・起点注意なし、
     advice.gtheory = null) / false = 実行した / null = 評価できなかった・記録の無い助言
+2026-10-18 transition の感度の実機の既定 off (scripts/advice_env.sh が TRANSITION_SENSITIVITY を export。欄を足すだけ):
+  version 行に "transition_sensitivity" (この server の実効値 true / false = config.TRANSITION_SENSITIVITY_ENABLED)、
+    "transition_sensitivity_source" (file / env / default = advice_env.sh が渡す TRANSITION_SENSITIVITY_SOURCE。通さない起動は
+    環境変数 TRANSITION_SENSITIVITY があれば env、無ければ null = config の既定)、"transition_sensitivity_env" (環境変数の生の値 or null)
+  advice 行 (kind = battle) に "sensitivity_status" と "sensitivity_changed" を必ず書く (sensitivity_fields_of)。
+    sensitivity_status: "disabled" = 感度を計算していない (設定で無効) / "computed" = 該当する仮説を全部計算した /
+    "partial" = 一部を計算し、残りは予算で省略 (または計算に失敗) / "omitted" = 該当する仮説を全部予算で省略 /
+    "failed" = 該当する仮説の計算が全部失敗 (退避の理由で順位が出ない) / "none" = 該当する仮説が無い (持ち物が判明・HP が確定 等) /
+    null = transition で評価していない (legacy・退避・評価できない)。
+    sensitivity_changed: 計算した仮説のどれかで第一候補が変わったら true、計算した仮説で変わらなければ false、計算した仮説が
+    無ければ null (**disabled / omitted / none は null で、「仮説を変えても第一候補は同じ」とは扱わない**)
 """
 from __future__ import annotations
 
@@ -591,6 +602,53 @@ def scoring_mode_banner(info: Optional[dict] = None) -> str:
     return f"採点方式: {i.get('scoring_mode')} ({src})"
 
 
+def transition_sensitivity_info() -> dict:
+    """この server の transition の感度の設定 (version 行に足す。2026-10-18)。実効値は config.TRANSITION_SENSITIVITY_ENABLED"""
+    import os
+    from champions_agent import config as _cfg
+    from tools.advice_mode import SENS_KEY, sens_source_of_env
+    raw = os.environ.get(SENS_KEY)
+    return {"transition_sensitivity": bool(getattr(_cfg, "TRANSITION_SENSITIVITY_ENABLED", True)),
+            "transition_sensitivity_source": sens_source_of_env(os.environ), "transition_sensitivity_env": raw if raw else None}
+
+
+SENS_BUDGET_REASON = "budget"            # advisor.scoring_transition の感度の予算での省略の理由
+
+
+def sensitivity_fields_of(advice: Optional[dict]) -> dict:
+    """battle の advice 行に必ず書く感度の欄 (純粋。2026-10-18)。{"sensitivity_status", "sensitivity_changed"} (値の意味は
+    モジュールの説明)。助言の transition_stats.sens (enabled / run / omitted の理由) と、計算した仮説の changes
+    (transition_stats.sensitivity の各仮説、hp_range.optimistic) から作る。transition_stats.sens が無い (legacy・退避) なら null"""
+    from advisor.scoring_transition import SENS_NOT_APPLICABLE
+    ts = (advice or {}).get("transition_stats") or {}
+    sens = ts.get("sens")
+    if not isinstance(sens, dict):
+        return {"sensitivity_status": None, "sensitivity_changed": None}
+    if not sens.get("enabled"):
+        return {"sensitivity_status": "disabled", "sensitivity_changed": None}
+    run = list(sens.get("run") or [])
+    omitted = dict(sens.get("omitted") or {})
+    budget = [k for k, v in omitted.items() if v == SENS_BUDGET_REASON]
+    failed = [k for k, v in omitted.items() if v != SENS_BUDGET_REASON and v not in SENS_NOT_APPLICABLE]
+    if run:
+        status = "partial" if (budget or failed) else "computed"
+    elif budget:
+        status = "omitted"
+    elif failed:
+        status = "failed"
+    else:
+        status = "none"
+    changed = None
+    if run:
+        hyps = dict(ts.get("sensitivity") or {})
+        opt = (ts.get("hp_range") or {}).get("optimistic")
+        if isinstance(opt, dict):
+            hyps["hp_optimistic"] = opt
+        flags = [bool(h.get("changes")) for k, h in hyps.items() if k in run and isinstance(h, dict) and "changes" in h]
+        changed = any(flags) if flags else None
+    return {"sensitivity_status": status, "sensitivity_changed": changed}
+
+
 def display_search_info() -> dict:
     """この server の表示用の探索の設定 (config.ADVICE_DISPLAY_SEARCH、"on" / "off")。version 行に足す"""
     from champions_agent import config as _cfg
@@ -770,7 +828,8 @@ class BattleLogger:
             self._version = runtime_versions(refresh=True)
             # 採点方式 (2026-10-16 実機の受入): version_id の digest の外に足すだけ
             self._write({"type": "version", **self._version, **scoring_mode_info(),
-                         "scoring_mode_source": scoring_mode_source(), **display_search_info()})
+                         "scoring_mode_source": scoring_mode_source(), **display_search_info(),
+                         **transition_sensitivity_info()})
         except Exception as e:
             print(f"[battle_log] 版の記録に失敗: {e}")
             self._version = None
@@ -1397,6 +1456,11 @@ class BattleLogger:
                 rec.update({"scoring_mode": None, "scoring_used": None, "fallback_reason": None})
             # 表示用の探索を省略したか (2026-10-16。true なら択評価・起点注意なし。欄を足すだけ)
             rec["search_skipped"] = search_skipped_of(advice)
+            # transition の感度の状態 (2026-10-18。計算していない / 計算した / 予算で省略 を区別する。欄を足すだけ)
+            try:
+                rec.update(sensitivity_fields_of(advice))
+            except Exception:
+                rec.update({"sensitivity_status": None, "sensitivity_changed": None})
         if state is not None:
             try:
                 compact = _compact_state(state)

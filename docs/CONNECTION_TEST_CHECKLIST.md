@@ -703,6 +703,30 @@ churn 6→1-2件、選出picked一致、ヒステリシス動作。
 - [ ] 終わったらファイルを `ADVICE_SCORING_MODE=legacy` に戻すか削除して、再起動 (「更新の反映」等) する。
       **戻さないと翌朝の daily-deploy の再起動後も transition のまま動く**。パネルで 設定値 = 実効値 = legacy を確かめる
 
+### transition の感度 (2026-10-18、実機の既定 off)
+
+transition の感度 (楽観側の HP・スカーフ / タスキの有無を入れ替えた仮説での順位。**順位には使わない**) は、実機の起動経路では
+既定で計算しない (遅い局面の処理時間の約半分が感度だったため。計画書 §8.34)。同じ `config/advice.local.env` に
+`TRANSITION_SENSITIVITY` (値 `0` / `1`) を書いて決め、`scripts/advice_env.sh` が uvicorn にだけ
+`TRANSITION_SENSITIVITY` と設定元 `TRANSITION_SENSITIVITY_SOURCE` を渡す (規則は採点方式と同じ):
+
+- ファイルにも環境変数 `TRANSITION_SENSITIVITY` にも無し → `0` (設定元 `default` = 感度を計算しない)。
+  有効に戻すにはファイルに `TRANSITION_SENSITIVITY=1` と書いて再起動する
+- ファイルと環境変数の値が違う、`0` / `1` 以外の値 → **エラーで起動しない**
+- 感度を切っても本採点 (候補・得点・順位・HP の不確かさの悲観側の評価・合法性・退避) は変わらない
+  (`python -m tools.real_accept --compare-sensitivity --target <ログ>` で照合できる)。
+  `champions_agent/config.py` の既定 (計算する) は変えていないので、測定の子プロセス・診断ツールは従来どおり
+
+確かめ方:
+
+- [ ] 操作パネルの「transition の感度 (アドバイザー)」で 設定値・実効値・設定元 を見る (既定は off / off / default)。
+      違えば「設定値と実効値が違う (再起動していない)」と警告バーが出る
+- [ ] 起動ログの `[server] transition の感度: 実効値 off / 設定元 default / 設定値 未設定 = 0 (...)` (⚠ が無いこと)
+- [ ] 対戦ログの version 行の `"transition_sensitivity"` (実効値)・`"transition_sensitivity_source"`。advice 行 (transition のとき)
+      の `"sensitivity_status"` は、`disabled` = 計算していない / `computed` = 計算した / `partial` = 一部を予算で省略 /
+      `omitted` = 全部を予算で省略 / `failed` = 計算に失敗 / `none` = 該当する仮説が無い。`"sensitivity_changed"` は計算した
+      仮説で第一候補が変わったか (計算していなければ null。**disabled を「仮説を変えても同じ」とは読まない**)
+
 ## 1. 追従テスト (今回のメイン): 全操作をアドバイス通りに行う
 
 1決定 = 1テストケースとして扱う。人間の判断を混ぜないことで、
