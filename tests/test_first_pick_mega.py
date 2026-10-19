@@ -2,14 +2,32 @@
 
 3 体組の評価はメガ割当先にメガ後の姿 (matrix_mega) を使うが、初手の行は全員に素の姿 (matrix) を
 使っていた。初手と理由文の対面も 3 体組の評価と同じ割当で引くことを確かめる。
-対面スコアは表で差し替え、相手スロットの重み・相手のメガ候補の混入は中立にして決定的にする。
+
+環境に依存しない (2026-10-19 修正): 本体 (使用率 DB・登録チーム・実戦バンクあり) で、登録のブリジュラスの
+ステルスロックが先発の設置ボーナスに入り、ワークツリー (どれも無し) と結果が変わった。
+advise_selection が読む外部入力は _Isolated で全部固定し、その間の SQLite 接続は記録して 0 件を確かめる:
+  - 対面スコア (_species_matchup_score) … 表
+  - 型予測の技 (_predicted_attack_moves、SetPredictor 経由で DB) … 空 (表で採点するので使わない)
+  - タイプからの種族推測 (get_inference、TypeInference が DB) … 候補なしの代用 (相手は種族判明で呼ばれない)
+  - 相手のメガ候補の混入 (_with_mega_candidates、使用率経由) … そのまま
+  - 実戦バンクの相手スロットの重み (real_prior.slot_weights / species_pick_prior) … 均等・事前分布なし
+  - 登録チーム (my_team.get_my_build / get_my_moves) … 空の登録 (tests.test_advice_m1a._Patch)、
+    加えて登録参照の無効化の環境変数 (MY_TEAM_DISABLED_ENV) を立てる
+  - 自分の特性 (_own_ability、登録・固定特性の表) … None (天候の相乗を入れない)
+  - 設置技持ちの判定 (_own_hazard_setter、画面の技・登録の技) … 個体の "hazard" 指定だけ (既定 False)
+  - 登録技 (_own_registered_moves) … 空 (use_registered=False でも呼ばれない側を固定)
 
     python -m tests.test_first_pick_mega
 """
 from __future__ import annotations
 
+import os
+import sqlite3
+
 import advisor.real_prior as RP
 import advisor.selection as S
+from champions_agent.config import MY_TEAM_DISABLED_ENV
+from tests.test_advice_m1a import _Patch
 
 
 def _mon(species_id, species_ja, item_id=None):
@@ -25,20 +43,67 @@ def _opp(species_id, species_ja):
 OPPS = [_opp("corviknight", "アーマーガア"), _opp("kingambit", "ドドゲザン")]
 
 
+class _NoInference:
+    """TypeInference の代用 (DB を読まない)。候補なし"""
+
+    def candidates(self, _types_ja, *a, **kw):
+        return []
+
+
+class _Isolated:
+    """advise_selection の外部入力を固定する (テストの間だけ)。table: {(自分の種族ID, 相手の種族ID): score}、表に無い対面は 0。
+    SQLite の接続は開かせずに記録する (self.db_calls。0 件であることを呼び出し側で確かめる)"""
+
+    def __init__(self, table):
+        self.table = table
+        self.db_calls = []
+
+    def __enter__(self):
+        table = self.table
+        self.patches = [
+            (S, "_species_matchup_score", lambda mv, _mm, cv, _cm: table.get((mv.species_id, cv.species_id), 0.0)),
+            (S, "_predicted_attack_moves", lambda _sid, limit=6: []),
+            (S, "get_inference", lambda: _NoInference()),
+            (S, "_with_mega_candidates", lambda cands, _p, _s: cands),
+            (S, "_own_ability", lambda _p, _sid, is_mega=False, item_id="": None),
+            (S, "_own_hazard_setter", lambda p: bool(p.get("hazard"))),
+            (S, "_own_registered_moves", lambda _ja: []),
+            (RP, "slot_weights", lambda priors: [1.0] * len(priors)),
+            (RP, "species_pick_prior", lambda _sid: None),
+            (sqlite3, "connect", self._no_db),
+        ]
+        self.saved = [(obj, name, getattr(obj, name)) for obj, name, _ in self.patches]
+        for obj, name, value in self.patches:
+            setattr(obj, name, value)
+        self.env = os.environ.get(MY_TEAM_DISABLED_ENV)
+        os.environ[MY_TEAM_DISABLED_ENV] = "1"
+        self.team = _Patch(builds={}, moves={})
+        self.team.__enter__()
+        return self
+
+    def _no_db(self, database, *a, **kw):
+        self.db_calls.append(str(database))
+        raise sqlite3.OperationalError("test_first_pick_mega: DB は読まない")
+
+    def __exit__(self, *a):
+        self.team.__exit__(*a)
+        if self.env is None:
+            os.environ.pop(MY_TEAM_DISABLED_ENV, None)
+        else:
+            os.environ[MY_TEAM_DISABLED_ENV] = self.env
+        for obj, name, value in self.saved:
+            setattr(obj, name, value)
+
+
 def _run(party, table, opps=None):
-    """表 {(自分の種族ID, 相手の種族ID): score} で対面スコアを差し替えて advise_selection を回す。表に無い対面は 0"""
-    saved = (S._species_matchup_score, S._with_mega_candidates, RP.slot_weights, RP.species_pick_prior)
-    S._species_matchup_score = lambda mv, _mm, cv, _cm: table.get((mv.species_id, cv.species_id), 0.0)
-    S._with_mega_candidates = lambda cands, _p, _s: cands
-    RP.slot_weights = lambda priors: [1.0] * len(priors)
-    RP.species_pick_prior = lambda sid: None
-    try:
-        state = {"selection_picked": 0,
-                 "player": {"party": party},
-                 "opponent": {"party": opps or OPPS}}
-        return S.advise_selection(state, use_registered=False)
-    finally:
-        S._species_matchup_score, S._with_mega_candidates, RP.slot_weights, RP.species_pick_prior = saved
+    """外部入力を固定して advise_selection を回す (登録は使わない)。DB への接続が 1 件でもあれば失敗"""
+    state = {"selection_picked": 0,
+             "player": {"party": party},
+             "opponent": {"party": opps or OPPS}}
+    with _Isolated(table) as iso:
+        advice = S.advise_selection(state, use_registered=False)
+    assert iso.db_calls == [], iso.db_calls
+    return advice
 
 
 def _both(score):
@@ -147,9 +212,33 @@ def test_unknown_mega_form_falls_back():
     print("test_unknown_mega_form_falls_back OK")
 
 
+def test_environment_inputs_ignored():
+    """本体で落ちた経路の再現: 登録にブリジュラスのステルスロック (と全員にあめふらし) がある環境でも、
+    _Isolated の下では登録を読まず、(a) と同じ結果になる。登録参照の無効化の環境変数も外した状態で確かめる"""
+    import advisor.my_team as MT
+    hostile = {ja: {"技": ["ステルスロック"], "特性": "あめふらし"}
+               for ja in ("ラグラージ", "ミミッキュ", "ブリジュラス", "ロトム", "カイリュー", "メタグロス")}
+    saved = (MT._load, MT._load_file, os.environ.get(MY_TEAM_DISABLED_ENV))
+    MT._load = MT._load_file = lambda: hostile
+    os.environ.pop(MY_TEAM_DISABLED_ENV, None)
+    try:
+        # 固定しなければ登録の技で設置役と判定される (本体での失敗の原因)
+        assert S._own_hazard_setter(_mon("duraludon", "ブリジュラス")) is True
+        advice = _run(_party_swap("leftovers"), _table(ROWS_SWAP))
+    finally:
+        MT._load, MT._load_file = saved[0], saved[1]
+        if saved[2] is not None:
+            os.environ[MY_TEAM_DISABLED_ENV] = saved[2]
+    assert _lead(advice) == "ミミッキュ", advice["recommend"]
+    assert _picks(advice) == sorted(["ミミッキュ", "ブリジュラス", "ロトム"]), advice["recommend"]
+    assert advice["synergy"] is None, advice["synergy"]
+    print("test_environment_inputs_ignored OK")
+
+
 if __name__ == "__main__":
     test_non_mega_unchanged()
     test_lead_uses_mega_row_for_assignee()
     test_only_assignee_uses_mega_row()
     test_unknown_mega_form_falls_back()
+    test_environment_inputs_ignored()
     print("ALL OK")
