@@ -1538,3 +1538,17 @@ REAL_ACCEPT_PROFILE_TOP = 30
 TRANSITION_PROFILE_REPEAT = 3
 TRANSITION_PROFILE_TOP = 10
 TRANSITION_PROFILE_SENS_DOMINANT_SHARE = 0.5
+
+# 対戦の助言の再計算 (server.py、advice_key.py。2026-10-19 レビュー: 再計算の鍵の不足)。
+# ADVICE_KEY_VERSION: 再計算の鍵の版 (起動ログに出す)。1 = 旧鍵 (場面・自分の場の個体の種族/HP%/PP・相手の場の個体の種族/HP%・
+#   場・両者の能力変化だけ)。2 = 採点の入力の鍵 (両者の全個体の種族・形態・HP の値と不確かさ・状態・持ち物 (確定/消費/喪失)・特性・
+#   技と PP・技の固定・対応待ち・選出の印、両陣営の設置/壁/おいかぜ/残数、場、メガ使用、ターン、直前の技、採点の設定、データの版)
+# ADVICE_RECALC_TTL_SEC: 鍵が同じでも前回の計算結果をこの秒数を超えて使わない (旧: server.py の 10.0 を定数化。値は同じ)
+# ADVICE_RECALC_FALLBACK_TTL_SEC: 退避 (scoring_fallback あり。予算超過など) した結果と評価エラーの有効期限。予算超過は処理の
+#   混み具合で変わるので、無期限 (鍵が変わるまで) に持たず短い間隔で計算し直す
+# ADVICE_KEY_HP_AGE_GRAIN_SEC: 場の個体の HP の観測からの経過時間を鍵に入れる粒度 (秒)。transition の HP の範囲は経過時間で
+#   下限が下がる (advisor.scoring_transition.hp_range_of、HP_RANGE_STALE_SEC 超)。経過時間がこの粒度を跨いだら計算し直す
+ADVICE_KEY_VERSION = 2
+ADVICE_RECALC_TTL_SEC = 10.0
+ADVICE_RECALC_FALLBACK_TTL_SEC = 2.0
+ADVICE_KEY_HP_AGE_GRAIN_SEC = 5.0

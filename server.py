@@ -32,8 +32,10 @@ from vision.stale_notice import advice_target, stale_advice_notice
 from vision.state import (HP_REJECT_COUNTS, MANUAL_REASON_OUT_OF_RANGE, apply_manual_species,
                           apply_manual_species_unplaced, format_hp_reject_counts)
 from vision.frame_burst import BurstPlanner
-from champions_agent.config import (CLIENT_HELLO_WAIT_SEC, DISPLAY_HIDDEN_WARN_COUNT, FRAME_BURST_DIR,
+from champions_agent.config import (ADVICE_KEY_HP_AGE_GRAIN_SEC, ADVICE_KEY_VERSION, ADVICE_RECALC_FALLBACK_TTL_SEC,
+                                    ADVICE_RECALC_TTL_SEC, CLIENT_HELLO_WAIT_SEC, DISPLAY_HIDDEN_WARN_COUNT, FRAME_BURST_DIR,
                                     MANUAL_SPECIES_RESOLVE_CUTOFF, PARTY_SIZE, SHADOW_VARIANTS_ENABLED)
+from advice_key import AdviceCache, DataVersions, advice_input_key, advise_cached, scoring_settings
 from client_state import (VIS_HIDDEN, VIS_VISIBLE, ClientRegistry, HiddenDisplayWatch, served_html_version, short_sid,
                           stale_of)
 
@@ -156,6 +158,14 @@ _pending_frame = None      # 処理中に届いた最新フレーム (sid, data)
 _last_state_json = ""
 _last_advice_time = 0.0
 _last_advice_key = ""
+# 対戦の助言の採点結果のキャッシュと再計算の鍵の材料 (advice_key。2026-10-19): 鍵 (採点の入力) が変わるか有効期限を超えたら採点し直す。
+# 据え置き・安定化ゲート・表示・記録はキャッシュを使ったときも毎回通す
+_advice_cache = AdviceCache()
+_data_versions = DataVersions()
+_advice_recheck = False   # 確定前 (provisional) の助言を出した: 次フレームで鍵が同じでも安定化ゲートを通し直す
+print(f"[server] 助言の再計算の鍵: 版 {ADVICE_KEY_VERSION} (版 1 は場面・場の個体の種族/HP%/PP・場・能力変化だけ。版 2 は採点の入力全体: "
+      f"全個体の持ち物/特性/対応待ち/技の固定/HP の不確かさ/消費、採点の設定、データの版)、有効期限 {ADVICE_RECALC_TTL_SEC:g} 秒 "
+      f"(退避・評価エラーは {ADVICE_RECALC_FALLBACK_TTL_SEC:g} 秒)、場の HP の経過時間の粒度 {ADVICE_KEY_HP_AGE_GRAIN_SEC:g} 秒")
 _last_dump_time = 0.0
 _last_scene_log = 0.0
 _last_scene = "unknown"
@@ -225,20 +235,9 @@ def _dump_raw_async(data: str, burst_id: str, ts: float) -> None:
     _dump_pool.submit(_write, data, BURST_DIR / burst_id / f"{int(ts * 1000)}.jpg")
 
 
-def _advice_key(state: dict) -> str:
-    """アドバイス再計算が必要かどうかの判定キー"""
-    try:
-        me = state["player"]["party"][state["player"]["active_index"]]
-        opp_idx = state["opponent"]["active_index"]
-        opp = state["opponent"]["party"][opp_idx] if opp_idx is not None else {}
-        return json.dumps([
-            state["scene"], me.get("species_id"), me.get("hp_percent"),
-            [m.get("pp") for m in me.get("moves", [])],
-            opp.get("species_id"), opp.get("hp_percent"),
-            state["field"], me.get("boosts"), opp.get("boosts"),
-        ], ensure_ascii=False)
-    except Exception:
-        return ""
+def _advice_key(state: dict, now: float) -> str:
+    """対戦の助言の再計算の鍵 (advice_key.advice_input_key に 採点の設定とデータの版を渡す。2026-10-19 版 2)"""
+    return advice_input_key(state, now, scoring_settings(), _data_versions.current())
 
 
 @sio.on('connect')
@@ -386,7 +385,7 @@ async def _handle_one_frame(sid, data):
     global processed_counter
     global _last_state_json, _last_advice_time, _last_advice_key
     global _last_dump_time, _last_scene_log
-    global _last_advice_target, _stale_notified, _end_notice_seq
+    global _last_advice_target, _stale_notified, _end_notice_seq, _advice_recheck
     try:
         encoded_data = data.split(',')[1]
         nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
@@ -534,18 +533,17 @@ async def _handle_one_frame(sid, data):
         # 3体目のひんしの確定) は出さない: リザルト画面が move_select に誤分類され、終わった対戦に助言が出ていた (第15回)
         if state["scene"] in ("command", "move_select", "watch") \
                 and not state.get("battle_ended") and not state.get("outcome"):
-            key = _advice_key(state)
             now = time.time()
-            if key and (key != _last_advice_key or now - _last_advice_time > 10.0):
+            key = _advice_key(state, now)
+            if key and (_advice_cache.needs_recalc(key, now) or _advice_recheck):
                 _last_advice_key = key
                 _last_advice_time = now
                 _t_adv = time.time()
-                if _shadow is None:
-                    advice = await loop.run_in_executor(None, advisor.advise, state)
-                else:
-                    advice = await loop.run_in_executor(
-                        None, lambda: advisor.advise(state, keep_common=True))
-                _advise_ms.append((time.time() - _t_adv) * 1000.0)
+                # 採点は鍵が変わったか有効期限を超えたときだけ (advice_key.advise_cached)。据え置き・安定化ゲートは毎回通す
+                advice, evaluated = await loop.run_in_executor(
+                    None, lambda: advise_cached(advisor, state, _advice_cache, key, now, keep_common=_shadow is not None))
+                if evaluated:
+                    _advise_ms.append((time.time() - _t_adv) * 1000.0)
                 _last_advice_target = advice_target(state, advice)
                 _stale_notified = False
                 advice["text"] = advisor.format_advice(advice)
@@ -555,14 +553,16 @@ async def _handle_one_frame(sid, data):
                     # 表示の後に投入する (表示を待たせない)。計算はワーカーのスレッドで行う
                     _submit_shadow(loop, state, advice)
                 if advice.get("provisional"):
-                    # 確定前: 次フレームで即再計算して安定を確認する
-                    # (キーを消さないと状態が動くまで10秒待ちになる)
-                    _last_advice_key = None
-                elif advice.get("ok"):
-                    print("--- アドバイス ---")
-                    print(advice["text"])
+                    # 確定前: 次フレームで安定化ゲートを通し直して安定を確認する (鍵が同じならキャッシュの採点結果を使う。
+                    # 通し直さないと状態が動くか有効期限を超えるまで確定しない)
+                    _advice_recheck = True
                 else:
-                    print(f"[server] アドバイス保留: {advice.get('reason')}")
+                    _advice_recheck = False
+                    if advice.get("ok"):
+                        print("--- アドバイス ---")
+                        print(advice["text"])
+                    else:
+                        print(f"[server] アドバイス保留: {advice.get('reason')}")
 
         # 場のポケモンが助言の対象と変わったのに新しい決定画面を取れていない間 (処理落ちで command を取りこぼす等)、
         # 前の個体向けの助言が表示に残る (2026-09-29 第16回: こだわりスカーフのサザンドラに交代したあと、アシレーヌ向けの
