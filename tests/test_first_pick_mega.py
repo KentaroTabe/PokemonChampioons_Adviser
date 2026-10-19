@@ -8,6 +8,9 @@
 advise_selection が読む外部入力は _Isolated で全部固定し、その間の SQLite 接続は記録して 0 件を確かめる:
   - 対面スコア (_species_matchup_score) … 表
   - 型予測の技 (_predicted_attack_moves、SetPredictor 経由で DB) … 空 (表で採点するので使わない)
+  - 自分の攻撃プロファイル (_my_attack_profile、SetPredictor.predict → _connect で DB) … 空
+    (タイプ相性の退避にだけ使う。表で採点するので使わない)。DB ファイルがあると選出の入口で毎回開いていた
+  - 型予測そのもの (selection.get_predictor) … 予測なしの代用 (上 2 つ以外の経路が増えても DB に届かない)
   - タイプからの種族推測 (get_inference、TypeInference が DB) … 候補なしの代用 (相手は種族判明で呼ばれない)
   - 相手のメガ候補の混入 (_with_mega_candidates、使用率経由) … そのまま
   - 実戦バンクの相手スロットの重み (real_prior.slot_weights / species_pick_prior) … 均等・事前分布なし
@@ -23,6 +26,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import traceback
 
 import advisor.real_prior as RP
 import advisor.selection as S
@@ -50,6 +54,13 @@ class _NoInference:
         return []
 
 
+class _NoPredictor:
+    """SetPredictor の代用 (DB を読まない)。予測技なし"""
+
+    def predict(self, _sid, *a, **kw):
+        return {"moves": [], "items": [], "abilities": [], "spreads": []}
+
+
 class _Isolated:
     """advise_selection の外部入力を固定する (テストの間だけ)。table: {(自分の種族ID, 相手の種族ID): score}、表に無い対面は 0。
     SQLite の接続は開かせずに記録する (self.db_calls。0 件であることを呼び出し側で確かめる)"""
@@ -63,6 +74,8 @@ class _Isolated:
         self.patches = [
             (S, "_species_matchup_score", lambda mv, _mm, cv, _cm: table.get((mv.species_id, cv.species_id), 0.0)),
             (S, "_predicted_attack_moves", lambda _sid, limit=6: []),
+            (S, "_my_attack_profile", lambda _sid: []),
+            (S, "get_predictor", lambda: _NoPredictor()),
             (S, "get_inference", lambda: _NoInference()),
             (S, "_with_mega_candidates", lambda cands, _p, _s: cands),
             (S, "_own_ability", lambda _p, _sid, is_mega=False, item_id="": None),
@@ -82,7 +95,8 @@ class _Isolated:
         return self
 
     def _no_db(self, database, *a, **kw):
-        self.db_calls.append(str(database))
+        # 呼び出し元のスタックも残す (呼び出し側が例外を握りつぶして続行するため、どこから開いたかを assert で示す)
+        self.db_calls.append(f"{database}\n" + "".join(traceback.format_stack(limit=8)[:-1]))
         raise sqlite3.OperationalError("test_first_pick_mega: DB は読まない")
 
     def __exit__(self, *a):
@@ -102,7 +116,7 @@ def _run(party, table, opps=None):
              "opponent": {"party": opps or OPPS}}
     with _Isolated(table) as iso:
         advice = S.advise_selection(state, use_registered=False)
-    assert iso.db_calls == [], iso.db_calls
+    assert iso.db_calls == [], "DB を開こうとした:\n" + "\n".join(iso.db_calls)
     return advice
 
 
