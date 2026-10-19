@@ -128,6 +128,14 @@
     null = transition で評価していない (legacy・退避・評価できない)。
     sensitivity_changed: 計算した仮説のどれかで第一候補が変わったら true、計算した仮説で変わらなければ false、計算した仮説が
     無ければ null (**disabled / omitted / none は null で、「仮説を変えても第一候補は同じ」とは扱わない**)
+2026-10-19 助言の行の簡約状態の版 (レビュー 2026-10-19 §1。欄と版を足すだけ。既存の欄の意味は変えない。旧版の行も読める):
+  advice 行の state に "state_schema": 2 (無い行は版 1) と、採点に使う欄 (compact_state: HP の不確かさと観測時刻・消費済み /
+    失った持ち物・技の固定と揮発状態・直前の技・ターン・交代技の後の繰り出し待ち・推定 / 対応待ちの印 (真偽を必ず書く)・
+    対応待ちの帰属 (pending_hint・t_first_seen)・技の相性の表示と最大 PP (move_meta))。state_id は版 2 の state の digest
+    (scene 行の state と server の影の比較の state_id は版 1 の _compact_state のまま)。
+  advice 行に "t_now" (evaluate に渡した state の now。実機の server は渡さないので null) と "data_version"
+    ({"usage_snapshot", "dex_sha256", "effects_sha256"}、data_version_of) を必ず書く。
+  move_locks は版 2 でも従来どおり書く (版 1 の読み手のため)。復元は tools.advice_replay.compact_to_engine_state
 """
 from __future__ import annotations
 
@@ -518,6 +526,90 @@ def _compact_state(state: dict) -> dict:
         },
         "mega_used": state.get("mega_used"),
     }
+
+
+# ------------------------------------------------------------------ 助言の行の簡約状態の版 (2026-10-19 レビュー)
+# 版 1 = _compact_state (欄の無い行は版 1)。版 2 = 版 1 + 採点に使う欄 (下記)。advice 行の state だけが版 2 で、scene 行
+# (scene_row_state) と server の影の比較の state_id (server.py が _compact_state から作る) は版 1 の形のまま
+STATE_SCHEMA_VERSION = 2
+STATE_SCHEMA_V1 = 1
+# 版 2 で個体に足す欄 (vision.state.PokemonState / state.to_dict と同じ名前、同じ値)。記録できなければ null:
+#   HP の不確かさと観測時刻 / 消費済み・失った持ち物 / 持ち物・特性の日本語名 (id に解決できなかった手入力・メガ石の判定) /
+#   技の固定と揮発状態 (アンコール・ちょうはつ・かなしばり・みがわり 等の volatiles、encore_move、残りターン、場に出たターン) /
+#   タイプ変化の印 / 場に出た・選出順 (交代候補の判定) / 表示名 / 対応待ちになった時刻 / 選べる技 (シミュレータの状態だけにある)
+MON_V2_FIELDS = ("hp_uncertain", "hp_estimated", "hp_source", "hp_read_ts", "item_consumed", "item_removed", "item_ja",
+                 "ability_ja", "volatiles", "encore_move", "volatile_turns", "entry_turn", "type_changed", "is_active",
+                 "pick_order", "display_name", "t_first_seen", "legal_move_ids")
+# 版 2 の個体の欄で、版 1 では True のときだけ書いた印 (版 2 は真偽を必ず書く。state に欄が無ければ null): guess (= species_guess、
+# 選出画面の推定)、pending (対応待ち)。candidates (形態の候補) は版 2 では必ず書く (空なら [])。pending_hint (対応待ちの候補の枠 = 帰属) と
+# move_meta ([[max_pp, effectiveness], ...]。moves と同じ並び) も版 2 で足す
+MON_V2_EXTRA = ("guess", "pending", "candidates", "pending_hint", "move_meta")
+# 版 2 で全体に足す欄: ターン・直前の技 (こだわり・アンコールの対象)・交代技の後の繰り出し待ち・まもる の連続回数 (RL の入力)・
+# 交代技の後に相手が行動済みか (シミュレータの状態だけにある)
+STATE_V2_FIELDS = ("turn", "last_move", "pending_pivot_switch", "protect_streak", "pivot_opp_acted")
+# 版 2 で陣営に足す欄 (シミュレータの状態だけにある: 選出数・今交代できる個体)
+SIDE_V2_FIELDS = ("team_size", "legal_switch_indices")
+# 観測で確定した情報と推定の区別 (state の既存の表現): 個体の item / ability / revealed / moves は観測 (自分側は登録) の値だけで、
+# 使用率からの推定は state に入らない (advisor が助言のたびに DB から作る。版は advice 行の data_version)。推定の印は
+# guess・candidates・pending・hp_estimated・hp_uncertain・hp_source。新しい欄は足さない
+
+
+def _plain(v):
+    """JSON に書ける形のコピー (list / dict は複製、ほかはそのまま)"""
+    if isinstance(v, dict):
+        return {k: _plain(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_plain(x) for x in v]
+    return v
+
+
+def _mon_v2_fields(p: dict) -> dict:
+    """個体の版 2 の欄 (純粋)。p = state.to_dict の個体"""
+    out = {k: _plain(p.get(k)) for k in MON_V2_FIELDS}
+    # 推定・対応待ちの印と形態の候補: state に欄があれば真偽 / 列を必ず書く (欄の無い state は null = 不明。False にしない)
+    out["guess"] = None if p.get("species_guess") is None else bool(p.get("species_guess"))
+    out["pending"] = None if p.get("pending") is None else bool(p.get("pending"))
+    out["candidates"] = None if p.get("species_candidates") is None else list(p.get("species_candidates") or [])
+    out["pending_hint"] = _plain(p.get("pending_hint")) if p.get("pending_hint") is not None else None
+    out["move_meta"] = [[(m or {}).get("max_pp"), (m or {}).get("effectiveness")] for m in (p.get("moves") or [])]
+    return out
+
+
+def compact_state(state: dict) -> dict:
+    """advice 行の簡約状態 (純粋。2026-10-19 版 2): _compact_state (版 1) + "state_schema": 2 + 採点に使う欄 (MON_V2_FIELDS /
+    MON_V2_EXTRA / STATE_V2_FIELDS / SIDE_V2_FIELDS)。復元は tools.advice_replay.compact_to_engine_state (対になる処理)"""
+    d = _compact_state(state)
+    d["state_schema"] = STATE_SCHEMA_VERSION
+    for k in STATE_V2_FIELDS:
+        d[k] = _plain(state.get(k))
+    for side in ("player", "opponent"):
+        sd = state.get(side) or {}
+        for k in SIDE_V2_FIELDS:
+            d[side][k] = _plain(sd.get(k))
+        for row, p in zip(d[side]["party"], sd.get("party") or []):
+            row.update(_mon_v2_fields(p))
+    return d
+
+
+def state_schema_of(compact: Optional[dict]) -> int:
+    """簡約状態の版 (純粋)。state_schema の無い行は版 1"""
+    v = (compact or {}).get("state_schema")
+    return v if isinstance(v, int) and not isinstance(v, bool) and v >= 1 else STATE_SCHEMA_V1
+
+
+def data_version_of(version: Optional[dict]) -> dict:
+    """advice 行の data_version (2026-10-19): 助言が参照したデータの版の鍵。usage_snapshot = 使用率 DB の snapshot id
+    (advisor.sets の SetPredictor が最初の接続で選んだ id。まだ接続していなければ null。この関数は接続しない)、
+    dex_sha256 / effects_sha256 = 図鑑・技効果表 (version 行の rules と同じ値。version 行が無ければ null)"""
+    snap = None
+    try:
+        import advisor.sets as _sets
+        p = getattr(_sets, "_predictor", None)
+        snap = getattr(p, "_snapshot_id", None) if p is not None else None
+    except Exception:
+        snap = None
+    rules = (version or {}).get("rules") or {}
+    return {"usage_snapshot": snap, "dex_sha256": rules.get("dex_sha256"), "effects_sha256": rules.get("effects_sha256")}
 
 
 def scene_row_state(state: dict) -> dict:
@@ -1463,12 +1555,20 @@ class BattleLogger:
                 rec.update({"sensitivity_status": None, "sensitivity_changed": None})
         if state is not None:
             try:
-                compact = _compact_state(state)
+                # 版 2 の簡約状態 (2026-10-19)。state_id はこの state の digest (版 2 の欄も含む)
+                compact = compact_state(state)
                 rec["state"] = compact
                 rec["state_id"] = state_digest(compact)
                 rec["turn"] = state.get("turn")
             except Exception:
                 pass
+        # evaluate に渡した state の now (無ければ null = 評価時の時計。再生は t_now → advice.t_gen → t の順に使う) と
+        # 参照したデータの版 (2026-10-19。欄を足すだけ)
+        rec["t_now"] = (state or {}).get("now")
+        try:
+            rec["data_version"] = data_version_of(self._version)
+        except Exception:
+            rec["data_version"] = None
         try:
             from advisor.versions import rl_loaded_now
             mp = (advice.get("model_pick") or {}) if kind == "selection" else {}
