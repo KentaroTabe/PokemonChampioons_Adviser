@@ -534,6 +534,9 @@ async def _handle_one_frame(sid, data):
         if state["scene"] in ("command", "move_select", "watch") \
                 and not state.get("battle_ended") and not state.get("outcome"):
             now = time.time()
+            # 評価時刻を state に渡す (2026-10-19 版 2 スキーマ: advice 行の t_now と、transition の HP 範囲の経過時間の基準。
+            # 鍵の材料 (advice_key.STATE_KEY_FIELDS) には含まれない)
+            state["now"] = now
             key = _advice_key(state, now)
             if key and (_advice_cache.needs_recalc(key, now) or _advice_recheck):
                 _last_advice_key = key
