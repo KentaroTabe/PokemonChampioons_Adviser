@@ -65,6 +65,13 @@ tests/test_real_accept.py でテストする。--compare-search の純粋な部�
 summarize_search_compare / render_search_compare_markdown) は tests/test_display_search_gate.py でテストする。
 --compare-sensitivity の純粋な部分 (q_signature / compare_sensitivity_pair / summarize_sensitivity_compare /
 render_sensitivity_compare_markdown) は tests/test_sensitivity_off.py でテストする。
+
+2026-10-19 状態の保存・復元 (レビュー 2026-10-19 §1。battle_logger.compact_state の版 2 と tools.advice_replay の対の復元):
+  - 再生の入力は advice 行 1 行だけから作る (_engine_state。後の行・scene 行から補わない)。state.now = t_now → t_gen → t
+  - 版 2 の行は対応待ち・推定・HP の不確かさと観測時刻・消費済み持ち物・技の固定・直前の技も戻す。技の固定の照合 (check_best) は
+    move_locks が無くても版 2 の state から作る (move_locks_for_check)
+  - 版 1 の行 (state_schema の無い行) は、照合できない項目 (RESTORE_UNKNOWN_LABELS) を unconfirmed に、checks の
+    state_restore を unknown に数える (= 正しさは 判定不能 (照合できた範囲で違反 0) より良くならない)。ログごとの版の行数を表に出す
 """
 from __future__ import annotations
 
@@ -81,7 +88,8 @@ from champions_agent.config import (
     ADVICE_SCORING_MODES, REAL_ACCEPT_DISPLAY_DEADLINE_SEC, REAL_ACCEPT_DISPLAY_IN_TIME_MIN, REAL_ACCEPT_FALLBACK_ALL_MAX,
     REAL_ACCEPT_FALLBACK_BUDGET_MAX, REAL_ACCEPT_LATENCY_DELTA_SEC, REAL_ACCEPT_LATENCY_P95_SEC, REAL_ACCEPT_PROFILE_TOP,
     REAL_ACCEPT_STALE_HP_SEC, REAL_ACCEPT_VIOLATIONS_MAX)
-from tools.advice_replay import DECISION_GAP_SEC
+from tools.advice_replay import (DECISION_GAP_SEC, RESTORE_UNKNOWN_LABELS, move_locks_for_check, replay_now,
+                                 restore_unknowns)
 from tools.decision_audit import _display_index
 from tools.shadow_load_check import percentiles
 
@@ -130,6 +138,8 @@ UNCONFIRMED_LABELS = {
     "selection_unknown": "選出が分からない (未選出の照合なし)",
     "lock_unknown": "技の固定の対象の技が分からない",
     "no_position_key": "助言に場の個体の鍵 (position_key) が無い",
+    # 状態の復元で照合できない項目 (2026-10-19: 版 1 の advice 行の state。tools.advice_replay.restore_unknowns)
+    **RESTORE_UNKNOWN_LABELS,
 }
 # 検査ごとの照合の結果 (成功 ok / 違反 ng / 判定不能 unknown。第一候補の種類に関係しない検査は None で数えない)
 CHECK_LABELS = {
@@ -139,6 +149,7 @@ CHECK_LABELS = {
     "switch_party": "交代先が party にある", "switch_form": "交代先の形態", "switch_self": "交代先が場の個体でない",
     "switch_fainted": "交代先がひんしでない", "switch_picked": "交代先が選出済み", "candidate_picked": "候補の交代先が選出済み",
     "active_identity": "場の個体の一致 (個体・メガ形態)",
+    "state_restore": "状態の復元 (版 2 の欄をすべて戻せたか。版 1 の行は判定不能)",
 }
 CHECK_RESULTS = ("ok", "ng", "unknown")
 STALE_LABELS = {"hp_stale": "場の HP の読みが古い (hp_stale > REAL_ACCEPT_STALE_HP_SEC)",
@@ -861,8 +872,8 @@ def render_markdown(result: dict) -> str:
                               "事前に固定していない (--logs / --log で選んだログ。遅延の判定はその旨を注記)"))
         for mode, cons in (tg.get("by_mode") or {}).items():
             L.append(f"- 版・設定の照合 ({mode_label(mode)}): " + ("一致" if cons["ok"] else "揃わない (" + "; ".join(cons["notes"]) + ")"))
-    L += ["", "| ログ | advice 行 | 決定点 | decision 行 | 使った方式 (advice 行) | move_locks | version_id | served_commit | "
-              "scoring_mode (version 行) |", "|---|---|---|---|---|---|---|---|---|"]
+    L += ["", "| ログ | advice 行 | 決定点 | decision 行 | 使った方式 (advice 行) | move_locks | state の版 | version_id | "
+              "served_commit | scoring_mode (version 行) |", "|---|---|---|---|---|---|---|---|---|---|"]
     for lg in c["logs"]:
         modes = ", ".join(f"{k} {v}" for k, v in lg["modes_used"].items()) or "-"
         v = lg.get("versions") or {}
@@ -871,7 +882,9 @@ def render_markdown(result: dict) -> str:
             return ", ".join(str(x)[:n] for x in xs) if xs else "記録なし"
         sc = j(v.get("served_commit") or [], 10) + (" (client 行)" if v.get("served_commit_source") == "client" else "")
         L.append(f"| {lg['name']} | {lg['n_advice_rows']} | {lg['n_decisions']} | {lg['n_decision_rows']} | {modes} | "
-                 f"{'あり' if lg['has_move_locks'] else 'なし'} | {j(v.get('version_id') or [])} | {sc} | "
+                 f"{'あり' if lg['has_move_locks'] else 'なし'} | "
+                 f"{', '.join(f'{k} {n}' for k, n in sorted((lg.get('state_schemas') or {}).items())) or '-'} | "
+                 f"{j(v.get('version_id') or [])} | {sc} | "
                  f"{j(v.get('scoring_mode') or [])} |")
     L += ["", "## 受入条件との照合", "", "| 項目 | 方式 | 値 | 基準 | 判定 | 注記 |", "|---|---|---|---|---|---|"]
     for r in result["acceptance"]:
@@ -1225,6 +1238,16 @@ def render_sensitivity_compare_markdown(result: dict) -> str:
 
 
 # ------------------------------------------------------------------ 副作用あり: 読み込み・再生・出力
+def state_schema_counts(rows: list) -> dict:
+    """advice 行の state の版ごとの行数 (純粋)。{"v1": n, "v2": m}"""
+    from battle_logger import state_schema_of
+    out: dict = {}
+    for r in rows:
+        k = f"v{state_schema_of(r.get('state'))}"
+        out[k] = out.get(k, 0) + 1
+    return out
+
+
 def load_records(path: Path) -> list:
     out = []
     for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
@@ -1274,12 +1297,22 @@ def _checker_kwargs() -> dict:
 
 
 def _engine_state(row: dict, resolver) -> dict:
+    """advice 行 1 行だけから再生の入力を作る (同じ対戦の後の行・scene 行からは補わない = 後から判明した情報を混ぜない)。
+    now = その行の t_now → t_gen → t (replay_now。現在の時計は使わない)"""
     from tools.advice_replay import compact_to_engine_state
     c = row["state"]
     st = compact_to_engine_state(c, resolver, row.get("move_locks"))
     st["scene"] = c.get("scene")
-    st.setdefault("turn", row.get("turn"))
+    if st.get("turn") is None:
+        st["turn"] = row.get("turn")
+    st["now"] = replay_now(row)
     return st
+
+
+def restore_check(row: dict) -> tuple:
+    """状態の復元の照合 (純粋): (unconfirmed に足す鍵の列, checks["state_restore"] の値 ok / unknown)"""
+    ru = restore_unknowns(row)
+    return ru, ("unknown" if ru else "ok")
 
 
 def _registered_ids(state: dict, resolver) -> list:
@@ -1400,7 +1433,7 @@ def run_compare_search(logs: list, out_dir: Optional[Path], gap_sec: float, targ
                         x["sig"] = rank_signature(adv)
                         x["search_skipped"] = adv.get("search_skipped")
                         if adv.get("ok"):
-                            chk = check_best(adv, compact, row.get("move_locks"), reg, detail=True, **ck)
+                            chk = check_best(adv, compact, move_locks_for_check(row), reg, detail=True, **ck)
                             x["violations"], x["checks"] = chk["violations"], chk["checks"]
                     m[stt] = x
                 m["diffs"] = compare_search_pair(m["on"], m["off"])
@@ -1486,7 +1519,7 @@ def run_compare_sensitivity(logs: list, out_dir: Optional[Path], gap_sec: float,
                     x["q"] = q_signature(adv)
                     x["sens_status"] = sensitivity_fields_of(adv)["sensitivity_status"]
                     if adv.get("ok"):
-                        chk = check_best(adv, compact, row.get("move_locks"), reg, detail=True, **ck)
+                        chk = check_best(adv, compact, move_locks_for_check(row), reg, detail=True, **ck)
                         x["violations"], x["checks"] = chk["violations"], chk["checks"]
                 d[stt] = x
             d["diffs"] = compare_sensitivity_pair(d["on"], d["off"])
@@ -1530,12 +1563,14 @@ def _load_logs(paths: list, gap_sec: float) -> list:
                      "n_advice_rows": len(rows), "n_decisions": len(dec),
                      "n_decision_rows": sum(1 for r in recs if r.get("type") == "decision"),
                      "has_move_locks": any("move_locks" in r for r in rows), "modes_used": modes_used,
+                     "state_schemas": state_schema_counts(rows),
                      "versions": log_versions(recs)})
     n_dec = sum(lg["n_decisions"] for lg in logs)
     print(f"ログ {len(logs)} 本、advice 行 {sum(lg['n_advice_rows'] for lg in logs)} → 決定点 {n_dec} (間引き {gap_sec} 秒)")
     for lg in logs:
         print(f"  {lg['name']}: advice {lg['n_advice_rows']} → 決定点 {lg['n_decisions']} / decision 行 {lg['n_decision_rows']} / "
-              f"方式 {lg['modes_used']} / move_locks {'あり' if lg['has_move_locks'] else 'なし'}")
+              f"方式 {lg['modes_used']} / move_locks {'あり' if lg['has_move_locks'] else 'なし'} / "
+              f"state の版 {lg['state_schemas']}")
     return logs
 
 
@@ -1590,7 +1625,10 @@ def run(paths: list, out_dir: Optional[Path], gap_sec: float = DECISION_GAP_SEC,
                     d["modes"][mode] = {"ok": False, "error": err or "None", "elapsed_ms": ms, "best": None,
                                         "violations": [], "unconfirmed": []}
                     continue
-                chk = check_best(adv, compact, row.get("move_locks"), reg, detail=True, **ck)
+                chk = check_best(adv, compact, move_locks_for_check(row), reg, detail=True, **ck)
+                ru, rst = restore_check(row)
+                chk["unconfirmed"] = list(dict.fromkeys(chk["unconfirmed"] + ru))
+                chk["checks"]["state_restore"] = rst
                 d["modes"][mode] = {"ok": bool(adv.get("ok")), "best": _slim_best(adv.get("best")), "elapsed_ms": ms,
                                     "scoring_used": adv.get("scoring_used") or (adv.get("scoring_mode") if adv.get("ok") else None),
                                     "fallback_reason": adv.get("scoring_fallback"), "reason": adv.get("reason"),

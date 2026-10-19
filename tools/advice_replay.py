@@ -19,6 +19,10 @@ import copy
 import json
 import time
 from pathlib import Path
+from typing import Optional
+
+from battle_logger import (MON_V2_EXTRA, MON_V2_FIELDS, SIDE_V2_FIELDS, STATE_SCHEMA_V1, STATE_V2_FIELDS,
+                           state_schema_of)
 
 REPO = Path(__file__).resolve().parent.parent
 LOG_DIR = REPO / "logs" / "battles"
@@ -29,12 +33,35 @@ DECISION_GAP_SEC = 8.0
 
 
 # ------------------------------------------------------------------
-# 簡約状態 (battle_logger._compact_state) -> エンジン入力への復元
+# 簡約状態 (battle_logger の compact_state = 版 2 / _compact_state = 版 1) -> エンジン入力への復元
 # ------------------------------------------------------------------
-def _mon_from_compact(m: dict, resolver) -> dict:
+# 版 1 の行で照合できない項目 (real_accept が判定不能に数える。2026-10-19 レビュー: 旧版で照合できないものは判定不能として区別する)
+RESTORE_UNKNOWN_LABELS = {
+    "restore_v1_hp": "HP の不確かさ・観測時刻 (版 1 の記録に無い。確定値として再生した)",
+    "restore_v1_item": "消費済み・失った持ち物 (版 1 の記録に無い)",
+    "restore_v1_pending": "推定・対応待ちの印の欠落と帰属 (版 1 は印が付いたときだけ書き、2026-10-09 より前は対応待ちの印も無い。"
+                          "候補の枠・初観測時刻は無い)",
+    "restore_v1_volatiles": "控えの揮発状態・交代技の後の繰り出し待ち (版 1 は move_locks の場の個体だけ。move_locks の無い行は"
+                            "場の個体の技の固定も無い)",
+    "restore_v1_move_meta": "技の相性の表示・最大 PP (版 1 の記録に無い)",
+    "restore_v2_missing": "版 2 の欄の欠け (記録の失敗)",
+}
+RESTORE_V1_KEYS = ("restore_v1_hp", "restore_v1_item", "restore_v1_pending", "restore_v1_volatiles", "restore_v1_move_meta")
+
+
+def _flag(m: dict, key: str, schema: int):
+    """推定・対応待ちの印の復元: 版 2 は記録の真偽 (欄が無ければ None)、版 1 は印が付いていれば True、無ければ None (不明。
+    版 1 は True のときだけ書き、それより前の行には印そのものが無いので、False と区別できない)"""
+    if schema >= 2:
+        return bool(m[key]) if key in m and m[key] is not None else None
+    return True if m.get(key) else None
+
+
+def _mon_from_compact(m: dict, resolver, schema: int = STATE_SCHEMA_V1) -> dict:
     hp_raw = m.get("hp_raw") or [None, None]
+    meta = m.get("move_meta") if isinstance(m.get("move_meta"), list) else None
     moves = []
-    for mv in (m.get("moves") or []):
+    for i, mv in enumerate(m.get("moves") or []):
         mid = mv[0] if isinstance(mv, (list, tuple)) else None
         pp = mv[1] if isinstance(mv, (list, tuple)) and len(mv) > 1 else None
         if not mid:
@@ -44,12 +71,14 @@ def _mon_from_compact(m: dict, resolver) -> dict:
             ja = resolver.ja_of("moves", mid)
         except Exception:
             pass
-        moves.append({"name_ja": ja or mid, "move_id": mid,
-                      "pp": pp, "max_pp": None, "effectiveness": None})
-    return {
+        mm = meta[i] if meta is not None and i < len(meta) and isinstance(meta[i], (list, tuple)) else None
+        moves.append({"name_ja": ja or mid, "move_id": mid, "pp": pp,
+                      "max_pp": mm[0] if mm and len(mm) > 0 else None,
+                      "effectiveness": mm[1] if mm and len(mm) > 1 else None})
+    d = {
         "species_id": m.get("species"),
         "species_ja": m.get("ja"),
-        "types": m.get("types") or [],
+        "types": list(m.get("types") or []),
         "hp_percent": m.get("hp"),
         "hp_current": hp_raw[0],
         "hp_max": hp_raw[1],
@@ -62,16 +91,32 @@ def _mon_from_compact(m: dict, resolver) -> dict:
         "revealed_moves": list(m.get("revealed") or []),
         "is_picked": bool(m.get("picked")),
     }
+    # 推定・対応待ち・形態の候補 (2026-10-19: 以前は保存しても復元していなかった)
+    d["species_guess"] = _flag(m, "guess", schema)
+    d["pending"] = _flag(m, "pending", schema)
+    cands = m.get("candidates")
+    d["species_candidates"] = list(cands) if isinstance(cands, list) else None
+    hint = m.get("pending_hint")
+    d["pending_hint"] = copy.deepcopy(hint) if hint is not None else None
+    # 版 2 の欄 (版 1 でも scene 行の state には HP の出所・観測時刻がある)。記録に無い欄は None のまま (確定値に変換しない)
+    for k in MON_V2_FIELDS:
+        d[k] = copy.deepcopy(m[k]) if k in m else None
+    return d
 
 
 def compact_to_engine_state(c: dict, resolver, move_locks: dict = None) -> dict:
-    """ログの簡約状態をエンジン入力 (evaluateが受ける形) に復元する。
+    """ログの簡約状態をエンジン入力 (evaluateが受ける形) に復元する (battle_logger.compact_state の対。純粋)。
 
-    move_locks: advice 行の move_locks (battle_logger.move_locks_of、2026-10-09 M1a 以降の行だけにある)。渡せば
-    turn / last_move と場の個体の技の固定 (volatiles / encore_move / volatile_turns / entry_turn) も戻す。
-    それ以前の行には無いので、技の固定は復元できない (戻した状態では固定なしになる)"""
+    版 2 (state_schema = 2): 個体・陣営・全体の版 2 の欄をすべて戻す (技の固定・直前の技・ターンも state から)。move_locks は使わない
+    (同じ state から書いた同じ値)。記録に無い欄は None のまま (不確かさ不明。確定値に変換しない)。
+    版 1 (state_schema の無い行): 版 1 の欄と、推定・対応待ちの印 (付いていれば) を戻す。move_locks (advice 行の欄、
+    battle_logger.move_locks_of、2026-10-09 M1a 以降の行だけにある) を渡せば turn / last_move と場の個体の技の固定 (volatiles /
+    encore_move / volatile_turns / entry_turn) も戻す。それ以前の行には無いので、技の固定は復元できない (戻した状態では固定なしになる)。
+    照合できない項目は restore_unknowns。now は復元しない (呼び出し側が replay_now で入れる)"""
+    schema = state_schema_of(c)
+
     def side(sd: dict) -> dict:
-        return {
+        out_sd = {
             "active_index": sd.get("active"),
             "remaining": sd.get("remaining"),
             "tailwind": bool(sd.get("tailwind")),
@@ -81,9 +126,14 @@ def compact_to_engine_state(c: dict, resolver, move_locks: dict = None) -> dict:
             "screens": dict(sd.get("screens") or {
                 "reflect": False, "light_screen": False,
                 "aurora_veil": False}),
-            "party": [_mon_from_compact(m, resolver)
+            "party": [_mon_from_compact(m, resolver, schema)
                       for m in (sd.get("party") or [])],
         }
+        if schema >= 2:
+            for k in SIDE_V2_FIELDS:
+                if k in sd:
+                    out_sd[k] = copy.deepcopy(sd[k])
+        return out_sd
     out = {
         "field": dict(c.get("field") or
                       {"weather": None, "terrain": None, "trick_room": False}),
@@ -92,6 +142,11 @@ def compact_to_engine_state(c: dict, resolver, move_locks: dict = None) -> dict:
         "player": side(c.get("player") or {}),
         "opponent": side(c.get("opponent") or {}),
     }
+    if schema >= 2:
+        for k in STATE_V2_FIELDS:
+            if k in c:
+                out[k] = copy.deepcopy(c[k])
+        return out
     if move_locks:
         out["turn"] = move_locks.get("turn")
         out["last_move"] = dict(move_locks.get("last_move") or {})
@@ -102,7 +157,53 @@ def compact_to_engine_state(c: dict, resolver, move_locks: dict = None) -> dict:
             if row and isinstance(idx, int) and 0 <= idx < len(sd["party"]):
                 for k in ("volatiles", "encore_move", "volatile_turns", "entry_turn"):
                     if k in row:
-                        sd["party"][idx][k] = row[k]
+                        sd["party"][idx][k] = copy.deepcopy(row[k])
+    return out
+
+
+def replay_now(row: dict) -> Optional[float]:
+    """再生の state.now (純粋): advice 行の t_now (evaluate に渡した now) → 助言の t_gen (生成時刻) → 行の t。どれも無ければ None。
+    現在の時計を使うと build_inputs が何日分も古い HP として扱うため (2026-10-19 レビュー)"""
+    for v in (row.get("t_now"), (row.get("advice") or {}).get("t_gen"), row.get("t")):
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return float(v)
+    return None
+
+
+def restore_unknowns(row: dict) -> list:
+    """advice 行の状態の復元で照合できない項目 (純粋。RESTORE_UNKNOWN_LABELS の鍵)。版 1 の行は RESTORE_V1_KEYS の全部
+    (どの個体でも HP の不確かさ等が記録に無い)。版 2 の行は欄が欠けていれば restore_v2_missing"""
+    c = row.get("state") or {}
+    if state_schema_of(c) < 2:
+        return list(RESTORE_V1_KEYS)
+    miss = [k for k in STATE_V2_FIELDS if k not in c]
+    for sname in ("player", "opponent"):
+        sd = c.get(sname) or {}
+        miss += [k for k in SIDE_V2_FIELDS if k not in sd]
+        for m in sd.get("party") or []:
+            miss += [k for k in MON_V2_FIELDS + MON_V2_EXTRA if k not in m]
+    return ["restore_v2_missing"] if miss else []
+
+
+def move_locks_for_check(row: dict) -> Optional[dict]:
+    """real_accept.check_best に渡す技の固定 (純粋): advice 行の move_locks があればそれ。無ければ、版 2 の行は state の場の個体の
+    揮発状態と直前の技から作る (固定が無いことも確定。空の欄は書かない battle_logger.move_locks_of と同じ形)、版 1 の行は None
+    (照合できない)"""
+    if row.get("move_locks") is not None:
+        return row["move_locks"]
+    c = row.get("state") or {}
+    if state_schema_of(c) < 2:
+        return None
+    out = {"turn": c.get("turn"), "last_move": {k: v for k, v in (c.get("last_move") or {}).items() if v}}
+    for sname in ("player", "opponent"):
+        sd = c.get(sname) or {}
+        idx, party = sd.get("active"), sd.get("party") or []
+        m = party[idx] if isinstance(idx, int) and 0 <= idx < len(party) else None
+        if not m:
+            continue
+        r = {k: m.get(k) for k in ("volatiles", "encore_move", "volatile_turns", "entry_turn") if m.get(k) not in (None, [], {})}
+        if r:
+            out[sname] = r
     return out
 
 
@@ -275,6 +376,7 @@ def run(paths: list, out_path: Path) -> dict:
     for fname, t, compact in decisions:
         try:
             base_state = compact_to_engine_state(compact, resolver)
+            base_state["now"] = float(t)     # 観測の時刻 (scene 行の t)。現在の時計で HP を古いと扱わない (2026-10-19)
             base = evaluate(base_state, resolver)
         except Exception:
             baseline_fail += 1
