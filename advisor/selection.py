@@ -554,9 +554,17 @@ def advise_selection(state: dict, resolver=None, use_registered: bool = True) ->
                 best = (total, combo, assignee)
 
     _, combo, mega_assignee = best
+
+    # 先発と理由文の対面は、3 体組の評価と同じメガ割当で引く (2026-10-19 レビュー)。
+    # 割当先はメガ後の姿 (matrix_mega)、それ以外は素の姿 (matrix)。メガ後の行が無い
+    # (形態が図鑑に無い等) ときは cell が素の姿に退避する。
+    # 「割当先がメガを切らずに先発する」選択肢は扱わない (割当先 = メガ前提で揃える)
+    def assigned(m, j):
+        return cell(m, j, m is mega_assignee)
+
     # 先発: 平均スコア最大 + 設置技持ちのボーナス (設置は初手に置けて
     # 初めて全交代に乗る。欠陥#4: 設置役を後発に回していた)
-    lead = max(combo, key=lambda m: sum(slot_w[o["index"]] * matrix[(m["index"], o["index"])]
+    lead = max(combo, key=lambda m: sum(slot_w[o["index"]] * assigned(m, o["index"])
                                          for o in opps)
                + (HAZARD_LEAD_BONUS if m.get("hazard_setter") else 0.0))
     ordered = [lead] + [m for m in combo if m is not lead]
@@ -564,9 +572,9 @@ def advise_selection(state: dict, resolver=None, use_registered: bool = True) ->
     # 理由文の生成: 各選出が誰に対して有利か
     reasons = []
     for m in ordered:
-        best_opps = sorted(opps, key=lambda o: -matrix[(m["index"], o["index"])])[:2]
+        best_opps = sorted(opps, key=lambda o: -assigned(m, o["index"]))[:2]
         vs = "、".join(f"{o['label']}に有利" for o in best_opps
-                       if matrix[(m["index"], o["index"])] > 0.15)
+                       if assigned(m, o["index"]) > 0.15)
         reasons.append(f"{m['name']}" + (f" ({vs})" if vs else ""))
 
     # 相手の種族推測の表示用データ

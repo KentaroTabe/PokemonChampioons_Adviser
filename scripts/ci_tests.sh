@@ -167,6 +167,7 @@ TESTS=(
   test_display_search_gate
   test_transition_profile
   test_sensitivity_off
+  test_first_pick_mega
 )
 
 fail=0
