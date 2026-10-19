@@ -24,6 +24,7 @@ PY="${1:-python}"
 TESTS=(
   test_meta_axis_guard
   test_advice_replay
+  test_advice_key
   test_advice_m1a
   test_advice_m2a
   test_transition
