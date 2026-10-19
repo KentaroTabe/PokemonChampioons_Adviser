@@ -370,7 +370,11 @@ def test_log_rows_carry_source():
         adv = [r for r in rows if r["type"] == "advice"]
         assert adv[0]["context"] == {"my_hp_estimated": True, "my_hp_source": "bar"}, adv[0]
         assert "context" not in adv[1], adv[1]
-        assert "hp_estimated" not in adv[0]["state"]["player"]["party"][0], "助言の行の state は変えない"
+        # 2026-10-19 版 2 スキーマ (レビュー: HP の不確かさと出所を助言の行の state に保存する) で期待値を変更。
+        # それまでは「助言の行の state は変えない」(hp_estimated を入れない) だった
+        adv_mon = adv[0]["state"]["player"]["party"][0]
+        assert adv[0]["state"].get("state_schema") == 2, adv[0]["state"].get("state_schema")
+        assert adv_mon.get("hp_estimated") is True and adv_mon.get("hp_source") == "bar", adv_mon
         assert BL.my_hp_context_of(None) == {}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
