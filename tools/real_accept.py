@@ -72,6 +72,18 @@ render_sensitivity_compare_markdown) は tests/test_sensitivity_off.py でテス
     move_locks が無くても版 2 の state から作る (move_locks_for_check)
   - 版 1 の行 (state_schema の無い行) は、照合できない項目 (RESTORE_UNKNOWN_LABELS) を unconfirmed に、checks の
     state_restore を unknown に数える (= 正しさは 判定不能 (照合できた範囲で違反 0) より良くならない)。ログごとの版の行数を表に出す
+
+2026-10-20 レビュー (docs/REAL_ACCEPT_TRANSITION_20261020.md §3〜§6。純粋な部分は tests/test_real_accept.py):
+  - 選出の照合は交代先ごと (pick_status / appearance_indices): 選出済み (印、または個体同定が確かな登場記録) / 非選出確定
+    (3 体が確定していてその外) / 不明。違反は非選出確定だけ、不明はその検査だけ判定不能。3 値の件数を report に出す
+  - 退避は 3 単位: 決定単位 (decision_fallback_rows。decision 行が参照する助言、規則は config REAL_ACCEPT_FALLBACK_DECISION_ADVICE。
+    各回と合算の両方に上限、1 回でも超えたら合算も未達)、助言行単位 (advice_row_counts、参考)、再生局面単位 (summarize の
+    fallback、参考)。助言行数 / 決定と、advice 行に evaluated があれば 実計算の回数 / 決定 も出す
+  - 再生の evaluate は各 advice 行の時点の version 行の設定 (感度 transition_sensitivity・表示用の探索 display_search。
+    replay_settings) で行う (時間・退避の比較を実機に揃える)。記録の無い旧ログは config の既定で、その旨を report に書く
+  - 版の照合は版の識別と実行状態を分ける (version_identity / group_consistency。version_id は比べない)。同条件の根拠
+    (比べた欄と値、全 advice 行の policy.rl_loaded) を report に出す。新しい version 行 (runtime の欄あり) は
+    advisor.versions.identity_of で識別を取る (無い版のコードでは旧い行の経路)
 """
 from __future__ import annotations
 
@@ -87,7 +99,8 @@ from battle_logger import DECISION_INFO_SCENES, DECISION_RESOLVE_SCENES, DECISIO
 from champions_agent.config import (
     ADVICE_SCORING_MODES, REAL_ACCEPT_DISPLAY_DEADLINE_SEC, REAL_ACCEPT_DISPLAY_IN_TIME_MIN, REAL_ACCEPT_FALLBACK_ALL_MAX,
     REAL_ACCEPT_FALLBACK_BUDGET_MAX, REAL_ACCEPT_LATENCY_DELTA_SEC, REAL_ACCEPT_LATENCY_P95_SEC, REAL_ACCEPT_PROFILE_TOP,
-    REAL_ACCEPT_STALE_HP_SEC, REAL_ACCEPT_VIOLATIONS_MAX)
+    REAL_ACCEPT_STALE_HP_SEC, REAL_ACCEPT_VIOLATIONS_MAX, BSS_PICK_COUNT, REAL_ACCEPT_FALLBACK_DECISION_ADVICE,
+    REAL_ACCEPT_VERSION_IGNORE_FIELDS, REAL_ACCEPT_VERSION_RUNTIME_FIELDS, REAL_ACCEPT_VERSION_REQUIRED_FIELDS)
 from tools.advice_replay import (DECISION_GAP_SEC, RESTORE_UNKNOWN_LABELS, move_locks_for_check, replay_now,
                                  restore_unknowns)
 from tools.decision_audit import _display_index
@@ -99,6 +112,7 @@ OUT_DIR = REPO / "logs" / "real_accept"
 MODES = tuple(ADVICE_SCORING_MODES)          # ("legacy", "transition")
 BUDGET_REASON = "budget"                     # advisor.scoring_transition の予算超過の退避の理由
 EXAMPLES_PER_KEY = 5                         # 違反・未確認の例を項目ごとに残す数
+LOG_INTERNAL_KEYS = ("records", "rows", "decisions", "path", "decision_versions")   # 出力 (result.json) に出さないログの欄
 
 OK, NG, UNKNOWN = "満たす", "満たさない", "判定不能"
 # 正しさ: 違反 0 だが照合できない検査が残る (2026-10-16 レビュー。「満たす」は全決定で全検査が照合できて違反 0 のときだけ)
@@ -135,7 +149,7 @@ UNCONFIRMED_LABELS = {
     "no_active": "state の場の個体が分からない",
     "moves_unknown": "技が読めず登録も無い (技の照合なし)",
     "moves_from_registration": "第一候補の技は登録からの補完 (画面では未確認)",
-    "selection_unknown": "選出が分からない (未選出の照合なし)",
+    "selection_unknown": "交代先の選出が不明 (3 体が確定せず、その交代先に選出の印・確かな登場記録が無い。その照合だけ判定不能)",
     "lock_unknown": "技の固定の対象の技が分からない",
     "no_position_key": "助言に場の個体の鍵 (position_key) が無い",
     # 状態の復元で照合できない項目 (2026-10-19: 版 1 の advice 行の state。tools.advice_replay.restore_unknowns)
@@ -257,9 +271,71 @@ def _hp_known(m: Optional[dict]) -> bool:
     return bool(m) and (m.get("hp") is not None or bool(m.get("status")))
 
 
+PICK_STATES = ("picked", "unpicked", "unknown")   # 交代先ごとの 選出済み / 非選出確定 / 不明
+PICK_STATE_LABELS = {"picked": "選出済み", "unpicked": "非選出確定", "unknown": "不明"}
+PICK_EVIDENCE_LABELS = {"mark": "選出の印", "active": "場の個体", "entry_turn": "場に出たターンの記録",
+                        "pick_order": "選出順の記録", "hp_read": "HP の実読み (その助言の時刻まで)", "event": "登場の文言 (events 行)"}
+
+
+def appearance_indices(records: list, party: list, t_ref: Optional[float]) -> set:
+    """自分の party のうち、時刻 t_ref までの events 行の交代の文言 (fired に switch_player、texts に名前) で登場が確かな個体の
+    index (純粋。2026-10-20 レビュー: 登場イベント)。名前は party の ja / display_name。t_ref が None なら空 (時刻で区切れない)"""
+    if t_ref is None:
+        return set()
+    texts = []
+    for r in records:
+        if r.get("type") != "events" or r.get("t") is None or float(r["t"]) > float(t_ref):
+            continue
+        if not any("switch_player" in str(f) for f in (r.get("fired") or [])):
+            continue
+        texts += [str(x) for x in (r.get("texts") or [])]
+    out = set()
+    for i, m in enumerate(party or []):
+        names = {n for n in (m.get("ja"), m.get("display_name")) if n}
+        if any(n in tx for n in names for tx in texts):
+            out.add(i)
+    return out
+
+
+def pick_status(compact: dict, appeared: Iterable = (), pick_count: int = BSS_PICK_COUNT) -> dict:
+    """自分の party の個体ごとの選出の判明 (純粋。2026-10-20 レビュー: 部分判明でも交代先ごとに確認できるかで判定する)。
+    選出済み = 選出の印 (picked)、または個体同定が確かな登場記録: 場の個体 (active / is_active)・場に出たターン (entry_turn)・
+    選出順 (pick_order)・HP の実読み (hp_read_ts、推定 hp_estimated は除く)・登場の文言 (appeared = appearance_indices の index。
+    その助言の時刻までの events 行)。compact はその advice 行の state (助言が見た状態) なので、その欄はどれも助言の時刻までの記録。
+    推定の個体 (guess / pending) は登場記録を数えない (印だけ)。
+    選出済みが pick_count 体以上 (3 体が確定) ならその外は 非選出確定、未満なら 不明。
+    戻り値 {"status": [PICK_STATES], "evidence": [[PICK_EVIDENCE_LABELS の鍵]], "n_confirmed", "complete"}"""
+    pl = compact.get("player") or {}
+    party = pl.get("party") or []
+    idx = pl.get("active")
+    app = set(appeared or ())
+    evid = []
+    for i, m in enumerate(party):
+        ev = []
+        if m.get("picked"):
+            ev.append("mark")
+        if not (m.get("guess") or m.get("pending")):
+            if i == idx or m.get("is_active"):
+                ev.append("active")
+            if m.get("entry_turn") is not None:
+                ev.append("entry_turn")
+            if m.get("pick_order") is not None:
+                ev.append("pick_order")
+            if m.get("hp_read_ts") is not None and not m.get("hp_estimated"):
+                ev.append("hp_read")
+            if i in app:
+                ev.append("event")
+        evid.append(ev)
+    n_conf = sum(1 for ev in evid if ev)
+    complete = n_conf >= pick_count
+    status = ["picked" if ev else ("unpicked" if complete else "unknown") for ev in evid]
+    return {"status": status, "evidence": evid, "n_confirmed": n_conf, "complete": complete}
+
+
 def check_best(adv: Optional[dict], compact: dict, move_locks: Optional[dict] = None, registered: Iterable = (),
                is_status_move: Callable = lambda mid: False, is_mega: Callable = lambda sid: False,
-               base_of: Callable = _identity, choice_items: Iterable = (), detail: bool = False) -> dict:
+               base_of: Callable = _identity, choice_items: Iterable = (), detail: bool = False,
+               appeared: Iterable = ()) -> dict:
     """1 決定の第一候補の検査 (純粋)。adv = evaluate の戻り値 (best / actions / position_key)、compact = advice 行の簡約状態
     (battle_logger._compact_state)、move_locks = advice 行の move_locks (None = 欄の無い行。技の固定・かなしばりは照合できない)、
     registered = 場の個体の登録の技の id (読めた技が 4 つ未満のときの補完に使う)。is_status_move(技 id) = 変化技か、
@@ -267,7 +343,11 @@ def check_best(adv: Optional[dict], compact: dict, move_locks: Optional[dict] = 
     choice_items = こだわり系の持ち物 id。
     戻り値 {"violations": [VIOLATION_LABELS の鍵], "unconfirmed": [UNCONFIRMED_LABELS の鍵]}。detail = True なら
     "checks": {CHECK_LABELS の鍵: "ok" / "ng" / "unknown" / None (この第一候補には関係しない)} も付ける (2026-10-16 レビュー:
-    判定不能を合格にしないため、検査ごとに 成功 / 違反 / 判定不能 を分ける)"""
+    判定不能を合格にしないため、検査ごとに 成功 / 違反 / 判定不能 を分ける)。
+    選出の照合 (2026-10-20 レビュー): 交代先ごとに pick_status (appeared = その助言の時刻までの登場の文言の index) で
+    選出済み / 非選出確定 / 不明 を決め、違反 (switch_unpicked / candidate_unpicked) は 非選出確定 だけ。不明はその検査
+    (switch_picked / candidate_picked) だけ判定不能 (unconfirmed に selection_unknown)。交代の候補が無ければ candidate_picked は ok。
+    detail = True なら "targets": [{"id", "best" (第一候補か), "status" (PICK_STATES), "evidence"}] (交代先ごと、重複なし) も付ける"""
     viol, unconf = [], []
     checks: dict = {k: None for k in CHECK_LABELS}
     adv = adv or {}
@@ -276,12 +356,14 @@ def check_best(adv: Optional[dict], compact: dict, move_locks: Optional[dict] = 
     party = pl.get("party") or []
     idx = pl.get("active")
     me = party[idx] if isinstance(idx, int) and 0 <= idx < len(party) else None
-    picked_known = any(m.get("picked") for m in party)
+    ps = pick_status(compact, appeared)
+    targets: list = []
 
     def out():
         r = {"violations": list(dict.fromkeys(viol)), "unconfirmed": list(dict.fromkeys(unconf))}
         if detail:
             r["checks"] = checks
+            r["targets"] = targets
         return r
 
     def same(a, b) -> bool:
@@ -397,25 +479,34 @@ def check_best(adv: Optional[dict], compact: dict, move_locks: Optional[dict] = 
                 checks["switch_fainted"] = "ng"
             else:
                 checks["switch_fainted"] = "ok" if _hp_known(t) else "unknown"
-            if picked_known and not t.get("picked"):
+            pst = ps["status"][ti]
+            if pst == "unpicked":
                 viol.append("switch_unpicked")
                 checks["switch_picked"] = "ng"
+            elif pst == "unknown":
+                unconf.append("selection_unknown")
+                checks["switch_picked"] = "unknown"
             else:
-                checks["switch_picked"] = "ok" if picked_known else "unknown"
-    if not picked_known:
+                checks["switch_picked"] = "ok"
+    seen_t: set = set()
+    cand_states = []
+    for j, a in enumerate([best] + list(adv.get("actions") or [])):
+        if not a or a.get("kind") != "switch":
+            continue
+        ci, _how = find(a.get("id"))
+        if ci is None or ci in seen_t:
+            continue
+        seen_t.add(ci)
+        cand_states.append(ps["status"][ci])
+        targets.append({"id": a.get("id"), "best": j == 0, "status": ps["status"][ci], "evidence": ps["evidence"][ci]})
+    if "unpicked" in cand_states:
+        viol.append("candidate_unpicked")
+        checks["candidate_picked"] = "ng"
+    elif "unknown" in cand_states:
         unconf.append("selection_unknown")
-        if any(a and a.get("kind") == "switch" for a in [best] + list(adv.get("actions") or [])):
-            checks["candidate_picked"] = "unknown"
+        checks["candidate_picked"] = "unknown"
     else:
         checks["candidate_picked"] = "ok"
-        for a in [best] + list(adv.get("actions") or []):
-            if not a or a.get("kind") != "switch":
-                continue
-            ci, _how = find(a.get("id"))
-            if ci is not None and not party[ci].get("picked"):
-                viol.append("candidate_unpicked")
-                checks["candidate_picked"] = "ng"
-                break
     # 助言の場の個体 (position_key の ("my", 枠, 現在形態の id, ひんし))
     pk = adv.get("position_key")
     my = pk[0] if isinstance(pk, (list, tuple)) and pk and isinstance(pk[0], (list, tuple)) and len(pk[0]) >= 3 else None
@@ -608,6 +699,361 @@ def target_consistency(log_infos: list, fields: tuple = CODE_FIELDS) -> dict:
     return {"ok": ok, "notes": notes, "values": values}
 
 
+# ------------------------------------------------------------------ 純粋: 版の識別と実行状態の照合 (2026-10-20 レビュー)
+SCORING_MODE_FIELDS = ("scoring_mode", "scoring_mode_env", "scoring_mode_source")   # 両方式の増分の照合では比べない欄
+
+
+def _flatten(d: Optional[dict], prefix: str = "") -> dict:
+    """入れ子の dict を「a.b」の鍵に平らにする (純粋)。dict でない入れ子 (list など) は JSON の文字列にして比べられる形にする"""
+    out = {}
+    for k, v in (d or {}).items():
+        key = f"{prefix}{k}"
+        if isinstance(v, dict) and v:
+            out.update(_flatten(v, key + "."))
+        elif v is None or isinstance(v, (str, int, float, bool)):
+            out[key] = v
+        else:
+            out[key] = json.dumps(v, ensure_ascii=False, sort_keys=True)
+    return out
+
+
+def _field_in(key: str, fields: Iterable) -> bool:
+    return any(key == f or key.startswith(f + ".") for f in fields)
+
+
+def _field_match(key: str, fields: Iterable) -> bool:
+    """欄の名前の照合 (前方一致に加えて末尾一致: identity_of の "scoring.scoring_mode" と旧い行の "scoring_mode" を同じ欄とみなす)"""
+    return any(key == f or key.startswith(f + ".") or key.endswith("." + f) for f in fields)
+
+
+def _identity_fn_default() -> Optional[Callable]:
+    """advisor.versions.identity_of (2026-10-20 に別の担当が足す、版の識別だけを取り出す関数)。無い版のコードでは None"""
+    try:
+        from advisor.versions import identity_of
+        return identity_of
+    except Exception:
+        return None
+
+
+def version_identity(records: list, ignore: Iterable = REAL_ACCEPT_VERSION_IGNORE_FIELDS,
+                     runtime: Iterable = REAL_ACCEPT_VERSION_RUNTIME_FIELDS, identity_fn: Optional[Callable] = None) -> dict:
+    """1 本のログの版の識別と実行状態 (純粋。identity_fn を渡さなければ advisor.versions.identity_of を読む。2026-10-20 レビュー:
+    旧い version_id は実行状態 (RL 方策の遅延読み込みの印) も含む digest なので、版の識別と実行状態を分けて照合する)。
+    version 行の形で 2 通りに読む:
+      - 新しい行 ("runtime" の欄がある、2026-10-20 の分離以降) で identity_fn が使えるとき: 版の識別 = identity_fn(version 行)
+        (コード・モデルの sha・データ版・採点設定) を平らにしたもの、実行状態 = version 行の runtime と、後から書かれた
+        runtime 行 ({"type": "runtime", "runtime": {...}}) の runtime。format = "identity_of"
+      - 旧い行 (runtime の欄が無い) か identity_fn が無いとき: 版の識別 = version 行の欄から ignore と runtime (実行状態の欄。
+        action_policy.loaded ほか) を除いたもの、実行状態 = runtime の欄 (+ runtime 行)。format = "fields"
+    どちらも served_commit (log_versions と同じ取り方) を版の識別に足す。戻り値:
+      "identity": {欄: [値]}、"runtime": {欄: [値]}、"version_id": [値]、"n_version_rows"、"format": ["identity_of" / "fields"]
+      "advice_runtime": {"n", "rl_loaded_true", "rl_loaded_false", "rl_loaded_missing"} (battle の advice 行の policy.rl_loaded)
+      "runtime_ok": True (全 advice 行で読み込み成功、実行状態に読み込みの失敗なし) / False (失敗の記録あり) / None (確認できない)
+      "runtime_basis": 根拠の文"""
+    ignore, runtime = tuple(ignore), tuple(runtime)
+    fn = identity_fn if identity_fn is not None else _identity_fn_default()
+    vers = [r for r in records if r.get("type") == "version"]
+    ident: dict = {}
+    rt: dict = {}
+    formats: list = []
+
+    def put(dst, k, x):
+        lst = dst.setdefault(k, [])
+        if x not in lst:
+            lst.append(x)
+    for v in vers:
+        if isinstance(v.get("runtime"), dict) and fn is not None:
+            formats.append("identity_of")
+            for k, x in _flatten(fn(v)).items():
+                put(ident, k, x)
+            for k, x in _flatten(v["runtime"]).items():
+                put(rt, f"runtime.{k}", x)
+            continue
+        formats.append("fields")
+        for k, x in _flatten(v).items():
+            if _field_in(k, ignore):
+                continue
+            put(rt if _field_in(k, runtime) else ident, k, x)
+    for r in records:
+        if r.get("type") == "runtime" and isinstance(r.get("runtime"), dict):
+            for k, x in _flatten(r["runtime"]).items():
+                put(rt, f"runtime.{k}", x)
+    formats = list(dict.fromkeys(formats))
+    lv = log_versions(records)
+    if lv["served_commit"]:
+        ident["served_commit"] = list(lv["served_commit"])
+    advs = [r for r in records if r.get("type") == "advice" and r.get("kind") == "battle"]
+    vals = [(r.get("policy") or {}).get("rl_loaded") for r in advs]
+    ar = {"n": len(advs), "rl_loaded_true": sum(1 for x in vals if x is True),
+          "rl_loaded_false": sum(1 for x in vals if x is False), "rl_loaded_missing": sum(1 for x in vals if x is None)}
+    v_fail = [f"{k} = {x}" for k, xs in rt.items() for x in xs
+              if (k.endswith("error") and x not in (None, "")) or (k.endswith("loaded") and x is False)]
+    if v_fail or ar["rl_loaded_false"]:
+        ok = False
+        basis = "読み込みの失敗の記録あり: " + ", ".join(v_fail + ([f"advice 行の policy.rl_loaded = False {ar['rl_loaded_false']} 行"]
+                                                         if ar["rl_loaded_false"] else []))
+    elif ar["n"] and ar["rl_loaded_true"] == ar["n"]:
+        ok = True
+        basis = f"battle の advice 行 {ar['n']} / {ar['n']} で policy.rl_loaded = True (読み込み成功)"
+    elif not ar["n"] and any(k.endswith("loaded") for k in rt) and all(xs == [True] for k, xs in rt.items()
+                                                                        if k.endswith("loaded")):
+        ok = True
+        basis = "advice 行なし。実行状態の読み込みの欄 = True"
+    else:
+        ok = None
+        basis = (f"読み込みを確認できない (advice 行 {ar['n']}、policy.rl_loaded の記録なし {ar['rl_loaded_missing']}、"
+                 f"実行状態の読み込みの欄 {[(k, xs) for k, xs in rt.items() if k.endswith('loaded')]})")
+    return {"identity": ident, "runtime": rt, "version_id": list(dict.fromkeys(v["version_id"] for v in vers if v.get("version_id"))),
+            "n_version_rows": len(vers), "format": formats, "advice_runtime": ar, "runtime_ok": ok, "runtime_basis": basis}
+
+
+def group_consistency(log_infos: list, exclude: Iterable = (),
+                      required: Iterable = REAL_ACCEPT_VERSION_REQUIRED_FIELDS) -> dict:
+    """対象群が同じ版・設定で、同じ実行状態 (読み込み成功) か (純粋。2026-10-20 レビュー)。log_infos = [{"name", "ident":
+    version_identity の戻り値}]。exclude = 比べない版の識別の欄 (両方式の増分の照合では SCORING_MODE_FIELDS)。
+    一致 = required の欄が全ログで記録され、版の識別の欄 (version 行の欄 − 時刻・version_id − 実行状態の欄 + served_commit) が
+    全ログで同じ 1 つの値 (一部のログにだけある欄も不一致)、かつ全ログで実行状態が読み込み成功。version_id は比べない
+    (実行状態を含む digest。違えば差のある実行状態の欄を注記する)。
+    戻り値 {"ok", "notes", "values": {欄: [値]}, "basis": [{"field", "value"}] (一致した欄と値)、"runtime": {ログ: 根拠の文}、
+    "version_id": [値]} (acceptance の版・設定の照合と同じ形 ok / notes を持つ)"""
+    exclude = tuple(exclude)
+    notes, values, basis = [], {}, []
+    ok = bool(log_infos)
+    if not log_infos:
+        notes.append("対象のログが無い")
+    fmts = list(dict.fromkeys(f for li in log_infos for f in li["ident"].get("format") or []))
+    if len(fmts) > 1:
+        notes.append(f"version 行の形が混ざる ({' / '.join(fmts)})。欄の名前が違うので一致にならない")
+
+    def has(idt, f):
+        return any(_field_match(k, (f,)) and any(x not in (None, "") for x in v) for k, v in idt.items())
+    for f in required:
+        if _field_match(f, exclude):
+            continue
+        missing = [li["name"] for li in log_infos if not has(li["ident"]["identity"], f)]
+        if missing:
+            ok = False
+            notes.append(f"{f} の記録なし {len(missing)} 本 ({', '.join(missing[:3])}{' ほか' if len(missing) > 3 else ''})")
+    fields = list(dict.fromkeys(k for li in log_infos for k in li["ident"]["identity"] if not _field_match(k, exclude)))
+    for f in fields:
+        vals: list = []
+        for li in log_infos:
+            for x in li["ident"]["identity"].get(f) or []:
+                if x not in vals:
+                    vals.append(x)
+        values[f] = vals
+        lacking = [li["name"] for li in log_infos if f not in li["ident"]["identity"]]
+        if lacking and not _field_match(f, required):
+            ok = False
+            notes.append(f"{f} が一部のログに無い ({', '.join(lacking[:3])}{' ほか' if len(lacking) > 3 else ''})")
+        elif len(vals) > 1:
+            ok = False
+            notes.append(f"{f} が揃わない ({' / '.join(str(v)[:16] for v in vals[:4])}{' ほか' if len(vals) > 4 else ''})")
+        elif len(vals) == 1:
+            basis.append({"field": f, "value": vals[0]})
+    runtime = {}
+    for li in log_infos:
+        idt = li["ident"]
+        runtime[li["name"]] = idt["runtime_basis"]
+        if idt["runtime_ok"] is not True:
+            ok = False
+            notes.append(f"実行状態: {li['name']} " + ("読み込みの失敗あり" if idt["runtime_ok"] is False else "読み込みを確認できない")
+                         + f" ({idt['runtime_basis']})")
+    vids = list(dict.fromkeys(v for li in log_infos for v in li["ident"]["version_id"]))
+    if len(vids) > 1:
+        rt_diff = []
+        for k in dict.fromkeys(k for li in log_infos for k in li["ident"]["runtime"]):
+            xs = []
+            for li in log_infos:
+                for x in li["ident"]["runtime"].get(k, [None]):
+                    if x not in xs:
+                        xs.append(x)
+            if len(xs) > 1:
+                rt_diff.append(f"{k}: {' / '.join(str(x) for x in xs)}")
+        notes.append(f"version_id は {len(vids)} 種類 ({' / '.join(vids[:4])})。版の識別の欄で照合した (version_id は比べない)"
+                     + (f"。実行状態の欄の差: {', '.join(rt_diff)}" if rt_diff else ""))
+    return {"ok": ok, "notes": notes, "values": values, "basis": basis, "runtime": runtime, "version_id": vids}
+
+
+# ------------------------------------------------------------------ 純粋: 再生の設定 (2026-10-20 レビュー: 実機の設定に揃える)
+def _search_bool(x) -> Optional[bool]:
+    if isinstance(x, bool):
+        return x
+    if isinstance(x, str) and x.strip().lower() in ("on", "off"):
+        return x.strip().lower() == "on"
+    return None
+
+
+def replay_settings(version: Optional[dict], default_sensitivity: bool, default_display_search) -> dict:
+    """再生の evaluate の設定 (純粋)。その advice 行の時点の version 行の transition_sensitivity / display_search を使い
+    (時間・退避の比較を実機の設定に揃えるため)、記録の無い欄は config の既定 (source = "config")。scoring_mode は version 行の
+    実効値 (実機で使った方式。再生は両方式で行う)。戻り値 {"scoring_mode", "transition_sensitivity": bool, "display_search": bool,
+    "source": {欄: "version" / "config" / None}, "from_version": 感度と探索の両方が version 行から}"""
+    v = version or {}
+    src = {}
+    sens = v.get("transition_sensitivity")
+    if isinstance(sens, bool):
+        src["transition_sensitivity"] = "version"
+    else:
+        sens = bool(default_sensitivity)
+        src["transition_sensitivity"] = "config"
+    ds = _search_bool(v.get("display_search"))
+    if ds is not None:
+        src["display_search"] = "version"
+    else:
+        ds = bool(_search_bool(default_display_search))
+        src["display_search"] = "config"
+    sm = v.get("scoring_mode")
+    src["scoring_mode"] = "version" if sm else None
+    return {"scoring_mode": sm, "transition_sensitivity": sens, "display_search": ds, "source": src,
+            "from_version": src["transition_sensitivity"] == "version" and src["display_search"] == "version"}
+
+
+def versions_by_row(records: list, rows: list) -> list:
+    """rows (records の advice 行) ごとに、その行より前の最後の version 行 (ファイルの順。純粋)。前に無ければログの最初の
+    version 行、それも無ければ None"""
+    first = next((r for r in records if r.get("type") == "version"), None)
+    pos = {id(r): None for r in rows}
+    cur = None
+    for r in records:
+        if r.get("type") == "version":
+            cur = r
+        elif id(r) in pos:
+            pos[id(r)] = cur
+    return [pos[id(r)] if pos[id(r)] is not None else first for r in rows]
+
+
+def settings_label(st: dict) -> str:
+    return (f"感度 {'on' if st['transition_sensitivity'] else 'off'} / 表示用の探索 {'on' if st['display_search'] else 'off'}"
+            f" (実機の方式 {st.get('scoring_mode') or '記録なし'})")
+
+
+# ------------------------------------------------------------------ 純粋: 退避の 3 単位と実計算の回数 (2026-10-20 レビュー)
+def fallback_of(rec: Optional[dict]) -> Optional[str]:
+    """advice 行の退避の理由 (top-level の fallback_reason → advice の scoring_fallback。純粋)"""
+    rec = rec or {}
+    if "fallback_reason" in rec:
+        return rec.get("fallback_reason")
+    return (rec.get("advice") or {}).get("scoring_fallback")
+
+
+def _t_gen(r: dict) -> Optional[float]:
+    x = (r.get("advice") or {}).get("t_gen", r.get("t"))
+    return None if x is None else float(x)
+
+
+def _valid_advice(r: dict, stale_hp_sec: float) -> bool:
+    a = r.get("advice") or {}
+    return (not a.get("provisional") and a.get("ok") is not False and bool(a.get("best") or a.get("actions"))
+            and not stale_reasons(r, None, stale_hp_sec))
+
+
+def decision_fallback_rows(records: list, rule: Iterable = REAL_ACCEPT_FALLBACK_DECISION_ADVICE,
+                           stale_hp_sec: float = REAL_ACCEPT_STALE_HP_SEC, unrecorded_mode: Optional[str] = UNKNOWN_MODE) -> list:
+    """退避の決定単位 (純粋): decision 行ごとに、開始前に固定した規則 rule (config REAL_ACCEPT_FALLBACK_DECISION_ADVICE) で
+    数える助言を選ぶ。戻り値の各行 {"advice_id" (decision 行), "turn", "mode", "used_advice_id", "rule" (使った規則、無ければ None),
+    "fallback_reason", "budget"}。方式は display_rows と同じ (直前の version 行 → 使った助言の記録)"""
+    rule = tuple(rule)
+    for step in rule:
+        if step not in ("decision_advice_id", "last_valid"):
+            raise ValueError(f"不明な規則: {step}")
+    timeline = scene_timeline(records)
+    advs = [r for r in records if r.get("type") == "advice" and r.get("kind") == "battle" and r.get("advice_id")]
+    by_id = {r["advice_id"]: r for r in advs}
+    out, prev_t, version = [], -1e18, None
+    for rec in records:
+        if rec.get("type") == "version":
+            version = rec
+            continue
+        if rec.get("type") != "decision" or rec.get("t_decided") is None:
+            continue
+        t_dec = float(rec["t_decided"])
+        t_open = decision_open_time(timeline, prev_t, t_dec)
+        lo = t_open if t_open is not None else prev_t
+        used, how = None, None
+        for step in rule:
+            if step == "decision_advice_id":
+                r = by_id.get(rec.get("advice_id"))
+            else:
+                cands = [r for r in advs if _t_gen(r) is not None and lo <= _t_gen(r) <= t_dec and _valid_advice(r, stale_hp_sec)]
+                r = max(cands, key=_t_gen) if cands else None
+            if r is not None:
+                used, how = r, step
+                break
+        dm = decision_mode(version, used, unrecorded_mode)
+        fb = fallback_of(used) if used is not None else None
+        out.append({"advice_id": rec.get("advice_id"), "turn": rec.get("turn"), "mode": dm["mode"],
+                    "used_advice_id": (used or {}).get("advice_id"), "rule": how, "fallback_reason": fb,
+                    "budget": bool(fb) and _reason_key(fb) == BUDGET_REASON})
+        prev_t = t_dec
+    return out
+
+
+def advice_row_counts(records: list, unrecorded_mode: Optional[str] = UNKNOWN_MODE) -> dict:
+    """1 本のログの助言行の数え (純粋): 助言行数 (battle の advice 行、確定前を含む。キャッシュを含む) / 決定、advice 行に
+    evaluated の欄 (実計算したか。別の担当が足す) があれば 実計算の回数 / 決定、助言行単位の退避 (方式 = 直前の version 行 →
+    advice 行の記録が transition の行)"""
+    version, rows = None, []
+    for rec in records:
+        if rec.get("type") == "version":
+            version = rec
+        elif rec.get("type") == "advice" and rec.get("kind") == "battle":
+            rows.append((decision_mode(version, rec, unrecorded_mode)["mode"], rec))
+    n_dec = sum(1 for r in records if r.get("type") == "decision" and r.get("t_decided") is not None)
+    has_eval = any("evaluated" in r for _m, r in rows)
+    n_eval = sum(1 for _m, r in rows if r.get("evaluated")) if has_eval else None
+    tr = [r for m, r in rows if m == "transition"]
+    by: dict = {}
+    for r in tr:
+        fb = fallback_of(r)
+        if fb:
+            k = _reason_key(fb)
+            by[k] = by.get(k, 0) + 1
+    n_fb = sum(by.values())
+    n_b = by.get(BUDGET_REASON, 0)
+    return {"n_rows": len(rows), "n_provisional": sum(1 for _m, r in rows if (r.get("advice") or {}).get("provisional")),
+            "n_decisions": n_dec, "rows_per_decision": (round(len(rows) / n_dec, 2) if n_dec else None),
+            "has_evaluated": has_eval, "n_with_evaluated": sum(1 for _m, r in rows if "evaluated" in r),
+            "n_evaluated": n_eval, "evaluated_per_decision": (round(n_eval / n_dec, 2) if has_eval and n_dec else None),
+            "fallback": {"n": len(tr), "n_fallback": n_fb, "rate": _rate(n_fb, len(tr)), "n_budget": n_b,
+                         "budget_rate": _rate(n_b, len(tr)), "by_reason": dict(sorted(by.items(), key=lambda kv: (-kv[1], kv[0])))}}
+
+
+def _fb_block(rows: list) -> dict:
+    matched = [r for r in rows if r.get("rule")]
+    by: dict = {}
+    for r in matched:
+        if r.get("fallback_reason"):
+            k = _reason_key(r["fallback_reason"])
+            by[k] = by.get(k, 0) + 1
+    n_fb = sum(by.values())
+    n_b = by.get(BUDGET_REASON, 0)
+    return {"n_decisions": len(rows), "n": len(matched), "n_unmatched": len(rows) - len(matched),
+            "n_fallback": n_fb, "rate": _rate(n_fb, len(matched)), "n_budget": n_b, "budget_rate": _rate(n_b, len(matched)),
+            "by_reason": dict(sorted(by.items(), key=lambda kv: (-kv[1], kv[0]))),
+            "rule_used": {k: sum(1 for r in matched if r["rule"] == k) for k in dict.fromkeys(r["rule"] for r in matched)}}
+
+
+def summarize_fallback_units(units: list, rule: Iterable = REAL_ACCEPT_FALLBACK_DECISION_ADVICE) -> dict:
+    """退避の 3 単位のうち 決定単位 と 助言行単位 の集計 (純粋。再生局面単位は summarize の fallback)。
+    units = [{"name", "decisions": decision_fallback_rows, "advice": advice_row_counts}]。決定単位は方式が transition の決定だけ。
+    戻り値 {"rule", "decision": {"all", "by_log"}, "advice_row": {"all", "by_log"}, "counts": {ログ: 助言行・実計算の数え}}"""
+    tr = {u["name"]: [r for r in u["decisions"] if r["mode"] == "transition"] for u in units}
+    dec = {"all": _fb_block([r for rs in tr.values() for r in rs]),
+           "by_log": {n: _fb_block(rs) for n, rs in tr.items() if rs}}
+    ar_logs = {u["name"]: u["advice"]["fallback"] for u in units if u["advice"]["fallback"]["n"]}
+    by: dict = {}
+    for f in ar_logs.values():
+        for k, v in f["by_reason"].items():
+            by[k] = by.get(k, 0) + v
+    n = sum(f["n"] for f in ar_logs.values())
+    n_fb, n_b = sum(by.values()), by.get(BUDGET_REASON, 0)
+    ar_all = {"n": n, "n_fallback": n_fb, "rate": _rate(n_fb, n), "n_budget": n_b, "budget_rate": _rate(n_b, n),
+              "by_reason": dict(sorted(by.items(), key=lambda kv: (-kv[1], kv[0])))}
+    counts = {u["name"]: {k: v for k, v in u["advice"].items() if k != "fallback"} for u in units}
+    return {"rule": list(rule), "decision": dec, "advice_row": {"all": ar_all, "by_log": ar_logs}, "counts": counts}
+
+
 # ------------------------------------------------------------------ 純粋: 集計と受入条件
 def _rate(a: int, b: int) -> Optional[float]:
     return round(a / b, 4) if b else None
@@ -625,7 +1071,9 @@ def summarize(decisions: list, examples_per_key: int = EXAMPLES_PER_KEY) -> dict
      "elapsed_ms", "scoring_used", "fallback_reason", "error", "checks" (任意。check_best(detail=True) の checks)}}}。
     有効 (古くない) な決定と古い局面の決定を分けて数える。退避と一致率は有効な決定で数える。
     照合できない決定 (n_unknown_decisions) = unconfirmed が残る、または checks に unknown がある決定 (checks の無い結果は
-    unconfirmed だけで決める)。checks は検査ごとに ok / ng / unknown を数える"""
+    unconfirmed だけで決める)。checks は検査ごとに ok / ng / unknown を数える。
+    pick_targets (2026-10-20): 交代先ごと (各決定の第一候補 + 候補の交代先、重複なし。結果の "targets") の 選出済み / 非選出確定 /
+    不明 の件数 ("all" と第一候補だけの "best")、pick_examples = 選出済みでない交代先の例"""
     valid = [d for d in decisions if not d.get("stale")]
     stale = [d for d in decisions if d.get("stale")]
     out = {"n": len(decisions), "n_valid": len(valid), "n_stale": len(stale),
@@ -638,6 +1086,8 @@ def summarize(decisions: list, examples_per_key: int = EXAMPLES_PER_KEY) -> dict
             ex: dict = {}
             n_eval, n_err, n_viol_dec, n_unk_dec = 0, 0, 0, 0
             ck = {k: {x: 0 for x in CHECK_RESULTS} for k in CHECK_LABELS}
+            pt = {w: {x: 0 for x in PICK_STATES} for w in ("all", "best")}
+            pex: list = []
             for d in ds:
                 r = (d.get("modes") or {}).get(mode)
                 if r is None:
@@ -662,10 +1112,19 @@ def summarize(decisions: list, examples_per_key: int = EXAMPLES_PER_KEY) -> dict
                         ck.setdefault(k, {y: 0 for y in CHECK_RESULTS})[x] += 1
                 if r.get("unconfirmed") or any(x == "unknown" for x in checks.values()):
                     n_unk_dec += 1
+                for tg in r.get("targets") or []:
+                    if tg.get("status") in PICK_STATES:
+                        pt["all"][tg["status"]] += 1
+                        if tg.get("best"):
+                            pt["best"][tg["status"]] += 1
+                        if tg["status"] != "picked" and len(pex) < examples_per_key * 2:
+                            pex.append({"log": d.get("log"), "advice_id": d.get("advice_id"), "turn": d.get("turn"),
+                                        "id": tg.get("id"), "best": bool(tg.get("best")), "status": tg["status"]})
             mo[name] = {"n_eval": n_eval, "n_error": n_err, "n_violation_decisions": n_viol_dec,
                         "violations": v, "n_violations": sum(v.values()),
                         "n_legality": sum(v[k] for k in LEGALITY_LABELS), "n_identity": sum(v[k] for k in IDENTITY_LABELS),
-                        "unconfirmed": u, "examples": ex, "n_unknown_decisions": n_unk_dec, "checks": ck}
+                        "unconfirmed": u, "examples": ex, "n_unknown_decisions": n_unk_dec, "checks": ck,
+                        "pick_targets": pt, "pick_examples": pex}
         ms = [float(d["modes"][mode]["elapsed_ms"]) for d in valid + stale
               if (d.get("modes") or {}).get(mode) and d["modes"][mode].get("elapsed_ms") is not None]
         mo["elapsed_ms"] = percentiles(ms)
@@ -732,13 +1191,50 @@ def _correctness_row(v: dict, lim_v) -> tuple:
     return v["n_violations"], OK, base
 
 
+REF = "参考"                                 # 判定に使わない単位の行 (助言行単位の退避)
+
+
+def _fallback_unit_rows(units: dict, lim: dict, add: Callable) -> None:
+    """退避の決定単位 (各回と合算。1 回でも超えたら合算も 満たさない) と助言行単位 (参考) の行を足す (純粋。acceptance の一部)"""
+    dec = units["decision"]
+    rule = " → ".join(units.get("rule") or [])
+    for lbl, key, nk, rk in (("予算超過", "budget", "n_budget", "budget_rate"), ("全理由", "all", "n_fallback", "rate")):
+        over = []
+        for lg, b in dec["by_log"].items():
+            r = b[rk]
+            st = UNKNOWN if r is None else (OK if r <= lim[key] else NG)
+            if st == NG:
+                over.append(f"{lg} {b[nk]} / {b['n']} ({r:.3f})")
+            add(f"退避: {lbl} (transition、決定単位、回ごと)", f"transition / {lg}", r, lim[key], st,
+                (PENDING_NOTE + "。" if st == NG else "") + f"{b[nk]} / {b['n']} 決定"
+                + (f"、助言が見つからない決定 {b['n_unmatched']} (分母に入れない)" if b["n_unmatched"] else ""))
+        a = dec["all"]
+        r = a[rk]
+        if r is not None and r > lim[key]:
+            over.insert(0, f"合算 {a[nk]} / {a['n']} ({r:.3f})")
+        st = NG if over else (UNKNOWN if r is None else OK)
+        notes = ([f"{a[nk]} / {a['n']} 決定 (decision 行が参照する助言。規則 {rule}、使った規則 {a['rule_used']})"]
+                 if a["n_decisions"] else ["transition の決定が無い (version 行の方式が transition の決定だけを数える)"])
+        if a["n_unmatched"]:
+            notes.append(f"助言が見つからない決定 {a['n_unmatched']} (分母に入れない)")
+        if over:
+            notes.insert(0, f"{PENDING_NOTE}: 基準超え {', '.join(over)}")
+        add(f"退避: {lbl} (transition、決定単位)", "transition", r, lim[key], st, "合算。" + "。".join(notes))
+        ar = units["advice_row"]["all"]
+        add(f"退避: {lbl} (transition、助言行単位)", "transition", ar[rk], lim[key], REF,
+            f"{ar[nk]} / {ar['n']} 行 (battle の advice 行、確定前・キャッシュを含む。参考、判定は決定単位)。回ごと: "
+            + (", ".join(f"{lg} {f[nk]} / {f['n']}" for lg, f in units["advice_row"]["by_log"].items()) or "-"))
+
+
 def acceptance(summary: dict, display: dict, record_check: dict, limits: Optional[dict] = None,
-               group: Optional[dict] = None) -> list:
+               group: Optional[dict] = None, units: Optional[dict] = None) -> list:
     """受入条件 (§8.22) との照合 (純粋)。戻り値 [{"item", "mode", "value", "limit", "status" (満たす / 満たさない / 判定不能 /
     PARTIAL), "note"}]。group = 対象群の情報 {"target_fixed": bool, "by_mode": {方式: target_consistency}, "delta":
     target_consistency (served_commit / version_id)}。None なら版・設定の照合をしない (呼び出し側が持たないとき)。
     遅延の p95 は各回 (display[方式]["by_log"]) と合算の両方に基準を当て、どれか 1 回でも超えたら合算も 満たさない
-    (注記の先頭に PENDING_NOTE)。対象群の版・設定が揃わなければ、超えた回が無いかぎり 判定不能"""
+    (注記の先頭に PENDING_NOTE)。対象群の版・設定が揃わなければ、超えた回が無いかぎり 判定不能。
+    units = summarize_fallback_units の戻り値 (2026-10-20 レビュー)。あれば退避を 決定単位 (各回と合算の両方に上限、1 回でも
+    超えたら合算も 満たさない) と 助言行単位 (参考) でも出し、再生の行は再生局面単位 (参考) と注記する"""
     lim = {"violations": REAL_ACCEPT_VIOLATIONS_MAX, "p95_sec": REAL_ACCEPT_LATENCY_P95_SEC,
            "delta_sec": REAL_ACCEPT_LATENCY_DELTA_SEC, "in_time": REAL_ACCEPT_DISPLAY_IN_TIME_MIN,
            "budget": REAL_ACCEPT_FALLBACK_BUDGET_MAX, "all": REAL_ACCEPT_FALLBACK_ALL_MAX,
@@ -756,7 +1252,10 @@ def acceptance(summary: dict, display: dict, record_check: dict, limits: Optiona
                           ("退避: 全理由 (transition、再生)", "all", "rate")):
         r = fb[rk]
         add(item, "transition", r, lim[key], UNKNOWN if r is None else (OK if r <= lim[key] else NG),
-            f"{fb['n_budget'] if key == 'budget' else fb['n_fallback']} / {fb['n']} 決定")
+            f"{fb['n_budget'] if key == 'budget' else fb['n_fallback']} / {fb['n']} 決定"
+            + ("。再生局面単位 (時間で間引いた決定点、参考。判定は決定単位の行)" if units is not None else ""))
+    if units is not None:
+        _fallback_unit_rows(units, lim, add)
     tgt_note = ""
     if group is not None and not group.get("target_fixed"):
         tgt_note = "対象は事前に固定していない (--target なし、--logs / --log で選んだログ)。"
@@ -855,6 +1354,97 @@ def _pct_txt(p: dict, scale: float = 1.0, unit: str = "ms") -> str:
     return f"p50 {p['p50'] * scale:.1f} / p95 {p['p95'] * scale:.1f} / max {p['max'] * scale:.1f} {unit} (n={p['n']})"
 
 
+def _replay_settings_lines(c: dict) -> list:
+    """条件の節: 再生の設定 (2026-10-20。version 行の設定に揃えたか)"""
+    rc = c.get("replay_settings")
+    if not rc:
+        return []
+    head = ("- 再生の設定 = version 行の設定 (時間・退避の比較を実機に揃える。採点一致の確認 --compare-* とは別)"
+            if c.get("replay_settings_from_version") else
+            "- 再生の設定: version 行に記録の無い欄は config の既定 (旧ログ。下の注記)")
+    out = [head]
+    for lg, ents in rc.items():
+        for e in ents:
+            src = e.get("source") or {}
+            cfg = [k for k in ("transition_sensitivity", "display_search") if src.get(k) == "config"]
+            out.append(f"  - {lg}: {settings_label(e)} — {e.get('n', 0)} 決定点"
+                       + (f" (config の既定: {', '.join(cfg)}。version 行に記録なし)" if cfg else " (version 行)"))
+    return out
+
+
+def _group_basis_lines(tg: Optional[dict]) -> list:
+    """同条件の根拠 (2026-10-20: 比べた版の識別の欄と値、実行状態の根拠)"""
+    if not tg:
+        return []
+    out = []
+    for mode, cons in (tg.get("by_mode") or {}).items():
+        if not cons.get("basis") and not cons.get("runtime"):
+            continue
+        out += ["", f"### 同条件の根拠 ({mode_label(mode)}、版の識別と実行状態を分けて照合)", "",
+                "| 欄 | 値 (全ログで同じ) |", "|---|---|"]
+        out += [f"| {b['field']} | {str(b['value'])[:80]} |" for b in cons.get("basis") or []]
+        diff = [f"{k}: {' / '.join(str(x)[:16] for x in v)}" for k, v in (cons.get("values") or {}).items() if len(v) > 1]
+        if diff:
+            out += ["", "揃わない欄: " + "; ".join(diff)]
+        out += ["", "実行状態 (読み込み):", ""] + [f"- {lg}: {txt}" for lg, txt in (cons.get("runtime") or {}).items()]
+        if cons.get("version_id"):
+            out.append(f"- version_id: {' / '.join(cons['version_id'])} (比べない。実行状態を含む digest)")
+    return out
+
+
+def _pick_target_lines(s: dict) -> list:
+    """正しさの節: 交代先ごとの 選出済み / 非選出確定 / 不明 (2026-10-20)"""
+    if not any(s["modes"][m]["valid"].get("pick_targets") for m in MODES):
+        return []
+    out = ["", "交代先ごとの選出の判明 (有効な決定、第一候補 + 候補の交代先、決定ごとに重複なし。違反は 非選出確定 だけ、"
+               "不明 はその照合だけ判定不能):", "",
+           "| 交代先 | " + " | ".join(f"{m} " + " / ".join(PICK_STATE_LABELS[x] for x in PICK_STATES) for m in MODES) + " |",
+           "|---|" + "---|" * len(MODES)]
+    for w, lab in (("all", "全交代先"), ("best", "第一候補")):
+        cells = []
+        for m in MODES:
+            pt = (s["modes"][m]["valid"].get("pick_targets") or {}).get(w) or {}
+            cells.append(" / ".join(str(pt.get(x, 0)) for x in PICK_STATES))
+        out.append(f"| {lab} | " + " | ".join(cells) + " |")
+    ex = [e for m in MODES for e in (s["modes"][m]["valid"].get("pick_examples") or []) if m == "transition"]
+    if ex:
+        out += ["", "選出済みでない交代先の例 (transition):", ""] + [
+            f"- {e['log']} {e['advice_id']} (turn {e.get('turn')}) {e['id']}{' (第一候補)' if e['best'] else ''}: "
+            f"{PICK_STATE_LABELS[e['status']]}" for e in ex]
+    return out
+
+
+def _fallback_unit_lines(u: Optional[dict]) -> list:
+    """退避の 3 単位と助言行・実計算の数え (2026-10-20)"""
+    if not u:
+        return []
+    out = ["", "### 退避の単位 (transition)", "",
+           f"決定単位 = decision 行が参照する助言 (規則 {' → '.join(u.get('rule') or [])}、開始前に固定。config "
+           "REAL_ACCEPT_FALLBACK_DECISION_ADVICE)。各回と合算の両方に上限を当てる。助言行単位・再生局面単位は参考。", "",
+           "| 単位 / 回 | 退避 (全理由) | 予算超過 | 理由 |", "|---|---|---|---|"]
+
+    def ln(label, b, unit):
+        return (f"| {label} | {b['n_fallback']} / {b['n']} {unit} ({_fmt(b['rate'])}) | {b['n_budget']} ({_fmt(b['budget_rate'])}) | "
+                + (", ".join(f"{k} {v}" for k, v in b["by_reason"].items()) or "-") + " |")
+    d = u["decision"]
+    out.append(ln("**決定単位 合算**", d["all"], "決定"))
+    out += [ln(f"決定単位 / {lg}", b, "決定") for lg, b in d["by_log"].items()]
+    a = u["advice_row"]
+    out.append(ln("助言行単位 合算 (確定前・キャッシュを含む)", a["all"], "行"))
+    out += [ln(f"助言行単位 / {lg}", b, "行") for lg, b in a["by_log"].items()]
+    if d["all"].get("n_unmatched"):
+        out += ["", f"助言が見つからない決定 {d['all']['n_unmatched']} (分母に入れない)"]
+    out += ["", "### 助言行と実計算の回数", "", "| ログ | 助言行 (battle、確定前を含む) | 決定 | 助言行 / 決定 | 実計算 / 決定 |",
+            "|---|---|---|---|---|"]
+    for lg, c in (u.get("counts") or {}).items():
+        ev = (f"{c['n_evaluated']} / {c['n_decisions']} = {_fmt(c['evaluated_per_decision'], 2)}"
+              + (f" (evaluated の欄 {c['n_with_evaluated']} / {c['n_rows']} 行)" if c["n_with_evaluated"] < c["n_rows"] else "")
+              if c["has_evaluated"] else "evaluated の欄なし (助言行数はキャッシュを含む)")
+        out.append(f"| {lg} | {c['n_rows']} (確定前 {c['n_provisional']}) | {c['n_decisions']} | "
+                   f"{_fmt(c['rows_per_decision'], 2)} | {ev} |")
+    return out
+
+
 def render_markdown(result: dict) -> str:
     c, s, disp = result["conditions"], result["summary"], result["display"]
     L = [f"# 実機の受入: 実戦ログの同一局面の両方式再生 ({c['at']})", "",
@@ -862,16 +1452,19 @@ def render_markdown(result: dict) -> str:
          "## 条件", "",
          f"- コード: {c['code'].get('commit') or '-'}{' (未コミットの変更あり)' if c['code'].get('dirty') else ''} / エンジン {c['code'].get('engine')}",
          f"- 方式: {' / '.join(c['modes'])} (RL 加点の重み {c['rl_blend_weight']}、RL_ADVICE_STYLE {c['rl_style']}、transition の予算 "
-         f"{c['transition_budget_ms']} ms、感度 {'あり' if c['transition_sensitivity'] else 'なし'})、据え置き・安定化ゲートは通さない"
+         f"{c['transition_budget_ms']} ms、{'config の既定の感度' if c.get('replay_settings') else '感度'} "
+         f"{'あり' if c['transition_sensitivity'] else 'なし'})、据え置き・安定化ゲートは通さない"
          + (f"、表示用の探索 {c['display_search']} (ADVICE_DISPLAY_SEARCH)" if c.get("display_search") else ""),
          f"- 間引き {c['gap_sec']} 秒、古い局面 = hp_stale > {c['stale_hp_sec']} 秒 または解決側の場面の後",
+         *_replay_settings_lines(c),
          f"- 決定数: advice 行 (battle、確定) {c['n_advice_rows']} → 決定点 {s['n']} (有効 {s['n_valid']} / 古い局面 {s['n_stale']})"]
     tg = c.get("target")
     if tg is not None:
         L.append("- 対象: " + ("事前に決めた接続テスト群 (--target)" if tg.get("fixed") else
                               "事前に固定していない (--logs / --log で選んだログ。遅延の判定はその旨を注記)"))
         for mode, cons in (tg.get("by_mode") or {}).items():
-            L.append(f"- 版・設定の照合 ({mode_label(mode)}): " + ("一致" if cons["ok"] else "揃わない (" + "; ".join(cons["notes"]) + ")"))
+            L.append(f"- 版・設定の照合 ({mode_label(mode)}): " + ("一致" if cons["ok"] else "揃わない")
+                     + (" (" + "; ".join(cons["notes"]) + ")" if cons.get("notes") else ""))
     L += ["", "| ログ | advice 行 | 決定点 | decision 行 | 使った方式 (advice 行) | move_locks | state の版 | version_id | "
               "served_commit | scoring_mode (version 行) |", "|---|---|---|---|---|---|---|---|---|---|"]
     for lg in c["logs"]:
@@ -889,6 +1482,7 @@ def render_markdown(result: dict) -> str:
     L += ["", "## 受入条件との照合", "", "| 項目 | 方式 | 値 | 基準 | 判定 | 注記 |", "|---|---|---|---|---|---|"]
     for r in result["acceptance"]:
         L.append(f"| {r['item']} | {r['mode']} | {_fmt(r['value'])} | {_fmt(r['limit'])} | {r['status']} | {r['note']} |")
+    L += _group_basis_lines(tg)
     L += ["", "## 正しさの違反 (再生)", "", "| 項目 | " + " | ".join(f"{m} 有効 | {m} 古い局面" for m in MODES) + " |",
           "|---|" + "---|" * (2 * len(MODES))]
     for k, lab in VIOLATION_LABELS.items():
@@ -908,6 +1502,7 @@ def render_markdown(result: dict) -> str:
             L.append(f"| {lab} | " + " | ".join(cells) + " |")
         L.append("| (照合できない検査が残る決定) | " + " | ".join(
             f"{s['modes'][m]['valid'].get('n_unknown_decisions', 0)} / {s['modes'][m]['valid']['n_eval']}" for m in MODES) + " |")
+    L += _pick_target_lines(s)
     L += ["", "照合できなかった項目 (違反に数えない、有効な決定):", ""]
     for k, lab in UNCONFIRMED_LABELS.items():
         L.append(f"- {lab}: " + " / ".join(f"{m} {s['modes'][m]['valid']['unconfirmed'][k]}" for m in MODES))
@@ -933,6 +1528,7 @@ def render_markdown(result: dict) -> str:
     L += ["", "## transition の退避 (有効な決定)", "",
           f"退避 {fb['n_fallback']} / {fb['n']} ({_fmt(fb['rate'])})、うち予算超過 {fb['n_budget']} ({_fmt(fb['budget_rate'])})", "",
           "| 理由 | 件数 |", "|---|---|"] + [f"| {k} | {v} |" for k, v in fb["by_reason"].items()]
+    L += _fallback_unit_lines(result.get("fallback_units"))
     L += ["", "## evaluate の所要時間 (再生、全決定点)", "", "| 方式 | 所要時間 |", "|---|---|"]
     for m in MODES:
         L.append(f"| {m} | {_pct_txt(s['modes'][m]['elapsed_ms'])} |")
@@ -1338,19 +1934,30 @@ def _slim_best(b: Optional[dict]) -> Optional[dict]:
     return None if not b else {"kind": b.get("kind"), "id": b.get("id"), "name": b.get("name")}
 
 
-def replay_one(state: dict, resolver, order: tuple) -> dict:
-    """1 決定点を order の順に各方式で evaluate する (副作用: エンジン)。{方式: (戻り値 or None, 所要 ms, エラー)}"""
+def replay_one(state: dict, resolver, order: tuple, settings: Optional[dict] = None) -> dict:
+    """1 決定点を order の順に各方式で evaluate する (副作用: エンジン)。{方式: (戻り値 or None, 所要 ms, エラー)}。
+    settings = replay_settings の戻り値 (2026-10-20: 実機の version 行の設定に揃える)。あれば感度
+    (config.TRANSITION_SENSITIVITY_ENABLED を一時的に切り替えて戻す) と表示用の探索 (evaluate の display_search) をその値にする。
+    None なら config の既定のまま"""
     from advisor.engine import evaluate
+    from champions_agent import config as C
     out = {}
-    for mode in order:
-        s = copy.deepcopy(state)
-        t0 = time.perf_counter()
-        try:
-            adv = evaluate(s, resolver, scoring_mode=mode)
-            err = None
-        except Exception as e:
-            adv, err = None, f"{type(e).__name__}: {e}"
-        out[mode] = (adv, round((time.perf_counter() - t0) * 1000.0, 1), err)
+    orig = C.TRANSITION_SENSITIVITY_ENABLED
+    try:
+        if settings is not None:
+            C.TRANSITION_SENSITIVITY_ENABLED = bool(settings["transition_sensitivity"])
+        ds = None if settings is None else bool(settings["display_search"])
+        for mode in order:
+            s = copy.deepcopy(state)
+            t0 = time.perf_counter()
+            try:
+                adv = evaluate(s, resolver, scoring_mode=mode, display_search=ds)
+                err = None
+            except Exception as e:
+                adv, err = None, f"{type(e).__name__}: {e}"
+            out[mode] = (adv, round((time.perf_counter() - t0) * 1000.0, 1), err)
+    finally:
+        C.TRANSITION_SENSITIVITY_ENABLED = orig
     return out
 
 
@@ -1447,7 +2054,7 @@ def run_compare_search(logs: list, out_dir: Optional[Path], gap_sec: float, targ
                        "rl_blend_weight": E.RL_BLEND_DEFAULT, "transition_budget_ms": C.TRANSITION_BUDGET_MS,
                        "transition_sensitivity": C.TRANSITION_SENSITIVITY_ENABLED, "search_blend": E.SEARCH_BLEND,
                        "display_search": C.ADVICE_DISPLAY_SEARCH, "gap_sec": gap_sec, "target_fixed": target_fixed,
-                       "logs": [{k: v for k, v in lg.items() if k not in ("records", "rows", "decisions", "path")}
+                       "logs": [{k: v for k, v in lg.items() if k not in LOG_INTERNAL_KEYS}
                                 for lg in logs]},
         "summary": summary, "decisions": rows,
     }
@@ -1533,7 +2140,7 @@ def run_compare_sensitivity(logs: list, out_dir: Optional[Path], gap_sec: float,
                        "transition_sensitivity": C.TRANSITION_SENSITIVITY_ENABLED,
                        "display_search": getattr(C, "ADVICE_DISPLAY_SEARCH", None), "gap_sec": gap_sec,
                        "target_fixed": target_fixed,
-                       "logs": [{k: v for k, v in lg.items() if k not in ("records", "rows", "decisions", "path")}
+                       "logs": [{k: v for k, v in lg.items() if k not in LOG_INTERNAL_KEYS}
                                 for lg in logs]},
         "summary": summary, "decisions": rows,
     }
@@ -1564,7 +2171,9 @@ def _load_logs(paths: list, gap_sec: float) -> list:
                      "n_decision_rows": sum(1 for r in recs if r.get("type") == "decision"),
                      "has_move_locks": any("move_locks" in r for r in rows), "modes_used": modes_used,
                      "state_schemas": state_schema_counts(rows),
-                     "versions": log_versions(recs)})
+                     "versions": log_versions(recs), "ident": version_identity(recs),
+                     "decision_versions": versions_by_row(recs, dec),
+                     "fallback_decisions": decision_fallback_rows(recs), "advice_counts": advice_row_counts(recs)})
     n_dec = sum(lg["n_decisions"] for lg in logs)
     print(f"ログ {len(logs)} 本、advice 行 {sum(lg['n_advice_rows'] for lg in logs)} → 決定点 {n_dec} (間引き {gap_sec} 秒)")
     for lg in logs:
@@ -1583,7 +2192,7 @@ def run(paths: list, out_dir: Optional[Path], gap_sec: float = DECISION_GAP_SEC,
     n_dec = sum(lg["n_decisions"] for lg in logs)
     if dry_run:
         print("(dry-run: 再生しない、何も書かない)")
-        return {"dry_run": True, "logs": [{k: v for k, v in lg.items() if k not in ("records", "rows", "decisions", "path")}
+        return {"dry_run": True, "logs": [{k: v for k, v in lg.items() if k not in LOG_INTERNAL_KEYS}
                                           for lg in logs]}
 
     if compare_search:
@@ -1596,15 +2205,19 @@ def run(paths: list, out_dir: Optional[Path], gap_sec: float = DECISION_GAP_SEC,
     import os
     resolver = NameResolver()
     ck = _checker_kwargs()
+    # 再生の設定は各 advice 行の時点の version 行の設定 (感度・表示用の探索。2026-10-20 レビュー: 時間・退避の比較を実機に揃える)
+    def settings_of(lg, j):
+        return replay_settings(lg["decision_versions"][j], C.TRANSITION_SENSITIVITY_ENABLED, C.ADVICE_DISPLAY_SEARCH)
     # 初回の読み込み (図鑑・RL・使用率) を所要時間から外す
-    first = next((lg["decisions"][0] for lg in logs if lg["decisions"]), None)
-    if first is not None:
-        replay_one(_engine_state(first, resolver), resolver, MODES)
+    first_lg = next((lg for lg in logs if lg["decisions"]), None)
+    if first_lg is not None:
+        replay_one(_engine_state(first_lg["decisions"][0], resolver), resolver, MODES, settings_of(first_lg, 0))
     decisions = []
+    replay_cfg: dict = {}
     i = 0
     for lg in logs:
         timeline = scene_timeline(lg["records"])
-        for row in lg["decisions"]:
+        for j, row in enumerate(lg["decisions"]):
             compact = row["state"]
             try:
                 st = _engine_state(row, resolver)
@@ -1614,10 +2227,15 @@ def run(paths: list, out_dir: Optional[Path], gap_sec: float = DECISION_GAP_SEC,
             reg = _registered_ids(st, resolver)
             order = MODES if i % 2 == 0 else tuple(reversed(MODES))      # 順番の偏り (キャッシュ) を均す
             i += 1
-            res = replay_one(st, resolver, order)
+            rs = settings_of(lg, j)
+            key = json.dumps(rs, sort_keys=True, ensure_ascii=False)
+            ent = replay_cfg.setdefault(lg["name"], {}).setdefault(key, dict(rs, n=0))
+            ent["n"] += 1
+            res = replay_one(st, resolver, order, rs)
+            appeared = appearance_indices(lg["records"], (compact.get("player") or {}).get("party") or [], replay_now(row))
             lm, _rec = advice_mode(row)
             d = {"log": lg["name"], "advice_id": row.get("advice_id"), "t": row.get("t"), "turn": row.get("turn"),
-                 "scene": compact.get("scene"), "active": _active_label(compact),
+                 "scene": compact.get("scene"), "active": _active_label(compact), "replay_settings": settings_label(rs),
                  "stale": stale_reasons(row, scene_before(timeline, float(row.get("t") or 0.0))),
                  "log_best": _slim_best((row.get("advice") or {}).get("best")), "log_mode": lm, "modes": {}}
             for mode, (adv, ms, err) in res.items():
@@ -1625,7 +2243,7 @@ def run(paths: list, out_dir: Optional[Path], gap_sec: float = DECISION_GAP_SEC,
                     d["modes"][mode] = {"ok": False, "error": err or "None", "elapsed_ms": ms, "best": None,
                                         "violations": [], "unconfirmed": []}
                     continue
-                chk = check_best(adv, compact, move_locks_for_check(row), reg, detail=True, **ck)
+                chk = check_best(adv, compact, move_locks_for_check(row), reg, detail=True, appeared=appeared, **ck)
                 ru, rst = restore_check(row)
                 chk["unconfirmed"] = list(dict.fromkeys(chk["unconfirmed"] + ru))
                 chk["checks"]["state_restore"] = rst
@@ -1633,7 +2251,7 @@ def run(paths: list, out_dir: Optional[Path], gap_sec: float = DECISION_GAP_SEC,
                                     "scoring_used": adv.get("scoring_used") or (adv.get("scoring_mode") if adv.get("ok") else None),
                                     "fallback_reason": adv.get("scoring_fallback"), "reason": adv.get("reason"),
                                     "violations": chk["violations"], "unconfirmed": chk["unconfirmed"],
-                                    "checks": chk["checks"]}
+                                    "checks": chk["checks"], "targets": chk["targets"]}
             decisions.append(d)
             if i % 20 == 0:
                 print(f"  {i} / {n_dec}")
@@ -1644,13 +2262,18 @@ def run(paths: list, out_dir: Optional[Path], gap_sec: float = DECISION_GAP_SEC,
             disp_rows.append({"log": lg["name"], **r})
     display = summarize_display(disp_rows)
     rc = record_check_of(logs)
-    vers = {lg["name"]: lg["versions"] for lg in logs}
-    by_mode = {m: target_consistency([{"name": n, "versions": vers[n]} for n in (ds.get("by_log") or {}) if n in vers])
+    # 版の照合 (2026-10-20 レビュー): 版の識別 (version 行の欄 − 時刻・version_id − 実行状態 + served_commit) と実行状態
+    # (全 advice 行の読み込み成功) を分けて照合する (group_consistency)。増分は方式の欄を除いて照合する
+    idents = {lg["name"]: lg["ident"] for lg in logs}
+    by_mode = {m: group_consistency([{"name": n, "ident": idents[n]} for n in (ds.get("by_log") or {}) if n in idents])
                for m, ds in display.items()}
-    delta_logs = [n for m in MODES for n in ((display.get(m) or {}).get("by_log") or {}) if n in vers]
+    delta_logs = list(dict.fromkeys(n for m in MODES for n in ((display.get(m) or {}).get("by_log") or {}) if n in idents))
     group = {"target_fixed": target_fixed, "by_mode": by_mode,
-             "delta": target_consistency([{"name": n, "versions": vers[n]} for n in delta_logs],
-                                         fields=("served_commit", "version_id"))}
+             "delta": group_consistency([{"name": n, "ident": idents[n]} for n in delta_logs], exclude=SCORING_MODE_FIELDS)}
+    units = summarize_fallback_units([{"name": lg["name"], "decisions": lg["fallback_decisions"], "advice": lg["advice_counts"]}
+                                      for lg in logs])
+    replay_cfg_out = {n: list(v.values()) for n, v in replay_cfg.items()}
+    all_from_version = bool(replay_cfg_out) and all(e["from_version"] for v in replay_cfg_out.values() for e in v)
     prof = None
     if profile:
         states = []
@@ -1666,14 +2289,16 @@ def run(paths: list, out_dir: Optional[Path], gap_sec: float = DECISION_GAP_SEC,
                        "rl_blend_weight": RL_BLEND_DEFAULT, "rl_style": os.environ.get("RL_ADVICE_STYLE", "balance"),
                        "transition_budget_ms": C.TRANSITION_BUDGET_MS, "transition_sensitivity": C.TRANSITION_SENSITIVITY_ENABLED,
                        "display_search": getattr(C, "ADVICE_DISPLAY_SEARCH", None),
+                       "replay_settings": replay_cfg_out, "replay_settings_from_version": all_from_version,
                        "gap_sec": gap_sec, "stale_hp_sec": REAL_ACCEPT_STALE_HP_SEC,
                        "display_deadline_sec": REAL_ACCEPT_DISPLAY_DEADLINE_SEC,
                        "n_advice_rows": sum(lg["n_advice_rows"] for lg in logs),
                        "target": {"fixed": target_fixed, "by_mode": by_mode, "delta": group["delta"]},
-                       "logs": [{k: v for k, v in lg.items() if k not in ("records", "rows", "decisions", "path")}
+                       "logs": [{k: v for k, v in lg.items() if k not in LOG_INTERNAL_KEYS}
                                 for lg in logs]},
         "summary": summary, "display": display, "display_all": summarize_display_all(disp_rows),
-        "acceptance": acceptance(summary, display, rc, group=group), "record_check": rc,
+        "acceptance": acceptance(summary, display, rc, group=group, units=units), "record_check": rc,
+        "fallback_units": units,
         "decisions": decisions, "display_rows": disp_rows, "profile": prof,
     }
     out_dir = Path(out_dir) if out_dir else OUT_DIR / time.strftime("%Y%m%d_%H%M%S")
