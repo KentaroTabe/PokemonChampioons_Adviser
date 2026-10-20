@@ -15,6 +15,10 @@
 - 有効期限: 通常 config.ADVICE_RECALC_TTL_SEC、退避 (scoring_fallback あり) と評価エラーは config.ADVICE_RECALC_FALLBACK_TTL_SEC。
 
 純粋な部分 (advice_input_key / AdviceCache) はサーバーを起動せずにテストする (tests/test_advice_key.py)。
+
+2026-10-20 (レビュー: キャッシュを使った助言の評価時刻): advise_cached_ex は (助言, 採点したか, 採点を実際に行った時刻,
+採点の時点の入力の写し) を返す。キャッシュを使ったときの時刻と入力の写しは、元の採点のときの値 (AdviceCache.t / inputs)。
+advise_cached は従来どおり (助言, 採点したか) を返す (tests/test_version_split.py)。
 """
 from __future__ import annotations
 
@@ -170,6 +174,7 @@ class AdviceCache:
         self.common = None
         self.t: float = 0.0
         self.short: bool = False
+        self.inputs = None          # 採点の時点で取った入力の写し (advise_cached_ex の inputs_fn。2026-10-20)
 
     def needs_recalc(self, key: str, now: float) -> bool:
         if self.result is None or key != self.key:
@@ -218,17 +223,34 @@ def _postprocess(advisor, result: dict, state: dict) -> dict:
     return result
 
 
+def advise_cached_ex(advisor, state: dict, cache: AdviceCache, key: str, now: float, keep_common: bool = False,
+                     inputs_fn=None) -> tuple:
+    """advise_cached の詳細版。戻り値 (advice, 採点したか, 採点を実際に行った時刻, 採点の時点の入力の写し)。
+    採点したときは時刻 = now、入力の写し = inputs_fn() (採点の直前に同じスレッドで取る。例外なら None)。キャッシュを使ったときは
+    元の採点の時刻 (cache.t) と、そのとき取った写し (cache.inputs)"""
+    if cache.needs_recalc(key, now):
+        advisor.last_common = None
+        inputs = None
+        if inputs_fn is not None:
+            try:
+                inputs = inputs_fn()
+            except Exception:
+                inputs = None
+        raw, common, error = _evaluate(advisor, state, keep_common)
+        cache.store(key, raw, now, common=common, error=error)
+        cache.inputs = copy.deepcopy(inputs)
+        result, evaluated = raw, True
+    else:
+        result, common, evaluated = cache.get(), cache.common, False
+        inputs = copy.deepcopy(cache.inputs)
+    if keep_common:
+        advisor.last_common = common
+    return _postprocess(advisor, result, state), evaluated, float(cache.t), inputs
+
+
 def advise_cached(advisor, state: dict, cache: AdviceCache, key: str, now: float, keep_common: bool = False) -> tuple:
     """対戦の助言。鍵が前回と同じで有効期限内ならキャッシュの採点結果を使い、そうでなければ採点する。
     どちらでも据え置き・安定化ゲート・画面の提案を通す。keep_common=True なら advisor.last_common に採点の共通部分を置く
     (キャッシュを使ったときはキャッシュした共通部分)。戻り値 (advice, 採点したか)"""
-    if cache.needs_recalc(key, now):
-        advisor.last_common = None
-        raw, common, error = _evaluate(advisor, state, keep_common)
-        cache.store(key, raw, now, common=common, error=error)
-        result, evaluated = raw, True
-    else:
-        result, common, evaluated = cache.get(), cache.common, False
-    if keep_common:
-        advisor.last_common = common
-    return _postprocess(advisor, result, state), evaluated
+    advice, evaluated, _t, _inp = advise_cached_ex(advisor, state, cache, key, now, keep_common=keep_common)
+    return advice, evaluated

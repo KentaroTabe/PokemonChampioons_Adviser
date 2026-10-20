@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from battle_logger import (MON_V2_EXTRA, MON_V2_FIELDS, SIDE_V2_FIELDS, STATE_SCHEMA_V1, STATE_V2_FIELDS,
+from battle_logger import (MON_INPUT_FIELDS, MON_V2_EXTRA, MON_V2_FIELDS, SIDE_V2_FIELDS, STATE_SCHEMA_V1, STATE_V2_FIELDS,
                            state_schema_of)
 
 REPO = Path(__file__).resolve().parent.parent
@@ -101,6 +101,10 @@ def _mon_from_compact(m: dict, resolver, schema: int = STATE_SCHEMA_V1) -> dict:
     # 版 2 の欄 (版 1 でも scene 行の state には HP の出所・観測時刻がある)。記録に無い欄は None のまま (確定値に変換しない)
     for k in MON_V2_FIELDS:
         d[k] = copy.deepcopy(m[k]) if k in m else None
+    # 採点の入力 (2026-10-20: 実効素早さの推定 spe_est)。記録にあるときだけ戻す (無い行は従来どおり欄なし = 推定なし)
+    for k in MON_INPUT_FIELDS:
+        if k in m and m[k] is not None:
+            d[k] = copy.deepcopy(m[k])
     return d
 
 
@@ -112,7 +116,8 @@ def compact_to_engine_state(c: dict, resolver, move_locks: dict = None) -> dict:
     版 1 (state_schema の無い行): 版 1 の欄と、推定・対応待ちの印 (付いていれば) を戻す。move_locks (advice 行の欄、
     battle_logger.move_locks_of、2026-10-09 M1a 以降の行だけにある) を渡せば turn / last_move と場の個体の技の固定 (volatiles /
     encore_move / volatile_turns / entry_turn) も戻す。それ以前の行には無いので、技の固定は復元できない (戻した状態では固定なしになる)。
-    照合できない項目は restore_unknowns。now は復元しない (呼び出し側が replay_now で入れる)"""
+    照合できない項目は restore_unknowns。now は復元しない (呼び出し側が replay_now で入れる)。
+    型推定 (advice 行の ev_infer、2026-10-20) は入れない (同じ行から apply_ev_infer で足す)"""
     schema = state_schema_of(c)
 
     def side(sd: dict) -> dict:
@@ -183,6 +188,29 @@ def restore_unknowns(row: dict) -> list:
         for m in sd.get("party") or []:
             miss += [k for k in MON_V2_FIELDS + MON_V2_EXTRA if k not in m]
     return ["restore_v2_missing"] if miss else []
+
+
+def apply_ev_infer(state: dict, ev_infer: Optional[dict]) -> dict:
+    """復元した state に、同じ advice 行の ev_infer (種族 id → 型推定、battle_logger.ev_infer_of) を "ev_infer_override" として
+    入れて返す (2026-10-20)。engine (evaluate_common) はトラッカーより優先して読み、記録に無い種族は推定なしにする。
+    ev_infer が dict でない (記録に無い・null) なら何もしない (engine は従来どおりその場のトラッカーを読む)"""
+    if isinstance(ev_infer, dict):
+        state["ev_infer_override"] = copy.deepcopy(ev_infer)
+    return state
+
+
+def scoring_inputs_missing(row: dict) -> list:
+    """advice 行 (kind = battle) の採点の入力のうち記録に無いもの (純粋。2026-10-20)。"spe_est" = 版 2 の state の個体に
+    実効素早さの推定の欄が無い (2026-10-20 より前の行)、"ev_infer" = 型推定の写しの欄が無い / null。restore_unknowns とは別
+    (照合する側が判定不能に数えるかを決める。この関数は数えない)"""
+    miss = []
+    c = row.get("state") or {}
+    mons = [m for sname in ("player", "opponent") for m in ((c.get(sname) or {}).get("party") or [])]
+    if any(k not in m for m in mons for k in MON_INPUT_FIELDS):
+        miss.append("spe_est")
+    if not isinstance(row.get("ev_infer"), dict):
+        miss.append("ev_infer")
+    return miss
 
 
 def move_locks_for_check(row: dict) -> Optional[dict]:

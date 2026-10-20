@@ -734,7 +734,11 @@ def evaluate_common(state: dict, resolver=None, scoring_mode: Optional[str] = No
     if opp_view is not None:
         try:
             from advisor.ev_infer import get_tracker, _nature_mult
-            guess = get_tracker().best_for(opp_view.species_id)
+            # 記録の再生 (2026-10-20): state に ev_infer_override (advice 行の ev_infer、種族 id → 推定) があればトラッカーより
+            # 優先して読む (記録に無い種族は推定なし)。無ければ従来どおりトラッカー
+            _ovr = state.get("ev_infer_override")
+            guess = (_ovr.get(opp_view.species_id) if isinstance(_ovr, dict)
+                     else get_tracker().best_for(opp_view.species_id))
             if guess and guess["n_obs"] >= 1 and guess["prob"] >= 0.25:
                 opp_view.ev = dict(guess["evs"])
                 opp_view.nature = _nature_mult(guess["nature"])

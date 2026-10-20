@@ -136,6 +136,22 @@
   advice 行に "t_now" (evaluate に渡した state の now。実機の server は渡さないので null) と "data_version"
     ({"usage_snapshot", "dex_sha256", "effects_sha256"}、data_version_of) を必ず書く。
   move_locks は版 2 でも従来どおり書く (版 1 の読み手のため)。復元は tools.advice_replay.compact_to_engine_state
+2026-10-20 版の識別と実行状態の分離・採点の時刻・推定の状態 (レビュー 10/20、tests/test_version_split.py。欄と行を足すだけ):
+  version 行の version_id は版の識別 (advisor.versions.identity_of: コード・モデルの実体の sha・データ版・採点設定) だけの digest。
+    実行状態は version 行の "runtime" ({"rl_loaded": null/true/false, "rl_error", "selection_fallback_reason", "selection_source",
+    "selection_package", "designated_package", "usage_snapshot_source"})。version 行の rules に "embedding_sha256" /
+    "usage_snapshot"、"scoring" (採点設定) を足した
+  {"type": "runtime", "version_id", "runtime": {...}, "reason": "rl_load"} version 行の後に RL 方策の読み込みが完了・失敗した
+    (advisor.versions.runtime_change)。advice 行を書く直前に 1 回だけ書く (読み手は最後の runtime 行 → version 行の runtime の順に採る)
+  advice 行 (kind = battle) に "evaluated" (このフレームで採点を実際に計算したか。キャッシュを使ったら false)・"t_eval" (採点を
+    実際に行った時刻。キャッシュなら元の採点の時刻)・"cache_hit" (= not evaluated) を必ず書く (evaluation_fields_of。呼び出し側が
+    渡さなければ null)。集計は evaluation_counts
+  advice 行の state (版 2) の個体に "spe_est" (server._attach_candidates が付ける実効素早さの推定。RL の素早さ比較の入力。
+    無ければ null)。MON_V2_FIELDS には入れない (10/20 以前の版 2 の行を欄の欠けと数えないため。MON_INPUT_FIELDS)
+  advice 行 (kind = battle) に "ev_infer" ({種族 id: advisor.ev_infer の best_for の戻り値 or null}、場の個体 (両者) の種族ごと。
+    ev_infer_of。採点を実際に行ったときの値で、キャッシュを使った行は元の採点のときの値)。渡されなければ null。
+    復元は tools.advice_replay.apply_ev_infer(復元した state, 行の ev_infer) が state["ev_infer_override"] に入れ、
+    advisor.engine はトラッカーより優先して読む
 """
 from __future__ import annotations
 
@@ -575,6 +591,11 @@ def _mon_v2_fields(p: dict) -> dict:
     return out
 
 
+# 版 2 の個体に 2026-10-20 に足した採点の入力 (server._attach_candidates が付ける欄)。MON_V2_FIELDS とは分ける
+# (それ以前の版 2 の行に無いので、advice_replay.restore_unknowns の欄の欠けには数えない。欠けは scoring_inputs_missing)
+MON_INPUT_FIELDS = ("spe_est",)
+
+
 def compact_state(state: dict) -> dict:
     """advice 行の簡約状態 (純粋。2026-10-19 版 2): _compact_state (版 1) + "state_schema": 2 + 採点に使う欄 (MON_V2_FIELDS /
     MON_V2_EXTRA / STATE_V2_FIELDS / SIDE_V2_FIELDS)。復元は tools.advice_replay.compact_to_engine_state (対になる処理)"""
@@ -588,7 +609,60 @@ def compact_state(state: dict) -> dict:
             d[side][k] = _plain(sd.get(k))
         for row, p in zip(d[side]["party"], sd.get("party") or []):
             row.update(_mon_v2_fields(p))
+            for k in MON_INPUT_FIELDS:
+                row[k] = _plain(p.get(k))
     return d
+
+
+def ev_infer_of(state: Optional[dict], best_for: Callable) -> dict:
+    """advice 行の ev_infer (純粋。best_for は種族 id → 推定 dict or None、advisor.ev_infer.SpreadTracker.best_for)。
+    場の個体 (自分・相手) の種族ごとに best_for の戻り値の写しを入れる (推定器が無ければ null)。種族の分からない個体は入れない。
+    engine (evaluate_common) は相手の場の個体の種族で best_for を読む (推測した種族のときはその種族。ここには入らない)"""
+    out: dict = {}
+    for side in ("player", "opponent"):
+        sd = (state or {}).get(side) or {}
+        idx, party = sd.get("active_index"), sd.get("party") or []
+        p = party[idx] if isinstance(idx, int) and 0 <= idx < len(party) else None
+        sid = (p or {}).get("species_id")
+        if not sid or sid in out:
+            continue
+        try:
+            g = best_for(sid)
+        except Exception:
+            g = None
+        out[sid] = json.loads(json.dumps(g, ensure_ascii=False, default=str)) if g is not None else None
+    return out
+
+
+def evaluation_fields_of(evaluated: Optional[bool], t_eval: Optional[float]) -> dict:
+    """advice 行の採点の実計算の欄 (純粋): evaluated (このフレームで採点したか)、t_eval (採点を実際に行った時刻。キャッシュを
+    使ったなら元の採点の時刻)、cache_hit (= not evaluated)。evaluated が None (呼び出し側が知らない) なら全部 null"""
+    if evaluated is None:
+        return {"evaluated": None, "t_eval": None, "cache_hit": None}
+    t = round(float(t_eval), 3) if isinstance(t_eval, (int, float)) and not isinstance(t_eval, bool) else None
+    return {"evaluated": bool(evaluated), "t_eval": t, "cache_hit": not bool(evaluated)}
+
+
+def evaluation_counts(records) -> dict:
+    """対戦ログの行から、対戦の助言 (kind = battle) の行数と採点の実計算・キャッシュの件数を数える (純粋)。
+    n_unknown = evaluated の欄が無い / null の行 (2026-10-20 より前の行)。n_eval_times = 実計算の時刻 (t_eval) の種類の数"""
+    out = {"n_advice": 0, "n_evaluated": 0, "n_cache_hit": 0, "n_unknown": 0}
+    times = set()
+    for r in records or []:
+        if r.get("type") != "advice" or r.get("kind") != "battle":
+            continue
+        out["n_advice"] += 1
+        ev = r.get("evaluated")
+        if ev is True:
+            out["n_evaluated"] += 1
+        elif ev is False:
+            out["n_cache_hit"] += 1
+        else:
+            out["n_unknown"] += 1
+        if ev is not None and r.get("t_eval") is not None:
+            times.add(r.get("t_eval"))
+    out["n_eval_times"] = len(times)
+    return out
 
 
 def state_schema_of(compact: Optional[dict]) -> int:
@@ -859,6 +933,7 @@ class BattleLogger:
         self._outcome_info = None            # 記録済みの勝敗の表示用 {"outcome","inferred","basis","basis_text"}
         self._revision = None                # 推定を更新した直後の情報 (server が 1 回だけ通知に使う)
         self._version = None        # この対戦の version 行 (advisor.versions.runtime_versions)
+        self._runtime = None        # この対戦の実行状態の最新 (version 行の runtime → runtime 行。2026-10-20)
         self._advice_seq = 0        # 助言 ID の連番 (ファイル内で一意)
         self._advice_files: dict = {}   # 助言 ID → その助言を書いた対戦ログ (表示の行を助言の対戦に帰属させる。2026-10-06)
         self._shown: dict = {}          # 助言 ID → 表示時刻 (ブラウザの時計。hidden でないもの)。decision 行に添える
@@ -922,9 +997,11 @@ class BattleLogger:
             self._write({"type": "version", **self._version, **scoring_mode_info(),
                          "scoring_mode_source": scoring_mode_source(), **display_search_info(),
                          **transition_sensitivity_info()})
+            self._runtime = dict(self._version.get("runtime") or {})
         except Exception as e:
             print(f"[battle_log] 版の記録に失敗: {e}")
             self._version = None
+            self._runtime = None
         # 助言ページの版と可視状態 (接続中の全クライアント。2026-10-07)
         if self.open_rows_source is not None:
             try:
@@ -1524,12 +1601,29 @@ class BattleLogger:
         except Exception as e:      # 記録の失敗で対戦ログを止めない
             print(f"[battle_log] 自分の HP の読みの経過の記録に失敗: {e}")
 
-    def on_advice(self, advice: dict, kind: str, state: Optional[dict] = None) -> str:
+    def _track_runtime(self) -> None:
+        """version 行の後に RL 方策の読み込みが完了・失敗していたら runtime 行を 1 行書く (2026-10-20)"""
+        if self._version is None:
+            return
+        try:
+            from advisor.versions import rl_loaded_now, runtime_change
+            ch = runtime_change(self._runtime, rl_loaded_now())
+        except Exception:
+            ch = None
+        if ch is None:
+            return
+        self._runtime = ch
+        self._write({"type": "runtime", "version_id": self._version.get("version_id"), "runtime": dict(ch), "reason": "rl_load"})
+
+    def on_advice(self, advice: dict, kind: str, state: Optional[dict] = None, evaluated: Optional[bool] = None,
+                  t_eval: Optional[float] = None, ev_infer: Optional[dict] = None) -> str:
         """助言の記録。advice に advice_id / t_gen を書き込み (ブラウザが表示の確認に使う)、助言が見た簡約状態とその digest、
         動いていた版の id、実際に使った選出モデルの経路 (model_pick.model: experiment:<id> / deployed) と RL の読み込み状態を残す。
-        戻り値 advice_id"""
+        evaluated / t_eval (2026-10-20): このフレームで採点したか・採点を実際に行った時刻 (advice_key.advise_cached_ex の戻り値)。
+        ev_infer: 採点が読んだ型推定 (ev_infer_of)。戻り値 advice_id"""
         if self._file is None:
             self._open_new()
+        self._track_runtime()
         self._advice_seq += 1
         aid = f"{self._file.stem[7:]}-{self._advice_seq:04d}"      # battle_YYYYmmdd_HHMMSS → YYYYmmdd_HHMMSS-0001
         self._advice_files[aid] = self._file
@@ -1553,6 +1647,9 @@ class BattleLogger:
                 rec.update(sensitivity_fields_of(advice))
             except Exception:
                 rec.update({"sensitivity_status": None, "sensitivity_changed": None})
+            # 採点の実計算の有無と時刻、採点が読んだ型推定 (2026-10-20。欄を足すだけ)
+            rec.update(evaluation_fields_of(evaluated, t_eval))
+            rec["ev_infer"] = ev_infer if isinstance(ev_infer, dict) else None
         if state is not None:
             try:
                 # 版 2 の簡約状態 (2026-10-19)。state_id はこの state の digest (版 2 の欄も含む)
