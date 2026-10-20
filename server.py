@@ -35,7 +35,7 @@ from vision.frame_burst import BurstPlanner
 from champions_agent.config import (ADVICE_KEY_HP_AGE_GRAIN_SEC, ADVICE_KEY_VERSION, ADVICE_RECALC_FALLBACK_TTL_SEC,
                                     ADVICE_RECALC_TTL_SEC, CLIENT_HELLO_WAIT_SEC, DISPLAY_HIDDEN_WARN_COUNT, FRAME_BURST_DIR,
                                     MANUAL_SPECIES_RESOLVE_CUTOFF, PARTY_SIZE, SHADOW_VARIANTS_ENABLED)
-from advice_key import AdviceCache, DataVersions, advice_input_key, advise_cached, scoring_settings
+from advice_key import AdviceCache, DataVersions, advice_input_key, advise_cached_ex, scoring_settings
 from client_state import (VIS_HIDDEN, VIS_VISIBLE, ClientRegistry, HiddenDisplayWatch, served_html_version, short_sid,
                           stale_of)
 
@@ -52,7 +52,7 @@ def should_advise_selection(state: dict) -> bool:
             and not state.get("outcome")
             and not state.get("battle_active"))
 from advisor.service import Advisor
-from battle_logger import BattleLogger
+from battle_logger import BattleLogger, ev_infer_of
 from tools.advice_mode import sens_startup_check, server_startup_check
 
 # 採点方式の検査 (2026-10-16 方式 C)。環境変数 ADVICE_SCORING_MODE が使えない値なら重い初期化の前に止める
@@ -542,15 +542,17 @@ async def _handle_one_frame(sid, data):
                 _last_advice_key = key
                 _last_advice_time = now
                 _t_adv = time.time()
-                # 採点は鍵が変わったか有効期限を超えたときだけ (advice_key.advise_cached)。据え置き・安定化ゲートは毎回通す
-                advice, evaluated = await loop.run_in_executor(
-                    None, lambda: advise_cached(advisor, state, _advice_cache, key, now, keep_common=_shadow is not None))
+                # 採点は鍵が変わったか有効期限を超えたときだけ (advice_key.advise_cached_ex)。据え置き・安定化ゲートは毎回通す。
+                # 採点を実際に行った時刻 (キャッシュなら元の時刻) と、採点の直前に取った型推定の写し (advice 行の ev_infer) も受け取る
+                advice, evaluated, t_eval, ev_snap = await loop.run_in_executor(
+                    None, lambda: advise_cached_ex(advisor, state, _advice_cache, key, now, keep_common=_shadow is not None,
+                                                   inputs_fn=lambda: ev_infer_of(state, spread_tracker.best_for)))
                 if evaluated:
                     _advise_ms.append((time.time() - _t_adv) * 1000.0)
                 _last_advice_target = advice_target(state, advice)
                 _stale_notified = False
                 advice["text"] = advisor.format_advice(advice)
-                battle_log.on_advice(advice, "battle", state)
+                battle_log.on_advice(advice, "battle", state, evaluated=evaluated, t_eval=t_eval, ev_infer=ev_snap)
                 await sio.emit('advice_update', advice, room=sid)
                 if _shadow is not None:
                     # 表示の後に投入する (表示を待たせない)。計算はワーカーのスレッドで行う
