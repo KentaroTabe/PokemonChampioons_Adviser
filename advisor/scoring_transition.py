@@ -697,7 +697,7 @@ def build_inputs(state: dict, resolver, *, my_view: MonView, opp_view: Optional[
 
     from advisor.engine import (_hp_frac_of, _opp_mega_forms, _rl_probs, build_mon_view, complete_moves_from_registration,
                                 opponent_move_pool, registered_moves_of_mon)
-    from advisor.party import battle_party_indices
+    from advisor.party import pick_state, unknown_alive_count
     from vision.state import roster_slots
     if opp_view is None or opp_p is None:
         return None, "opp_unknown"
@@ -736,8 +736,10 @@ def build_inputs(state: dict, resolver, *, my_view: MonView, opp_view: Optional[
         ranges.append(dict(r, side=side, slot=slot, party_index=party_index,
                            name=p.get("species_ja") or p.get("species_id")))
 
-    # 自分の控え (legacy の交代候補と同じ規則)
-    allowed = battle_party_indices(my_state)
+    # 自分の控え (legacy の交代候補と同じ規則: advisor.party.pick_state の picked。選出が未判明の個体は控え = 残存戦力にも
+    # 交代の候補にも入れず、数だけ my_unknown に残す。2026-10-20)
+    my_picks = pick_state(my_state)
+    allowed = my_picks.picked
     bench, bench_meta = [], []
     my_moves = {my_view.species_id: tuple(m for m in legal_move_ids if dex.move(m))}
     for i, p in enumerate(my_state["party"]):
@@ -810,9 +812,10 @@ def build_inputs(state: dict, resolver, *, my_view: MonView, opp_view: Optional[
         unknown = max(0, int(C.VALUATION_TEAM_SIZE) - n_seen)
     else:
         unknown = max(0, int(remaining) - n_seen_alive)
-    # 自分の状態に無い残り (選出の印が足りず控えを特定できないとき): 残数 − 分かっている生存数
+    # 自分の状態に無い残り (選出の印が足りず控えを特定できないとき): 残数 − 分かっている生存数。残数が無ければ選出のうち
+    # 未判明の数 (2026-10-20: 以前は 0 = 未判明の個体を 0 体扱いにしていた。選出が 3 体分かっていれば 0 で従来どおり)
     my_known_alive = (0 if my_fainted else 1) + len(bench)
-    my_unknown = max(0, int(my_state["remaining"]) - my_known_alive) if my_state.get("remaining") is not None else 0
+    my_unknown = unknown_alive_count(my_state, my_known_alive, my_picks)
     opp_vols = {str(v).lower() for v in (opp_p.get("volatiles") or [])}
     opp_locked = None
     if "encore" in opp_vols:

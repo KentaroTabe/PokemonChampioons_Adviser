@@ -835,9 +835,10 @@ def _legal_actions_impl(state: dict, use_legal_flag: bool) -> list:
     party = my.get("party", [])
     own = party[mi] if mi is not None and mi < len(party) else None
     out = []
-    # 交代は選出済みの3体に限る (未選出への交代提案の防止)
-    from advisor.party import battle_party_indices
-    allowed = battle_party_indices(my)
+    # 交代は選出済みの3体に限る (未選出への交代提案の防止。2026-10-20: 選出が未判明の個体にも確率を配らない =
+    # advisor.party.usable_indices)
+    from advisor.party import usable_indices
+    allowed = usable_indices(my)
     # 実行環境の「今交代できる個体」(2026-10-15 M3a、シミュレータだけ。とらわれ等で交代できなければ確率を配らない)
     from advisor.engine import legal_switch_filter
     switchable = legal_switch_filter(my)
