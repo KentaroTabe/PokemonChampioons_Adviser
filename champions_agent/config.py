@@ -1530,6 +1530,19 @@ REAL_ACCEPT_STALE_HP_SEC = HP_RANGE_STALE_SEC
 # (遅延の分布にも期限内にも入れない、分母には残す)。
 # PROFILE_TOP: --profile で evaluate の内訳 (cProfile の累積時間の上位) を出す行数
 REAL_ACCEPT_PROFILE_TOP = 30
+# 2026-10-20 レビュー (docs/REAL_ACCEPT_TRANSITION_20261020.md §6) で開始前に固定した規則:
+# - FALLBACK_DECISION_ADVICE: 退避の決定単位で「各決定のどの助言で退避を数えるか」。前から順に試し、最初に見つかった助言を使う。
+#   "decision_advice_id" = decision 行の advice_id の助言、"last_valid" = その決定の窓 (決定開始 〜 決定時刻、決定開始が取れなければ
+#   前の決定 〜 決定時刻) の最後の有効な助言 (確定・評価できた・候補あり・古い局面でない)。どちらも無い決定は分母に入れず件数を出す。
+#   上限 (FALLBACK_BUDGET_MAX / FALLBACK_ALL_MAX) は各回 (ログごと) と合算の両方に当て、1 回でも超えたら合算も未達
+# - VERSION_IGNORE_FIELDS: 版の照合で比べない version 行の欄 (記録の時刻と、版の識別と実行状態をまとめた digest の version_id)
+# - VERSION_RUNTIME_FIELDS: version 行のうち実行状態 (読み込み成功 / 失敗) の欄。版の識別とは別に照合し、実行状態は対象の全
+#   battle の advice 行の policy.rl_loaded (読み込み成功) を根拠にする。"runtime" は別の担当が足す予定の欄 (あれば実行状態として扱う)
+# - VERSION_REQUIRED_FIELDS: 対象群の全ログで記録が必要な版の識別の欄 (served_commit は version 行に無ければ client 行から取る)
+REAL_ACCEPT_FALLBACK_DECISION_ADVICE = ("decision_advice_id", "last_valid")
+REAL_ACCEPT_VERSION_IGNORE_FIELDS = ("type", "t", "collected_at", "version_id")
+REAL_ACCEPT_VERSION_RUNTIME_FIELDS = ("runtime", "action_policy.loaded", "action_policy.error", "selection_model.fallback_reason")
+REAL_ACCEPT_VERSION_REQUIRED_FIELDS = ("served_commit", "scoring_mode")
 
 # transition の処理時間の内訳の計測 (tools/transition_profile.py、2026-10-16 レビュー、計画書 §8.33)。
 # REPEAT: 決定ごと・感度 on / off ごとに evaluate を繰り返す回数 (中央値を使う)。TOP: 遅い局面として内訳を出す件数

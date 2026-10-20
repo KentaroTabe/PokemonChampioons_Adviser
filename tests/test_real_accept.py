@@ -621,6 +621,274 @@ def test_render_markdown_new_sections():
     print("test_render_markdown_new_sections OK")
 
 
+# ------------------------------------------------------------------ 2026-10-20 レビュー (交代先ごとの選出 / 退避の 3 単位 / 再生の設定 / 版の照合)
+def _mon2(sp, picked=False, **kw):
+    m = _mon(sp, picked=picked, hp=kw.pop("hp", None))
+    m.update(kw)
+    return m
+
+
+def _party_1020(**indeedee):
+    """10/20 の 2 戦目の形: 選出は カメックス・オオニューラ・イエッサン、印は 2 体だけ (イエッサン は印なし)"""
+    return [_mon2("blastoise", picked=True, hp=66.1, hp_read_ts=10.0, moves=[["hydropump", 8]]),
+            _mon2("indeedee", **indeedee), _mon2("sneasler", picked=True), _mon2("kingambit"), _mon2("salamence"),
+            _mon2("archaludon")]
+
+
+def test_pick_status_per_target():
+    """交代先ごとの 選出済み (印 / 確かな登場記録) / 非選出確定 (3 体確定の外) / 不明 (推定の個体・HP の推定は数えない)"""
+    def comp(party):
+        return {"scene": SCENE_COMMAND, "player": {"active": 0, "party": party}, "opponent": {"active": 0, "party": [_mon("dragonite")]}}
+    sw = lambda i: {"kind": "switch", "id": i}
+    pk = [["my", 0, "blastoise", False]]
+    # 確かな登場記録 (HP の実読み) で 3 体確定 → イエッサン は選出済み、ブリジュラス は非選出確定 (候補に入れば違反)
+    c = comp(_party_1020(hp=100.0, hp_read_ts=5.0))
+    ps = RA.pick_status(c)
+    assert ps["status"] == ["picked", "picked", "picked", "unpicked", "unpicked", "unpicked"] and ps["complete"], ps
+    assert ps["evidence"][1] == ["hp_read"] and ps["evidence"][0] == ["mark", "active", "hp_read"], ps["evidence"]
+    adv = {"ok": True, "best": sw("indeedee"), "actions": [sw("indeedee"), sw("sneasler")], "position_key": pk}
+    r = RA.check_best(adv, c, {}, detail=True, **CK)
+    assert r["violations"] == [] and r["unconfirmed"] == [] and r["checks"]["switch_picked"] == "ok", r
+    assert [t["status"] for t in r["targets"]] == ["picked", "picked"] and r["targets"][0]["best"] is True
+    adv2 = dict(adv, actions=[sw("indeedee"), sw("archaludon")])
+    r = RA.check_best(adv2, c, {}, detail=True, **CK)
+    assert r["violations"] == ["candidate_unpicked"] and r["checks"]["candidate_picked"] == "ng", r
+    # 他の登場記録: 場に出たターン / 選出順 / 場の個体 (is_active) / 登場の文言
+    for kw in ({"entry_turn": 0}, {"pick_order": 2}, {"is_active": True}):
+        assert RA.pick_status(comp(_party_1020(**kw)))["status"][1] == "picked", kw
+    # 推定の HP (hp_estimated) と推定の個体 (guess / pending) は数えない → 2 体しか確定せず、イエッサン も ブリジュラス も 不明
+    for kw in ({"hp": 50.0, "hp_read_ts": 5.0, "hp_estimated": True}, {"entry_turn": 0, "guess": True},
+               {"hp_read_ts": 5.0, "pending": True}, {"hp": 100.0}):          # HP の値だけ (実読みの時刻なし) も数えない
+        ps = RA.pick_status(comp(_party_1020(**kw)))
+        assert ps["status"][1] == "unknown" and ps["status"][5] == "unknown" and not ps["complete"], (kw, ps)
+    cu = comp(_party_1020(hp=50.0, hp_read_ts=5.0, hp_estimated=True))
+    r = RA.check_best(adv2, cu, {}, detail=True, **CK)                  # 第一候補 イエッサン・候補 ブリジュラス とも不明
+    assert r["violations"] == [] and r["unconfirmed"] == ["selection_unknown"], r
+    assert r["checks"]["switch_picked"] == "unknown" and r["checks"]["candidate_picked"] == "unknown", r
+    assert [t["status"] for t in r["targets"]] == ["unknown", "unknown"]
+    # 推定の個体でも選出の印はそのまま選出済み
+    assert RA.pick_status(comp(_party_1020(picked=True, guess=True)))["status"][1] == "picked"
+    # 登場の文言 (events 行の switch_player)。その助言の時刻より後の文言は使わない
+    party = _party_1020()
+    party[1]["ja"] = "イエッサン"
+    recs = [{"type": "events", "fired": ["switch_player"], "texts": ["ゆけっイエッサン"], "t": 100.0},
+            {"type": "events", "fired": ["switch_opponent"], "texts": ["ボーマンダ"], "t": 101.0},
+            {"type": "events", "fired": ["switch_player"], "texts": ["ゆけっボーマンダ"], "t": 300.0}]
+    assert RA.appearance_indices(recs, party, 200.0) == {1}
+    assert RA.appearance_indices(recs, party, 50.0) == set() and RA.appearance_indices(recs, party, None) == set()
+    ps = RA.pick_status(comp(party), appeared={1})
+    assert ps["status"][1] == "picked" and ps["evidence"][1] == ["event"] and ps["status"][4] == "unpicked"
+    # 1 体しか分からない (印なし、場の個体だけ) → 交代先は全部 不明 (違反にしない)
+    c1 = comp([_mon2("indeedee", hp=100.0, hp_read_ts=1.0, entry_turn=0), _mon2("archaludon"), _mon2("blastoise")])
+    c1["player"]["active"] = 0
+    r = RA.check_best({"ok": True, "best": sw("archaludon"), "actions": [sw("archaludon")],
+                       "position_key": [["my", 0, "indeedee", False]]}, c1, {}, detail=True, **CK)
+    assert r["violations"] == [] and r["checks"]["switch_picked"] == "unknown", r
+    # 集計: 交代先ごとの 3 値の件数 (全交代先と第一候補)
+    ds = [_dec(legacy=dict(_res(), targets=[{"id": "indeedee", "best": True, "status": "picked"},
+                                            {"id": "archaludon", "best": False, "status": "unpicked"}]),
+               transition=dict(_res(), targets=[{"id": "archaludon", "best": True, "status": "unknown"}]))]
+    s = RA.summarize(ds)
+    assert s["modes"]["legacy"]["valid"]["pick_targets"] == {"all": {"picked": 1, "unpicked": 1, "unknown": 0},
+                                                             "best": {"picked": 1, "unpicked": 0, "unknown": 0}}
+    assert s["modes"]["transition"]["valid"]["pick_targets"]["best"]["unknown"] == 1
+    assert s["modes"]["transition"]["valid"]["pick_examples"][0]["id"] == "archaludon"
+    print("test_pick_status_per_target OK")
+
+
+def _fb_log(n_dec: int, n_fb: int, t0: float, mode="transition", reason="opp_unevaluated_ambiguous", extra_rows=1,
+            evaluated=False):
+    """決定 n_dec 件 (うち n_fb 件の参照する助言が退避) の合成ログ。各決定の前に退避なしの助言行を extra_rows 行足す"""
+    recs = [{"type": "version", "scoring_mode": mode, "t": t0}]
+    t = t0
+    for i in range(n_dec):
+        t += 10.0
+        recs.append({"type": "scene", "scene": SCENE_COMMAND, "t": t})
+        for j in range(extra_rows):
+            r = _adv_rec(f"x{t0}-{i}-{j}", t + 0.1 + j * 0.01)
+            r["fallback_reason"] = None
+            if evaluated:
+                r["evaluated"] = (j == 0)
+            recs.append(r)
+        r = _adv_rec(f"a{t0}-{i}", t + 0.5)
+        r["fallback_reason"] = reason if i < n_fb else None
+        if evaluated:
+            r["evaluated"] = True
+        recs.append(r)
+        recs.append({"type": "decision", "advice_id": f"a{t0}-{i}", "turn": i + 1, "t_decided": t + 2.0, "t": t + 2.1})
+        recs.append({"type": "scene", "scene": SCENE_FIELD, "t": t + 2.5})
+    return recs
+
+
+def test_fallback_units():
+    """退避の 3 単位: 決定単位はレビュワーの数字 (0/6、1/12、5/13 → 合算 6/31) を再現し、各回と合算の両方に 20% を当てる"""
+    logs = [("a.jsonl", _fb_log(6, 0, 0.0)), ("b.jsonl", _fb_log(12, 1, 1000.0, reason="opp_fainted")),
+            ("c.jsonl", _fb_log(13, 5, 2000.0))]
+    units = RA.summarize_fallback_units([{"name": n, "decisions": RA.decision_fallback_rows(r), "advice": RA.advice_row_counts(r)}
+                                         for n, r in logs])
+    d = units["decision"]
+    assert [(b["n_fallback"], b["n"]) for b in d["by_log"].values()] == [(0, 6), (1, 12), (5, 13)]
+    assert d["all"]["n_fallback"] == 6 and d["all"]["n"] == 31 and d["all"]["rate"] == round(6 / 31, 4)
+    assert d["all"]["rule_used"] == {"decision_advice_id": 31} and d["all"]["by_reason"] == {"opp_unevaluated_ambiguous": 5,
+                                                                                           "opp_fainted": 1}
+    # 助言行単位 (確定前・キャッシュを含む): 決定あたり 2 行 → 62 行のうち 6
+    a = units["advice_row"]["all"]
+    assert (a["n_fallback"], a["n"]) == (6, 62), a
+    assert units["counts"]["c.jsonl"]["rows_per_decision"] == 2.0 and units["counts"]["c.jsonl"]["has_evaluated"] is False
+    s = RA.summarize([_dec(legacy=_res(), transition=_res())])
+    acc = RA.acceptance(s, {}, {"n_logs": 3, "n_logs_ok": 3}, units=units)
+    rows = {r["item"] + "|" + r["mode"]: r for r in acc}
+    agg = rows["退避: 全理由 (transition、決定単位)|transition"]
+    assert agg["status"] == RA.NG and agg["value"] == round(6 / 31, 4), agg      # 合算 19.4% は基準内でも、3 回目で未達
+    assert RA.PENDING_NOTE in agg["note"] and "c.jsonl 5 / 13" in agg["note"], agg["note"]
+    assert rows["退避: 全理由 (transition、決定単位、回ごと)|transition / a.jsonl"]["status"] == RA.OK
+    assert rows["退避: 全理由 (transition、決定単位、回ごと)|transition / b.jsonl"]["status"] == RA.OK
+    assert rows["退避: 全理由 (transition、決定単位、回ごと)|transition / c.jsonl"]["status"] == RA.NG
+    assert rows["退避: 全理由 (transition、助言行単位)|transition"]["status"] == RA.REF
+    assert "再生局面単位" in rows["退避: 全理由 (transition、再生)|transition"]["note"]
+    # 3 回目が基準内なら合算も 満たす
+    units2 = RA.summarize_fallback_units([{"name": n, "decisions": RA.decision_fallback_rows(r), "advice": RA.advice_row_counts(r)}
+                                          for n, r in logs[:2]])
+    rows2 = {r["item"] + "|" + r["mode"]: r for r in RA.acceptance(s, {}, {"n_logs": 2, "n_logs_ok": 2}, units=units2)}
+    assert rows2["退避: 全理由 (transition、決定単位)|transition"]["status"] == RA.OK
+    # 規則: decision 行の advice_id の助言が無ければ、その決定の窓の最後の有効な助言 (確定前は使わない)
+    recs = _fb_log(2, 0, 0.0)
+    recs = [r for r in recs if not (r.get("type") == "advice" and r.get("advice_id") == "a0.0-1")]
+    late = _adv_rec("p", 20.9, provisional=True)
+    late["fallback_reason"] = "budget"
+    recs.insert(-2, late)
+    fr = RA.decision_fallback_rows(recs)
+    assert [r["rule"] for r in fr] == ["decision_advice_id", "last_valid"] and fr[1]["used_advice_id"] == "x0.0-1-0", fr
+    assert RA.decision_fallback_rows(recs, rule=("decision_advice_id",))[1]["rule"] is None
+    b = RA.summarize_fallback_units([{"name": "z", "decisions": RA.decision_fallback_rows(recs, rule=("decision_advice_id",)),
+                                      "advice": RA.advice_row_counts(recs)}])["decision"]["all"]
+    assert b["n"] == 1 and b["n_unmatched"] == 1
+    # 予算超過は別に数える。legacy の決定は数えない
+    fr = RA.decision_fallback_rows(_fb_log(3, 1, 0.0, reason="budget:main"))
+    assert [r["budget"] for r in fr] == [True, False, False]
+    assert RA.summarize_fallback_units([{"name": "l", "decisions": RA.decision_fallback_rows(_fb_log(3, 1, 0.0, mode="legacy")),
+                                         "advice": RA.advice_row_counts(_fb_log(3, 1, 0.0, mode="legacy"))}]
+                                       )["decision"]["all"]["n"] == 0
+    # 実計算の回数: advice 行に evaluated があれば 実計算 / 決定 (無ければ助言行数だけ)
+    c = RA.advice_row_counts(_fb_log(4, 0, 0.0, extra_rows=2, evaluated=True))
+    assert c["n_rows"] == 12 and c["rows_per_decision"] == 3.0 and c["n_evaluated"] == 8 and c["evaluated_per_decision"] == 2.0, c
+    md = RA._fallback_unit_lines(units)
+    assert any("決定単位 / c.jsonl | 5 / 13 決定" in x for x in md) and any("evaluated の欄なし" in x for x in md)
+    print("test_fallback_units OK")
+
+
+def test_replay_settings():
+    """再生の設定: version 行の感度・表示用の探索に揃える。記録の無い旧ログは config の既定 (その旨を残す)"""
+    v = {"type": "version", "scoring_mode": "transition", "transition_sensitivity": False, "display_search": "off"}
+    st = RA.replay_settings(v, True, "on")
+    assert st["transition_sensitivity"] is False and st["display_search"] is False and st["scoring_mode"] == "transition"
+    assert st["from_version"] and st["source"] == {"transition_sensitivity": "version", "display_search": "version",
+                                                   "scoring_mode": "version"}, st
+    st = RA.replay_settings({"type": "version"}, True, "off")
+    assert st["transition_sensitivity"] is True and st["display_search"] is False and not st["from_version"]
+    assert st["source"]["transition_sensitivity"] == "config" and st["scoring_mode"] is None
+    assert RA.replay_settings(None, False, "on")["display_search"] is True
+    # advice 行ごとの直前の version 行 (前に無ければ最初の version 行)
+    a1, a2, a3 = {"type": "advice", "n": 1}, {"type": "advice", "n": 2}, {"type": "advice", "n": 3}
+    v1, v2 = {"type": "version", "id": 1}, {"type": "version", "id": 2}
+    assert RA.versions_by_row([a1, v1, a2, v2, a3], [a1, a2, a3]) == [v1, v1, v2]
+    assert RA.versions_by_row([a1], [a1]) == [None]
+    lines = RA._replay_settings_lines({"replay_settings": {"a.jsonl": [dict(RA.replay_settings(v, True, "on"), n=3)],
+                                                           "b.jsonl": [dict(RA.replay_settings({}, True, "off"), n=2)]},
+                                       "replay_settings_from_version": False})
+    assert "config の既定" in lines[0] and "感度 off / 表示用の探索 off" in lines[1] and "(version 行)" in lines[1]
+    assert "config の既定: transition_sensitivity, display_search" in lines[2], lines
+    assert RA._replay_settings_lines({"replay_settings": {"a.jsonl": [dict(RA.replay_settings(v, True, "on"), n=3)]},
+                                      "replay_settings_from_version": True})[0].startswith("- 再生の設定 = version 行の設定")
+    print("test_replay_settings OK")
+
+
+def _ver_1020(loaded, **kw):
+    v = {"type": "version", "designated_package": None,
+         "selection_model": {"package": None, "path": "/m/selection_model.pt", "sha256": "7034", "fallback_reason": None,
+                             "source": "deployed"},
+         "action_policy": {"path": "/m/policy.zip", "sha256": "49d9", "loaded": loaded, "error": None},
+         "team": {"sha256": "e8c1", "species": ["blastoise", "indeedee"]},
+         "rules": {"git_commit": "2465b643", "dex_sha256": "8c44", "effects_sha256": "5d1b", "selection_features": "v1"},
+         "version_id": "2e5e" if loaded is None else "8618", "collected_at": 1.0, "scoring_mode": "transition",
+         "scoring_mode_env": "transition", "scoring_mode_source": "file", "display_search": "off",
+         "transition_sensitivity": False, "transition_sensitivity_source": "default", "t": 2.0}
+    v.update(kw)
+    return v
+
+
+def _log_1020(ver, rl=True, n=3):
+    return [ver, {"type": "client", "served_commit": "2465b643"}] + [
+        {"type": "advice", "kind": "battle", "policy": {"rl_loaded": rl}, "advice_id": f"r{i}"} for i in range(n)]
+
+
+def test_version_identity_and_runtime():
+    """版の識別と実行状態の分離: action_policy.loaded だけ違う 2 本は同条件 (根拠を出す)、設定が違えば不一致"""
+    li = lambda n, recs: {"name": n, "ident": RA.version_identity(recs, identity_fn=None)}
+    a = li("a", _log_1020(_ver_1020(None)))
+    b = li("b", _log_1020(_ver_1020(True)))
+    assert "action_policy.loaded" in a["ident"]["runtime"] and "action_policy.loaded" not in a["ident"]["identity"]
+    assert "version_id" not in a["ident"]["identity"] and a["ident"]["identity"]["served_commit"] == ["2465b643"]
+    assert a["ident"]["runtime_ok"] is True and "3 / 3 で policy.rl_loaded = True" in a["ident"]["runtime_basis"]
+    g = RA.group_consistency([a, b])
+    assert g["ok"] is True, g
+    fields = {x["field"]: x["value"] for x in g["basis"]}
+    assert fields["rules.git_commit"] == "2465b643" and fields["transition_sensitivity"] is False and fields["served_commit"] == "2465b643"
+    assert any("version_id は 2 種類" in n and "action_policy.loaded: None / True" in n for n in g["notes"]), g["notes"]
+    assert g["runtime"]["a"].startswith("battle の advice 行 3 / 3")
+    # 旧い照合 (version_id を比べる) では揃わない
+    assert RA.target_consistency([{"name": "a", "versions": RA.log_versions(_log_1020(_ver_1020(None)))},
+                                  {"name": "b", "versions": RA.log_versions(_log_1020(_ver_1020(True)))}])["ok"] is False
+    # 設定 (感度) が違えば不一致
+    c = li("c", _log_1020(_ver_1020(True, transition_sensitivity=True)))
+    g = RA.group_consistency([a, c])
+    assert g["ok"] is False and any("transition_sensitivity が揃わない" in n for n in g["notes"]), g["notes"]
+    # モデルの sha が違えば不一致
+    d = li("d", _log_1020(_ver_1020(True, action_policy={"path": "/m/policy.zip", "sha256": "ffff", "loaded": True, "error": None})))
+    assert RA.group_consistency([a, d])["ok"] is False
+    # 実行状態: 読み込みの失敗 (advice 行の rl_loaded = False / version 行の error) は同条件にしない
+    e = li("e", _log_1020(_ver_1020(True), rl=False))
+    assert e["ident"]["runtime_ok"] is False and RA.group_consistency([a, e])["ok"] is False
+    f = li("f", _log_1020(_ver_1020(False, action_policy={"path": "/m/policy.zip", "sha256": "49d9", "loaded": False,
+                                                          "error": "ImportError"}), rl=None))
+    assert f["ident"]["runtime_ok"] is False
+    h = li("h", _log_1020(_ver_1020(None), rl=None))                          # 確認できない
+    assert h["ident"]["runtime_ok"] is None and RA.group_consistency([a, h])["ok"] is False
+    # 両方式の増分の照合は方式の欄を除く
+    lg = li("l", _log_1020(_ver_1020(True, scoring_mode="legacy", scoring_mode_env="legacy")))
+    assert RA.group_consistency([a, lg])["ok"] is False
+    assert RA.group_consistency([a, lg], exclude=RA.SCORING_MODE_FIELDS)["ok"] is True
+    # 必須の欄 (scoring_mode) の記録が無い
+    old = li("o", _log_1020({"type": "version", "version_id": "x", "rules": {"git_commit": "e653"}}))
+    g = RA.group_consistency([old])
+    assert g["ok"] is False and any("scoring_mode の記録なし" in n for n in g["notes"])
+    # 新しい version 行 (runtime の欄あり): identity_fn で版の識別を取り、実行状態は runtime と後の runtime 行
+    def ident_fn(v):
+        return {"code": {"git_commit": (v.get("rules") or {}).get("git_commit")},
+                "scoring": {"scoring_mode": v.get("scoring_mode"), "sensitivity": v.get("transition_sensitivity")}}
+    nv1 = dict(_ver_1020(None), runtime={"rl_loaded": None, "rl_error": None}, version_id="same")
+    nv2 = dict(_ver_1020(True), runtime={"rl_loaded": True, "rl_error": None}, version_id="same")
+    n1 = {"name": "n1", "ident": RA.version_identity(_log_1020(nv1) + [{"type": "runtime", "runtime": {"rl_loaded": True}}],
+                                                       identity_fn=ident_fn)}
+    n2 = {"name": "n2", "ident": RA.version_identity(_log_1020(nv2), identity_fn=ident_fn)}
+    assert n1["ident"]["format"] == ["identity_of"] and set(n1["ident"]["identity"]) == {
+        "code.git_commit", "scoring.scoring_mode", "scoring.sensitivity", "served_commit"}, n1["ident"]["identity"]
+    assert n1["ident"]["runtime"]["runtime.rl_loaded"] == [None, True] and n1["ident"]["runtime_ok"] is True
+    g = RA.group_consistency([n1, n2])
+    assert g["ok"] is True and not any("version_id" in n for n in g["notes"]), g
+    nf = {"name": "nf", "ident": RA.version_identity(_log_1020(nv2) + [{"type": "runtime", "runtime": {"rl_loaded": False,
+                                                                                                    "rl_error": "x"}}],
+                                                       identity_fn=ident_fn)}
+    assert nf["ident"]["runtime_ok"] is False
+    # 新旧の形が混ざる群は一致にしない (欄の名前が違う)
+    g = RA.group_consistency([n1, a])
+    assert g["ok"] is False and any("形が混ざる" in n for n in g["notes"])
+    # 根拠の Markdown
+    md = RA._group_basis_lines({"by_mode": {"transition": RA.group_consistency([a, b])}})
+    assert any("同条件の根拠" in x for x in md) and "| rules.git_commit | 2465b643 |" in md and any("policy.rl_loaded" in x for x in md)
+    print("test_version_identity_and_runtime OK")
+
+
 def main() -> None:
     test_thin_and_rows()
     test_decision_open_time()
@@ -640,6 +908,10 @@ def main() -> None:
     test_latency_rule()
     test_versions_and_consistency()
     test_render_markdown_new_sections()
+    test_pick_status_per_target()
+    test_fallback_units()
+    test_replay_settings()
+    test_version_identity_and_runtime()
     print("\nALL OK")
 
 
