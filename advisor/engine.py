@@ -1062,6 +1062,10 @@ def evaluate_common(state: dict, resolver=None, scoring_mode: Optional[str] = No
                 self_cost = move_self_cost(my_view, my_bench_cache, tgt_view,
                                            opp_view.hp_frac if opp_view is not None else 1.0,
                                            mid, my_field, d["avg"] / 100.0, act_discount)
+                # 控え (sim_bench) は選出の判明した個体だけ。未判明の生存の個体が残るなら「控えなし」にしない (2026-10-20)
+                if self_cost and self_cost.get("faints") and not self_cost.get("requires_switch") \
+                        and my_unknown_alive(my_state) > 0:
+                    self_cost["requires_switch"] = True
                 sc_txt = self_cost_text(self_cost) if self_cost else ""
                 if sc_txt:
                     reason_parts.append(sc_txt)
@@ -1088,9 +1092,11 @@ def evaluate_common(state: dict, resolver=None, scoring_mode: Optional[str] = No
 
     # ------------------------------------------------------------------
     # 交代の評価 (選出済みの3体に限る: 未選出への交代は提案できない)
+    # 2026-10-20: 選出が未判明の個体 (印も確かな登場記録も無い) も候補にしない (advisor.party.usable_indices。以前は印が
+    # 足りないと全員を許可し、対戦冒頭に未選出のブリジュラスへの交代を第一候補に出した)
     # ------------------------------------------------------------------
-    from advisor.party import battle_party_indices
-    _allowed = battle_party_indices(my_state)
+    from advisor.party import usable_indices
+    _allowed = usable_indices(my_state)
     # 実行環境の「今交代できる個体」(2026-10-15 M3a、シミュレータだけ): 選出した生存の控えでも、とらわれ等で今交代できない個体は
     # 候補から外して illegal_actions に理由を残す (残存戦力の扱いは変えない)
     _switchable = legal_switch_filter(my_state)
@@ -1615,16 +1621,16 @@ def _run_endgame(my_state, opp_state, resolver, my_active_moves=None) -> str:
     my_active_moves: 自分の場の個体の技 (evaluate_common は legal_move_slots の選べる技 = 登録の補完込み・アンコール等で
     選べない技を除く。2026-10-09 M2a)。None なら状態の技。控えの個体は状態の技 (固定は交代で解ける)"""
     from advisor.endgame import matchup_matrix, endgame_note
+    from advisor.party import usable_indices
     if opp_active_pending(opp_state):
         return ""
 
     def mons_of(side_state, side):
         out = []
-        # 自分側は選出済みの3体のみ (未選出は勝ち筋に数えられない)
+        # 自分側は選出済みの3体のみ (未選出は勝ち筋に数えられない。選出が未判明の個体も入れない: advisor.party.usable_indices)
         allowed = None
         if side == "player":
-            from advisor.party import battle_party_indices
-            allowed = battle_party_indices(side_state)
+            allowed = usable_indices(side_state)
         for i, p in _side_members(side_state, side):
             if p.get("status") == "fainted":
                 continue
@@ -1654,7 +1660,25 @@ def _run_endgame(my_state, opp_state, resolver, my_active_moves=None) -> str:
         return ""
     n_unknown = max(0, (opp_state.get("remaining") or len(opp_mons))
                     - len(opp_mons))
-    return endgame_note(matchup_matrix(my_mons, opp_mons), n_unknown)
+    result = matchup_matrix(my_mons, opp_mons)
+    # 自分の選出に未判明の生存の個体が残る (2026-10-20): 「こちらの残り全員が不利」(負け筋) は言えないので出さない
+    # (未判明の個体を 0 体扱いにしない。文言は増やさない)
+    if my_unknown_alive(my_state) > 0:
+        result = dict(result, lose_threats=[])
+    return endgame_note(result, n_unknown)
+
+
+def my_unknown_alive(my_state: dict) -> int:
+    """自分の選出のうち、状態から特定できない生存の個体の数 (純粋。2026-10-20)。選出のうち未判明の数 (pick_state の
+    unknown_count) を、残数 (HUD の remaining) − 分かっている生存数 (advisor.party.unknown_alive_count) で上から抑える。
+    選出が 3 体分かっていれば 0 (従来どおり)"""
+    from advisor.party import pick_state, unknown_alive_count
+    ps = pick_state(my_state)
+    if ps.unknown_count <= 0:
+        return 0
+    party = my_state.get("party") or []
+    known_alive = sum(1 for i in ps.picked if i < len(party) and (party[i] or {}).get("status") != "fainted")
+    return min(ps.unknown_count, unknown_alive_count(my_state, known_alive, ps))
 
 
 def _apply_search_blend(actions: list, search_actions: list,
@@ -1737,14 +1761,15 @@ def self_cost_text(sc: dict) -> str:
 
 
 def sim_bench(side_state: dict, side: str, resolver) -> list:
-    """遷移・探索用の控え [(MonView, hp_frac)] (場の個体・ひんしを除く。自分側は選出済みの 3 体に限る: 未選出は交代できない)。
+    """遷移・探索用の控え [(MonView, hp_frac)] (場の個体・ひんしを除く。自分側は選出済みの 3 体に限る: 未選出は交代できない。
+    2026-10-20: 選出が未判明の個体も入れない = advisor.party.usable_indices)。
     探索 (_run_search) と直接の採点の自分の損失 (move_self_cost) が同じ控えを使う"""
     bench = []
     active_idx = side_state.get("active_index")
     allowed = None
     if side == "player":
-        from advisor.party import battle_party_indices
-        allowed = battle_party_indices(side_state)
+        from advisor.party import usable_indices
+        allowed = usable_indices(side_state)
     for i, p in _side_members(side_state, side):
         if i == active_idx or p.get("status") == "fainted":
             continue

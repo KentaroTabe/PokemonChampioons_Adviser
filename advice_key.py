@@ -220,6 +220,10 @@ def _postprocess(advisor, result: dict, state: dict) -> dict:
     suggestion = advisor.suggest_check(state)
     if suggestion:
         result["suggestion"] = suggestion
+    if result.get("ok"):
+        # 自分の選出の判定の欄 (2026-10-20、Advisor.advise と同じ。欄の追加だけで採点の値は変えない)
+        from advisor.service import pick_state_field
+        result = dict(result, pick_state=pick_state_field(state))
     return result
 
 

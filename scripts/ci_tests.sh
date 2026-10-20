@@ -163,6 +163,7 @@ TESTS=(
   test_diag_scoring_compare
   test_sim_picked_roster
   test_sim_legal_inputs
+  test_pick_state
   test_sim_mega_form
   test_sim_revive_select
   test_diag_scenes

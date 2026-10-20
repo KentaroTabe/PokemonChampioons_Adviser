@@ -59,6 +59,18 @@ def apply_advice_stability(result: dict, hist: Optional[dict], turn,
     return result, hist
 
 
+def pick_state_field(state_dict: dict) -> Optional[dict]:
+    """advice の欄 pick_state (純粋。2026-10-20): 自分の選出の判定 (advisor.party.pick_state) を種族 id の並びにしたもの
+    {"picked": [...], "unknown_count": n, "not_picked": [...]}。欄の追加だけで採点の値は変えない (evaluate の戻り値の鍵は
+    変えず、助言の入口のここで足す)。読めなければ None"""
+    from advisor.party import pick_state
+    try:
+        my = state_dict["player"]
+        return pick_state(my).to_advice(my.get("party") or [])
+    except Exception:
+        return None
+
+
 def is_legal_action(a: dict, illegal_keys=frozenset()) -> bool:
     """行動が選べるか (純粋)。evaluate の illegal_actions に入った行動、legal=False、旧形式の −90 点以下は選べない"""
     return a.get("legal", True) is not False and (a.get("score") or 0) > -90 \
@@ -175,6 +187,8 @@ class Advisor:
         suggestion = self.suggest_check(state_dict)
         if suggestion:
             result["suggestion"] = suggestion
+        if result.get("ok"):
+            result = dict(result, pick_state=pick_state_field(state_dict))
         return result
 
     @staticmethod

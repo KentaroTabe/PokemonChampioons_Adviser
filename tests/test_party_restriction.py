@@ -31,9 +31,10 @@ def test_indices():
     # フラグ皆無 + 登場3体 -> 登場組
     st = _party6(picked_idx=(), appeared_idx=(1, 2, 5))
     assert battle_party_indices(st) == {1, 2, 5}
-    # 情報不足 -> None (制限なし)
+    # 情報不足 -> 2026-10-20 レビュー (開発者承認) で「全員許可 (None)」をやめ、確かな登場記録の個体だけを許可する。
+    # 未判明の個体は実行可能な交代先として推奨しない (期待値の変更)
     st = _party6(picked_idx=(), appeared_idx=(0,))
-    assert battle_party_indices(st) is None
+    assert battle_party_indices(st) == {0}
     print("test_indices OK")
 
 
