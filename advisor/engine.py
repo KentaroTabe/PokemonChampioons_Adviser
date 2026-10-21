@@ -547,11 +547,19 @@ def build_mon_view(p: dict, resolver=None, side: str = "opponent") -> Optional[M
                 if r:
                     ability = r[1]
 
+    base = sp["baseStats"]
+    tv = p.get("transform_view") if side == "opponent" else None
+    if tv:
+        # へんしん の評価用の見た目 (advisor.transform.eval_view、2026-10-21): 種族値・努力値・性格は写し (こちらの登録の型)、
+        # 最大 HP は相手の種族の種族値 (写した種族の HP を仮定しない)
+        from advisor.transform import view_stats
+        base, ev, nature = view_stats(tv, ev)
+
     return MonView(
         species_id=sid,
         name_ja=p.get("species_ja") or p.get("display_name") or sid,
         types=types_en,
-        base=sp["baseStats"],
+        base=base,
         hp_frac=hp_frac,
         status=p.get("status"),
         boosts=p.get("boosts") or {},
@@ -599,6 +607,17 @@ def opponent_move_pool(opp_state: dict, opp_view: MonView, resolver) -> list:
     - 残り 4-k 枠は使用率データから「判明技を除いた採用率上位」で推定
     - 4 つ判明済みなら推定は行わない (完全スカウト状態)
     """
+    tv = opp_state.get("transform_view")
+    if tv:
+        # へんしん 中 (advisor.transform、2026-10-21): 技は写しの技 (こちらの登録・判明技) を判明技として使い、使用率の技の推定は
+        # しない。特性は写し (opp_view に入っている)。持ち物は相手の種族 (メタモン) の使用率の推定のまま (観測扱いにしない)
+        try:
+            pred_o = get_predictor().predict(tv.get("original_species") or "")
+        except Exception:
+            pred_o = {"items": []}
+        if not opp_view.item and not opp_state.get("item_removed") and pred_o.get("items"):
+            opp_view.item = pred_o["items"][0][0]
+        return [(mid, 100.0) for mid in tv.get("moves") or []]
     pool = {}
     revealed_set = set()
     for ja in opp_state.get("revealed_moves") or []:
@@ -691,6 +710,10 @@ def evaluate_common(state: dict, resolver=None, scoring_mode: Optional[str] = No
     遷移 (transition の採点) と simulate_turn は探索と独立なので、省略しても候補・得点・順位は変わらない。
     """
     dex = get_dex()
+    # へんしん (2026-10-21、advisor.transform): 相手の場の個体に transform があれば、評価用の見た目 (写し、HP・持ち物は相手のまま)
+    # に置き換えた状態で以降のすべて (legacy の採点・transition の入力・探索・終盤評価・RL の観測) を計算する
+    from advisor.transform import eval_state, transform_note
+    state, transform_applied = eval_state(state)
     my_state = state["player"]
     opp_state = state["opponent"]
 
@@ -731,7 +754,21 @@ def evaluate_common(state: dict, resolver=None, scoring_mode: Optional[str] = No
     # 型推定 (先後・ダメージ観測の尤度スコアリング) が確度を持っていれば、
     # 相手のEV/性格/持ち物の仮定を推定値に差し替える
     opp_spread_note = ""
-    if opp_view is not None:
+    tview = (opp_p or {}).get("transform_view") if opp_view is not None else None
+    if tview:
+        opp_inference_note = transform_note(opp_p)
+        try:
+            from advisor.ev_infer import get_tracker
+            _ovr = state.get("ev_infer_override")
+            orig = tview.get("original_species")
+            guess = _ovr.get(orig) if isinstance(_ovr, dict) else get_tracker().best_for(orig)
+            if guess and guess["n_obs"] >= 1 and guess["prob"] >= 0.25:
+                opp_view.ev = dict(opp_view.ev, hp=int((guess.get("evs") or {}).get("hp", 0)))
+                if not opp_view.item and not opp_p.get("item_removed") and guess["item"]:
+                    opp_view.item = guess["item"]
+        except Exception:
+            pass
+    elif opp_view is not None:
         try:
             from advisor.ev_infer import get_tracker, _nature_mult
             # 記録の再生 (2026-10-20): state に ev_infer_override (advice 行の ev_infer、種族 id → 推定) があればトラッカーより
@@ -1300,6 +1337,10 @@ def evaluate_common(state: dict, resolver=None, scoring_mode: Optional[str] = No
         # 相手の場の個体が対応待ち: 終盤評価・探索を保留した印 (advice 行にそのまま残る。2026-10-09 ④)
         "opp_pending": opp_pending,
         "opp_pending_note": opp_pending_note(opp_state) if opp_pending else None,
+        # へんしん の評価用入力を使ったか (2026-10-21。True = 写しで評価、False = 相手の場の個体に transform なし、None = 相手の場の
+        # 個体が分からない)。共通部分の内部の欄 (evaluate の戻り値には出さない。advice の欄は Advisor.advise / advice_key._postprocess
+        # が advisor.transform.transform_applied_of で同じ状態から付ける = pick_state と同じ扱い)
+        "transform_applied": transform_applied,
         "encore": "encore" in my_vols,
         "encore_locked": encore_locked,
         "choice_locked": choice_locked,
@@ -1547,6 +1588,8 @@ def _sacrifice_note(actions: list, endgame: str) -> str:
 
 def _opp_mega_forms(opp_p: dict, state: dict) -> dict:
     """相手の個体がこの先メガシンカする姿 {mega_sid: p} (advisor.gimmick: 石の使用率の事前分布 + 持ち物/メガ済み/権利消費の判明情報)"""
+    if opp_p.get("transform_view"):
+        return {}   # へんしん 中の個体はメガシンカしない (石は相手の持ち物ではない。2026-10-21)
     try:
         from advisor.gimmick import expected_mega
         item_id = opp_p.get("item_id")
@@ -1875,8 +1918,8 @@ def _belief_worlds(opp_view, opp_p: dict) -> list:
     呼び出し側は従来の単一探索に落ちる。仮説の持ち物は、持ち物が未判明で
     はたき落とされてもいない場合にだけ適用する (MAP経路と同じ規則)。
     """
-    if BELIEF_K <= 0 or opp_view is None:
-        return []
+    if BELIEF_K <= 0 or opp_view is None or (opp_p or {}).get("transform_view"):
+        return []   # へんしん 中は写しの実数値 (こちらの登録の型) で評価する (2026-10-21)
     try:
         from advisor.ev_infer import get_tracker, _nature_mult
         hyps = get_tracker().hypotheses_for(opp_view.species_id, BELIEF_K,

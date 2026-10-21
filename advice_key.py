@@ -64,8 +64,15 @@ SIDE_KEY_FIELDS = ("active_index", "remaining", "team_size", "hazards", "screens
 STATE_KEY_FIELDS = ("scene", "turn", "field", "mega_used", "last_move", "protect_streak", "pending_pivot_switch")
 
 
+# へんしん (2026-10-21、advisor.transform): 有無とコピー元・写し (採点の入力になる部分)。観測根拠と時刻は採点に使わないので入れない
+TRANSFORM_KEY_FIELDS = ("source_species", "source_index", "copy")
+
+
 def _mon_key(p: dict, is_active: bool, now: Optional[float], grain: float) -> dict:
     out = {k: p.get(k) for k in MON_KEY_FIELDS if p.get(k) is not None}
+    tf = p.get("transform")
+    if tf:
+        out["transform"] = {k: tf.get(k) for k in TRANSFORM_KEY_FIELDS}
     out["moves"] = [[m.get(k) for k in MOVE_KEY_FIELDS] if isinstance(m, dict) else m for m in (p.get("moves") or [])]
     # 場の個体の HP の観測からの経過時間 (粒度で丸める)。控えは経過時間で範囲が変わらない (hp_range_of の is_active=False)
     ts = p.get("hp_read_ts")
@@ -236,7 +243,9 @@ def _postprocess(advisor, result: dict, state: dict) -> dict:
     if result.get("ok"):
         # 自分の選出の判定の欄 (2026-10-20、Advisor.advise と同じ。欄の追加だけで採点の値は変えない)
         from advisor.service import pick_state_field
-        result = dict(result, pick_state=pick_state_field(state))
+        from advisor.transform import transform_applied_of
+        # へんしん の評価用入力を使ったか (2026-10-21、Advisor.advise と同じ。鍵に transform が入るのでキャッシュの結果とも一致する)
+        result = dict(result, pick_state=pick_state_field(state), transform_applied=transform_applied_of(state))
     return result
 
 

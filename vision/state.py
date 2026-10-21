@@ -335,6 +335,10 @@ class PokemonState:
     encore_move: Optional[str] = None
     volatile_turns: dict = field(default_factory=dict)
     entry_turn: Optional[int] = None
+    # へんしん (2026-10-21、advisor/transform.py): 相手の個体が こちらの場の個体に へんしん したことを観測で確かめたときだけ
+    # {"source_species", "source_index", "copy": {species, types, moves, ability, boosts, base_stats, ev, nature},
+    #  "evidence", "t"}。HP・持ち物・状態異常・種族の識別 (species_id / species_ja) はこの個体のまま。交代で消える
+    transform: Optional[dict] = None
 
     def merge_species(self, species_ja: str, species_id: Optional[str], guess: bool = False,
                       score: Optional[float] = None):
@@ -366,6 +370,8 @@ class PokemonState:
         self.encore_move = None
         self.volatile_turns = {}
         self.entry_turn = None
+        # へんしん は交代で解ける (2026-10-21)
+        self.transform = None
         self.is_active = False
         # タイプ変化は交代で元に戻る。フラグを解除すると次のbackfillが
         # 図鑑タイプへ正してくれる (typesをここで直接触ると図鑑参照が要る)
@@ -852,6 +858,8 @@ class SideState:
             dst.volatile_turns = dict(src.volatile_turns)
         if src.entry_turn is not None:
             dst.entry_turn = src.entry_turn
+        if src.transform is not None:
+            dst.transform = src.transform   # へんしん も場の個体の観測と一緒に移す (2026-10-21)
         dst.moves = src.moves or dst.moves
         dst.revealed_moves = list(dict.fromkeys([*dst.revealed_moves, *src.revealed_moves]))
         dst.aliases = list(dict.fromkeys([*dst.aliases, *src.aliases]))[-6:]
@@ -1003,6 +1011,8 @@ class BattleStateV2:
         self.my_hp_trace_outbox: list = []
         # 様子見画面の右列の読み (最新のフレームの分。[{row, hp_text, pct, species, method, score, written}])
         self.watch_opp_rows: list = []
+        # へんしん の観測の追跡 (advisor.transform.observe_frame がフレームの終わりに更新する。to_dict には出さない。2026-10-21)
+        self.transform_tracker: Optional[dict] = None
 
     # --- イベントログ ---
     def log_event(self, source: str, text: str, event_id: Optional[str] = None,
@@ -1134,7 +1144,7 @@ class BattleStateV2:
                       "revealed_moves", "aliases", "is_mega", "is_active",
                       "is_picked", "pick_order", "species_guess", "guess_score",
                       "pending", "species_candidates", "t_first_seen",
-                      "encore_move", "volatile_turns", "entry_turn"):
+                      "encore_move", "volatile_turns", "entry_turn", "transform"):
                 if k in md and md[k] is not None:
                     setattr(mon, k, md[k])
             mon.moves = [MoveSlot(**{kk: m.get(kk) for kk in

@@ -23,8 +23,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from battle_logger import (MON_INPUT_FIELDS, MON_V2_EXTRA, MON_V2_FIELDS, SIDE_V2_FIELDS, STATE_SCHEMA_V1, STATE_V2_FIELDS,
-                           state_schema_of)
+from battle_logger import (MON_INPUT_FIELDS, MON_STATE_ADDED_FIELDS, MON_V2_EXTRA, MON_V2_FIELDS, SIDE_V2_FIELDS,
+                           STATE_SCHEMA_V1, STATE_V2_FIELDS, state_schema_of)
 
 REPO = Path(__file__).resolve().parent.parent
 LOG_DIR = REPO / "logs" / "battles"
@@ -105,6 +105,10 @@ def _mon_from_compact(m: dict, resolver, schema: int = STATE_SCHEMA_V1) -> dict:
         d[k] = copy.deepcopy(m[k]) if k in m else None
     # 採点の入力 (2026-10-20: 実効素早さの推定 spe_est)。記録にあるときだけ戻す (無い行は従来どおり欄なし = 推定なし)
     for k in MON_INPUT_FIELDS:
+        if k in m and m[k] is not None:
+            d[k] = copy.deepcopy(m[k])
+    # 状態の欄 (2026-10-21: へんしん の transform)。記録にあるときだけ戻す (無い行・null は従来どおり欄なし = へんしん なし)
+    for k in MON_STATE_ADDED_FIELDS:
         if k in m and m[k] is not None:
             d[k] = copy.deepcopy(m[k])
     return d

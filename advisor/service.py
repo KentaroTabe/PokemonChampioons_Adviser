@@ -188,7 +188,9 @@ class Advisor:
         if suggestion:
             result["suggestion"] = suggestion
         if result.get("ok"):
-            result = dict(result, pick_state=pick_state_field(state_dict))
+            # へんしん の評価用入力を使ったか (2026-10-21、advisor.transform。欄の追加だけで採点の値は変えない)
+            from advisor.transform import transform_applied_of
+            result = dict(result, pick_state=pick_state_field(state_dict), transform_applied=transform_applied_of(state_dict))
         return result
 
     @staticmethod
