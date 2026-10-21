@@ -35,7 +35,7 @@ from vision.frame_burst import BurstPlanner
 from champions_agent.config import (ADVICE_KEY_HP_AGE_GRAIN_SEC, ADVICE_KEY_VERSION, ADVICE_RECALC_FALLBACK_TTL_SEC,
                                     ADVICE_RECALC_TTL_SEC, CLIENT_HELLO_WAIT_SEC, DISPLAY_HIDDEN_WARN_COUNT, FRAME_BURST_DIR,
                                     MANUAL_SPECIES_RESOLVE_CUTOFF, PARTY_SIZE, SHADOW_VARIANTS_ENABLED)
-from advice_key import AdviceCache, DataVersions, advice_input_key, advise_cached_ex, scoring_settings
+from advice_key import AdviceCache, DataVersions, frame_advice_step
 from client_state import (VIS_HIDDEN, VIS_VISIBLE, ClientRegistry, HiddenDisplayWatch, served_html_version, short_sid,
                           stale_of)
 
@@ -233,11 +233,6 @@ def _dump_raw_async(data: str, burst_id: str, ts: float) -> None:
             print(f"[server] 連続保存に失敗: {e}")
 
     _dump_pool.submit(_write, data, BURST_DIR / burst_id / f"{int(ts * 1000)}.jpg")
-
-
-def _advice_key(state: dict, now: float) -> str:
-    """対戦の助言の再計算の鍵 (advice_key.advice_input_key に 採点の設定とデータの版を渡す。2026-10-19 版 2)"""
-    return advice_input_key(state, now, scoring_settings(), _data_versions.current())
 
 
 @sio.on('connect')
@@ -534,19 +529,20 @@ async def _handle_one_frame(sid, data):
         if state["scene"] in ("command", "move_select", "watch") \
                 and not state.get("battle_ended") and not state.get("outcome"):
             now = time.time()
-            # 評価時刻を state に渡す (2026-10-19 版 2 スキーマ: advice 行の t_now と、transition の HP 範囲の経過時間の基準。
-            # 鍵の材料 (advice_key.STATE_KEY_FIELDS) には含まれない)
-            state["now"] = now
-            key = _advice_key(state, now)
-            if key and (_advice_cache.needs_recalc(key, now) or _advice_recheck):
-                _last_advice_key = key
+            _t_adv = time.time()
+            # フレームごとの判断は advice_key.frame_advice_step だけ (2026-10-21。録画再生 tools.shadow_load_check も同じ関数を呼ぶ):
+            # 評価時刻を state["now"] に渡し (advice 行の t_now と transition の HP 範囲の経過時間の基準。鍵の材料には含まれない)、
+            # 再計算の鍵 (版 2) が変わったか有効期限 (退避・評価エラーは短い) を超えたときだけ採点する。確定前の助言の次のフレームは
+            # 鍵が同じでも安定化ゲートを通し直す。採点を実際に行った時刻 (キャッシュなら元の時刻) と、採点の直前に取った型推定の写し
+            # (advice 行の ev_infer) も受け取る
+            step = await loop.run_in_executor(
+                None, lambda: frame_advice_step(advisor, state, now, _advice_cache, _data_versions, _advice_recheck,
+                                                keep_common=_shadow is not None,
+                                                inputs_fn=lambda: ev_infer_of(state, spread_tracker.best_for)))
+            if step["advice"] is not None:
+                _last_advice_key = step["key"]
                 _last_advice_time = now
-                _t_adv = time.time()
-                # 採点は鍵が変わったか有効期限を超えたときだけ (advice_key.advise_cached_ex)。据え置き・安定化ゲートは毎回通す。
-                # 採点を実際に行った時刻 (キャッシュなら元の時刻) と、採点の直前に取った型推定の写し (advice 行の ev_infer) も受け取る
-                advice, evaluated, t_eval, ev_snap = await loop.run_in_executor(
-                    None, lambda: advise_cached_ex(advisor, state, _advice_cache, key, now, keep_common=_shadow is not None,
-                                                   inputs_fn=lambda: ev_infer_of(state, spread_tracker.best_for)))
+                advice, evaluated, t_eval, ev_snap = step["advice"], step["evaluated"], step["t_eval"], step["inputs"]
                 if evaluated:
                     _advise_ms.append((time.time() - _t_adv) * 1000.0)
                 _last_advice_target = advice_target(state, advice)
@@ -557,12 +553,10 @@ async def _handle_one_frame(sid, data):
                 if _shadow is not None:
                     # 表示の後に投入する (表示を待たせない)。計算はワーカーのスレッドで行う
                     _submit_shadow(loop, state, advice)
-                if advice.get("provisional"):
-                    # 確定前: 次フレームで安定化ゲートを通し直して安定を確認する (鍵が同じならキャッシュの採点結果を使う。
-                    # 通し直さないと状態が動くか有効期限を超えるまで確定しない)
-                    _advice_recheck = True
-                else:
-                    _advice_recheck = False
+                # 確定前 (provisional) なら次フレームで安定化ゲートを通し直して安定を確認する (鍵が同じならキャッシュの採点結果を
+                # 使う。通し直さないと状態が動くか有効期限を超えるまで確定しない)。値は frame_advice_step が決める
+                _advice_recheck = step["recheck"]
+                if not advice.get("provisional"):
                     if advice.get("ok"):
                         print("--- アドバイス ---")
                         print(advice["text"])

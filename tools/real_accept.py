@@ -101,7 +101,7 @@ from champions_agent.config import (
     REAL_ACCEPT_FALLBACK_BUDGET_MAX, REAL_ACCEPT_LATENCY_DELTA_SEC, REAL_ACCEPT_LATENCY_P95_SEC, REAL_ACCEPT_PROFILE_TOP,
     REAL_ACCEPT_STALE_HP_SEC, REAL_ACCEPT_VIOLATIONS_MAX, BSS_PICK_COUNT, REAL_ACCEPT_FALLBACK_DECISION_ADVICE,
     REAL_ACCEPT_VERSION_IGNORE_FIELDS, REAL_ACCEPT_VERSION_RUNTIME_FIELDS, REAL_ACCEPT_VERSION_REQUIRED_FIELDS)
-from tools.advice_replay import (DECISION_GAP_SEC, RESTORE_UNKNOWN_LABELS, move_locks_for_check, replay_now,
+from tools.advice_replay import (DECISION_GAP_SEC, RESTORE_UNKNOWN_LABELS, move_locks_for_check, replay_input_counts, replay_now,
                                  restore_unknowns)
 from tools.decision_audit import _display_index
 from tools.shadow_load_check import percentiles
@@ -1457,6 +1457,7 @@ def render_markdown(result: dict) -> str:
          + (f"、表示用の探索 {c['display_search']} (ADVICE_DISPLAY_SEARCH)" if c.get("display_search") else ""),
          f"- 間引き {c['gap_sec']} 秒、古い局面 = hp_stale > {c['stale_hp_sec']} 秒 または解決側の場面の後",
          *_replay_settings_lines(c),
+         replay_inputs_line(c.get("replay_inputs")),
          f"- 決定数: advice 行 (battle、確定) {c['n_advice_rows']} → 決定点 {s['n']} (有効 {s['n_valid']} / 古い局面 {s['n_stale']})"]
     tg = c.get("target")
     if tg is not None:
@@ -1697,6 +1698,7 @@ def render_search_compare_markdown(result: dict) -> str:
          f"設定 ADVICE_DISPLAY_SEARCH = {c['display_search']}",
          f"- 決定点 {sm['n']} (間引き {c['gap_sec']} 秒、古い局面も含む全決定点)。決定ごとに 方式 × on / off の 4 通りを、"
          "決定ごとに順番を逆にして evaluate する (キャッシュの偏りを均す)",
+         replay_inputs_line(c.get("replay_inputs")),
          "- ログ: " + ", ".join(f"{lg['name']} ({lg['n_decisions']})" for lg in c["logs"]), "",
          "## 照合の結果", "", "| 方式 | 照合した決定 | 不一致の決定 | 判定 | 種類別 |", "|---|---|---|---|---|"]
     for mode, mo in sm["modes"].items():
@@ -1810,6 +1812,7 @@ def render_sensitivity_compare_markdown(result: dict) -> str:
          f"- 方式: transition (予算 {c['transition_budget_ms']} ms)、設定 TRANSITION_SENSITIVITY_ENABLED = {c['transition_sensitivity']} "
          f"(照合では on / off を切り替える)、ADVICE_DISPLAY_SEARCH = {c.get('display_search')}",
          f"- 決定点 {sm['n']} (間引き {c['gap_sec']} 秒、古い局面も含む全決定点)。決定ごとに on / off の順番を交互にする",
+         replay_inputs_line(c.get("replay_inputs")),
          "- ログ: " + ", ".join(f"{lg['name']} ({lg['n_decisions']})" for lg in c["logs"]), "",
          "## 照合の結果", "", "| 照合した決定 | 不一致の決定 | 判定 | 種類別 |", "|---|---|---|---|",
          f"| {sm['n']} | {sm['n_mismatch']} | {sm['status']} | {kinds} |", "",
@@ -1892,17 +1895,23 @@ def _checker_kwargs() -> dict:
     return {"is_status_move": is_status_move, "is_mega": is_mega_form, "base_of": base_of, "choice_items": CHOICE_ITEM_IDS}
 
 
-def _engine_state(row: dict, resolver) -> dict:
+def _engine_state_ex(row: dict, resolver) -> tuple:
     """advice 行 1 行だけから再生の入力を作る (同じ対戦の後の行・scene 行からは補わない = 後から判明した情報を混ぜない)。
-    now = その行の t_now → t_gen → t (replay_now。現在の時計は使わない)"""
-    from tools.advice_replay import compact_to_engine_state
+    now = その行の t_eval → t_now → t_gen → t (replay_now。現在の時計は使わない)、行に ev_infer があれば型推定を入れる
+    (tools.advice_replay.replay_state、2026-10-21 レビュー: 通常の再生・--compare-search・--compare-sensitivity のすべて)。
+    戻り値 (state, {"now_source", "ev_infer_applied"})"""
+    from tools.advice_replay import replay_state
     c = row["state"]
-    st = compact_to_engine_state(c, resolver, row.get("move_locks"))
+    st, info = replay_state(row, resolver, row.get("move_locks"))
     st["scene"] = c.get("scene")
     if st.get("turn") is None:
         st["turn"] = row.get("turn")
-    st["now"] = replay_now(row)
-    return st
+    return st, info
+
+
+def _engine_state(row: dict, resolver) -> dict:
+    """_engine_state_ex の state だけ"""
+    return _engine_state_ex(row, resolver)[0]
 
 
 def restore_check(row: dict) -> tuple:
@@ -1928,6 +1937,15 @@ def _active_label(compact: dict) -> Optional[str]:
     party, idx = pl.get("party") or [], pl.get("active")
     m = party[idx] if isinstance(idx, int) and 0 <= idx < len(party) else None
     return None if m is None else f"{m.get('species')}{' (mega)' if m.get('mega') else ''}"
+
+
+def replay_inputs_line(ri: Optional[dict]) -> str:
+    """条件の節: 再生の入力の now の出所と型推定の適用の件数 (純粋。2026-10-21)"""
+    if not ri:
+        return "- 再生の入力: 記録なし"
+    src = ", ".join(f"{k} {v}" for k, v in sorted(ri.get("now_source", {}).items())) or "-"
+    return (f"- 再生の入力 (決定点 {ri.get('n', 0)}): now の出所 {src} (t_eval → t_now → t_gen → t)、"
+            f"型推定 (advice 行の ev_infer) を適用 {ri.get('ev_infer_applied', 0)}")
 
 
 def _slim_best(b: Optional[dict]) -> Optional[dict]:
@@ -2014,22 +2032,24 @@ def run_compare_search(logs: list, out_dir: Optional[Path], gap_sec: float, targ
         replay_search_pair(_engine_state(first, resolver), resolver, combos)
     n_dec = sum(lg["n_decisions"] for lg in logs)
     rows = []
+    infos = []
     i = 0
     for lg in logs:
         timeline = scene_timeline(lg["records"])
         for row in lg["decisions"]:
             compact = row["state"]
             try:
-                st = _engine_state(row, resolver)
+                st, info = _engine_state_ex(row, resolver)
             except Exception as e:
                 print(f"  復元できない: {lg['name']} {row.get('advice_id')}: {e}")
                 continue
+            infos.append(info)
             reg = _registered_ids(st, resolver)
             order = combos if i % 2 == 0 else tuple(reversed(combos))
             i += 1
             res = replay_search_pair(st, resolver, order)
             d = {"log": lg["name"], "advice_id": row.get("advice_id"), "t": row.get("t"), "turn": row.get("turn"),
-                 "active": _active_label(compact),
+                 "active": _active_label(compact), **info,
                  "stale": stale_reasons(row, scene_before(timeline, float(row.get("t") or 0.0))), "modes": {}}
             for mode, pair in res.items():
                 m = {}
@@ -2054,6 +2074,7 @@ def run_compare_search(logs: list, out_dir: Optional[Path], gap_sec: float, targ
                        "rl_blend_weight": E.RL_BLEND_DEFAULT, "transition_budget_ms": C.TRANSITION_BUDGET_MS,
                        "transition_sensitivity": C.TRANSITION_SENSITIVITY_ENABLED, "search_blend": E.SEARCH_BLEND,
                        "display_search": C.ADVICE_DISPLAY_SEARCH, "gap_sec": gap_sec, "target_fixed": target_fixed,
+                       "replay_inputs": replay_input_counts(infos),
                        "logs": [{k: v for k, v in lg.items() if k not in LOG_INTERNAL_KEYS}
                                 for lg in logs]},
         "summary": summary, "decisions": rows,
@@ -2103,21 +2124,23 @@ def run_compare_sensitivity(logs: list, out_dir: Optional[Path], gap_sec: float,
         replay_sensitivity_pair(_engine_state(first, resolver), resolver, SENS_STATES)
     n_dec = sum(lg["n_decisions"] for lg in logs)
     rows = []
+    infos = []
     i = 0
     for lg in logs:
         for row in lg["decisions"]:
             compact = row["state"]
             try:
-                st = _engine_state(row, resolver)
+                st, info = _engine_state_ex(row, resolver)
             except Exception as e:
                 print(f"  復元できない: {lg['name']} {row.get('advice_id')}: {e}")
                 continue
+            infos.append(info)
             reg = _registered_ids(st, resolver)
             order = SENS_STATES if i % 2 == 0 else tuple(reversed(SENS_STATES))
             i += 1
             res = replay_sensitivity_pair(st, resolver, order)
             d = {"log": lg["name"], "advice_id": row.get("advice_id"), "t": row.get("t"), "turn": row.get("turn"),
-                 "active": _active_label(compact)}
+                 "active": _active_label(compact), **info}
             for stt, (adv, ms, err) in res.items():
                 x = {"elapsed_ms": ms, "error": err, "sig": None, "q": None, "violations": [], "checks": {},
                      "sens_status": None}
@@ -2139,7 +2162,7 @@ def run_compare_sensitivity(logs: list, out_dir: Optional[Path], gap_sec: float,
                        "transition_budget_ms": C.TRANSITION_BUDGET_MS,
                        "transition_sensitivity": C.TRANSITION_SENSITIVITY_ENABLED,
                        "display_search": getattr(C, "ADVICE_DISPLAY_SEARCH", None), "gap_sec": gap_sec,
-                       "target_fixed": target_fixed,
+                       "target_fixed": target_fixed, "replay_inputs": replay_input_counts(infos),
                        "logs": [{k: v for k, v in lg.items() if k not in LOG_INTERNAL_KEYS}
                                 for lg in logs]},
         "summary": summary, "decisions": rows,
@@ -2213,6 +2236,7 @@ def run(paths: list, out_dir: Optional[Path], gap_sec: float = DECISION_GAP_SEC,
     if first_lg is not None:
         replay_one(_engine_state(first_lg["decisions"][0], resolver), resolver, MODES, settings_of(first_lg, 0))
     decisions = []
+    infos = []
     replay_cfg: dict = {}
     i = 0
     for lg in logs:
@@ -2220,10 +2244,11 @@ def run(paths: list, out_dir: Optional[Path], gap_sec: float = DECISION_GAP_SEC,
         for j, row in enumerate(lg["decisions"]):
             compact = row["state"]
             try:
-                st = _engine_state(row, resolver)
+                st, info = _engine_state_ex(row, resolver)
             except Exception as e:
                 print(f"  復元できない: {lg['name']} {row.get('advice_id')}: {e}")
                 continue
+            infos.append(info)
             reg = _registered_ids(st, resolver)
             order = MODES if i % 2 == 0 else tuple(reversed(MODES))      # 順番の偏り (キャッシュ) を均す
             i += 1
@@ -2236,6 +2261,7 @@ def run(paths: list, out_dir: Optional[Path], gap_sec: float = DECISION_GAP_SEC,
             lm, _rec = advice_mode(row)
             d = {"log": lg["name"], "advice_id": row.get("advice_id"), "t": row.get("t"), "turn": row.get("turn"),
                  "scene": compact.get("scene"), "active": _active_label(compact), "replay_settings": settings_label(rs),
+                 "now_source": info["now_source"], "ev_infer_applied": info["ev_infer_applied"],
                  "stale": stale_reasons(row, scene_before(timeline, float(row.get("t") or 0.0))),
                  "log_best": _slim_best((row.get("advice") or {}).get("best")), "log_mode": lm, "modes": {}}
             for mode, (adv, ms, err) in res.items():
@@ -2290,6 +2316,7 @@ def run(paths: list, out_dir: Optional[Path], gap_sec: float = DECISION_GAP_SEC,
                        "transition_budget_ms": C.TRANSITION_BUDGET_MS, "transition_sensitivity": C.TRANSITION_SENSITIVITY_ENABLED,
                        "display_search": getattr(C, "ADVICE_DISPLAY_SEARCH", None),
                        "replay_settings": replay_cfg_out, "replay_settings_from_version": all_from_version,
+                       "replay_inputs": replay_input_counts(infos),
                        "gap_sec": gap_sec, "stale_hp_sec": REAL_ACCEPT_STALE_HP_SEC,
                        "display_deadline_sec": REAL_ACCEPT_DISPLAY_DEADLINE_SEC,
                        "n_advice_rows": sum(lg["n_advice_rows"] for lg in logs),

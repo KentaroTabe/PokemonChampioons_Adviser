@@ -11,6 +11,8 @@
 - 基準は「復元状態での再計算」(ログに残った当時の助言ではない)。
   復元の不完全さの影響を摂動効果から分離するため。
 - RLブレンドは本番同等 (EMA方策)。決定ごとに同一条件で基準/摂動を比較する。
+- 再生の入力は replay_state (2026-10-21): now = t_eval → t_now → t_gen → t (replay_now)、行に ev_infer があれば
+  apply_ev_infer で型推定を入れる (real_accept・shadow_load_check と同じ)。scene 行には t_eval / ev_infer が無いので now = t のまま。
 """
 from __future__ import annotations
 
@@ -166,13 +168,25 @@ def compact_to_engine_state(c: dict, resolver, move_locks: dict = None) -> dict:
     return out
 
 
-def replay_now(row: dict) -> Optional[float]:
-    """再生の state.now (純粋): advice 行の t_now (evaluate に渡した now) → 助言の t_gen (生成時刻) → 行の t。どれも無ければ None。
-    現在の時計を使うと build_inputs が何日分も古い HP として扱うため (2026-10-19 レビュー)"""
-    for v in (row.get("t_now"), (row.get("advice") or {}).get("t_gen"), row.get("t")):
+# 再生の now の出所 (replay_now_source の 2 つ目の戻り値。None = どれも無い)
+NOW_SOURCES = ("t_eval", "t_now", "t_gen", "t")
+
+
+def replay_now_source(row: dict) -> tuple:
+    """再生の state.now とその出所 (純粋): advice 行の t_eval (採点を実際に行った時刻。キャッシュを使った行は元の採点の時刻、
+    2026-10-20 以降の行) → t_now (そのフレームで evaluate に渡した now) → 助言の t_gen (生成時刻) → 行の t。
+    戻り値 (now or None, NOW_SOURCES のどれか or None)。現在の時計を使うと build_inputs が何日分も古い HP として扱うため
+    (2026-10-19 レビュー)。t_eval を先にするのは、キャッシュを使った行の助言の得点が元の採点の時刻の HP の範囲で計算されているため
+    (2026-10-21 レビュー)"""
+    for name, v in zip(NOW_SOURCES, (row.get("t_eval"), row.get("t_now"), (row.get("advice") or {}).get("t_gen"), row.get("t"))):
         if isinstance(v, (int, float)) and not isinstance(v, bool):
-            return float(v)
-    return None
+            return float(v), name
+    return None, None
+
+
+def replay_now(row: dict) -> Optional[float]:
+    """再生の state.now (純粋): t_eval → t_now → t_gen → t (replay_now_source の 1 つ目)。どれも無ければ None"""
+    return replay_now_source(row)[0]
 
 
 def restore_unknowns(row: dict) -> list:
@@ -188,6 +202,29 @@ def restore_unknowns(row: dict) -> list:
         for m in sd.get("party") or []:
             miss += [k for k in MON_V2_FIELDS + MON_V2_EXTRA if k not in m]
     return ["restore_v2_missing"] if miss else []
+
+
+def replay_state(row: dict, resolver, move_locks: Optional[dict] = None) -> tuple:
+    """advice 行 (や scene 行) 1 行から再生の入力を作る (2026-10-21 レビュー: 評価時刻と型推定の復元を再生のすべてでつなぐ)。
+    state = compact_to_engine_state(row["state"]) に now (replay_now_source) と、行に ev_infer があれば apply_ev_infer を入れたもの。
+    戻り値 (state, {"now_source": NOW_SOURCES のどれか or None, "ev_infer_applied": 行の ev_infer を入れたか})"""
+    st = compact_to_engine_state(row["state"], resolver, move_locks)
+    now, src = replay_now_source(row)
+    st["now"] = now
+    applied = isinstance(row.get("ev_infer"), dict)
+    apply_ev_infer(st, row.get("ev_infer"))
+    return st, {"now_source": src, "ev_infer_applied": applied}
+
+
+def replay_input_counts(infos: list) -> dict:
+    """replay_state の情報の件数 (純粋): {"n", "now_source": {出所: 件数}, "ev_infer_applied": 件数}"""
+    out = {"n": 0, "now_source": {}, "ev_infer_applied": 0}
+    for info in infos:
+        out["n"] += 1
+        k = str(info.get("now_source"))
+        out["now_source"][k] = out["now_source"].get(k, 0) + 1
+        out["ev_infer_applied"] += 1 if info.get("ev_infer_applied") else 0
+    return out
 
 
 def apply_ev_infer(state: dict, ev_infer: Optional[dict]) -> dict:
@@ -369,7 +406,7 @@ def extract_decisions(path: Path) -> list:
         if t - last_t < DECISION_GAP_SEC:
             continue
         last_t = t
-        out.append((path.name, t, st))
+        out.append((path.name, t, r))
     return out
 
 
@@ -401,10 +438,13 @@ def run(paths: list, out_path: Path) -> dict:
                     "examples": []}
              for name, _ in PERTURBATIONS}
     baseline_fail = 0
-    for fname, t, compact in decisions:
+    infos = []
+    for fname, t, row in decisions:
         try:
-            base_state = compact_to_engine_state(compact, resolver)
-            base_state["now"] = float(t)     # 観測の時刻 (scene 行の t)。現在の時計で HP を古いと扱わない (2026-10-19)
+            # now = t_eval → t_now → t_gen → t (scene 行は t = 観測の時刻。現在の時計で HP を古いと扱わない、2026-10-19)。
+            # 行に ev_infer があれば型推定も入れる (2026-10-21。摂動は base_state の写しなので同じ推定で比べる)
+            base_state, info = replay_state(row, resolver)
+            infos.append(info)
             base = evaluate(base_state, resolver)
         except Exception:
             baseline_fail += 1
@@ -450,6 +490,7 @@ def run(paths: list, out_path: Path) -> dict:
 
     result = {"at": time.strftime("%Y-%m-%d %H:%M"),
               "decisions": len(decisions), "baseline_fail": baseline_fail,
+              "replay_inputs": replay_input_counts(infos),
               "stats": stats,
               "logs": [p.name for p in paths]}
     out_path.parent.mkdir(parents=True, exist_ok=True)
