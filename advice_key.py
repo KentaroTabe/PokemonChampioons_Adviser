@@ -19,6 +19,10 @@
 2026-10-20 (レビュー: キャッシュを使った助言の評価時刻): advise_cached_ex は (助言, 採点したか, 採点を実際に行った時刻,
 採点の時点の入力の写し) を返す。キャッシュを使ったときの時刻と入力の写しは、元の採点のときの値 (AdviceCache.t / inputs)。
 advise_cached は従来どおり (助言, 採点したか) を返す (tests/test_version_split.py)。
+
+2026-10-21 (レビュー: 録画再生が本番の再計算の経路を通らない): フレームごとの判断 (now を state に入れる → 鍵 → 要否 →
+advise_cached_ex、確定前の通し直し) を frame_advice_step に抽出した。server._handle_one_frame と tools.shadow_load_check は
+この関数だけを呼ぶ (tests/test_replay_path、実際の入口は tests/test_replay_path_server)。
 """
 from __future__ import annotations
 
@@ -177,9 +181,18 @@ class AdviceCache:
         self.inputs = None          # 採点の時点で取った入力の写し (advise_cached_ex の inputs_fn。2026-10-20)
 
     def needs_recalc(self, key: str, now: float) -> bool:
-        if self.result is None or key != self.key:
-            return True
-        return now - self.t > self.current_ttl()
+        return self.recalc_reason(key, now) is not None
+
+    def recalc_reason(self, key: str, now: float) -> Optional[str]:
+        """計算し直す理由 (純粋): "first" = 結果を持っていない、"key_changed" = 鍵が変わった、"ttl" = 通常の有効期限を超えた、
+        "fallback_ttl" = 退避・評価エラーの短い有効期限を超えた。キャッシュを使えるなら None (2026-10-21、needs_recalc と同じ判定)"""
+        if self.result is None:
+            return "first"
+        if key != self.key:
+            return "key_changed"
+        if now - self.t > self.current_ttl():
+            return "fallback_ttl" if self.short else "ttl"
+        return None
 
     def current_ttl(self) -> float:
         """いま持っている結果の有効期限 (秒)"""
@@ -258,3 +271,42 @@ def advise_cached(advisor, state: dict, cache: AdviceCache, key: str, now: float
     (キャッシュを使ったときはキャッシュした共通部分)。戻り値 (advice, 採点したか)"""
     advice, evaluated, _t, _inp = advise_cached_ex(advisor, state, cache, key, now, keep_common=keep_common)
     return advice, evaluated
+
+
+# フレームごとの助言の判断の理由 (frame_advice_step の reason)。AdviceCache.recalc_reason の 4 つに加えて:
+# "recheck" = キャッシュは使えるが、確定前 (provisional) の助言を出した次のフレームなので安定化ゲートを通し直す (採点はしない)、
+# "cached_skip" = キャッシュが使えて通し直しも要らない (助言を出さない)、"no_key" = 自分の場の個体が無い (助言を出さない)
+FRAME_STEP_REASONS = ("first", "key_changed", "ttl", "fallback_ttl", "recheck", "cached_skip", "no_key")
+
+
+def frame_advice_step(advisor, state: dict, now: float, cache: AdviceCache, data_versions, recheck: bool = False,
+                      keep_common: bool = False, inputs_fn=None) -> dict:
+    """本番のフレームごとの対戦の助言の判断 (2026-10-21 レビュー: 録画再生を本番と同じ経路に通す)。
+    server._handle_one_frame (決定画面のフレーム) と tools.shadow_load_check (録画再生) はこの関数だけを呼ぶ。
+
+    手順: state["now"] = now (advice 行の t_now と transition の HP の範囲の経過時間の基準) → 再計算の鍵 (advice_input_key に
+    実行時の採点の設定 scoring_settings() とデータの版 data_versions.current()) → 鍵が "" なら何もしない → キャッシュが使えて
+    recheck も偽なら何もしない → それ以外は advise_cached_ex (鍵が変わったか有効期限を超えたら採点、そうでなければキャッシュの
+    採点結果に据え置き・安定化ゲートを通す)。
+
+    引数: cache / data_versions は呼び出し側が持つ (server はプロセスに 1 つ、再生は再生 1 回に 1 つ)。recheck = 前のフレームで
+    確定前の助言を出したか (戻り値の "recheck" を次のフレームに渡す)。keep_common / inputs_fn は advise_cached_ex と同じ。
+    戻り値 {"advice": 助言 or None (出さない), "evaluated": 採点したか, "t_eval": 採点を実際に行った時刻 (キャッシュなら元の時刻。
+    出さないなら None), "inputs": 採点の時点の入力の写し, "key": 鍵, "key_changed": 前の結果の鍵から変わったか (結果が無ければ偽),
+    "reason": FRAME_STEP_REASONS のどれか, "recheck": 次のフレームに渡す recheck}"""
+    state["now"] = now
+    key = advice_input_key(state, now, scoring_settings(), data_versions.current())
+    out = {"advice": None, "evaluated": False, "t_eval": None, "inputs": None, "key": key,
+           "key_changed": bool(key and cache.result is not None and key != cache.key), "reason": None, "recheck": bool(recheck)}
+    if not key:
+        out["reason"] = "no_key"
+        return out
+    why = cache.recalc_reason(key, now)
+    if why is None and not recheck:
+        out["reason"] = "cached_skip"
+        return out
+    advice, evaluated, t_eval, inputs = advise_cached_ex(advisor, state, cache, key, now, keep_common=keep_common,
+                                                         inputs_fn=inputs_fn)
+    out.update(advice=advice, evaluated=evaluated, t_eval=t_eval, inputs=inputs, reason=why or "recheck",
+               recheck=bool(advice.get("provisional")))
+    return out

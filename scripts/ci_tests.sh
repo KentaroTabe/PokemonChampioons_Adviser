@@ -13,6 +13,8 @@
 # - test_migrate_obs: torch が要る。検証の対象が nn.Linear の入力次元のゼロ拡張そのもので、torch なしでは確かめられない。
 #   torch は RL モデル用の重い依存 (requirements-full.txt で固定) で、requirements-ci.txt の「RL モデル非依存のテストだけを
 #   回すので画像処理の土台だけで足りる」という方針に合わないため、CI の最小依存に入れない
+# - test_replay_path_server: server.py (socketio / fastapi) を import して実際の入口 (_handle_one_frame) を動かす (2026-10-21)。
+#   CI で回る部分 (server.py の構文木での確認・録画再生の経路・記録 → 再生) は test_replay_path に分けて CI に残した
 # test_battle_prune は検証する関数を champions_agent/env/showdown_env_pure.py に分けて CI に残した (showdown_env は
 # poke-env を先頭で読み、poke-env 0.10 は numpy>=2.0.2 を要求して CI の numpy<2 と両立しない)。
 # Showdown のデータ (pokemon-showdown/、未コミット) の読み手は、コミット済みのキャッシュを先に読むので CI でも同じ結果になる
@@ -172,6 +174,7 @@ TESTS=(
   test_transition_profile
   test_sensitivity_off
   test_first_pick_mega
+  test_replay_path
 )
 
 fail=0

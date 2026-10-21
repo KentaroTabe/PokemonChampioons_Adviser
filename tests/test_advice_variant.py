@@ -541,8 +541,10 @@ def test_advice_trace_variant_summary():
 
 def test_load_check_pure_parts():
     """負荷確認の道具 (tools/shadow_load_check) の純粋な部分: 分位点、期限超過率、スキップの内訳、フレームの選び方、
-    状態の鍵 (server._advice_key と同じ)"""
-    from tools.shadow_load_check import advice_key, percentiles, run_summary, select_frame_paths
+    状態の鍵 (2026-10-21: 旧い鍵の写しを削除し、server と同じ advice_key.frame_advice_step / advice_input_key を使う)"""
+    import advice_key as K
+    from tools import shadow_load_check as SLC
+    from tools.shadow_load_check import percentiles, run_summary, select_frame_paths
     p = percentiles([float(x) for x in range(1, 101)])
     assert p == {"n": 100, "p50": 51.0, "p95": 95.0, "max": 100.0}, p
     assert percentiles([])["p95"] is None
@@ -561,7 +563,8 @@ def test_load_check_pure_parts():
         assert got == ["frame_50.png", "frame_100.png", "sel_200.png"], got
     st = _pivot_state()
     st["scene"] = "command"
-    assert advice_key(st) and advice_key({}) == ""
+    assert K.advice_input_key(st, 0.0) and K.advice_input_key({}, 0.0) == ""
+    assert SLC.frame_advice_step is K.frame_advice_step and not hasattr(SLC, "advice_key")
     from tools.shadow_load_check import build_sequence
     assert build_sequence(2, 3) == [(0, None)] * 3 + [(1, None)] * 3
     assert build_sequence(2, 2, 3) == [(0, 0), (1, 0), (0, 1), (1, 1), (0, 2), (1, 2)]
