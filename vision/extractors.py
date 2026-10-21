@@ -1625,6 +1625,8 @@ def link_active_to_party(state: BattleStateV2, side_name: str) -> None:
         slot.volatile_turns = dict(active.volatile_turns)
     if active.entry_turn is not None:
         slot.entry_turn = active.entry_turn
+    if getattr(active, "transform", None) is not None:
+        slot.transform = active.transform   # へんしん も場の個体の観測と一緒に移す (2026-10-21)
     slot.moves = active.moves or slot.moves
     slot.revealed_moves = list({*slot.revealed_moves, *active.revealed_moves})
     slot.is_mega = active.is_mega or slot.is_mega

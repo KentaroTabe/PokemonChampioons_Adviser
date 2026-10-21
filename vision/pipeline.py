@@ -475,6 +475,15 @@ class VisionPipeline:
             self.state.dump_my_hp_trace("battle_end")
             self.state.my_hp_trace_end_done = True
 
+        # へんしん の観測 (2026-10-21、advisor.transform): このフレームの状態と発火したイベントから、相手の場の個体が こちらの
+        # 場の個体に へんしん したことを確かめたら transform を付ける。判定だけで、シーン判定・イベント辞書・HP の推定は変えない
+        # (対戦開始の HUD より前の初手の繰り出しの かわりもの も拾えるよう、battle_active では絞らない)
+        try:
+            from advisor.transform import observe_frame
+            observe_frame(self.state, fired, time.time(), self.resolver)
+        except Exception:
+            pass
+
         return self.state.to_dict(), fired
 
     # ------------------------------------------------------------------

@@ -152,6 +152,10 @@
     ev_infer_of。採点を実際に行ったときの値で、キャッシュを使った行は元の採点のときの値)。渡されなければ null。
     復元は tools.advice_replay.apply_ev_infer(復元した state, 行の ev_infer) が state["ev_infer_override"] に入れ、
     advisor.engine はトラッカーより優先して読む
+2026-10-21 へんしん の入力修正 (advisor.transform、欄を足すだけ):
+  advice 行の state (版 2) の個体に "transform" (へんしん のコピー元・写し・観測根拠 {"source_species", "source_index", "copy",
+    "evidence", "t"}、無ければ null。MON_STATE_ADDED_FIELDS)。advice に "transform_applied" (True = 写しで評価 / False = 相手の
+    場の個体に transform なし / None = 相手の場の個体が分からない)。復元は tools.advice_replay._mon_from_compact
 """
 from __future__ import annotations
 
@@ -594,6 +598,9 @@ def _mon_v2_fields(p: dict) -> dict:
 # 版 2 の個体に 2026-10-20 に足した採点の入力 (server._attach_candidates が付ける欄)。MON_V2_FIELDS とは分ける
 # (それ以前の版 2 の行に無いので、advice_replay.restore_unknowns の欄の欠けには数えない。欠けは scoring_inputs_missing)
 MON_INPUT_FIELDS = ("spe_est",)
+# 版 2 の個体に 2026-10-21 に足した状態の欄 (vision.state.PokemonState。へんしん のコピー元・写し・観測根拠、advisor.transform)。
+# 必ず書く (無ければ null)。それ以前の版 2 の行に無いので、MON_V2_FIELDS (restore_unknowns の欄の欠け) には入れない
+MON_STATE_ADDED_FIELDS = ("transform",)
 
 
 def compact_state(state: dict) -> dict:
@@ -610,6 +617,8 @@ def compact_state(state: dict) -> dict:
         for row, p in zip(d[side]["party"], sd.get("party") or []):
             row.update(_mon_v2_fields(p))
             for k in MON_INPUT_FIELDS:
+                row[k] = _plain(p.get(k))
+            for k in MON_STATE_ADDED_FIELDS:
                 row[k] = _plain(p.get(k))
     return d
 

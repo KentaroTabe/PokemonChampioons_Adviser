@@ -1565,3 +1565,21 @@ ADVICE_KEY_VERSION = 2
 ADVICE_RECALC_TTL_SEC = 10.0
 ADVICE_RECALC_FALLBACK_TTL_SEC = 2.0
 ADVICE_KEY_HP_AGE_GRAIN_SEC = 5.0
+
+# へんしん (メタモン・かわりもの) の入力修正 (2026-10-21 レビュー、docs/FALLBACK_DIAG_20261020.md・計画書 §8.43、advisor/transform.py)。
+# 相手の場の個体が こちらの場の個体に へんしん したことを「記録される観測」で確かめたときだけ、状態の個体に transform (コピー元・写し・
+# 観測根拠) を付け、評価の入力 (両方式共通) を写しにする。確かめられなければ付けない (= 従来どおり transition は退避)。
+# 根拠は 10/20 3 戦目 (battle_20261020_085941) の実データで記録されていた 2 種類だけ:
+#   TRANSFORM_EVENT_EVIDENCE: 発動そのものの観測 (イベント id)。ターン 9 の「メタモンのかわりもの」(249 行目) が
+#     ability_opponent_imposter で記録されていた。コピー元 = 相手のその個体が場に出たときのこちらの場の個体
+#   TRANSFORM_MOVE_EVIDENCE: TRANSFORM_SPECIES の個体が TRANSFORM_OWN_MOVES 以外の技を使った (= もう写している)。ターン 3 の
+#     「相手のメタモンのあくのはどう」(98 行目、move_opponent_darkpulse)。相手が場に出てからこちらの場の個体と能力ランクが
+#     変わっていない (コピー元が 1 つに決まる) ときで、その技がコピー元の技 (登録・判明) に入っているときだけ
+# TRANSFORM_EVENT_WINDOW_SEC: 発動のイベントと「相手の場の個体が TRANSFORM_SPECIES になった」観測の順序が前後してよい時間 (秒)
+# TRANSFORM_COPY_PP: へんしん 後の技の PP (ゲームの仕様で 5)
+TRANSFORM_SPECIES = ("ditto",)
+TRANSFORM_OWN_MOVES = ("transform",)
+TRANSFORM_EVENT_EVIDENCE = ("ability_opponent_imposter",)
+TRANSFORM_MOVE_EVIDENCE = True
+TRANSFORM_EVENT_WINDOW_SEC = 10.0
+TRANSFORM_COPY_PP = 5

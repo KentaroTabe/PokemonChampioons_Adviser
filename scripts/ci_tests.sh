@@ -28,6 +28,7 @@ TESTS=(
   test_advice_replay
   test_advice_key
   test_state_schema_roundtrip
+  test_transform_input
   test_version_split
   test_advice_m1a
   test_advice_m2a
