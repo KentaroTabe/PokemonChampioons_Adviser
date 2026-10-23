@@ -747,3 +747,11 @@ k本なら水準1−0.05/k、推定差≥0.05かつ区間下限>0で採用候補
 
 - CI 相当スイート 152 本 失敗 0。
 - 候補版 = このコミットの次の docs コミット (コードは c8cb69ba と同じ)。試運転 1 戦 (正式集計に含めない) → 版の固定 → 10/23 頃に L→T→T→L。
+
+### 8.46 負荷待ちの間の作業 (2026-10-23 午後): 入力の実行時固定・残件・文書 (統合 3391d8b0)
+
+- 試運転 (battle_20261023_124148、legacy) は別セッションの処理で load 120〜264、フレーム処理 0.9%、助言 0 件 → 無効。負荷が戻ってからやり直す。
+- 未コミットの 2 ファイル: config/my_team.example.json は登録チームの実物の型が写っていたので HEAD に戻した。champions_agent/data/species_embedding.json は追跡済みの生成物 (公開の使用率統計から再生成) としてコミット (26370a98)。
+- 入力の実行時固定 (a392f09c、検査報告 10/19 §2): ピンに選出モデルの実体 (.pt・emb・meta)・使用率 DB の bundle (指定 snapshot 以下、snapshot 75 で 1.31 MB)・実戦バンクの写し・manifest (sha256)。子プロセスは明示された版 (環境変数 ADVICE_USAGE_DB / ADVICE_USAGE_SNAPSHOT / ADVICE_REAL_BANK / ADVICE_REAL_BANK_SHA16) だけを読み、不一致は停止。verdict と arc_remeasure_summary で事後照合。real_accept / advice_replay に --data-mode restore|current (既定 restore)。既存 4 件の監査: 選出モデルの sha は今の配備先と一致 4/4、.pt のピン 0/4、bundle 無しでは全 261 種で予測が違う、バンクは今と不一致 4/4。子プロセスの snapshot は起動時の最新 (META_PIN 24 ではない)。残: ev_infer と team_advice の他の関数は全期間を読む、arc_remeasure の起動側、restore で 10/20 より前のログはほぼ判定不能になる見込み。
+- 残件の小修正 (ab4e2102): SELECTION_RECALC_SEC、へんしん 中の観測を型推定に入れない、写しの技の除去、KNOWN_ISSUES の状態欄の更新。RL の観測 own_bench は学習側と同じ並びのため変更せず (判断待ち)。test_ev_infer の既存の失敗 (使用率 DB 依存) を記録。
+- 文書 (ff8abbf6): docs/STATUS_20261023.md (現状まとめ)、docs/PR_DRAFT_feature_team_build_20261023.md (push 保留 140 コミットの PR 下書き)。
