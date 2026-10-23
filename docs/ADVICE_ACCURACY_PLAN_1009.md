@@ -755,3 +755,9 @@ k本なら水準1−0.05/k、推定差≥0.05かつ区間下限>0で採用候補
 - 入力の実行時固定 (a392f09c、検査報告 10/19 §2): ピンに選出モデルの実体 (.pt・emb・meta)・使用率 DB の bundle (指定 snapshot 以下、snapshot 75 で 1.31 MB)・実戦バンクの写し・manifest (sha256)。子プロセスは明示された版 (環境変数 ADVICE_USAGE_DB / ADVICE_USAGE_SNAPSHOT / ADVICE_REAL_BANK / ADVICE_REAL_BANK_SHA16) だけを読み、不一致は停止。verdict と arc_remeasure_summary で事後照合。real_accept / advice_replay に --data-mode restore|current (既定 restore)。既存 4 件の監査: 選出モデルの sha は今の配備先と一致 4/4、.pt のピン 0/4、bundle 無しでは全 261 種で予測が違う、バンクは今と不一致 4/4。子プロセスの snapshot は起動時の最新 (META_PIN 24 ではない)。残: ev_infer と team_advice の他の関数は全期間を読む、arc_remeasure の起動側、restore で 10/20 より前のログはほぼ判定不能になる見込み。
 - 残件の小修正 (ab4e2102): SELECTION_RECALC_SEC、へんしん 中の観測を型推定に入れない、写しの技の除去、KNOWN_ISSUES の状態欄の更新。RL の観測 own_bench は学習側と同じ並びのため変更せず (判断待ち)。test_ev_infer の既存の失敗 (使用率 DB 依存) を記録。
 - 文書 (ff8abbf6): docs/STATUS_20261023.md (現状まとめ)、docs/PR_DRAFT_feature_team_build_20261023.md (push 保留 140 コミットの PR 下書き)。
+
+### 8.47 入力固定後の確認 (2026-10-23 夜、コード 3391d8b0、CI 相当 154 本 失敗 0)
+
+- real_accept の --data-mode の比較 (10/20 の 3 戦): restore (既定) は 38 決定すべて復元できない (version 行に使用率の snapshot・バンクの記録が無い 10/20 の形のため) → 正しさは「データの版の復元」で判定不能、遅延・退避の行 (記録から数える) は current と同じ。current は従来どおり (判定不能 13〜14/36、退避 決定単位 6/31 未達、遅延 0.70 秒)。
+- 正式群のログ (新しい version 行: rules.usage_snapshot・team.sha256・runtime) で restore が成立するかは、試運転のログで確認する (試運転の確認項目に追加)。成立しなければ current を参考として併記し、restore の条件を直す。
+- 候補版のコード = 3391d8b0 (入力固定・残件を含む)。試運転の前に再起動が要る (稼働中のプロセスは無い)。
