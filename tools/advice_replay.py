@@ -16,6 +16,8 @@
 - 再生のデータの版 (2026-10-23、tools.inputs_pin): --data-mode restore (既定) は決定ごとにその時点の version 行の使用率の snapshot・
   登録チームの sha と selection_record 行のバンクの sha16 を当時の版として使い、復元できない決定 (記録なし・手元の DB に無い・
   今の登録と違う) は再生しない (件数と理由を出す)。current は今のデータで評価し直す。結果に使ったデータの版 (data_versions) を残す。
+  登録チームは version 行の team.registry (助言エンジンが読んだ登録、2026-10-23 から記録) があればそれに差し替える
+  (tools.inputs_pin.restore_plan。registry_sha256 と合わなければ判定不能)。
 """
 from __future__ import annotations
 

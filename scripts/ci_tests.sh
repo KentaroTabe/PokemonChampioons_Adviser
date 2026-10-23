@@ -178,6 +178,7 @@ TESTS=(
   test_replay_path
   test_residuals_1023
   test_inputs_pin
+  test_restore_team_text
 )
 
 fail=0

@@ -83,12 +83,49 @@ def registration_disabled() -> bool:
     return raw not in ("", "0", "false", "no")
 
 
+# 再生 (tools.real_accept / tools.advice_replay の --data-mode restore) の間だけ使う登録 (2026-10-23)。None = 差し替えなし。
+# dict のときは _load() がこれを返す (version 行の team.registry = 当時 _load() が返した登録そのもの)。advisor.data_pin.set_override が
+# 立て、clear_override が外す。書き込み (_load_file を読む update_build / set_build) には効かない
+_REGISTRY_OVERRIDE: Optional[dict] = None
+
+
 def _load() -> dict:
     """登録の読み取り経路 (get_my_build / get_my_moves / has_build / registered_species_* / team_advice など) が読む登録。
-    登録参照の無効化 (registration_disabled) 中は空 = 全種が未登録。書き込み (update_build / set_build) は _load_file を使う"""
+    登録参照の無効化 (registration_disabled) 中は空 = 全種が未登録。書き込み (update_build / set_build) は _load_file を使う。
+    再生の差し替え (set_registry_override) 中はその登録 (記録した時点で無効化が効いていれば記録も空なので、無効化より優先する)"""
+    if _REGISTRY_OVERRIDE is not None:
+        return _REGISTRY_OVERRIDE
     if registration_disabled():
         return {}
     return _load_file()
+
+
+def registry_sha(registry) -> Optional[str]:
+    """登録 (_load() の dict) の sha256 の先頭 16 桁 (純粋。2026-10-23)。キーの順に依らない正規形 (sort_keys、区切りの空白なし、
+    ensure_ascii=False) の UTF-8 から計算する。dict でなければ None"""
+    if not isinstance(registry, dict):
+        return None
+    import hashlib
+    raw = json.dumps(registry, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def registry_snapshot() -> dict:
+    """今 _load() が返す登録の写し (version 行の team.registry に残す。助言エンジンが実際に読む登録そのもの)"""
+    return json.loads(json.dumps(_load(), ensure_ascii=False))
+
+
+def set_registry_override(registry: dict) -> None:
+    """再生の間だけ _load() が返す登録を差し替える (写しを持つ)"""
+    global _REGISTRY_OVERRIDE
+    if not isinstance(registry, dict):
+        raise TypeError(f"登録の差し替えは dict ({type(registry).__name__})")
+    _REGISTRY_OVERRIDE = json.loads(json.dumps(registry, ensure_ascii=False))
+
+
+def clear_registry_override() -> None:
+    global _REGISTRY_OVERRIDE
+    _REGISTRY_OVERRIDE = None
 
 
 def _load_file() -> dict:
