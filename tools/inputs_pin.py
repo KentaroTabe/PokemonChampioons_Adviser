@@ -11,8 +11,11 @@
 復元は判定不能 (最新へ黙って退避しない)。
 
 実戦ログの再生 (tools.real_accept / tools.advice_replay の --data-mode):
-  restore (既定) = version 行の使用率 snapshot・登録チームの sha と selection_record 行のバンクの sha16 を当時の版として使う
-                  (restore_plan。無い・手元に無い・今の登録と違えば判定不能)
+  restore (既定) = version 行の使用率 snapshot・登録チームと selection_record 行のバンクの sha16 を当時の版として使う
+                  (restore_plan。無い・手元に無い・今の登録と違えば判定不能)。登録チームは version 行の team.registry
+                  (助言エンジンが実際に読んだ登録 = advisor.my_team._load() の dict、2026-10-23 から) があればそれに差し替える
+                  (記録の整合 team.registry_sha256 == registry の sha を確かめ、合わなければ判定不能)。無い旧ログは従来どおり
+                  team.sha256 (registered_team() の本文の sha) を今の値と比べる
   current        = 今のデータ (DB の最新・今のバンク・今の登録) で過去の局面を評価し直す
 どちらも使ったデータの版を出す。純粋な部分 (bundle の規則・manifest の照合・ログの版の読み出し・復元の計画) は tests/test_inputs_pin.py。
 """
@@ -197,11 +200,48 @@ def data_version_at(records: list, t: Optional[float]) -> dict:
             "bank_sha16": (((sel or {}).get("opp_pick_pred") or {}).get("bank") or {}).get("sha256")}
 
 
+def _version_row_at(records: list, t: Optional[float]) -> Optional[dict]:
+    """時刻 t の時点の version 行 (純粋。data_version_at と同じ規則: t 以前で最後、無ければログの最初、t が None なら最初)"""
+    ver = first = None
+    for r in records or []:
+        if r.get("type") != "version":
+            continue
+        first = first or r
+        rt = r.get("t")
+        if t is not None and rt is not None and float(rt) <= float(t):
+            ver = r
+    return ver or first
+
+
+def team_registry_at(records: list, t: Optional[float]) -> Optional[dict]:
+    """時刻 t の時点の version 行の登録の記録 (純粋。2026-10-23): {"registry": team.registry, "registry_sha256": team.registry_sha256}。
+    version 行が無い・どちらの欄も無い (2026-10-23 より前の記録) なら None"""
+    team = (_version_row_at(records, t) or {}).get("team") or {}
+    if "registry" not in team and "registry_sha256" not in team:
+        return None
+    return {"registry": team.get("registry"), "registry_sha256": team.get("registry_sha256")}
+
+
+def check_team_registry(rec: Optional[dict]) -> tuple:
+    """登録の記録の整合 (純粋): (使う登録 or None, 判定不能の理由 or None)。registry が dict で、registry_sha256 が
+    advisor.my_team.registry_sha(registry) と一致するときだけ使う"""
+    from advisor.my_team import registry_sha
+    rec = rec or {}
+    reg, rs = rec.get("registry"), rec.get("registry_sha256")
+    if not isinstance(reg, dict):
+        return None, "version 行の team.registry が無い・dict でない (記録の不整合)"
+    actual = registry_sha(reg)
+    if not rs or rs != actual:
+        return None, f"version 行の team.registry_sha256 {rs} が registry の sha {actual} と違う (記録の不整合)"
+    return reg, None
+
+
 DATA_MODES = ("restore", "current")
 
 
 def restore_plan(want: dict, snapshots: Iterable, team_sha16: Optional[str], banks: dict, mode: str = "restore",
-                 latest_snapshot: Optional[int] = None) -> dict:
+                 latest_snapshot: Optional[int] = None, team_registry: Optional[dict] = None,
+                 current_registry_sha16: Optional[str] = None) -> dict:
     """再生に使うデータの版の計画 (純粋)。want = data_version_at の当時の版、snapshots = 手元の DB にある snapshot id、
     team_sha16 = 今の登録チームの本文の sha16、banks = 手元のバンク {sha16: path}、latest_snapshot = DB の最新。
     restore: 当時の snapshot が DB にあり、当時の登録チームが今の登録と同じなら ok (使う snapshot = 当時の値)。どれかが無ければ ok False
@@ -209,7 +249,11 @@ def restore_plan(want: dict, snapshots: Iterable, team_sha16: Optional[str], ban
              バンクを読まないので、再生自体は止めない)
     current: 今のデータ (DB の最新・今のバンク・今の登録) で評価し直す。ok は常に True、当時の版と違う欄を notes に出す
     戻り値 {"mode", "ok", "reasons", "notes", "usage_snapshot" (使う id、current は None = 最新), "bank_path", "bank_sha16",
-            "bank_blocked", "recorded": want, "used": {...}}"""
+            "bank_blocked", "recorded": want, "used": {...}, "team_registry": 差し替える登録 or None}
+    2026-10-23 登録チーム: team_registry = team_registry_at の記録 (version 行の team.registry と registry_sha256。無い旧ログは None)。
+      restore: 記録があれば整合 (check_team_registry) を確かめ、合えばその登録を使う (今の登録とは比べない。used.team_registry_sha16)、
+               合わなければ判定不能。記録が無ければ従来どおり team_sha16 (今の本文の sha) と比べる
+      current: 今の登録を使う。記録の sha と current_registry_sha16 (今の登録の sha) が違えば notes に出す"""
     if mode not in DATA_MODES:
         raise ValueError(f"--data-mode は {DATA_MODES} のどれか ({mode})")
     want = dict(want or {})
@@ -224,15 +268,24 @@ def restore_plan(want: dict, snapshots: Iterable, team_sha16: Optional[str], ban
             notes.append(f"登録チーム: 当時 {ts} → 今 {team_sha16}")
         if bs and cur_bank and bs != cur_bank[0]:
             notes.append(f"実戦バンク: 当時 {bs} → 今 {cur_bank[0]}")
+        rec_rs = (team_registry or {}).get("registry_sha256")
+        if rec_rs and current_registry_sha16 and rec_rs != current_registry_sha16:
+            notes.append(f"登録 (my_team): 当時 {rec_rs} → 今 {current_registry_sha16}")
         return {"mode": mode, "ok": True, "reasons": [], "notes": notes, "usage_snapshot": None,
                 "bank_path": None, "bank_sha16": None, "bank_blocked": None, "recorded": want,
                 "used": {"usage_snapshot": latest_snapshot, "team_sha16": team_sha16,
-                         "bank_sha16": cur_bank[0] if cur_bank else None}}
+                         "bank_sha16": cur_bank[0] if cur_bank else None}, "team_registry": None}
     if us is None:
         reasons.append("version 行に使用率の snapshot が無い (2026-10-20 より前の記録か version 行なし)")
     elif int(us) not in snaps:
         reasons.append(f"当時の使用率の snapshot {us} が手元の DB に無い")
-    if not ts:
+    reg = None
+    if team_registry is not None:
+        # 当時の登録 (version 行の team.registry) を使う。今の登録・本文とは比べない (2026-10-23)
+        reg, why = check_team_registry(team_registry)
+        if why:
+            reasons.append(why)
+    elif not ts:
         reasons.append("version 行に登録チームの sha が無い")
     elif not team_sha16:
         reasons.append("今の登録チームの本文が作れない (照合できない)")
@@ -247,17 +300,21 @@ def restore_plan(want: dict, snapshots: Iterable, team_sha16: Optional[str], ban
         bank_blocked = "当時のバンクの版の記録が無い (selection_record 行なし)"
     if bank_blocked:
         notes.append(f"実戦バンク: {bank_blocked} (読もうとしたら止める。対戦中の評価は読まない)")
+    used = {"usage_snapshot": int(us) if us is not None else None, "team_sha16": ts if not reasons else None,
+            "bank_sha16": bs if bank_path else None}
+    if team_registry is not None:
+        used["team_registry_sha16"] = team_registry.get("registry_sha256") if reg is not None and not reasons else None
     return {"mode": mode, "ok": not reasons, "reasons": reasons, "notes": notes,
             "usage_snapshot": int(us) if us is not None and not reasons else None,
             "bank_path": str(bank_path) if bank_path else None, "bank_sha16": bs if bank_path else None,
-            "bank_blocked": bank_blocked, "recorded": want,
-            "used": {"usage_snapshot": int(us) if us is not None else None, "team_sha16": ts if not reasons else None,
-                     "bank_sha16": bs if bank_path else None}}
+            "bank_blocked": bank_blocked, "recorded": want, "used": used,
+            "team_registry": reg if not reasons else None}
 
 
 def plan_key(plan: dict) -> tuple:
-    """同じ版かどうかの鍵 (純粋。版が変わったときだけ差し替える)"""
-    return (plan.get("mode"), plan.get("usage_snapshot"), plan.get("bank_path"), plan.get("bank_sha16"), plan.get("bank_blocked"))
+    """同じ版かどうかの鍵 (純粋。版が変わったときだけ差し替える。登録の差し替えは used.team_registry_sha16 で区別する)"""
+    return (plan.get("mode"), plan.get("usage_snapshot"), plan.get("bank_path"), plan.get("bank_sha16"), plan.get("bank_blocked"),
+            (plan.get("used") or {}).get("team_registry_sha16"))
 
 
 def summarize_data_versions(entries: list) -> dict:
@@ -432,7 +489,8 @@ def planned_record(selection_model: Path, src_db: Optional[Path] = None, bank: O
 
 
 def local_data(db: Optional[Path] = None, bank: Optional[Path] = None) -> dict:
-    """再生の手元のデータ (副作用: 読み取り): DB の snapshot id の一覧と最新、今のバンクの sha16、今の登録チームの本文の sha16"""
+    """再生の手元のデータ (副作用: 読み取り): DB の snapshot id の一覧と最新、今のバンクの sha16、今の登録チームの本文の sha16、
+    今の登録 (advisor.my_team._load()) の sha16 (team_registry_sha16。current の notes に使う)"""
     db = Path(db) if db is not None else SRC_USAGE_DB
     bank = Path(bank) if bank is not None else SRC_BANK
     snaps = snapshot_ids(db)
@@ -443,8 +501,13 @@ def local_data(db: Optional[Path] = None, bank: Optional[Path] = None) -> dict:
         team = _registered_team()[0]
     except Exception:
         team = None
+    try:
+        from advisor.my_team import registry_sha, registry_snapshot
+        reg_sha = registry_sha(registry_snapshot())
+    except Exception:
+        reg_sha = None
     return {"db": str(db), "snapshots": snaps, "latest": max(snaps) if snaps else None,
-            "banks": ({bsha[:16]: str(bank)} if bsha else {}), "team_sha16": team}
+            "banks": ({bsha[:16]: str(bank)} if bsha else {}), "team_sha16": team, "team_registry_sha16": reg_sha}
 
 
 class DataSwitch:
@@ -463,7 +526,8 @@ class DataSwitch:
     def plan(self, log_name: str, records: list, t: Optional[float], record: bool = True) -> dict:
         """時刻 t の決定の版を決め、復元できれば差し替える。record = 要約に数える (初回の読み込みの空回しは数えない)"""
         L = self.local
-        p = restore_plan(data_version_at(records, t), L["snapshots"], L["team_sha16"], L["banks"], self.mode, L["latest"])
+        p = restore_plan(data_version_at(records, t), L["snapshots"], L["team_sha16"], L["banks"], self.mode, L["latest"],
+                         team_registry=team_registry_at(records, t), current_registry_sha16=L.get("team_registry_sha16"))
         if record:
             self.entries.append({"log": log_name, "plan": p})
         if p["ok"]:
@@ -485,7 +549,7 @@ class DataSwitch:
         key = plan_key(p)
         if key != self._key:
             set_override(usage_db=L["db"], usage_snapshot=p["usage_snapshot"], bank_path=p["bank_path"], bank_sha16=p["bank_sha16"],
-                         bank_blocked=p["bank_blocked"])
+                         bank_blocked=p["bank_blocked"], team_registry=p.get("team_registry"))
             self._key = key
 
     def close(self) -> None:
@@ -496,7 +560,7 @@ class DataSwitch:
     def summary(self) -> dict:
         L = self.local
         return {"mode": self.mode, "local": {"db": L["db"], "latest_snapshot": L["latest"], "bank_sha16": list(L["banks"]),
-                                             "team_sha16": L["team_sha16"]},
+                                             "team_sha16": L["team_sha16"], "team_registry_sha16": L.get("team_registry_sha16")},
                 **summarize_data_versions(self.entries)}
 
 

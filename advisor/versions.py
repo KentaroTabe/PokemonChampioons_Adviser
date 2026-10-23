@@ -5,7 +5,9 @@
   - 指定: logs/.experiment_package のラベル (designated_package)
   - 実際: 選出モデルは advisor_model_path が返した経路 (登録パーティが Package の 6 体に含まれないときは配布版に退避する) と、
     その sha256、退避の理由。行動方策 (RL) は読み込み順の先頭に存在する zip とその sha256、読み込めたか
-  - 構築と型の版: config/my_team.json の本文の sha256 と 6 体
+  - 構築と型の版: 登録チームの本文 (tools.team_build.run.registered_team()、直近の選出ロスターの 6 体) の sha256 と 6 体。
+    2026-10-23 から、助言エンジンが実際に読む登録 (advisor.my_team._load() の dict) を team.registry に、その sha を
+    team.registry_sha256 に残す (再生の --data-mode restore が使う。digest には入れない)
   - 規則・データの版: git の commit、図鑑と効果表の sha256、選出の特徴量の版
 をまとめ、全体の digest (version_id) を付ける。battle_logger が対戦の先頭に "version" の行として書き、各助言の行は version_id と
 選出モデルの実際の経路を持つ。評価側 (tools/team_build/real_eval.version_check) は Package の manifest の selection_model_sha256 と
@@ -122,14 +124,19 @@ def summarize_versions(designated_package: Optional[str], selection_path: Option
                        rl_path: Optional[str], rl_sha: Optional[str], rl_loaded: Optional[bool], rl_error: Optional[str],
                        team_sha: Optional[str], git: Optional[str], dex_sha: Optional[str], effects_sha: Optional[str],
                        features: Optional[str], *, embedding_sha: Optional[str] = None, usage_snapshot=None,
-                       usage_snapshot_source: Optional[str] = None, scoring: Optional[dict] = None) -> dict:
+                       usage_snapshot_source: Optional[str] = None, scoring: Optional[dict] = None,
+                       team_registry: Optional[dict] = None) -> dict:
     """版の要約 (純粋)。退避の理由 (fallback_reason) をここで決める:
       - ラベルが無い → None (退避ではない。配布版が本来の経路)
       - ラベルはあるが Package のモデルが使われていない → "package_model_missing" (モデルのファイルが無い) か
         "party_not_in_package" (登録パーティが Package の 6 体に含まれない)
       - 選出モデルのファイルが無い → "selection_model_missing" (規則への退避)
     2026-10-20: embedding_sha (種族の埋め込み)・usage_snapshot (使用率の snapshot id) を rules に、採点設定 scoring を "scoring" に、
-    実行状態を "runtime" に足す (欄の追加だけ)。version_id は identity_of の digest"""
+    実行状態を "runtime" に足す (欄の追加だけ)。version_id は identity_of の digest。
+    2026-10-23: team_registry (助言エンジンが実際に読む登録 = advisor.my_team._load() の dict) を渡せば team に "registry" と
+    "registry_sha256" (advisor.my_team.registry_sha) を足す (欄の追加だけ。identity_of / digest には入れない)。再生の
+    --data-mode restore はこの登録を使う (tools.inputs_pin)。team.sha256 (registered_team() の本文の sha) は直近の選出ロスターで
+    変わり、対戦開始時 = 前の対戦のロスターの値なので、登録の復元には使えない"""
     fallback = None
     if designated_package and selection_package != designated_package:
         if package_species and my_species and not set(my_species) <= set(package_species):
@@ -153,9 +160,22 @@ def summarize_versions(designated_package: Optional[str], selection_path: Option
                   "embedding_sha256": embedding_sha, "usage_snapshot": usage_snapshot},
         "scoring": {k: (scoring or {}).get(k) for k in SCORING_IDENTITY_KEYS},
     }
+    if isinstance(team_registry, dict):
+        from advisor.my_team import registry_sha
+        doc["team"]["registry"] = team_registry
+        doc["team"]["registry_sha256"] = registry_sha(team_registry)
     doc["runtime"] = dict(runtime_of(doc), usage_snapshot_source=usage_snapshot_source)
     doc["version_id"] = digest(doc)
     return doc
+
+
+def _team_registry() -> Optional[dict]:
+    """助言エンジンが今読む登録 (advisor.my_team._load() の写し)。読めなければ None (記録のために助言を止めない)"""
+    try:
+        from advisor.my_team import registry_snapshot
+        return registry_snapshot()
+    except Exception:
+        return None
 
 
 def _registered_team() -> tuple:
@@ -220,7 +240,7 @@ def runtime_versions(refresh: bool = False) -> dict:
                              rl_path, rl_sha, rl_loaded, rl_err, team_sha, git,
                              sha256_file(REPO / "advisor" / "data" / "dex.json"), sha256_file(REPO / "advisor" / "data" / "move_effects.json"),
                              features, embedding_sha=sha256_file(EMBEDDING_PATH), usage_snapshot=snap,
-                             usage_snapshot_source=snap_src, scoring=scoring_identity())
+                             usage_snapshot_source=snap_src, scoring=scoring_identity(), team_registry=_team_registry())
     doc["collected_at"] = round(now, 2)
     _CACHE.update(key=key, value=doc, t=now)
     return doc

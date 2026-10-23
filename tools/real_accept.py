@@ -57,7 +57,9 @@ advisor.engine.evaluate(..., scoring_mode=...) に通す。図鑑・resolver・�
 
 2026-10-23 再生のデータの版 (レビュー 2026-10-19 §2、tools.inputs_pin): --data-mode restore (既定) | current。
   - restore: 決定ごとに、その時点の version 行の使用率の snapshot と登録チームの sha、selection_record 行のバンクの sha16 を当時の
-    版として使う (advisor.data_pin.set_override。型予測・タイプからの候補はその snapshot、候補の範囲はその id 以下)。当時の snapshot が
+    版として使う (advisor.data_pin.set_override。型予測・タイプからの候補はその snapshot、候補の範囲はその id 以下)。登録チームは
+    version 行の team.registry (助言エンジンが読んだ登録そのもの、2026-10-23 から記録) があればそれに差し替え (registry_sha256 と
+    合わなければ記録の不整合で判定不能)、無い旧ログは今の登録の本文の sha と比べる。当時の snapshot が
     手元の DB に無い・記録が無い (2026-10-20 より前の version 行)・当時の登録チームが今の登録と違う決定は再生せず、照合できない決定
     (unconfirmed data_restore、checks data_restore unknown) に数える = 正しさは 判定不能 (照合できた範囲で違反 0) より良くならない。
     バンクが手元に無ければ読もうとしたら止める (対戦中の評価は読まない)。
@@ -2251,7 +2253,8 @@ def data_versions_markdown(dv: Optional[dict]) -> str:
     loc = dv.get("local") or {}
     L = ["", "## 再生のデータの版 (--data-mode " + str(dv.get("mode")) + ")", "",
          f"手元: 使用率 DB {loc.get('db')} (最新 snapshot {loc.get('latest_snapshot')}) / バンク {', '.join(loc.get('bank_sha16') or []) or 'なし'}"
-         f" / 登録チーム {loc.get('team_sha16')}",
+         f" / 登録チーム {loc.get('team_sha16')}"
+         + (f" / 登録 (my_team) {loc.get('team_registry_sha16')}" if loc.get("team_registry_sha16") else ""),
          f"決定 {dv.get('n_decisions', 0)} (復元できない {dv.get('n_unrestored_decisions', 0)}) / ログ {dv.get('n_logs', 0)} "
          f"(全決定を復元 {dv.get('n_restored', 0)})", "",
          "| ログ | 決定 | 当時の版 (snapshot / 登録 / バンク) | 使った版 | 結果 |", "|---|---|---|---|---|"]
@@ -2261,8 +2264,11 @@ def data_versions_markdown(dv: Optional[dict]) -> str:
             res = "復元" if x["ok"] and dv.get("mode") == "restore" else ("今のデータ" if x["ok"] else "判定不能: " + " / ".join(x["reasons"]))
             if x.get("notes"):
                 res += " (" + " / ".join(x["notes"]) + ")"
+            team_used = str(used.get("team_sha16"))
+            if "team_registry_sha16" in used:      # version 行の team.registry で登録を差し替えた (2026-10-23)
+                team_used += f" (my_team {used.get('team_registry_sha16')})"
             L.append(f"| {name} | {x.get('n')} | {rec.get('usage_snapshot')} / {rec.get('team_sha16')} / {rec.get('bank_sha16')} | "
-                     f"{used.get('usage_snapshot')} / {used.get('team_sha16')} / {used.get('bank_sha16')} | {res} |")
+                     f"{used.get('usage_snapshot')} / {team_used} / {used.get('bank_sha16')} | {res} |")
     return "\n".join(L) + "\n"
 
 

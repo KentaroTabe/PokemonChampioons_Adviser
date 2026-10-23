@@ -9,6 +9,8 @@
   3. 既定 = 従来どおり (使用率 DB の最新 snapshot・config.REAL_BANK_PATH)
 版を明示したとき (pinned) は、その版が無い・sha16 が違えば InputsPinError で止める (最新へ黙って退避しない)。
 TypeInference / champions_usable の参照範囲は「指定 snapshot id 以下」(advisor.infer)。
+登録チーム (2026-10-23): set_override(team_registry=...) は再生の間だけ advisor.my_team._load() を当時の登録 (version 行の
+team.registry) に差し替える (環境変数での指定は無い)。clear_override で外す。
 
 check_runtime() は子プロセスの起動時の照合 (tools.check_advisor_player が対戦の前に呼ぶ)。純粋な部分 (spec_from_env) と
 照合 (check_runtime) は tests/test_inputs_pin.py で確かめる。
@@ -133,18 +135,28 @@ def read_bank_bytes(src: dict) -> Optional[bytes]:
     return raw
 
 
-def set_override(usage_db=None, usage_snapshot=None, bank_path=None, bank_sha16=None, bank_blocked=None) -> None:
-    """同じプロセスの中で使う版を差し替え、読み込み済みのキャッシュを捨てる (再生の --data-mode restore)"""
+def set_override(usage_db=None, usage_snapshot=None, bank_path=None, bank_sha16=None, bank_blocked=None,
+                 team_registry: Optional[dict] = None) -> None:
+    """同じプロセスの中で使う版を差し替え、読み込み済みのキャッシュを捨てる (再生の --data-mode restore)。
+    team_registry (2026-10-23) = 当時の登録 (version 行の team.registry)。dict なら advisor.my_team._load() をそれに差し替え、
+    None なら差し替えない (config/my_team.json を読む)"""
+    from advisor import my_team as MT
     _override.clear()
     _override.update({"usage_db": str(usage_db) if usage_db is not None else None,
                       "usage_snapshot": int(usage_snapshot) if usage_snapshot is not None else None,
                       "bank_path": str(bank_path) if bank_path is not None else None,
                       "bank_sha16": bank_sha16, "bank_blocked": bank_blocked})
+    if team_registry is not None:
+        MT.set_registry_override(team_registry)
+    else:
+        MT.clear_registry_override()
     reset_caches()
 
 
 def clear_override() -> None:
+    from advisor import my_team as MT
     _override.clear()
+    MT.clear_registry_override()
     reset_caches()
 
 
