@@ -354,6 +354,24 @@ class SpreadEstimator:
                 "n_obs": self.n_obs}
 
 
+def transform_masked(opp: Optional[dict], opp_move_id: Optional[str] = None) -> bool:
+    """相手の場の個体の素早さ・ダメージの観測を、その個体の種族の推定器に入れてはいけないか (純粋。2026-10-23 へんしん の残件)。
+
+    へんしん (メタモン・かわりもの) 中の個体の 攻撃・防御・特攻・特防・素早さ と技はコピー元 (こちらの個体) のもので、相手の種族の
+    型 (性格・努力値) の仮説では説明できない (HP と持ち物だけが相手のまま)。コピー元 = こちらの個体の値は登録で分かっていて、推定器
+    (相手の種族ごとの型の仮説) に帰属させる先が無いので、観測を捨てる。対象は transform の付いた個体と、へんしん する種
+    (config TRANSFORM_SPECIES) の個体 (観測根拠がまだ揃わず transform が付いていないフレームでも写しのことがある)。
+    例外: 先後の観測で、相手の技が へんしん する前の自分の技 (config TRANSFORM_OWN_MOVES。へんしん そのもの) のときは、その
+    ターンの素早さは相手の個体自身のもの (opp_move_id で渡す)。こだわりの固定 (observe_choice_lock) は持ち物 = 相手のままなので
+    ここでは捨てない"""
+    from champions_agent import config as C
+    if not opp:
+        return False
+    if not (opp.get("transform") or opp.get("species_id") in tuple(C.TRANSFORM_SPECIES)):
+        return False
+    return not (opp_move_id and opp_move_id in tuple(C.TRANSFORM_OWN_MOVES))
+
+
 class SpreadTracker:
     """フレームストリームから観測を抽出し、種族ごとの推定器を更新する。
 
@@ -478,6 +496,9 @@ class SpreadTracker:
         my_view, me = self._my_view(state)
         if not opp or not opp.get("species_id") or my_view is None:
             return
+        # へんしん 中の素早さはコピー元のもの (transform_masked。2026-10-23)
+        if transform_masked(opp, om[1]):
+            return
         # 特性による優先度変化の可能性がある行動は先後観測に使わない
         # (実戦: いたずらごころヤミラミのおにび先制を「実速が上」と誤学習し
         #  推定素早さが大きく狂った)。可能特性ベースで保守的に弾く
@@ -517,6 +538,9 @@ class SpreadTracker:
                     or not opp or not opp.get("species_id")
                     or my_view is None):
                 return
+            # へんしん 中の防御・特防はコピー元のもの (transform_masked。2026-10-23)
+            if transform_masked(opp):
+                return
             self.estimator(opp["species_id"]).observe_damage(
                 my_view, True, attacker_move[1], delta, opp)
         elif side == "player":
@@ -526,6 +550,9 @@ class SpreadTracker:
             if (not attacker_move or ts - attacker_move[0] > 12.0
                     or not opp or not opp.get("species_id")
                     or my_view is None):
+                return
+            # へんしん 中の攻撃・特攻と技はコピー元のもの (transform_masked。2026-10-23)
+            if transform_masked(opp, attacker_move[1]):
                 return
             self.estimator(opp["species_id"]).observe_damage(
                 my_view, False, attacker_move[1], delta, opp)

@@ -1565,6 +1565,9 @@ ADVICE_KEY_VERSION = 2
 ADVICE_RECALC_TTL_SEC = 10.0
 ADVICE_RECALC_FALLBACK_TTL_SEC = 2.0
 ADVICE_KEY_HP_AGE_GRAIN_SEC = 5.0
+# SELECTION_RECALC_SEC: 選出画面の選出提案 (advise_selection) を、選出の入力 (選出の進捗・両者のパーティ・選出の印) が同じでも
+#   この秒数を超えたら計算し直す (旧: server.py の 15.0 のハードコードを config に移した。値は同じ。2026-10-23)
+SELECTION_RECALC_SEC = 15.0
 
 # へんしん (メタモン・かわりもの) の入力修正 (2026-10-21 レビュー、docs/FALLBACK_DIAG_20261020.md・計画書 §8.43、advisor/transform.py)。
 # 相手の場の個体が こちらの場の個体に へんしん したことを「記録される観測」で確かめたときだけ、状態の個体に transform (コピー元・写し・

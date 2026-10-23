@@ -176,6 +176,7 @@ TESTS=(
   test_sensitivity_off
   test_first_pick_mega
   test_replay_path
+  test_residuals_1023
 )
 
 fail=0

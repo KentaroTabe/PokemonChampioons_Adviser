@@ -370,7 +370,10 @@ class PokemonState:
         self.encore_move = None
         self.volatile_turns = {}
         self.entry_turn = None
-        # へんしん は交代で解ける (2026-10-21)
+        # へんしん は交代で解ける (2026-10-21)。写しの技 (コピー元の技) は判明技から外す (へんしん 自体は残す。2026-10-23)
+        if self.transform:
+            from advisor.transform import strip_copied_moves
+            self.revealed_moves = strip_copied_moves(self.revealed_moves, self.transform)
         self.transform = None
         self.is_active = False
         # タイプ変化は交代で元に戻る。フラグを解除すると次のbackfillが
