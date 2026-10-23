@@ -790,3 +790,10 @@ k本なら水準1−0.05/k、推定差≥0.05かつ区間下限>0で採用候補
 - 使用率 snapshot: 起動時の最新でよいが、実験開始時に一度だけ確定し、全条件・再開分が同じ写しを読む (条件ごとの起動や再起動で最新を取り直さない)。**正式群でも、助言が読むバンクは開始時の写しに固定し、使用率も L/T の切替後に同じ snapshot を読む** (版を記録することと条件を固定することは別)。→ 実機の起動経路 (advice.local.env / advice_env.sh) で ADVICE_USAGE_SNAPSHOT・ADVICE_REAL_BANK (写し) を渡せるようにする (本試験前にマージ、版を取り直す)。
 - 登録チーム: 正式群では 6 体と型を固定 (対戦ごとの 3 体選出は通常どおり)。**識別 (identity_of) は registry_sha256 を含まず、ロスター由来の team.sha256 を使っている** (登録内容を変えても識別が同じ / 登録が同じでもロスターで識別が変わる) → 新形式では登録内容の sha を必須照合し、対戦中の選出情報と分ける (本試験前にマージ)。
 - 過去 4 件のモデル sha の一致は「差し替えの証拠が無い」確認であり、過去測定全体の妥当性や旧 P1 の根拠を回復するものではない。
+
+### 8.50 実機のデータ固定・識別の修正・起動確認のマージと、版の取り直し (2026-10-23 18:43 再起動)
+
+- マージ (c9731886 / 統合 9180d39d): advice.local.env に ADVICE_USAGE_SNAPSHOT / ADVICE_REAL_BANK / ADVICE_REAL_BANK_SHA16 (uvicorn だけに export、server が起動時に検証、version 行に pinned を記録、パネル表示)、`tools/advice_mode --freeze-data` (写しと 3 行)。識別 (identity_of) は新形式で registry_sha256 を必須、ロスター由来の team.sha256 / species は runtime へ (旧形式は互換、新旧が混ざる群は一致にしない)。起動スクリプトは起動した pid の待受と DEBUG_DUMP_FRAMES=1 を最大 30 秒 (ADVISOR_LAUNCH_CHECK_SEC) 確認し、時間切れは「確認できず」。バンクの sha は識別に入れない (正式群での照合は判断待ち)。
+- テスト期待値の変更 (運用側、§8.49 の識別の要件に伴う): test_restore_team_text「registry を足しても version_id と identity は変わらない」→「変わる」。
+- 設計文書 2 本をマージ (aaffb85d): docs/DESIGN_ENTRY_EFFECTS_20261023.md、docs/DESIGN_PRIOR_MIXING_20261023.md (予備集計: バンク由来の選出率は一様より対数尤度で −0.46 ± 0.19、103 戦。確定値ではない)。
+- **§8.48 の版の更新**: コード = 9180d39d (served_commit)、再起動 18:43:15 (pid 32587、待受と DEBUG_DUMP_FRAMES=1 を確認済み)、legacy、データの固定なし (正式群の開始時に --freeze-data で確定して 3 行を書き、再起動する)。他の値 (モデル・図鑑・登録) は §8.48 のまま。正式群の開始時に snapshot・バンクの値を記録する。
