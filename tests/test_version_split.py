@@ -359,6 +359,108 @@ def test_ev_infer_of_shapes():
     print("test_ev_infer_of_shapes OK")
 
 
+# ------------------------------------------------------------------ 2026-10-23: 識別に登録内容の sha を必須化 (計画書 §8.49)
+REG_A = {"カメックス": {"種族ID": "blastoise", "性格": "ひかえめ", "技": ["だいちのはどう", "はどうだん"]}}
+REG_B = {"カメックス": {"種族ID": "blastoise", "性格": "ずぶとい", "技": ["だいちのはどう", "はどうだん"]}}
+
+
+def _doc_reg(registry, **over):
+    """新形式 (team.registry あり) の version 行。over は _doc と同じ (team_sha / my_species = ロスター由来)"""
+    a = dict(designated=None, sel_path="/m/deployed.pt", sel_sha="sel1", sel_pkg=None, pkg_species=None,
+             my_species=["a", "b", "c", "d", "e", "f"], rl_path="/m/rl.zip", rl_sha="rl1", team_sha="team1", git="git1",
+             dex="dex1", eff="eff1", features="v1")
+    req = over.pop("registry_required", True)
+    a.update(over)
+    return V.summarize_versions(a["designated"], a["sel_path"], a["sel_sha"], a["sel_pkg"], a["pkg_species"], a["my_species"],
+                                a["rl_path"], a["rl_sha"], True, None, a["team_sha"], a["git"], a["dex"], a["eff"],
+                                a["features"], embedding_sha="emb1", usage_snapshot=7, usage_snapshot_source="db_latest",
+                                scoring=dict(SCORING), team_registry=registry, registry_required=req)
+
+
+def _old_identity_digest(doc: dict) -> str:
+    """2026-10-20〜23 の identity_of の規則 (team_sha256 / team_species を識別に入れる) で計算した digest (旧形式の互換の確認用)"""
+    import hashlib
+    ident = V.identity_of(doc)
+    team = doc.get("team") or {}
+    ident["data"] = {"usage_snapshot": (doc.get("rules") or {}).get("usage_snapshot"),
+                     "dex_sha256": (doc.get("rules") or {}).get("dex_sha256"),
+                     "effects_sha256": (doc.get("rules") or {}).get("effects_sha256"), "team_sha256": team.get("sha256"),
+                     "team_species": sorted(str(x) for x in (team.get("species") or []))}
+    return hashlib.sha256(json.dumps(ident, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")).hexdigest()[:12]
+
+
+def test_identity_registry_sha_required():
+    """新形式: 登録内容が変われば識別が変わり、登録が同じならロスター (team.sha256 / 6 体) が変わっても同じ識別。ロスター由来の欄は
+    runtime に移る。registry_sha256 が無い新形式の行は識別不能。旧形式 (registry なし) は従来どおり team.sha256 で識別"""
+    a1 = _doc_reg(REG_A)
+    b1 = _doc_reg(REG_B)
+    a2 = _doc_reg(REG_A, team_sha="team2", my_species=["a", "b", "c", "d", "e", "x"])
+    from advisor.my_team import registry_sha
+    # 登録内容を変えると識別が変わる (レビュワーの検査 1)
+    assert a1["team"]["registry_sha256"] == registry_sha(REG_A) != b1["team"]["registry_sha256"]
+    assert a1["version_id"] != b1["version_id"] and V.identity_of(a1) != V.identity_of(b1)
+    # 登録が同じならロスターで識別は変わらない (レビュワーの検査 2)
+    assert a1["version_id"] == a2["version_id"] and V.identity_of(a1) == V.identity_of(a2)
+    data = V.identity_of(a1)["data"]
+    assert data == {"usage_snapshot": 7, "dex_sha256": "dex1", "effects_sha256": "eff1", "registry_sha256": registry_sha(REG_A)}
+    assert "team_sha256" not in data and "team_species" not in data
+    # ロスター由来の欄は実行状態 (runtime) にある
+    assert a1["runtime"]["team_sha256"] == "team1" and a2["runtime"]["team_sha256"] == "team2"
+    assert a2["runtime"]["team_species"] == ["a", "b", "c", "d", "e", "x"]
+    assert V.identity_problems(a1) == [] and V.is_registry_row(a1)
+    # 登録を読めなかった新形式の行 (runtime_versions は registry_required=True): 識別不能 (ロスター由来の sha に戻さない)
+    miss = _doc_reg(None)
+    assert miss["team"]["registry"] is None and miss["team"]["registry_sha256"] is None and V.is_registry_row(miss)
+    assert V.identity_problems(miss) and "registry_sha256" in V.identity_problems(miss)[0]
+    assert "team_sha256" not in V.identity_of(miss)["data"]
+    broken = copy.deepcopy(a1)
+    del broken["team"]["registry_sha256"]
+    assert V.identity_problems(broken)                                          # registry だけあって sha が無い
+    # 旧形式 (registry の欄なし): 従来どおり team.sha256 / team_species で識別し、記録済みの version_id と同じ digest
+    old = _doc(None)
+    assert not V.is_registry_row(old) and V.identity_problems(old) == []
+    assert "team_sha256" in V.identity_of(old)["data"] and old["version_id"] == _old_identity_digest(old) == V.digest(old)
+    assert _doc(None, team_sha="team2")["version_id"] != old["version_id"]
+    assert _doc_reg(None, registry_required=False)["version_id"] == old["version_id"]   # 渡さなければ旧形式のまま
+    # 新形式は同じ材料でも旧形式と version_id が違う (識別の材料が変わる。旧ログの version_id は書き換えない)
+    assert a1["version_id"] != _old_identity_digest(a1)
+    print("test_identity_registry_sha_required OK")
+
+
+def test_real_accept_registry_identity():
+    """tools.real_accept の版の照合 (version_identity / group_consistency) は identity_of に追従する: registry sha を必須照合し、
+    ロスター由来の team.sha256 は照合しない。registry sha の無い新形式の行は一致にしない"""
+    from tools import real_accept as RA
+
+    def log(ver):
+        return [dict(ver, type="version"), {"type": "client", "served_commit": "git1"}] + [
+            {"type": "advice", "kind": "battle", "policy": {"rl_loaded": True}, "advice_id": f"r{i}"} for i in range(2)]
+
+    def li(name, ver):
+        v = dict(ver, scoring_mode="transition")
+        return {"name": name, "ident": RA.version_identity(log(v))}
+    a1 = li("a1", _doc_reg(REG_A))
+    a2 = li("a2", _doc_reg(REG_A, team_sha="team2", my_species=["a", "b", "c", "d", "e", "x"]))
+    b1 = li("b1", _doc_reg(REG_B))
+    assert a1["ident"]["format"] == ["identity_of"] and a1["ident"]["identity_problems"] == []
+    assert "data.registry_sha256" in a1["ident"]["identity"] and "data.team_sha256" not in a1["ident"]["identity"]
+    g = RA.group_consistency([a1, a2])
+    assert g["ok"] is True, g["notes"]                                          # ロスターの差は照合しない
+    g = RA.group_consistency([a1, b1])
+    assert g["ok"] is False and any("data.registry_sha256 が揃わない" in n for n in g["notes"]), g["notes"]
+    m = li("m", _doc_reg(None))
+    assert m["ident"]["identity_problems"]
+    g = RA.group_consistency([m, li("m2", _doc_reg(None))])
+    assert g["ok"] is False and any("版を識別できない" in n for n in g["notes"]), g["notes"]
+    # 旧形式 (registry なし) どうしは従来どおり team.sha256 で照合する
+    o1, o2 = li("o1", _doc(True)), li("o2", _doc(True, team_sha="team2"))
+    assert RA.group_consistency([o1, li("o1b", _doc(True))])["ok"] is True
+    assert RA.group_consistency([o1, o2])["ok"] is False
+    # 新旧が混ざる群は一致にしない (識別の欄が違う)
+    assert RA.group_consistency([a1, o1])["ok"] is False
+    print("test_real_accept_registry_identity OK")
+
+
 def main():
     test_version_id_ignores_runtime()
     test_version_id_changes_with_identity()
@@ -370,6 +472,8 @@ def main():
     test_spe_est_roundtrip_rl_input()
     test_ev_infer_roundtrip_evaluate()
     test_ev_infer_of_shapes()
+    test_identity_registry_sha_required()
+    test_real_accept_registry_identity()
     print("ALL OK")
 
 

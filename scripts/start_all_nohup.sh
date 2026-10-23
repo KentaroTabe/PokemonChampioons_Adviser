@@ -23,7 +23,8 @@ case "$ADV_STATE" in
     advice_env_resolve || exit 1
     ( advice_env_export
       nohup bash -c "source .venv/bin/activate && PYTHONUNBUFFERED=1 DEBUG_DUMP_FRAMES=1 RL_ADVICE_STYLE=balance uvicorn server:app_asgi --host 0.0.0.0 --port $ADVISOR_PORT" \
-        > logs/server_nohup.log 2>&1 & disown )
+        > logs/server_nohup.log 2>&1 &
+      echo $! > logs/.advisor_launch_pid; disown )
     echo "アドバイザー($ADVISOR_PORT): 起動";;
 esac
 

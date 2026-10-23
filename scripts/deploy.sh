@@ -49,7 +49,8 @@ mkdir -p logs
 # で balance が最強 (ベンチ0.70)。_best昇格も同測定に基づく
 ( advice_env_export
   nohup bash -c "source .venv/bin/activate && PYTHONUNBUFFERED=1 DEBUG_DUMP_FRAMES=1 RL_ADVICE_STYLE=balance uvicorn server:app_asgi --host 0.0.0.0 --port $ADVISOR_PORT" \
-    > logs/server_nohup.log 2>&1 & disown )
+    > logs/server_nohup.log 2>&1 &
+  echo $! > logs/.advisor_launch_pid; disown )
 
 for _ in $(seq 1 30); do
   if [ "$(port_state "$ADVISOR_PORT" "$ADVISOR_PATTERN")" = ours ]; then

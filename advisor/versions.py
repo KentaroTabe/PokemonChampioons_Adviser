@@ -7,7 +7,7 @@
     その sha256、退避の理由。行動方策 (RL) は読み込み順の先頭に存在する zip とその sha256、読み込めたか
   - 構築と型の版: 登録チームの本文 (tools.team_build.run.registered_team()、直近の選出ロスターの 6 体) の sha256 と 6 体。
     2026-10-23 から、助言エンジンが実際に読む登録 (advisor.my_team._load() の dict) を team.registry に、その sha を
-    team.registry_sha256 に残す (再生の --data-mode restore が使う。digest には入れない)
+    team.registry_sha256 に残す (再生の --data-mode restore が使う。同日の後の変更で、新形式の行の digest は registry_sha256 を使う。下記)
   - 規則・データの版: git の commit、図鑑と効果表の sha256、選出の特徴量の版
 をまとめ、全体の digest (version_id) を付ける。battle_logger が対戦の先頭に "version" の行として書き、各助言の行は version_id と
 選出モデルの実際の経路を持つ。評価側 (tools/team_build/real_eval.version_check) は Package の manifest の selection_model_sha256 と
@@ -26,6 +26,16 @@
   (RL 方策の遅延読み込みの前に version 行を書くので null) だけ version_id が違って見えた。
   読み込みが version 行の後に完了・失敗したら battle_logger が "runtime" 行を 1 行書く (runtime_change)。advice 行の
   policy.rl_loaded も従来どおり。照合する側は「版の識別が同じ」と「実行状態が同じ (読み込み成功)」を別々に確かめる。
+
+2026-10-23 レビュー (識別に登録内容の sha を必須化、計画書 §8.49):
+  新形式の version 行 (team に "registry" の欄がある行。runtime_versions は登録を読めなくても欄を書く) の識別のデータ版は
+  **登録内容の sha (team.registry_sha256)** を使い、ロスター由来の team.sha256 (直近の選出ロスター + 使用率の補完の本文。対戦ごとに
+  変わり得る) と team.species は識別から外して実行状態 (runtime_of の team_sha256 / team_species) に移す。registry_sha256 が無い
+  新形式の行は識別不能 (identity_problems が理由を返し、tools.real_accept の照合は一致にしない)。旧形式の行 (registry の欄なし) は
+  従来どおり team.sha256 と team.species で識別する (記録済みの version_id と同じ digest になる)。新形式の version_id は値が変わる
+  (旧ログの version_id は書き換えない)。
+  データの固定 (advisor.data_pin、実機は advice_env.sh が渡す環境変数): 使用率は rules.usage_snapshot と runtime の
+  usage_snapshot_source "pinned"、実戦バンクは rules.real_bank ({"path", "sha16", "pinned"}) に残す (識別には入れない)。
 """
 from __future__ import annotations
 
@@ -64,7 +74,9 @@ def identity_of(doc: Optional[dict]) -> dict:
     データ版・採点設定だけを取り出す。実行状態 (読み込みの成否・退避理由・指定のラベル) と時刻は入れない。
 
     2026-10-20 より前の version 行 (scoring / embedding / usage_snapshot の欄が無い) も読める: 採点設定は行の上位の欄
-    (scoring_mode / transition_sensitivity / display_search、2026-10-16〜18 に足した欄) から取り、無い欄は None"""
+    (scoring_mode / transition_sensitivity / display_search、2026-10-16〜18 に足した欄) から取り、無い欄は None。
+    2026-10-23: 新形式の行 (is_registry_row) のデータ版は登録内容の sha (registry_sha256) で、ロスター由来の team.sha256 /
+    team_species は入れない。旧形式の行は従来どおり team_sha256 / team_species (識別不能かどうかは identity_problems)"""
     d = doc or {}
     sel = d.get("selection_model") or {}
     ap = d.get("action_policy") or {}
@@ -78,11 +90,33 @@ def identity_of(doc: Optional[dict]) -> dict:
         "code": {"git_commit": rules.get("git_commit"), "selection_features": rules.get("selection_features")},
         "models": {"selection_sha256": sel.get("sha256"), "rl_sha256": ap.get("sha256"),
                    "embedding_sha256": rules.get("embedding_sha256")},
-        "data": {"usage_snapshot": rules.get("usage_snapshot"), "dex_sha256": rules.get("dex_sha256"),
-                 "effects_sha256": rules.get("effects_sha256"), "team_sha256": team.get("sha256"),
-                 "team_species": sorted(str(x) for x in (team.get("species") or []))},
+        "data": _identity_data(rules, team),
         "scoring": {k: sc.get(k) for k in SCORING_IDENTITY_KEYS},
     }
+
+
+def is_registry_row(doc: Optional[dict]) -> bool:
+    """新形式 (登録内容の sha で識別する) の version 行か (純粋): team に "registry" か "registry_sha256" の欄がある"""
+    team = (doc or {}).get("team") or {}
+    return isinstance(team, dict) and ("registry" in team or "registry_sha256" in team)
+
+
+def _identity_data(rules: dict, team: dict) -> dict:
+    base = {"usage_snapshot": rules.get("usage_snapshot"), "dex_sha256": rules.get("dex_sha256"),
+            "effects_sha256": rules.get("effects_sha256")}
+    if "registry" in team or "registry_sha256" in team:
+        # 新形式: 登録内容の sha (必須。無ければ identity_problems が識別不能とする)。ロスター由来の欄は runtime_of へ
+        return dict(base, registry_sha256=team.get("registry_sha256"))
+    # 旧形式 (2026-10-23 より前): 従来どおり (記録済みの version_id と同じ digest)
+    return dict(base, team_sha256=team.get("sha256"), team_species=sorted(str(x) for x in (team.get("species") or [])))
+
+
+def identity_problems(doc: Optional[dict]) -> list:
+    """版の識別が成り立たない理由 (純粋。空なら識別できる)。新形式の行で登録内容の sha (team.registry_sha256) が無い → 識別不能
+    (登録を読めなかった。ロスター由来の team.sha256 では代用しない)"""
+    if is_registry_row(doc) and not ((doc or {}).get("team") or {}).get("registry_sha256"):
+        return ["team.registry_sha256 の記録なし (登録内容を読めず、版を識別できない)"]
+    return []
 
 
 def runtime_of(doc: Optional[dict]) -> dict:
@@ -95,9 +129,12 @@ def runtime_of(doc: Optional[dict]) -> dict:
         return dict(rt)
     sel = d.get("selection_model") or {}
     ap = d.get("action_policy") or {}
+    team = d.get("team") or {}
+    # 2026-10-23: ロスター由来の team.sha256 / team.species (対戦中の選出情報。新形式の行では識別に入れない) もここに残す
     return {"rl_loaded": ap.get("loaded"), "rl_error": ap.get("error"), "selection_fallback_reason": sel.get("fallback_reason"),
             "selection_source": sel.get("source"), "selection_package": sel.get("package"),
-            "designated_package": d.get("designated_package"), "usage_snapshot_source": None}
+            "designated_package": d.get("designated_package"), "usage_snapshot_source": None,
+            "team_sha256": team.get("sha256"), "team_species": sorted(str(x) for x in (team.get("species") or []))}
 
 
 def runtime_change(runtime: Optional[dict], rl_loaded: Optional[bool]) -> Optional[dict]:
@@ -125,7 +162,8 @@ def summarize_versions(designated_package: Optional[str], selection_path: Option
                        team_sha: Optional[str], git: Optional[str], dex_sha: Optional[str], effects_sha: Optional[str],
                        features: Optional[str], *, embedding_sha: Optional[str] = None, usage_snapshot=None,
                        usage_snapshot_source: Optional[str] = None, scoring: Optional[dict] = None,
-                       team_registry: Optional[dict] = None) -> dict:
+                       team_registry: Optional[dict] = None, registry_required: bool = False,
+                       real_bank: Optional[dict] = None) -> dict:
     """版の要約 (純粋)。退避の理由 (fallback_reason) をここで決める:
       - ラベルが無い → None (退避ではない。配布版が本来の経路)
       - ラベルはあるが Package のモデルが使われていない → "package_model_missing" (モデルのファイルが無い) か
@@ -134,9 +172,14 @@ def summarize_versions(designated_package: Optional[str], selection_path: Option
     2026-10-20: embedding_sha (種族の埋め込み)・usage_snapshot (使用率の snapshot id) を rules に、採点設定 scoring を "scoring" に、
     実行状態を "runtime" に足す (欄の追加だけ)。version_id は identity_of の digest。
     2026-10-23: team_registry (助言エンジンが実際に読む登録 = advisor.my_team._load() の dict) を渡せば team に "registry" と
-    "registry_sha256" (advisor.my_team.registry_sha) を足す (欄の追加だけ。identity_of / digest には入れない)。再生の
+    "registry_sha256" (advisor.my_team.registry_sha) を足す (同日の後の変更で識別にも使う。下記)。再生の
     --data-mode restore はこの登録を使う (tools.inputs_pin)。team.sha256 (registered_team() の本文の sha) は直近の選出ロスターで
-    変わり、対戦開始時 = 前の対戦のロスターの値なので、登録の復元には使えない"""
+    変わり、対戦開始時 = 前の対戦のロスターの値なので、登録の復元には使えない。
+    2026-10-23 (計画書 §8.49): registry を足した行 (新形式) は識別 (identity_of / digest) に registry_sha256 を使い、team.sha256 /
+    species は runtime に移す (version_id の値が変わる)。registry_required=True (runtime_versions) なら、登録を読めなかったときも
+    team.registry / registry_sha256 を None で書く (新形式のまま識別不能にする。ロスター由来の sha へ黙って戻さない)。
+    real_bank = 実戦バンクの版 ({"path", "sha16", "pinned"}、advisor.real_prior.bank_version から) を rules.real_bank に足す
+    (識別には入れない)"""
     fallback = None
     if designated_package and selection_package != designated_package:
         if package_species and my_species and not set(my_species) <= set(package_species):
@@ -164,6 +207,11 @@ def summarize_versions(designated_package: Optional[str], selection_path: Option
         from advisor.my_team import registry_sha
         doc["team"]["registry"] = team_registry
         doc["team"]["registry_sha256"] = registry_sha(team_registry)
+    elif registry_required:
+        doc["team"]["registry"] = None
+        doc["team"]["registry_sha256"] = None
+    if real_bank is not None:
+        doc["rules"]["real_bank"] = dict(real_bank)
     doc["runtime"] = dict(runtime_of(doc), usage_snapshot_source=usage_snapshot_source)
     doc["version_id"] = digest(doc)
     return doc
@@ -240,10 +288,24 @@ def runtime_versions(refresh: bool = False) -> dict:
                              rl_path, rl_sha, rl_loaded, rl_err, team_sha, git,
                              sha256_file(REPO / "advisor" / "data" / "dex.json"), sha256_file(REPO / "advisor" / "data" / "move_effects.json"),
                              features, embedding_sha=sha256_file(EMBEDDING_PATH), usage_snapshot=snap,
-                             usage_snapshot_source=snap_src, scoring=scoring_identity(), team_registry=_team_registry())
+                             usage_snapshot_source=snap_src, scoring=scoring_identity(), team_registry=_team_registry(),
+                             registry_required=True, real_bank=real_bank_info())
     doc["collected_at"] = round(now, 2)
     _CACHE.update(key=key, value=doc, t=now)
     return doc
+
+
+def real_bank_info() -> Optional[dict]:
+    """実戦バンクの版 (2026-10-23): {"path", "sha16", "pinned"} (advisor.real_prior.bank_version、advisor.data_pin の版を読む)。
+    バンクが無ければ None、読めなければ {"path": None, "sha16": None, "pinned": None, "error": 理由} (記録のために助言を止めない)"""
+    try:
+        from advisor.real_prior import bank_version
+        v = bank_version()
+        if v is None:
+            return None
+        return {"path": v.get("path"), "sha16": v.get("sha256"), "pinned": bool(v.get("pinned"))}
+    except Exception as e:
+        return {"path": None, "sha16": None, "pinned": None, "error": repr(e)[:160]}
 
 
 def usage_snapshot_info() -> tuple:
@@ -252,12 +314,13 @@ def usage_snapshot_info() -> tuple:
     1 戦目は型予測がまだ接続していないので、接続済みの値だけを使うと 1 戦目だけ版が違って見える (RL 方策と同じ問題) ため"""
     try:
         import advisor.sets as _sets
-        p = getattr(_sets, "_predictor", None)
-        if p is not None and getattr(p, "_snapshot_id", None) is not None:
-            return p._snapshot_id, "predictor"
-        # 版を明示しているとき (advisor.data_pin、2026-10-23): その DB・snapshot (無ければ記録しない = (None, None))
         from advisor.data_pin import connect_usage, resolve_snapshot, usage_source
+        p = getattr(_sets, "_predictor", None)
         src = usage_source()
+        if p is not None and getattr(p, "_snapshot_id", None) is not None:
+            # 版を明示しているとき (2026-10-23 実機の固定を含む) は出どころを "pinned" にする (型予測も明示した版を読んでいる)
+            return p._snapshot_id, ("pinned" if src["pinned"] else "predictor")
+        # 版を明示しているとき (advisor.data_pin、2026-10-23): その DB・snapshot (無ければ記録しない = (None, None))
         if src["pinned"]:
             conn = connect_usage(src["db"], True)
             try:

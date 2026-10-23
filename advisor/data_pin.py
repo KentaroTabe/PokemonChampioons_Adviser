@@ -12,6 +12,11 @@ TypeInference / champions_usable の参照範囲は「指定 snapshot id 以下�
 登録チーム (2026-10-23): set_override(team_registry=...) は再生の間だけ advisor.my_team._load() を当時の登録 (version 行の
 team.registry) に差し替える (環境変数での指定は無い)。clear_override で外す。
 
+実機 (アドバイザーの常駐、2026-10-23 計画書 §8.49): config/advice.local.env の ADVICE_USAGE_SNAPSHOT / ADVICE_REAL_BANK /
+ADVICE_REAL_BANK_SHA16 を scripts/advice_env.sh が uvicorn にだけ export する。読み手はどれも呼ばれたときに os.environ を読む
+(import 時には読まない) ので、server の import 順に依らずに効く。起動時の検査は tools.advice_mode.data_pin_startup_check
+(verify_spec: 指定 snapshot が DB にない・写しが無い・sha16 が違う・元のバンクそのものなら起動しない)。
+
 check_runtime() は子プロセスの起動時の照合 (tools.check_advisor_player が対戦の前に呼ぶ)。純粋な部分 (spec_from_env) と
 照合 (check_runtime) は tests/test_inputs_pin.py で確かめる。
 """
@@ -184,6 +189,36 @@ def reset_caches() -> None:
         R._ver_cache.update({"path": None, "mtime": None, "info": None})
     except Exception:
         pass
+
+
+def verify_spec(spec: dict, default_db: Path = DEFAULT_USAGE_DB, live_bank: Optional[Path] = None,
+                cwd: Optional[Path] = None) -> dict:
+    """spec (spec_from_env の形) で明示した版が読めることを確かめる (副作用: 読み取り。2026-10-23 実機の起動時の検査)。
+    - 使用率: snapshot id (または DB) を明示していれば、その DB (usage_db、無ければ default_db) を読み取り専用で開き、指定 snapshot が
+      DB にあることを確かめる (無ければ InputsPinError)
+    - バンク: パスを明示していれば、そのファイルがあり (相対パスは cwd から)、sha16 を明示していれば一致すること。live_bank を渡せば、
+      それと同じファイル (写しではない = 対戦ごとに書き換わる) なら InputsPinError
+    戻り値 {"usage_db", "usage_snapshot", "bank_path", "bank_sha16"} (明示していない欄は None。bank_sha16 は実際の sha16)"""
+    base = Path(cwd) if cwd is not None else Path.cwd()
+    out = {"usage_db": None, "usage_snapshot": None, "bank_path": None, "bank_sha16": None}
+    if spec.get("usage_db") or spec.get("usage_snapshot") is not None:
+        db = Path(spec["usage_db"]) if spec.get("usage_db") else Path(default_db)
+        if not db.is_absolute():
+            db = base / db
+        conn = connect_usage(db, True)
+        try:
+            out.update(usage_db=str(db), usage_snapshot=resolve_snapshot(conn, spec.get("usage_snapshot"), True))
+        finally:
+            conn.close()
+    if spec.get("bank_path"):
+        p = Path(spec["bank_path"])
+        if not p.is_absolute():
+            p = base / p
+        if live_bank is not None and p.exists() and Path(live_bank).exists() and os.path.samefile(p, live_bank):
+            raise InputsPinError(f"実戦バンク {p} は対戦ごとに書き換わる元のファイル (写しを指定する: python -m tools.advice_mode --freeze-data)")
+        raw = read_bank_bytes({"path": p, "sha16": spec.get("bank_sha16"), "pinned": True, "blocked": None})
+        out.update(bank_path=str(p), bank_sha16=sha16_bytes(raw))
+    return out
 
 
 def check_runtime() -> Optional[dict]:
