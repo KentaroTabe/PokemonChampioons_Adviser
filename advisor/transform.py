@@ -212,6 +212,25 @@ def tracker_step(tracker: Optional[dict], opp_index, opp: Optional[dict], my_ind
     return tr, {"transform": tf, "boosts": merge_boosts(cp.get("boosts"), _boosts(opp), pair.get("opp_boosts"))}
 
 
+def strip_copied_moves(revealed: list, tf: Optional[dict], own_moves=None) -> list:
+    """へんしん が解けたとき (交代) の判明技の列 (純粋。2026-10-23): 写しの技 (transform.copy.moves = コピー元の技) を外す。
+    写しの技の日本語名 (name_ja) と id (move_id) のどちらかに一致するものを外し、並びは保つ。へんしん する種の自分の技
+    (config TRANSFORM_OWN_MOVES。へんしん そのもの) は写しに入っていても外さない。transform が無ければそのまま"""
+    revealed = list(revealed or [])
+    if not tf:
+        return revealed
+    own = set(C.TRANSFORM_OWN_MOVES if own_moves is None else own_moves)
+    drop = set()
+    for m in ((tf.get("copy") or {}).get("moves") or []):
+        mid = (m or {}).get("move_id")
+        if not mid or mid in own:
+            continue
+        drop.add(mid)
+        if m.get("name_ja"):
+            drop.add(m["name_ja"])
+    return [r for r in revealed if r not in drop]
+
+
 def _default_copy_fn(resolver) -> Callable:
     """こちらの個体の写しを作る関数 (登録の技・型は config/my_team.json を読む)"""
     def fn(my: dict, _idx) -> Optional[dict]:

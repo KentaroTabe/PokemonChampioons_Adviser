@@ -34,7 +34,8 @@ from vision.state import (HP_REJECT_COUNTS, MANUAL_REASON_OUT_OF_RANGE, apply_ma
 from vision.frame_burst import BurstPlanner
 from champions_agent.config import (ADVICE_KEY_HP_AGE_GRAIN_SEC, ADVICE_KEY_VERSION, ADVICE_RECALC_FALLBACK_TTL_SEC,
                                     ADVICE_RECALC_TTL_SEC, CLIENT_HELLO_WAIT_SEC, DISPLAY_HIDDEN_WARN_COUNT, FRAME_BURST_DIR,
-                                    MANUAL_SPECIES_RESOLVE_CUTOFF, PARTY_SIZE, SHADOW_VARIANTS_ENABLED)
+                                    MANUAL_SPECIES_RESOLVE_CUTOFF, PARTY_SIZE, SELECTION_RECALC_SEC,
+                                    SHADOW_VARIANTS_ENABLED)
 from advice_key import AdviceCache, DataVersions, frame_advice_step
 from client_state import (VIS_HIDDEN, VIS_VISIBLE, ClientRegistry, HiddenDisplayWatch, served_html_version, short_sid,
                           stale_of)
@@ -512,7 +513,7 @@ async def _handle_one_frame(sid, data):
                 [p.get("is_picked") for p in state["player"]["party"]],
             ], ensure_ascii=False)
             now = time.time()
-            if sel_key != _last_advice_key or now - _last_advice_time > 15.0:
+            if sel_key != _last_advice_key or now - _last_advice_time > SELECTION_RECALC_SEC:
                 _last_advice_key = sel_key
                 _last_advice_time = now
                 advice = await loop.run_in_executor(None, advisor.advise_selection, state)
