@@ -625,6 +625,15 @@ BUILD_SCHEMA_VERSION = "1"
 # 自己対戦の相手は使用率メタの代表型 + 相性ヒューリスティクスの選出で机上の分布になる。実戦で当たった相手の
 # 構成と選出傾向を混ぜて補正する (ユーザー決定 9/9)。学習に影響する変更は training_changes.json に記録
 REAL_BANK_PATH = "logs/real_opponents/bank.json"
+# --- 助言が読む外部データの版の明示 (2026-10-23、レビュー 2026-10-19 §2。advisor/data_pin.py) ---
+# 設定されていれば、型予測 (advisor.sets.SetPredictor)・タイプからの候補 (advisor.infer.TypeInference、参照範囲は指定 snapshot id 以下)・
+# チャンピオンズの種の判定 (advisor.team_advice.champions_usable)・実戦バンク (advisor.real_prior) がその版を読む。指定した版が無い・
+# sha16 が違えば止める (advisor.data_pin.InputsPinError。最新へ黙って退避しない)。未設定なら従来どおり (DB の最新・REAL_BANK_PATH)。
+# 正式比較 (tools/usefulness_p1) は子プロセスにピンの usage_bundle.sqlite3 / snapshot id / bank.json / その sha16 を渡す
+USAGE_DB_ENV = "ADVICE_USAGE_DB"                 # 使用率 DB (またはピンの bundle) のパス
+USAGE_SNAPSHOT_ENV = "ADVICE_USAGE_SNAPSHOT"     # 使う snapshot id
+REAL_BANK_ENV = "ADVICE_REAL_BANK"               # 実戦バンクのパス
+REAL_BANK_SHA_ENV = "ADVICE_REAL_BANK_SHA16"     # 実戦バンクの期待 sha16 (sha256 の先頭 16 桁)
 REAL_BANK_MIN_ROSTER = 4               # バンクに載せる相手ロースターの最小既知数 (6 体そろわない対戦もある)
 REAL_BANK_MIN_TEAMS = 5                # 自己対戦に混ぜるのに必要な (本文が合法な) チーム数
 REAL_BANK_MIN_PICK_OBS = 2             # 観測した選出をそのまま相手の選出分布に使う最小観測数 (未満はヒューリスティクス)

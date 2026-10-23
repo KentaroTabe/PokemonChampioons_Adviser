@@ -6,6 +6,10 @@ DBが無い/種族が未収録の場合は空を返し、呼び出し側でタ�
 
 注: 現状のDBは gen9ou のデータ。ポケモンチャンピオンズ用の使用率ソース
 (champs.pokedb.tokyo 等) が整備されたら ingest 側を差し替えるだけでよい。
+
+2026-10-23 (レビュー 2026-10-19 §2): 読む DB と snapshot は advisor.data_pin で明示できる (環境変数 ADVICE_USAGE_DB /
+ADVICE_USAGE_SNAPSHOT、または再生の set_override)。明示が無ければ従来どおり DB の最新。明示した snapshot が無ければ
+InputsPinError で止める (最新へ退避しない)。
 """
 from __future__ import annotations
 
@@ -63,8 +67,18 @@ def exclusive_form_for_move(species_id: str, move_id: str,
 
 
 class SetPredictor:
-    def __init__(self, db_path: Path = DB_PATH):
-        self.db_path = db_path
+    def __init__(self, db_path: Optional[Path] = None, snapshot_id: Optional[int] = None):
+        """db_path / snapshot_id を渡さなければ advisor.data_pin の版 (明示が無ければ DB_PATH の最新)"""
+        from advisor.data_pin import usage_source
+        src = usage_source()
+        if db_path is None:
+            # 明示が無いときの既定は従来どおりこのモジュールの DB_PATH (テストが差し替える)
+            db_path = src["db"] if src["pinned"] else DB_PATH
+        if snapshot_id is None:
+            snapshot_id = src["snapshot_id"]
+        self.db_path = Path(db_path)
+        self.pinned_snapshot = int(snapshot_id) if snapshot_id is not None else None
+        self.pinned = bool(src["pinned"] or snapshot_id is not None)
         self._conn = None
         self._snapshot_id = None
         # サーバーはフレーム処理をスレッドプールで回すため、predict() が
@@ -75,6 +89,17 @@ class SetPredictor:
 
     def _connect(self) -> Optional[sqlite3.Connection]:
         if self._conn is not None:
+            return self._conn
+        if self.pinned:
+            # 版を明示したとき: 無い・snapshot が無いなら InputsPinError (握りつぶさない。最新へ退避しない)
+            from advisor.data_pin import connect_usage, resolve_snapshot
+            conn = connect_usage(self.db_path, True, check_same_thread=False)
+            try:
+                self._snapshot_id = resolve_snapshot(conn, self.pinned_snapshot, True)
+            except Exception:
+                conn.close()
+                raise
+            self._conn = conn
             return self._conn
         if not self.db_path.exists():
             return None

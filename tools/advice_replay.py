@@ -13,6 +13,9 @@
 - RLブレンドは本番同等 (EMA方策)。決定ごとに同一条件で基準/摂動を比較する。
 - 再生の入力は replay_state (2026-10-21): now = t_eval → t_now → t_gen → t (replay_now)、行に ev_infer があれば
   apply_ev_infer で型推定を入れる (real_accept・shadow_load_check と同じ)。scene 行には t_eval / ev_infer が無いので now = t のまま。
+- 再生のデータの版 (2026-10-23、tools.inputs_pin): --data-mode restore (既定) は決定ごとにその時点の version 行の使用率の snapshot・
+  登録チームの sha と selection_record 行のバンクの sha16 を当時の版として使い、復元できない決定 (記録なし・手元の DB に無い・
+  今の登録と違う) は再生しない (件数と理由を出す)。current は今のデータで評価し直す。結果に使ったデータの版 (data_versions) を残す。
 """
 from __future__ import annotations
 
@@ -428,14 +431,29 @@ def _best_margin(advice: dict) -> float:
     return acts[0]["score"] - acts[1]["score"]
 
 
-def run(paths: list, out_path: Path) -> dict:
+def _read_records(path: Path) -> list:
+    out = []
+    for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+def run(paths: list, out_path: Path, data_mode: str = "restore") -> dict:
+    """data_mode = 再生のデータの版 (restore = 当時の版 / current = 今のデータ。tools.inputs_pin.DataSwitch)"""
     from advisor.engine import evaluate
     from vision.normalize import NameResolver
+    from tools.inputs_pin import DataSwitch
     resolver = NameResolver()
+    ds = DataSwitch(data_mode)
 
     decisions = []
+    records = {}
     for p in paths:
         decisions += extract_decisions(p)
+        records[p.name] = _read_records(p)
     print(f"決定点 {len(decisions)}件 ({len(paths)}ログ)")
 
     stats = {name: {"applicable": 0, "flips": 0, "big_margin_flips": 0,
@@ -444,6 +462,8 @@ def run(paths: list, out_path: Path) -> dict:
     baseline_fail = 0
     infos = []
     for fname, t, row in decisions:
+        if not ds.plan(fname, records.get(fname) or [], t)["ok"]:
+            continue            # 当時のデータの版を復元できない決定は再生しない (data_versions に件数と理由)
         try:
             # now = t_eval → t_now → t_gen → t (scene 行は t = 観測の時刻。現在の時計で HP を古いと扱わない、2026-10-19)。
             # 行に ev_infer があれば型推定も入れる (2026-10-21。摂動は base_state の写しなので同じ推定で比べる)
@@ -484,6 +504,10 @@ def run(paths: list, out_path: Path) -> dict:
                          "base": list(bkey), "pert": list(pkey),
                          "margin": round(margin, 1)})
 
+    data_versions = ds.summary()
+    ds.close()
+    print(f"データの版 ({data_mode}): 決定 {data_versions['n_decisions']} のうち復元できない {data_versions['n_unrestored_decisions']} "
+          f"(再生していない)")
     print(f"基準再計算 不能/助言なし: {baseline_fail}件")
     print(f"\n{'摂動':<18} {'適用':>4} {'反転':>4} {'反転率':>7} {'高マージン反転':>8}")
     for name, _ in PERTURBATIONS:
@@ -495,6 +519,7 @@ def run(paths: list, out_path: Path) -> dict:
     result = {"at": time.strftime("%Y-%m-%d %H:%M"),
               "decisions": len(decisions), "baseline_fail": baseline_fail,
               "replay_inputs": replay_input_counts(infos),
+              "data_mode": data_mode, "data_versions": data_versions,
               "stats": stats,
               "logs": [p.name for p in paths]}
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -511,6 +536,8 @@ def main() -> None:
     ap.add_argument("--out", default=None)
     ap.add_argument("--belief-k", type=int, default=None,
                     help="エンジンの相手型仮説数を上書き (P7比較用: 0=点推定, 8=多世界)")
+    ap.add_argument("--data-mode", choices=("restore", "current"), default="restore",
+                    help="再生のデータの版: restore = 当時の版 (無い・今の登録と違えば再生しない) / current = 今のデータで評価し直す")
     args = ap.parse_args()
     if args.belief_k is not None:
         import advisor.engine as _eng
@@ -519,7 +546,7 @@ def main() -> None:
     paths = sorted(LOG_DIR.glob("battle_*.jsonl"))[-args.logs:]
     out = Path(args.out) if args.out else \
         OUT_DIR / f"replay_{time.strftime('%Y%m%d_%H%M')}.json"
-    run(paths, out)
+    run(paths, out, args.data_mode)
 
 
 if __name__ == "__main__":

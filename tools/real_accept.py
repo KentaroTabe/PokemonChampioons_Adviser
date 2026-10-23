@@ -55,6 +55,16 @@ advisor.engine.evaluate(..., scoring_mode=...) に通す。図鑑・resolver・�
     不一致が 1 件でもあれば「満たさない」(summarize_sensitivity_compare)。所要時間 (on / off) と感度の状態
     (battle_logger.sensitivity_fields_of の sensitivity_status) の件数も出す。出力は result.json と report.md
 
+2026-10-23 再生のデータの版 (レビュー 2026-10-19 §2、tools.inputs_pin): --data-mode restore (既定) | current。
+  - restore: 決定ごとに、その時点の version 行の使用率の snapshot と登録チームの sha、selection_record 行のバンクの sha16 を当時の
+    版として使う (advisor.data_pin.set_override。型予測・タイプからの候補はその snapshot、候補の範囲はその id 以下)。当時の snapshot が
+    手元の DB に無い・記録が無い (2026-10-20 より前の version 行)・当時の登録チームが今の登録と違う決定は再生せず、照合できない決定
+    (unconfirmed data_restore、checks data_restore unknown) に数える = 正しさは 判定不能 (照合できた範囲で違反 0) より良くならない。
+    バンクが手元に無ければ読もうとしたら止める (対戦中の評価は読まない)。
+  - current: 再生の開始時の DB の最新・今のバンク・今の登録で過去の局面を評価し直す (当時の入力ではないことを report に出す)。
+  - result.json の conditions.data_versions (ログごとの当時の版・使った版・理由) と、受入条件の表の「入力: 再生のデータの版」の行。
+    --compare-search / --compare-sensitivity も同じ規則で差し替え、復元できない決定は照合しない。
+
 出力: logs/real_accept/<日時>/result.json と report.md (条件・正しさの違反・一致率・退避・所要時間・古い局面・受入条件との照合)。
 受入条件 (champions_agent.config の REAL_ACCEPT_*) との照合は 満たす / 満たさない / 判定不能。10 fps の録画再生での処理率
 (負荷) はこの道具では測らない (tools.shadow_load_check --compare-scoring)。
@@ -154,6 +164,8 @@ UNCONFIRMED_LABELS = {
     "no_position_key": "助言に場の個体の鍵 (position_key) が無い",
     # 状態の復元で照合できない項目 (2026-10-19: 版 1 の advice 行の state。tools.advice_replay.restore_unknowns)
     **RESTORE_UNKNOWN_LABELS,
+    # 2026-10-23: --data-mode restore で当時のデータの版 (使用率の snapshot・登録チーム) を復元できない決定 (再生していない)
+    "data_restore": "当時のデータの版を復元できない (再生していない。--data-mode restore)",
 }
 # 検査ごとの照合の結果 (成功 ok / 違反 ng / 判定不能 unknown。第一候補の種類に関係しない検査は None で数えない)
 CHECK_LABELS = {
@@ -164,6 +176,7 @@ CHECK_LABELS = {
     "switch_fainted": "交代先がひんしでない", "switch_picked": "交代先が選出済み", "candidate_picked": "候補の交代先が選出済み",
     "active_identity": "場の個体の一致 (個体・メガ形態)",
     "state_restore": "状態の復元 (版 2 の欄をすべて戻せたか。版 1 の行は判定不能)",
+    "data_restore": "データの版の復元 (当時の使用率の snapshot・登録チーム。--data-mode restore だけ数える)",
 }
 CHECK_RESULTS = ("ok", "ng", "unknown")
 STALE_LABELS = {"hp_stale": "場の HP の読みが古い (hp_stale > REAL_ACCEPT_STALE_HP_SEC)",
@@ -1227,14 +1240,15 @@ def _fallback_unit_rows(units: dict, lim: dict, add: Callable) -> None:
 
 
 def acceptance(summary: dict, display: dict, record_check: dict, limits: Optional[dict] = None,
-               group: Optional[dict] = None, units: Optional[dict] = None) -> list:
+               group: Optional[dict] = None, units: Optional[dict] = None, data: Optional[dict] = None) -> list:
     """受入条件 (§8.22) との照合 (純粋)。戻り値 [{"item", "mode", "value", "limit", "status" (満たす / 満たさない / 判定不能 /
     PARTIAL), "note"}]。group = 対象群の情報 {"target_fixed": bool, "by_mode": {方式: target_consistency}, "delta":
     target_consistency (served_commit / version_id)}。None なら版・設定の照合をしない (呼び出し側が持たないとき)。
     遅延の p95 は各回 (display[方式]["by_log"]) と合算の両方に基準を当て、どれか 1 回でも超えたら合算も 満たさない
     (注記の先頭に PENDING_NOTE)。対象群の版・設定が揃わなければ、超えた回が無いかぎり 判定不能。
     units = summarize_fallback_units の戻り値 (2026-10-20 レビュー)。あれば退避を 決定単位 (各回と合算の両方に上限、1 回でも
-    超えたら合算も 満たさない) と 助言行単位 (参考) でも出し、再生の行は再生局面単位 (参考) と注記する"""
+    超えたら合算も 満たさない) と 助言行単位 (参考) でも出し、再生の行は再生局面単位 (参考) と注記する。
+    data = tools.inputs_pin.DataSwitch.summary() (2026-10-23)。あれば再生のデータの版の行 (data_row) を足す"""
     lim = {"violations": REAL_ACCEPT_VIOLATIONS_MAX, "p95_sec": REAL_ACCEPT_LATENCY_P95_SEC,
            "delta_sec": REAL_ACCEPT_LATENCY_DELTA_SEC, "in_time": REAL_ACCEPT_DISPLAY_IN_TIME_MIN,
            "budget": REAL_ACCEPT_FALLBACK_BUDGET_MAX, "all": REAL_ACCEPT_FALLBACK_ALL_MAX,
@@ -1323,7 +1337,26 @@ def acceptance(summary: dict, display: dict, record_check: dict, limits: Optiona
     add("記録: 使った方式と退避理由 (version 行・advice 行)", "-", f"{rc['n_logs_ok']} / {rc['n_logs']} ログ", None,
         UNKNOWN if not rc["n_logs"] else (OK if rc["n_logs_ok"] == rc["n_logs"] else NG),
         "欄の無いログは記録の追加 (2026-10-16) より前" if rc["n_logs_ok"] < rc["n_logs"] else "")
+    if data is not None:
+        rows.append(data_row(data))
     return rows
+
+
+def data_row(data: dict) -> dict:
+    """再生の入力のデータの版の行 (純粋。2026-10-23)。data = tools.inputs_pin.DataSwitch.summary()。
+    restore: 全決定で当時の版を復元できれば 満たす、復元できない決定があれば 判定不能 (その決定は再生していない)。
+    current: 参考 (今のデータで過去の局面を評価し直した。当時の入力ではない)"""
+    item = "入力: 再生のデータの版 (使用率の snapshot・登録チーム・バンク)"
+    n, nu = data.get("n_decisions", 0), data.get("n_unrestored_decisions", 0)
+    if data.get("mode") == "current":
+        loc = data.get("local") or {}
+        return {"item": item, "mode": "current", "value": f"{n} 決定", "limit": None, "status": REF,
+                "note": f"今のデータで過去の局面を評価し直した (当時の入力ではない): 使用率 snapshot {loc.get('latest_snapshot')}・"
+                        f"バンク {', '.join(loc.get('bank_sha16') or []) or 'なし'}・登録チーム {loc.get('team_sha16')}"}
+    reasons = sorted({r for v in (data.get("by_log") or {}).values() for x in v for r in x["reasons"]})
+    return {"item": item, "mode": "restore", "value": f"{n - nu} / {n} 決定 (ログ {data.get('n_restored', 0)} / {data.get('n_logs', 0)})",
+            "limit": None, "status": UNKNOWN if (nu or not n) else OK,
+            "note": ("復元できない決定は再生していない: " + " / ".join(reasons)) if nu else ("" if n else "決定が無い")}
 
 
 def record_check_of(logs: list) -> dict:
@@ -2019,15 +2052,18 @@ def replay_search_pair(state: dict, resolver, order: tuple) -> dict:
     return out
 
 
-def run_compare_search(logs: list, out_dir: Optional[Path], gap_sec: float, target_fixed: bool) -> dict:
-    """--compare-search の本体 (副作用: エンジン・出力)。logs = _load_logs の戻り値"""
+def run_compare_search(logs: list, out_dir: Optional[Path], gap_sec: float, target_fixed: bool,
+                       data_mode: str = "restore") -> dict:
+    """--compare-search の本体 (副作用: エンジン・出力)。logs = _load_logs の戻り値。data_mode = 再生のデータの版 (tools.inputs_pin)"""
     from vision.normalize import NameResolver
     import advisor.engine as E
     from champions_agent import config as C
+    from tools.inputs_pin import DataSwitch
     resolver = NameResolver()
     ck = _checker_kwargs()
+    ds = DataSwitch(data_mode)
     combos = tuple((m, st) for m in MODES for st in SEARCH_STATES)
-    first = next((lg["decisions"][0] for lg in logs if lg["decisions"]), None)
+    first = _first_restorable(logs, ds)
     if first is not None:      # 初回の読み込み (図鑑・RL・使用率) を所要時間から外す
         replay_search_pair(_engine_state(first, resolver), resolver, combos)
     n_dec = sum(lg["n_decisions"] for lg in logs)
@@ -2038,6 +2074,8 @@ def run_compare_search(logs: list, out_dir: Optional[Path], gap_sec: float, targ
         timeline = scene_timeline(lg["records"])
         for row in lg["decisions"]:
             compact = row["state"]
+            if not ds.plan(lg["name"], lg["records"], row.get("t"))["ok"]:
+                continue
             try:
                 st, info = _engine_state_ex(row, resolver)
             except Exception as e:
@@ -2074,15 +2112,16 @@ def run_compare_search(logs: list, out_dir: Optional[Path], gap_sec: float, targ
                        "rl_blend_weight": E.RL_BLEND_DEFAULT, "transition_budget_ms": C.TRANSITION_BUDGET_MS,
                        "transition_sensitivity": C.TRANSITION_SENSITIVITY_ENABLED, "search_blend": E.SEARCH_BLEND,
                        "display_search": C.ADVICE_DISPLAY_SEARCH, "gap_sec": gap_sec, "target_fixed": target_fixed,
-                       "replay_inputs": replay_input_counts(infos),
+                       "replay_inputs": replay_input_counts(infos), "data_mode": data_mode, "data_versions": ds.summary(),
                        "logs": [{k: v for k, v in lg.items() if k not in LOG_INTERNAL_KEYS}
                                 for lg in logs]},
         "summary": summary, "decisions": rows,
     }
+    ds.close()
     out_dir = Path(out_dir) if out_dir else OUT_DIR / time.strftime("%Y%m%d_%H%M%S")
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
-    md = render_search_compare_markdown(result)
+    md = render_search_compare_markdown(result) + data_versions_markdown(result["conditions"]["data_versions"])
     (out_dir / "report.md").write_text(md, encoding="utf-8")
     print(md)
     print(f"保存: {out_dir}")
@@ -2112,14 +2151,17 @@ def replay_sensitivity_pair(state: dict, resolver, order: tuple) -> dict:
     return out
 
 
-def run_compare_sensitivity(logs: list, out_dir: Optional[Path], gap_sec: float, target_fixed: bool) -> dict:
-    """--compare-sensitivity の本体 (副作用: エンジン・出力)。logs = _load_logs の戻り値"""
+def run_compare_sensitivity(logs: list, out_dir: Optional[Path], gap_sec: float, target_fixed: bool,
+                            data_mode: str = "restore") -> dict:
+    """--compare-sensitivity の本体 (副作用: エンジン・出力)。logs = _load_logs の戻り値。data_mode = 再生のデータの版 (tools.inputs_pin)"""
     from vision.normalize import NameResolver
     from battle_logger import sensitivity_fields_of
     from champions_agent import config as C
+    from tools.inputs_pin import DataSwitch
     resolver = NameResolver()
     ck = _checker_kwargs()
-    first = next((lg["decisions"][0] for lg in logs if lg["decisions"]), None)
+    ds = DataSwitch(data_mode)
+    first = _first_restorable(logs, ds)
     if first is not None:      # 初回の読み込み (図鑑・RL・使用率) を所要時間から外す
         replay_sensitivity_pair(_engine_state(first, resolver), resolver, SENS_STATES)
     n_dec = sum(lg["n_decisions"] for lg in logs)
@@ -2129,6 +2171,8 @@ def run_compare_sensitivity(logs: list, out_dir: Optional[Path], gap_sec: float,
     for lg in logs:
         for row in lg["decisions"]:
             compact = row["state"]
+            if not ds.plan(lg["name"], lg["records"], row.get("t"))["ok"]:
+                continue
             try:
                 st, info = _engine_state_ex(row, resolver)
             except Exception as e:
@@ -2163,6 +2207,7 @@ def run_compare_sensitivity(logs: list, out_dir: Optional[Path], gap_sec: float,
                        "transition_sensitivity": C.TRANSITION_SENSITIVITY_ENABLED,
                        "display_search": getattr(C, "ADVICE_DISPLAY_SEARCH", None), "gap_sec": gap_sec,
                        "target_fixed": target_fixed, "replay_inputs": replay_input_counts(infos),
+                       "data_mode": data_mode, "data_versions": ds.summary(),
                        "logs": [{k: v for k, v in lg.items() if k not in LOG_INTERNAL_KEYS}
                                 for lg in logs]},
         "summary": summary, "decisions": rows,
@@ -2170,11 +2215,55 @@ def run_compare_sensitivity(logs: list, out_dir: Optional[Path], gap_sec: float,
     out_dir = Path(out_dir) if out_dir else OUT_DIR / time.strftime("%Y%m%d_%H%M%S")
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
-    md = render_sensitivity_compare_markdown(result)
+    ds.close()
+    md = render_sensitivity_compare_markdown(result) + data_versions_markdown(result["conditions"]["data_versions"])
     (out_dir / "report.md").write_text(md, encoding="utf-8")
     print(md)
     print(f"保存: {out_dir}")
     return result
+
+
+def unrestored_decision(log_name: str, row: dict, compact: dict, plan: dict) -> dict:
+    """当時のデータの版を復元できない決定 (純粋。2026-10-23): 再生せず、両方式とも照合できない決定 (unconfirmed data_restore、
+    checks data_restore unknown) にする。第一候補・所要時間は無し"""
+    res = {"ok": False, "best": None, "elapsed_ms": None, "scoring_used": None, "fallback_reason": None, "reason": None,
+           "violations": [], "unconfirmed": ["data_restore"], "checks": {"data_restore": "unknown"}, "targets": [],
+           "data_reasons": list(plan.get("reasons") or [])}
+    return {"log": log_name, "advice_id": row.get("advice_id"), "t": row.get("t"), "turn": row.get("turn"),
+            "scene": compact.get("scene"), "active": _active_label(compact), "replay_settings": None, "now_source": None,
+            "ev_infer_applied": None, "stale": [], "log_best": _slim_best((row.get("advice") or {}).get("best")),
+            "log_mode": advice_mode(row)[0], "modes": {m: dict(res) for m in MODES}, "data_restore": False}
+
+
+def _first_restorable(logs: list, ds) -> Optional[dict]:
+    """初回の読み込みの空回しに使う決定 (版を差し替える。要約には数えない)。復元できる決定が無ければ None"""
+    for lg in logs:
+        for row in lg["decisions"]:
+            if ds.plan(lg["name"], lg["records"], row.get("t"), record=False)["ok"]:
+                return row
+    return None
+
+
+def data_versions_markdown(dv: Optional[dict]) -> str:
+    """再生のデータの版の節 (純粋。2026-10-23)"""
+    if not dv:
+        return ""
+    loc = dv.get("local") or {}
+    L = ["", "## 再生のデータの版 (--data-mode " + str(dv.get("mode")) + ")", "",
+         f"手元: 使用率 DB {loc.get('db')} (最新 snapshot {loc.get('latest_snapshot')}) / バンク {', '.join(loc.get('bank_sha16') or []) or 'なし'}"
+         f" / 登録チーム {loc.get('team_sha16')}",
+         f"決定 {dv.get('n_decisions', 0)} (復元できない {dv.get('n_unrestored_decisions', 0)}) / ログ {dv.get('n_logs', 0)} "
+         f"(全決定を復元 {dv.get('n_restored', 0)})", "",
+         "| ログ | 決定 | 当時の版 (snapshot / 登録 / バンク) | 使った版 | 結果 |", "|---|---|---|---|---|"]
+    for name, items in (dv.get("by_log") or {}).items():
+        for x in items:
+            rec, used = x.get("recorded") or {}, x.get("used") or {}
+            res = "復元" if x["ok"] and dv.get("mode") == "restore" else ("今のデータ" if x["ok"] else "判定不能: " + " / ".join(x["reasons"]))
+            if x.get("notes"):
+                res += " (" + " / ".join(x["notes"]) + ")"
+            L.append(f"| {name} | {x.get('n')} | {rec.get('usage_snapshot')} / {rec.get('team_sha16')} / {rec.get('bank_sha16')} | "
+                     f"{used.get('usage_snapshot')} / {used.get('team_sha16')} / {used.get('bank_sha16')} | {res} |")
+    return "\n".join(L) + "\n"
 
 
 def _load_logs(paths: list, gap_sec: float) -> list:
@@ -2208,9 +2297,10 @@ def _load_logs(paths: list, gap_sec: float) -> list:
 
 def run(paths: list, out_dir: Optional[Path], gap_sec: float = DECISION_GAP_SEC, dry_run: bool = False,
         target_fixed: bool = False, profile: bool = False, compare_search: bool = False,
-        compare_sensitivity: bool = False) -> dict:
+        compare_sensitivity: bool = False, data_mode: str = "restore") -> dict:
     """target_fixed = 対象のログを事前に決めた接続テスト群として渡したか (--target)。profile = evaluate の内訳も出す。
-    compare_search = 通常の受入の代わりに表示用の探索 on / off の照合をする (run_compare_search)"""
+    compare_search = 通常の受入の代わりに表示用の探索 on / off の照合をする (run_compare_search)。
+    data_mode = 再生のデータの版 (restore = 当時の版 / current = 今のデータ。tools.inputs_pin.DataSwitch)"""
     logs = _load_logs(paths, gap_sec)
     n_dec = sum(lg["n_decisions"] for lg in logs)
     if dry_run:
@@ -2219,22 +2309,25 @@ def run(paths: list, out_dir: Optional[Path], gap_sec: float = DECISION_GAP_SEC,
                                           for lg in logs]}
 
     if compare_search:
-        return run_compare_search(logs, out_dir, gap_sec, target_fixed)
+        return run_compare_search(logs, out_dir, gap_sec, target_fixed, data_mode)
     if compare_sensitivity:
-        return run_compare_sensitivity(logs, out_dir, gap_sec, target_fixed)
+        return run_compare_sensitivity(logs, out_dir, gap_sec, target_fixed, data_mode)
     from vision.normalize import NameResolver
     from advisor.engine import RL_BLEND_DEFAULT
     from champions_agent import config as C
+    from tools.inputs_pin import DataSwitch
     import os
     resolver = NameResolver()
     ck = _checker_kwargs()
+    dsw = DataSwitch(data_mode)
     # 再生の設定は各 advice 行の時点の version 行の設定 (感度・表示用の探索。2026-10-20 レビュー: 時間・退避の比較を実機に揃える)
     def settings_of(lg, j):
         return replay_settings(lg["decision_versions"][j], C.TRANSITION_SENSITIVITY_ENABLED, C.ADVICE_DISPLAY_SEARCH)
     # 初回の読み込み (図鑑・RL・使用率) を所要時間から外す
     first_lg = next((lg for lg in logs if lg["decisions"]), None)
-    if first_lg is not None:
-        replay_one(_engine_state(first_lg["decisions"][0], resolver), resolver, MODES, settings_of(first_lg, 0))
+    first_row = _first_restorable(logs, dsw)
+    if first_lg is not None and first_row is not None:
+        replay_one(_engine_state(first_row, resolver), resolver, MODES, settings_of(first_lg, 0))
     decisions = []
     infos = []
     replay_cfg: dict = {}
@@ -2243,6 +2336,11 @@ def run(paths: list, out_dir: Optional[Path], gap_sec: float = DECISION_GAP_SEC,
         timeline = scene_timeline(lg["records"])
         for j, row in enumerate(lg["decisions"]):
             compact = row["state"]
+            plan = dsw.plan(lg["name"], lg["records"], row.get("t"))
+            if not plan["ok"]:
+                # 当時のデータの版を復元できない決定は再生しない (最新で代わりに評価しない)。照合できない決定に数える
+                decisions.append(unrestored_decision(lg["name"], row, compact, plan))
+                continue
             try:
                 st, info = _engine_state_ex(row, resolver)
             except Exception as e:
@@ -2273,6 +2371,7 @@ def run(paths: list, out_dir: Optional[Path], gap_sec: float = DECISION_GAP_SEC,
                 ru, rst = restore_check(row)
                 chk["unconfirmed"] = list(dict.fromkeys(chk["unconfirmed"] + ru))
                 chk["checks"]["state_restore"] = rst
+                chk["checks"]["data_restore"] = "ok" if data_mode == "restore" else None
                 d["modes"][mode] = {"ok": bool(adv.get("ok")), "best": _slim_best(adv.get("best")), "elapsed_ms": ms,
                                     "scoring_used": adv.get("scoring_used") or (adv.get("scoring_mode") if adv.get("ok") else None),
                                     "fallback_reason": adv.get("scoring_fallback"), "reason": adv.get("reason"),
@@ -2310,8 +2409,11 @@ def run(paths: list, out_dir: Optional[Path], gap_sec: float = DECISION_GAP_SEC,
                 except Exception:
                     continue
         prof = {m: profile_evaluate(states, resolver, m) for m in MODES}
+    data_versions = dsw.summary()
+    dsw.close()
     result = {
         "conditions": {"at": time.strftime("%Y-%m-%d %H:%M"), "code": _code_info(), "modes": list(MODES),
+                       "data_mode": data_mode, "data_versions": data_versions,
                        "rl_blend_weight": RL_BLEND_DEFAULT, "rl_style": os.environ.get("RL_ADVICE_STYLE", "balance"),
                        "transition_budget_ms": C.TRANSITION_BUDGET_MS, "transition_sensitivity": C.TRANSITION_SENSITIVITY_ENABLED,
                        "display_search": getattr(C, "ADVICE_DISPLAY_SEARCH", None),
@@ -2324,14 +2426,14 @@ def run(paths: list, out_dir: Optional[Path], gap_sec: float = DECISION_GAP_SEC,
                        "logs": [{k: v for k, v in lg.items() if k not in LOG_INTERNAL_KEYS}
                                 for lg in logs]},
         "summary": summary, "display": display, "display_all": summarize_display_all(disp_rows),
-        "acceptance": acceptance(summary, display, rc, group=group, units=units), "record_check": rc,
+        "acceptance": acceptance(summary, display, rc, group=group, units=units, data=data_versions), "record_check": rc,
         "fallback_units": units,
         "decisions": decisions, "display_rows": disp_rows, "profile": prof,
     }
     out_dir = Path(out_dir) if out_dir else OUT_DIR / time.strftime("%Y%m%d_%H%M%S")
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
-    md = render_markdown(result)
+    md = render_markdown(result) + data_versions_markdown(data_versions)
     (out_dir / "report.md").write_text(md, encoding="utf-8")
     print(md)
     print(f"保存: {out_dir}")
@@ -2353,6 +2455,9 @@ def main() -> None:
     cg = ap.add_mutually_exclusive_group()
     cg.add_argument("--compare-search", action="store_true",
                     help="通常の受入の代わりに、両方式それぞれで表示用の探索 on / off の候補・得点・順位・第一候補の合法性の一致を照合する")
+    ap.add_argument("--data-mode", choices=("restore", "current"), default="restore",
+                    help="再生のデータの版: restore = 当時の版 (version 行の使用率の snapshot・登録チーム、selection_record 行のバンク。"
+                         "無い・今の登録と違えば判定不能) / current = 今のデータで過去の局面を評価し直す")
     cg.add_argument("--compare-sensitivity", action="store_true",
                     help="通常の受入の代わりに、transition で感度 on / off の本採点の候補・得点・Q・順位・第一候補の合法性・退避の一致を照合する")
     args = ap.parse_args()
@@ -2366,7 +2471,8 @@ def main() -> None:
     if missing or not paths:
         raise SystemExit(f"対戦ログが無い: {missing or LOG_DIR}")
     run(paths, Path(args.out) if args.out else None, args.gap_sec, args.dry_run, target_fixed=bool(args.target),
-        profile=args.profile, compare_search=args.compare_search, compare_sensitivity=args.compare_sensitivity)
+        profile=args.profile, compare_search=args.compare_search, compare_sensitivity=args.compare_sensitivity,
+        data_mode=args.data_mode)
 
 
 if __name__ == "__main__":

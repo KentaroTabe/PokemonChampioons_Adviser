@@ -11,7 +11,10 @@
 受入 (2026-10-15 M3a): 再測定の json の accept (champions_agent.env.sim_accept) が上限を超えた腕を含む判定は、再測定の判定を
 「受入不成立」にして判定の変化を出さない。accept の無い json (修正前の版) は「受入監査なし」と表示する。再測定の腕の
 inputs_version が今の版でない・腕の間で違うときは警告を出す。
-純粋な部分は tests/test_arc_remeasure.py で確かめる。
+入力の実体の固定 (2026-10-23、tools.inputs_pin): manifest.json に inputs_pin (ピンの選出モデル一組・使用率の bundle・バンクの写しの
+manifest) があれば、ピンのファイルの sha256 を照合し、欠落・不一致なら再測定の判定を「判定不能 (入力の固定を確かめられない)」にする
+(apply_inputs_pin)。inputs_pin の無い manifest (今の arc_remeasure はピンに入力の実体を置かない) は「入力の実体の固定なし」と表示する。
+純粋な部分は tests/test_arc_remeasure.py と tests/test_inputs_pin.py で確かめる。
 """
 from __future__ import annotations
 
@@ -30,6 +33,7 @@ REPO = Path(__file__).resolve().parent.parent
 Z95 = 1.96
 ADOPT, INCONCLUSIVE, REJECT, UNTESTABLE = "採用", "判定不能", "棄却", "検定不能"
 ACCEPT_FAILED = "受入不成立"     # 再測定の受入監査を満たさない (2026-10-15 M3a)
+INPUTS_UNVERIFIED = "判定不能 (入力の固定を確かめられない)"     # 2026-10-23: ピンの入力の欠落・sha 不一致
 
 
 # ------------------------------------------------------------------ 純粋
@@ -128,6 +132,19 @@ def build_summary(out_docs: dict, old_docs: dict, smoke: bool) -> dict:
                                    for k in r["reg_signals"] if k.startswith("team_reg_"))}
 
 
+def apply_inputs_pin(summary: dict, inputs_pin: Optional[dict], reasons: Optional[list]) -> dict:
+    """入力の実体の固定の照合結果を集計に反映する (純粋)。inputs_pin = manifest の inputs_pin (無ければ None = 固定なし)、
+    reasons = 照合の理由 (tools.inputs_pin.verify_pin)。理由があれば再測定の判定を INPUTS_UNVERIFIED にして判定の変化を出さない"""
+    out = dict(summary)
+    out["inputs_pin"] = None if inputs_pin is None else {"reasons": list(reasons or []),
+                                                          "selection_sha16": (inputs_pin.get("selection_model") or {}).get("sha16"),
+                                                          "usage_snapshot": (inputs_pin.get("usage_bundle") or {}).get("snapshot_id"),
+                                                          "bank_sha16": (inputs_pin.get("real_bank") or {}).get("sha16")}
+    if inputs_pin is not None and reasons:
+        out["verdicts"] = [dict(v, new=dict(v["new"], verdict=INPUTS_UNVERIFIED), changed=None) for v in summary["verdicts"]]
+    return out
+
+
 def _f(x, fmt="{:.3f}") -> str:
     return "—" if x is None else fmt.format(x)
 
@@ -161,6 +178,13 @@ def render(summary: dict) -> str:
         b = summary["baseline"]
         lines.append(f"advisor baseline (p9_300/A): 当時 {_f(b['old_wr'])} → 再測定 {_f(b['new_wr'])}")
     lines.append(f"登録のずれ: {'サインなし (team_reg_* が出ていない)' if summary['registration_ok'] else 'サインあり (team_reg_* を確認)'}")
+    if "inputs_pin" in summary:
+        ip = summary["inputs_pin"]
+        if ip is None:
+            lines.append("入力の実体の固定: なし (選出モデル・使用率・バンクは子プロセスの起動時の配備先・最新を読んだ。復元は確かめられない)")
+        else:
+            lines.append(f"入力の実体の固定: 選出モデル {ip.get('selection_sha16')} / 使用率 snapshot {ip.get('usage_snapshot')} / "
+                         f"バンク {ip.get('bank_sha16')} / 照合 " + ("OK" if not ip["reasons"] else "NG: " + " / ".join(ip["reasons"])))
     return "\n".join(lines)
 
 
@@ -197,6 +221,13 @@ def main(argv: Optional[list] = None) -> int:
         print(f"[arc] {out_dir} に判定の結果が無い", file=sys.stderr)
         return 1
     summary = build_summary(out_docs, old_docs, smoke=bool(man.get("smoke")))
+    ip = man.get("inputs_pin") if isinstance(man.get("inputs_pin"), dict) else None
+    reasons = None
+    if ip is not None:
+        from tools.inputs_pin import verify_pin
+        pin = ip.get("pin_dir") or (man.get("pin") or {}).get("dir")
+        reasons = verify_pin(Path(pin), ip) if pin else ["manifest にピンの dir が無い"]
+    summary = apply_inputs_pin(summary, ip, reasons)
     print(render(summary))
     if args.json:
         Path(args.json).write_text(json.dumps(summary, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
