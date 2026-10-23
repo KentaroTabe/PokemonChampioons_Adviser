@@ -761,3 +761,22 @@ k本なら水準1−0.05/k、推定差≥0.05かつ区間下限>0で採用候補
 - real_accept の --data-mode の比較 (10/20 の 3 戦): restore (既定) は 38 決定すべて復元できない (version 行に使用率の snapshot・バンクの記録が無い 10/20 の形のため) → 正しさは「データの版の復元」で判定不能、遅延・退避の行 (記録から数える) は current と同じ。current は従来どおり (判定不能 13〜14/36、退避 決定単位 6/31 未達、遅延 0.70 秒)。
 - 正式群のログ (新しい version 行: rules.usage_snapshot・team.sha256・runtime) で restore が成立するかは、試運転のログで確認する (試運転の確認項目に追加)。成立しなければ current を参考として併記し、restore の条件を直す。
 - 候補版のコード = 3391d8b0 (入力固定・残件を含む)。試運転の前に再起動が要る (稼働中のプロセスは無い)。
+
+### 8.48 正式比較群の版の固定 (2026-10-23 13:56 再起動、開始前の記録)
+
+- 試運転 (battle_20261023_133837、legacy、8 決定): 助言 25 件、期限内 8/8、遅延 p95 2.03 秒、新しい欄すべて記録、現在データのモードで記録の第一候補と再生の一致 8/8。復元モードは登録チームの照合の設計不備で 0/8 → 修正 (29e2d2e2: version 行に助言エンジンが読む登録 registry と registry_sha256 を残し、復元はそれを使う。写しのログで 8/8 成立・一致 8/8)。試運転は正式集計に含めない。
+- **固定した版** (アドバイザー再起動 13:56:43、pid の起動時刻で確認):
+
+| 項目 | 値 |
+|---|---|
+| コード | feature/team-build 8b158e86 (served_commit はこの値。以後の docs コミットはコードを変えない) |
+| 選出モデル / RL 方策 | selection_model.pt 70346910469d8afc / battle_policy_balance_ema 49d93a0dc595928d (10/20 の version 行と同じ。配備先は未更新) |
+| 埋め込み | 配備の写し 8d867ae12d2ac093 (data 側の sha 46fbb289aaf9c864 は選出モデルの入力に使われない) |
+| 図鑑 / 効果表 | 8c44727bcca41efe / 5d1b789e6a0b9167 |
+| 使用率 | snapshot 75 (version 行 rules.usage_snapshot) |
+| 登録チーム | config/my_team.json (10/9 12:05 から不変) registry_sha256 c61c1e5084d3db20。群の間は変更しない |
+| 実戦バンク | 7e515273fc132860 (10/23 時点。対戦ごとに更新され得るので version 行で記録) |
+| 設定 | config/advice.local.env: 区間 L では無し (legacy / default)、区間 T では ADVICE_SCORING_MODE=transition の 1 行。感度 off (既定)、探索 off (既定)、鍵 版 2、有効期限 10 秒 / 退避 2 秒、HP 経過時間の粒度 5 秒、RL 加点 ×25 |
+| 確認方法 | 各区間の 1 戦目の version 行 (scoring_mode / source / transition_sensitivity / rules.usage_snapshot / team.registry_sha256 / served_commit) と runtime 行 |
+
+- **群の手順**: L (legacy、50 決定以上、最後の対戦は全決定を含める) → ファイルに ADVICE_SCORING_MODE=transition を書いて再起動 → T 50 → T 50 (別セッションとして記録) → ファイルを削除して再起動 → L 50。各区間の開始・終了時刻を控える。終了条件は事前固定 (各区間 50 決定以上で、50 を超えた対戦の終わりで止める)。試験中はコード・設定を変えず、本体での計測をしない。集計は real_accept --target (既定 restore、current を参考に併記)、退避は決定単位で各回と合算に 20%。
