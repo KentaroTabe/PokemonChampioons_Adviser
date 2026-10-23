@@ -36,7 +36,8 @@ from typing import Optional
 from urllib.parse import urlparse
 
 from champions_agent.config import ADVICE_SCORING_MODES, BUILD_SMOKE_CANARY_BATTLES, transition_sensitivity_from_value
-from tools.advice_mode import (LOCAL_FILE_REL, SOURCES, file_view, mismatch, read_local_text, sens_file_view, sens_onoff)
+from tools.advice_mode import (LOCAL_FILE_REL, PIN_KEYS, PIN_SOURCE_KEY, SOURCES, file_view, mismatch, pin_file_view,
+                               pin_mismatch, read_local_text, sens_file_view, sens_onoff)
 from tools.analyze_battles import MIN_BATTLE_SCENES, _parse_battle
 
 REPO = Path(__file__).resolve().parent.parent
@@ -52,6 +53,9 @@ _SCORING_ENV_RE = re.compile(r"(?:^|\s)ADVICE_SCORING_MODE=(\S*)")
 _SCORING_SOURCE_RE = re.compile(r"(?:^|\s)ADVICE_SCORING_MODE_SOURCE=(\S*)")
 _SENS_ENV_RE = re.compile(r"(?:^|\s)TRANSITION_SENSITIVITY=(\S*)")
 _SENS_SOURCE_RE = re.compile(r"(?:^|\s)TRANSITION_SENSITIVITY_SOURCE=(\S*)")
+# データの固定 (2026-10-23)。パスに空白を含む値は読めない (--freeze-data の写しは logs/pinned_data/<時刻>/bank.json)
+_PIN_ENV_RES = {k: re.compile(r"(?:^|\s)" + k + r"=(\S*)") for k in PIN_KEYS}
+_PIN_SOURCE_RE = re.compile(r"(?:^|\s)" + PIN_SOURCE_KEY + r"=(\S*)")
 
 
 def shell_assignments(text: str) -> dict:
@@ -256,6 +260,42 @@ def sensitivity_config_warnings(cfg: dict) -> list:
     f = cfg["file"]
     if not f.get("error") and cfg.get("mismatch"):
         return [f"transition の感度の設定値 ({sens_onoff(f['configured'])}) と稼働中のアドバイザーの実効値が違います。"
+                "反映するには「更新の反映」か「接続テスト開始」で再起動してください"]
+    return []
+
+
+def data_pin_from_ps(text: str) -> Optional[dict]:
+    """ps eww の出力から、アドバイザーのデータの固定の実効値と設定元 (純粋。2026-10-23)。{"values": {鍵: 値 or None},
+    "source": advice_env.sh が渡した設定元 (file / env / file+env / default。通さない起動は鍵があれば env、無ければ None)}。
+    出力が空 (プロセスが読めない) なら None"""
+    if not (text or "").strip():
+        return None
+    vals = {}
+    for k, rx in _PIN_ENV_RES.items():
+        m = rx.search(text)
+        vals[k] = (m.group(1) if m else "") or None
+    ms = _PIN_SOURCE_RE.search(text)
+    src = ms.group(1) if ms else None
+    if src not in ("file", "env", "file+env", "default"):
+        src = "env" if any(vals.values()) else None
+    return {"values": vals, "source": src}
+
+
+def data_pin_config_view(file_text: Optional[str], ps_text: str, file_error: Optional[str] = None) -> dict:
+    """データの固定の設定値 (ファイル)・実効値 (稼働中)・設定元 (純粋。2026-10-23)。{"file": tools.advice_mode.pin_file_view,
+    "running": data_pin_from_ps の戻り値 (停止中・読めなければ None), "mismatch": 設定値と稼働中の実効値が違う}"""
+    view = pin_file_view(file_text)
+    if file_error:
+        view = {**view, "exists": True, "values": None, "pinned": None, "error": file_error}
+    run = data_pin_from_ps(ps_text)
+    return {"file": view, "running": run, "mismatch": pin_mismatch(view, (run or {}).get("values") if run else None)}
+
+
+def data_pin_config_warnings(cfg: dict) -> list:
+    """データの固定の警告 (純粋。設定ファイルが読めないときは採点方式の警告に出るので重ねない)"""
+    f = cfg["file"]
+    if not f.get("error") and cfg.get("mismatch"):
+        return ["データの固定 (使用率の snapshot・実戦バンクの写し) の設定値と稼働中のアドバイザーの実効値が違います。"
                 "反映するには「更新の反映」か「接続テスト開始」で再起動してください"]
     return []
 
@@ -500,6 +540,9 @@ class Panel:
         # transition の感度 (2026-10-18): 設定値・実効値・設定元
         sensitivity_config = sensitivity_config_view(file_text, ps_text, file_error)
         warnings += sensitivity_config_warnings(sensitivity_config)
+        # データの固定 (2026-10-23): 設定値・実効値・設定元
+        data_pin_config = data_pin_config_view(file_text, ps_text, file_error)
+        warnings += data_pin_config_warnings(data_pin_config)
         return {
             "now": time.time(),
             "processes": {"advisor": advisor, "frontend": frontend, "showdown": showdown,
@@ -507,6 +550,7 @@ class Panel:
             "scoring": scoring,
             "scoring_config": scoring_config,
             "sensitivity_config": sensitivity_config,
+            "data_pin_config": data_pin_config,
             # フロントの URL は自分たちが待ち受けているときだけ (停止中に既定ポートを出すと別のプロセスを指してしまう)
             "urls": {"frontend": (f"http://{ip}:{frontend['port']}" if frontend["state"] == "ours" else None),
                      "frontend_local": (f"http://localhost:{frontend['port']}" if frontend["state"] == "ours" else None)},
@@ -617,6 +661,25 @@ function sensRows(cfg, adv) {
     + `<div class="row"><span>　実効値 (稼働中)</span>${mis ? `<span class="badge warn">${run}</span>` : `<span>${run}</span>`}</div>`
     + `<div class="row"><span>　設定元</span><span>${srcTxt}</span></div>`;
 }
+const PIN_KEYS = ['ADVICE_USAGE_SNAPSHOT', 'ADVICE_REAL_BANK', 'ADVICE_REAL_BANK_SHA16'];
+function pinText(v) {
+  if (!v || !PIN_KEYS.some((k) => v[k])) return 'なし (最新の snapshot・logs/real_opponents/bank.json)';
+  return `snapshot ${esc(v.ADVICE_USAGE_SNAPSHOT || '最新')} / バンク ${esc(v.ADVICE_REAL_BANK || 'logs/real_opponents/bank.json')}`
+    + (v.ADVICE_REAL_BANK_SHA16 ? ` (sha16 ${esc(v.ADVICE_REAL_BANK_SHA16)})` : '');
+}
+function pinRows(cfg, adv) {
+  const f = (cfg || {}).file || {};
+  const conf = f.error ? `<span class="badge warn">読めない</span>`
+    : f.pinned ? `${pinText(f.values)} (${esc(f.path)})` : `未設定 = 最新 (${esc(f.path)} ${f.exists ? 'に鍵なし' : 'なし'})`;
+  const r = (cfg || {}).running;
+  const run = adv.state !== 'ours' ? '- (停止中)' : !r ? '不明 (プロセスの環境変数を読めない)' : pinText(r.values);
+  const srcTxt = adv.state !== 'ours' ? '-' : !r ? '不明' : r.source ? esc(r.source) : '記録なし (advice_env.sh を通さない起動)';
+  const mis = cfg && cfg.mismatch;
+  return `<div class="row"><span>データの固定 (アドバイザー)</span>${mis ? '<span class="badge warn">設定値と実効値が違う (再起動していない)</span>' : '<span></span>'}</div>`
+    + `<div class="row"><span>　設定値 (ファイル)</span><span>${conf}</span></div>`
+    + `<div class="row"><span>　実効値 (稼働中)</span>${mis ? `<span class="badge warn">${run}</span>` : `<span>${run}</span>`}</div>`
+    + `<div class="row"><span>　設定元</span><span>${srcTxt}</span></div>`;
+}
 function render(st) {
   $('clock').textContent = new Date(st.now * 1000).toLocaleTimeString('ja-JP');
   $('warnings').innerHTML = (st.warnings || []).map((w) => `<div class="warnbox">⚠ ${esc(w)}</div>`).join('');
@@ -625,7 +688,8 @@ function render(st) {
     + `<div class="row"><span>学習ループ</span>${badge(p.training, '稼働中', '停止中')}</div>`
     + `<div class="row"><span>構築の測定 run</span>${badge(!p.measuring, 'なし', '実行中', 'warn')}</div>`
     + scoringRows(st.scoring, st.scoring_config, p.advisor)
-    + sensRows(st.sensitivity_config, p.advisor);
+    + sensRows(st.sensitivity_config, p.advisor)
+    + pinRows(st.data_pin_config, p.advisor);
   $('urls').innerHTML = st.urls.frontend
     ? `フロントエンド: <a href="${st.urls.frontend}" target="_blank">${st.urls.frontend}</a> `
       + `(このMac: <a href="${st.urls.frontend_local}" target="_blank">${st.urls.frontend_local}</a>)`

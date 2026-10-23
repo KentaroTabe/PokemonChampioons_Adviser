@@ -86,14 +86,18 @@ def test_registry_sha_pure():
 
 
 def test_summarize_versions_registry_field():
-    """team_registry を渡すと team.registry / registry_sha256 が付く。version_id (digest) は変わらない、渡さなければ欄も無い"""
+    """team_registry を渡すと team.registry / registry_sha256 が付く。渡さなければ欄も無い。
+    2026-10-23 レビュー (計画書 §8.49): 新形式 (registry あり) の識別は registry_sha256 を必須とし、ロスター由来の team.sha256 は
+    識別に入れない → registry を渡すと version_id と identity が変わる (期待値の変更)"""
     args = ("pkg", "/m/sel.pt", "s1", "pkg", ["a"], ["blastoise"], "/m/rl.zip", "r1", True, None, "team1", "g", "d", "e", "v1")
     d0 = V.summarize_versions(*args)
     d1 = V.summarize_versions(*args, team_registry=REG_THEN)
     assert "registry" not in d0["team"] and "registry_sha256" not in d0["team"]
     assert d1["team"]["registry"] == REG_THEN and d1["team"]["registry_sha256"] == MT.registry_sha(REG_THEN)
-    assert d1["team"]["sha256"] == "team1" and d1["version_id"] == d0["version_id"]
-    assert V.identity_of(d1) == V.identity_of(d0)
+    assert d1["team"]["sha256"] == "team1" and d1["version_id"] != d0["version_id"]
+    assert V.identity_of(d1) != V.identity_of(d0)
+    assert V.identity_of(d1)["data"]["registry_sha256"] == MT.registry_sha(REG_THEN)
+    assert "team_sha256" not in V.identity_of(d1)["data"]        # ロスター由来の sha は識別に入れない
     # runtime_versions が読む登録の写し = 助言エンジンが読む登録 (_load())
     with _TempMyTeam(REG_THEN):
         snap = V._team_registry()

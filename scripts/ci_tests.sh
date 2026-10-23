@@ -179,6 +179,7 @@ TESTS=(
   test_residuals_1023
   test_inputs_pin
   test_restore_team_text
+  test_live_data_pin
 )
 
 fail=0

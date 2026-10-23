@@ -56,6 +56,8 @@ fi
 # 「準備完了」と表示され、DEBUG_DUMP_FRAMES 無しの手動起動を招いて
 # 終了時の視覚監査ができなくなる (2026-08-11に発生)
 # 「稼働中」は自分たちのプロセスが待ち受けているときだけ (別プロジェクトが同じポートを使っていても起動側で空きへずらす)
+# 今回起動したプロセスの pid は deploy.sh / start_all_nohup.sh が logs/.advisor_launch_pid に書く (前回の値は消しておく)
+rm -f logs/.advisor_launch_pid
 set -- $(choose_port "$ADVISOR_PORT_DEFAULT" "$ADVISOR_PORT" "$ADVISOR_PATTERN")
 if [ "$2" = "ours" ]; then
   bash scripts/deploy.sh || {
@@ -67,12 +69,23 @@ else
 fi
 load_ports
 
-# フレーム保存の実測確認 (視覚監査の前提。無ければ終了時に監査できない)
-if ! ps eww "$(pgrep -f 'uvicorn server:app_asgi' | head -1)" 2>/dev/null \
-     | grep -q "DEBUG_DUMP_FRAMES=1"; then
-  echo "⚠ アドバイザーが DEBUG_DUMP_FRAMES=1 で起動していません。"
-  echo "  このままだと終了時の視覚監査 (誤認一覧) が作れません。"
-  echo "  一度止めて再実行してください: pkill -f 'uvicorn server:app_asgi'"
+# フレーム保存の実測確認 (視覚監査の前提。無ければ終了時に監査できない)。2026-10-23: 起動直後 (uvicorn の待受の前) に一度だけ
+# プロセス一覧を見ると誤警告になるので、今回起動したプロセス (pid) について、ポートの待受と DEBUG_DUMP_FRAMES=1 の両方を
+# 最大 ADVISOR_LAUNCH_CHECK_SEC 秒 (config/ports.env) 待って確かめる。時間切れは「確認できず」(起動していないとは言わない)
+LAUNCH_PID="$(cat logs/.advisor_launch_pid 2>/dev/null || true)"
+if advisor_launch_wait "$LAUNCH_PID" "$ADVISOR_PORT" "${ADVISOR_LAUNCH_CHECK_SEC:-30}"; then
+  echo "フレーム保存: 今回起動したアドバイザー (pid $LAUNCH_PID) がポート $ADVISOR_PORT で待ち受け、DEBUG_DUMP_FRAMES=1 を確認"
+else
+  case "$LAUNCH_STATE" in
+    no_pid) why="今回起動したプロセスの pid が分からない (logs/.advisor_launch_pid なし)";;
+    no_listener) why="pid $LAUNCH_PID の系統がポート $ADVISOR_PORT で待ち受けていない";;
+    other_process) why="ポート $ADVISOR_PORT で待ち受けているのは今回起動したプロセス (pid $LAUNCH_PID) ではない";;
+    no_dump) why="待ち受けているプロセスの環境変数に DEBUG_DUMP_FRAMES=1 が無い";;
+    *) why="判定 $LAUNCH_STATE";;
+  esac
+  echo "⚠ ${ADVISOR_LAUNCH_CHECK_SEC:-30} 秒以内に、アドバイザーの待受と DEBUG_DUMP_FRAMES=1 を確認できませんでした ($why)。"
+  echo "  logs/server_nohup.log を確認してください。DEBUG_DUMP_FRAMES=1 で動いていないと終了時の視覚監査 (誤認一覧) が作れません。"
+  echo "  起動に時間がかかっているだけなら、少し待って操作パネルか bash scripts/status.sh で確かめてください。"
 fi
 
 IP=$(ipconfig getifaddr en0 2>/dev/null || echo "localhost")

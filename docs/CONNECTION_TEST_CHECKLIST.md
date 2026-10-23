@@ -727,6 +727,33 @@ transition の感度 (楽観側の HP・スカーフ / タスキの有無を入�
       `omitted` = 全部を予算で省略 / `failed` = 計算に失敗 / `none` = 該当する仮説が無い。`"sensitivity_changed"` は計算した
       仮説で第一候補が変わったか (計算していなければ null。**disabled を「仮説を変えても同じ」とは読まない**)
 
+### 正式群 (L → T → T → L) の使用率・実戦バンクの固定 (2026-10-23、計画書 §8.49)
+
+実機は既定で使用率 DB の最新 snapshot (毎朝 06:30 の usage-update で増える) と `logs/real_opponents/bank.json` (対戦ごとに更新)
+を読む。正式群では、群の間ずっと開始時の写しを読ませる (方式の切替の再起動の後も同じ snapshot・同じバンク)。同じ
+`config/advice.local.env` に 3 つの鍵を書き、`scripts/advice_env.sh` が uvicorn にだけ渡す (学習・測定の子プロセスには渡さない):
+
+- `ADVICE_USAGE_SNAPSHOT` = 使用率の snapshot id (型予測・タイプからの候補・チャンピオンズの種の判定はこの id (以下) を読む)
+- `ADVICE_REAL_BANK` = 実戦バンクの写しのパス (元の `logs/real_opponents/bank.json` を指すとエラー)
+- `ADVICE_REAL_BANK_SHA16` = 写しの sha16 (任意。あれば起動時に照合)
+- 指定 snapshot が DB に無い・写しが無い・sha16 が違う・値が不正・ファイルと環境変数の矛盾 → **エラーで起動しない**
+  (deploy.sh は止める前に中止。server も起動時に同じ検査をする)
+
+手順:
+
+- [ ] 群の開始前に写しを作る: `.venv/bin/python -m tools.advice_mode --freeze-data`
+      (`logs/pinned_data/<時刻>/bank.json` に写しを作り、今の最新 snapshot id と写しのパス・sha16 の 3 行を表示する。
+      設定ファイルは書き換えない)
+- [ ] 表示された 3 行 (`ADVICE_USAGE_SNAPSHOT=...` / `ADVICE_REAL_BANK=...` / `ADVICE_REAL_BANK_SHA16=...`) を
+      `config/advice.local.env` に追加し、再起動する (「接続テスト開始」か「更新の反映」)
+- [ ] 操作パネルの「データの固定 (アドバイザー)」で 設定値 = 実効値、設定元 file を確かめる。起動ログの
+      `[server] データの固定: 実効値 snapshot N / バンク ... [snapshot N は DB にある, バンクの sha16 ... (指定と一致)] / 設定元 file`
+      (⚠ が無いこと)
+- [ ] 1 戦目の対戦ログの version 行で `rules.usage_snapshot` = N、`runtime.usage_snapshot_source` = `"pinned"`、
+      `rules.real_bank` = `{"path": 写し, "sha16": ..., "pinned": true}` を確かめる
+- [ ] **方式の切替 (L ↔ T) で `ADVICE_SCORING_MODE` を書き換えるときも、3 行は残す** (消すと最新に戻る)
+- [ ] 群が終わったら 3 行を削除して再起動し、パネルで「なし」を確かめる (写しのディレクトリは記録として残してよい)
+
 ## 1. 追従テスト (今回のメイン): 全操作をアドバイス通りに行う
 
 1決定 = 1テストケースとして扱う。人間の判断を混ぜないことで、

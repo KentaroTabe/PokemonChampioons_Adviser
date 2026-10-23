@@ -9,6 +9,11 @@
 - 2026-10-18 transition の感度 (TRANSITION_SENSITIVITY、値 0 / 1): 解決の規則 (無ければ 0 = 実機の既定 off、ファイル 1 で on、
   矛盾・不正値はエラー)、CLI --resolve --sensitivity、起動ログ・操作パネルの設定値・実効値・設定元、4 本の起動スクリプトで
   uvicorn に同じ値と設定元が届き、学習ループには渡らないこと
+- 2026-10-23 データの固定 (ADVICE_USAGE_SNAPSHOT / ADVICE_REAL_BANK / ADVICE_REAL_BANK_SHA16): 解決の規則 (正常・不正値・矛盾・
+  sha16 だけ)、CLI --resolve --data-pin (固定したデータの起動前の検査を含む)、4 本の起動スクリプトで値のある鍵だけが uvicorn に
+  届き学習ループには漏れないこと、検査に通らなければ起動しない (deploy.sh は止める前に中止)、操作パネルの設定値・実効値・設定元
+- 2026-10-23 起動の確認 (start_connection_test.sh): 判定 launch_state (純粋)、今回起動した pid の待受と DEBUG_DUMP_FRAMES=1 を
+  待って確認 (遅い起動でも誤警告しない)、時間切れは「確認できず」
 
     python -m tests.test_advice_mode
 """
@@ -585,6 +590,304 @@ def test_config_default_unchanged():
     print("test_config_default_unchanged OK")
 
 
+# ------------------------------------------------------------------ データの固定 (2026-10-23)
+PIN_ENV_PREFIXES = ("ADVICE_USAGE_", "ADVICE_REAL_BANK", "ADVICE_DATA_PIN")
+SHA_A = "0123456789abcdef"
+
+
+def test_data_pin_resolve_rules():
+    r = AM.resolve_data_pin
+    none = r(None, {})
+    assert none == {"values": {"ADVICE_USAGE_SNAPSHOT": None, "ADVICE_REAL_BANK": None, "ADVICE_REAL_BANK_SHA16": None},
+                    "sources": {"ADVICE_USAGE_SNAPSHOT": None, "ADVICE_REAL_BANK": None, "ADVICE_REAL_BANK_SHA16": None},
+                    "source": "default", "pinned": False}
+    assert r("ADVICE_SCORING_MODE=transition\n", {})["source"] == "default"
+    full = f"ADVICE_USAGE_SNAPSHOT=67\nADVICE_REAL_BANK=/p/bank.json\nADVICE_REAL_BANK_SHA16={SHA_A.upper()}\n"
+    got = r(full, {})
+    assert got["values"] == {"ADVICE_USAGE_SNAPSHOT": "67", "ADVICE_REAL_BANK": "/p/bank.json", "ADVICE_REAL_BANK_SHA16": SHA_A}
+    assert got["source"] == "file" and got["pinned"]
+    assert r(None, {"ADVICE_USAGE_SNAPSHOT": " 67 "})["values"]["ADVICE_USAGE_SNAPSHOT"] == "67"
+    assert r(None, {"ADVICE_USAGE_SNAPSHOT": "67"})["source"] == "env"
+    assert r("ADVICE_USAGE_SNAPSHOT=67\n", {"ADVICE_USAGE_SNAPSHOT": "067"})["source"] == "file"          # 一致 → 続行
+    assert r("ADVICE_USAGE_SNAPSHOT=67\n", {"ADVICE_REAL_BANK": "/p/b.json"})["source"] == "file+env"
+    assert r("ADVICE_REAL_BANK='/p/a b.json'\n", {})["values"]["ADVICE_REAL_BANK"] == "/p/a b.json"      # 引用符は外す
+    assert "矛盾" in _err(r, "ADVICE_USAGE_SNAPSHOT=67\n", {"ADVICE_USAGE_SNAPSHOT": "68"})
+    assert "矛盾" in _err(r, "ADVICE_REAL_BANK=/p/a.json\n", {"ADVICE_REAL_BANK": "/p/b.json"})
+    for bad in ("0", "-1", "abc", "1.5", "latest"):
+        assert "正の整数" in _err(r, f"ADVICE_USAGE_SNAPSHOT={bad}\n", {}), bad
+        assert "環境変数" in _err(r, None, {"ADVICE_USAGE_SNAPSHOT": bad}), bad
+    for bad in ("xyz", SHA_A[:15], SHA_A + "0", "g" * 16):
+        assert "16 進" in _err(r, f"ADVICE_REAL_BANK=/p/b.json\nADVICE_REAL_BANK_SHA16={bad}\n", {}), bad
+    assert "一緒に" in _err(r, f"ADVICE_REAL_BANK_SHA16={SHA_A}\n", {})                                 # sha16 だけ
+    assert "2 回" in _err(r, "ADVICE_USAGE_SNAPSHOT=1\nADVICE_USAGE_SNAPSHOT=1\n", {})
+    # 他の鍵は従来どおりエラー (測定の子プロセス用の ADVICE_USAGE_DB・設定元の鍵も書けない)
+    for key in ("ADVICE_USAGE_DB", "ADVICE_DATA_PIN_SOURCE"):
+        assert "認めない鍵" in _err(r, f"{key}=x\n", {}), key
+    # 採点方式・感度の解決はデータの固定の鍵があっても変わらない
+    assert AM.resolve(full, None)["mode"] == "legacy" and AM.resolve_sensitivity(full, None)["value"] == "0"
+    # 表示用
+    assert AM.pin_file_view(full)["pinned"] and AM.pin_file_view("ADVICE_USAGE_SNAPSHOT=x\n")["error"]
+    assert "なし" in AM.pin_values_text(None) and "snapshot 67" in AM.pin_values_text(got["values"])
+    assert AM.pin_source_of_env({}) is None and AM.pin_source_of_env({"ADVICE_USAGE_SNAPSHOT": "1"}) == "env"
+    assert AM.pin_source_of_env({"ADVICE_DATA_PIN_SOURCE": "default"}) == "default"
+    v = AM.pin_file_view(full)
+    assert not AM.pin_mismatch(v, AM.pin_env_values({"ADVICE_USAGE_SNAPSHOT": "67", "ADVICE_REAL_BANK": "/p/bank.json",
+                                                     "ADVICE_REAL_BANK_SHA16": SHA_A}))
+    assert AM.pin_mismatch(v, AM.pin_env_values({}))                       # 設定を書いたが再起動していない
+    assert not AM.pin_mismatch(AM.pin_file_view(None), AM.pin_env_values({})) and not AM.pin_mismatch(v, None)
+    print("test_data_pin_resolve_rules OK")
+
+
+def _pin_root(td: Path) -> dict:
+    """検査の基準 (リポジトリのルートの形): 合成の使用率 DB (snapshot 1・2)・元のバンク・写し"""
+    from tests.test_inputs_pin import _bank, _make_db
+    db_dir = td / "champions_agent" / "data" / "db"
+    db_dir.mkdir(parents=True, exist_ok=True)
+    _make_db(db_dir / "champions.sqlite3")
+    (td / "logs" / "real_opponents").mkdir(parents=True, exist_ok=True)
+    live = _bank(td / "logs" / "real_opponents" / "bank.json", 45)
+    (td / "logs" / "pinned_data" / "t1").mkdir(parents=True, exist_ok=True)
+    copy = _bank(td / "logs" / "pinned_data" / "t1" / "bank.json", 20)
+    from advisor.data_pin import sha16_bytes
+    return {"live": live, "copy": copy, "sha": sha16_bytes(copy.read_bytes())}
+
+
+def test_data_pin_cli():
+    py = sys.executable
+    with tempfile.TemporaryDirectory() as tdn:
+        td = Path(tdn)
+        fx = _pin_root(td)
+        f = td / "a.env"
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("ADVICE_SCORING_MODE", "TRANSITION_SENSITIVITY")
+                                                                         + PIN_ENV_PREFIXES)}
+        env["PYTHONPATH"] = str(REPO)
+        run = lambda e, *extra: subprocess.run([py, "-m", "tools.advice_mode", "--resolve", "--sensitivity", *extra, "--file",
+                                                str(f), "--root", str(td)], cwd=str(REPO), env=e, capture_output=True, text=True)
+        out = run(env, "--data-pin")
+        assert out.returncode == 0 and out.stdout.splitlines()[4:] == [
+            "ADVICE_USAGE_SNAPSHOT=", "ADVICE_REAL_BANK=", "ADVICE_REAL_BANK_SHA16=", "ADVICE_DATA_PIN_SOURCE=default"], out
+        f.write_text(f"ADVICE_USAGE_SNAPSHOT=2\nADVICE_REAL_BANK=logs/pinned_data/t1/bank.json\nADVICE_REAL_BANK_SHA16={fx['sha']}\n",
+                     encoding="utf-8")
+        assert len(run(env).stdout.splitlines()) == 4                                       # --data-pin なしは従来の 4 行
+        out = run(env, "--data-pin")
+        assert out.returncode == 0 and out.stdout.splitlines()[4:] == [
+            "ADVICE_USAGE_SNAPSHOT=2", "ADVICE_REAL_BANK=logs/pinned_data/t1/bank.json", f"ADVICE_REAL_BANK_SHA16={fx['sha']}",
+            "ADVICE_DATA_PIN_SOURCE=file"], out
+        # 起動前の検査: snapshot が DB に無い / sha16 が違う / 写しが無い / 元のバンクそのもの → 終了コード 2、何も出さない
+        for text, frag in (("ADVICE_USAGE_SNAPSHOT=9\n", "snapshot 9"),
+                           (f"ADVICE_REAL_BANK=logs/pinned_data/t1/bank.json\nADVICE_REAL_BANK_SHA16={SHA_A}\n", "sha16"),
+                           ("ADVICE_REAL_BANK=logs/pinned_data/none.json\n", "無い"),
+                           ("ADVICE_REAL_BANK=logs/real_opponents/bank.json\n", "写し")):
+            f.write_text(text, encoding="utf-8")
+            bad = run(env, "--data-pin")
+            assert bad.returncode == 2 and frag in bad.stderr and "=" not in bad.stdout, (text, bad)
+        f.write_text("ADVICE_USAGE_SNAPSHOT=2\n", encoding="utf-8")
+        bad = run(dict(env, ADVICE_USAGE_SNAPSHOT="1"), "--data-pin")
+        assert bad.returncode == 2 and "矛盾" in bad.stderr, bad
+    print("test_data_pin_cli OK")
+
+
+class PinSandbox(Sandbox):
+    """Sandbox に合成の使用率 DB・元のバンク・写しを置き、uvicorn と学習ループのダミーがデータの固定の環境変数も書き出す"""
+
+    def __init__(self, td: Path, **kw):
+        super().__init__(td, **kw)
+        self.fx = _pin_root(td)
+        pindump = ('env | grep -E "^(ADVICE_USAGE_|ADVICE_REAL_BANK|ADVICE_DATA_PIN)" | sort > "{out}.tmp"; '
+                   'mv "{out}.tmp" "{out}"')
+        for name, out in (("stubbin/uvicorn", "uvicorn_pin.txt"), ("champions_agent/scripts/train_forever.sh", "train_pin.txt")):
+            sp = td / name
+            body = sp.read_text(encoding="utf-8").rstrip("\n")
+            sp.write_text(body.replace("#!/bin/sh\n", "#!/bin/sh\n" + pindump.format(out=td / out) + "\n", 1) + "\n",
+                          encoding="utf-8")
+
+    def env(self, extra: dict = None, minimal: bool = False) -> dict:
+        e = super().env(extra=None, minimal=minimal)
+        e = {k: v for k, v in e.items() if not k.startswith(PIN_ENV_PREFIXES)}
+        e.update(extra or {})
+        return e
+
+
+def test_data_pin_start_scripts():
+    """4 本の起動スクリプトで、値のある鍵だけが uvicorn に届き (設定元つき)、学習ループには漏れない。検査に通らなければ起動しない
+    (deploy.sh は止める前に中止)"""
+    runs = (("start_all_nohup.sh", (), {}), ("start_connection_test.sh", (), {}), ("start_servers.sh", (), {}),
+            ("deploy.sh", ("--force",), {"advisor_running": True, "minimal": True}))
+    for script, args, opt in runs:
+        def case(td):
+            sb = PinSandbox(td, advisor_running=opt.get("advisor_running", False),
+                            training_mode="continuous" if script == "start_all_nohup.sh" else "on_demand")
+            sb.write_local(f"ADVICE_SCORING_MODE=transition\nADVICE_USAGE_SNAPSHOT=2\n"
+                           f"ADVICE_REAL_BANK=logs/pinned_data/t1/bank.json\nADVICE_REAL_BANK_SHA16={sb.fx['sha']}\n")
+            out = sb.run(script, *args, env=sb.env(minimal=opt.get("minimal", False)))
+            if script != "start_servers.sh":
+                assert out.returncode == 0, (script, out.stdout, out.stderr)
+            assert sb.received().get("ADVICE_SCORING_MODE") == "transition", (script, out.stdout, out.stderr)
+            got = sb.received("uvicorn_pin.txt", wait=2.0)
+            assert got == {"ADVICE_USAGE_SNAPSHOT": "2", "ADVICE_REAL_BANK": "logs/pinned_data/t1/bank.json",
+                           "ADVICE_REAL_BANK_SHA16": sb.fx["sha"], "ADVICE_DATA_PIN_SOURCE": "file"}, (script, got, out.stdout)
+            if script != "start_servers.sh":
+                assert "データの固定: snapshot 2" in out.stdout, (script, out.stdout)
+            if script == "start_all_nohup.sh":
+                assert sb.received("train_env.txt") == {} and (td / "train_env.txt").exists()            # 学習ループが動いた
+                assert sb.received("train_pin.txt", wait=2.0) == {} and (td / "train_pin.txt").exists()  # 学習ループには漏れない
+        _sandbox_case(case)
+
+        def case_none(td):
+            sb = PinSandbox(td, advisor_running=opt.get("advisor_running", False))
+            out = sb.run(script, *args, env=sb.env(minimal=opt.get("minimal", False)))
+            assert sb.received().get("ADVICE_SCORING_MODE"), (script, out.stdout, out.stderr)
+            assert sb.received("uvicorn_pin.txt", wait=2.0) == {"ADVICE_DATA_PIN_SOURCE": "default"}, script   # 何も足さない
+        _sandbox_case(case_none)
+
+        for local, frag in (("ADVICE_USAGE_SNAPSHOT=9\n", "snapshot 9"),
+                            ("ADVICE_REAL_BANK=logs/pinned_data/t1/bank.json\nADVICE_REAL_BANK_SHA16=0123456789abcdef\n", "sha16"),
+                            ("ADVICE_REAL_BANK_SHA16=0123456789abcdef\n", "一緒に")):
+            def case_bad(td):
+                sb = PinSandbox(td, advisor_running=opt.get("advisor_running", False))
+                sb.write_local(local)
+                out = sb.run(script, *args, env=sb.env(minimal=opt.get("minimal", False)))
+                assert out.returncode != 0 and not sb.called("uvicorn") and frag in out.stderr, (script, local, out.stderr)
+                if script == "deploy.sh":
+                    assert not sb.called("pkill") and "止めずに中止" in out.stdout                       # 止める前に中止
+                if script == "start_connection_test.sh":
+                    assert not (td / "logs" / ".connection_test_start").exists()
+            _sandbox_case(case_bad)
+    print("test_data_pin_start_scripts OK")
+
+
+def test_control_panel_data_pin():
+    sha = SHA_A
+    ps = (f"uvicorn server:app_asgi ADVICE_USAGE_SNAPSHOT=2 ADVICE_REAL_BANK=/p/pinned/bank.json ADVICE_REAL_BANK_SHA16={sha} "
+          "ADVICE_DATA_PIN_SOURCE=file")
+    run = CP.data_pin_from_ps(ps)
+    assert run == {"values": {"ADVICE_USAGE_SNAPSHOT": "2", "ADVICE_REAL_BANK": "/p/pinned/bank.json",
+                              "ADVICE_REAL_BANK_SHA16": sha}, "source": "file"}, run
+    assert CP.data_pin_from_ps("uvicorn server:app_asgi PATH=/bin") == {
+        "values": {"ADVICE_USAGE_SNAPSHOT": None, "ADVICE_REAL_BANK": None, "ADVICE_REAL_BANK_SHA16": None}, "source": None}
+    assert CP.data_pin_from_ps("") is None
+    text = f"ADVICE_USAGE_SNAPSHOT=2\nADVICE_REAL_BANK=/p/pinned/bank.json\nADVICE_REAL_BANK_SHA16={sha}\n"
+    v = CP.data_pin_config_view(text, ps)
+    assert v["file"]["pinned"] and v["running"]["source"] == "file" and not v["mismatch"] and CP.data_pin_config_warnings(v) == []
+    v2 = CP.data_pin_config_view(text, "uvicorn server:app_asgi ADVICE_DATA_PIN_SOURCE=default")       # 再起動していない
+    assert v2["mismatch"] and "再起動" in CP.data_pin_config_warnings(v2)[0]
+    assert not CP.data_pin_config_view(text, "")["mismatch"]                                          # 停止中
+    assert not CP.data_pin_config_view(None, "uvicorn server:app_asgi PATH=/bin")["mismatch"]          # どちらも固定なし
+    v3 = CP.data_pin_config_view("ADVICE_USAGE_SNAPSHOT=x\n", ps)
+    assert v3["file"]["error"] and not v3["mismatch"] and CP.data_pin_config_warnings(v3) == []
+
+    class Probe:
+        def listener(self, port):
+            return {"pid": 11, "command": "python uvicorn server:app_asgi --port 8000"} if port == 8000 else None
+
+        def pgrep(self, pattern):
+            return []
+
+        def lan_ip(self):
+            return "localhost"
+
+        def process_env(self, pid):
+            return "python uvicorn server:app_asgi ADVICE_DATA_PIN_SOURCE=default"
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "logs").mkdir()
+        (root / "config").mkdir()
+        s = CP.Settings(port=0, bind="127.0.0.1", poll_sec=1.0, tail_lines=10, path_prefix="", server_log_tail_bytes=1024,
+                        advisor_port=8000, frontend_port=3000, showdown_port=8100, smoke_battles=20)
+        st = CP.Panel(root, s, probe=Probe()).status()
+        assert st["data_pin_config"]["running"]["source"] == "default" and not st["data_pin_config"]["mismatch"]
+        assert not any("データの固定" in w for w in st["warnings"])
+        (root / "config" / "advice.local.env").write_text(text, encoding="utf-8")
+        st = CP.Panel(root, s, probe=Probe()).status()
+        assert st["data_pin_config"]["mismatch"] and any("データの固定" in w for w in st["warnings"])
+    page = CP.render_page(s, CP.ACTIONS)
+    assert "データの固定 (アドバイザー)" in page and "pinRows" in page
+    print("test_control_panel_data_pin OK")
+
+
+# ------------------------------------------------------------------ 起動の確認 (2026-10-23)
+def _launch_state(*args) -> str:
+    """scripts/lib/ports.sh の launch_state (純粋) を呼ぶ"""
+    cmd = '. scripts/lib/ports.sh; launch_state "$@"'
+    out = subprocess.run(["bash", "-c", cmd, "x", *args], cwd=str(REPO), capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return out.stdout.strip()
+
+
+def test_launch_state_pure():
+    table = "100 1\n200 100\n300 200\n400 1"
+    dump = "PID TT STAT TIME COMMAND\n200 ?? S 0:01 python uvicorn server:app_asgi PATH=/bin DEBUG_DUMP_FRAMES=1 RL_ADVICE_STYLE=balance"
+    assert _launch_state("", "200", table, dump) == "no_pid"
+    assert _launch_state("100", "", table, dump) == "no_listener"
+    assert _launch_state("100", "200", table, dump) == "ok"                    # nohup bash -c の子の python が待ち受け
+    assert _launch_state("100", "300", table, dump) == "ok"                    # 孫
+    assert _launch_state("200", "200", "", dump) == "ok"                       # 起動した pid そのもの
+    assert _launch_state("100", "400", table, dump) == "other_process"         # 前のプロセス・別のプロセス
+    assert _launch_state("100", "200", table, dump.replace("DEBUG_DUMP_FRAMES=1", "DEBUG_DUMP_FRAMES=10")) == "no_dump"
+    assert _launch_state("100", "200", table, "python uvicorn server:app_asgi") == "no_dump"
+    assert _launch_state("100", "200", table, "python uvicorn XDEBUG_DUMP_FRAMES=1") == "no_dump"
+    assert _launch_state("100", "200", table, "python uvicorn DEBUG_DUMP_FRAMES=1") == "ok"   # 行末
+    print("test_launch_state_pure OK")
+
+
+def test_start_connection_test_waits_for_launch():
+    """今回起動した pid の待受と DEBUG_DUMP_FRAMES=1 を待って確かめる。uvicorn が遅れて待ち受けても誤警告しない。
+    時間切れは「確認できず」(起動していないとは言わない)"""
+    def stubs(sb, ready_after: int, dump: bool):
+        cnt = sb.root / "lsof_count"
+        pidf = sb.root / "logs" / ".advisor_launch_pid"
+        rec = f'echo "$(basename "$0") $*" >> "{sb.calls}"'
+        lsof = (rec + "\ncase \"$*\" in\n"
+                f'  *-iTCP:8000*)\n    [ -f "{pidf}" ] || exit 0\n'
+                f'    n=$(cat "{cnt}" 2>/dev/null || echo 0); n=$((n + 1)); echo $n > "{cnt}"\n'
+                f'    [ "$n" -ge {ready_after} ] && cat "{pidf}";;\n'
+                "  *) :;;\nesac")
+        envtxt = "python uvicorn server:app_asgi PATH=/bin" + (" DEBUG_DUMP_FRAMES=1" if dump else "")
+        ps = ('case "$1" in\n  eww) echo "' + envtxt + '";;\n  -A) :;;\n  *) echo "python uvicorn server:app_asgi";;\nesac')
+        for name, body in (("lsof", lsof), ("ps", ps)):
+            (sb.bin / name).write_text(STUB.format(body=body), encoding="utf-8")
+
+    def case_slow(td):
+        sb = Sandbox(td)
+        stubs(sb, ready_after=4, dump=True)                                   # 3 回目までは待ち受けていない
+        out = sb.run("start_connection_test.sh", env=sb.env())
+        assert out.returncode == 0, (out.stdout, out.stderr)
+        pid = (td / "logs" / ".advisor_launch_pid").read_text().strip()
+        assert pid.isdigit() and f"今回起動したアドバイザー (pid {pid})" in out.stdout and "DEBUG_DUMP_FRAMES=1 を確認" in out.stdout, out.stdout
+        assert "⚠" not in out.stdout.split("=== 準備完了 ===")[0].split("フレーム保存")[-1], out.stdout
+    _sandbox_case(case_slow)
+
+    def case_no_dump(td):
+        sb = Sandbox(td)
+        stubs(sb, ready_after=1, dump=False)
+        out = sb.run("start_connection_test.sh", env=sb.env())
+        assert out.returncode == 0 and "確認できませんでした" in out.stdout and "DEBUG_DUMP_FRAMES=1 が無い" in out.stdout, out.stdout
+        assert "30 秒以内" in out.stdout and "起動していません" not in out.stdout
+    _sandbox_case(case_no_dump)
+
+    def case_timeout(td):
+        sb = Sandbox(td)                                                       # 既定のダミー: 誰も待ち受けない
+        out = sb.run("start_connection_test.sh", env=sb.env())
+        assert out.returncode == 0 and "確認できませんでした" in out.stdout and "待ち受けていない" in out.stdout, out.stdout
+        assert "起動していません" not in out.stdout
+    _sandbox_case(case_timeout)
+
+    def case_stale_pid(td):
+        sb = Sandbox(td, advisor_running=True)                                # deploy.sh 経由。前回の pid ファイルは消してから
+        (td / "logs" / ".advisor_launch_pid").write_text("1\n", encoding="utf-8")
+        # deploy.sh の対戦中の判定 (python3 -m tools.check_battle_active) を「対戦中でない」(終了コード 1) にする
+        (sb.bin / "python3").write_text(STUB.format(body=f'echo "$(basename "$0") $*" >> "{sb.calls}"\nexit 1'),
+                                        encoding="utf-8")
+        out = sb.run("start_connection_test.sh", env=sb.env())
+        pid = (td / "logs" / ".advisor_launch_pid").read_text().strip()
+        assert out.returncode == 0 and pid != "1" and pid.isdigit(), (out.stdout, out.stderr)
+        # 待ち受けているのは前からいるプロセス (ダミーの lsof は 99999) → 今回起動したプロセスではない
+        assert "今回起動したプロセス" in out.stdout and "確認できませんでした" in out.stdout, out.stdout
+    _sandbox_case(case_stale_pid)
+    print("test_start_connection_test_waits_for_launch OK")
+
+
 if __name__ == "__main__":
     test_resolve_rules()
     test_quoted_and_commented_value()
@@ -605,4 +908,10 @@ if __name__ == "__main__":
     test_sensitivity_start_scripts()
     test_control_panel_sensitivity()
     test_config_default_unchanged()
+    test_data_pin_resolve_rules()
+    test_data_pin_cli()
+    test_data_pin_start_scripts()
+    test_control_panel_data_pin()
+    test_launch_state_pure()
+    test_start_connection_test_waits_for_launch()
     print("ALL OK")

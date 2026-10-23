@@ -741,6 +741,15 @@ def _field_match(key: str, fields: Iterable) -> bool:
     return any(key == f or key.startswith(f + ".") or key.endswith("." + f) for f in fields)
 
 
+def _identity_problems(v: dict) -> list:
+    """版の識別が成り立たない理由 (advisor.versions.identity_problems、2026-10-23: 新形式の行で登録内容の sha が無い)。無い版のコードでは []"""
+    try:
+        from advisor.versions import identity_problems
+        return list(identity_problems(v))
+    except Exception:
+        return []
+
+
 def _identity_fn_default() -> Optional[Callable]:
     """advisor.versions.identity_of (2026-10-20 に別の担当が足す、版の識別だけを取り出す関数)。無い版のコードでは None"""
     try:
@@ -764,7 +773,9 @@ def version_identity(records: list, ignore: Iterable = REAL_ACCEPT_VERSION_IGNOR
       "identity": {欄: [値]}、"runtime": {欄: [値]}、"version_id": [値]、"n_version_rows"、"format": ["identity_of" / "fields"]
       "advice_runtime": {"n", "rl_loaded_true", "rl_loaded_false", "rl_loaded_missing"} (battle の advice 行の policy.rl_loaded)
       "runtime_ok": True (全 advice 行で読み込み成功、実行状態に読み込みの失敗なし) / False (失敗の記録あり) / None (確認できない)
-      "runtime_basis": 根拠の文"""
+      "runtime_basis": 根拠の文
+      "identity_problems": 版の識別が成り立たない理由の列 (2026-10-23: 新形式の行 = team.registry の欄がある行で登録内容の sha
+        team.registry_sha256 が無い。識別は登録内容の sha を必須照合し、ロスター由来の team.sha256 は照合しない)"""
     ignore, runtime = tuple(ignore), tuple(runtime)
     fn = identity_fn if identity_fn is not None else _identity_fn_default()
     vers = [r for r in records if r.get("type") == "version"]
@@ -776,9 +787,13 @@ def version_identity(records: list, ignore: Iterable = REAL_ACCEPT_VERSION_IGNOR
         lst = dst.setdefault(k, [])
         if x not in lst:
             lst.append(x)
+    problems: list = []
     for v in vers:
         if isinstance(v.get("runtime"), dict) and fn is not None:
             formats.append("identity_of")
+            for why in _identity_problems(v):
+                if why not in problems:
+                    problems.append(why)
             for k, x in _flatten(fn(v)).items():
                 put(ident, k, x)
             for k, x in _flatten(v["runtime"]).items():
@@ -819,7 +834,8 @@ def version_identity(records: list, ignore: Iterable = REAL_ACCEPT_VERSION_IGNOR
         basis = (f"読み込みを確認できない (advice 行 {ar['n']}、policy.rl_loaded の記録なし {ar['rl_loaded_missing']}、"
                  f"実行状態の読み込みの欄 {[(k, xs) for k, xs in rt.items() if k.endswith('loaded')]})")
     return {"identity": ident, "runtime": rt, "version_id": list(dict.fromkeys(v["version_id"] for v in vers if v.get("version_id"))),
-            "n_version_rows": len(vers), "format": formats, "advice_runtime": ar, "runtime_ok": ok, "runtime_basis": basis}
+            "n_version_rows": len(vers), "format": formats, "advice_runtime": ar, "runtime_ok": ok, "runtime_basis": basis,
+            "identity_problems": problems}
 
 
 def group_consistency(log_infos: list, exclude: Iterable = (),
@@ -849,6 +865,10 @@ def group_consistency(log_infos: list, exclude: Iterable = (),
         if missing:
             ok = False
             notes.append(f"{f} の記録なし {len(missing)} 本 ({', '.join(missing[:3])}{' ほか' if len(missing) > 3 else ''})")
+    for li in log_infos:
+        for why in li["ident"].get("identity_problems") or []:
+            ok = False
+            notes.append(f"版を識別できない: {li['name']} ({why})")
     fields = list(dict.fromkeys(k for li in log_infos for k in li["ident"]["identity"] if not _field_match(k, exclude)))
     for f in fields:
         vals: list = []
