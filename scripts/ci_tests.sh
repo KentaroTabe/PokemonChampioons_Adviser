@@ -177,6 +177,7 @@ TESTS=(
   test_first_pick_mega
   test_replay_path
   test_residuals_1023
+  test_inputs_pin
 )
 
 fail=0

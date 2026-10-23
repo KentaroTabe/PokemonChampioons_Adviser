@@ -72,6 +72,9 @@ from champions_agent import config as _CFG  # noqa: E402 (--models-dir の環境
 from champions_agent.config import SIM_INPUTS_VERSION, TRAINING_BATTLE_FORMAT  # noqa: E402
 from champions_agent.env.sim_accept import summary_from_stats as sim_accept_summary  # noqa: E402
 
+# 起動時に照合した外部データの版 (advisor.data_pin.check_runtime。main が設定し、結果 JSON の inputs_pin に残す)
+_INPUTS_PIN: Optional[dict] = None
+
 
 def _constant_teambuilder(text: str):
     """固定チームテキストを毎戦出す Teambuilder (text_for_battle で型登録に使う。どの対戦も同じ本文)"""
@@ -560,6 +563,8 @@ async def run(n_battles: int, opp_seed: int | None, json_out: str | None,
             # 2026-10-15 M3a: 状態変換の版 (修正前の結果を混ぜないための印) と受入監査 (第一候補の合法性・未選出の候補・説明できない
             # 飛ばし・ランダム退避・選出不明の件数。champions_agent.env.sim_accept)
             "inputs_version": SIM_INPUTS_VERSION,
+            # 2026-10-23: 助言の外部データの版の明示 (advisor.data_pin.check_runtime の起動時の照合。明示が無ければ None)
+            "inputs_pin": _INPUTS_PIN,
             "accept": sim_accept_summary(stats),
             # 2026-10-16 E-holdout-1: さいきのいのり の蘇生先を固定規則で選んだ決定数 (助言の決定 decide には数えない。
             # stats の revive_select / accept:revive_select と同じ値)
@@ -642,6 +647,17 @@ def main() -> None:
     if args.print_models_dir:
         print(json.dumps(models_dir_report(), ensure_ascii=False))
         return
+    # 2026-10-23 (レビュー 2026-10-19 §2): 環境変数で版を明示していれば (tools.usefulness_p1 の子プロセス)、対戦の前に使用率の
+    # snapshot とバンクの sha16 を照合する。合わなければ止める (最新へ黙って退避しない)
+    global _INPUTS_PIN
+    from advisor.data_pin import InputsPinError, check_runtime
+    try:
+        _INPUTS_PIN = check_runtime()
+    except InputsPinError as e:
+        raise SystemExit(f"入力の版の照合に失敗: {e}")
+    if _INPUTS_PIN is not None:
+        print(f"[inputs] 使用率 {_INPUTS_PIN['usage_db']} snapshot {_INPUTS_PIN['usage_snapshot']} / "
+              f"バンク {_INPUTS_PIN['bank_path']} sha16 {_INPUTS_PIN['bank_sha16']}")
     asyncio.run(run(args.battles, args.opp_seed, args.json, args.skip_random,
                     args.belief_k, args.sensor_q, args.workers, args.no_rl_blend,
                     search_blend=args.search_blend, team_file=args.team_file,

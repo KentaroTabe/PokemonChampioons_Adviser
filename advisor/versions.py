@@ -235,6 +235,15 @@ def usage_snapshot_info() -> tuple:
         p = getattr(_sets, "_predictor", None)
         if p is not None and getattr(p, "_snapshot_id", None) is not None:
             return p._snapshot_id, "predictor"
+        # 版を明示しているとき (advisor.data_pin、2026-10-23): その DB・snapshot (無ければ記録しない = (None, None))
+        from advisor.data_pin import connect_usage, resolve_snapshot, usage_source
+        src = usage_source()
+        if src["pinned"]:
+            conn = connect_usage(src["db"], True)
+            try:
+                return resolve_snapshot(conn, src["snapshot_id"], True), "pinned"
+            finally:
+                conn.close()
         db = Path(getattr(p, "db_path", None) or _sets.DB_PATH)
         if not db.exists():
             return None, None

@@ -31,6 +31,9 @@ n が最終対戦数に満たない、または条件表が incomplete: true な
 「封印 holdout 層 (N 構築) での 1 回の確認、search の結果とは合算しない」と出し、fold の表示を出さない。事後の検査として、
 条件表の分割ファイルを読み直し (sha16 が条件表と一致すること)、battles.jsonl の相手 id が全件 holdout 層に属することを確かめる。
 満たさなければ比較条件の不成立 (invalid)。判定は §0.5 のまま (k は条件表の比較の本数)。
+入力の実体の固定 (2026-10-23、usefulness_p1 の条件表の inputs_pin): ピンの選出モデル一組・使用率の bundle・バンクの写しの sha256 が
+manifest と一致し、各条件の結果 JSON の inputs_pin (子プロセスが起動時に照合した snapshot・バンクの sha16) がピンと同じことを
+事後に確かめる (inputs_pin_post_check)。欠落・不一致は比較条件の不成立 (invalid)。inputs_pin の無い条件表は注記だけ。
 
 純粋な部分 (corrected_z / decide / compare / wilson / align / build_verdict / render) は tests/test_usefulness_verdict.py で確かめる。
 """
@@ -518,6 +521,13 @@ def render(verdict: dict, conditions: Optional[dict] = None) -> str:
         n_out = sum(sum(x.values()) for x in (h.get("outside") or {}).values())
         lines += ["", f"相手 id の層の検査 (封印 holdout 層 {h.get('n_holdout_ids', '-')} 構築): 検査 {h.get('checked', 0)} 件 / "
                       f"層の外 {n_out} 件 / 分割ファイルの sha16 {h.get('split_sha16_now') or '-'} (条件表 {h.get('split_sha16') or '-'})"]
+    if v.get("inputs_pin") is not None:
+        ips = v["inputs_pin"]
+        ips = ips if "pin_dir" not in ips else {"": ips}
+        for k, s in ips.items():
+            lines += ["", f"入力の実体の固定{(' (' + k + ')') if k else ''}: 選出モデル {s.get('selection_sha16') or '-'} / "
+                          f"使用率 snapshot {s.get('usage_snapshot')} (bundle {s.get('bundle_sha16') or '-'}) / "
+                          f"バンク {s.get('bank_sha16') or '-'} / 照合 {'OK' if not s.get('reasons') else 'NG ' + str(len(s['reasons'])) + ' 件'}"]
     if v["notes"]:
         lines += ["", "### 注記", ""] + [f"- {x}" for x in v["notes"]]
     return "\n".join(lines) + "\n"
@@ -754,6 +764,33 @@ def holdout_post_check(conditions: dict, opp_ids_by_cond: Optional[dict], conds:
     return reasons, summary
 
 
+INPUTS_PIN_MISSING_NOTE = ("条件表に入力の実体の固定 (inputs_pin) が無い (2026-10-23 より前の条件表): 選出モデルの実体・使用率の "
+                           "snapshot・バンクは sha16 の記録だけで、ピンからの復元は確かめていない")
+
+
+def inputs_pin_post_check(conditions: dict, out_dir: Path, conds: Sequence[str]) -> tuple:
+    """入力の実体の固定の事後の検査 (副作用: ピンと結果 JSON の読み取り。2026-10-23、tools.inputs_pin)。条件表に inputs_pin
+    (ピン作成後の manifest) があれば、ピンのファイルの sha256 が manifest と一致すること (verify_pin) と、各条件の結果 JSON の
+    inputs_pin (子プロセスが起動時に照合した版) がピンと同じことを確かめる。欠落・sha 不一致は比較条件の不成立 (採否を出さない。
+    最新のデータで代わりに確かめない)。結果 JSON の無い条件 (時間上限で止めた等) は子プロセスの版を確かめない (要約に残す)。
+    戻り値 (成り立たない理由の list, 要約 or None (条件表に inputs_pin が無い))"""
+    from tools import inputs_pin as IP
+    rec = (conditions or {}).get("inputs_pin")
+    if not isinstance(rec, dict) or rec.get("planned"):
+        return [], None
+    pin = rec.get("pin_dir")
+    reasons = IP.verify_pin(Path(pin), rec) if pin else ["条件表の inputs_pin にピンの dir が無い"]
+    docs = {c: _read_json(Path(out_dir) / f"{cond_file(c)}.json") for c in conds}
+    got = {c: d.get("inputs_pin") for c, d in docs.items() if d is not None}
+    child_reasons, missing = IP.child_inputs_reasons(rec, got)
+    reasons = list(reasons) + child_reasons + [f"{c}: 結果 JSON に子プロセスの入力の版 (inputs_pin) の記録が無い" for c in missing]
+    summary = {"pin_dir": pin, "selection_sha16": (rec.get("selection_model") or {}).get("sha16"),
+               "usage_snapshot": (rec.get("usage_bundle") or {}).get("snapshot_id"),
+               "bundle_sha16": (rec.get("usage_bundle") or {}).get("sha16"), "bank_sha16": (rec.get("real_bank") or {}).get("sha16"),
+               "unchecked_conditions": [c for c, d in docs.items() if d is None], "reasons": list(reasons)}
+    return reasons, summary
+
+
 def load_part(out_dir: Path) -> dict:
     """1 part の出力 dir → merge_parts の入力 (採点方式の比較の条件で読む)"""
     cpath = out_dir / "conditions.json"
@@ -785,13 +822,25 @@ def run_merged(out_dirs: Sequence[Path], merged_out: Path) -> dict:
                 for p in parts for c in conds} if acc_req else None
     # 封印 holdout 層 (2026-10-15): 相手 id が全件 holdout 層に属することを事後にも確かめる
     ho_reasons, ho_summary = holdout_post_check(conditions, m["opp_ids"], conds) if is_holdout(conditions) else ([], None)
+    # 入力の実体の固定 (2026-10-23): part ごとのピン (part ごとに別のピン) と子プロセスの版
+    pin_reasons, pin_summaries = [], {}
+    for p in parts:
+        r, s = inputs_pin_post_check(p["conditions"], Path(p["dir"]), conds)
+        k = (p["conditions"].get("part") or {}).get("k")
+        pin_reasons += [f"part {k}: {x}" for x in r]
+        if s is not None:
+            pin_summaries[f"part {k}"] = s
     v = build_verdict(conditions, m["outcomes"], tuple(conditions.get("weights") or P1_WEIGHTS),
                       float(conditions.get("baseline_weight", P1_BASELINE_WEIGHT)), final_battles, mde, alpha, m["sources"],
                       m["opp_ids"], m["elapsed"], baseline_cond=base_c, compare_conds=other_c, scoring_stats=sstats,
-                      own_records_by_cond=own_recs, extra_invalid=list(m["invalid"]) + ho_reasons,
+                      own_records_by_cond=own_recs, extra_invalid=list(m["invalid"]) + ho_reasons + pin_reasons,
                       accept_records_by_cond=m["records"] if acc_req else None, inputs_versions=versions)
     if ho_summary is not None:
         v["holdout"] = ho_summary
+    if pin_summaries:
+        v["inputs_pin"] = pin_summaries
+    if len(pin_summaries) < len(parts):
+        v["notes"].append(INPUTS_PIN_MISSING_NOTE)
     v["notes"] = list(m["notes"]) + list(v["notes"])
     if not acc_req:
         v["notes"].append(ACCEPT_MISSING_NOTE)
@@ -847,11 +896,18 @@ def run(out_dir: Path) -> dict:
     if is_holdout(conditions):
         conds_all = ([base_c] + other_c) if scoring else [cond_name(w) for w in weights]
         ho_reasons, ho_summary = holdout_post_check(conditions, opp_ids, conds_all)
+    # 入力の実体の固定 (2026-10-23): ピンのファイルと子プロセスの版
+    conds_all = ([base_c] + other_c) if scoring else [cond_name(w) for w in weights]
+    pin_reasons, pin_summary = inputs_pin_post_check(conditions, out_dir, conds_all)
     v = build_verdict(conditions, outcomes, weights, baseline, final_battles, mde, alpha, sources, opp_ids, elapsed,
                       baseline_cond=base_c, compare_conds=other_c, scoring_stats=sstats, own_records_by_cond=own_recs,
-                      accept_records_by_cond=acc_recs, inputs_versions=versions, extra_invalid=ho_reasons)
+                      accept_records_by_cond=acc_recs, inputs_versions=versions, extra_invalid=ho_reasons + pin_reasons)
     if ho_summary is not None:
         v["holdout"] = ho_summary
+    if pin_summary is not None:
+        v["inputs_pin"] = pin_summary
+    else:
+        v["notes"].append(INPUTS_PIN_MISSING_NOTE)
     if acc_recs is None:
         v["notes"].append(ACCEPT_MISSING_NOTE)
     if scoring and own_recs is None:

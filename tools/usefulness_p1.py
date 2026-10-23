@@ -59,6 +59,14 @@
     (同じ seed・同じ分割数・違う k) の行だけで、同じ 1 回の確認の続きとして許す。
     本番の起動時 (検査を通った後・子プロセスの起動前) に 1 行追記する: {sealed_id, candidate_key, run_id = 出力 dir 名, at, purpose,
     part, seed, kind}。dry-run では追記しない。
+2026-10-23 レビュー (2026-10-19 §2、入力を記録だけでなく実行時にも固定する。tools/inputs_pin.py):
+  - ピンに選出モデルの実体 (--selection-model の .pt) と同じ dir の埋め込み・meta を一組で複製し、使用率 DB から起動時の最新 snapshot の
+    予測に要る行を usage_bundle.sqlite3 に書き出し、実戦バンクの写し bank.json を置く (inputs_manifest.json に出所と sha256)。
+    子プロセスの --selection-model はピンの .pt、環境変数 ADVICE_USAGE_DB / ADVICE_USAGE_SNAPSHOT / ADVICE_REAL_BANK /
+    ADVICE_REAL_BANK_SHA16 でピンの bundle・snapshot id・バンク・sha16 を渡す (子プロセスは起動時に照合し、合わなければ止まる)。
+  - 条件表の inputs_pin に manifest (dry-run は元のファイルの見込み planned)。起動前検査: ピンのファイルの sha256 が manifest と一致、
+    選出の 3 つが同じ dir から、条件表の選出モデルの sha16 とピンの .pt が一致、全コマンドの --selection-model がピンの .pt。
+    合わなければ起動しない。--pin-dir で inputs_manifest.json の無い古いピンを渡しても起動しない (新しいピンを作る)。
 開始時刻の注意 (ツールでは強制しない): launchd の track-progress (毎日 21:50、17〜34 分) の後に始め、06:30 の usage-update の前に終える。
 
 純粋な部分 (条件表・コマンド・環境・進捗・終了時の更新) は tests/test_usefulness_p1.py で確かめる。
@@ -82,7 +90,9 @@ from champions_agent.config import (
     P1_SCORING_BASELINE, P1_SCORING_MODES, P1_SCORING_POOL_FILE, P1_SCORING_POOL_SHA16, P1_SCORING_START_MARGIN_SEC,
     P1_SCORING_TEAM_SHA16, P1_SCORING_TIME_LIMIT_SEC, P1_TEAM_DEFAULT,
     P1_TEAM_SHA16, P1_TEAM_SOURCES, P1_TERMINATE_GRACE_SEC, P1_TIME_LIMIT_SEC, P1_WEIGHTS, MY_TEAM_DISABLED_ENV, SHOWDOWN_PORT,
-    SIM_ACCEPT_LIMITS, SIM_INPUTS_VERSION, TRAINING_BATTLE_FORMAT, TRANSITION_SENSITIVITY_ENV)
+    SIM_ACCEPT_LIMITS, SIM_INPUTS_VERSION, TRAINING_BATTLE_FORMAT, TRANSITION_SENSITIVITY_ENV, REAL_BANK_ENV, REAL_BANK_SHA_ENV,
+    USAGE_DB_ENV, USAGE_SNAPSHOT_ENV)
+from tools import inputs_pin as IP
 from tools.usefulness_verdict import HOLDOUT_TIER, TEAM_LABELS, cond_file, cond_name, corrected_z, holdout_banner
 
 REPO = Path(__file__).resolve().parent.parent
@@ -93,6 +103,7 @@ HOLDOUT_USAGE_KIND = "usefulness_p1"
 # 経路に効く環境変数 (設定されていれば条件表に残す)
 PATH_ENV_VARS = ("RL_ADVICE_STYLE", "RL_POLICY_SOURCE", "RL_BLEND_WEIGHT", "SELECTION_FEATURES", "SHOWDOWN_PORT",
                  "ADVICE_SCORING_MODE")
+INPUTS_ENV_VARS = (USAGE_DB_ENV, USAGE_SNAPSHOT_ENV, REAL_BANK_ENV, REAL_BANK_SHA_ENV)
 SCHEDULE_NOTE = "launchd の track-progress (毎日 21:50、17〜34 分) が終わってから始め、06:30 の usage-update の前に終える"
 PIN_PLANNED = "(起動時に scripts/pin_models.sh で作成)"
 CKPT_DIR = REPO / "champions_agent" / "train" / "checkpoints"
@@ -273,6 +284,48 @@ def command_opponent_spec(cmd: Sequence[str]) -> dict:
             "offset": int(val("--opp-offset") or 0), "battles": int(val("--battles") or 0)}
 
 
+def command_selection_model(cmd: Sequence[str]) -> Optional[str]:
+    """コマンドの --selection-model の値 (純粋)"""
+    args = list(cmd)
+    return args[args.index("--selection-model") + 1] if "--selection-model" in args and \
+        args.index("--selection-model") + 1 < len(args) else None
+
+
+def pin_model_path(pin: str) -> str:
+    """子プロセスに渡す選出モデル = ピンの .pt (純粋。ピン作成前は PIN_PLANNED の下)"""
+    return str(Path(pin) / IP.PIN_MODEL_FILE)
+
+
+def inputs_pin_errors(cond: dict) -> list:
+    """入力の実体の固定の起動前検査 (純粋。2026-10-23)。条件表に inputs_pin (dict) が無ければ検査しない (それより前の条件表)。
+    planned (ピン作成前): 元の選出モデル・使用率 DB の snapshot が読めること。
+    ピン作成後: collect_facts が照合した理由 (check_reasons) が無いこと、条件表の選出モデルの sha16 とピンの .pt が一致すること、
+    全コマンドの --selection-model がピンの .pt を指すこと"""
+    rec = cond.get("inputs_pin")
+    if not isinstance(rec, dict):
+        return []
+    errs = []
+    if rec.get("planned"):
+        if not rec.get("selection_model"):
+            errs.append("選出モデルの実体が読めない (ピンに複製できない)")
+        if not rec.get("usage_bundle"):
+            errs.append("使用率 DB の snapshot が読めない (bundle を書き出せない)")
+        want = pin_model_path(PIN_PLANNED)
+    else:
+        for r in rec.get("check_reasons") or []:
+            errs.append(f"入力のピン: {r}")
+        pin_sha = (rec.get("selection_model") or {}).get("sha16")
+        sel_sha = (cond.get("selection_model") or {}).get("sha16")
+        if pin_sha and sel_sha and pin_sha != sel_sha:
+            errs.append(f"ピンの選出モデル {pin_sha} が指定の選出モデル {sel_sha} と違う")
+        want = pin_model_path(rec.get("pin_dir") or "")
+    for c, cmd in (cond.get("commands") or {}).items():
+        got = command_selection_model(cmd)
+        if got != want:
+            errs.append(f"{c} の --selection-model {got} がピンの選出モデル {want} でない")
+    return errs
+
+
 def planned_opponent_ids(doc: dict, spec: dict) -> list:
     """コマンドの相手列の指定 (command_opponent_spec) → check_advisor_player が作るのと同じ相手列 (純粋)。
     check_advisor_player は不合法な構築を飛ばす余裕を持たせて 2 × (offset + n) + 層の件数 の長さの列を作る (全件を返す)"""
@@ -391,6 +444,10 @@ def env_record(env: dict) -> dict:
         rec[MY_TEAM_DISABLED_ENV] = env.get(MY_TEAM_DISABLED_ENV)
     if env.get(TRANSITION_SENSITIVITY_ENV) is not None:
         rec[TRANSITION_SENSITIVITY_ENV] = env.get(TRANSITION_SENSITIVITY_ENV)
+    # 助言の外部データの版の明示 (2026-10-23、tools.inputs_pin.child_env)。立っているときだけ残す
+    for k in INPUTS_ENV_VARS:
+        if env.get(k) is not None:
+            rec[k] = env.get(k)
     return rec
 
 
@@ -505,6 +562,8 @@ def build_conditions(design: dict, facts: dict, battles: int, prelim: bool, seed
         "season_pin": f.get("season_pin"),
         "usage_db": f.get("usage_db"),
         "real_bank": f.get("real_bank"),
+        # 入力の実体の固定 (2026-10-23): ピンの選出モデル一組・使用率の bundle・バンクの写しの manifest (dry-run は見込み planned)
+        "inputs_pin": f.get("inputs_pin"),
         "opponents": opponents,
         "advisor": dict(f.get("advisor") or {}, pick_policy=P1_PICK_POLICY, belief_k=P1_BELIEF_K, skip_random=True),
         "env": env_record(env),
@@ -570,6 +629,8 @@ def preflight_errors(cond: dict, out_has_results: bool = False) -> list:
     rl = cond.get("rl_checkpoint") or {}
     if not rl.get("sha16"):
         errs.append(f"RL の checkpoint がピンに無い ({rl.get('pin_dir')})")
+    # 入力の実体の固定 (2026-10-23): 選出モデル一組・使用率の bundle・バンクの写しの照合
+    errs += inputs_pin_errors(cond)
     sd = cond.get("showdown") or {}
     # Showdown の版とルール (2026-10-09 M2d、レビュー 4): commit と使う mod を条件表に記録できたこと
     if not sd.get("commit"):
@@ -635,6 +696,12 @@ def preflight_warnings(cond: dict) -> list:
         warns.append("予備測定の結果を指定していない (--prelim-dir): 予備測定での自チームの対応の確認をしていない")
     if (cond.get("git") or {}).get("dirty_files"):
         warns.append(f"作業ツリーに未コミットの変更がある: {cond['git']['dirty_files']}")
+    ip = cond.get("inputs_pin")
+    if isinstance(ip, dict):
+        if not ip.get("real_bank"):
+            warns.append("実戦バンクが無い: バンクの写しをピンに置かない (子プロセスにバンクの版を渡さない)")
+        if not ip.get("selection_emb"):
+            warns.append("選出モデルと同じ dir に埋め込み (selection_model_emb.json) が無い: 選出は species_embedding.json に落ちる")
     return warns
 
 
@@ -999,6 +1066,18 @@ def collect_facts(team_text: Optional[str], selection_model: Path, split_file: P
     except Exception as e:
         facts["real_bank"] = None
         notes.append(f"real_bank: 読めない ({e!r})")
+    # 入力の実体の固定 (2026-10-23): ピン作成前 (dry-run) は元のファイルの見込み、作成後はピンの manifest とその照合
+    facts["inputs_pin"] = inputs_pin_facts(selection_model, pin_dir, notes)
+    ip = facts["inputs_pin"] or {}
+    facts["usage_db"]["pinned_snapshot_id"] = (ip.get("usage_bundle") or {}).get("snapshot_id")
+    if ip.get("real_bank") and facts.get("real_bank") is not None:
+        facts["real_bank"]["pinned_file"] = (str(Path(pin_dir) / ip["real_bank"]["file"]) if pin_dir is not None
+                                             else f"{PIN_PLANNED}/{IP.BANK_FILE}")
+        facts["real_bank"]["pinned_sha16"] = ip["real_bank"].get("sha16")
+    sm = ip.get("selection_model") or {}
+    facts["selection_model"]["pin_file"] = (str(Path(pin_dir) / IP.PIN_MODEL_FILE) if pin_dir is not None
+                                            else pin_model_path(PIN_PLANNED))
+    facts["selection_model"]["pin_sha16"] = sm.get("sha16") if not ip.get("planned") else None
     # 分割ファイル
     holdout = tier == HOLDOUT_TIER
     split = ({"sha16": _sha16(split_file), "sealed_id": None, "run_id": None, "n_teams_in_tier": None} if holdout else
@@ -1026,6 +1105,28 @@ def collect_facts(team_text: Optional[str], selection_model: Path, split_file: P
         notes.append(f"advisor: engine の値が読めない ({e!r})")
     facts["advisor"] = adv
     return facts
+
+
+def inputs_pin_facts(selection_model: Path, pin_dir: Optional[Path], notes: list) -> Optional[dict]:
+    """条件表の inputs_pin (副作用: 読み取り)。ピン作成前は tools.inputs_pin.planned_record (元の sha256 と bundle にする snapshot)、
+    作成後はピンの inputs_manifest.json と照合の理由 (check_reasons。無い・sha256 が違う・出所が揃わない)"""
+    try:
+        if pin_dir is None:
+            rec = IP.planned_record(selection_model)
+            notes.append("inputs_pin: dry-run のためピンは作っていない。値は元のファイルの見込み (起動時に複製・書き出す)")
+            return rec
+        rec = IP.read_manifest(pin_dir)
+        if rec is None:
+            return {"pin_dir": str(pin_dir), "planned": False, "selection_model": None, "usage_bundle": None, "real_bank": None,
+                    "check_reasons": [f"{Path(pin_dir) / IP.MANIFEST_FILE} が無い (入力の実体を固定していないピン。--pin-dir を外して"
+                                      "新しいピンを作る)"]}
+        rec = dict(rec, pin_dir=str(pin_dir), planned=False)
+        rec["check_reasons"] = IP.verify_pin(pin_dir, rec)
+        return rec
+    except Exception as e:
+        notes.append(f"inputs_pin: 取得に失敗 ({e!r})")
+        return {"pin_dir": str(pin_dir) if pin_dir else None, "planned": pin_dir is None, "selection_model": None,
+                "usage_bundle": None, "real_bank": None, "check_reasons": [f"取得に失敗 ({e!r})"]}
 
 
 def _listening(port: int) -> bool:
@@ -1144,15 +1245,20 @@ def copy_selection_aux(pin_dir: Path, src_dir: Path = None) -> list:
     return copied
 
 
-def make_pin() -> Path:
-    """scripts/pin_models.sh でピンを作り (最終行がピンの絶対パス)、選出モデルの埋め込みと meta を複製する"""
+def make_pin(selection_model: Optional[Path] = None) -> Path:
+    """scripts/pin_models.sh でピンを作り (最終行がピンの絶対パス)、選出モデルの実体と同じ dir の埋め込み・meta を一組で複製し、
+    使用率の bundle とバンクの写しを置く (tools.inputs_pin.make_inputs_pin、2026-10-23。以前は checkpoints の埋め込みと meta だけを
+    copy_selection_aux で複製し、.pt は配備先を読んでいた)"""
     r = subprocess.run(["bash", str(REPO / "scripts" / "pin_models.sh")], capture_output=True, text=True, cwd=str(REPO), timeout=600)
     if r.returncode != 0:
         raise SystemExit(f"ピンの作成に失敗: {r.stderr.strip()}")
     pin = Path(r.stdout.strip().splitlines()[-1])
-    copied = copy_selection_aux(pin)
-    if SELECTION_EMB_FILE not in copied:
-        print(f"[p1] 注意: {CKPT_DIR / SELECTION_EMB_FILE} が無く、ピンへ複製できなかった")
+    man = IP.make_inputs_pin(pin, Path(selection_model) if selection_model is not None else _abs(P1_SELECTION_MODEL))
+    if not man.get("selection_emb"):
+        print(f"[p1] 注意: 選出モデルと同じ dir に {SELECTION_EMB_FILE} が無く、ピンへ複製できなかった")
+    ub = man.get("usage_bundle") or {}
+    print(f"[p1] 入力のピン: 選出モデル {(man.get('selection_model') or {}).get('sha16')} / 使用率 snapshot {ub.get('snapshot_id')} "
+          f"(bundle {ub.get('size_bytes')} bytes) / バンク {(man.get('real_bank') or {}).get('sha16')}")
     return pin
 
 
@@ -1324,18 +1430,21 @@ def main(argv: Optional[list] = None) -> int:
         facts = collect_facts(team_text, selection_model, split_file, fold, pin_now, notes_now,
                               team_source=team_source, seed=seed, own_pool=own_pool, showdown_dir=showdown_dir,
                               prelim_dir=prelim_dir, tier=tier)
+        # 子プロセスの選出モデルはピンの .pt (2026-10-23。配備先を読まない)
+        sel_cmd = Path(pin_model_path(pin_s))
         if design.get("factor") == "scoring":
             cmds = {c: build_command(design["cond_weight"][c], out_dir, team_file, split_file, fold, seed, battles,
-                                     selection_model, pin_s, cond=c, own_pool=own_pool, offset=offset, tier=tier)
+                                     sel_cmd, pin_s, cond=c, own_pool=own_pool, offset=offset, tier=tier)
                     for c in design["conditions"]}
         else:
             cmds = {cond_name(w): build_command(w, out_dir, team_file, split_file, fold, seed, battles,
-                                                selection_model, pin_s, own_pool=own_pool, tier=tier) for w in design["weights"]}
+                                                sel_cmd, pin_s, own_pool=own_pool, tier=tier) for w in design["weights"]}
         if holdout:
             # 封印 holdout 層 (2026-10-15): 実際のコマンドから作る相手列の層の検査と開封履歴の確認
             facts = dict(facts, holdout=holdout_facts(cmds, split_file, design, (facts.get("git") or {}).get("commit"),
                                                       usage_log, part_rec, seed))
         env = child_environment(pin_s, team_source=team_source, sensitivity_off=sens_off)
+        env.update(IP.child_env(facts.get("inputs_pin"), pin_s))
         return build_conditions(design, facts, battles, args.prelim, seed, fold, str(split_file),
                                 time_limit, str(out_dir), cmds, env, started_at, notes_now, team_source=team_source,
                                 offset=offset, part=part_rec, tier=tier)
@@ -1367,7 +1476,7 @@ def main(argv: Optional[list] = None) -> int:
         print("[p1] 起動しない")
         return 2
     if pin_dir is None:
-        pin_dir = make_pin()
+        pin_dir = make_pin(selection_model)
         print(f"[p1] ピン {pin_dir}")
     out_dir.mkdir(parents=True, exist_ok=True)
     if team_file is not None:
@@ -1400,6 +1509,7 @@ def main(argv: Optional[list] = None) -> int:
     print(f"[p1] 条件表 {out_dir / 'conditions.json'} / {battles} 戦 × {len(cond['commands'])} 条件 / 開始 {started_at}")
     print(f"[p1] 注意: {SCHEDULE_NOTE}")
     env = child_environment(str(pin_dir), team_source=team_source, sensitivity_off=sens_off)
+    env.update(IP.child_env(cond.get("inputs_pin"), pin_dir))
     final = launch(cond, out_dir, env, battles, time_limit)
     if args.prelim:
         # 採点方式の比較 (2026-10-09 M2e): 全体の上限 (600 戦) と余裕から開始可否を求める。RL の比較は従来の秒/戦の基準
