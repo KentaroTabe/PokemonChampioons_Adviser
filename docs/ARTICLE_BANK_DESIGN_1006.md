@@ -25,6 +25,12 @@
    (最初はランキングページ 1 件) に限定。並列取得・巡回をしない、再取得は必要な更新時だけ、保存は構造化した結果と出典だけ、
    編集部の推奨として当初は弱点検査と選出仮説に使う (プールには入れない))。方針は URL の許可リスト (`allowed_urls`) と用途の制限
    (`purposes`) を持ち、実装 (`host_allowed`) が守る。構造化データの LLM 送信 (`send_llm`) は GameWith でも未判断 (unknown)。
+   追補 (2026-10-30 開発者承認): ブログの記事の取得のために項目を足した (はてなブログ系 5 つ・note.com は条件つき allow、pokesol.app は
+   deny、seesaa.net / fc2.net / ameblo.jp は unknown。根拠は各項目の note)。サブドメインが記事ごとに違うホスト (はてなブログ等) は
+   `"match": "suffix"` の 1 項目で照合する (完全一致を優先し、無ければ接尾辞の最長一致: `host_policy_key`)。allow の項目は URL の
+   一覧の代わりに `"allowed_from": "manifest"` を持ち、`logs/articles/manifest.json` の selected な記事 URL (正規化して比較) だけを
+   取得対象にする (`fetch_block_reason`。`allowed_urls` があればそちらが優先、知らない値の `allowed_from` は通さない)。
+   10/30 の方針と manifest で取得できるのは selected 286 URL のうち 161 (note 59・はてなブログ系 102)。pokesol 118 は deny。
 3. 未解決の名前: 種別と表記だけを LLM に渡して対応を提案させ、別名辞書 (記事専用、OCR 用の表とは分離) に登録する (§3.8)。
    往復一致は必須の検査だが自動確定の条件ではない。LLM だけが根拠の対応は candidate で、人が別名の対応を一度確認すれば次回から辞書で解決。
 4. 合成記事は解析器の受入・回帰テストにだけ使う。実在の記事本文はコミットしない。合成の記録はバンクの保存・読み出しの両方で既定で拒否。
@@ -371,11 +377,23 @@ case: {case_id, record_kind: team|single_set (§3.7),
 - 方針 (`host_policy.json`) で fetch が allow、かつ allowed_urls にある URL だけ取得する (`plan_urls`: 方針に通らない URL と、以前取得した URL
   (`state.jsonl` か `access.jsonl` に url_hash がある。dry-run のアクセスも数える。`--refetch` のときだけ取り直す) は skip)。与えられた URL だけで、
   ページ内のリンクを辿らない。
+- 方針の項目の照合と URL の制限 (2026-10-30 開発者承認、§0 の 2 の追補): 項目はホスト名の完全一致を優先し、無ければ `"match": "suffix"` の
+  項目のうちホストがその鍵で終わる (`host == 鍵` か `"." + 鍵` で終わる) 最も長い鍵 (`article_bank.host_policy_key`)。fetch の可否は
+  `fetch_block_reason` (通らない理由: no_policy / deny / unknown / no_url / not_in_allowed_urls / not_in_manifest / unknown_allowed_from)。
+  `allowed_urls` が無く `"allowed_from": "manifest"` の項目は、manifest (`--manifest`、既定 `logs/articles/manifest.json`。関数に渡さなければ
+  既定のファイルを 1 回読んでキャッシュ) の selected な entry の URL (`articles_ingest.normalize_url` で正規化) のときだけ取得する。
+  `min_interval_s` は照合した項目の値を使い、待ち時間はホスト群 (照合した項目の鍵) ごと: はてなの別サブドメインどうしでも
+  空ける (同じプラットフォームへの連続アクセスを避ける。2026-10-30 判断)。項目の無いホストはホスト名ごと。
+- 取得履歴の行と候補に、取得の時点の方針の版を残す (2026-10-30、欄の追加のみ): `policy_sha16` (方針の内容を sort_keys で直列化した JSON の
+  sha256 の先頭 16 桁。`article_bank.policy_version`)、`policy_key` (照合した項目)、`policy_decided_at` (その項目の decided_at)。
+  それより前の行には無い。
+- `--dry-run` は、与えた URL をホスト群 (照合した項目、無ければホスト名) ごとに、方針で取得できる数とできない数・理由に分けた表も出す
+  (`articles_fetch.policy_url_table` / `policy_table_lines`。ネットワークに出ない・取得履歴を見ない純粋な集計で、単体で呼べる)。
 - 取得履歴 `logs/articles/access.jsonl` (日時・URL・ハッシュ・回数・mode dry_run / save。本文なし) と、構造化した候補 `logs/articles/candidates/`
   (記録・state 行・件数。本文なし) は dry-run でも書く。照合のやり直しは候補で行い、保存は `--from-candidates <file>` で再取得なしに行う
   (conflict / failed の記録は入れない)。解析器を直した後の再検査だけは再取得が要る (本文を残さないため)。
   履歴の仕組みができる前の 10/6 のアクセス 8 回は mode manual_note / count 8 の 1 行で記録した。
-- 1 本ずつ (並列なし)。同じホストへの要求の間は方針の `min_interval_s` (無ければ BUILD_ARTICLE_FETCH_MIN_INTERVAL_S) 以上空ける。
+- 1 本ずつ (並列なし)。同じホスト群 (照合した方針の項目。無ければホスト名) への要求の間は方針の `min_interval_s` (無ければ BUILD_ARTICLE_FETCH_MIN_INTERVAL_S) 以上空ける。
   User-Agent は `articles_ingest.USER_AGENT`。文字コードは `decode_html` (ヘッダ → meta → UTF-8)。
 - ページ → `units_for` (ホストの変換層) → `process_batch` (LLM なし) → バンクに保存 (`--base-version` で既存の版に併合する。同じ構築の
   同一内容は足さず、内容が変わった構築は旧版と結ぶ: §5.1)、state 行、サイト固有 id の観測、別名辞書 (確定・候補があれば)。

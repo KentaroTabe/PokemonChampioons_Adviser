@@ -13,7 +13,10 @@
 - set_regulation: 規制を更新し、根拠 (regulation_basis) と履歴 (regulation_history) を残す
 - assert_no_prose: 記録や LLM の入力に かな・漢字を含む文字列が無いこと (本文・引用の混入の門)
 - llm_payload: LLM に渡す部分集合 (個体の型、主張、選出規則、未確定項目の分類と参照 id)
-- host_allowed: ホストごとの可否 (fetch / send_llm が allow のときだけ通す。unknown は進めない)
+- host_allowed: ホストごとの可否 (fetch / send_llm が allow のときだけ通す。unknown は進めない)。項目の照合は完全一致を優先し、
+  無ければ match = suffix の項目の最長の接尾辞 (host_policy_key)。fetch は allowed_urls、無ければ allowed_from = manifest
+  (manifest.json の selected な記事 URL だけ) で URL も見る (fetch_block_reason が通らない理由を返す。2026-10-30 開発者承認)
+- policy_version / policy_stamp: 方針の版 (sha16) と照合した項目・decided_at (取得履歴・候補に記録する)
 - lineage_key / merge_cases / extend_bank (2026-10-06 ユーザー判断、設計書 §5.1): 同じ記事 (url_hash) の同じ構築 (team_code、無ければ
   unit_index) を 1 つの系列とし、同じ系列の同一内容 (case_id が同じ) は重複して入れず、内容の更新は新しい版を足して
   supersedes (新版) / superseded_by (旧版) で旧版と結ぶ (旧版は消さない)。手入力は型の内容を系列の鍵にする。conflict / failed は入れない
@@ -53,6 +56,7 @@ LINK_KEYS = ("supersedes", "superseded_by")   # 系列の版の関係 (バンク
 MERGE_OUTCOMES = ("added", "updated", "duplicate", "reverted", "rejected")
 REPO = Path(__file__).resolve().parent.parent.parent
 DEFAULT_BANK_DIR = REPO / "logs" / "articles" / "bank"
+DEFAULT_MANIFEST_PATH = REPO / "logs" / "articles" / "manifest.json"   # 取得対象の一覧 (articles_ingest.DEFAULT_OUT と同じ)
 _PROSE_RE = re.compile(r"[ぁ-んァ-ヶ一-龥]")
 PAYLOAD_MEMBER_KEYS = ("id", "species_id", "base_species_id", "mega_stone", "item", "nature", "ability", "points", "ev252", "actual", "moves")
 SOURCE_AXES = (("publisher_kind", BUILD_ARTICLE_PUBLISHER_KINDS), ("usage_evidence", BUILD_ARTICLE_USAGE_EVIDENCE))
@@ -470,36 +474,122 @@ def llm_payload(record: dict) -> dict:
 POLICY_ACTIONS = ("fetch", "store", "send_llm")   # host_policy の allow / unknown / deny を持つ項目 (それ以外の purpose は用途の制限で見る)
 
 
-def host_policy_entry(policy: Optional[dict], host: Optional[str]) -> dict:
-    """host_policy.json の host の項目 (ホスト名は canonical_host で比較: 小文字、www. とポートを落とす)。無ければ空"""
+# fetch が通らない理由 (fetch_block_reason の戻り値。None = 通る)
+FETCH_BLOCK_REASONS = ("no_policy", "deny", "unknown", "no_url", "not_in_allowed_urls", "not_in_manifest", "unknown_allowed_from")
+_MANIFEST_URLS_CACHE: dict = {}          # manifest.json のパス → selected な記事 URL (正規化) の集合 (既定の manifest を 1 回だけ読む)
+
+
+def host_policy_key(policy: Optional[dict], host: Optional[str]) -> Optional[str]:
+    """host に当てはまる host_policy.json の項目の鍵 (ホスト名は canonical_host で比較: 小文字、www. とポートを落とす)。
+    完全一致を優先し、無ければ match = suffix の項目のうち host がその鍵で終わる (host == 鍵 か host が "." + 鍵 で終わる) 最も長い鍵
+    (2026-10-30 開発者承認: はてなブログ等のサブドメインを 1 項目で扱う)。値が dict でない項目 (_note 等) はホストではない。無ければ None"""
     from tools.team_build.article_parse import canonical_host
     key = canonical_host(host)
     if not key:
-        return {}
-    for h, entry in (policy or {}).items():
-        if isinstance(entry, dict) and canonical_host(h) == key:
-            return entry
-    return {}
+        return None
+    items = [(h, canonical_host(h)) for h, entry in (policy or {}).items() if isinstance(entry, dict)]
+    for h, ch in items:
+        if ch == key:
+            return h
+    best = None
+    for h, ch in items:
+        if ch and (policy[h].get("match") == "suffix") and key.endswith("." + ch):
+            if best is None or len(ch) > len(canonical_host(best)):
+                best = h
+    return best
 
 
-def host_allowed(policy: Optional[dict], host: Optional[str], purpose: str = "fetch", url: Optional[str] = None) -> bool:
-    """host_policy.json ({host: {"fetch" | "store" | "send_llm": allow|unknown|deny, "allowed_urls": [...], "purposes": [...]}}) の判定
-    (2026-10-06 ユーザー判断: ホスト全体を無条件に allow にせず、対象 URL と用途の制限も実装で守る)。
-    - fetch / store / send_llm: 値が allow のときだけ True (unknown は進めない)。fetch で allowed_urls があれば url が必須で、
-      正規化した URL (articles_ingest.normalize_url: 追跡クエリ・断片・末尾の / を落とす) が一覧のどれかと一致するときだけ True
+def host_policy_entry(policy: Optional[dict], host: Optional[str]) -> dict:
+    """host_policy.json の host の項目 (照合は host_policy_key: 完全一致を優先、無ければ match = suffix の最長一致)。無ければ空"""
+    k = host_policy_key(policy, host)
+    return policy[k] if k is not None else {}
+
+
+def load_manifest(path: Path = DEFAULT_MANIFEST_PATH) -> dict:
+    """取得対象の一覧 (articles_ingest の manifest.json)。無ければ entries が空の dict"""
+    p = Path(path)
+    if not p.exists():
+        return {"entries": []}
+    return json.loads(p.read_text(encoding="utf-8"))
+
+
+def manifest_selected_urls(manifest) -> frozenset:
+    """manifest (dict の entries か entry の列) のうち selected な entry の URL (articles_ingest.normalize_url で正規化) の集合。
+    集合 (set / frozenset) を渡したら、正規化済みの selected な URL の集合としてそのまま使う (同じ manifest で何度も照合するとき用)"""
+    from tools.team_build.articles_ingest import normalize_url
+    if isinstance(manifest, (set, frozenset)):
+        return frozenset(manifest)
+    entries = manifest.get("entries") if isinstance(manifest, dict) else manifest
+    return frozenset(normalize_url(e["url"]) for e in entries or [] if isinstance(e, dict) and e.get("selected") and e.get("url"))
+
+
+def _default_manifest_urls(path: Optional[Path] = None) -> frozenset:
+    """既定の manifest.json の selected な URL (パスごとに 1 回だけ読んでキャッシュする。無ければ空)"""
+    key = str(path or DEFAULT_MANIFEST_PATH)
+    if key not in _MANIFEST_URLS_CACHE:
+        _MANIFEST_URLS_CACHE[key] = manifest_selected_urls(load_manifest(Path(key)))
+    return _MANIFEST_URLS_CACHE[key]
+
+
+def fetch_block_reason(policy: Optional[dict], host: Optional[str], url: Optional[str] = None, manifest=None) -> Optional[str]:
+    """fetch が通らない理由 (FETCH_BLOCK_REASONS)、通るなら None (純粋。manifest を渡さなければ既定の manifest.json をキャッシュから読む)。
+    - 項目が無い: no_policy / fetch が deny: deny / allow 以外 (unknown・欠落): unknown
+    - allowed_urls があれば従来どおり: url が無ければ no_url、正規化した URL が一覧に無ければ not_in_allowed_urls
+    - allowed_urls が無く allowed_from = manifest: url が無ければ no_url、manifest の selected な entry の URL (正規化) に無ければ
+      not_in_manifest (2026-10-30 開発者承認)。allowed_from が知らない値なら通さない (unknown_allowed_from)
+    - どちらも無ければ通る (従来どおり)"""
+    entry = host_policy_entry(policy, host)
+    if not entry:
+        return "no_policy"
+    v = entry.get("fetch")
+    if v != "allow":
+        return "deny" if v == "deny" else "unknown"
+    from tools.team_build.articles_ingest import normalize_url
+    if entry.get("allowed_urls") is not None:
+        if not url:
+            return "no_url"
+        return None if normalize_url(url) in {normalize_url(u) for u in entry["allowed_urls"]} else "not_in_allowed_urls"
+    source = entry.get("allowed_from")
+    if source is None:
+        return None
+    if source != "manifest":
+        return "unknown_allowed_from"
+    if not url:
+        return "no_url"
+    urls = manifest_selected_urls(manifest) if manifest is not None else _default_manifest_urls()
+    return None if normalize_url(url) in urls else "not_in_manifest"
+
+
+def host_allowed(policy: Optional[dict], host: Optional[str], purpose: str = "fetch", url: Optional[str] = None, manifest=None) -> bool:
+    """host_policy.json ({host: {"fetch" | "store" | "send_llm": allow|unknown|deny, "allowed_urls": [...], "allowed_from": "manifest",
+    "match": "suffix", "purposes": [...]}}) の判定 (2026-10-06 ユーザー判断: ホスト全体を無条件に allow にせず、対象 URL と用途の制限も
+    実装で守る)。項目の照合は host_policy_key (完全一致を優先、無ければ match = suffix の最長一致。2026-10-30)。
+    - fetch: fetch_block_reason が None のときだけ True (allow で、allowed_urls があればその URL、無くて allowed_from = manifest なら
+      manifest の selected な記事 URL のときだけ。URL は articles_ingest.normalize_url で正規化して比較)。manifest を渡さなければ
+      既定の manifest.json を 1 回読んでキャッシュしたものを使う
+    - store / send_llm: 値が allow のときだけ True (unknown は進めない)
     - それ以外の purpose (pool / weakness / selection / parser_eval): purposes があればその中にあるときだけ True、無ければ True"""
+    if purpose == "fetch":
+        return fetch_block_reason(policy, host, url, manifest) is None
     entry = host_policy_entry(policy, host)
     if purpose in POLICY_ACTIONS:
-        if entry.get(purpose) != "allow":
-            return False
-        if purpose == "fetch" and entry.get("allowed_urls") is not None:
-            from tools.team_build.articles_ingest import normalize_url
-            if not url:
-                return False
-            return normalize_url(url) in {normalize_url(u) for u in entry["allowed_urls"]}
-        return True
+        return entry.get(purpose) == "allow"
     purposes = entry.get("purposes")
     return True if purposes is None else purpose in purposes
+
+
+def policy_version(policy: Optional[dict]) -> str:
+    """方針 (host_policy.json の内容) の版: sort_keys で直列化した JSON の sha256 の先頭 16 桁 (bank_version と同じ作り。
+    ファイルの整形・項目の順には依存しない)"""
+    return hashlib.sha256(json.dumps(policy or {}, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
+def policy_stamp(policy: Optional[dict], host: Optional[str], version: Optional[str] = None) -> dict:
+    """取得履歴・候補に残す方針の版: {"policy_sha16", "policy_key" (照合した項目の鍵。無ければ None), "policy_decided_at" (その項目の
+    decided_at。無ければ None)}。version を渡せば sha16 の計算を省く"""
+    k = host_policy_key(policy, host)
+    return {"policy_sha16": version or policy_version(policy), "policy_key": k,
+            "policy_decided_at": (policy[k].get("decided_at") if k is not None else None)}
 
 
 def bank_version(cases: list) -> str:
