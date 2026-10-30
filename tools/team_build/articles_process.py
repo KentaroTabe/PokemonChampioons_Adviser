@@ -95,11 +95,12 @@ def _parse(unit: dict, inf: dict, dic: ArticleDictionary) -> dict:
 
 def process_batch(units: list, dic: Optional[ArticleDictionary] = None, aliases: Optional[dict] = None, site_store=None,
                   llm_resolver: Optional[Callable[[dict], dict]] = None, limits: Optional[dict] = None, policy: Optional[dict] = None,
-                  today: Optional[str] = None) -> dict:
+                  today: Optional[str] = None, manifest: Optional[dict] = None) -> dict:
     """unit の列 → 記録・別名の候補・処理状態 (本文を含まない)。手順は module の docstring。
     dic: 辞書 (別名は aliases で差し替える)。aliases: 別名辞書のデータ (article_aliases.load_aliases の形、None = 空)。
     site_store: SiteIdStore かその状態の dict (None = 空)。policy: host_policy ({host: {"fetch", "send_llm"}}。None = どこも許可しない)。
-    llm_resolver: 名前の対応を返す関数 (article_aliases.llm_resolver。None = LLM を使わない)"""
+    llm_resolver: 名前の対応を返す関数 (article_aliases.llm_resolver。None = LLM を使わない)。
+    manifest: 方針の allowed_from = manifest の照合に使う取得対象の一覧 (None = 既定の manifest.json。article_bank.host_allowed)"""
     lim = batch_limits(limits)
     today = today or datetime.date.today().isoformat()
     base_dic = dic or default_dictionary()
@@ -116,7 +117,7 @@ def process_batch(units: list, dic: Optional[ArticleDictionary] = None, aliases:
         idxs = [i for i, inf in enumerate(info) if inf["page"] == page]
         allowed = []
         for i in idxs:
-            if host_allowed(policy, info[i]["host"], "fetch", url=info[i]["url"]):      # allowed_urls があれば URL も見る
+            if host_allowed(policy, info[i]["host"], "fetch", url=info[i]["url"], manifest=manifest):   # allowed_urls / allowed_from があれば URL も見る
                 allowed.append(i)
             else:
                 rows[i] = _state_row(info[i], "host_not_allowed")
