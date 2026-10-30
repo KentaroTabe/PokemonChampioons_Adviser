@@ -1667,3 +1667,14 @@ TRANSFORM_EVENT_EVIDENCE = ("ability_opponent_imposter",)
 TRANSFORM_MOVE_EVIDENCE = True
 TRANSFORM_EVENT_WINDOW_SEC = 10.0
 TRANSFORM_COPY_PP = 5
+
+# 引き継ぎ評価 I-10 (ログ・版固定・再生・実験管理の記録契約。2026-10-31 段階 A、docs/INHERITANCE_EVALUATION_PLAN_20261031.md §5 I-10。
+# tools/inheritance_eval/record_contract.py)。出力先は既定で REPO からの相対 (本体の logs/ へは --out で渡す)
+INH_I10_TEST_ID = "I-10"
+INH_I10_RUN_ID = "phaseA_20261031"
+INH_I10_CODE_COMMIT = "768bae44"            # 試験したコードの版 (指示書の基準)
+INH_I10_TIME_BUDGET_SEC = 1500.0            # 担当あたりの計算時間の上限 (25 分)。超えた試験は unexecuted
+INH_I10_OUT_SUBDIR = "logs/inheritance_eval/phaseA_20261031/I-10"
+INH_I10_SNAPSHOT_MISSING = 999999           # 試験 7: 存在しない使用率の snapshot id
+INH_I10_SHA_MISSING = "0000000000000000"    # 試験 4・7: 存在しない sha16
+INH_I10_COMMIT_MISSING = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"   # 試験 7: 存在しない git commit
