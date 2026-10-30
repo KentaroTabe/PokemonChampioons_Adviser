@@ -1667,3 +1667,26 @@ TRANSFORM_EVENT_EVIDENCE = ("ability_opponent_imposter",)
 TRANSFORM_MOVE_EVIDENCE = True
 TRANSFORM_EVENT_WINDOW_SEC = 10.0
 TRANSFORM_COPY_PP = 5
+
+# 引き継ぎ評価 段階 A (docs/INHERITANCE_EVALUATION_PLAN_20261031.md §7・§9、2026-10-31 開発者指示)。
+# INH_RUN_ID: 段階 A の run_id (出力は logs/inheritance_eval/<INH_RUN_ID>/<test_id>/)
+# INH_CODE_COMMIT: 段階 A で固定したコードの commit (manifest.json に書く)
+# INH_TIME_BUDGET_SEC: 担当 (試験) あたりの自動処理の計算時間の上限 (25 分)。超える分は unexecuted / timeout で残す
+# INH_ASSET_CATEGORIES: 資産・測定の区分 (計画書 §5 I-00 の 5 区分 + 規則参照)
+INH_RUN_ID = "phaseA_20261031"
+INH_CODE_COMMIT = "768bae44"
+INH_TIME_BUDGET_SEC = 1500.0
+INH_ASSET_CATEGORIES = ("観測事実", "推定値", "生成物", "実対戦結果", "合成結果", "規則参照")
+# I-00 資産台帳 (tools/inheritance_eval/inventory.py)
+# INH_INV_FRAME_SLACK_SEC: 画像の時刻を対戦ログの期間 (最初の行〜最後の行) に対応づけるときの前後の余裕 (秒)
+# INH_INV_SAMPLE_HASH_BYTES: 抽出 hash (全件 hash の代わり) に使う先頭・末尾のバイト数
+# INH_INV_FULL_HASH_BUDGET_SEC: 全件 hash に使ってよい時間 (秒)。超えたら残りは抽出 hash (sample) で代える
+# INH_INV_MODEL_EXTS: モデルとして数える拡張子 (".zip.prev" のような退避名も拡張子の後ろに . が続けば数える)
+# INH_INV_EXCLUDE_DIRS: モデルの探索で入らないディレクトリ名 (fnmatch のパターン。依存物・外部の実装)
+# INH_INV_SELECTION_COMPANIONS: 選出モデル (.pt) と同じ dir に揃っている必要があるファイル (tools.inputs_pin の SELECTION_FILES と同じ組)
+INH_INV_FRAME_SLACK_SEC = 300.0
+INH_INV_SAMPLE_HASH_BYTES = 65536
+INH_INV_FULL_HASH_BUDGET_SEC = 600.0
+INH_INV_MODEL_EXTS = (".pt", ".pth", ".pkl", ".npz", ".npy", ".onnx", ".zip", ".joblib", ".safetensors", ".ckpt", ".h5")
+INH_INV_EXCLUDE_DIRS = (".venv*", "node_modules", "pokemon-showdown", ".git", "__pycache__")
+INH_INV_SELECTION_COMPANIONS = ("selection_model_emb.json", "selection_model_meta.json")
