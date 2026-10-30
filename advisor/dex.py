@@ -94,6 +94,24 @@ def field_effects() -> dict:
         return {}
 
 
+def effect_duration(effect: Optional[str], setter_item: Optional[str] = None) -> Optional[int]:
+    """天候・フィールド・壁・トリックルームの継続ターン (純粋。表は advisor/data/field_effects.json の duration)。
+
+    effect は state の値 (sun / rain / ... / electric / ...) か欄名 (reflect / light_screen / aurora_veil / trick_room)。
+    setter_item は設定者の持ち物 (Showdown の item id)。消費・喪失済みや不明なら None を渡す (基本のターン)。
+    表に無い効果、または表が読めないときは None (残りターン不明 = ターン経過では消さない、従来の None と同じ扱い)。
+    """
+    table = field_effects().get("duration") or {}
+    base = (table.get("base") or {}).get(effect or "")
+    if base is None:
+        return None
+    if setter_item:
+        ext = ((table.get("extenders") or {}).get(effect or "") or {}).get(setter_item)
+        if ext is not None:
+            return int(ext)
+    return int(base)
+
+
 BOOST_MOVES_PATH = Path(__file__).resolve().parent / "data" / "boost_moves.json"
 
 

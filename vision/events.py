@@ -222,6 +222,31 @@ SIMPLE_EVENTS = [
     {"id": "critical", "keywords": [["急所", "きゆうしよ", "キュウショ"]], "action": "noop"},
 ]
 
+# 天候・フィールドの開始の文言の id ((action, value) → SIMPLE_EVENTS の id)。技の使用より先に開始の文言を読んだとき、
+# 技の側で「直前の開始」と判定して設定者の持ち物で残りターンを直すのに使う
+_FIELD_START_EVENT = {(ev["action"], ev["value"]): ev["id"] for ev in SIMPLE_EVENTS
+                      if ev["action"] in ("weather", "terrain") and ev["value"]}
+
+# 場を張る特性 (ポップアップの表示で設定者の個体が分かる開始)。オリジン系の特性 (ひひいろのこどう・ハドロンエンジン) は
+# advisor/data/field_effects.json の sources (ダメージ計算・型生成の表) に無いのでここに持つ
+_FIELD_ABILITIES = {
+    "drought": ("weather", "sun"), "drizzle": ("weather", "rain"),
+    "sandstream": ("weather", "sandstorm"), "snowwarning": ("weather", "snow"),
+    "orichalcumpulse": ("weather", "sun"),
+    "electricsurge": ("terrain", "electric"), "grassysurge": ("terrain", "grassy"),
+    "psychicsurge": ("terrain", "psychic"), "mistysurge": ("terrain", "misty"),
+    "hadronengine": ("terrain", "electric"),
+}
+
+
+def _field_move_source(move_id: Optional[str]) -> Optional[tuple]:
+    """場を張る技 → (kind, value) (表は advisor/data/field_effects.json の sources.moves)。該当なしは None"""
+    if not move_id:
+        return None
+    from advisor.dex import field_effects
+    src = ((field_effects().get("sources") or {}).get("moves") or {}).get(move_id)
+    return tuple(src) if src else None
+
 # ランク変化: (loose_keyパターン, 変化量)。長いパターンから順に判定する
 RANK_CHANGES = [
     ("さいたいまてあかつ", +6), ("最大まて上かつ", +6),
@@ -907,6 +932,9 @@ class EventParser:
                 and r[0] not in mon.revealed_moves:
             mon.revealed_moves.append(r[0])
             self._maybe_correct_form(mon, r[1])
+        # 開始の文言が先に読めていた天候・フィールドの技 (連結文を含む) は、技の使用者の持ち物で残りターンを直す。
+        # 値の設定はしない (二重適用にならない) ので apply_effects に関係なく行う
+        self._apply_move_field_duration(r[1], side_name, mon)
         if apply_effects:
             # 他イベントが既に発火している場合は場への効果を二重適用しない
             self._apply_move_side_effect(r[1], side_name)
@@ -1304,20 +1332,81 @@ class EventParser:
                              event_id=f"item_{side_name}_whiteherb_auto")
 
     # --------------------------------------------------------------
+    def _setter_item(self, side_name: str, mon) -> Optional[str]:
+        """場の効果の設定者の持ち物 (延長の判定用)。消費・喪失済みなら None (延長しない)。
+        自分側で state に持ち物が無ければ登録 (advisor.my_team) で補う (backfill_player_static と同じ解決)。
+        相手側の不明は None (基本のターン。持ち物の推定は別の単位)"""
+        if mon is None or getattr(mon, "item_consumed", False) or getattr(mon, "item_removed", False):
+            return None
+        if mon.item_id:
+            return mon.item_id
+        if side_name != "player":
+            return None
+        try:
+            from advisor.my_team import get_my_build
+            item_ja = (get_my_build(mon.species_ja) or {}).get("item_ja")
+            r = self.resolver.resolve(item_ja, "items", cutoff=0.9) if item_ja else None
+        except Exception:
+            return None
+        return r[1] if r else None
+
+    def _set_field_effect(self, kind: str, value: str, setter: Optional[tuple] = None) -> None:
+        """天候 (kind="weather")・フィールド (kind="terrain") の開始: 値と残りターンを入れる。
+        setter = (side_name, mon) が分かれば、その個体の持ち物で延長後のターンにする (表は field_effects.json の duration)"""
+        from advisor.dex import effect_duration
+        item = self._setter_item(*setter) if setter else None
+        f = self.state.field
+        setattr(f, kind, value)
+        setattr(f, f"{kind}_turns", effect_duration(value, item))
+
+    def _recent_field_starter(self, kind: str, value: str) -> Optional[tuple]:
+        """直近 (EVENT_DEDUP_SEC) にこの天候・フィールドを張る特性の表示か技の使用を観測していれば (side_name, "ability"|"move")。
+        両方の側に当たれば設定者を決められないので None。記録は既存の重複排除の時刻 (_recent_fired) を参照するだけ"""
+        from advisor.dex import field_effects
+        moves = ((field_effects().get("sources") or {}).get("moves") or {})
+        hits = {}
+        for side in ("player", "opponent"):
+            if any(src == (kind, value) and self._recently(f"ability_{side}_{ab}", EVENT_DEDUP_SEC)
+                   for ab, src in _FIELD_ABILITIES.items()):
+                hits[side] = "ability"
+                continue
+            if any(tuple(src) == (kind, value) and self._recently(f"move_{side}_{mv}", EVENT_DEDUP_SEC)
+                   for mv, src in moves.items()):
+                hits[side] = "move"
+        if len(hits) != 1:
+            return None
+        return next(iter(hits.items()))
+
+    def _start_field_from_message(self, kind: str, value: str) -> None:
+        """開始の文言 (設定者が書かれていない) からの開始。直前に設定者の分かる開始 (特性の表示・技の使用) があれば
+        その設定者の持ち物で延長する。特性の表示で開始済みの同じ効果は戻さない (表示 → 文言の順で 5 に戻っていた)"""
+        f = self.state.field
+        starter = self._recent_field_starter(kind, value)
+        if starter and starter[1] == "ability" and getattr(f, kind) == value \
+                and getattr(f, f"{kind}_turns") is not None:
+            return
+        setter = (starter[0], self.state.side(starter[0]).active()) if starter else None
+        self._set_field_effect(kind, value, setter)
+
+    def _apply_move_field_duration(self, move_id: str, side_name: str, mon) -> None:
+        """技の使用より先に開始の文言を読んでいた (連結文・読みの順の入れ替わり) とき、技の使用者の持ち物で残りターンを直す。
+        開始の文言が直前に無い (既に同じ天候 = 技は失敗、または文言がこれから来る) なら何もしない"""
+        src = _field_move_source(move_id)
+        if not src:
+            return
+        kind, value = src
+        start_id = _FIELD_START_EVENT.get((kind, value))
+        if getattr(self.state.field, kind) != value or not start_id or \
+                not self._recently(start_id, EVENT_DEDUP_SEC):
+            return
+        self._set_field_effect(kind, value, (side_name, mon))
+
     def _apply_ability_effect(self, ability_id: str, side_name: str,
                               mon=None):
-        weather_map = {"drought": "sun", "drizzle": "rain",
-                       "sandstream": "sandstorm", "snowwarning": "snow",
-                       "orichalcumpulse": "sun"}
-        terrain_map = {"electricsurge": "electric", "grassysurge": "grassy",
-                       "psychicsurge": "psychic", "mistysurge": "misty",
-                       "hadronengine": "electric"}
-        if ability_id in weather_map:
-            self.state.field.weather = weather_map[ability_id]
-            self.state.field.weather_turns = 5
-        elif ability_id in terrain_map:
-            self.state.field.terrain = terrain_map[ability_id]
-            self.state.field.terrain_turns = 5
+        if ability_id in _FIELD_ABILITIES:
+            kind, value = _FIELD_ABILITIES[ability_id]
+            setter_mon = mon if mon is not None else self.state.side(side_name).active()
+            self._set_field_effect(kind, value, (side_name, setter_mon))
         elif ability_id == "intimidate":
             other = "opponent" if side_name == "player" else "player"
             self.state.side(other).ensure_active().set_boost("atk", -1)
@@ -1355,8 +1444,10 @@ class EventParser:
         elif move_id == "tailwind":
             uside.tailwind = True
         elif move_id == "trickroom":
+            from advisor.dex import effect_duration
             self.state.field.trick_room = not self.state.field.trick_room
-            self.state.field.trick_room_turns = 5 if self.state.field.trick_room else None
+            self.state.field.trick_room_turns = \
+                effect_duration("trick_room") if self.state.field.trick_room else None
         elif move_id == "rapidspin":
             uside.clear_hazards()
         elif move_id == "defog":
@@ -1375,15 +1466,16 @@ class EventParser:
             self.state.battle_ended = True
             self.state.end_hint = None
             return
-        if action == "weather":
-            f.weather = ev["value"]
-            f.weather_turns = 5 if ev["value"] else None
-        elif action == "terrain":
-            f.terrain = ev["value"]
-            f.terrain_turns = 5 if ev["value"] else None
+        if action in ("weather", "terrain"):
+            if ev["value"]:
+                self._start_field_from_message(action, ev["value"])
+            else:
+                setattr(f, action, None)
+                setattr(f, f"{action}_turns", None)
         elif action == "trickroom":
+            from advisor.dex import effect_duration
             f.trick_room = ev["value"]
-            f.trick_room_turns = 5 if ev["value"] else None
+            f.trick_room_turns = effect_duration("trick_room") if ev["value"] else None
         elif action == "gravity":
             f.gravity = ev["value"]
         elif action == "side_flag":
