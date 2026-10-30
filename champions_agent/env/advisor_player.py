@@ -1025,6 +1025,14 @@ def _state_summary(battle) -> dict:
             "can_mega": bool(getattr(battle, "can_mega_evolve", False))}
 
 
+def raise_if_pin_error(advice: Optional[dict]) -> None:
+    """助言の結果が固定入力の異常 (advisor.data_pin.pin_error_result の形) なら InputsPinError を送り直す (2026-10-31)。
+    choose_move はそれを他の例外と同じく stats["error"] に数える (採点の集計 _count_scoring・助言どおりの決定には数えない)"""
+    from advisor.data_pin import InputsPinError, is_pin_error_result
+    if is_pin_error_result(advice):
+        raise InputsPinError(advice.get("error") or "固定入力の異常")
+
+
 def _count_scoring(stats: dict, advice: Optional[dict]) -> None:
     """transition 方式の決定数と退避 (scoring_fallback) の件数を stats に数える (純粋な集計。legacy では何も足さない)。
     退避の理由は「unsupported:効果:技」「opp_unsupported:効果:技」(2026-10-09 M2c) までと、それ以外は「:」の前で分類する"""
@@ -1160,6 +1168,10 @@ def make_advisor_player(team_source=None, stats: Optional[dict] = None,
                             stats["last_switchable_mismatch"] = chk
                         # 採点方式は config.ADVICE_SCORING_MODE (環境変数 ADVICE_SCORING_MODE で上書き。2026-10-09 M2b)
                         advice = evaluate(state, resolver, rl_blend_weight=rl_blend_weight)
+                        # 固定入力の異常 (2026-10-31 E-inputs-3): evaluate は InputsPinError を結果の形 (reason = inputs_pin) で返す。
+                        # 測定は不成立にするので、退避 (助言なし) に落として黙らせず、以前 (例外が外へ出ていたとき) と同じく
+                        # 例外としてこの決定のエラー (stats["error"] / last_error) に数える (raise_if_pin_error)
+                        raise_if_pin_error(advice)
                         _count_scoring(stats, advice)
                         try:
                             me = state["player"]

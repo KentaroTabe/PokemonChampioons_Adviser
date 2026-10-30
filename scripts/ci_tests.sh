@@ -15,6 +15,8 @@
 #   回すので画像処理の土台だけで足りる」という方針に合わないため、CI の最小依存に入れない
 # - test_replay_path_server: server.py (socketio / fastapi) を import して実際の入口 (_handle_one_frame) を動かす (2026-10-21)。
 #   CI で回る部分 (server.py の構文木での確認・録画再生の経路・記録 → 再生) は test_replay_path に分けて CI に残した
+# - test_inputs_pin_propagation_server: 同じく server._handle_one_frame で固定入力の異常の停止・記録を確かめる (2026-10-31)。
+#   CI で回る部分 (engine・advice_key の判断・real_accept・advice_replay) は test_inputs_pin_propagation
 # test_battle_prune は検証する関数を champions_agent/env/showdown_env_pure.py に分けて CI に残した (showdown_env は
 # poke-env を先頭で読み、poke-env 0.10 は numpy>=2.0.2 を要求して CI の numpy<2 と両立しない)。
 # Showdown のデータ (pokemon-showdown/、未コミット) の読み手は、コミット済みのキャッシュを先に読むので CI でも同じ結果になる
@@ -186,6 +188,7 @@ TESTS=(
   test_smogon_eval
   test_item_cues
   test_ev_infer_item_pin
+  test_inputs_pin_propagation
 )
 
 fail=0

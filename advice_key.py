@@ -23,6 +23,13 @@ advise_cached は従来どおり (助言, 採点したか) を返す (tests/test
 2026-10-21 (レビュー: 録画再生が本番の再計算の経路を通らない): フレームごとの判断 (now を state に入れる → 鍵 → 要否 →
 advise_cached_ex、確定前の通し直し) を frame_advice_step に抽出した。server._handle_one_frame と tools.shadow_load_check は
 この関数だけを呼ぶ (tests/test_replay_path、実際の入口は tests/test_replay_path_server)。
+
+2026-10-31 (レビュー E-inputs-3: 固定入力の異常を通常の「推定なし」と分ける): 採点の結果が固定入力の異常
+(advisor.data_pin.pin_error_result、reason = config.INPUTS_PIN_REASON) なら、advise_cached_ex はキャッシュに入れず (短い有効期限の
+退避の結果にもしない)、持っていた結果も捨て、据え置き・安定化ゲートの履歴 (advisor._last_best / _stab_hist) も捨てる
+(異常の前の候補を据え置き・再利用しない)。据え置き・安定化ゲート・画面の提案は通さずにその結果を返す。server は
+inputs_pin_notice の表示 (助言停止の 1 行と error) を送り、InputsPinMonitor が通した分だけ対戦ログに inputs_pin_row の行を書く
+(tests/test_inputs_pin_propagation)。
 """
 from __future__ import annotations
 
@@ -34,6 +41,7 @@ import traceback
 from pathlib import Path
 from typing import Optional
 
+from advisor.data_pin import is_pin_error_result
 from champions_agent import config as C
 
 # 個体の欄のうち採点の入力になるもの (vision.state.PokemonState の欄名。値はそのまま鍵に入れる)。
@@ -263,6 +271,10 @@ def advise_cached_ex(advisor, state: dict, cache: AdviceCache, key: str, now: fl
             except Exception:
                 inputs = None
         raw, common, error = _evaluate(advisor, state, keep_common)
+        if is_pin_error_result(raw):
+            # 固定入力の異常 (2026-10-31): キャッシュ・据え置き・安定化ゲートに使わない。異常の前の結果・候補も再利用しない
+            forget_advice(advisor, cache)
+            return dict(raw), True, float(now), copy.deepcopy(inputs)
         cache.store(key, raw, now, common=common, error=error)
         cache.inputs = copy.deepcopy(inputs)
         result, evaluated = raw, True
@@ -272,6 +284,16 @@ def advise_cached_ex(advisor, state: dict, cache: AdviceCache, key: str, now: fl
     if keep_common:
         advisor.last_common = common
     return _postprocess(advisor, result, state), evaluated, float(cache.t), inputs
+
+
+def forget_advice(advisor, cache: AdviceCache) -> None:
+    """採点の結果のキャッシュと、据え置き・安定化ゲートの履歴を捨てる (固定入力の異常のとき。2026-10-31)"""
+    cache.clear()
+    advisor.last_common = None
+    if hasattr(advisor, "_last_best"):
+        advisor._last_best = None
+    if hasattr(advisor, "_stab_hist"):
+        advisor._stab_hist = None
 
 
 def advise_cached(advisor, state: dict, cache: AdviceCache, key: str, now: float, keep_common: bool = False) -> tuple:
@@ -319,3 +341,45 @@ def frame_advice_step(advisor, state: dict, now: float, cache: AdviceCache, data
     out.update(advice=advice, evaluated=evaluated, t_eval=t_eval, inputs=inputs, reason=why or "recheck",
                recheck=bool(advice.get("provisional")))
     return out
+
+
+# ------------------------------------------------------------------ 固定入力の異常の表示と記録 (2026-10-31 E-inputs-3)
+INPUTS_PIN_SOURCES = ("evaluate", "tracker")   # 異常の出どころ: 助言エンジンの採点 / 型推定のトラッカーのフレームの観測 (on_frame)
+
+
+def inputs_pin_notice(result: dict) -> dict:
+    """固定入力の異常のときに助言欄へ送る内容 (純粋)。第一候補・候補は持たない。text の 1 行目が config.INPUTS_PIN_STOP_TEXT、
+    2 行目が error。advice_id は付けない (advice 行は書かないので、表示の確認も返らない)"""
+    err = str((result or {}).get("error") or "")
+    return {"ok": False, "reason": C.INPUTS_PIN_REASON, "error": err, "kind": "battle", "inputs_pin": True,
+            "text": f"{C.INPUTS_PIN_STOP_TEXT}\n  {err}" if err else C.INPUTS_PIN_STOP_TEXT}
+
+
+def inputs_pin_row(source: str, error: str, state: Optional[dict], n_suppressed: int = 0) -> dict:
+    """対戦ログの固定入力の異常の行 (純粋。type = config.INPUTS_PIN_LOG_TYPE、時刻 t は battle_logger が付ける)。
+    既存の読み手は type で行を選ぶので、この行は読み飛ばされる (tools.real_accept だけが読む)"""
+    st = state or {}
+    return {"type": C.INPUTS_PIN_LOG_TYPE, "reason": C.INPUTS_PIN_REASON, "source": source, "error": str(error),
+            "scene": st.get("scene"), "turn": st.get("turn"), "battle_seq": st.get("battle_seq"),
+            "n_suppressed": int(n_suppressed), "interval_sec": float(C.INPUTS_PIN_LOG_INTERVAL_SEC)}
+
+
+class InputsPinMonitor:
+    """同じ固定入力の異常を毎フレーム記録しないための間引き (純粋。時刻は引数)。異常の種類 = (出どころ, error の文言, battle_seq)。
+    種類ごとに最初の 1 回と、前に記録してから interval_sec 秒を超えたときだけ記録する (間に記録しなかった件数を n_suppressed に返す)。
+    battle_seq を種類に含めるので、対戦が替われば (対戦ログのファイルが替われば) 新しい対戦のファイルにも 1 行書く"""
+
+    def __init__(self, interval_sec: Optional[float] = None):
+        self.interval = float(C.INPUTS_PIN_LOG_INTERVAL_SEC if interval_sec is None else interval_sec)
+        self._seen: dict = {}       # 種類 → [最後に記録した時刻, 記録しなかった件数]
+
+    def check(self, source: str, error: str, battle_seq, now: float) -> Optional[int]:
+        """記録するなら前に記録してから記録しなかった件数 (int)、記録しないなら None"""
+        k = (source, str(error), battle_seq)
+        ent = self._seen.get(k)
+        if ent is None or now - ent[0] > self.interval:
+            n = 0 if ent is None else ent[1]
+            self._seen[k] = [float(now), 0]
+            return n
+        ent[1] += 1
+        return None

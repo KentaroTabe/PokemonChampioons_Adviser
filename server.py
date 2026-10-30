@@ -34,9 +34,11 @@ from vision.state import (HP_REJECT_COUNTS, MANUAL_REASON_OUT_OF_RANGE, apply_ma
 from vision.frame_burst import BurstPlanner
 from champions_agent.config import (ADVICE_KEY_HP_AGE_GRAIN_SEC, ADVICE_KEY_VERSION, ADVICE_RECALC_FALLBACK_TTL_SEC,
                                     ADVICE_RECALC_TTL_SEC, CLIENT_HELLO_WAIT_SEC, DISPLAY_HIDDEN_WARN_COUNT, FRAME_BURST_DIR,
-                                    MANUAL_SPECIES_RESOLVE_CUTOFF, PARTY_SIZE, SELECTION_RECALC_SEC,
+                                    INPUTS_PIN_STOP_TEXT, MANUAL_SPECIES_RESOLVE_CUTOFF, PARTY_SIZE, SELECTION_RECALC_SEC,
                                     SHADOW_VARIANTS_ENABLED)
-from advice_key import AdviceCache, DataVersions, frame_advice_step
+from advice_key import (AdviceCache, DataVersions, InputsPinMonitor, forget_advice, frame_advice_step, inputs_pin_notice,
+                        inputs_pin_row)
+from advisor.data_pin import InputsPinError, is_pin_error_result, pin_error_result
 from client_state import (VIS_HIDDEN, VIS_VISIBLE, ClientRegistry, HiddenDisplayWatch, served_html_version, short_sid,
                           stale_of)
 
@@ -169,6 +171,10 @@ _last_advice_key = ""
 _advice_cache = AdviceCache()
 _data_versions = DataVersions()
 _advice_recheck = False   # 確定前 (provisional) の助言を出した: 次フレームで鍵が同じでも安定化ゲートを通し直す
+# 固定入力の異常 (2026-10-31 E-inputs-3): 対戦ログへの記録の間引き (同じ異常は config.INPUTS_PIN_LOG_INTERVAL_SEC 秒に 1 回) と、
+# 助言欄に出している停止の表示 ((error, battle_seq)。同じ対戦の同じ error の停止を毎フレーム送らない。通常の助言を送ったら None に戻す)
+_pin_monitor = InputsPinMonitor()
+_pin_notice_shown = None
 print(f"[server] 助言の再計算の鍵: 版 {ADVICE_KEY_VERSION} (版 1 は場面・場の個体の種族/HP%/PP・場・能力変化だけ。版 2 は採点の入力全体: "
       f"全個体の持ち物/特性/対応待ち/技の固定/HP の不確かさ/消費、採点の設定、データの版)、有効期限 {ADVICE_RECALC_TTL_SEC:g} 秒 "
       f"(退避・評価エラーは {ADVICE_RECALC_FALLBACK_TTL_SEC:g} 秒)、場の HP の経過時間の粒度 {ADVICE_KEY_HP_AGE_GRAIN_SEC:g} 秒")
@@ -386,7 +392,7 @@ async def _handle_one_frame(sid, data):
     global processed_counter
     global _last_state_json, _last_advice_time, _last_advice_key
     global _last_dump_time, _last_scene_log
-    global _last_advice_target, _stale_notified, _end_notice_seq, _advice_recheck
+    global _last_advice_target, _stale_notified, _end_notice_seq, _advice_recheck, _pin_notice_shown
     try:
         encoded_data = data.split(',')[1]
         nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
@@ -408,7 +414,14 @@ async def _handle_one_frame(sid, data):
         if DUMP_FRAMES and _burst.is_new_battle(state.get("battle_seq")):
             _write_burst_skipped(time.time())
         battle_log.on_frame(state, fired)
-        spread_tracker.on_frame(state, fired)   # 相手の型推定 (先後/ダメージ観測)
+        # 相手の型推定 (先後/ダメージ観測)。固定入力の異常 (InputsPinError、2026-10-31) は認識処理を止めずに記録し、このフレームの
+        # 対戦の助言だけを止める (型推定が観測を取り込めていないので、その推定で助言しない)
+        tracker_pin = None
+        try:
+            spread_tracker.on_frame(state, fired)
+        except InputsPinError as e:
+            tracker_pin = pin_error_result(e)
+            _record_inputs_pin("tracker", tracker_pin, state, time.time())
         if DUMP_FRAMES:
             _b = _burst.on_processed(state.get("scene"), state.get("battle_seq"), time.time())
             if _b:
@@ -541,11 +554,28 @@ async def _handle_one_frame(sid, data):
             # 再計算の鍵 (版 2) が変わったか有効期限 (退避・評価エラーは短い) を超えたときだけ採点する。確定前の助言の次のフレームは
             # 鍵が同じでも安定化ゲートを通し直す。採点を実際に行った時刻 (キャッシュなら元の時刻) と、採点の直前に取った型推定の写し
             # (advice 行の ev_infer) も受け取る
-            step = await loop.run_in_executor(
-                None, lambda: frame_advice_step(advisor, state, now, _advice_cache, _data_versions, _advice_recheck,
-                                                keep_common=_shadow is not None,
-                                                inputs_fn=lambda: ev_infer_of(state, spread_tracker.best_for)))
-            if step["advice"] is not None:
+            if tracker_pin is not None:
+                forget_advice(advisor, _advice_cache)
+                step = {"advice": tracker_pin}
+            else:
+                step = await loop.run_in_executor(
+                    None, lambda: frame_advice_step(advisor, state, now, _advice_cache, _data_versions, _advice_recheck,
+                                                    keep_common=_shadow is not None,
+                                                    inputs_fn=lambda: ev_infer_of(state, spread_tracker.best_for)))
+            if is_pin_error_result(step["advice"]):
+                # 固定入力の異常 (2026-10-31 E-inputs-3): 助言を表示せず停止の 1 行と error を出す。advice 行・影の計算・キャッシュ・
+                # 据え置きには使わない (frame_advice_step がキャッシュと履歴を捨てた)。対戦ログには間引いて異常の行を書く
+                if tracker_pin is None:
+                    _record_inputs_pin("evaluate", step["advice"], state, now)
+                _advice_recheck = False
+                _last_advice_target = None
+                notice = inputs_pin_notice(step["advice"])
+                shown_key = (notice["error"], state.get("battle_seq"))
+                if _pin_notice_shown != shown_key:
+                    _pin_notice_shown = shown_key
+                    await sio.emit('advice_update', notice, room=sid)
+            elif step["advice"] is not None:
+                _pin_notice_shown = None
                 _last_advice_key = step["key"]
                 _last_advice_time = now
                 advice, evaluated, t_eval, ev_snap = step["advice"], step["evaluated"], step["t_eval"], step["inputs"]
@@ -583,6 +613,20 @@ async def _handle_one_frame(sid, data):
 
     except Exception as e:
         print(f"[server] 画像処理エラー: {e}")
+
+
+def _record_inputs_pin(source: str, result: dict, state: dict, now: float) -> bool:
+    """固定入力の異常を対戦ログに 1 行書く (_pin_monitor が通した分だけ。2026-10-31)。書いたら True。書けなくても処理は止めない"""
+    n = _pin_monitor.check(source, result.get("error"), state.get("battle_seq"), now)
+    if n is None:
+        return False
+    try:
+        battle_log.on_inputs_pin(inputs_pin_row(source, result.get("error"), state, n))
+    except Exception as e:
+        print(f"[server] 固定入力の異常の記録に失敗: {e}")
+    print(f"[server] {INPUTS_PIN_STOP_TEXT} ({source}): {result.get('error')}"
+          + (f" (前の記録から {n} 件は記録していない)" if n else ""))
+    return True
 
 
 _end_notice_seq = None   # 対戦終了の通知 (vision.end_notice.battle_end_notice) を出した battle_seq (1 対戦 1 回)

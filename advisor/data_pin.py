@@ -29,7 +29,8 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 
-from champions_agent.config import REAL_BANK_ENV, REAL_BANK_PATH, REAL_BANK_SHA_ENV, USAGE_DB_ENV, USAGE_SNAPSHOT_ENV
+from champions_agent.config import (INPUTS_PIN_REASON, REAL_BANK_ENV, REAL_BANK_PATH, REAL_BANK_SHA_ENV, USAGE_DB_ENV,
+                                    USAGE_SNAPSHOT_ENV)
 
 REPO = Path(__file__).resolve().parent.parent
 DEFAULT_USAGE_DB = REPO / "champions_agent" / "data" / "db" / "champions.sqlite3"   # advisor.sets.DB_PATH と同じ
@@ -37,6 +38,17 @@ DEFAULT_USAGE_DB = REPO / "champions_agent" / "data" / "db" / "champions.sqlite3
 
 class InputsPinError(RuntimeError):
     """明示した版のデータが無い・sha16 が違う (最新へ退避しないで止める)"""
+
+
+def pin_error_result(err) -> dict:
+    """InputsPinError を助言の結果の形にする (純粋。2026-10-31 E-inputs-3)。通常の「推定なし」・評価エラーと分けるため reason は
+    config.INPUTS_PIN_REASON。第一候補 (best / actions) は持たない"""
+    return {"ok": False, "reason": INPUTS_PIN_REASON, "error": str(err)}
+
+
+def is_pin_error_result(result) -> bool:
+    """助言の結果が固定入力の異常 (pin_error_result の形) か (純粋)"""
+    return isinstance(result, dict) and result.get("ok") is False and result.get("reason") == INPUTS_PIN_REASON
 
 
 # 同じプロセスの中の上書き (None の欄は環境変数・既定に任せる)。bank_blocked = 理由の文字列 (バンクを読もうとしたら止める)
