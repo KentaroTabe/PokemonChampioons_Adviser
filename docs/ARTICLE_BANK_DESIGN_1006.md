@@ -25,7 +25,7 @@
    (最初はランキングページ 1 件) に限定。並列取得・巡回をしない、再取得は必要な更新時だけ、保存は構造化した結果と出典だけ、
    編集部の推奨として当初は弱点検査と選出仮説に使う (プールには入れない))。方針は URL の許可リスト (`allowed_urls`) と用途の制限
    (`purposes`) を持ち、実装 (`host_allowed`) が守る。構造化データの LLM 送信 (`send_llm`) は GameWith でも未判断 (unknown)。
-   追補 (2026-10-30 開発者承認): ブログの記事の取得のために項目を足した (はてなブログ系 5 つ・note.com は条件つき allow、pokesol.app は
+   追補 (2026-10-30): ブログの記事の取得のために項目を足した (はてなブログ系 5 つは条件つき allow (開発者承認)、note.com はレビュー (10/30) で「規約上の利用範囲を確認し許可を確認できた範囲から小規模に」とされたため unknown のまま、pokesol.app は
    deny、seesaa.net / fc2.net / ameblo.jp は unknown。根拠は各項目の note)。サブドメインが記事ごとに違うホスト (はてなブログ等) は
    `"match": "suffix"` の 1 項目で照合する (完全一致を優先し、無ければ接尾辞の最長一致: `host_policy_key`)。allow の項目は URL の
    一覧の代わりに `"allowed_from": "manifest"` を持ち、`logs/articles/manifest.json` の selected な記事 URL (正規化して比較) だけを
