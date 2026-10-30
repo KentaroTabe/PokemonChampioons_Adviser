@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 構築記事の定期調査の同期 (例。install していない)。毎週木曜 09:00 (この Mac の時刻 = JST) に dry-run の結果を
+     logs/articles/sync_launchd.log に出すだけで、blogs.csv は書き換えない。自動で反映するかは運用側の判断
+     (反映するなら ProgramArguments に <string>--apply</string> を足す)。調査の routine は水曜に push する。
+     gh (Homebrew) を見つけるため PATH を渡す。gh の認証はログイン中のユーザーのキーチェーンを使う。
+     使うとき: cp scripts/com.championsadviser.articles-sync.plist ~/Library/LaunchAgents/ && launchctl load ~/Library/LaunchAgents/com.championsadviser.articles-sync.plist -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.championsadviser.articles-sync</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/kenta/GitHub/PokemonChampioons_Adviser/scripts/articles_sync.sh</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key><integer>4</integer>
+        <key>Hour</key><integer>9</integer>
+        <key>Minute</key><integer>0</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/kenta/GitHub/PokemonChampioons_Adviser/logs/articles/sync_launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/kenta/GitHub/PokemonChampioons_Adviser/logs/articles/sync_launchd.log</string>
+</dict>
+</plist>

@@ -86,6 +86,14 @@
 
 - 一覧: `logs/articles/blogs.csv` (ユーザーが URL を足す) → `articles_ingest` の manifest (規制・形式・順位・robots)。URL が足されても
   そのホストの取得が承認済みとは扱わない。記事内リンクを辿って範囲を広げない。
+- 一覧の同期 (2026-10-30、`tools/team_build/articles_sync`、`scripts/articles_sync.sh`): 一覧の調査は別リポジトリ
+  (`ARTICLE_SURVEY_REPO` / `ARTICLE_SURVEY_BRANCH` の `research/`) の routine が毎週行い、`research/blogs.csv` (列はこの一覧 + 第4ラウンド・
+  自動更新) と `research/state.json` を push する。同期はこの 2 つだけを `gh api` で読み (`research/merged.json` は第三者の文章の
+  抜粋が入り得るので読まない)、ブランチ先頭の sha で同じ版を読む。差分の鍵は正規化した根拠記事URL ごと (URL の無い行は著者 + 題名)。
+  既定は dry-run。`--apply` で blogs.csv を調査の行と列に置き換え (ローカルにだけある鍵を持つ行は末尾に残す。控え `blogs.csv.bak.YYYYMMDD`)、
+  manifest を作り直し (robots の判定は前の manifest から URL ごとに引き継ぎ、新しい URL は unchecked)、`logs/articles/sync.jsonl` に
+  取得時刻・sha・state の last_run / processed_seasons・差分の件数・適用の有無を残す。**本文の取得は同期の範囲外**: 一覧に URL が
+  増えても取得はホストの方針 (下の host_policy.json) が先で、同期はそれを変えない。
 - ホストの可否: `logs/articles/host_policy.json` (host_policy/2) = {host: {"fetch", "store", "send_llm" (allow / unknown / deny),
   "allowed_urls": [...] (任意。あればこの URL だけ取得), "purposes": [...] (任意。あればこの用途だけ), "max_parallel", "min_interval_s",
   "refetch", "checked_at", "decided_at", "note"}}。`article_bank.host_allowed(policy, host, purpose, url=None)` は fetch / store / send_llm が
