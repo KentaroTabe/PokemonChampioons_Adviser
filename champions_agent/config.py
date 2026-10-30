@@ -749,6 +749,17 @@ BUILD_ARTICLE_SEASON_REGULATION = {"M-1": "gen9championsbssregma", "M-2": "gen9c
                                    # 2026-10-05 判断 #9: M-1 = M-A (題名の表記 4 件)、M-2〜M-5 = M-B (M-5 は手順書)、M-6 = M-C (9/9 から)。MCS だけの行は unknown
 BUILD_ARTICLE_DOUBLE_WORDS = ("ダブル", "double", "vgc")   # 記事の題名にあればダブルの記事 (記事バンクから除く)。NFKC で見る (半角カナも当たる)
 BUILD_ARTICLE_DOUBLE_EXCLUDE_WORDS = ("ダブルエース",)      # ダブルバトルを意味しない複合語 (先に取り除く。10/6 の一覧更新: 「勝てるダブルエース構築」はシングル)
+# 構築記事の定期調査の同期 (tools/team_build/articles_sync、2026-10-30)。調査は別リポジトリの routine が毎週 push する一覧 (メタ情報だけ)。
+# 読むのは CSV と状態ファイルだけ (research/merged.json は第三者の文章の抜粋が入り得るので読まない)。本文の取得はしない
+ARTICLE_SURVEY_REPO = "KentaroTabe/PokemonChampions_seeker"
+ARTICLE_SURVEY_BRANCH = "claude/eager-volta-e7cy8q"
+ARTICLE_SURVEY_CSV_PATH = "research/blogs.csv"
+ARTICLE_SURVEY_STATE_PATH = "research/state.json"
+ARTICLE_SYNC_GH_BIN = "gh"                 # GitHub CLI (読み取りの gh api だけ使う)
+ARTICLE_SYNC_GH_TIMEOUT_S = 60             # gh api 1 回の待ち時間の上限 (秒)
+ARTICLE_SYNC_SHOW_MAX = 40                 # 差分の表で種類ごとに表示する行の上限 (件数は全部数える)
+ARTICLE_SYNC_LOG_NAME = "sync.jsonl"       # 同期の記録 (出力先のディレクトリに 1 行ずつ追記)
+ARTICLE_SYNC_BACKUP_SUFFIX = ".bak.%Y%m%d"  # 控えの名前 (blogs.csv / manifest.json の後ろに付ける。strftime)
 # 記事バンク (tools/team_build/article_parse + article_bank、docs/ARTICLE_BANK_DESIGN_1006.md)。2026-10-06 の初期案 (検証前の値)。
 # 本文は LLM に渡さない: 定型部分 (使用ポケモン) を決定的に解析し、解説は限定した規則で構造化する。LLM には構造化した結果だけ渡す
 BUILD_ARTICLE_MEMBER_SECTION_WORDS = ("使用ポケモン", "個体紹介", "個別解説", "構築紹介", "パーティ紹介", "採用理由")  # 個体の節の見出し語

@@ -96,6 +96,7 @@ TESTS=(
   test_set_lint
   test_theme_check
   test_articles_ingest
+  test_articles_sync
   test_article_parse
   test_article_bank
   test_article_aliases
