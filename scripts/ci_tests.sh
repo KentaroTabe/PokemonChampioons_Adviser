@@ -184,6 +184,7 @@ TESTS=(
   test_restore_team_text
   test_live_data_pin
   test_smogon_eval
+  test_item_cues
 )
 
 fail=0
