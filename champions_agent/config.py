@@ -91,6 +91,12 @@ SMOGON_EVAL_PROB_FLOOR = 0.005       # 予測の一覧に無い技・持ち物�
 # 型推定 (advisor/ev_infer.py) で表示により確定した持ち物が仮説に無いとき、足す仮説の事前の重み (DB の一覧に無い持ち物の下限。
 # SMOGON_EVAL_PROB_FLOOR と同じ考え方。2026-10-30)。一覧にあればその採用率を使う
 EV_INFER_ITEM_FLOOR = 0.005
+# 型推定の観測の記録 (2026-10-31、docs/KNOWN_ISSUES.md E-ev-2)。候補外の持ち物が初めて判明したとき、記録した観測 (先後・ダメージ・
+# こだわりの固定・持ち物) を 事前の配分 × 新しい持ち物 の仮説で評価し直す。記録はメモリ内だけ (対戦ログには残さない)。
+# 上限を超えた古い観測は評価し直さない (その観測の重みは新しい仮説へ流用しない)。1 個体の観測は通常 1 対戦で数十件以内
+EV_INFER_OBS_LOG_MAX = 64
+# False なら評価し直さず、事前の重みのまま (以前の仮説の重みは流用しない)
+EV_INFER_REEVAL_ON_REVEAL = True
 # 使用率 DB の usage_snapshot.fetched_at の時刻帯。列の既定は SQLite の datetime('now') (UTC) で、取り込みの INSERT は
 # fetched_at を渡さない (champions_agent/data/database.py)。usage-update の launchd は毎日 06:30 (ローカル) で、
 # fetched_at は 21:3x に並ぶ (= 06:3x JST の UTC 表記) ので UTC と解釈する。"utc" か "local"
