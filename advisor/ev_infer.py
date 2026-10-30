@@ -15,10 +15,19 @@
   トラッカーの推定器はデータの版 (data_version) ごとに作り直し、data_pin.reset_caches() でも消える。
 - 表示で判明した相手の持ち物は、トラッカーが個体ごとに一度だけ observe_item(..., add_missing=True) に渡す
   (item_observation / knocked_off_items / item_to_pass。消費・喪失の後は出力の持ち物を「なし」にする)。
+
+2026-10-31 (レビューの再現、開発者承認。docs/KNOWN_ISSUES.md E-ev-1 / E-ev-2):
+- 版を明示したとき、DB のテーブル欠落等の sqlite の例外も InputsPinError に包んで上げる (空の仮説で続けない)。
+- 持ち物の変更・消費・喪失で、以前の条件で得た実効素早さの範囲 (spe_lower / spe_upper) を捨てる (speed_range_stale)。
+- 推定器は観測の記録 (_obs_log) と事前の仮説 (_prior_hyps) を持つ。候補外の持ち物の初判明は 事前の配分 × 新しい持ち物 から
+  仮説を作り直して記録した観測を評価し直し (prior_item_hyps + replay_observations)、実際の変更 (別の持ち物を渡し済み、または
+  持ち物なしの後) は配分の事後を保って持ち物だけ切り替える (switch_item_hyps)。初判明か変更かは item_reveal_kind。
 """
 from __future__ import annotations
 
+import copy
 import math
+import sqlite3
 import time
 from pathlib import Path
 from typing import Optional
@@ -104,12 +113,18 @@ def _open_usage() -> tuple:
     版を明示したとき: data_pin.connect_usage(読み取り専用) + resolve_snapshot で、その snapshot だけを読む絞り込みを 2 つとも使う。
       DB・snapshot が無ければ InputsPinError (握りつぶさない)。
     明示が無いとき: 従来どおり DB_PATH を開き、チャンピオンズの全 snapshot (_champions_filter) → 全ソース ("1=1")。DB が無ければ (None, None)"""
-    from advisor.data_pin import connect_usage, resolve_snapshot
+    from advisor.data_pin import InputsPinError, connect_usage, resolve_snapshot
     _db, snap, pinned = data_version()
     if pinned:
-        conn = connect_usage(Path(_db), True)
+        try:
+            conn = connect_usage(Path(_db), True)
+        except sqlite3.Error as e:
+            raise InputsPinError(f"明示した使用率 DB {_db} を開けない: {e}") from e
         try:
             sid = resolve_snapshot(conn, snap, True)
+        except sqlite3.Error as e:
+            conn.close()
+            raise InputsPinError(f"明示した使用率 DB {_db} の snapshot を読めない: {e}") from e
         except Exception:
             conn.close()
             raise
@@ -153,6 +168,90 @@ def item_share(rows: list, item_id: str) -> Optional[float]:
     return (got / total) if got > 0 else None
 
 
+def _pin_query_error(e: Exception, what: str):
+    """版を明示しているとき、使用率の読み取りで起きた sqlite の例外を InputsPinError にして返す (明示が無ければ None。2026-10-31)"""
+    from advisor.data_pin import InputsPinError
+    db, snap, pinned = data_version()
+    if not pinned:
+        return None
+    return InputsPinError(f"明示した使用率 DB {db} (snapshot {snap}) の {what} を読めない: {e}")
+
+
+def _spread_key(h: dict) -> tuple:
+    return (h["nature"], tuple(sorted((h["evs"] or {}).items())))
+
+
+def _group_spreads(hyps: list) -> list:
+    """仮説を配分 (性格・努力値) ごとにまとめ、[(代表の仮説, 重みの対数和)] を出てきた順に返す (純粋)"""
+    groups: dict = {}
+    for h in hyps:
+        groups.setdefault(_spread_key(h), []).append(h)
+    out = []
+    for hs in groups.values():
+        mx = max(h["logw"] for h in hs)
+        out.append((hs[0], mx + math.log(sum(math.exp(h["logw"] - mx) for h in hs))))
+    return out
+
+
+def switch_item_hyps(hyps: list, item_id: str) -> list:
+    """実際の持ち物の変更 (トリック等。2026-10-31): 配分の事後 (仮説の重みを配分ごとに合計) を保ち、持ち物だけ item_id に切り替える
+    (純粋)。変更前の観測は変更前の持ち物で評価した重みとして配分に残る。hyps は変えずに新しい一覧を返す"""
+    iid = _item_key(item_id)
+    if not hyps or not iid:
+        return list(hyps)
+    return [{"nature": h["nature"], "evs": dict(h["evs"]), "item": iid, "logw": lw} for h, lw in _group_spreads(hyps)]
+
+
+def prior_item_hyps(prior_hyps: list, item_id: str, prior: float) -> list:
+    """候補外の持ち物の初判明 (2026-10-31): 事前の配分 × 新しい持ち物 の仮説 (純粋)。重み = 配分の事前の重み (事前の仮説を配分ごとに
+    合計) × prior (持ち物の事前の重み = DB の採用率、無ければ下限)。観測は入っていない (呼び出し側が記録から評価し直す)"""
+    iid = _item_key(item_id)
+    if not prior_hyps or not iid:
+        return []
+    lp = math.log(max(float(prior), 1e-300))
+    return [{"nature": h["nature"], "evs": dict(h["evs"]), "item": iid, "logw": lw + lp} for h, lw in _group_spreads(prior_hyps)]
+
+
+def item_reveal_kind(confirmed: Optional[str], gone_before: bool, item_id: Optional[str]) -> Optional[str]:
+    """判明した持ち物の観測が「初判明」か「実際の変更」か (純粋。2026-10-31)。
+    - confirmed = これまでに渡した (確定した) 持ち物、gone_before = 観測の直前に「現在は持ち物なし」だったか
+    - 別の持ち物を渡し済み、または持ち物なし (消費・喪失) の後に持ち物が判明した → "change" (以前の観測は以前の持ち物のもの)
+    - それ以外 → "first" (観測の間ずっとこの持ち物だった)。item_id が無ければ None"""
+    iid = _item_key(item_id)
+    if not iid:
+        return None
+    if gone_before or (_item_key(confirmed) and _item_key(confirmed) != iid):
+        return "change"
+    return "first"
+
+
+def speed_range_stale(item_changed: bool, gone_before: bool, gone_now: bool) -> bool:
+    """以前の条件で得た実効素早さの範囲を捨てるか (純粋。2026-10-31): 持ち物が変わった、または「現在は持ち物なし」が切り替わった"""
+    return bool(item_changed) or bool(gone_before) != bool(gone_now)
+
+
+# 評価し直す観測の種類 (記録の kind)
+REPLAYABLE_OBS = ("speed", "damage", "choice_lock", "item")
+
+
+def replay_observations(hyps: list, log, apply) -> int:
+    """記録した観測を hyps に順に掛け直す (純粋な高階関数。2026-10-31)。apply(hyps, entry) が尤度を掛ける。
+    種類が REPLAYABLE_OBS に無い記録は飛ばす (その観測の重みは流用しない)。戻り値は掛け直した件数"""
+    n = 0
+    for e in log or ():
+        if isinstance(e, dict) and e.get("kind") in REPLAYABLE_OBS:
+            apply(hyps, e)
+            n += 1
+    return n
+
+
+def trim_obs_log(log: list, max_n: int) -> list:
+    """観測の記録を新しい方から max_n 件に切る (純粋。古い観測は評価し直せなくなる = 初判明のとき流用しない)"""
+    if max_n is None or max_n < 0:
+        return log
+    return log[-max_n:] if max_n else []
+
+
 def confirm_item_hyps(hyps: list, item_id: str, prior: float) -> list:
     """表示で確定した持ち物に仮説を絞る (純粋。2026-10-30)。
     - 仮説にその持ち物があれば、その持ち物の仮説だけを残す (持ち物の違う仮説は落とす)。
@@ -165,17 +264,8 @@ def confirm_item_hyps(hyps: list, item_id: str, prior: float) -> list:
     same = [h for h in hyps if (h["item"] or "") == iid]
     if same:
         return same
-    groups: dict = {}
-    for h in hyps:
-        key = (h["nature"], tuple(sorted((h["evs"] or {}).items())))
-        groups.setdefault(key, []).append(h)
     lp = math.log(max(float(prior), 1e-300))
-    out = []
-    for hs in groups.values():
-        mx = max(h["logw"] for h in hs)
-        lse = mx + math.log(sum(math.exp(h["logw"] - mx) for h in hs))
-        out.append({"nature": hs[0]["nature"], "evs": dict(hs[0]["evs"]), "item": iid, "logw": lse + lp})
-    return out
+    return [{"nature": h["nature"], "evs": dict(h["evs"]), "item": iid, "logw": lw + lp} for h, lw in _group_spreads(hyps)]
 
 
 def item_observation(mon: Optional[dict]) -> tuple:
@@ -213,6 +303,14 @@ def item_to_pass(passed: Optional[str], item_id: Optional[str]) -> Optional[str]
     return iid
 
 
+def _snapshot_obj(obj):
+    """観測の記録に残す引数の写し (MonView・FieldView。写せなければそのもの)"""
+    try:
+        return copy.deepcopy(obj)
+    except Exception:
+        return obj
+
+
 class SpreadEstimator:
     """1体の相手ポケモンに対する型仮説の管理"""
 
@@ -221,6 +319,10 @@ class SpreadEstimator:
     def __init__(self, species_id: str):
         self.species_id = species_id
         self.hyps: list = self._build_hypotheses(species_id)
+        # 事前の仮説の写しと観測の記録 (2026-10-31。候補外の持ち物の初判明で評価し直す。メモリ内だけ)
+        self._prior_hyps: list = copy.deepcopy(self.hyps)
+        self._obs_log: list = []
+        self._confirmed_item: Optional[str] = None   # add_missing=True で確定した持ち物 (初判明と変更の区別)
         self.n_obs = 0
         self.spe_lower: Optional[float] = None   # 実効素早さの下限 (観測由来)
         self.spe_upper: Optional[float] = None
@@ -249,6 +351,11 @@ class SpreadEstimator:
                 if rows:
                     return item_share(rows, item_id)
             return None
+        except sqlite3.Error as e:
+            err = _pin_query_error(e, "item_usage")
+            if err is not None:
+                raise err from e
+            return None
         except Exception:
             return None
         finally:
@@ -263,7 +370,7 @@ class SpreadEstimator:
     @staticmethod
     def _query_spreads(species_id: str) -> list:
         """[配分の行 [(nature, evs, 重み)], 持ち物の行 [(item_name, 重み)]]。版は advisor.data_pin (_open_usage)。
-        版を明示していて DB・snapshot が無ければ InputsPinError (握りつぶさない)。明示が無いときの失敗は従来どおり空"""
+        版を明示していて DB・snapshot・テーブルが無ければ (sqlite の例外も) InputsPinError (握りつぶさない)。明示が無いときの失敗は従来どおり空"""
         from advisor.data_pin import InputsPinError
         try:
             db, filters = _open_usage()
@@ -293,6 +400,12 @@ class SpreadEstimator:
             items = q("item_usage", "item_name", filters[0], 4) or \
                 q("item_usage", "item_name", filters[1], 4)
             return [rows, items]
+        except sqlite3.Error as e:
+            # 版を明示していればテーブル欠落等も止める (2026-10-31。空の仮説で続けない)
+            err = _pin_query_error(e, "spread_usage / item_usage")
+            if err is not None:
+                raise err from e
+            return [[], []]
         except Exception:
             return [[], []]
         finally:
@@ -341,7 +454,10 @@ class SpreadEstimator:
         return hyps
 
     # ------------------------------------------------------------------
-    def _view(self, hyp: dict, opp_state: dict) -> Optional[MonView]:
+    def _view(self, hyp: dict, opp_state: dict, gone: Optional[bool] = None) -> Optional[MonView]:
+        """仮説の MonView。gone = 持ち物なしで計算するか (None は今の item_gone。観測の評価し直しでは記録の時点の値)"""
+        if gone is None:
+            gone = self.item_gone
         dex = get_dex()
         sp = dex.species(self.species_id)
         if sp is None:
@@ -354,10 +470,100 @@ class SpreadEstimator:
             boosts=opp_state.get("boosts") or {},
             ability=opp_state.get("ability_id"),
             # 消費・喪失の後は持ち物なしで計算する (仮説の持ち物は以前持っていた物のまま。2026-10-30)
-            item=None if self.item_gone else hyp["item"],
+            item=None if gone else hyp["item"],
             ev=hyp["evs"],
             nature=_nature_mult(hyp["nature"]),
         )
+
+    # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _opp_snapshot(opp_state: Optional[dict]) -> dict:
+        """観測の記録に残す相手の欄の写し (_view と先後の計算が読む欄だけ)"""
+        o = opp_state or {}
+        return {"boosts": dict(o.get("boosts") or {}), "ability_id": o.get("ability_id"), "status": o.get("status")}
+
+    def _record(self, kind: str, **args) -> dict:
+        """観測を記録に足して記録 (entry) を返す (2026-10-31)。gone = 記録の時点の「現在は持ち物なし」。
+        件数の上限は config.EV_INFER_OBS_LOG_MAX (超えたら古い方から捨てる)。__init__ を通さずに作った推定器でも動く"""
+        from champions_agent import config as C
+        entry = dict(args, kind=kind, t=time.time(), gone=bool(self.item_gone))
+        log = getattr(self, "_obs_log", None)
+        if log is None:
+            log = self._obs_log = []
+        log.append(entry)
+        if len(log) > int(C.EV_INFER_OBS_LOG_MAX):
+            self._obs_log = trim_obs_log(log, int(C.EV_INFER_OBS_LOG_MAX))
+        return entry
+
+    def _apply_obs(self, hyps: list, entry: dict) -> None:
+        """記録 1 件の尤度を hyps に掛ける (観測したときと、初判明で評価し直すときの共通。持ち物なしは記録の時点の値)"""
+        kind, gone = entry.get("kind"), entry.get("gone")
+        if kind == "speed":
+            from advisor.damage import FieldView, effective_speed
+            fv = FieldView(weather="rain" if entry["rain"] else None)
+            opp_state, my_spe = entry["opp"], entry["my_spe"]
+            for h in hyps:
+                v = self._view(h, opp_state, gone=gone)
+                if v is None:
+                    continue
+                v.status = opp_state.get("status")
+                spe = effective_speed(v, fv)
+                consistent = (spe > my_spe) if entry["opp_first"] else (spe < my_spe)
+                # 先後は追い風/こだわり等の未観測要因もあるためソフトに更新
+                h["logw"] += math.log(1.0 if consistent else 0.2)
+        elif kind == "damage":
+            observed_pct = entry["pct"]
+            for h in hyps:
+                hyp_view = self._view(h, entry["opp"], gone=gone)
+                if hyp_view is None:
+                    continue
+                try:
+                    if entry["defender_is_hyp"]:
+                        d = calc_damage(entry["attacker"], hyp_view, entry["move_id"], entry["fieldv"])
+                    else:
+                        d = calc_damage(hyp_view, entry["attacker"], entry["move_id"], entry["fieldv"])
+                except Exception:
+                    continue
+                lo, hi = d["min"] - 3.0, d["max"] + 3.0
+                if lo <= observed_pct <= hi:
+                    like = 1.0
+                else:
+                    dist = (lo - observed_pct) if observed_pct < lo \
+                        else (observed_pct - hi)
+                    like = math.exp(-(dist / 6.0) ** 2) + 1e-6
+                h["logw"] += math.log(like)
+        elif kind == "choice_lock":
+            # 3連続同一技はこだわり系のほぼ確定的な証拠 (変化技サイクル等の例外はあるが稀) なので強く更新する
+            for h in hyps:
+                if h["item"] and h["item"].startswith("choice"):
+                    h["logw"] += math.log(4.0)
+                else:
+                    h["logw"] += math.log(0.1)
+        elif kind == "item":
+            iid = entry["item"]
+            if not any((h["item"] or "") == iid for h in hyps):
+                return   # 仮説に無い持ち物なら情報として使えない (全滅を避ける)
+            for h in hyps:
+                if (h["item"] or "") != iid:
+                    h["logw"] += math.log(1e-6)
+
+    def _replay(self, hyps: list) -> list:
+        """記録した観測を新しい仮説に順に掛け直す (初判明の評価し直し)。記録に無い観測 (上限で捨てた分) の重みは流用しない"""
+        replay_observations(hyps, getattr(self, "_obs_log", None) or [], self._apply_obs)
+        return hyps
+
+    def _invalidate_speed_range(self) -> None:
+        self.spe_lower = None
+        self.spe_upper = None
+
+    def set_item_gone(self, gone: bool) -> None:
+        """「現在は持ち物なし」を設定する (トラッカーが state の欄から決める。2026-10-31)。切り替わったら、以前の条件で得た
+        実効素早さの範囲を捨てる (speed_range_stale。消費・喪失の後に古い下限・上限を流用しない)"""
+        before = bool(self.item_gone)
+        self.item_gone = bool(gone)
+        if speed_range_stale(False, before, self.item_gone):
+            self._invalidate_speed_range()
 
     # ------------------------------------------------------------------
     def observe_speed(self, opp_first: bool, my_effective_speed: float,
@@ -371,20 +577,11 @@ class SpreadEstimator:
             self.spe_lower = max(self.spe_lower or 0, my_effective_speed)
         else:
             self.spe_upper = min(self.spe_upper or 9999, my_effective_speed)
-        from advisor.damage import FieldView, effective_speed
-        fv = FieldView(weather="rain" if rain else None)
-        for h in self.hyps:
-            v = self._view(h, opp_state)
-            if v is None:
-                continue
-            v.status = opp_state.get("status")
-            spe = effective_speed(v, fv)
-            consistent = (spe > my_effective_speed) if opp_first \
-                else (spe < my_effective_speed)
-            # 先後は追い風/こだわり等の未観測要因もあるためソフトに更新
-            h["logw"] += math.log(1.0 if consistent else 0.2)
+        entry = self._record("speed", opp_first=bool(opp_first), my_spe=my_effective_speed,
+                             opp=self._opp_snapshot(opp_state), rain=bool(rain))
+        self._apply_obs(self.hyps, entry)
 
-    def observe_item(self, item_id: Optional[str], add_missing: bool = False) -> None:
+    def observe_item(self, item_id: Optional[str], add_missing: bool = False, change: Optional[bool] = None) -> None:
         """持ち物の判明 (発動/はたき落とし/表示) で、別の持ち物の仮説を実質除外する。
 
         add_missing=False (既定。シミュレータの探索 champions_agent/env/search_expert が毎ターン呼ぶ): 従来どおり、別の持ち物の仮説を
@@ -392,23 +589,48 @@ class SpreadEstimator:
         add_missing=True (2026-10-30。サーバーのトラッカーが表示で確定した持ち物を個体ごとに一度だけ渡す): confirm_item_hyps で
           その持ち物の仮説だけを残し、仮説に無ければ配分ごとに持ち物を差し替えた仮説を足す (事前の重みは DB の採用率、一覧に無ければ
           config.EV_INFER_ITEM_FLOOR)。「現在は持ち物なし」(item_gone) はここでは変えない (消費した持ち物の観測もこの経路で渡すため。
-          トラッカーが state の欄から決める)"""
+          トラッカーが state の欄から決める)。
+          2026-10-31: 初判明か実際の変更かで扱いを分ける (change: True=変更 / False=初判明 / None=推定器が item_reveal_kind で決める。
+          トラッカーは None で渡し、推定器の _confirmed_item (トラッカーの _item_passed と同じ個体の記録) と item_gone で決まる)。
+          - 初判明で候補にある: その仮説だけ残す (従来どおり)。
+          - 初判明で候補に無い: 事前の配分 × 新しい持ち物 (prior_item_hyps) から作り直し、記録した観測を評価し直す
+            (config.EV_INFER_REEVAL_ON_REVEAL が偽なら評価し直さず事前の重みのまま。どちらも以前の仮説の重みは流用しない)。
+          - 実際の変更: 配分の事後を保って持ち物だけ切り替え (switch_item_hyps)、実効素早さの範囲を捨てる"""
         if not item_id or not self.hyps:
             return
         iid = _item_key(item_id)
         if add_missing:
-            prior = 1.0
-            if not any((h["item"] or "") == iid for h in self.hyps):
-                prior = self._item_prior(iid)
-            self.hyps = confirm_item_hyps(self.hyps, iid, prior)
+            if change is None:
+                kind = item_reveal_kind(getattr(self, "_confirmed_item", None), bool(self.item_gone), iid)
+            else:
+                kind = "change" if change else "first"
+            if kind == "change":
+                self.hyps = switch_item_hyps(self.hyps, iid)
+                if speed_range_stale(True, bool(self.item_gone), bool(self.item_gone)):
+                    self._invalidate_speed_range()
+            elif any((h["item"] or "") == iid for h in self.hyps):
+                self.hyps = confirm_item_hyps(self.hyps, iid, 1.0)
+            else:
+                self.hyps = self._reveal_outside(iid)
+            self._confirmed_item = iid
             self.n_obs += 1
             return
         if not any((h["item"] or "") == iid for h in self.hyps):
             return   # 仮説に無い持ち物なら情報として使えない (全滅を避ける)
         self.n_obs += 1
-        for h in self.hyps:
-            if (h["item"] or "") != iid:
-                h["logw"] += math.log(1e-6)
+        self._apply_obs(self.hyps, self._record("item", item=iid))
+
+    def _reveal_outside(self, iid: str) -> list:
+        """候補外の持ち物の初判明 (2026-10-31)。事前の仮説が無い (__init__ を通さずに作った) ときは従来の confirm_item_hyps"""
+        from champions_agent import config as C
+        prior = self._item_prior(iid)
+        prior_hyps = getattr(self, "_prior_hyps", None)
+        if not prior_hyps:
+            return confirm_item_hyps(self.hyps, iid, prior)
+        fresh = prior_item_hyps(prior_hyps, iid, prior)
+        if bool(C.EV_INFER_REEVAL_ON_REVEAL):
+            self._replay(fresh)
+        return fresh
 
     def observe_choice_lock(self) -> None:
         """同一技の3連続使用を観測 -> こだわり系持ち物の仮説を強める"""
@@ -416,13 +638,7 @@ class SpreadEstimator:
             return
         self._choice_locked = True
         self.n_obs += 1
-        # 3連続同一技はこだわり系のほぼ確定的な証拠 (変化技サイクル等の
-        # 例外はあるが稀) なので強く更新する
-        for h in self.hyps:
-            if h["item"] and h["item"].startswith("choice"):
-                h["logw"] += math.log(4.0)
-            else:
-                h["logw"] += math.log(0.1)
+        self._apply_obs(self.hyps, self._record("choice_lock"))
 
     def observe_damage(self, attacker: MonView, defender_is_hyp: bool,
                        move_id: str, observed_pct: float,
@@ -432,25 +648,10 @@ class SpreadEstimator:
         if not self.hyps or observed_pct <= 1.0:
             return
         self.n_obs += 1
-        for h in self.hyps:
-            hyp_view = self._view(h, opp_state)
-            if hyp_view is None:
-                continue
-            try:
-                if defender_is_hyp:
-                    d = calc_damage(attacker, hyp_view, move_id, fieldv)
-                else:
-                    d = calc_damage(hyp_view, attacker, move_id, fieldv)
-            except Exception:
-                continue
-            lo, hi = d["min"] - 3.0, d["max"] + 3.0
-            if lo <= observed_pct <= hi:
-                like = 1.0
-            else:
-                dist = (lo - observed_pct) if observed_pct < lo \
-                    else (observed_pct - hi)
-                like = math.exp(-(dist / 6.0) ** 2) + 1e-6
-            h["logw"] += math.log(like)
+        entry = self._record("damage", attacker=_snapshot_obj(attacker), defender_is_hyp=bool(defender_is_hyp),
+                             move_id=move_id, pct=observed_pct, opp=self._opp_snapshot(opp_state),
+                             fieldv=_snapshot_obj(fieldv))
+        self._apply_obs(self.hyps, entry)
 
     # ------------------------------------------------------------------
     def best(self) -> Optional[dict]:
@@ -694,7 +895,8 @@ class SpreadTracker:
         - 持ち物が初めて判明した (または はたきおとす・トリック 等で前に渡した物と違う物になった) とき observe_item(..., add_missing=True) を 1 回
         - 消費 (item_consumed): その持ち物の観測 (まだ渡していなければ) + 現在は持ち物なし (推定器の item_gone)
         - 喪失 (item_removed): 失った物が分かれば (このフレームの knockoff_opponent_<id> を場の個体に帰属) その観測 + 現在は持ち物なし
-        「現在は持ち物なし」は仮説の持ち物を変えない (出力と以後の計算だけ)"""
+        「現在は持ち物なし」は仮説の持ち物を変えない (出力と以後の計算だけ)。
+        2026-10-31: 持ち物の変更・消費・喪失で、以前の実効素早さの範囲を捨てる (observe_item の変更 / set_item_gone)"""
         opp = state.get("opponent") or {}
         party = opp.get("party") or []
         act = opp.get("active_index")
@@ -712,9 +914,10 @@ class SpreadTracker:
             est = self.estimator(sid)
             new = item_to_pass(self._item_passed.get(key), held)
             if new:
+                # 初判明か実際の変更かは推定器が決める (item_reveal_kind: 渡し済みの持ち物 = この記録と同じ、直前の持ち物なし)
                 est.observe_item(new, add_missing=True)
                 self._item_passed[key] = new
-            est.item_gone = gone
+            est.set_item_gone(gone)
 
     def _my_view(self, state: dict):
         from advisor.engine import build_mon_view

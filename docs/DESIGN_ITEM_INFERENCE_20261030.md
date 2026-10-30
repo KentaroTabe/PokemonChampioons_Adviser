@@ -275,6 +275,10 @@
   観測をどちらが掛けるか (両方で掛けない)、どちらが記録・再生の正とするかの更新責任を明記する。前の版の §3.5 の案 (`sets` 側で分布を持ち `ev_infer` に重みを渡す) はこちら。
 - `observe_item` (§6.4 の論点 4、対応済み (feature/team-build に 2026-10-31 マージ)) に求めること: (1) 上位候補に無い持ち物が表示で判明したら、その持ち物の仮説を候補に追加できる (今は何もしない)。
   (2) 消費・喪失は「以前持っていた物」(消費したきのみ・はたきおとされた物) と「現在の持ち物なし」を分けて扱う。
+- **観測の記録と再評価 (2026-10-31 追加修正、feat/ev-infer-speed-reeval)**: 推定器は観測の記録 (`_obs_log`、先後・ダメージ・こだわりの固定・持ち物、メモリ内だけ、
+  上限 `EV_INFER_OBS_LOG_MAX`) と事前の仮説 (`_prior_hyps`) を持つ。候補外の持ち物の**初判明**は 事前の配分 × 新しい持ち物 から作り直して記録した観測を評価し直し、
+  **実際の変更** (別の持ち物を渡し済み、または持ち物なしの後に判明。`item_reveal_kind`) は配分の事後を保って持ち物だけ切り替える。持ち物の変更・消費・喪失では
+  実効素早さの範囲 (`spe_lower` / `spe_upper`) を捨てる。評価し直せない観測 (上限で捨てた分) の重みは流用しない (KNOWN_ISSUES E-ev-1 / E-ev-2)。
 - `observe_choice_lock` の比 40 は §3.2 の候補 2 と比べてから置き換える (既存の挙動の変更。§6.5 の 2)。
 - 否定は `SpreadTracker._on_frame` の連続の追跡に足す (今は同じ技の連続だけを見ていて、違う技が来ても何もしない)。§3.4 の識別を満たす組だけ。
 
@@ -393,10 +397,12 @@
 3. `ev_infer` の持ち物の仮説 (DB 上位 4、`_champions_filter` の全 snapshot、data_pin の固定なし) と `sets.predict` の統一。再生で同じ推定になるには事前分布の版が固定されている必要がある。
    **対応済み (feat/ev-infer-item-pin、2026-10-30 マージ)**。レビュワーがコード上で再現した (`_query_spreads` は data_pin の DB・snapshot ではなく `DB_PATH` を開き、snapshot を絞らずに合計する)。
    - (10/30 対応) 版の固定は対応した: `ev_infer` は `advisor/data_pin` を通り、版を明示したときはその snapshot だけを読む (無ければ InputsPinError)。`sets.predict` との事前分布の統一はしていない (feat/ev-infer-item-pin)。
+   - (10/31 追加修正) 版を明示したとき、テーブル欠落等の sqlite の例外も InputsPinError に包む (以前は空の仮説を返していた。feat/ev-infer-speed-reeval)。
 4. `observe_item` がサーバーの経路で呼ばれていない。表示で持ち物が判明しても、型推定 (努力値) の仮説は判明前の持ち物の仮説を含んだまま。
    **対応済み (feat/ev-infer-item-pin、2026-10-30 マージ)**。レビュワーがコード上で再現した (持ち物の判明した状態をトラッカーに渡しても `observe_item` は呼ばれない)。
    上位外の持ち物の追加と、消費・喪失の「以前持っていた物」と「現在の持ち物なし」の区別も同じブランチ (§3.5)。
    - (10/30 対応) トラッカーが個体ごとに一度だけ `observe_item(..., add_missing=True)` を呼ぶ。候補に無い持ち物は仮説に足し、消費・喪失の後は出力の持ち物を「なし」にする (feat/ev-infer-item-pin)。
+   - (10/31 追加修正) 初判明と実際の変更を区別し、初判明は記録した観測を新しい仮説で評価し直す。持ち物の変更・消費・喪失で実効素早さの範囲を捨てる (§3.5、KNOWN_ISSUES E-ev-1 / E-ev-2、feat/ev-infer-speed-reeval)。
 5. 自分の延長の持ち物 (しめったいわ・グランドコート) の天候・フィールドも、vision は開始で 5 にして 5 ターンで消す (`vision/events.py`、`vision/pipeline._tick_field_effects`)。
    6〜8 ターン目は雨・サイコフィールドなしで計算している。**対応済み (feat/field-extender-items、2026-10-30 マージ: field_effects.json の duration と dex.effect_duration、自分側は state の item_id → 登録で補う)**。**壁も対応済み (feat/screen-turns、2026-10-31: 陣営ごとに `reflect_turns` / `light_screen_turns` / `aurora_veil_turns` を追加し、技の使用者の持ち物で開始 (ひかりのねんど 8)、ターン経過で 0 になったら消す。旧ログの欄なしは None で減らさない。場の状況画面の n/m も反映。tests/test_screen_turns.py)**。レビュワーがコード上で再現した
    (ペリッパー しめったいわ・イエッサン グランドコート の特性による開始と、その後のターン経過で確かめたもの)。実戦の対戦ログでの影響の実測は未確認。

@@ -187,6 +187,7 @@ TESTS=(
   test_smogon_eval
   test_item_cues
   test_ev_infer_item_pin
+  test_ev_infer_reeval
 )
 
 fail=0
