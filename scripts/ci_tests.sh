@@ -43,6 +43,7 @@ TESTS=(
   test_battle_active
   test_battle_outcome_infer
   test_events
+  test_field_extender
   test_team_proposal
   test_team_menu
   test_rescue

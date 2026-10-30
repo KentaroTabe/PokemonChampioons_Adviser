@@ -1,5 +1,21 @@
 {
-  "_comment": "フィールド/天候の補正表。advisor.damage (助言のダメージ計算) と tools/team_build/gen_sets (型生成) の唯一の源。倍率はゲームの仕様値。sources = 場を張る特性/技、type_boost = タイプ別の威力補正 (フィールドは接地した使用者だけ)、terrain_target_nerf = 接地した相手への減衰、weather_defense = 天候による防御側の実数補正、moves = 技固有の効果 (grounded: user/target/none、types: 変化後のタイプ、other_weather_mult: 条件外の天候での倍率)、priority = 優先度の変化",
+  "_comment": "フィールド/天候の補正表。advisor.damage (助言のダメージ計算) と tools/team_build/gen_sets (型生成) の唯一の源。倍率はゲームの仕様値。sources = 場を張る特性/技、type_boost = タイプ別の威力補正 (フィールドは接地した使用者だけ)、terrain_target_nerf = 接地した相手への減衰、weather_defense = 天候による防御側の実数補正、moves = 技固有の効果 (grounded: user/target/none、types: 変化後のタイプ、other_weather_mult: 条件外の天候での倍率)、priority = 優先度の変化、duration = 継続ターン (vision の残りターンの源)",
+  "duration": {
+    "_comment": "効果ごとの継続ターン。キーは state の値 (天候 sun/rain/sandstorm/snow、フィールド electric/grassy/psychic/misty) と state の欄名 (壁 reflect/light_screen/aurora_veil、trick_room)。base = 基本のターン、extenders = 設定者の持ち物 (Showdown の item id) → 延長後のターン。読み取りは advisor.dex.effect_duration。2026-10-30 (docs/DESIGN_ITEM_INFERENCE_20261030.md §6.4 論点 5)",
+    "base": {
+      "sun": 5, "rain": 5, "sandstorm": 5, "snow": 5,
+      "electric": 5, "grassy": 5, "psychic": 5, "misty": 5,
+      "reflect": 5, "light_screen": 5, "aurora_veil": 5,
+      "trick_room": 5
+    },
+    "extenders": {
+      "sun": {"heatrock": 8}, "rain": {"damprock": 8},
+      "sandstorm": {"smoothrock": 8}, "snow": {"icyrock": 8},
+      "electric": {"terrainextender": 8}, "grassy": {"terrainextender": 8},
+      "psychic": {"terrainextender": 8}, "misty": {"terrainextender": 8},
+      "reflect": {"lightclay": 8}, "light_screen": {"lightclay": 8}, "aurora_veil": {"lightclay": 8}
+    }
+  },
   "sources": {
     "abilities": {
       "psychicsurge": ["terrain", "psychic"], "electricsurge": ["terrain", "electric"],
