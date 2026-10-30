@@ -1667,3 +1667,26 @@ TRANSFORM_EVENT_EVIDENCE = ("ability_opponent_imposter",)
 TRANSFORM_MOVE_EVIDENCE = True
 TRANSFORM_EVENT_WINDOW_SEC = 10.0
 TRANSFORM_COPY_PP = 5
+# 引き継ぎ評価 段階 A の検証セット F (事実確認) と R (既知の失敗) の標本 (tools/inheritance_eval/fsample、
+# docs/INHERITANCE_EVALUATION_PLAN_20261031.md §4・§7、2026-10-31)。目標の件数は計画書 §4 の初期規模。
+# セッション = 対戦ログの時間の幅の間が SESSION_GAP_SEC 以下で続く対戦 (接続テストの 1 回)。決定画面の窓は scene 行の連続
+# (command / move_select と selection を別の系統、情報確認の画面は窓を閉じない)。同じ系統・同じターンの窓が REOPEN_MERGE_SEC 以内に
+# 開き直したら同じ決定とみなす (認識の揺れ)。ターン 0 の selection は 1 対戦 1 決定にまとめる。1 決定に付ける保存フレームは最大 MAX_FRAMES_PER_CASE 枚。
+# R の根拠画像は記録の時刻から ±R_FRAME_TOL_SEC (保存フレームの間隔 約 10 秒) 以内の保存フレーム。
+# NEAR_FRAME_TOLS_SEC は「画像の無い決定」の窓の外 (前後) にある最も近い保存フレームの距離の集計の区切り (診断用。F には入れない)。
+# ラベル作成の所要は見積もり (未実測): 1 決定あたりの分 (選出 / ターン)、人の作業の予算 (計画書 §7 段階 A の 2 時間)
+INH_FSAMPLE_SEED = 20261031
+INH_FSAMPLE_TARGET_DECISIONS = 60
+INH_FSAMPLE_TARGET_BATTLES = 12
+INH_FSAMPLE_TARGET_SESSIONS = 3
+INH_FSAMPLE_SESSION_GAP_SEC = 1800.0
+INH_FSAMPLE_REOPEN_MERGE_SEC = 3.0
+INH_FSAMPLE_MAX_FRAMES_PER_CASE = 3
+INH_FSAMPLE_BURST_SUBDIR = "burst"
+INH_FSAMPLE_DATASET_KINDS = ("real",)
+INH_FSAMPLE_R_FRAME_TOL_SEC = 10.0
+INH_FSAMPLE_NEAR_FRAME_TOLS_SEC = (5.0, 10.0)
+INH_FSAMPLE_LABEL_MIN_SELECTION = 3.0
+INH_FSAMPLE_LABEL_MIN_TURN = 2.0
+INH_FSAMPLE_LABEL_BUDGET_MIN = 120.0
+INH_FSAMPLE_TIME_BUDGET_SEC = 1500.0
