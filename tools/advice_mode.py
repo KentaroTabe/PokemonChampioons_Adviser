@@ -431,7 +431,8 @@ def precheck_data_pin(values: dict, root: Path, env: Optional[dict] = None) -> O
 def data_pin_startup_check(env: Optional[dict] = None, path: Path = LOCAL_FILE) -> str:
     """server.py の起動時のデータの固定の検査と起動ログの 1 行 (2026-10-23)。実効値は環境変数 (advice_env.sh が uvicorn にだけ渡す)。
     値が不正・指定 snapshot が DB に無い・写しのバンクが無い / sha16 が違う・元のバンクそのものを指す → SystemExit
-    (最新へ黙って退避しない)。助言側 (advisor.sets / infer / team_advice / real_prior) は advisor.data_pin で同じ環境変数を読む"""
+    (最新へ黙って退避しない)。助言側 (advisor.sets / infer / team_advice / real_prior / ev_infer) は advisor.data_pin で同じ環境変数を読む
+    (ev_infer は 2026-10-30 から。ここで確かめる DB・snapshot と同じものを読むので、フレームごとの InputsPinError は起きない)"""
     from advisor import data_pin as DP
     e = os.environ if env is None else env
     try:

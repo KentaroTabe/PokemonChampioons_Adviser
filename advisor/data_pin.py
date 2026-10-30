@@ -1,7 +1,8 @@
 """助言が読む外部データ (使用率 DB の snapshot・実戦バンク) の「使う版」の明示 (2026-10-23、レビュー 2026-10-19 §2)。
 
 型予測 (advisor.sets.SetPredictor)・タイプからの候補 (advisor.infer.TypeInference)・チャンピオンズの種の判定
-(advisor.team_advice.champions_usable)・実戦バンク (advisor.real_prior) は、ここで決めた版を読む。
+(advisor.team_advice.champions_usable)・実戦バンク (advisor.real_prior)・相手の型推定 (advisor.ev_infer、2026-10-30。版を明示したときは
+その snapshot だけ) は、ここで決めた版を読む。
 
 版の決め方 (上が優先):
   1. set_override(...) (同じプロセスの中の再生。tools.real_accept / tools.advice_replay の --data-mode restore)
@@ -187,6 +188,14 @@ def reset_caches() -> None:
         import advisor.real_prior as R
         R._cache.update({"path": None, "mtime": None, "bank": None})
         R._ver_cache.update({"path": None, "mtime": None, "info": None})
+    except Exception:
+        pass
+    try:
+        # 型推定のトラッカーの推定器 (版ごとの仮説。2026-10-30)。読み込まれていなければ持っている値も無い
+        import sys
+        E = sys.modules.get("advisor.ev_infer")
+        if E is not None and E._tracker is not None:
+            E._tracker.drop_estimators()
     except Exception:
         pass
 

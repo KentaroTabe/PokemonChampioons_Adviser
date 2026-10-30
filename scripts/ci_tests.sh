@@ -185,6 +185,7 @@ TESTS=(
   test_live_data_pin
   test_smogon_eval
   test_item_cues
+  test_ev_infer_item_pin
 )
 
 fail=0

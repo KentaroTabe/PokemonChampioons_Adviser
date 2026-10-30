@@ -387,10 +387,12 @@
 1. `observe_choice_lock` の比 40 → 2 (既存の挙動の変更)。**決定済み** (§6.5 の 2): 2 は候補。同じ観測条件で記録・比較してから暫定値として導入する。
 2. 持ち物の分布を engine でどう使うか: 今の点推定 (最頻) のままか、transition の感度 (スカーフ / タスキ の有無) に確率として渡すか。
 3. `ev_infer` の持ち物の仮説 (DB 上位 4、`_champions_filter` の全 snapshot、data_pin の固定なし) と `sets.predict` の統一。再生で同じ推定になるには事前分布の版が固定されている必要がある。
-   **修正中 (別ブランチ feat/ev-infer-item-pin)**。レビュワーがコード上で再現した (`_query_spreads` は data_pin の DB・snapshot ではなく `DB_PATH` を開き、snapshot を絞らずに合計する)。
+   **対応済み (feat/ev-infer-item-pin、2026-10-30 マージ)**。レビュワーがコード上で再現した (`_query_spreads` は data_pin の DB・snapshot ではなく `DB_PATH` を開き、snapshot を絞らずに合計する)。
+   - (10/30 対応) 版の固定は対応した: `ev_infer` は `advisor/data_pin` を通り、版を明示したときはその snapshot だけを読む (無ければ InputsPinError)。`sets.predict` との事前分布の統一はしていない (feat/ev-infer-item-pin)。
 4. `observe_item` がサーバーの経路で呼ばれていない。表示で持ち物が判明しても、型推定 (努力値) の仮説は判明前の持ち物の仮説を含んだまま。
-   **修正中 (別ブランチ feat/ev-infer-item-pin)**。レビュワーがコード上で再現した (持ち物の判明した状態をトラッカーに渡しても `observe_item` は呼ばれない)。
+   **対応済み (feat/ev-infer-item-pin、2026-10-30 マージ)**。レビュワーがコード上で再現した (持ち物の判明した状態をトラッカーに渡しても `observe_item` は呼ばれない)。
    上位外の持ち物の追加と、消費・喪失の「以前持っていた物」と「現在の持ち物なし」の区別も同じブランチ (§3.5)。
+   - (10/30 対応) トラッカーが個体ごとに一度だけ `observe_item(..., add_missing=True)` を呼ぶ。候補に無い持ち物は仮説に足し、消費・喪失の後は出力の持ち物を「なし」にする (feat/ev-infer-item-pin)。
 5. 自分の延長の持ち物 (しめったいわ・グランドコート) の天候・フィールドも、vision は開始で 5 にして 5 ターンで消す (`vision/events.py`、`vision/pipeline._tick_field_effects`)。
    6〜8 ターン目は雨・サイコフィールドなしで計算している。**修正中 (別ブランチ feat/field-extender-items)**。レビュワーがコード上で再現した
    (ペリッパー しめったいわ・イエッサン グランドコート の特性による開始と、その後のターン経過で確かめたもの)。実戦の対戦ログでの影響の実測は未確認。
