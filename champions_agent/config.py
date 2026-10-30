@@ -1667,3 +1667,14 @@ TRANSFORM_EVENT_EVIDENCE = ("ability_opponent_imposter",)
 TRANSFORM_MOVE_EVIDENCE = True
 TRANSFORM_EVENT_WINDOW_SEC = 10.0
 TRANSFORM_COPY_PP = 5
+
+# 引き継ぎ評価 段階 A の I-05 型検査 (tools/inheritance_eval/setlint_audit.py、docs/INHERITANCE_EVALUATION_PLAN_20261031.md §5 I-05。2026-10-31)。
+# INH_SETLINT_FORMAT: 合法性の参照に使うローカル Showdown の形式 id (config/formats.ts の [Gen 9 Champions] BSS Reg M-C)
+# INH_SETLINT_IGNORED_ERRORS: 1 体ずつ検査するときに捨てるチーム単位の誤りの先頭 (6 体未満。型そのものの合法性ではない)
+# INH_SETLINT_SMOGON_TOP: Smogon chaos から型を組む種の数 (使用率の上位。None = 全種。全 323 種でも validate-team 込みで約 1 分のため全種)
+# INH_SETLINT_WORKERS: validate-team の並列数 / INH_SETLINT_TIME_BUDGET_SEC: 担当あたりの計算時間の上限 (共通規約の 25 分)
+INH_SETLINT_FORMAT = "gen9championsbssregmc"
+INH_SETLINT_IGNORED_ERRORS = ("You must bring at least",)
+INH_SETLINT_SMOGON_TOP = None
+INH_SETLINT_WORKERS = 4
+INH_SETLINT_TIME_BUDGET_SEC = 1500
