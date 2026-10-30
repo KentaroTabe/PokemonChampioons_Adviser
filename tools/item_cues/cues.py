@@ -33,8 +33,10 @@ RULES = (
     "相手の判明した持ち物: 状態行の相手の party の item の、(対戦, 基本種) ごとの最初の値。メガストーン (id の末尾 ite/itex/itey/itez・"
     "megastone) と marble (いのちのたま の誤解決) は別に数える",
     "自分側の登録の持ち物: 状態行の自分の party の item の、(対戦, 基本種) ごとの最初の値",
-    "否定の守りの条件: 個体ごとの最初の否定の 1 組。clean_1030 = turn が同じ・わるあがき・間の状態で場の個体が別の種、のどれでもない。"
-    "clean = わるあがき・場の個体の変化・時刻の差 < ITEM_CUE_MIN_SEP_SEC のどれでもない (§3.4 の 3 処理の空白・5 のアンコール / へんしん は未適用)",
+    "否定の守りの条件: 個体ごとの最初の否定の 1 組。guard_1030 (10/30 の定義) = turn が同じ・わるあがき・間の状態で場の個体が別の種、のどれでもない。"
+    "guard_partial (§3.4 の一部だけ) = わるあがき・場の個体の変化・時刻の差 < ITEM_CUE_MIN_SEP_SEC (集計用の暫定値) のどれでもない "
+    "(未検査: §3.4 の 3 処理の空白・5 のアンコール / へんしん・持ち物変更区間・個体と出場区間の識別。全条件を満たす標本ではない)。"
+    "guard_full (較正用の確定標本) = 未判定 (全条件を検査できる記録が無い)",
 )
 
 
@@ -105,10 +107,13 @@ def guard_counts(rows: list, R: dict, L: dict, name: str) -> None:
                 key = (attr, side)
                 R["guard"][key + ("negation",)] += 1
                 for k, v in g.items():
+                    if v is None:                     # guard_full: 未判定 (数えない。未判定の組の数だけ残す)
+                        R["guard_undetermined"][key + (k,)] += 1
+                        continue
                     R["guard"][key + (k,)] += int(v)
                 R["guard_dt"][key + (cm.dt_bucket(a, b),)] += 1
-                if attr == cm.ATTR_NEXT_ON_SWITCH and g["clean_1030"] and not g["clean"]:
-                    L["guard_clean_1030_not_clean"].append((name, side, sid, a["move"], b["move"], a.get("t"), b.get("t")))
+                if attr == cm.ATTR_NEXT_ON_SWITCH and g["guard_1030"] and not g["guard_partial"]:
+                    L["guard_1030_not_partial"].append((name, side, sid, a["move"], b["move"], a.get("t"), b.get("t")))
 
 
 def pre_cues(timeline: list, opp_known: dict) -> Counter:
@@ -260,6 +265,17 @@ def db_items(db_path: Path, snapshots: list) -> list:
 
 # ---------------------------------------------------------------- 出力
 
+def guards_payload(res: dict) -> dict:
+    """JSON の守りの条件の説明 (各 guard の検査した条件・未検査の条件、ITEM_CUE_MIN_SEP_SEC が暫定値であること、guard_full は未判定)"""
+    return {"definitions": cm.GUARD_DEFS,
+            "min_sep_sec": {"value": C.ITEM_CUE_MIN_SEP_SEC, "note": cm.GUARD_MIN_SEP_NOTE},
+            "guard_full": {"n": 0, "status": "undetermined", "reason": cm.GUARD_FULL_UNDETERMINED,
+                           "n_pairs_undetermined": {" / ".join(k[:2]): v for k, v in res["R"]["guard_undetermined"].items()
+                                                    if k[-1] == "guard_full"}},
+            "renamed_from_1030": {"clean_1030": "guard_1030", "clean": "guard_partial",
+                                  "guard_clean_1030_not_clean": "guard_1030_not_partial"}}
+
+
 def render(rec: dict, ov: dict, res: dict, dbi: list) -> list:
     R = res["R"]
     out = ["# 持ち物の手がかりの件数 (cues)", ""] + cm.render_record(rec)
@@ -284,7 +300,7 @@ def render(rec: dict, ov: dict, res: dict, dbi: list) -> list:
     groups = (("player_scarf", "自分: スカーフ"), ("player_other", "自分: それ以外"), ("opponent", "相手"))
     labels = (("mons_with_move", "技を使った個体"), ("ge2moves", "技 2 回以上"), ("ge3moves", "技 3 回以上"),
               ("lock", f"同じ技 {C.ITEM_CUE_LOCK_REPEAT} 連続"), ("lock_distinct_turns", "　うち turn の値が別々"),
-              ("lock_sep", f"　うち隣り合う時刻の差 ≥ {C.ITEM_CUE_MIN_SEP_SEC} 秒"), ("negation", "違う技 2 つ (否定)"),
+              ("lock_sep", f"　うち隣り合う時刻の差 ≥ {C.ITEM_CUE_MIN_SEP_SEC} 秒 ({cm.GUARD_MIN_SEP_NOTE})"), ("negation", "違う技 2 つ (否定)"),
               ("lock_and_negation", "連続と否定の両方"), ("dup_same_turn", "同じ技が同じ turn の値で続いた回数"))
     out += cm.md_table([""] + [g[1] for g in groups], [[lab] + [R["choice"][(g, k)] for g, _ in groups] for k, lab in labels])
     out += ["", f"- 自分の連続の登録の持ち物: {cm.md_counter(R['choice_lock_item_player'])}",
@@ -293,12 +309,22 @@ def render(rec: dict, ov: dict, res: dict, dbi: list) -> list:
             f"- 相手の否定の後の判明: {cm.md_counter(R['choice_negation_item_opponent'])}",
             f"- スカーフ持ちの否定: {res['lists'].get('scarf_negation', [])}", ""]
     out += ["## 否定の守りの条件 (個体ごとの最初の 1 組)", "",
-            "帰属 next_on_switch が主。last_state は 10/30 の negation_guard.py の帰属 (設計文書 §1.2 の 216 / 215 と 134 / 154)。", ""]
+            "帰属 next_on_switch が主。last_state は 10/30 の negation_guard.py の帰属 (設計文書 §1.2 の 216 / 215 と 134 / 154)。", "",
+            f"- ITEM_CUE_MIN_SEP_SEC = {C.ITEM_CUE_MIN_SEP_SEC} 秒 ({cm.GUARD_MIN_SEP_NOTE})",
+            f"- 較正用の確定標本: 0 ({cm.GUARD_FULL_UNDETERMINED})",
+            "- どの guard も、交代・ひんしの発火で切った出場区間の中の組が前提 (§3.4 の 1)。"
+            "guard_partial は §3.4 の条件の一部だけを検査した数で、全条件を満たす標本ではない", ""]
+    out += [f"- **{k}** — {d['label']}。検査した条件: {'、'.join(d['checked']) or '(なし)'}。"
+            f"未検査: {'、'.join(d['unchecked']) or '(なし)'}" + (f"。{d['status']}" if d.get("status") else "")
+            for k, d in cm.GUARD_DEFS.items()]
+    out += [""]
     gk = (("negation", "否定"), ("same_turn", "turn が同じ"), ("struggle", "わるあがき"), ("active_changed", "間に場の個体が別の種"),
-          ("too_close", f"時刻の差 < {C.ITEM_CUE_MIN_SEP_SEC} 秒"), ("clean_1030", "どれにも当たらない (10/30)"),
-          ("clean", "守りの条件つき (§3.4)"))
+          ("too_close", f"時刻の差 < {C.ITEM_CUE_MIN_SEP_SEC} 秒 ({cm.GUARD_MIN_SEP_NOTE})"),
+          ("guard_1030", "guard_1030: どれにも当たらない (10/30 の定義)"),
+          ("guard_partial", "guard_partial: §3.4 の一部の条件だけ通る (全条件ではない)"))
     cols = [(a, s) for a in cm.ATTRIBUTIONS for s in cm.SIDES]
-    out += cm.md_table([""] + [f"{a} / {s}" for a, s in cols], [[lab] + [R["guard"][(a, s, k)] for a, s in cols] for k, lab in gk])
+    out += cm.md_table([""] + [f"{a} / {s}" for a, s in cols], [[lab] + [R["guard"][(a, s, k)] for a, s in cols] for k, lab in gk]
+                       + [["guard_full: 較正用の確定標本"] + ["0 (未判定)" for _ in cols]])
     out += ["", "時刻の差の分布 (最初の 1 組):", ""]
     bks = ("<5s", "<10s", "<20s", "<30s", "<60s", ">=60s", "no_t")
     out += cm.md_table([""] + list(bks), [[f"{a} / {s}"] + [R["guard_dt"][(a, s, k)] for k in bks] for a, s in cols])
@@ -335,7 +361,8 @@ def main(argv=None) -> None:
     res = collect(loaded)
     payload = {"record": rec, "overview": ov, "counts": res["counts"], "lists": res["lists"], "samples": res["samples"],
                "by_month": res["by_month"], "maxturn_median": res["maxturn_median"], "maxturn_max": res["maxturn_max"],
-               "ev_infer": res["ev_infer"], "ev_infer_battles": res["ev_infer_battles"], "db_items": dbi}
+               "ev_infer": res["ev_infer"], "ev_infer_battles": res["ev_infer_battles"], "db_items": dbi,
+               "guards": guards_payload(res)}
     md, js = cm.write_outputs(Path(args.out), CLI, render(rec, ov, res, dbi), payload)
     print(f"→ {md}\n→ {js}")
 
