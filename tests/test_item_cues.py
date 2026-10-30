@@ -3,7 +3,8 @@
     python -m tests.test_item_cues
 
 - 帰属 (next_on_switch / last_state) と出場区間 (交代・ひんしで切る)
-- 連続・否定の判定 (turn の値の重複、時刻の差)、守りの条件 (turn が同じ・わるあがき・場の個体の変化・時刻の差)
+- 連続・否定の判定 (turn の値の重複、時刻の差)、守りの条件 (turn が同じ・わるあがき・場の個体の変化・時刻の差)、
+  guard_1030 / guard_partial の名前と guard_full (較正用の確定標本) が未判定であること
 - 天候・フィールド・壁の開始の束ね・終了の対応 (壁は側を合わせる)・上書き、再現率の計算
 - 3 本の CLI (cues / field / recall) の集計と、出力の先頭の再現の記録の形
 """
@@ -120,21 +121,23 @@ def test_guard_flags():
     a = {"move": "shadowball", "turn": 1, "t": 100.0, "i": 2}
     b = {"move": "makeitrain", "turn": 2, "t": 130.0, "i": 6}
     g = cm.guard_flags(a, b, "opponent", "gholdengo", [{"opponent": "gholdengo"}], min_sep=20)
-    assert g["clean"] and g["clean_1030"] and not any(g[k] for k in ("same_turn", "struggle", "active_changed", "too_close")), g
+    assert g["guard_partial"] and g["guard_1030"] and not any(g[k] for k in ("same_turn", "struggle", "active_changed", "too_close")), g
     # turn が同じでも時刻が離れていれば §3.4 の条件は通る (10/30 の条件は落とす)
     g = cm.guard_flags(a, dict(b, turn=1), "opponent", "gholdengo", [], min_sep=20)
-    assert g["same_turn"] and not g["clean_1030"] and g["clean"], g
+    assert g["same_turn"] and not g["guard_1030"] and g["guard_partial"], g
     # 時刻の差が短い (再読みの疑い)・時刻が無い
     g = cm.guard_flags(a, dict(b, t=105.0), "opponent", "gholdengo", [], min_sep=20)
-    assert g["too_close"] and not g["clean"] and g["clean_1030"], g
+    assert g["too_close"] and not g["guard_partial"] and g["guard_1030"], g
     assert cm.guard_flags(a, dict(b, t=None), "opponent", "gholdengo", [], min_sep=20)["too_close"]
     # わるあがき
     g = cm.guard_flags(a, dict(b, move="struggle"), "opponent", "gholdengo", [], min_sep=20)
-    assert g["struggle"] and not g["clean"] and not g["clean_1030"]
+    assert g["struggle"] and not g["guard_partial"] and not g["guard_1030"]
     # 間の状態行で場の個体が別の種 (交代の読み落としの疑い)。不明 (None) は変化にしない
     g = cm.guard_flags(a, b, "opponent", "gholdengo", [{"opponent": None}, {"opponent": "amoonguss"}], min_sep=20)
-    assert g["active_changed"] and not g["clean"] and not g["clean_1030"]
+    assert g["active_changed"] and not g["guard_partial"] and not g["guard_1030"]
     assert not cm.guard_flags(a, b, "opponent", "gholdengo", [{"opponent": None}], min_sep=20)["active_changed"]
+    # 旧名 (clean / clean_1030) は返さない
+    assert not {"clean", "clean_1030"} & set(g), g
     # 間の状態行の取り出し (行番号が開区間)
     acts = [(1, {"opponent": "a"}), (3, {"opponent": "b"}), (6, {"opponent": "c"})]
     assert cm.actives_between(acts, 2, 6) == [{"opponent": "b"}]
@@ -240,8 +243,8 @@ def test_cli_cues():
         # 自分の garchomp: 同じ turn・5 秒差 → どちらの条件でも落ちる。相手の gholdengo: 30 秒差・別の turn → 通る
         for attr in cm.ATTRIBUTIONS:
             assert g[f"{attr} / player / negation"] == 1 and g[f"{attr} / player / same_turn"] == 1
-            assert g[f"{attr} / player / too_close"] == 1 and g.get(f"{attr} / player / clean", 0) == 0
-            assert g[f"{attr} / opponent / clean"] == 1 and g[f"{attr} / opponent / clean_1030"] == 1
+            assert g[f"{attr} / player / too_close"] == 1 and g.get(f"{attr} / player / guard_partial", 0) == 0
+            assert g[f"{attr} / opponent / guard_partial"] == 1 and g[f"{attr} / opponent / guard_1030"] == 1
         assert c["switch_player"] == {"switch_fired": 1, "changes": 1, "no_switch_fired": 0}, c["switch_player"]
         # 交代の発火なしに場の個体が変わった (交代の読み落とし・種の訂正の上限の目安)
         R = defaultdict(Counter)
@@ -249,6 +252,36 @@ def test_cli_cues():
         assert R["switch_opponent"] == {"changes": 1, "no_switch_fired": 1}, R["switch_opponent"]
         assert rep["overview"]["n_files"] == 2 and rep["overview"]["fired_prefix"]["move_player"] == 5
     print("test_cli_cues OK")
+
+
+def test_guard_full_undetermined():
+    """較正用の確定標本 (guard_full) は今の記録では判定できないので常に None。report に「未判定」を出し、数えない"""
+    a = {"move": "shadowball", "turn": 1, "t": 100.0, "i": 2}
+    b = {"move": "makeitrain", "turn": 2, "t": 130.0, "i": 6}
+    # guard_partial を通る組でも guard_full は None (確定標本にしない)
+    g = cm.guard_flags(a, b, "opponent", "gholdengo", [{"opponent": "gholdengo"}], min_sep=20)
+    assert g["guard_partial"] and g["guard_full"] is None, g
+    assert cm.GUARD_DEFS["guard_partial"]["unchecked"] and cm.GUARD_DEFS["guard_full"]["status"] == cm.GUARD_FULL_UNDETERMINED
+    with tempfile.TemporaryDirectory() as td:
+        d, out = Path(td) / "battles", Path(td) / "out"
+        d.mkdir()
+        _write_logs(d)
+        rep, md = _run(cues_cli, d, out)
+        c = rep["counts"]
+        # guard_full は数に入れない (0 と区別するため鍵ごと無い)。未判定の組は否定の数と同じ
+        assert not any(k.endswith("/ guard_full") for k in c["guard"]), c["guard"]
+        for attr in cm.ATTRIBUTIONS:
+            for side in cm.SIDES:
+                assert c["guard_undetermined"][f"{attr} / {side} / guard_full"] == c["guard"][f"{attr} / {side} / negation"]
+        gs = rep["guards"]
+        assert gs["guard_full"]["n"] == 0 and gs["guard_full"]["status"] == "undetermined"
+        assert gs["min_sep_sec"] == {"value": C.ITEM_CUE_MIN_SEP_SEC, "note": cm.GUARD_MIN_SEP_NOTE}
+        assert set(gs["definitions"]) == {"guard_1030", "guard_partial", "guard_full"}
+        assert "較正用の確定標本: 0 (未判定 — 全条件を検査できる記録が無い)" in md
+        assert f"ITEM_CUE_MIN_SEP_SEC = {C.ITEM_CUE_MIN_SEP_SEC} 秒 (集計用の暫定値)" in md
+        assert "| guard_full: 較正用の確定標本 | 0 (未判定) |" in md
+        assert "clean" not in md.split("## 否定の守りの条件")[1].split("## 交代")[0]
+    print("test_guard_full_undetermined OK")
 
 
 def test_cli_cues_db():
@@ -307,6 +340,7 @@ def main():
     test_episodes_merge_end_and_superseded()
     test_recall_pure()
     test_cli_cues()
+    test_guard_full_undetermined()
     test_cli_cues_db()
     test_cli_field_and_recall()
     print("ALL OK")

@@ -269,23 +269,54 @@ def individual_cues(stints: list, n_lock: int = C.ITEM_CUE_LOCK_REPEAT, min_sep:
     return out
 
 
+# 否定の守りの条件の 3 つの名前 (2026-10-31 レビューで clean_1030 → guard_1030、clean → guard_partial に改名し、guard_full を分けた)。
+# どれも「交代・ひんしの発火で切った出場区間の中の組」(設計文書 §3.4 の 1) が前提。
+# guard_partial は §3.4 の条件の一部だけを検査した数で、全条件を満たす標本ではない。較正 (§5.1) に使う確定標本は guard_full だけ。
+GUARD_MIN_SEP_NOTE = "集計用の暫定値"     # ITEM_CUE_MIN_SEP_SEC の値の横に出す (推定の実装で使う値は較正で決める)
+GUARD_FULL_UNDETERMINED = "未判定 — 全条件を検査できる記録が無い"
+GUARD_DEFS = {
+    "guard_1030": {
+        "label": "10/30 の定義 (設計文書 §1.2 の「どれにも当たらない」)",
+        "checked": ["turn の値が同じでない", "わるあがき でない", "間の状態行で場の個体が同じ (§3.4 の 2)"],
+        "unchecked": ["時刻の差 (§3.4 の 4)", "処理の空白 (§3.4 の 3)", "アンコール・へんしん (§3.4 の 5)", "持ち物変更区間",
+                      "個体と出場区間の識別 (§3.4 の (a)〜(c))"],
+    },
+    "guard_partial": {
+        "label": "§3.4 の条件の一部だけ (全条件を満たす標本ではない)",
+        "checked": ["わるあがき でない (§3.4 の 5 の一部)", "間の状態行で場の個体が同じ (§3.4 の 2)",
+                    f"時刻の差 ≥ ITEM_CUE_MIN_SEP_SEC ({GUARD_MIN_SEP_NOTE}) (§3.4 の 4)"],
+        "unchecked": ["処理の空白 (§3.4 の 3)", "アンコール・へんしん (§3.4 の 5)", "持ち物変更区間",
+                      "個体と出場区間の識別 (§3.4 の (a)〜(c))"],
+    },
+    "guard_full": {
+        "label": "較正用の確定標本 (§3.4 の全条件と識別を検査できた組)",
+        "checked": [],
+        "unchecked": ["§3.4 の全条件と識別 (今の対戦ログでは全部は検査できない)"],
+        "status": GUARD_FULL_UNDETERMINED,
+    },
+}
+
+
 def guard_flags(a: dict, b: dict, side: str, sid: str, actives_between: Iterable[dict],
                 min_sep: float = C.ITEM_CUE_MIN_SEP_SEC) -> dict:
     """続けて起きる 2 つの技 (a → b、同じ出場区間 = 間に交代・ひんしの発火なし) の守りの条件 (純粋)。
     actives_between: 2 つの技の間の状態行の場の個体 ({側: 基本種})。
 
     same_turn: turn の値が同じ (10/30 の条件。数え漏れで正しい組も当たる)
-    struggle: どちらかが わるあがき (§3.4 の 5。アンコール・へんしん はログから判定しないので未適用)
+    struggle: どちらかが わるあがき (§3.4 の 5 の一部。アンコール・へんしん はログから判定しないので未検査)
     active_changed: 間の状態行で場の個体が別の種になった (§3.4 の 2)
-    too_close: 時刻の差が min_sep 未満、または時刻が無い (§3.4 の 4)
-    clean_1030 = same_turn・struggle・active_changed のどれでもない (設計文書 §1.2 の「どれにも当たらない」)
-    clean = struggle・active_changed・too_close のどれでもない (§3.4 の条件。§3.4 の 3 の処理の空白はログで測れないので未適用)"""
+    too_close: 時刻の差が min_sep 未満、または時刻が無い (§3.4 の 4。min_sep は集計用の暫定値)
+    guard_1030 = same_turn・struggle・active_changed のどれでもない (設計文書 §1.2 の「どれにも当たらない」。10/30 の定義)
+    guard_partial = struggle・active_changed・too_close のどれでもない (§3.4 の条件の一部だけ。全条件を満たす標本ではない)
+    guard_full = 常に None (未判定)。§3.4 の 3 処理の空白・5 のアンコール / へんしん・持ち物変更区間・個体と出場区間の識別は
+                 今の対戦ログでは検査できないので、較正用の確定標本は判定しない (GUARD_DEFS)"""
     same_turn = a.get("turn") == b.get("turn")
     struggle = STRUGGLE in (a.get("move"), b.get("move"))
     changed = any(act.get(side) and act.get(side) != sid for act in actives_between)
     too_close = not _sep_ok(a, b, min_sep)
     return {"same_turn": same_turn, "struggle": struggle, "active_changed": changed, "too_close": too_close,
-            "clean_1030": not (same_turn or struggle or changed), "clean": not (struggle or changed or too_close)}
+            "guard_1030": not (same_turn or struggle or changed), "guard_partial": not (struggle or changed or too_close),
+            "guard_full": None}
 
 
 def actives_between(actives: list, i_from: int, i_to: int) -> list:
