@@ -14,6 +14,7 @@ source .venv/bin/activate
 LOCAL_ONLY_TESTS=(
   test_migrate_obs
   test_replay_path_server
+  test_inputs_pin_propagation_server
 )
 
 targets=("$@")

@@ -96,6 +96,15 @@ render_sensitivity_compare_markdown) は tests/test_sensitivity_off.py でテス
   - 版の照合は版の識別と実行状態を分ける (version_identity / group_consistency。version_id は比べない)。同条件の根拠
     (比べた欄と値、全 advice 行の policy.rl_loaded) を report に出す。新しい version 行 (runtime の欄あり) は
     advisor.versions.identity_of で識別を取る (無い版のコードでは旧い行の経路)
+
+2026-10-31 固定入力の異常 (レビュー E-inputs-3): 実機の対戦ログに固定入力の異常の行 (type = config.INPUTS_PIN_LOG_TYPE、
+server が助言を止めた記録。advice 行の advice.reason = config.INPUTS_PIN_REASON も同じ扱い) がある対戦は不成立:
+その対戦を含む群の版の照合 (group_consistency) は一致にならず、受入条件の 満たす / PARTIAL の行は 判定不能 にする
+(違反の 満たさない はそのまま)。理由は report の「同条件の根拠」に出す (inputs_pin_rows / inputs_pin_lines)。
+再生の evaluate が固定入力の異常を返した決定 (--data-mode restore の当時の版が手元で使えない) は、照合できない決定
+(unconfirmed data_restore) に数える (再生の結果で照合しない)。--compare-search / --compare-sensitivity も、on / off の
+どちらか一方でも固定入力の異常を返した決定は一致にも不一致にもせず、照合できない決定 (n_unconfirmed) に数え、判定を 判定不能 にする
+(pair_unconfirmed)
 """
 from __future__ import annotations
 
@@ -109,6 +118,7 @@ from typing import Callable, Iterable, Optional
 
 from battle_logger import DECISION_INFO_SCENES, DECISION_RESOLVE_SCENES, DECISION_SCENES
 from champions_agent.config import (
+    INPUTS_PIN_LOG_TYPE, INPUTS_PIN_REASON,
     ADVICE_SCORING_MODES, REAL_ACCEPT_DISPLAY_DEADLINE_SEC, REAL_ACCEPT_DISPLAY_IN_TIME_MIN, REAL_ACCEPT_FALLBACK_ALL_MAX,
     REAL_ACCEPT_FALLBACK_BUDGET_MAX, REAL_ACCEPT_LATENCY_DELTA_SEC, REAL_ACCEPT_LATENCY_P95_SEC, REAL_ACCEPT_PROFILE_TOP,
     REAL_ACCEPT_STALE_HP_SEC, REAL_ACCEPT_VIOLATIONS_MAX, BSS_PICK_COUNT, REAL_ACCEPT_FALLBACK_DECISION_ADVICE,
@@ -693,6 +703,37 @@ def log_versions(records: list) -> dict:
     return out
 
 
+def inputs_pin_rows(records: list, examples: int = EXAMPLES_PER_KEY) -> dict:
+    """1 本のログの固定入力の異常の記録 (純粋。2026-10-31): type = INPUTS_PIN_LOG_TYPE の行と、advice 行で advice.reason =
+    INPUTS_PIN_REASON の行。戻り値 {"n": 行数, "n_rows": 異常の行, "n_advice": advice 行, "n_suppressed": 異常の行の n_suppressed の和,
+    "sources": {出どころ: 行数}, "errors": [error の文言 (重複なし、examples 件まで)]}"""
+    out = {"n": 0, "n_rows": 0, "n_advice": 0, "n_suppressed": 0, "sources": {}, "errors": []}
+    for r in records or []:
+        if r.get("type") == INPUTS_PIN_LOG_TYPE:
+            out["n_rows"] += 1
+            out["n_suppressed"] += int(r.get("n_suppressed") or 0)
+            src, err = r.get("source") or "-", r.get("error")
+        elif r.get("type") == "advice" and (r.get("advice") or {}).get("reason") == INPUTS_PIN_REASON:
+            out["n_advice"] += 1
+            src, err = "advice", (r.get("advice") or {}).get("error")
+        else:
+            continue
+        out["n"] += 1
+        out["sources"][src] = out["sources"].get(src, 0) + 1
+        if err and err not in out["errors"] and len(out["errors"]) < examples:
+            out["errors"].append(str(err))
+    return out
+
+
+def inputs_pin_text(info: Optional[dict]) -> str:
+    """inputs_pin_rows の戻り値の 1 行の説明 (純粋)"""
+    info = info or {}
+    src = ", ".join(f"{k} {v}" for k, v in sorted((info.get("sources") or {}).items()))
+    return (f"固定入力の異常の記録 {info.get('n', 0)} 行 ({src}"
+            + (f"、間引いた件数 {info['n_suppressed']}" if info.get("n_suppressed") else "") + ")"
+            + (f": {' / '.join(info.get('errors') or [])}" if info.get("errors") else ""))
+
+
 def target_consistency(log_infos: list, fields: tuple = CODE_FIELDS) -> dict:
     """対象群が同じコード・設定か (純粋): log_infos = [{"name", "versions": log_versions の戻り値}]。
     各欄 (CODE_FIELDS) が全ログで記録され、値が 1 種類なら一致。戻り値 {"ok": True / False, "notes": [...], "values": {欄: [値]}}。
@@ -835,7 +876,7 @@ def version_identity(records: list, ignore: Iterable = REAL_ACCEPT_VERSION_IGNOR
                  f"実行状態の読み込みの欄 {[(k, xs) for k, xs in rt.items() if k.endswith('loaded')]})")
     return {"identity": ident, "runtime": rt, "version_id": list(dict.fromkeys(v["version_id"] for v in vers if v.get("version_id"))),
             "n_version_rows": len(vers), "format": formats, "advice_runtime": ar, "runtime_ok": ok, "runtime_basis": basis,
-            "identity_problems": problems}
+            "identity_problems": problems, "inputs_pin": inputs_pin_rows(records)}
 
 
 def group_consistency(log_infos: list, exclude: Iterable = (),
@@ -886,6 +927,13 @@ def group_consistency(log_infos: list, exclude: Iterable = (),
             notes.append(f"{f} が揃わない ({' / '.join(str(v)[:16] for v in vals[:4])}{' ほか' if len(vals) > 4 else ''})")
         elif len(vals) == 1:
             basis.append({"field": f, "value": vals[0]})
+    pin = {}
+    for li in log_infos:
+        info = li["ident"].get("inputs_pin") or {}
+        if info.get("n"):
+            ok = False
+            pin[li["name"]] = inputs_pin_text(info)
+            notes.append(f"不成立: {li['name']} に{pin[li['name']]}")
     runtime = {}
     for li in log_infos:
         idt = li["ident"]
@@ -907,7 +955,7 @@ def group_consistency(log_infos: list, exclude: Iterable = (),
                 rt_diff.append(f"{k}: {' / '.join(str(x) for x in xs)}")
         notes.append(f"version_id は {len(vids)} 種類 ({' / '.join(vids[:4])})。版の識別の欄で照合した (version_id は比べない)"
                      + (f"。実行状態の欄の差: {', '.join(rt_diff)}" if rt_diff else ""))
-    return {"ok": ok, "notes": notes, "values": values, "basis": basis, "runtime": runtime, "version_id": vids}
+    return {"ok": ok, "notes": notes, "values": values, "basis": basis, "runtime": runtime, "version_id": vids, "inputs_pin": pin}
 
 
 # ------------------------------------------------------------------ 純粋: 再生の設定 (2026-10-20 レビュー: 実機の設定に揃える)
@@ -1262,7 +1310,8 @@ def _fallback_unit_rows(units: dict, lim: dict, add: Callable) -> None:
 
 
 def acceptance(summary: dict, display: dict, record_check: dict, limits: Optional[dict] = None,
-               group: Optional[dict] = None, units: Optional[dict] = None, data: Optional[dict] = None) -> list:
+               group: Optional[dict] = None, units: Optional[dict] = None, data: Optional[dict] = None,
+               inputs_pin: Optional[dict] = None) -> list:
     """受入条件 (§8.22) との照合 (純粋)。戻り値 [{"item", "mode", "value", "limit", "status" (満たす / 満たさない / 判定不能 /
     PARTIAL), "note"}]。group = 対象群の情報 {"target_fixed": bool, "by_mode": {方式: target_consistency}, "delta":
     target_consistency (served_commit / version_id)}。None なら版・設定の照合をしない (呼び出し側が持たないとき)。
@@ -1270,7 +1319,9 @@ def acceptance(summary: dict, display: dict, record_check: dict, limits: Optiona
     (注記の先頭に PENDING_NOTE)。対象群の版・設定が揃わなければ、超えた回が無いかぎり 判定不能。
     units = summarize_fallback_units の戻り値 (2026-10-20 レビュー)。あれば退避を 決定単位 (各回と合算の両方に上限、1 回でも
     超えたら合算も 満たさない) と 助言行単位 (参考) でも出し、再生の行は再生局面単位 (参考) と注記する。
-    data = tools.inputs_pin.DataSwitch.summary() (2026-10-23)。あれば再生のデータの版の行 (data_row) を足す"""
+    data = tools.inputs_pin.DataSwitch.summary() (2026-10-23)。あれば再生のデータの版の行 (data_row) を足す。
+    inputs_pin = {ログ名: inputs_pin_rows の戻り値} (2026-10-31)。あれば実機の固定入力の異常の行 (inputs_pin_row) を足し、異常の記録が
+    ある対戦を 1 本でも含めば、満たす / PARTIAL の行を 判定不能 にする (不成立。満たさない・参考はそのまま)"""
     lim = {"violations": REAL_ACCEPT_VIOLATIONS_MAX, "p95_sec": REAL_ACCEPT_LATENCY_P95_SEC,
            "delta_sec": REAL_ACCEPT_LATENCY_DELTA_SEC, "in_time": REAL_ACCEPT_DISPLAY_IN_TIME_MIN,
            "budget": REAL_ACCEPT_FALLBACK_BUDGET_MAX, "all": REAL_ACCEPT_FALLBACK_ALL_MAX,
@@ -1361,7 +1412,42 @@ def acceptance(summary: dict, display: dict, record_check: dict, limits: Optiona
         "欄の無いログは記録の追加 (2026-10-16) より前" if rc["n_logs_ok"] < rc["n_logs"] else "")
     if data is not None:
         rows.append(data_row(data))
+    if inputs_pin is not None:
+        prow = inputs_pin_row(inputs_pin)
+        if prow["status"] == UNKNOWN:
+            for r in rows:
+                if r["status"] in (OK, PARTIAL):
+                    r["status"] = UNKNOWN
+                    r["note"] = "不成立 (実機の固定入力の異常の記録がある対戦を含む)。" + (r["note"] or "")
+        rows.append(prow)
     return rows
+
+
+def inputs_pin_row(inputs_pin: dict) -> dict:
+    """実機の固定入力の異常の行 (純粋。2026-10-31)。inputs_pin = {ログ名: inputs_pin_rows の戻り値}。
+    異常の記録のある対戦が 1 本でもあれば 判定不能 (不成立)、無ければ 満たす"""
+    item = "入力: 実機の固定入力 (data_pin) の異常の記録 (対戦ログ)"
+    bad = {n: v for n, v in (inputs_pin or {}).items() if (v or {}).get("n")}
+    n = len(inputs_pin or {})
+    if bad:
+        return {"item": item, "mode": "-", "value": f"{len(bad)} / {n} ログ", "limit": 0, "status": UNKNOWN,
+                "note": "不成立: " + "; ".join(f"{k}: {inputs_pin_text(v)}" for k, v in bad.items())}
+    return {"item": item, "mode": "-", "value": f"0 / {n} ログ", "limit": 0, "status": OK if n else UNKNOWN,
+            "note": "" if n else "対象のログが無い"}
+
+
+def inputs_pin_lines(inputs_pin: Optional[dict]) -> list:
+    """report の「同条件の根拠」の固定入力の異常の節 (純粋。2026-10-31)。異常の記録のあるログだけを並べる"""
+    bad = {n: v for n, v in (inputs_pin or {}).items() if (v or {}).get("n")}
+    if inputs_pin is None:
+        return []
+    out = ["", "### 同条件の根拠 (実機の固定入力の異常)", ""]
+    if not bad:
+        return out + [f"- 異常の記録なし ({len(inputs_pin)} ログ)"]
+    out.append("不成立 (判定不能): 次の対戦は助言が読む固定入力 (advisor.data_pin で版を明示したデータ) が使えず、server が助言を止めた。"
+               "この対戦を含む群は同条件とみなさない")
+    out += [f"- {n}: {inputs_pin_text(v)}" for n, v in bad.items()]
+    return out
 
 
 def data_row(data: dict) -> dict:
@@ -1539,6 +1625,7 @@ def render_markdown(result: dict) -> str:
     for r in result["acceptance"]:
         L.append(f"| {r['item']} | {r['mode']} | {_fmt(r['value'])} | {_fmt(r['limit'])} | {r['status']} | {r['note']} |")
     L += _group_basis_lines(tg)
+    L += inputs_pin_lines(c.get("inputs_pin"))
     L += ["", "## 正しさの違反 (再生)", "", "| 項目 | " + " | ".join(f"{m} 有効 | {m} 古い局面" for m in MODES) + " |",
           "|---|" + "---|" * (2 * len(MODES))]
     for k, lab in VIOLATION_LABELS.items():
@@ -1641,6 +1728,19 @@ SEARCH_DIFF_LABELS = {
 }
 
 
+def pin_note(adv: Optional[dict]) -> Optional[str]:
+    """evaluate の戻り値が固定入力の異常 (reason = INPUTS_PIN_REASON) なら error の文言、そうでなければ None (純粋。2026-10-31)"""
+    if isinstance(adv, dict) and adv.get("ok") is False and adv.get("reason") == INPUTS_PIN_REASON:
+        return str(adv.get("error") or INPUTS_PIN_REASON)
+    return None
+
+
+def pair_unconfirmed(on: dict, off: dict) -> Optional[str]:
+    """on / off の照合ができない理由 (純粋。2026-10-31): どちらか一方でも固定入力の異常 (結果の "inputs_pin") なら
+    INPUTS_PIN_REASON。照合できるなら None"""
+    return INPUTS_PIN_REASON if ((on or {}).get("inputs_pin") or (off or {}).get("inputs_pin")) else None
+
+
 def rank_signature(adv: Optional[dict]) -> Optional[dict]:
     """evaluate の戻り値のうち、表示用の探索 on / off で一致すべき部分 (純粋): 評価できたか・候補の並び [(種類, id, 名前, 得点)]・
     第一候補・使った方式・退避の理由。理由の文 (reason) と表示の注記は照合しない"""
@@ -1692,6 +1792,7 @@ def summarize_search_compare(rows: list, examples_per_key: int = EXAMPLES_PER_KE
     out = {"n": len(rows), "modes": {}}
     for mode in MODES:
         rs = [r for r in rows if (r.get("modes") or {}).get(mode)]
+        n_unc = sum(1 for r in rs if r["modes"][mode].get("unconfirmed"))      # 照合できない決定 (固定入力の異常、2026-10-31)
         by = {k: 0 for k in SEARCH_DIFF_LABELS}
         ex = []
         n_mis = 0
@@ -1729,14 +1830,16 @@ def summarize_search_compare(rows: list, examples_per_key: int = EXAMPLES_PER_KE
         for st in SEARCH_STATES:
             fb[st]["rate"] = _rate(fb[st]["n_fallback"], fb[st]["n"])
             fb[st]["budget_rate"] = _rate(fb[st]["n_budget"], fb[st]["n"])
-        status = UNKNOWN if not rs else (OK if n_mis == 0 else NG)
-        out["modes"][mode] = {"n": len(rs), "n_mismatch": n_mis, "by_kind": by, "examples": ex, "status": status,
+        status = NG if n_mis else (UNKNOWN if (len(rs) - n_unc <= 0 or n_unc) else OK)
+        out["modes"][mode] = {"n": len(rs) - n_unc, "n_unconfirmed": n_unc, "n_mismatch": n_mis, "by_kind": by, "examples": ex,
+                              "status": status,
                               "elapsed_ms": {st: percentiles(el[st]) for st in SEARCH_STATES},
                               "elapsed_delta_ms": percentiles(delta), "n_search_skipped": skipped,
                               "fallback": fb if mode == "transition" else None}
     sts = [mo["status"] for mo in out["modes"].values()]
     out["status"] = NG if NG in sts else (UNKNOWN if UNKNOWN in sts or not sts else OK)
     out["n_mismatch"] = sum(mo["n_mismatch"] for mo in out["modes"].values())
+    out["n_unconfirmed"] = sum(mo["n_unconfirmed"] for mo in out["modes"].values())
     return out
 
 
@@ -1760,6 +1863,9 @@ def render_search_compare_markdown(result: dict) -> str:
         kinds = ", ".join(f"{SEARCH_DIFF_LABELS.get(k, k)} {v}" for k, v in mo["by_kind"].items() if v) or "-"
         L.append(f"| {mode} | {mo['n']} | {mo['n_mismatch']} | {mo['status']} | {kinds} |")
     L.append(f"| 総合 | {sm['n']} | {sm['n_mismatch']} | {sm['status']} | |")
+    if sm.get("n_unconfirmed"):
+        L += ["", f"照合できない決定 (固定入力の異常。on / off のどちらかが reason = {INPUTS_PIN_REASON}、一致にも不一致にも数えない): "
+                  + ", ".join(f"{m} {mo.get('n_unconfirmed', 0)}" for m, mo in sm["modes"].items()) + "。判定は 判定不能"]
     L += ["", "## 所要時間 (evaluate、全決定点)", "", "| 方式 | 探索 on | 探索 off | 差 (同じ決定の off − on) |", "|---|---|---|---|"]
     for mode, mo in sm["modes"].items():
         L.append(f"| {mode} | {_pct_txt(mo['elapsed_ms']['on'])} | {_pct_txt(mo['elapsed_ms']['off'])} | "
@@ -1820,6 +1926,7 @@ def summarize_sensitivity_compare(rows: list, examples_per_key: int = EXAMPLES_P
     delta = []
     fb = {st: {"n": 0, "n_fallback": 0, "n_budget": 0} for st in SENS_STATES}
     status = {st: {} for st in SENS_STATES}
+    n_unc = sum(1 for r in rows if r.get("unconfirmed"))       # 照合できない決定 (固定入力の異常、2026-10-31)
     for r in rows:
         diffs = r.get("diffs") or []
         if diffs:
@@ -1849,8 +1956,8 @@ def summarize_sensitivity_compare(rows: list, examples_per_key: int = EXAMPLES_P
     for st in SENS_STATES:
         fb[st]["rate"] = _rate(fb[st]["n_fallback"], fb[st]["n"])
         fb[st]["budget_rate"] = _rate(fb[st]["n_budget"], fb[st]["n"])
-    return {"n": len(rows), "n_mismatch": n_mis, "by_kind": by, "examples": ex,
-            "status": UNKNOWN if not rows else (OK if n_mis == 0 else NG),
+    return {"n": len(rows) - n_unc, "n_unconfirmed": n_unc, "n_mismatch": n_mis, "by_kind": by, "examples": ex,
+            "status": NG if n_mis else (UNKNOWN if (len(rows) - n_unc <= 0 or n_unc) else OK),
             "elapsed_ms": {st: percentiles(el[st]) for st in SENS_STATES}, "elapsed_delta_ms": percentiles(delta),
             "fallback": fb, "sens_status": status}
 
@@ -1871,6 +1978,8 @@ def render_sensitivity_compare_markdown(result: dict) -> str:
          "- ログ: " + ", ".join(f"{lg['name']} ({lg['n_decisions']})" for lg in c["logs"]), "",
          "## 照合の結果", "", "| 照合した決定 | 不一致の決定 | 判定 | 種類別 |", "|---|---|---|---|",
          f"| {sm['n']} | {sm['n_mismatch']} | {sm['status']} | {kinds} |", "",
+         *([f"照合できない決定 (固定入力の異常。on / off のどちらかが reason = {INPUTS_PIN_REASON}、一致にも不一致にも数えない): "
+            f"{sm['n_unconfirmed']}。判定は 判定不能", ""] if sm.get("n_unconfirmed") else []),
          "## 所要時間 (evaluate、全決定点)", "", "| 感度 on | 感度 off | 差 (同じ決定の off − on) |", "|---|---|---|",
          f"| {_pct_txt(sm['elapsed_ms']['on'])} | {_pct_txt(sm['elapsed_ms']['off'])} | {_pct_txt(sm['elapsed_delta_ms'])} |", "",
          "## 退避率", "", "| 感度 | 評価 | 退避 (全理由) | 予算超過 |", "|---|---|---|---|"]
@@ -2115,15 +2224,16 @@ def run_compare_search(logs: list, out_dir: Optional[Path], gap_sec: float, targ
                 m = {}
                 for stt, (adv, ms, err) in pair.items():
                     x = {"elapsed_ms": ms, "error": err, "sig": None, "violations": [], "checks": {},
-                         "search_skipped": None}
-                    if adv is not None and not err:
+                         "search_skipped": None, "inputs_pin": pin_note(adv)}
+                    if adv is not None and not err and not x["inputs_pin"]:
                         x["sig"] = rank_signature(adv)
                         x["search_skipped"] = adv.get("search_skipped")
                         if adv.get("ok"):
                             chk = check_best(adv, compact, move_locks_for_check(row), reg, detail=True, **ck)
                             x["violations"], x["checks"] = chk["violations"], chk["checks"]
                     m[stt] = x
-                m["diffs"] = compare_search_pair(m["on"], m["off"])
+                m["unconfirmed"] = pair_unconfirmed(m["on"], m["off"])
+                m["diffs"] = [] if m["unconfirmed"] else compare_search_pair(m["on"], m["off"])
                 d["modes"][mode] = m
             rows.append(d)
             if i % 20 == 0:
@@ -2209,8 +2319,8 @@ def run_compare_sensitivity(logs: list, out_dir: Optional[Path], gap_sec: float,
                  "active": _active_label(compact), **info}
             for stt, (adv, ms, err) in res.items():
                 x = {"elapsed_ms": ms, "error": err, "sig": None, "q": None, "violations": [], "checks": {},
-                     "sens_status": None}
-                if adv is not None and not err:
+                     "sens_status": None, "inputs_pin": pin_note(adv)}
+                if adv is not None and not err and not x["inputs_pin"]:
                     x["sig"] = rank_signature(adv)
                     x["q"] = q_signature(adv)
                     x["sens_status"] = sensitivity_fields_of(adv)["sensitivity_status"]
@@ -2218,7 +2328,8 @@ def run_compare_sensitivity(logs: list, out_dir: Optional[Path], gap_sec: float,
                         chk = check_best(adv, compact, move_locks_for_check(row), reg, detail=True, **ck)
                         x["violations"], x["checks"] = chk["violations"], chk["checks"]
                 d[stt] = x
-            d["diffs"] = compare_sensitivity_pair(d["on"], d["off"])
+            d["unconfirmed"] = pair_unconfirmed(d["on"], d["off"])
+            d["diffs"] = [] if d["unconfirmed"] else compare_sensitivity_pair(d["on"], d["off"])
             rows.append(d)
             if i % 20 == 0:
                 print(f"  {i} / {n_dec}")
@@ -2243,6 +2354,14 @@ def run_compare_sensitivity(logs: list, out_dir: Optional[Path], gap_sec: float,
     print(md)
     print(f"保存: {out_dir}")
     return result
+
+
+def replay_pin_result(adv: dict, elapsed_ms) -> dict:
+    """再生の evaluate が固定入力の異常 (reason = INPUTS_PIN_REASON) を返した方式の結果 (純粋。2026-10-31): 照合しない
+    (unconfirmed data_restore、checks data_restore unknown。unrestored_decision と同じ数え方)。理由は data_reasons"""
+    return {"ok": False, "best": None, "elapsed_ms": elapsed_ms, "scoring_used": None, "fallback_reason": None,
+            "reason": INPUTS_PIN_REASON, "violations": [], "unconfirmed": ["data_restore"], "checks": {"data_restore": "unknown"},
+            "targets": [], "data_reasons": [f"{INPUTS_PIN_REASON}: {(adv or {}).get('error')}"]}
 
 
 def unrestored_decision(log_name: str, row: dict, compact: dict, plan: dict) -> dict:
@@ -2311,13 +2430,16 @@ def _load_logs(paths: list, gap_sec: float) -> list:
                      "state_schemas": state_schema_counts(rows),
                      "versions": log_versions(recs), "ident": version_identity(recs),
                      "decision_versions": versions_by_row(recs, dec),
-                     "fallback_decisions": decision_fallback_rows(recs), "advice_counts": advice_row_counts(recs)})
+                     "fallback_decisions": decision_fallback_rows(recs), "advice_counts": advice_row_counts(recs),
+                     "inputs_pin": inputs_pin_rows(recs)})
     n_dec = sum(lg["n_decisions"] for lg in logs)
     print(f"ログ {len(logs)} 本、advice 行 {sum(lg['n_advice_rows'] for lg in logs)} → 決定点 {n_dec} (間引き {gap_sec} 秒)")
     for lg in logs:
         print(f"  {lg['name']}: advice {lg['n_advice_rows']} → 決定点 {lg['n_decisions']} / decision 行 {lg['n_decision_rows']} / "
               f"方式 {lg['modes_used']} / move_locks {'あり' if lg['has_move_locks'] else 'なし'} / "
               f"state の版 {lg['state_schemas']}")
+        if lg["inputs_pin"]["n"]:
+            print(f"  ⚠ {lg['name']}: 不成立 ({inputs_pin_text(lg['inputs_pin'])})")
     return logs
 
 
@@ -2393,6 +2515,10 @@ def run(paths: list, out_dir: Optional[Path], gap_sec: float = DECISION_GAP_SEC,
                     d["modes"][mode] = {"ok": False, "error": err or "None", "elapsed_ms": ms, "best": None,
                                         "violations": [], "unconfirmed": []}
                     continue
+                if (adv or {}).get("reason") == INPUTS_PIN_REASON:
+                    # 再生の固定入力の異常 (2026-10-31): 当時の版で評価できていないので照合しない (照合できない決定に数える)
+                    d["modes"][mode] = replay_pin_result(adv, ms)
+                    continue
                 chk = check_best(adv, compact, move_locks_for_check(row), reg, detail=True, appeared=appeared, **ck)
                 ru, rst = restore_check(row)
                 chk["unconfirmed"] = list(dict.fromkeys(chk["unconfirmed"] + ru))
@@ -2448,11 +2574,13 @@ def run(paths: list, out_dir: Optional[Path], gap_sec: float = DECISION_GAP_SEC,
                        "gap_sec": gap_sec, "stale_hp_sec": REAL_ACCEPT_STALE_HP_SEC,
                        "display_deadline_sec": REAL_ACCEPT_DISPLAY_DEADLINE_SEC,
                        "n_advice_rows": sum(lg["n_advice_rows"] for lg in logs),
+                       "inputs_pin": {lg["name"]: lg["inputs_pin"] for lg in logs},
                        "target": {"fixed": target_fixed, "by_mode": by_mode, "delta": group["delta"]},
                        "logs": [{k: v for k, v in lg.items() if k not in LOG_INTERNAL_KEYS}
                                 for lg in logs]},
         "summary": summary, "display": display, "display_all": summarize_display_all(disp_rows),
-        "acceptance": acceptance(summary, display, rc, group=group, units=units, data=data_versions), "record_check": rc,
+        "acceptance": acceptance(summary, display, rc, group=group, units=units, data=data_versions,
+                                 inputs_pin={lg["name"]: lg["inputs_pin"] for lg in logs}), "record_check": rc,
         "fallback_units": units,
         "decisions": decisions, "display_rows": disp_rows, "profile": prof,
     }

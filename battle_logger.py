@@ -156,6 +156,12 @@
   advice 行の state (版 2) の個体に "transform" (へんしん のコピー元・写し・観測根拠 {"source_species", "source_index", "copy",
     "evidence", "t"}、無ければ null。MON_STATE_ADDED_FIELDS)。advice に "transform_applied" (True = 写しで評価 / False = 相手の
     場の個体に transform なし / None = 相手の場の個体が分からない)。復元は tools.advice_replay._mon_from_compact
+2026-10-31 固定入力の異常 (レビュー E-inputs-3、行を足すだけ。既存の行の意味は変えない):
+  {"type": "inputs_pin_error", "reason": "inputs_pin", "source": "evaluate"|"tracker", "error", "scene", "turn", "battle_seq",
+   "n_suppressed", "interval_sec"} 助言が読む固定入力 (advisor.data_pin で版を明示したデータ) が使えず、助言を止めた
+    (advice_key.inputs_pin_row。type の文字列は config.INPUTS_PIN_LOG_TYPE)。その助言は advice 行に書かない。同じ異常 (出どころ・
+    error・battle_seq) は config.INPUTS_PIN_LOG_INTERVAL_SEC 秒に 1 回まで (間に書かなかった件数が n_suppressed)。
+    既存の読み手は type で行を選ぶので読み飛ばす。tools.real_accept はこの行のある対戦を含む群を判定不能にする
 """
 from __future__ import annotations
 
@@ -1720,6 +1726,11 @@ class BattleLogger:
         except Exception:
             pass
         return aid
+
+    def on_inputs_pin(self, row: dict) -> None:
+        """固定入力の異常の行 (2026-10-31。row は advice_key.inputs_pin_row の戻り値) を今の対戦のファイルに書く
+        (ファイルが開いていなければ開く。advice 行と同じ)"""
+        self._write(dict(row))
 
     def on_selection_record(self, advice_id: str, record: Optional[dict]) -> None:
         """選出の助言の記録用の欄 (2026-10-07 段 0、advisor.selection_record の candidates / opp_pick_pred) を、助言とは別の

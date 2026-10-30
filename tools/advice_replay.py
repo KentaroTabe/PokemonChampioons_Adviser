@@ -18,12 +18,16 @@
   今の登録と違う) は再生しない (件数と理由を出す)。current は今のデータで評価し直す。結果に使ったデータの版 (data_versions) を残す。
   登録チームは version 行の team.registry (助言エンジンが読んだ登録、2026-10-23 から記録) があればそれに差し替える
   (tools.inputs_pin.restore_plan。registry_sha256 と合わなければ判定不能)。
+- 固定入力の異常 (2026-10-31、レビュー E-inputs-3): 再生中に固定入力 (advisor.data_pin) の異常 (InputsPinError、または evaluate の
+  reason = config.INPUTS_PIN_REASON) が出たら、その対戦の再生を失敗として止め (残りの決定は再生しない)、理由を出力する。
+  結果の inputs_pin_failures に残し、main は終了コード 1 で終わる (黙って続けない)。他の対戦の再生は続ける
 """
 from __future__ import annotations
 
 import argparse
 import copy
 import json
+import sys
 import time
 from pathlib import Path
 from typing import Optional
@@ -443,8 +447,16 @@ def _read_records(path: Path) -> list:
     return out
 
 
+def _pin_error_of(adv) -> Optional[str]:
+    """evaluate の結果が固定入力の異常なら error の文言 (純粋)、そうでなければ None"""
+    from advisor.data_pin import is_pin_error_result
+    return str(adv.get("error") or "") if is_pin_error_result(adv) else None
+
+
 def run(paths: list, out_path: Path, data_mode: str = "restore") -> dict:
-    """data_mode = 再生のデータの版 (restore = 当時の版 / current = 今のデータ。tools.inputs_pin.DataSwitch)"""
+    """data_mode = 再生のデータの版 (restore = 当時の版 / current = 今のデータ。tools.inputs_pin.DataSwitch)。
+    固定入力の異常 (2026-10-31) が出た対戦は再生を止め、結果の inputs_pin_failures ([{"log", "t", "error"}]) に残す"""
+    from advisor.data_pin import InputsPinError
     from advisor.engine import evaluate
     from vision.normalize import NameResolver
     from tools.inputs_pin import DataSwitch
@@ -463,7 +475,16 @@ def run(paths: list, out_path: Path, data_mode: str = "restore") -> dict:
              for name, _ in PERTURBATIONS}
     baseline_fail = 0
     infos = []
+    pin_failures: list = []
+    pin_failed: set = set()
+
+    def pin_fail(fname, t, err):
+        pin_failed.add(fname)
+        pin_failures.append({"log": fname, "t": t, "error": err})
+        print(f"✗ 再生を止めた (固定入力の異常): {fname} t={t}: {err}")
     for fname, t, row in decisions:
+        if fname in pin_failed:
+            continue            # 固定入力の異常で止めた対戦の残りの決定は再生しない
         if not ds.plan(fname, records.get(fname) or [], t)["ok"]:
             continue            # 当時のデータの版を復元できない決定は再生しない (data_versions に件数と理由)
         try:
@@ -472,8 +493,14 @@ def run(paths: list, out_path: Path, data_mode: str = "restore") -> dict:
             base_state, info = replay_state(row, resolver)
             infos.append(info)
             base = evaluate(base_state, resolver)
+        except InputsPinError as e:
+            pin_fail(fname, t, str(e))
+            continue
         except Exception:
             baseline_fail += 1
+            continue
+        if _pin_error_of(base) is not None:
+            pin_fail(fname, t, _pin_error_of(base))
             continue
         bkey = _best_key(base)
         if not base.get("ok") or bkey is None:
@@ -489,8 +516,14 @@ def run(paths: list, out_path: Path, data_mode: str = "restore") -> dict:
                 continue
             try:
                 adv = evaluate(pert, resolver)
+            except InputsPinError as e:
+                pin_fail(fname, t, str(e))
+                break
             except Exception:
                 continue
+            if _pin_error_of(adv) is not None:
+                pin_fail(fname, t, _pin_error_of(adv))
+                break
             pkey = _best_key(adv)
             if pkey is None:
                 continue
@@ -511,6 +544,8 @@ def run(paths: list, out_path: Path, data_mode: str = "restore") -> dict:
     print(f"データの版 ({data_mode}): 決定 {data_versions['n_decisions']} のうち復元できない {data_versions['n_unrestored_decisions']} "
           f"(再生していない)")
     print(f"基準再計算 不能/助言なし: {baseline_fail}件")
+    if pin_failures:
+        print(f"✗ 固定入力の異常で再生を止めた対戦: {len(pin_failed)} 本 ({', '.join(sorted(pin_failed))})")
     print(f"\n{'摂動':<18} {'適用':>4} {'反転':>4} {'反転率':>7} {'高マージン反転':>8}")
     for name, _ in PERTURBATIONS:
         s = stats[name]
@@ -522,7 +557,7 @@ def run(paths: list, out_path: Path, data_mode: str = "restore") -> dict:
               "decisions": len(decisions), "baseline_fail": baseline_fail,
               "replay_inputs": replay_input_counts(infos),
               "data_mode": data_mode, "data_versions": data_versions,
-              "stats": stats,
+              "stats": stats, "inputs_pin_failures": pin_failures,
               "logs": [p.name for p in paths]}
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(result, ensure_ascii=False, indent=1),
@@ -548,7 +583,10 @@ def main() -> None:
     paths = sorted(LOG_DIR.glob("battle_*.jsonl"))[-args.logs:]
     out = Path(args.out) if args.out else \
         OUT_DIR / f"replay_{time.strftime('%Y%m%d_%H%M')}.json"
-    run(paths, out, args.data_mode)
+    res = run(paths, out, args.data_mode)
+    if res.get("inputs_pin_failures"):
+        print(f"✗ 固定入力の異常で失敗した対戦がある ({len(res['inputs_pin_failures'])} 件)。終了コード 1")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

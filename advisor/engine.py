@@ -17,6 +17,7 @@ from typing import Optional
 from advisor.dex import get_dex, BOOST_MULT
 from advisor.damage import MonView, FieldView, _is_grounded, calc_damage
 from advisor.sets import get_predictor
+from advisor.data_pin import InputsPinError, pin_error_result
 from champions_agent.config import ADVICE_SEARCH_BLEND, RL_BLEND_WEIGHT_DEFAULT
 
 # 画面の相性ヒント -> タイプ倍率
@@ -613,7 +614,8 @@ def opponent_move_pool(opp_state: dict, opp_view: MonView, resolver) -> list:
         # しない。特性は写し (opp_view に入っている)。持ち物は相手の種族 (メタモン) の使用率の推定のまま (観測扱いにしない)
         try:
             pred_o = get_predictor().predict(tv.get("original_species") or "")
-        except Exception:
+        except Exception as e:
+            _reraise_pin(e)        # 型予測 (advisor.sets) の固定入力の異常は推定なしに落とさない (2026-10-31)
             pred_o = {"items": []}
         if not opp_view.item and not opp_state.get("item_removed") and pred_o.get("items"):
             opp_view.item = pred_o["items"][0][0]
@@ -697,6 +699,33 @@ def resolve_scoring_mode(scoring_mode: Optional[str] = None) -> str:
 
 def evaluate_common(state: dict, resolver=None, scoring_mode: Optional[str] = None,
                     display_search: Optional[bool] = None) -> dict:
+    """採点の共通部分 (_evaluate_common) の入口。固定入力 (advisor.data_pin) の異常 (InputsPinError) だけを捕まえ、
+    {"ok": False, "reason": config.INPUTS_PIN_REASON, "error": ...} (data_pin.pin_error_result) を返す (第一候補を出さない。
+    2026-10-31 E-inputs-3: 型推定の参照の except が握りつぶして ok=True と第一候補を返していた)。他の例外の扱いは従来どおり
+    (評価の中の except で握りつぶす箇所はそのまま、外へ出る例外は呼び出し側へ)。finish_evaluation は ok でない結果をそのまま返す"""
+    try:
+        return _evaluate_common(state, resolver, scoring_mode=scoring_mode, display_search=display_search)
+    except InputsPinError as e:
+        return pin_error_result(e)
+
+
+def _spread_guess(state: dict, species_id: Optional[str]) -> Optional[dict]:
+    """型推定の点推定 (記録の再生: state の ev_infer_override があればそれ、無ければトラッカーの best_for)。
+    固定入力の異常 (InputsPinError) は呼び出し側の except で握りつぶさずに外へ出す (_reraise_pin)"""
+    from advisor.ev_infer import get_tracker
+    _ovr = state.get("ev_infer_override")
+    return _ovr.get(species_id) if isinstance(_ovr, dict) else get_tracker().best_for(species_id)
+
+
+def _reraise_pin(e: BaseException) -> None:
+    """固定入力を読む箇所 (型推定の参照、へんしん 中の型予測 get_predictor、タイプからの候補 get_inference) を包む except の中で
+    呼ぶ: 固定入力の異常だけは握りつぶさずに送り直す (evaluate_common が結果の形にする)"""
+    if isinstance(e, InputsPinError):
+        raise e
+
+
+def _evaluate_common(state: dict, resolver=None, scoring_mode: Optional[str] = None,
+                     display_search: Optional[bool] = None) -> dict:
     """採点の共通部分 (RL 加点より前): ダメージ・採点の基礎・詰み筋・同時手番探索・SEARCH_BLEND・rl_hint の取得まで。
 
     戻り値: 評価できなければ {"ok": False, "reason"} (evaluate の戻り値と同じ)。評価できれば
@@ -737,7 +766,8 @@ def evaluate_common(state: dict, resolver=None, scoring_mode: Optional[str] = No
             try:
                 from advisor.infer import get_inference
                 cands = get_inference().candidates(opp_p["types"])
-            except Exception:
+            except Exception as e:
+                _reraise_pin(e)    # タイプからの候補 (advisor.infer) の固定入力の異常は候補なしに落とさない (2026-10-31)
                 cands = []
             if cands:
                 sid, prob, ja = cands[0]
@@ -758,24 +788,19 @@ def evaluate_common(state: dict, resolver=None, scoring_mode: Optional[str] = No
     if tview:
         opp_inference_note = transform_note(opp_p)
         try:
-            from advisor.ev_infer import get_tracker
-            _ovr = state.get("ev_infer_override")
-            orig = tview.get("original_species")
-            guess = _ovr.get(orig) if isinstance(_ovr, dict) else get_tracker().best_for(orig)
+            guess = _spread_guess(state, tview.get("original_species"))
             if guess and guess["n_obs"] >= 1 and guess["prob"] >= 0.25:
                 opp_view.ev = dict(opp_view.ev, hp=int((guess.get("evs") or {}).get("hp", 0)))
                 if not opp_view.item and not opp_p.get("item_removed") and guess["item"]:
                     opp_view.item = guess["item"]
-        except Exception:
-            pass
+        except Exception as e:
+            _reraise_pin(e)
     elif opp_view is not None:
         try:
-            from advisor.ev_infer import get_tracker, _nature_mult
+            from advisor.ev_infer import _nature_mult
             # 記録の再生 (2026-10-20): state に ev_infer_override (advice 行の ev_infer、種族 id → 推定) があればトラッカーより
             # 優先して読む (記録に無い種族は推定なし)。無ければ従来どおりトラッカー
-            _ovr = state.get("ev_infer_override")
-            guess = (_ovr.get(opp_view.species_id) if isinstance(_ovr, dict)
-                     else get_tracker().best_for(opp_view.species_id))
+            guess = _spread_guess(state, opp_view.species_id)
             if guess and guess["n_obs"] >= 1 and guess["prob"] >= 0.25:
                 opp_view.ev = dict(guess["evs"])
                 opp_view.nature = _nature_mult(guess["nature"])
@@ -788,8 +813,8 @@ def evaluate_common(state: dict, resolver=None, scoring_mode: Optional[str] = No
             if guess and (guess.get("spe_lower") or guess.get("spe_upper")):
                 opp_view.spe_bounds = (guess.get("spe_lower"),
                                        guess.get("spe_upper"))
-        except Exception:
-            pass
+        except Exception as e:
+            _reraise_pin(e)
 
     my_field = build_field_view(state, "player")
     opp_field = build_field_view(state, "opponent")
@@ -1265,7 +1290,8 @@ def evaluate_common(state: dict, resolver=None, scoring_mode: Optional[str] = No
                                   opp_state, opp_view, resolver,
                                   pool, my_field, opp_field,
                                   wincon_sid=wincon_sid, my_moves=legality.legal_move_ids)
-        except Exception:
+        except Exception as e:
+            _reraise_pin(e)            # 型の仮説 (_belief_worlds) の固定入力の異常は探索の失敗として握りつぶさない
             import traceback
             traceback.print_exc()
 
@@ -1924,7 +1950,8 @@ def _belief_worlds(opp_view, opp_p: dict) -> list:
         from advisor.ev_infer import get_tracker, _nature_mult
         hyps = get_tracker().hypotheses_for(opp_view.species_id, BELIEF_K,
                                             BELIEF_MIN_WEIGHT)
-    except Exception:
+    except Exception as e:
+        _reraise_pin(e)        # 固定入力の異常は点推定に落とさず外へ出す (evaluate_common が結果の形にする)
         return []
     if len(hyps) < 2:
         return []

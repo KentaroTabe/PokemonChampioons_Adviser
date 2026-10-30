@@ -686,6 +686,15 @@ USAGE_DB_ENV = "ADVICE_USAGE_DB"                 # 使用率 DB (またはピン
 USAGE_SNAPSHOT_ENV = "ADVICE_USAGE_SNAPSHOT"     # 使う snapshot id
 REAL_BANK_ENV = "ADVICE_REAL_BANK"               # 実戦バンクのパス
 REAL_BANK_SHA_ENV = "ADVICE_REAL_BANK_SHA16"     # 実戦バンクの期待 sha16 (sha256 の先頭 16 桁)
+# 固定入力の異常の伝え方 (2026-10-31 レビュー E-inputs-3: engine が InputsPinError を握りつぶして第一候補を返していた)。
+# 助言エンジン (advisor.engine.evaluate / evaluate_common) は InputsPinError を {"ok": False, "reason": INPUTS_PIN_REASON,
+# "error": ...} で返す (通常の「推定なし」と分ける)。server はその結果を表示せず (INPUTS_PIN_STOP_TEXT の 1 行と error)、キャッシュ・
+# 据え置きに使わず、対戦ログに type = INPUTS_PIN_LOG_TYPE の行を書く。同じ異常 (出どころ・文言・対戦) は
+# INPUTS_PIN_LOG_INTERVAL_SEC 秒に 1 回まで (間の件数は次の行の n_suppressed)。tools.real_accept はその行のある対戦を含む群を判定不能にする
+INPUTS_PIN_REASON = "inputs_pin"
+INPUTS_PIN_LOG_TYPE = "inputs_pin_error"
+INPUTS_PIN_STOP_TEXT = "助言停止: 固定入力の異常"
+INPUTS_PIN_LOG_INTERVAL_SEC = 300.0
 REAL_BANK_MIN_ROSTER = 4               # バンクに載せる相手ロースターの最小既知数 (6 体そろわない対戦もある)
 REAL_BANK_MIN_TEAMS = 5                # 自己対戦に混ぜるのに必要な (本文が合法な) チーム数
 REAL_BANK_MIN_PICK_OBS = 2             # 観測した選出をそのまま相手の選出分布に使う最小観測数 (未満はヒューリスティクス)
