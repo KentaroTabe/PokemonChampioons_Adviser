@@ -77,8 +77,8 @@ def test_terrain_extender_psychic_surge_8():
 
 
 def test_light_clay_screens_8():
-    """(c) ひかりのねんど + 壁 で 8 (表と読み取り)。壁の残りターンの欄は state に無いので、ここでは継続ターンの表だけを確かめる
-    (欄を足すのは対戦ログのスキーマの変更になるため今回はしない)。壁の展開そのものは従来どおり"""
+    """(c) ひかりのねんど + 壁 で 8 (表と読み取り)。ここでは継続ターンの表と壁の展開だけを確かめる
+    (壁の残りターンの欄 reflect_turns 等は 2026-10-31 に追加。開始・減算・終了は tests/test_screen_turns.py)"""
     for wall in ("reflect", "light_screen", "aurora_veil"):
         assert effect_duration(wall, "lightclay") == 8, wall
         assert effect_duration(wall, None) == 5, wall
