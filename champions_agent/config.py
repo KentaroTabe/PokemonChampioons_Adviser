@@ -98,6 +98,25 @@ SMOGON_EVAL_CI = 0.95                # 区間の水準
 SMOGON_EVAL_DB_SNAPSHOT = 75         # 比べる使用率 DB の snapshot (正式群の版。計画書 §8.48)
 SMOGON_EVAL_MEGA_VIEWS = ("pooled", "known")   # Smogon の名寄せ: pooled = 基本種 + メガを重みで合算 (DB と同じ条件)、known = メガが判明していればメガの項目
 SMOGON_EVAL_MEGA_VIEW = "pooled"     # 主の比較に使う見方 (もう一方は感度として report に出す)
+
+# --- 持ち物の手がかりの集計 (tools/item_cues。実戦ログを読むだけの集計の道具。2026-10-30 レビュー、開発者承認) ---
+# 助言・推定はこれを読まない。名前は docs/DESIGN_ITEM_INFERENCE_20261030.md §3.4 に合わせる。
+# 値を変えたら集計の数が変わる (各 CLI の出力の先頭の「再現の記録」に、使った値を全部残す)
+ITEM_CUE_MERGE_SEC = 15.0            # 天候・フィールド・壁の開始の信号 (文言・特性・技) がこの秒数以内なら 1 回の開始に束ねる (§1.2)
+# 続けて起きる観測 (違う技 2 つ・同じ技の連続) の、隣り合う 2 つの技の時刻の差の下限 (§3.4 の 4。同じ文言の再読みの重複を数えない)。
+# 根拠: 再発火の抑止窓 EVENT_DEDUP_SEC = 10 秒 (vision/events.py) より長く、正当な連続の最短 (1 ターン ≈ 実測 30 秒以上) より短い中間。
+# 集計の道具での暫定値 (推定の実装で使う値は較正で決める)。turn の値は数え漏れがあるので使わない
+ITEM_CUE_MIN_SEP_SEC = 20.0
+# §3.4 の 3 (処理の空白 ITEM_CUE_MAX_GAP_SEC) は対戦ログにフレームごとの処理の時刻が無いので集計では測れない (置かない。推定の実装で決める)
+ITEM_CUE_LOCK_REPEAT = 3             # こだわりの固定の手がかり = 同じ技の連続の回数
+ITEM_CUE_FIELD_BASE_TURNS = 5        # 天候・フィールド・壁の延長なしの継続ターン (状態の残りがこれを超えた = 場の状況画面の n/m で m を読んだ印)
+ITEM_CUE_NOEND_REMAIN_TURNS = 5      # 終了の文言が無い開始を「開始から対戦の最後までこのターン数以上」で分ける (count_cues の区分)
+ITEM_CUE_OPPORTUNITY_TURNS = 6       # 開始後この数以上ターンが続いた = 延長なしの 5 を超えたかを見る機会があった
+ITEM_CUE_MUST_END_TURNS = 9          # 開始からこの数以上ターンが続いた = 延長 (8) があっても対戦中に終わったはず (終了の文言の再現率の母数)
+ITEM_CUE_RECALL_MIN_MOVES = 2        # たべのこし の表示の再現率の母数: 技をこの回数以上使った個体
+# 延長の持ち物 (自分側の登録で、開始した個体が持っていたかの分類に使う)
+ITEM_CUE_EXTENDER_ITEMS = {"weather": ("damprock", "heatrock", "smoothrock", "icyrock"), "terrain": ("terrainextender",),
+                           "screen": ("lightclay",)}
 # meta_sets が前スナップショットから「実質変化」(技集合/持ち物/特性/性格/配分の
 # いずれか) した種がこの数以上なら、日次更新ログに警告を出す。
 # 評価軸 (ベンチ・h2h のチーム中身) は meta_sets 経由で動くため、大量の
