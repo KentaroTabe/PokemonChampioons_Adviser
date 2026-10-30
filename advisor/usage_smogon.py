@@ -9,7 +9,8 @@ chaos の数は百分率ではなく重み付き件数 (レーティングの不
   (a) 持ち物の分布  items[i]      = w_i / W          (個体あたり 1 つ。"nothing" = 持ち物なしは分母に入れて一覧からは外す)
   (b) 特性の分布    abilities[a]  = w_a / W          (同上)
   (c) 技の保有確率  moves_hold[m] = w_m / W          (技ごとに「持っている割合」。合計は最大 4 = 400%)
-  (d) 技を使う確率  moves_use[m]  = moves_hold[m] / SMOGON_MOVE_USE_DIVISOR   (暫定。使う条件付き確率の推定はしない)
+行動の選択確率 (その技を使う確率) は作らない。採用統計から出せるのは保有確率だけで、使う確率は局面で決まる
+(2026-10-30 レビュー: 以前の「保有 ÷ 4 の暫定」は削除。最初の単位は技の保有・持ち物・特性の予測の評価まで)。
 全技の重みの合計 (4W) で割った値は (c) ではない (メガボーマンダの すてみタックル: 保有 約 79.2%、4W で割ると 約 19.8%)。
 周辺分布の積を実在する型の分布とは見なさない。配分 (Spreads) は配分の分布として別に持つ。
 
@@ -26,7 +27,7 @@ from __future__ import annotations
 import re
 from typing import Callable, Optional
 
-from champions_agent.config import SMOGON_CONVERT_VERSION, SMOGON_MOVE_USE_DIVISOR
+from champions_agent.config import SMOGON_CONVERT_VERSION
 
 # chaos の表記 (英数字の小文字にしたもの) → この プロジェクトの種族 id。基本則 (英数字の小文字 + 図鑑の別名) で引けないものだけ
 SPECIES_OVERRIDES = {
@@ -120,13 +121,12 @@ def _weight_total(entry: dict) -> tuple:
 
 
 def convert_entry(entry: dict, move_ok: Callable[[str], bool], item_ok: Callable[[str], bool],
-                  ability_ok: Callable[[str], bool], spread_unit: str = "points",
-                  use_divisor: float = SMOGON_MOVE_USE_DIVISOR) -> tuple:
-    """1 種の chaos の項目 → (変換した dict, この種で落としたもの) (純粋)"""
+                  ability_ok: Callable[[str], bool], spread_unit: str = "points") -> tuple:
+    """1 種の chaos の項目 → (変換した dict, この種で落としたもの) (純粋)。技は保有確率だけ (使う確率は作らない)"""
     W, basis = _weight_total(entry)
     dropped = {"moves": {}, "items": {}, "abilities": {}, "move_hold_over_1": 0}
     out = {"weight": W, "weight_basis": basis, "raw_count": entry.get("Raw count"), "usage": entry.get("usage"),
-           "items": {}, "abilities": {}, "moves_hold": {}, "moves_use": {}, "spreads": [],
+           "items": {}, "abilities": {}, "moves_hold": {}, "spreads": [],
            "item_nothing": 0.0, "move_empty_slots": 0.0}
     if W <= 0:
         return out, dropped
@@ -161,7 +161,6 @@ def convert_entry(entry: dict, move_ok: Callable[[str], bool], item_ok: Callable
             dropped["move_hold_over_1"] += 1
             h = 1.0
         out["moves_hold"][mid] = min(1.0, out["moves_hold"].get(mid, 0.0) + h)
-    out["moves_use"] = {m: h / float(use_divisor) for m, h in out["moves_hold"].items()}
     for k, w in (entry.get("Spreads") or {}).items():
         sp = parse_spread(k, spread_unit)
         if sp is None:
@@ -174,8 +173,7 @@ def convert_entry(entry: dict, move_ok: Callable[[str], bool], item_ok: Callable
 
 def convert_chaos(payload: dict, species_ok: Callable[[str], bool], move_ok: Callable[[str], bool],
                   item_ok: Callable[[str], bool], ability_ok: Callable[[str], bool],
-                  canonical: Optional[Callable[[str], str]] = None,
-                  use_divisor: float = SMOGON_MOVE_USE_DIVISOR) -> dict:
+                  canonical: Optional[Callable[[str], str]] = None) -> dict:
     """chaos JSON 全体 → {"species": {id: 変換した dict}, "checks": 落とした件数, "spread_unit", "convert_version", ...} (純粋)。
     species_ok / move_ok / item_ok / ability_ok は合法性 (図鑑・名前表にあるか) の判定。テストでは差し替える"""
     data = payload.get("data") or {}
@@ -189,7 +187,7 @@ def convert_chaos(payload: dict, species_ok: Callable[[str], bool], move_ok: Cal
             continue
         checks["species_total"] += 1
         sid = species_project_id(name, canonical)
-        conv, dropped = convert_entry(entry, move_ok, item_ok, ability_ok, unit, use_divisor)
+        conv, dropped = convert_entry(entry, move_ok, item_ok, ability_ok, unit)
         if not species_ok(sid):
             checks["species_dropped"].append(name)
             checks["species_dropped_weight"] += conv["weight"]
@@ -211,7 +209,7 @@ def convert_chaos(payload: dict, species_ok: Callable[[str], bool], move_ok: Cal
                 row["weight"] += w
     info = payload.get("info") or {}
     return {"species": species, "checks": checks, "spread_unit": unit, "convert_version": SMOGON_CONVERT_VERSION,
-            "move_use_divisor": use_divisor, "metagame": info.get("metagame"), "cutoff": info.get("cutoff"),
+            "metagame": info.get("metagame"), "cutoff": info.get("cutoff"),
             "number_of_battles": info.get("number of battles")}
 
 
@@ -219,17 +217,17 @@ def merge_views(entries: list) -> dict:
     """複数の項目 (同じ組の基本種とメガ等) を重み W で合算した dict (純粋)。保有確率・持ち物・特性は W の加重平均"""
     entries = [e for e in entries if e and e.get("weight", 0) > 0]
     if not entries:
-        return {"weight": 0.0, "items": {}, "abilities": {}, "moves_hold": {}, "moves_use": {}, "spreads": [],
+        return {"weight": 0.0, "items": {}, "abilities": {}, "moves_hold": {}, "spreads": [],
                 "item_nothing": 0.0, "move_empty_slots": 0.0, "members": []}
     if len(entries) == 1:
         e = entries[0]
         return dict(e, members=[e.get("name")])
     W = sum(e["weight"] for e in entries)
-    out = {"weight": W, "items": {}, "abilities": {}, "moves_hold": {}, "moves_use": {}, "spreads": [],
+    out = {"weight": W, "items": {}, "abilities": {}, "moves_hold": {}, "spreads": [],
            "item_nothing": 0.0, "move_empty_slots": 0.0, "members": [e.get("name") for e in entries]}
     for e in entries:
         f = e["weight"] / W
-        for cat in ("items", "abilities", "moves_hold", "moves_use"):
+        for cat in ("items", "abilities", "moves_hold"):
             for k, v in e.get(cat, {}).items():
                 out[cat][k] = out[cat].get(k, 0.0) + f * v
         out["item_nothing"] += f * e.get("item_nothing", 0.0)

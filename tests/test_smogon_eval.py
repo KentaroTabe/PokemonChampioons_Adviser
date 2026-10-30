@@ -6,6 +6,8 @@
 - 変換 (advisor.usage_smogon): 保有確率 (個体の重み W で割る) と重みの割合 (全技の重みで割る) の区別、メガの表記の名寄せ、
   合法性の検査 (落とした件数)、配分の単位
 - 対応比較 (tools.usage_prior_eval): 判明技だけ、反復の水増しなし、後の行を混ぜない、時系列の切り分け、ブートストラップ、report の形
+- 追補 (10/30 レビュー): 予測の入力は判明前の行だけ (判明後の state で予測が変わらない)、技を使う確率を出さない、除外の理由の集計、
+  特性の比較 (種・形態で決まる特性は数えない)、対戦時点の DB snapshot の選択、特性 2 件の名前表
 """
 from __future__ import annotations
 
@@ -55,9 +57,8 @@ def test_hold_probability_vs_weight_share():
     assert abs(sum(conv["moves_hold"].values()) - 3.0) < 1e-12    # 空き枠 1 つ分を除いた保有確率の合計 (最大 4)
     assert abs(conv["move_empty_slots"] - 1.0) < 1e-12
     assert "" not in conv["moves_hold"]
-    # 技を使う確率 = 保有 ÷ 4 (暫定。保有と分けて持つ)
-    for m, h in conv["moves_hold"].items():
-        assert abs(conv["moves_use"][m] - h / 4.0) < 1e-12
+    # 技を使う確率は作らない (2026-10-30 レビュー: 採用統計から行動の選択確率を作らない。保有確率だけ)
+    assert "moves_use" not in conv
     # 持ち物: 個体あたり 1 つ。"nothing" は分母に入れて一覧から外す
     assert abs(conv["items"]["salamencite"] - 0.9) < 1e-12 and "nothing" not in conv["items"]
     assert abs(conv["item_nothing"] - 0.1) < 1e-12
@@ -349,7 +350,9 @@ def test_report_shape():
         logs.mkdir()
         old = [{"type": "session", "t": start - 100, "dataset_kind": "real"},
                _adv(start - 90, [_mon("garchomp", ["じしん"])])]
+        # start + 105 の行 = 判明前の行 (予測時点)。これが無いと 110 で判明した じしん・こだわりスカーフ は予測時点が無く除外される
         new = [{"type": "session", "t": start + 100, "dataset_kind": "real"},
+               _adv(start + 105, [_mon("garchomp", []), _mon("mimikyu", [])]),
                _adv(start + 110, [_mon("garchomp", ["じしん"], item="choicescarf"), _mon("mimikyu", [])]),
                _adv(start + 120, [_mon("garchomp", ["じしん", "げきりん"], item="choicescarf"), _mon("mimikyu", [])])]
         sim = [{"type": "session", "t": start + 200, "dataset_kind": "sim"}, _adv(start + 210, [_mon("garchomp", ["じしん"])])]
@@ -383,6 +386,218 @@ def test_report_shape():
     print("test_report_shape OK")
 
 
+# ------------------------------------------------------------------ 予測の入力と正解の分離 (2026-10-30 レビュー)
+def _mon_full(species=None, revealed=(), item=None, guess=False, ability=None, mega=False):
+    m = _mon(species, revealed, item, guess)
+    m["ability"] = ability
+    m["mega"] = mega
+    return m
+
+
+def _samples(rows, **kw):
+    obs, stats = ev.extract_observations(rows, "b", JA.get, is_mega=lambda s: s.endswith("megaz"), **kw)
+    samples, excl = ev.prediction_samples(obs, group_of=lambda s: s[:-len("megaz")] if s.endswith("megaz") else s)
+    return obs, stats, samples, excl
+
+
+def test_prediction_input_excludes_post_reveal_info():
+    """予測の入力は判明前の最後の行の state だけ。判明した行・後の行の state (持ち物・メガ・特性) を変えても予測は変わらない"""
+    base = [{"type": "version", "t": 100.0},
+            _adv(110.0, [_mon_full("garchomp"), _mon_full("salamence")])]
+    # A: 判明した行・後の行に追加の情報が無い
+    rows_a = base + [_adv(120.0, [_mon_full("garchomp", ["じしん"]), _mon_full("salamence")]),
+                     _adv(130.0, [_mon_full("garchomp", ["じしん"], item="choicescarf"), _mon_full("salamence")])]
+    # B: 判明した行 (120) から後に、持ち物・メガ・特性が state に入っている (正解や後の情報)
+    rows_b = base + [_adv(120.0, [_mon_full("garchompmegaz", ["じしん"], item="choicescarf", ability="sandforce", mega=True),
+                                  _mon_full("salamence", item="lifeorb")]),
+                     _adv(130.0, [_mon_full("garchompmegaz", ["じしん"], item="choicescarf", mega=True),
+                                  _mon_full("salamence", item="lifeorb")])]
+    _oa, _sa, sa, _ea = _samples(rows_a)
+    _ob, _sb, sb, _eb = _samples(rows_b)
+    key = ("battle", "slot", "kind", "value", "species", "mega_known", "t_pred")
+    move_a = [tuple(s[k] for k in key) for s in sa if s["kind"] == "move"]
+    move_b = [tuple(s[k] for k in key) for s in sb if s["kind"] == "move"]
+    assert move_a == move_b == [("b", 0, "move", "earthquake", "garchomp", False, 110.0)], (move_a, move_b)
+    # B の判明した行の種族 (メガ) は記録だけで、予測の入力には入らない
+    assert [s["species_at_reveal"] for s in sb if s["kind"] == "move"] == ["garchompmegaz"]
+    # 持ち物: A は 130 で判明 (予測時点 120 = 判明前の最後の行)、B は 120 で判明 (予測時点 110)。どちらも予測の入力は garchomp・メガ未判明
+    it_a = [(s["value"], s["species"], s["mega_known"], s["t_pred"], s["t_reveal"]) for s in sa if s["kind"] == "item"]
+    it_b = [(s["value"], s["species"], s["mega_known"], s["t_pred"], s["t_reveal"]) for s in sb if s["kind"] == "item" and s["slot"] == 0]
+    assert it_a == [("choicescarf", "garchomp", False, 120.0, 130.0)], it_a
+    assert it_b == [("choicescarf", "garchomp", False, 110.0, 120.0)], it_b
+    # 予測 (尤度) は予測の入力だけで決まる: メガの項目を引いていれば違う値になるところ、基本種の値になる
+    sm = {"garchomp": {"moves_hold": {"earthquake": 0.9}, "items": {"choicescarf": 0.3}, "abilities": {"sandforce": 0.1}},
+          "garchompmegaz": {"moves_hold": {"earthquake": 0.2}, "items": {"choicescarf": 0.01}, "abilities": {"sandforce": 1.0}}}
+    calls = []
+
+    def sm_view(sid, mega_known):
+        calls.append((sid, mega_known))
+        return sm.get(sid)
+    scored_a = ev.score_observations([s for s in sa if s["kind"] == "move"], sm_view, sm.get, 0.005)
+    scored_b = ev.score_observations([s for s in sb if s["kind"] == "move"], sm_view, sm.get, 0.005)
+    assert [r["p_sm"] for r in scored_a] == [r["p_sm"] for r in scored_b] == [0.9]
+    assert set(calls) == {("garchomp", False)}, calls
+    scored_items = ev.score_observations([s for s in sb if s["kind"] == "item" and s["slot"] == 0], sm_view, sm.get, 0.005)
+    assert [r["p_sm"] for r in scored_items] == [0.3]
+    # 判明前の行の state も「その行より前」しか使わない: 同時刻の行はファイルの順
+    rows_c = [{"type": "version", "t": 100.0},
+              _adv(110.0, [_mon_full("garchomp")]),
+              _adv(110.0, [_mon_full("garchomp", ["じしん"])])]
+    _o, _s, sc_, _e = _samples(rows_c)
+    assert [(s["value"], s["t_pred"]) for s in sc_] == [("earthquake", 110.0)]
+    print("test_prediction_input_excludes_post_reveal_info OK")
+
+
+def test_prediction_exclusions_and_ability():
+    """除外の理由: 予測時点が無い / 予測時点で種が未確定 / 図鑑に無い種。特性: 種・形態で決まるものは数えない、2 つ目は conflict"""
+    fixed = {"mimikyu": True}
+    rows = [
+        {"type": "version", "t": 100.0},
+        # 最初の advice 行で判明 → 予測時点が無い
+        _adv(110.0, [_mon_full("garchomp", ["じしん"]), _mon_full("salamence", guess=True), _mon_full("fakemon"),
+                     _mon_full("mimikyu", ability="disguise")]),
+        # 枠 1: 判明の行では確定だが、判明前の行では推定 → 予測時点で種が未確定
+        _adv(120.0, [_mon_full("garchomp", ["じしん", "げきりん"], ability="roughskin"),
+                     _mon_full("salamence", ["ドラゴンダンス"], ability="intimidate"),
+                     _mon_full("fakemon", ["つるぎのまい"]),
+                     _mon_full("mimikyu", ability="disguise")]),
+        # 枠 1 はメガシンカして特性が変わる (メガの印) → 種・形態で決まるので数えない。枠 0 の 2 つ目の特性は conflict
+        _adv(130.0, [_mon_full("garchomp", ["じしん", "げきりん"], ability="sandveil"),
+                     _mon_full("salamence", ["ドラゴンダンス"], ability="aerilate", mega=True),
+                     _mon_full("fakemon", ["つるぎのまい"]),
+                     _mon_full("mimikyu", ability="disguise")]),
+    ]
+
+    def ability_fixed(sid, mega):
+        return bool(sid) and (mega or fixed.get(sid, False))
+    obs, stats = ev.extract_observations(rows, "b", JA.get, ability_fixed=ability_fixed)
+    assert stats == {"ability_fixed": 2, "ability_conflict": 1}, stats    # mimikyu disguise (1 回)、salamence aerilate
+    samples, excl = ev.prediction_samples(obs, is_known=lambda s: s != "fakemon")
+    assert excl == {"move": {"no_pred_time": 1, "pred_species_unknown": 1, "species_not_in_dex": 1},
+                    "ability": {"pred_species_unknown": 1}}, excl
+    got = sorted((s["slot"], s["kind"], s["value"], s["t_pred"]) for s in samples)
+    assert got == [(0, "ability", "roughskin", 110.0), (0, "move", "outrage", 110.0)], got
+    # 除外の表: 取り出し・予測の入力・対応 (種なし) を種類ごとに、判明なしの個体を分けて数える
+    results = {"move": {"n_missing_smogon": 0, "n_missing_db": 1}, "item": {}, "ability": {}}
+    tab = ev.exclusion_table(stats, excl, results, n_known_individuals=4,
+                             individuals_with_obs={"move": 3, "ability": 2})
+    assert tab["move"]["reasons"] == {"no_pred_time": 1, "pred_species_unknown": 1, "species_not_in_dex": 1, "missing_db": 1}
+    assert tab["ability"]["reasons"] == {"ability_fixed": 2, "ability_conflict": 1, "pred_species_unknown": 1}
+    assert tab["item"] == {"reasons": {}, "n_individuals": 4, "n_individuals_with_obs": 0, "n_no_reveal": 4}
+    assert tab["move"]["n_no_reveal"] == 1 and tab["ability"]["n_no_reveal"] == 2
+    assert ev.known_slots(rows) == {0, 1, 2, 3}
+    # 枠の取り違え: 判明前の行と判明の行で種の組が違う (メガは同じ組) → species_changed
+    rows_x = [{"type": "version", "t": 100.0},
+              _adv(110.0, [_mon_full("charizard"), _mon_full("garchomp")]),
+              _adv(120.0, [_mon_full("sharpedo", ["じしん"]), _mon_full("garchompmegaz", ["げきりん"])])]
+    _o, _s, sx, ex = _samples(rows_x)
+    assert ex == {"move": {"species_changed": 1}}, ex
+    assert [(s["slot"], s["value"], s["species"], s["species_at_reveal"]) for s in sx] == [(1, "outrage", "garchomp", "garchompmegaz")]
+    print("test_prediction_exclusions_and_ability OK")
+
+
+def test_snapshot_at_battle_selection():
+    """対戦時点の snapshot = 取得が対戦の開始以前の最大 id。fetched_at は UTC と解釈 (local も選べる)"""
+    import calendar
+    assert ev.parse_db_time("2026-10-22 21:32:02", "utc") == calendar.timegm((2026, 10, 22, 21, 32, 2, 0, 0, 0))
+    assert ev.parse_db_time("2026-10-22 21:32:02", "local") == time.mktime((2026, 10, 22, 21, 32, 2, 0, 0, -1))
+    assert ev.parse_db_time(None) is None and ev.parse_db_time("x") is None
+    snaps = [(73, 1000.0), (74, 2000.0), (75, 3000.0), (99, None)]
+    assert ev.snapshot_at_battle(snaps, 2000.0) == 74           # 同時刻は含む
+    assert ev.snapshot_at_battle(snaps, 2999.9) == 74
+    assert ev.snapshot_at_battle(snaps, 5000.0) == 75           # fetched_at が読めない snapshot は選ばない
+    assert ev.snapshot_at_battle(snaps, 999.0) is None
+    assert ev.snapshot_at_battle(snaps, None) is None
+    print("test_snapshot_at_battle_selection OK")
+
+
+def test_report_db_at_battle_and_no_use_probability():
+    """--db-snapshot-at-battle: 対戦ごとに対戦時点の snapshot で比べ、固定と両方を出す。特性も比べる。技を使う確率は出力に無い"""
+    start = ev.eval_start_epoch("2026-09")
+    t_battle = start + 100
+    utc = lambda t: time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(t))     # noqa: E731
+    payload = _payload({"Garchomp": _entry({"roughskin": 80.0, "sandveil": 20.0}, {"choicescarf": 50.0, "lifeorb": 50.0},
+                                           {"earthquake": 90.0, "outrage": 60.0, "": 250.0})})
+    conv = us.convert_chaos(payload, _ok, _ok, _ok, _ok)
+    assert "move_use_divisor" not in conv and all("moves_use" not in e for e in conv["species"].values())
+    manifest = {"url": "u", "sha256": "cd" * 32, "size": 10, "fetched_at": 1.0, "fetched_at_utc": "x", "convert_version": 1}
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        db = td / "db.sqlite3"
+        c = sqlite3.connect(str(db))
+        c.executescript("""
+            CREATE TABLE usage_snapshot (id INTEGER PRIMARY KEY, source TEXT, format TEXT, fetched_at TEXT);
+            CREATE TABLE move_usage (id INTEGER PRIMARY KEY, snapshot_id INT, pokemon_name TEXT, move_name TEXT, usage_percent REAL);
+            CREATE TABLE item_usage (id INTEGER PRIMARY KEY, snapshot_id INT, pokemon_name TEXT, item_name TEXT, usage_percent REAL);
+            CREATE TABLE ability_usage (id INTEGER PRIMARY KEY, snapshot_id INT, pokemon_name TEXT, ability_name TEXT, usage_percent REAL);
+        """)
+        src = ("championsbattledata+pokedb", "champions-singles")
+        c.executemany("INSERT INTO usage_snapshot VALUES (?,?,?,?)", [
+            (73, *src, utc(t_battle - 2 * 86400)), (74, *src, utc(t_battle - 50)),
+            (75, *src, utc(t_battle + 86400)),                       # 固定 (対戦より後)
+            (76, "championsbattledata", "champions-singles", utc(t_battle - 10))])   # source が違うので対戦時点に選ばない
+        for sid, eq, scarf, rough in ((73, 10.0, 10.0, 10.0), (74, 60.0, 40.0, 50.0), (75, 80.0, 40.0, 70.0), (76, 99.0, 99.0, 99.0)):
+            c.execute("INSERT INTO move_usage (snapshot_id, pokemon_name, move_name, usage_percent) VALUES (?,?,?,?)",
+                      (sid, "garchomp", "earthquake", eq))
+            c.execute("INSERT INTO item_usage (snapshot_id, pokemon_name, item_name, usage_percent) VALUES (?,?,?,?)",
+                      (sid, "garchomp", "choicescarf", scarf))
+            c.execute("INSERT INTO ability_usage (snapshot_id, pokemon_name, ability_name, usage_percent) VALUES (?,?,?,?)",
+                      (sid, "garchomp", "roughskin", rough))
+        c.commit()
+        c.close()
+        logs = td / "battles"
+        logs.mkdir()
+        rows = [{"type": "session", "t": t_battle, "dataset_kind": "real"},
+                _adv(t_battle + 5, [_mon_full("garchomp"), _mon_full("mimikyu", ability="disguise")]),
+                _adv(t_battle + 10, [_mon_full("garchomp", ["じしん"], item="choicescarf", ability="roughskin"),
+                                     _mon_full("mimikyu", ability="disguise")])]
+        (logs / "battle_x.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n", encoding="utf-8")
+        rep = ev.build_report("2026-09", "gen9championsbssregmc", 1500, payload, manifest, db, 75, logs, n_boot=50,
+                              db_at_battle=True)
+        rep_fixed_only = ev.build_report("2026-09", "gen9championsbssregmc", 1500, payload, manifest, db, 75, logs, n_boot=50)
+    # 固定 (75) と対戦時点 (74) の両方
+    fx, ab = rep["results"], rep["db_at_battle"]["results"]
+    assert abs(fx["move"]["mean_diff"] - math.log(0.9 / 0.8)) < 1e-9 and abs(ab["move"]["mean_diff"] - math.log(0.9 / 0.6)) < 1e-9
+    assert abs(fx["item"]["mean_diff"] - math.log(0.5 / 0.4)) < 1e-9 and abs(ab["item"]["mean_diff"] - math.log(0.5 / 0.4)) < 1e-9
+    assert abs(fx["ability"]["mean_diff"] - math.log(0.8 / 0.7)) < 1e-9 and abs(ab["ability"]["mean_diff"] - math.log(0.8 / 0.5)) < 1e-9
+    assert fx["ability"]["n_paired"] == 1 and fx["ability"]["n_individuals_paired"] == 1
+    assert rep["db_at_battle"]["snapshots_used"] == {"74": 1} and rep["db_at_battle"]["n_battles_no_snapshot"] == 0
+    cmp_ = rep["db_at_battle"]["db_fixed_vs_at_battle"]["move"]
+    assert cmp_["n"] == 1 and abs(cmp_["mean_diff"] - math.log(0.6 / 0.8)) < 1e-9
+    assert rep["db"]["fetched_at_tz"] == "utc" and rep["battles"]["n_eval_before_db_snapshot"] == 1
+    # mimikyu の ばけのかわ は種で決まる特性なので数えない
+    assert rep["extraction"] == {"ability_fixed": 1}, rep["extraction"]
+    assert rep["exclusions"]["ability"]["reasons"] == {"ability_fixed": 1}
+    assert rep["exclusions"]["ability"]["n_individuals"] == 2 and rep["exclusions"]["ability"]["n_no_reveal"] == 1
+    # 予測の入力は判明前の行 (t_battle + 5)
+    assert {o["t_pred"] for o in rep["observations"]} == {t_battle + 5}
+    assert rep_fixed_only["db_at_battle"] == {"enabled": False}
+    # 技を使う確率は report にも出ない
+    assert "move_use_divisor" not in rep["stats"]
+    md = ev.render_markdown(rep)
+    for head in ("### 2.2 対戦時点の snapshot", "### 3.2 評価できた対戦数・個体数", "### 3.3 除外した標本と理由", "ability_fixed"):
+        assert head in md, head
+    assert "保有 ÷" not in md and "使う確率 =" not in md
+    assert "### 2.2" not in ev.render_markdown(rep_fixed_only)
+    json.dumps(rep, ensure_ascii=False)
+    print("test_report_db_at_battle_and_no_use_probability OK")
+
+
+def test_ability_names_in_table():
+    """特性 ほのおのたてがみ (firemane)・うなぎのぼり (eelevate) が名前表にあり、変換の合法性の検査で落ちない"""
+    from advisor.ja_names import ability_ja
+    assert ability_ja("firemane") == "ほのおのたてがみ" and ability_ja("eelevate") == "うなぎのぼり"
+    v = us.legal_vocab()
+    assert v["ability_ok"]("firemane") and v["ability_ok"]("eelevate")
+    payload = _payload({"Pyroar-Mega": _entry({"Fire Mane": 10.0}, {"Pyroarite": 10.0}, {"": 40.0}),
+                        "Eelektross-Mega": _entry({"Eelevate": 5.0}, {"Eelektrossite": 5.0}, {"": 20.0})})
+    conv = us.convert_chaos(payload, _ok, _ok, v["item_ok"], v["ability_ok"])
+    assert conv["checks"]["abilities_dropped"] == {}, conv["checks"]["abilities_dropped"]
+    assert conv["species"]["pyroarmega"]["abilities"] == {"firemane": 1.0}
+    assert conv["species"]["eelektrossmega"]["abilities"] == {"eelevate": 1.0}
+    print("test_ability_names_in_table OK")
+
+
 def main():
     test_hold_probability_vs_weight_share()
     test_mega_name_mapping_and_group()
@@ -393,6 +608,11 @@ def main():
     test_likelihood_only_revealed_and_bootstrap()
     test_time_split()
     test_report_shape()
+    test_prediction_input_excludes_post_reveal_info()
+    test_prediction_exclusions_and_ability()
+    test_snapshot_at_battle_selection()
+    test_report_db_at_battle_and_no_use_probability()
+    test_ability_names_in_table()
     print("ALL OK")
 
 
