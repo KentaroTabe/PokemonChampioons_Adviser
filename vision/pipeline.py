@@ -125,7 +125,7 @@ class VisionPipeline:
 
     # ------------------------------------------------------------------
     def _tick_field_effects(self) -> None:
-        """新ターン確定時に天候/フィールド/トリックルームの残りターンを減算し、
+        """新ターン確定時に天候/フィールド/トリックルーム/壁 (両陣営) の残りターンを減算し、
         尽きたら消す。
 
         終了ダイアログはフレーム間引きで取り逃すことがある (実測: 天候終了の
@@ -156,6 +156,12 @@ class VisionPipeline:
                     "system", "トリックルームがターン経過で終了と推定",
                     event_id="trickroom_expire")
                 f.trick_room, f.trick_room_turns = False, None
+        # 壁 (2026-10-31)。残りターンが None (旧ログ・読めなかった) の壁は減らさない
+        for side_name in ("player", "opponent"):
+            for key in self.state.side(side_name).tick_screens():
+                self.state.log_event(
+                    "system", f"壁({side_name}:{key})がターン経過で終了と推定",
+                    event_id=f"{key}_expire_{side_name}")
 
     # ------------------------------------------------------------------
     def rescue_scan(self, img) -> None:

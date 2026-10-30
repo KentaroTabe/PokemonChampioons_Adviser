@@ -17,7 +17,7 @@ import numpy as np
 
 from vision import zones, ocr
 from vision.zones import crop
-from vision.state import BattleStateV2, MoveSlot, PokemonState, adopt_selection_guess, has_observation
+from vision.state import SCREEN_KEYS, BattleStateV2, MoveSlot, PokemonState, adopt_selection_guess, has_observation
 from vision.typeicons import classify_type_icon, classify_type_icon_detail, icon_std
 from vision import type_reading as TR
 from vision import my_hp_estimate
@@ -2580,6 +2580,9 @@ def extract_field_check(img, state: BattleStateV2, resolver) -> None:
                     f.trick_room_turns = turns_left
             elif action == "side_flag":
                 setattr(side, value, True)
+                # 壁の n/m は残りターンに入れる (2026-10-31。天候・フィールドと同じ)
+                if value in SCREEN_KEYS and turns_left is not None:
+                    setattr(side, f"{value}_turns", turns_left)
             elif action == "hazard":
                 setattr(side, value, True)
             elif action == "hazard_count":

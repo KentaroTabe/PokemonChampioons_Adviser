@@ -58,7 +58,7 @@
 | 表示の読み取り | `vision/events.py` `_parse_popup` | 「<名前>の<特性 or 持ち物>」を全分割で照合 (特性が優先)。持ち物なら `item_id` を入れ、`_apply_item_activation` (`advisor/data/item_effects.json`) で回復・ランク・消費を反映 |
 | 文言の辞書 | `vision/events.py` `SIMPLE_EVENTS` | 持ち物は たべのこし の回復・タスキ の「こらえた」・いのちのたま の反動・ふうせん。天候の開始と終了 (開始で `weather_turns = 5`)、フィールド、壁の終了 |
 | 喪失 | `_parse_knockoff` | はたきおとす で `item_removed`。以後、登録・使用率で持ち物を戻さない |
-| 継続ターン | `vision/pipeline.py` `_tick_field_effects` | 新しいターンごとに残りを 1 減らし 0 で消す。開始は文言・特性で 5、場の状況画面 (`extract_field_check`) の n/m を読めたら m − n。自分の延長の持ち物でも 5 で消す (対応済み (feature/team-build に 2026-10-31 マージ)、§6.4 の論点 5) |
+| 継続ターン | `vision/pipeline.py` `_tick_field_effects` | 新しいターンごとに残りを 1 減らし 0 で消す (壁も陣営ごとに同じ、2026-10-31)。開始は文言・特性で 5、場の状況画面 (`extract_field_check`) の n/m を読めたら m − n。自分の延長の持ち物でも 5 で消す (対応済み (feature/team-build に 2026-10-31 マージ)、§6.4 の論点 5) |
 | 矛盾の除去 | `advisor/scoring_transition.py` `_drop_contradicted_item` | 消費・喪失なら持ち物なし。とつげきチョッキ の仮定は変化技を見たら外す |
 | こだわりの技の固定 (相手) | `scoring_transition.restrict_opp_pool` | **観測で確定した** こだわり系 (`item_id`) のときだけ直前の技に固定。相手の スカーフ が判明したことが無いので、実戦では一度も条件を満たしていない (§1.2) |
 | 持ち物の感度 | `scoring_transition` (`TRANSITION_SENSITIVITY_ITEMS` = スカーフ / タスキ) | 観測が無ければ有無を入れ替えた仮説で第一候補が変わるかを見る。実機の既定は off |
@@ -396,7 +396,7 @@
    上位外の持ち物の追加と、消費・喪失の「以前持っていた物」と「現在の持ち物なし」の区別も同じブランチ (§3.5)。
    - (10/30 対応) トラッカーが個体ごとに一度だけ `observe_item(..., add_missing=True)` を呼ぶ。候補に無い持ち物は仮説に足し、消費・喪失の後は出力の持ち物を「なし」にする (feat/ev-infer-item-pin)。
 5. 自分の延長の持ち物 (しめったいわ・グランドコート) の天候・フィールドも、vision は開始で 5 にして 5 ターンで消す (`vision/events.py`、`vision/pipeline._tick_field_effects`)。
-   6〜8 ターン目は雨・サイコフィールドなしで計算している。**対応済み (feat/field-extender-items、2026-10-30 マージ: field_effects.json の duration と dex.effect_duration、自分側は state の item_id → 登録で補う。壁は表だけで state の残りターンの欄は未追加)**。レビュワーがコード上で再現した
+   6〜8 ターン目は雨・サイコフィールドなしで計算している。**対応済み (feat/field-extender-items、2026-10-30 マージ: field_effects.json の duration と dex.effect_duration、自分側は state の item_id → 登録で補う)**。**壁も対応済み (feat/screen-turns、2026-10-31: 陣営ごとに `reflect_turns` / `light_screen_turns` / `aurora_veil_turns` を追加し、技の使用者の持ち物で開始 (ひかりのねんど 8)、ターン経過で 0 になったら消す。旧ログの欄なしは None で減らさない。場の状況画面の n/m も反映。tests/test_screen_turns.py)**。レビュワーがコード上で再現した
    (ペリッパー しめったいわ・イエッサン グランドコート の特性による開始と、その後のターン経過で確かめたもの)。実戦の対戦ログでの影響の実測は未確認。
 6. 尤度比を自分側で較正する前提 (自分と相手のプレイの違い、同じプレイヤー・チームの繰り返し観測)。
 7. 集計スクリプト (§8) は scratchpad にあり、リポジトリに無い。**決定済み** (§6.5 の 5): 共通処理と少数の CLI に整理して保存する (tools/item_cues に実装済み (2026-10-30 マージ))。

@@ -22,6 +22,9 @@ STAT_KEYS = ("atk", "def", "spa", "spd", "spe", "acc", "eva")
 
 MAJOR_STATUSES = ("poison", "toxic", "burn", "paralysis", "sleep", "freeze", "drowsy")
 
+# 壁 (陣営の欄名)。それぞれ <欄名>_turns に残りターンを持つ (2026-10-31)。継続ターンは advisor/data/field_effects.json の duration
+SCREEN_KEYS = ("reflect", "light_screen", "aurora_veil")
+
 # --- HP の読みの棄却の記録 (2026-10-09、KNOWN_ISSUES A1 の 10/8 の行) ---
 # 抽出 (vision/extractors) が HP の読みを捨てたとき、その理由と観測を残す。理由の名前は既存の分岐に 1 つずつ付けた:
 #   name_mismatch               相手: HUD の名前が読めたが、場の個体の既知の名前と類似度が閾値未満
@@ -521,6 +524,11 @@ class SideState:
     reflect: bool = False
     light_screen: bool = False
     aurora_veil: bool = False
+    # 壁の残りターン (2026-10-31)。開始時に advisor.dex.effect_duration (基本 5、設定者がひかりのねんど持ちなら 8)、
+    # 新しいターンごとに tick_screens で 1 減らし 0 で壁を消す。None = 不明 (旧ログ・読めなかった。ターン経過では消さない)
+    reflect_turns: Optional[int] = None
+    light_screen_turns: Optional[int] = None
+    aurora_veil_turns: Optional[int] = None
     safeguard: bool = False
     tailwind: bool = False
     wish: bool = False
@@ -913,6 +921,23 @@ class SideState:
                 self.active_index = min(self.active_index, len(self.party) - 1) \
                     if self.party else None
 
+    def tick_screens(self) -> list:
+        """新しいターンの確定で壁の残りターンを 1 減らし、尽きた壁を消す (純粋: この陣営の欄だけを変える)。
+        残りターンが None の壁は減らさない (消えない)。戻り値は消した壁の欄名のリスト"""
+        expired = []
+        for key in SCREEN_KEYS:
+            left = getattr(self, f"{key}_turns")
+            if not getattr(self, key) or left is None:
+                continue
+            left -= 1
+            if left <= 0:
+                setattr(self, key, False)
+                setattr(self, f"{key}_turns", None)
+                expired.append(key)
+            else:
+                setattr(self, f"{key}_turns", left)
+        return expired
+
     def clear_hazards(self):
         self.stealth_rock = False
         self.spikes = 0
@@ -936,6 +961,10 @@ class SideState:
                 "light_screen": self.light_screen,
                 "aurora_veil": self.aurora_veil,
                 "safeguard": self.safeguard,
+                # 壁の残りターン (2026-10-31 に追加。旧ログには無い = None)
+                "reflect_turns": self.reflect_turns,
+                "light_screen_turns": self.light_screen_turns,
+                "aurora_veil_turns": self.aurora_veil_turns,
             },
             "tailwind": self.tailwind,
         }
@@ -1173,6 +1202,11 @@ class BattleStateV2:
             side.reflect = bool(sc.get("reflect"))
             side.light_screen = bool(sc.get("light_screen"))
             side.aurora_veil = bool(sc.get("aurora_veil"))
+            # 壁の残りターン (2026-10-31)。欄の無い旧ログは None (ターン経過では消さない)
+            for key in SCREEN_KEYS:
+                left = sc.get(f"{key}_turns")
+                setattr(side, f"{key}_turns",
+                        int(left) if isinstance(left, (int, float)) and not isinstance(left, bool) else None)
             side.tailwind = bool(sd.get("tailwind"))
         f = d.get("field") or {}
         self.field.weather = f.get("weather")

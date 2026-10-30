@@ -20,7 +20,7 @@ from typing import Optional
 from champions_agent.config import (BATTLE_END_FAINT_CONFIRM_SEC, BSS_PICK_COUNT, MOVE_LOCK_ENCORE_TURNS,
                                     MOVE_LOCK_TAUNT_TURNS)
 from vision.normalize import loose_key, normalize
-from vision.state import BattleStateV2, lock_turns_left
+from vision.state import SCREEN_KEYS, BattleStateV2, lock_turns_left
 
 # 同一イベントIDの再発火を抑止する窓 (秒)。メッセージは表示中にフレーム
 # 間隔で繰り返し読まれ、OCR揺れで別テキストとして 3〜7 秒後に再解析される
@@ -226,6 +226,10 @@ SIMPLE_EVENTS = [
 # 技の側で「直前の開始」と判定して設定者の持ち物で残りターンを直すのに使う
 _FIELD_START_EVENT = {(ev["action"], ev["value"]): ev["id"] for ev in SIMPLE_EVENTS
                       if ev["action"] in ("weather", "terrain") and ev["value"]}
+
+# 壁の技 → 陣営の欄名 (vision.state.SCREEN_KEYS)。技の使用者を壁の残りターンの設定者にする (2026-10-31)
+_SCREEN_MOVES = {"reflect": "reflect", "lightscreen": "light_screen", "auroraveil": "aurora_veil"}
+_SCREEN_MOVE_OF = {key: move_id for move_id, key in _SCREEN_MOVES.items()}
 
 # 場を張る特性 (ポップアップの表示で設定者の個体が分かる開始)。オリジン系の特性 (ひひいろのこどう・ハドロンエンジン) は
 # advisor/data/field_effects.json の sources (ダメージ計算・型生成の表) に無いのでここに持つ
@@ -935,9 +939,11 @@ class EventParser:
         # 開始の文言が先に読めていた天候・フィールドの技 (連結文を含む) は、技の使用者の持ち物で残りターンを直す。
         # 値の設定はしない (二重適用にならない) ので apply_effects に関係なく行う
         self._apply_move_field_duration(r[1], side_name, mon)
+        # 壁も同じ (開始の文言が先に読めていたら使用者の持ち物で残りターンを直す。値の設定はしない)
+        self._apply_move_screen_duration(r[1], side_name, mon)
         if apply_effects:
             # 他イベントが既に発火している場合は場への効果を二重適用しない
-            self._apply_move_side_effect(r[1], side_name)
+            self._apply_move_side_effect(r[1], side_name, mon)
             self._apply_move_boosts(r[1], side_name, mon)
             self._apply_move_item_recoil(r[1], mon)
             self._apply_expected_damage(r[1], side_name)
@@ -1401,6 +1407,38 @@ class EventParser:
             return
         self._set_field_effect(kind, value, (side_name, mon))
 
+    def _set_screen(self, side_name: str, key: str, setter_mon=None) -> None:
+        """壁の開始: 欄と残りターンを入れる。setter_mon (技の使用者) の持ち物で延長後のターンにする
+        (表は field_effects.json の duration、持ち物の解決は _setter_item)。設定者が不明 (None) なら基本のターン"""
+        from advisor.dex import effect_duration
+        side = self.state.side(side_name)
+        item = self._setter_item(side_name, setter_mon) if setter_mon is not None else None
+        setattr(side, key, True)
+        setattr(side, f"{key}_turns", effect_duration(key, item))
+
+    def _apply_screen_message(self, side_name: str, key: str, value: bool) -> None:
+        """壁の開始・終了の文言。終了は欄と残りターンを消す。開始は直前 (EVENT_DEDUP_SEC) にその陣営の壁の技の使用を
+        観測していればその場の個体の持ち物で、無ければ基本のターンで入れる (設定者の書かれていない文言だけの開始。
+        窓内の再読みは呼び出し側の重複排除で来ない。天候の _start_field_from_message と同じ考え方)"""
+        side = self.state.side(side_name)
+        if not value:
+            setattr(side, key, False)
+            setattr(side, f"{key}_turns", None)
+            return
+        moved = self._recently(f"move_{side_name}_{_SCREEN_MOVE_OF[key]}", EVENT_DEDUP_SEC)
+        self._set_screen(side_name, key, side.active() if moved else None)
+        # 開始の文言を陣営つきで記録 (技の使用が後から来たとき、使用者の持ち物で直すかの判定に使う)
+        self._recent_fired[f"screen_msg_{side_name}_{key}"] = time.time()
+
+    def _apply_move_screen_duration(self, move_id: str, side_name: str, mon) -> None:
+        """技の使用より先にその陣営の壁の開始の文言を読んでいた (連結文・読みの順の入れ替わり) とき、技の使用者の持ち物で
+        残りターンを直す。開始の文言が直前に無い (既に張ってある壁の張り直し = 技は失敗) なら何もしない"""
+        key = _SCREEN_MOVES.get(move_id)
+        if not key or not getattr(self.state.side(side_name), key) or \
+                not self._recently(f"screen_msg_{side_name}_{key}", EVENT_DEDUP_SEC):
+            return
+        self._set_screen(side_name, key, mon)
+
     def _apply_ability_effect(self, ability_id: str, side_name: str,
                               mon=None):
         if ability_id in _FIELD_ABILITIES:
@@ -1423,7 +1461,7 @@ class EventParser:
                     target.hp_current = max(
                         0, target.hp_current - round(target.hp_max / 8))
 
-    def _apply_move_side_effect(self, move_id: str, user_side: str):
+    def _apply_move_side_effect(self, move_id: str, user_side: str, mon=None):
         target = "opponent" if user_side == "player" else "player"
         tside = self.state.side(target)
         uside = self.state.side(user_side)
@@ -1435,12 +1473,12 @@ class EventParser:
             tside.toxic_spikes = min(2, tside.toxic_spikes + 1)
         elif move_id == "stickyweb":
             tside.sticky_web = True
-        elif move_id == "reflect":
-            uside.reflect = True
-        elif move_id == "lightscreen":
-            uside.light_screen = True
-        elif move_id == "auroraveil":
-            uside.aurora_veil = True
+        elif move_id in _SCREEN_MOVES:
+            # 壁: 使用者 (mon) の持ち物で残りターンを入れる。既に張ってある壁の張り直しはゲームでは失敗するので
+            # 残りターンを戻さない (2026-10-31)
+            key = _SCREEN_MOVES[move_id]
+            if not getattr(uside, key):
+                self._set_screen(user_side, key, mon)
         elif move_id == "tailwind":
             uside.tailwind = True
         elif move_id == "trickroom":
@@ -1479,8 +1517,12 @@ class EventParser:
         elif action == "gravity":
             f.gravity = ev["value"]
         elif action == "side_flag":
-            _, side, _ = self._target_mon(cleaned, source)
-            setattr(side, ev["key"], ev["value"])
+            side_name_f, side, _ = self._target_mon(cleaned, source)
+            if ev["key"] in SCREEN_KEYS:
+                # 壁は残りターンも入れる・消す (2026-10-31)
+                self._apply_screen_message(side_name_f, ev["key"], ev["value"])
+            else:
+                setattr(side, ev["key"], ev["value"])
         elif action == "hazard":
             _, side, _ = self._target_mon(cleaned, source)
             setattr(side, ev["key"], ev["value"])
