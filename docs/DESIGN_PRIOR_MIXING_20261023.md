@@ -3,6 +3,7 @@
 計画: [docs/ADVICE_ACCURACY_PLAN_1009.md](ADVICE_ACCURACY_PLAN_1009.md) §8.36 (10/19 の 7 提案への回答で「分布混合は別単位」)・§8.49 (② の後に ③。
 予測対象と利用できる観測を先に確定し、持ち物・技・選出を一括で混ぜない)。関連: [docs/USEFULNESS_VERIFICATION_PLAN_1007.md](USEFULNESS_VERIFICATION_PLAN_1007.md) §5 (選出傾向の混合は C、時系列で分けた対数尤度)。
 この文書は設計と予備集計だけ。コードは変えていない。方針はレビューと開発者が決める。
+(§9 は 2026-10-30 の追記: Smogon の Champions 統計を評価する道具を足した。助言・既定の方式・使用率 DB は変えていない。)
 
 ## 0. 要点
 
@@ -208,3 +209,83 @@
 - 10/5 以降の対戦でロースターが 4 体そろわない原因。
 - シーズン (M1) の開始日。
 - 予備集計の数値は scratchpad のスクリプトの結果で、テストとして固定していない。
+
+## 9. Smogon の Champions 統計の評価基盤 (2026-10-30 追記、レビュー 10/30・開発者承認)
+
+背景: [docs/EXTERNAL_BATTLE_AI_SURVEY_20261030.md](EXTERNAL_BATTLE_AI_SURVEY_20261030.md) §2.1・§6 の 1。Smogon の統計に Champions の BSS
+(gen9championsbssregmb / regmc) がある。方針は導入ではなく「取得形式・確率変換・実戦適合性の検証」まで。混合比の調整は後。
+**評価の道具だけで、助言・既定の方式・使用率 DB (本試験用の snapshot) は変えていない** (§6 の「変えないもの」はそのまま)。
+
+### 9.1 取得入口 (`champions_agent/data/sources/usage_scraper.py`)
+
+- 既存の `fetch_usage_stats(source="smogon", fmt=...)` は fmt を無視して gen9ou (`SMOGON_FALLBACK_FORMAT`) を取る。既定の挙動なので変えない。
+- 新しい入口 `fetch_smogon_chaos_exact(month, fmt, cutoff)`: 形式が `SMOGON_CHAMPIONS_FORMATS` (BSS の regmb / regmc だけ。6 体の ou / uu と
+  ダブルの vgc は入れない) に無い・月が YYYY-MM でない・HTTP が 200 でない・中身の `info.metagame` / `info.cutoff` が指定と違う → `SmogonChaosError`
+  で止める (gen9ou・別の月・別の cutoff に退避しない)。
+- 元 JSON はバイト列のまま `logs/usage_smogon/<month>/<fmt>-<cutoff>.json` に、sha256・取得時刻・サイズ・`SMOGON_CONVERT_VERSION`・対戦数を
+  `<fmt>-<cutoff>.manifest.json` に保存する。保存済みなら取らない (再取得しない)。保存済みのファイルの sha256 が manifest と違えば止める。
+
+### 9.2 確率変換の定義 (`advisor/usage_smogon.py`、`SMOGON_CONVERT_VERSION` = 1)
+
+chaos の数は百分率ではなく重み付き件数。個体ごとに W = Abilities の重みの合計 (= Items の合計 = Spreads の合計、2026-09 の regmc の 323 項目で
+全部一致)。Moves の重みの合計は 4W (空き枠は "" の項目)。`Raw count` は重みの無い件数 (メガボーマンダで 49,324 に対して W ≈ 35,028) なので分母に使わない。
+
+| 用途 | 定義 | 合計 |
+|---|---|---|
+| (a) 持ち物の分布 | w_i / W。"nothing" (持ち物なし) は分母に入れて一覧から外す | 1 |
+| (b) 特性の分布 | w_a / W | 1 |
+| (c) 技の保有確率 | w_m / W (その技を持っている割合)。例: メガボーマンダの すてみタックル 0.792 | 最大 4 (空き枠の分だけ少ない) |
+| (d) 技を使う確率 | (c) ÷ `SMOGON_MOVE_USE_DIVISOR` (= 4) の暫定。使う条件付き確率の推定はしない。今回の評価には使わない | 最大 1 |
+| 配分 | Spreads を {性格, 能力ポイント} の分布として別に持つ。値が全部 0〜32 なら能力ポイント (regmc はこれ)、32 を超えれば努力値として `ev_infer._ev_to_points` で換算 | 1 |
+
+- 全技の重みの合計 (4W) で割った値は (c) ではない (すてみタックル 0.198)。今の `sets.predict` は上位候補の中で合計 100 に正規化するので、その出力も (c) ではない。
+- 周辺分布の積を実在する型の分布とは見なさない。
+- 名寄せ: Showdown の表記 → 英数字の小文字 (Salamence-Mega → salamencemega、Lucario-Mega-Z → lucariomegaz) → 例外表 (Meowstic-F-Mega →
+  meowsticfemalemega 等) → 図鑑の別名 (`canonical_species_id`)。持ち物は leek → stick (名前表の id が古い綴り)。
+- メガ: chaos はメガ形態を別の項目 (石を持つ個体) で持つ。使用率 DB (championsbattledata) は基本種にまとめている。比べるときの Smogon の見方は
+  pooled (基本種 + そのメガを W で加重平均。DB と同じ条件。主) と known (状態の種がメガ形態ならメガの項目。感度) の 2 つ (`SMOGON_EVAL_MEGA_VIEW(S)`)。
+- 合法性: 図鑑 (`advisor/data/dex.json`) に無い種・技、名前表 (`vision/data/jp_names.json`) に無い持ち物・特性は落とし、件数と重みを記録する。
+  分母 W は落とす前のまま (残りの確率は変わらない)。
+
+### 9.3 評価の規則 (`tools/usage_prior_eval.py`)
+
+- 観測: 対戦ログの advice 行の state (相手の party) を時刻順に読み、個体 (対戦 × party の枠) ごとに初めて判明した技 (`revealed`、
+  `NameResolver` の閾値 0.8 で id に。`opponent_move_pool` と同じ) と初めて判明した持ち物 (`item`) を 1 標本にする。同じ対戦・同じ個体・同じ技の反復は 1 標本。
+  観測の時点の種族で予測し、後の行の情報 (種族の確定・メガシンカ) を混ぜない。種族が不明・推定 (guess) の時点で判明したものは数えない (件数は残す)。
+  持ち物は枠ごとに最初の 1 つ (後で違う値が出たら件数だけ数える)。辞書外のメガストーン (`megastone`) は数えない。
+- 事象: 判明した技は「持っている」(log (c))。見えなかった技を「持っていない」と数えない。持ち物は判明したものだけ (log (a))。
+- 比べる予測: 使用率 DB = snapshot を固定 (`SMOGON_EVAL_DB_SNAPSHOT` = 75)、`move_usage` / `item_usage` の usage_percent / 100 (上位 10 だけ。
+  `sets.predict` の正規化は通さない。DB の技の採用率はもともと保有確率の意味)。Smogon = 月・形式・cutoff を固定した (c) / (a)。
+  一覧に無い値は両方とも `SMOGON_EVAL_PROB_FLOOR` (0.005)。
+- 対応比較: 両方の予測に種がある観測だけで、差 = log p(Smogon) − log p(DB) の観測あたりの平均。区間は対戦単位のブートストラップ
+  (`SMOGON_EVAL_BOOTSTRAP_N` = 2000、95%、seed 固定)。技と持ち物は別に出す。
+- 時系列: 評価するのは統計の月の翌月 1 日 0 時 (ローカル時刻) 以降に始まった対戦だけ (2026-09 の統計 → 10 月の対戦)。封印 holdout は流用しない。
+  使用率 DB の snapshot 75 (fetched_at 2026-10-22) は評価の対戦の大半より後なので、DB 側は評価の対戦より後の情報を含みうる (DB に有利な向き)。report にその件数を出す。
+- 感度: メガの見方 (pooled / known)、learnset の照合 (`--learnsets` に champions mod の learnsets.ts を渡すと、種が覚えない技の観測
+  = へんしん の写し・帰属の誤りを除いた比較も出す)。
+- report: Markdown + JSON (`logs/usage_prior_eval/<month>-<fmt>-<cutoff>-snap<id>/`)。統計の形式・月・cutoff・sha256・変換版、DB の snapshot、
+  対戦の期間と件数、種ごとの件数、対数尤度の差と区間、カバー率、変換で落としたもの、次の手順。テスト: `tests/test_smogon_eval.py`。
+
+### 9.4 最初の結果 (2026-10-30、参考値)
+
+統計 gen9championsbssregmc / 2026-09 / cutoff 1500 (対戦数 69,462、sha256 d274cc77…f26e)、DB snapshot 75、10 月の対戦 50 本 (10/5〜10/23)。
+
+| 種類 | 観測 (対応) | 対戦 | log p (Smogon) | log p (DB) | 差 | 95% 区間 | 一覧に入っていた (Smogon / DB) |
+|---|---|---|---|---|---|---|---|
+| 技 | 138 | 47 | −1.075 | −1.145 | +0.071 | [−0.027, +0.172] | 0.97 / 0.90 |
+| 持ち物 | 22 | 19 | −1.459 | −1.288 | −0.170 | [−0.379, +0.022] | 1.00 / 1.00 |
+
+- カバー率: 観測のあった 55 種・評価の対戦の相手 78 種とも、Smogon・DB の両方に予測がある (無い種なし)。
+- 変換の検査: 種 323 項目は全部図鑑にある (名寄せの例外 2 件を足した後)。技は空き枠以外に落としたもの無し。特性 firemane・eelevate (各 1 種) が名前表に無く落とした。
+- 感度: known で技 +0.056 [−0.059, +0.170]。learnset の照合で 4 観測 (メタモンの写し 2、アンコール 2) を除くと技 +0.073 [−0.028, +0.178]。
+- 読み方: 技は Smogon がわずかに上、持ち物は DB がわずかに上だが、どちらも区間が 0 をまたぎ判定できない。持ち物は 22 観測と少ない。
+  判明しやすい技・表示の出る持ち物に偏った評価で、DB 側は時系列の情報の漏れ (上記) を含む。混合比は決めていない。
+
+### 9.5 次の手順 (設計だけ、今回は実装しない)
+
+1. 差の区間が 0 より上に出る対象 (技・持ち物) が見えたら、決定再生 (`tools.advice_replay` / `tools.real_accept` の `--data-mode restore`) で
+   同じ局面を DB の予測と Smogon の予測 (または混合) で評価し、推奨の反転率を出す。
+2. 反転した局面で、持ち物 (こだわりスカーフ・きあいのタスキ)・素早さ (配分の分布、`ev_infer` の仮説)・耐久の誤推定のどれが効いたかを、1 つずつ入れ替えて分ける。
+3. 混合比は前半の期間で選び、後半の期間で 1 回だけ評価する (3.1)。
+4. 未確認: Showdown 上の Champions の模擬 (プレイヤー層・時期) と実機のランクマッチの分布の差、DB の fetched_at の時刻帯 (対戦時点の snapshot を
+   選ぶ時系列の比較はまだしていない)、2026-10 の統計 (10/30 時点で未公開、HTTP 404)。
