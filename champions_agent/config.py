@@ -75,6 +75,26 @@ USAGE_MIN_RATING = 1500
 # ingest側の足切りと、ベンチ用チームプール (env/ranked_teams.py) の
 # 足切りで同じ値を使う。
 USAGE_MIN_RANKED_TEAMS = 100
+
+# --- Smogon の Champions 統計 (型の事前分布の候補として評価する道具だけ。2026-10-30 レビュー、開発者承認) ---
+# 助言・既定の方式・使用率 DB はこれを読まない (tools/usage_prior_eval.py の評価だけ)。
+# 取得は usage_scraper.fetch_smogon_chaos_exact (月・形式・cutoff を明示。形式が違えば止める、gen9ou に退避しない)。
+# 形式はシングルの BSS (6 体見せ 3 体選出) だけ。gen9championsou / uu (6 体全部) と vgc (ダブル) は対戦形式が違うので入れない
+SMOGON_CHAMPIONS_FORMATS = ("gen9championsbssregmb", "gen9championsbssregmc")
+SMOGON_USAGE_DIR = "logs/usage_smogon"          # 元 JSON (<month>/<fmt>-<cutoff>.json) と manifest (<month>/<fmt>-<cutoff>.manifest.json)
+SMOGON_FETCH_TIMEOUT_SEC = 60
+# 変換の版 (smogon_convert の定義を変えたら上げる。manifest と report に残す)
+SMOGON_CONVERT_VERSION = 1
+# 技を「使う」確率の暫定 = 保有確率 / この数 (条件付きの推定はしない。保有と分けて記録するだけ)
+SMOGON_MOVE_USE_DIVISOR = 4
+# 実戦記録での対応比較 (tools/usage_prior_eval.py)
+SMOGON_EVAL_PROB_FLOOR = 0.005       # 予測の一覧に無い技・持ち物に置く確率 (両方の予測に同じ値。log(0) を避ける)
+SMOGON_EVAL_BOOTSTRAP_N = 2000       # 対戦単位のブートストラップの回数
+SMOGON_EVAL_BOOTSTRAP_SEED = 20261030
+SMOGON_EVAL_CI = 0.95                # 区間の水準
+SMOGON_EVAL_DB_SNAPSHOT = 75         # 比べる使用率 DB の snapshot (正式群の版。計画書 §8.48)
+SMOGON_EVAL_MEGA_VIEWS = ("pooled", "known")   # Smogon の名寄せ: pooled = 基本種 + メガを重みで合算 (DB と同じ条件)、known = メガが判明していればメガの項目
+SMOGON_EVAL_MEGA_VIEW = "pooled"     # 主の比較に使う見方 (もう一方は感度として report に出す)
 # meta_sets が前スナップショットから「実質変化」(技集合/持ち物/特性/性格/配分の
 # いずれか) した種がこの数以上なら、日次更新ログに警告を出す。
 # 評価軸 (ベンチ・h2h のチーム中身) は meta_sets 経由で動くため、大量の
