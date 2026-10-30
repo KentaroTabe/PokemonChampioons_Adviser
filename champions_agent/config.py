@@ -88,6 +88,9 @@ SMOGON_FETCH_TIMEOUT_SEC = 60
 SMOGON_CONVERT_VERSION = 2
 # 実戦記録での対応比較 (tools/usage_prior_eval.py)
 SMOGON_EVAL_PROB_FLOOR = 0.005       # 予測の一覧に無い技・持ち物・特性に置く確率 (両方の予測に同じ値。log(0) を避ける)
+# 型推定 (advisor/ev_infer.py) で表示により確定した持ち物が仮説に無いとき、足す仮説の事前の重み (DB の一覧に無い持ち物の下限。
+# SMOGON_EVAL_PROB_FLOOR と同じ考え方。2026-10-30)。一覧にあればその採用率を使う
+EV_INFER_ITEM_FLOOR = 0.005
 # 使用率 DB の usage_snapshot.fetched_at の時刻帯。列の既定は SQLite の datetime('now') (UTC) で、取り込みの INSERT は
 # fetched_at を渡さない (champions_agent/data/database.py)。usage-update の launchd は毎日 06:30 (ローカル) で、
 # fetched_at は 21:3x に並ぶ (= 06:3x JST の UTC 表記) ので UTC と解釈する。"utc" か "local"

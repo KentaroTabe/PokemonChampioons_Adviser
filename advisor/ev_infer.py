@@ -7,11 +7,18 @@
 
 観測の収集は SpreadTracker.on_frame (サーバーの毎フレーム処理から呼ぶ)。
 推定結果は best() でアドバイザーが参照する。
+
+2026-10-30 (docs/DESIGN_ITEM_INFERENCE_20261030.md §6.4 の論点 3・4):
+- 読む使用率 DB と snapshot は advisor.data_pin の版 (環境変数 ADVICE_USAGE_DB / ADVICE_USAGE_SNAPSHOT、再生の set_override)。
+  版を明示したとき (pinned) はその snapshot だけを読み、DB・snapshot が無ければ InputsPinError で止める (最新へ退避しない)。
+  明示が無ければ従来どおり DB_PATH の チャンピオンズの全 snapshot (_champions_filter) → 全ソースの順。
+  トラッカーの推定器はデータの版 (data_version) ごとに作り直し、data_pin.reset_caches() でも消える。
+- 表示で判明した相手の持ち物は、トラッカーが個体ごとに一度だけ observe_item(..., add_missing=True) に渡す
+  (item_observation / knocked_off_items / item_to_pass。消費・喪失の後は出力の持ち物を「なし」にする)。
 """
 from __future__ import annotations
 
 import math
-import sqlite3
 import time
 from pathlib import Path
 from typing import Optional
@@ -78,8 +85,138 @@ def _nature_mult(nature: str) -> dict:
     return {pair[0]: 1.1, pair[1]: 0.9}
 
 
+def _item_key(item) -> Optional[str]:
+    """持ち物の名前を仮説の持ち物 id の形にそろえる (純粋。"Choice Scarf" / "choice-scarf" → "choicescarf")"""
+    return (str(item or "")).replace("-", "").replace(" ", "").lower() or None
+
+
+def data_version() -> tuple:
+    """型推定が読む使用率の版 (db のパス, 明示した snapshot id or None, pinned)。advisor.data_pin.usage_source() を読む
+    (環境変数と set_override。明示が無ければ db はこのモジュールの DB_PATH (テストが差し替える) で snapshot は None = 従来の範囲)"""
+    from advisor.data_pin import usage_source
+    src = usage_source()
+    db = src["db"] if src["pinned"] else DB_PATH
+    return (str(db), src["snapshot_id"], bool(src["pinned"]))
+
+
+def _open_usage() -> tuple:
+    """使用率 DB を開き (接続, [第一の絞り込み, 予備の絞り込み]) を返す (副作用: DB を開く)。
+    版を明示したとき: data_pin.connect_usage(読み取り専用) + resolve_snapshot で、その snapshot だけを読む絞り込みを 2 つとも使う。
+      DB・snapshot が無ければ InputsPinError (握りつぶさない)。
+    明示が無いとき: 従来どおり DB_PATH を開き、チャンピオンズの全 snapshot (_champions_filter) → 全ソース ("1=1")。DB が無ければ (None, None)"""
+    from advisor.data_pin import connect_usage, resolve_snapshot
+    _db, snap, pinned = data_version()
+    if pinned:
+        conn = connect_usage(Path(_db), True)
+        try:
+            sid = resolve_snapshot(conn, snap, True)
+        except Exception:
+            conn.close()
+            raise
+        flt = f"snapshot_id = {int(sid)}"
+        return conn, [flt, flt]
+    conn = connect_usage(Path(_db), False)
+    if conn is None:
+        return None, None
+    try:
+        # チャンピオンズ実データを優先し、無い場合のみ全ソース (Smogon フォールバック含む) を使う。SVデータの型を混ぜない
+        from advisor.team_advice import _champions_filter
+        return conn, [_champions_filter(conn), "1=1"]
+    except Exception:
+        conn.close()
+        raise
+
+
+def _usage_rows(db, table: str, cols: str, species_id: str, flt: str, limit: Optional[int]) -> list:
+    """種族の行を重みの降順で (名前は DB の表記そのまま → 記号を抜いた表記の順に照合)。limit=None は全部"""
+    lim = f" LIMIT {int(limit)}" if limit is not None else ""
+    for name_expr in (
+        "pokemon_name = ?",
+        "REPLACE(REPLACE(pokemon_name,'-',''),' ','') = ?",
+    ):
+        got = list(db.execute(
+            f"SELECT {cols}, SUM(usage_percent) w FROM {table} "
+            f"WHERE {name_expr} AND {flt} GROUP BY {cols} "
+            f"ORDER BY w DESC{lim}", (species_id,)))
+        if got:
+            return got
+    return []
+
+
+def item_share(rows: list, item_id: str) -> Optional[float]:
+    """持ち物の行 [(item_name, 重み)] の中で item_id の占める割合 (純粋)。行が無い・一覧に無ければ None"""
+    total = sum(w for _, w in rows if w) or 0.0
+    if total <= 0:
+        return None
+    key = _item_key(item_id)
+    got = sum(w for n, w in rows if w and _item_key(n) == key)
+    return (got / total) if got > 0 else None
+
+
+def confirm_item_hyps(hyps: list, item_id: str, prior: float) -> list:
+    """表示で確定した持ち物に仮説を絞る (純粋。2026-10-30)。
+    - 仮説にその持ち物があれば、その持ち物の仮説だけを残す (持ち物の違う仮説は落とす)。
+    - 無ければ、配分 (性格・努力値) ごとに持ち物だけを確定した持ち物に差し替えた仮説を 1 つ作る。重みは その配分の仮説の重みの
+      合計 (これまでの観測を含む) × prior (事前の重み = DB の採用率、一覧に無ければ下限)。持ち物の違う仮説は落とす。
+    hyps は変えずに新しい一覧を返す"""
+    iid = _item_key(item_id)
+    if not hyps or not iid:
+        return list(hyps)
+    same = [h for h in hyps if (h["item"] or "") == iid]
+    if same:
+        return same
+    groups: dict = {}
+    for h in hyps:
+        key = (h["nature"], tuple(sorted((h["evs"] or {}).items())))
+        groups.setdefault(key, []).append(h)
+    lp = math.log(max(float(prior), 1e-300))
+    out = []
+    for hs in groups.values():
+        mx = max(h["logw"] for h in hs)
+        lse = mx + math.log(sum(math.exp(h["logw"] - mx) for h in hs))
+        out.append({"nature": hs[0]["nature"], "evs": dict(hs[0]["evs"]), "item": iid, "logw": lse + lp})
+    return out
+
+
+def item_observation(mon: Optional[dict]) -> tuple:
+    """state の相手の個体の持ち物の欄の解釈 (純粋。2026-10-30)。戻り値 (渡す持ち物 id or None, 現在は持ち物なしか)。
+    vision/state.PokemonState の欄 (item_id / item_consumed / item_removed) の組み合わせと意味:
+    - item_id あり・item_consumed なし: 今その持ち物を持っている (表示の文言・発動・ポップアップ・手入力で判明) → (item_id, False)。
+      item_removed が立っていても item_id があれば、喪失 (vision は item_id を消す) の後に入った別の持ち物 (トリック等) とみなす
+    - item_id あり・item_consumed あり: その持ち物を持っていて消費した (きのみ・タスキ・ふうせん・しろいハーブ等が発動して無くなった)
+      → 「以前その持ち物を持っていた」の観測 + 現在は持ち物なし → (item_id, True)
+    - item_id なし・item_removed あり: はたきおとす等で失った。vision は item_id を消すので、失った物は state からは分からない
+      (分かるのは同じフレームの発火 knockoff_opponent_<id> か、それ以前に判明していたとき) → (None, True)
+    - item_id なし・item_consumed あり (通常は起きない): 消費したが物は不明 → (None, True)
+    - どれも無い: 未判明 → (None, False)"""
+    if not isinstance(mon, dict):
+        return None, False
+    iid = _item_key(mon.get("item_id"))
+    consumed, removed = bool(mon.get("item_consumed")), bool(mon.get("item_removed"))
+    if iid:
+        return iid, consumed
+    return None, (consumed or removed)
+
+
+def knocked_off_items(fired: list, side: str = "opponent") -> list:
+    """このフレームの発火から、はたきおとす等で失われた持ち物 id (純粋。vision.events の event_id knockoff_<side>_<item id>)"""
+    pre = f"knockoff_{side}_"
+    return [_item_key(f[len(pre):]) for f in (fired or []) if isinstance(f, str) and f.startswith(pre) and f[len(pre):]]
+
+
+def item_to_pass(passed: Optional[str], item_id: Optional[str]) -> Optional[str]:
+    """型推定に渡す持ち物 (純粋)。同じ個体にまだ渡していない持ち物の観測だけを返す (同じ物を続けて渡さない)。
+    渡した物と違う物 (はたきおとす・トリックで持ち物が変わった後の新しい持ち物) は別の 1 回として返す"""
+    iid = _item_key(item_id)
+    if not iid or iid == _item_key(passed):
+        return None
+    return iid
+
+
 class SpreadEstimator:
     """1体の相手ポケモンに対する型仮説の管理"""
+
+    item_gone = False   # 既定 (__init__ を通さずに作る呼び出し側のため。意味は __init__ の注記)
 
     def __init__(self, species_id: str):
         self.species_id = species_id
@@ -88,29 +225,57 @@ class SpreadEstimator:
         self.spe_lower: Optional[float] = None   # 実効素早さの下限 (観測由来)
         self.spe_upper: Optional[float] = None
         self._choice_locked = False
+        # 現在は持ち物なし (消費・喪失を観測した。2026-10-30)。仮説の持ち物 (以前持っていた物) は変えず、
+        # 出力 (best / top_k / speed_estimate) と以後の観測の計算では持ち物なしにする。新しい持ち物を観測したら外す
+        self.item_gone = False
 
     # ------------------------------------------------------------------
     @staticmethod
-    def _query_spreads(species_id: str) -> list:
+    def _query_item_share(species_id: str, item_id: str) -> Optional[float]:
+        """その種族の持ち物の一覧 (_query_spreads と同じ版・同じ絞り込みの順) の中で item_id の割合。一覧に無ければ None。
+        版を明示していて DB・snapshot が無ければ InputsPinError"""
+        from advisor.data_pin import InputsPinError
         try:
-            db = sqlite3.connect(str(DB_PATH))
-            # チャンピオンズ実データを優先し、無い場合のみ全ソース (Smogon
-            # フォールバック含む) を使う。SVデータの型を混ぜない
-            from advisor.team_advice import _champions_filter
-            filters = [_champions_filter(db), "1=1"]
+            db, filters = _open_usage()
+        except InputsPinError:
+            raise
+        except Exception:
+            return None
+        if db is None:
+            return None
+        try:
+            for flt in dict.fromkeys(filters):
+                rows = _usage_rows(db, "item_usage", "item_name", species_id, flt, None)
+                if rows:
+                    return item_share(rows, item_id)
+            return None
+        except Exception:
+            return None
+        finally:
+            db.close()
 
+    def _item_prior(self, item_id: str) -> float:
+        """仮説に無い持ち物を足すときの事前の重み: DB の一覧にあればその採用率、無ければ config.EV_INFER_ITEM_FLOOR"""
+        from champions_agent import config as C
+        share = self._query_item_share(self.species_id, item_id)
+        return share if share and share > 0 else float(C.EV_INFER_ITEM_FLOOR)
+
+    @staticmethod
+    def _query_spreads(species_id: str) -> list:
+        """[配分の行 [(nature, evs, 重み)], 持ち物の行 [(item_name, 重み)]]。版は advisor.data_pin (_open_usage)。
+        版を明示していて DB・snapshot が無ければ InputsPinError (握りつぶさない)。明示が無いときの失敗は従来どおり空"""
+        from advisor.data_pin import InputsPinError
+        try:
+            db, filters = _open_usage()
+        except InputsPinError:
+            raise
+        except Exception:
+            return [[], []]
+        if db is None:
+            return [[], []]
+        try:
             def q(table, cols, flt, limit):
-                for name_expr in (
-                    "pokemon_name = ?",
-                    "REPLACE(REPLACE(pokemon_name,'-',''),' ','') = ?",
-                ):
-                    got = list(db.execute(
-                        f"SELECT {cols}, SUM(usage_percent) w FROM {table} "
-                        f"WHERE {name_expr} AND {flt} GROUP BY {cols} "
-                        f"ORDER BY w DESC LIMIT {limit}", (species_id,)))
-                    if got:
-                        return got
-                return []
+                return _usage_rows(db, table, cols, species_id, flt, limit)
 
             rows = q("spread_usage", "nature, evs", filters[0], 8)
             if not rows:
@@ -127,10 +292,11 @@ class SpreadEstimator:
                                      (sum(x[2] for x in extra) or 1.0)))
             items = q("item_usage", "item_name", filters[0], 4) or \
                 q("item_usage", "item_name", filters[1], 4)
-            db.close()
             return [rows, items]
         except Exception:
             return [[], []]
+        finally:
+            db.close()
 
     def _build_hypotheses(self, species_id: str) -> list:
         spreads, items = self._query_spreads(species_id)
@@ -187,7 +353,8 @@ class SpreadEstimator:
             hp_frac=1.0,
             boosts=opp_state.get("boosts") or {},
             ability=opp_state.get("ability_id"),
-            item=hyp["item"],
+            # 消費・喪失の後は持ち物なしで計算する (仮説の持ち物は以前持っていた物のまま。2026-10-30)
+            item=None if self.item_gone else hyp["item"],
             ev=hyp["evs"],
             nature=_nature_mult(hyp["nature"]),
         )
@@ -217,11 +384,25 @@ class SpreadEstimator:
             # 先後は追い風/こだわり等の未観測要因もあるためソフトに更新
             h["logw"] += math.log(1.0 if consistent else 0.2)
 
-    def observe_item(self, item_id: Optional[str]) -> None:
-        """持ち物の判明 (発動/はたき落とし/表示) で、別の持ち物の仮説を実質除外する"""
+    def observe_item(self, item_id: Optional[str], add_missing: bool = False) -> None:
+        """持ち物の判明 (発動/はたき落とし/表示) で、別の持ち物の仮説を実質除外する。
+
+        add_missing=False (既定。シミュレータの探索 champions_agent/env/search_expert が毎ターン呼ぶ): 従来どおり、別の持ち物の仮説を
+          ×1e-6 にする。仮説に無い持ち物なら何もしない (全滅を避ける)。
+        add_missing=True (2026-10-30。サーバーのトラッカーが表示で確定した持ち物を個体ごとに一度だけ渡す): confirm_item_hyps で
+          その持ち物の仮説だけを残し、仮説に無ければ配分ごとに持ち物を差し替えた仮説を足す (事前の重みは DB の採用率、一覧に無ければ
+          config.EV_INFER_ITEM_FLOOR)。「現在は持ち物なし」(item_gone) はここでは変えない (消費した持ち物の観測もこの経路で渡すため。
+          トラッカーが state の欄から決める)"""
         if not item_id or not self.hyps:
             return
-        iid = str(item_id).replace("-", "").replace(" ", "").lower()
+        iid = _item_key(item_id)
+        if add_missing:
+            prior = 1.0
+            if not any((h["item"] or "") == iid for h in self.hyps):
+                prior = self._item_prior(iid)
+            self.hyps = confirm_item_hyps(self.hyps, iid, prior)
+            self.n_obs += 1
+            return
         if not any((h["item"] or "") == iid for h in self.hyps):
             return   # 仮説に無い持ち物なら情報として使えない (全滅を避ける)
         self.n_obs += 1
@@ -287,6 +468,8 @@ class SpreadEstimator:
         pts = _ev_to_points(top["evs"])
         ev_txt = " ".join(f"{abbr[k]}{v}" for k, v in pts.items() if v)
         nature_ja = _NATURE_JA.get(top["nature"], top["nature"]) or "性格不明"
+        # 消費・喪失の後は出力の持ち物を「なし」にする (engine に仮説の持ち物を入れさせない。2026-10-30)
+        item_out = None if self.item_gone else top["item"]
         spe_note = ""
         if self.spe_lower or self.spe_upper:
             lo = f"{self.spe_lower:.0f}<" if self.spe_lower else ""
@@ -296,14 +479,14 @@ class SpreadEstimator:
             "nature": top["nature"],
             "nature_ja": nature_ja,
             "evs": top["evs"],
-            "item": top["item"],
+            "item": item_out,
             "prob": round(prob, 3),
             "n_obs": self.n_obs,
             "spe_lower": self.spe_lower,
             "spe_upper": self.spe_upper,
             "summary": f"{nature_ja}"
                        f" {ev_txt}"
-                       + (f" @{top['item']}" if top["item"] else "")
+                       + (f" @{item_out}" if item_out else (" 持ち物なし" if self.item_gone else ""))
                        + f" ({prob:.0%}, 観測{self.n_obs}件)"
                        + spe_note,
         }
@@ -328,7 +511,7 @@ class SpreadEstimator:
             if wn < min_weight and out:
                 break
             out.append({"nature": h["nature"], "evs": h["evs"],
-                        "item": h["item"], "weight": round(wn, 4)})
+                        "item": None if self.item_gone else h["item"], "weight": round(wn, 4)})
         return out
 
     def speed_estimate(self, opp_state: Optional[dict] = None) -> Optional[dict]:
@@ -377,9 +560,13 @@ class SpreadTracker:
 
     battle_loggerと同様にサーバーの毎フレーム処理から on_frame(state, fired)
     で呼ばれる。技イベントとHP変化イベント (state.events) を時系列で対応付ける。
+
+    推定器 (_est) はデータの版 (data_version: 使用率 DB のパス + snapshot id + pinned) ごと (2026-10-30)。版が変わったら
+    (再生の data_pin.set_override 等) 作り直す。data_pin.reset_caches() は drop_estimators() を呼ぶ。
     """
 
     def __init__(self):
+        self._version = None
         self.reset()
 
     def reset(self):
@@ -389,13 +576,31 @@ class SpreadTracker:
         self._order_turn = None       # 先後を判定済みのターン
         self._prev_scene = None
         self._opp_streak = {}         # species_id -> (move_id, 連続回数)
+        # 型推定に渡した持ち物の観測 (相手の個体 (species_id, 枠) -> 持ち物 id。2026-10-30)。同じ観測を毎フレーム掛けない
+        self._item_passed: dict = {}
+
+    def drop_estimators(self) -> None:
+        """推定器と、推定器に渡した持ち物の観測の記録を捨てる (データの版が変わったとき。対戦の途中の観測の追跡は残す)"""
+        self._est = {}
+        self._item_passed = {}
+        self._version = None
+
+    def _sync_version(self) -> None:
+        v = data_version()
+        if v != self._version:
+            if self._version is not None:
+                self._est = {}
+                self._item_passed = {}
+            self._version = v
 
     def estimator(self, species_id: str) -> SpreadEstimator:
+        self._sync_version()
         if species_id not in self._est:
             self._est[species_id] = SpreadEstimator(species_id)
         return self._est[species_id]
 
     def best_for(self, species_id: Optional[str]) -> Optional[dict]:
+        self._sync_version()
         est = self._est.get(species_id)
         return est.best() if est else None
 
@@ -409,8 +614,13 @@ class SpreadTracker:
 
     # ------------------------------------------------------------------
     def on_frame(self, state: dict, fired: list) -> None:
+        from advisor.data_pin import InputsPinError
         try:
             self._on_frame(state, fired)
+        except InputsPinError:
+            # 明示した版のデータが無い: 握りつぶさない (最新へ退避しない)。起動時の検査
+            # (tools.advice_mode.data_pin_startup_check → data_pin.verify_spec) が同じ DB・snapshot を確かめるので、通常は起きない
+            raise
         except Exception:
             pass   # 推定は補助機能。失敗しても本体を止めない
 
@@ -434,6 +644,9 @@ class SpreadTracker:
             for p in state["opponent"].get("party", []):
                 if p.get("species_id"):
                     self.estimator(p["species_id"])
+
+        # 持ち物の判明・消費・喪失 (2026-10-30)
+        self._observe_items(state, fired)
 
         now = time.time()
         turn = state.get("turn")
@@ -476,6 +689,33 @@ class SpreadTracker:
             self._observe_hp_drop(state, det.get("side"), delta, e["ts"])
 
     # ------------------------------------------------------------------
+    def _observe_items(self, state: dict, fired: list) -> None:
+        """相手の個体の持ち物の欄 (item_observation) を、個体 (species_id, 枠) ごとに一度だけ型推定に渡す。
+        - 持ち物が初めて判明した (または はたきおとす・トリック 等で前に渡した物と違う物になった) とき observe_item(..., add_missing=True) を 1 回
+        - 消費 (item_consumed): その持ち物の観測 (まだ渡していなければ) + 現在は持ち物なし (推定器の item_gone)
+        - 喪失 (item_removed): 失った物が分かれば (このフレームの knockoff_opponent_<id> を場の個体に帰属) その観測 + 現在は持ち物なし
+        「現在は持ち物なし」は仮説の持ち物を変えない (出力と以後の計算だけ)"""
+        opp = state.get("opponent") or {}
+        party = opp.get("party") or []
+        act = opp.get("active_index")
+        knocked = knocked_off_items(fired, "opponent")
+        for idx, p in enumerate(party):
+            if not isinstance(p, dict) or not p.get("species_id"):
+                continue
+            sid = p["species_id"]
+            held, gone = item_observation(p)
+            if held is None and gone and p.get("item_removed") and idx == act and knocked:
+                held = knocked[-1]
+            if not held and not gone:
+                continue
+            key = (sid, idx)
+            est = self.estimator(sid)
+            new = item_to_pass(self._item_passed.get(key), held)
+            if new:
+                est.observe_item(new, add_missing=True)
+                self._item_passed[key] = new
+            est.item_gone = gone
+
     def _my_view(self, state: dict):
         from advisor.engine import build_mon_view
         me = self._active(state, "player")
