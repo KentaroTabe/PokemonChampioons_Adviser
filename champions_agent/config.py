@@ -84,11 +84,14 @@ SMOGON_CHAMPIONS_FORMATS = ("gen9championsbssregmb", "gen9championsbssregmc")
 SMOGON_USAGE_DIR = "logs/usage_smogon"          # 元 JSON (<month>/<fmt>-<cutoff>.json) と manifest (<month>/<fmt>-<cutoff>.manifest.json)
 SMOGON_FETCH_TIMEOUT_SEC = 60
 # 変換の版 (smogon_convert の定義を変えたら上げる。manifest と report に残す)
-SMOGON_CONVERT_VERSION = 1
-# 技を「使う」確率の暫定 = 保有確率 / この数 (条件付きの推定はしない。保有と分けて記録するだけ)
-SMOGON_MOVE_USE_DIVISOR = 4
+# 2 (2026-10-30 レビュー): 技を使う確率 (保有 ÷ 4 の暫定) を出力から外した (行動の選択確率は作らない。保有確率だけ)
+SMOGON_CONVERT_VERSION = 2
 # 実戦記録での対応比較 (tools/usage_prior_eval.py)
-SMOGON_EVAL_PROB_FLOOR = 0.005       # 予測の一覧に無い技・持ち物に置く確率 (両方の予測に同じ値。log(0) を避ける)
+SMOGON_EVAL_PROB_FLOOR = 0.005       # 予測の一覧に無い技・持ち物・特性に置く確率 (両方の予測に同じ値。log(0) を避ける)
+# 使用率 DB の usage_snapshot.fetched_at の時刻帯。列の既定は SQLite の datetime('now') (UTC) で、取り込みの INSERT は
+# fetched_at を渡さない (champions_agent/data/database.py)。usage-update の launchd は毎日 06:30 (ローカル) で、
+# fetched_at は 21:3x に並ぶ (= 06:3x JST の UTC 表記) ので UTC と解釈する。"utc" か "local"
+SMOGON_EVAL_DB_FETCHED_AT_TZ = "utc"
 SMOGON_EVAL_BOOTSTRAP_N = 2000       # 対戦単位のブートストラップの回数
 SMOGON_EVAL_BOOTSTRAP_SEED = 20261030
 SMOGON_EVAL_CI = 0.95                # 区間の水準
