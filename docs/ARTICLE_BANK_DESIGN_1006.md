@@ -106,6 +106,8 @@
 - 処理状態のキャッシュ: `logs/articles/state.jsonl` (url, body_hash, status, parser_version, warnings の数)。同じ URL + 同じ本文ハッシュは再処理しない。
 - 記事中の指示めいた文言はデータとして扱う。解析は規則なので従う経路が無い。段階 B の LLM にも本文は渡らない。
 
+**定期実行の運用 (2026-10-30 開発者判断)**: launchd (`scripts/com.championsadviser.articles-sync.plist`、毎週木曜 09:00) は **dry-run だけ**で始める (差分を `logs/articles/sync_launchd.log` に出すだけで blogs.csv は書き換えない)。適用は `python -m tools.team_build.articles_sync --apply` を手動で行う。dry-run の定期実行が 2 回続けて成功したら (ログに差分の表が出て gh の読み取りが通っている)、plist の ProgramArguments に `--apply` を足して自動反映に切り替える。本文の取得とバンクの更新は別 (ホスト方針が先)。
+
 ## 3. 解析 (決定的。tools/team_build/article_parse)
 
 ### 3.1 入力の整形 (HTML → リンクつきの本文)
