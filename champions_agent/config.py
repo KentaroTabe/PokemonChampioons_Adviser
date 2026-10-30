@@ -1667,3 +1667,25 @@ TRANSFORM_EVENT_EVIDENCE = ("ability_opponent_imposter",)
 TRANSFORM_MOVE_EVIDENCE = True
 TRANSFORM_EVENT_WINDOW_SEC = 10.0
 TRANSFORM_COPY_PP = 5
+
+# ------------------------------------------------------------------ 引き継ぎ評価 (docs/INHERITANCE_EVALUATION_PLAN_20261031.md、2026-10-31)
+# 段階 A の共通: run_id と出力先 (本体ツリーの logs/ 配下、相対パス)。試験ごとの道具は tools/inheritance_eval/
+# INH_TIME_BUDGET_SEC: 担当 1 つあたりの自動処理の計算時間の上限 (計画書 §7 段階 A 合計 2 時間の割り当て)。超えた分は unexecuted
+INH_RUN_ID = "phaseA_20261031"
+INH_OUT_DIR = "logs/inheritance_eval"
+INH_TIME_BUDGET_SEC = 25 * 60
+# I-01 日本語辞書・型登録・名前／単位／形式の変換 (tools/inheritance_eval/conversion.py)
+#   INH_CONV_FORMAT: 対象規制 (Showdown の形式 id、検証と実数値の計算に使う。TRAINING_BATTLE_FORMAT と同じ M-C)
+#   INH_CONV_SHOWDOWN_DIR: ローカル Showdown (data/text/ja を読み取り専用で解析し、dist の Teams / TeamValidator / Battle を node で呼ぶ)
+#   INH_CONV_SMOGON_FILE: 全走査に足す Smogon chaos (logs/usage_smogon/ の 2026-09)
+#   INH_CONV_REGISTRY_FILE: 登録構築 (読み取りのみ)
+#   INH_CONV_FIXTURE: S の fixture (上限 INH_CONV_FIXTURE_MAX 件、計画書 §4)
+#   INH_CONV_EV_MAX: 従来の努力値の 1 能力の上限 (能力ポイントの上限・合計は BUILD_GEN_EV_POINT_CAP / BUILD_GEN_POINT_BUDGET)
+INH_CONV_TEST_ID = "I-01"
+INH_CONV_FORMAT = TRAINING_BATTLE_FORMAT
+INH_CONV_SHOWDOWN_DIR = "pokemon-showdown"
+INH_CONV_SMOGON_FILE = "logs/usage_smogon/2026-09/gen9championsbssregmc-1500.json"
+INH_CONV_REGISTRY_FILE = "config/my_team.json"
+INH_CONV_FIXTURE = "tests/fixtures/inheritance/conversion_cases.jsonl"
+INH_CONV_FIXTURE_MAX = 80
+INH_CONV_EV_MAX = 252
