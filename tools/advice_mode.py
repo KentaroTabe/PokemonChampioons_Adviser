@@ -50,6 +50,18 @@ RL 方策と、登録チームに使われるはずの選出モデルを写し�
 
     python -m tools.advice_mode --resolve --sensitivity --data-pin --model-pin [--file PATH] [--root DIR]   # advice_env.sh (13 行)
     python -m tools.advice_mode --freeze-data --with-models [--rl-policy ZIP] [--selection-model PT]       # 3 行 + 4 行
+
+2026-10-31 版の固定の bundle (追加レビュー判断 2・4、advisor/pin_bundle.py): 上の写し (--freeze-data --with-models) は RL の zip と
+選出の pt だけで、選出の埋め込み・meta と使用率 DB の中身は配備先を読み続ける。正式比較は --freeze-bundle で 1 つの dir に一組で
+固定する (RL 方策、選出モデル + 埋め込み + meta + 条件付きモデル、使用率 DB の必要な snapshot を抽出した sqlite、バンク、登録、
+manifest.json)。設定ファイルには ADVICE_PIN_BUNDLE=<dir> の 1 行だけを書く (個別の 7 行は manifest から埋まる。書くなら値を揃える。
+違えば起動しない)。構築専用の選出モデルを別構築に適用する汎化試験は ADVICE_PIN_ALLOW_OTHER_TEAM=1 (既定は止める)。
+advice_env.sh は --bundle-pin で両方を解決・検査して uvicorn にだけ export する。server は起動時に bundle 全体を検査する
+(bundle_startup_check。不正なら起動しない)。
+
+    python -m tools.advice_mode --freeze-bundle [--out-dir DIR] [--rl-policy ZIP] [--selection-model PT --selection-kind general|team
+        [--selection-team ID,...] [--selection-sets TEAM.txt]] [--usage-db DB] [--usage-snapshot N] [--bank BANK] [--registry JSON]
+    python -m tools.advice_mode --resolve ... --bundle-pin [--file PATH] [--root DIR]   # advice_env.sh (末尾に 3 行)
 """
 from __future__ import annotations
 
@@ -60,9 +72,9 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from champions_agent.config import (ADVICE_SCORING_MODES, REAL_BANK_ENV, REAL_BANK_PATH, REAL_BANK_SHA_ENV, RL_POLICY_PIN_ENV,
-                                    RL_POLICY_SHA_ENV, SELECTION_MODEL_PIN_ENV, SELECTION_MODEL_SHA_ENV,
-                                    TRANSITION_SENSITIVITY_ENV, USAGE_SNAPSHOT_ENV)
+from champions_agent.config import (ADVICE_SCORING_MODES, PIN_ALLOW_OTHER_TEAM_ENV, PIN_BUNDLE_ENV, REAL_BANK_ENV, REAL_BANK_PATH,
+                                    REAL_BANK_SHA_ENV, RL_POLICY_PIN_ENV, RL_POLICY_SHA_ENV, SELECTION_MODEL_PIN_ENV,
+                                    SELECTION_MODEL_SHA_ENV, TRANSITION_SENSITIVITY_ENV, USAGE_SNAPSHOT_ENV)
 
 REPO = Path(__file__).resolve().parent.parent
 ENV_KEY = "ADVICE_SCORING_MODE"
@@ -86,7 +98,12 @@ MODEL_SEL_SHA_KEY = SELECTION_MODEL_SHA_ENV     # "ADVICE_SELECTION_MODEL_SHA16"
 MODEL_PIN_KEYS = (MODEL_RL_KEY, MODEL_RL_SHA_KEY, MODEL_SEL_KEY, MODEL_SEL_SHA_KEY)
 MODEL_SHA_OF = {MODEL_RL_SHA_KEY: MODEL_RL_KEY, MODEL_SEL_SHA_KEY: MODEL_SEL_KEY}   # sha16 の鍵 → そのパスの鍵
 MODEL_PIN_SOURCE_KEY = "ADVICE_MODEL_PIN_SOURCE"
-ALLOWED_KEYS = (ENV_KEY, SENS_KEY) + PIN_KEYS + MODEL_PIN_KEYS
+# 2026-10-31 版の固定の bundle: bundle の dir と、構築専用モデルを別構築に適用する汎化試験の明示
+BUNDLE_KEY = PIN_BUNDLE_ENV                    # "ADVICE_PIN_BUNDLE"
+ALLOW_OTHER_KEY = PIN_ALLOW_OTHER_TEAM_ENV     # "ADVICE_PIN_ALLOW_OTHER_TEAM" (0 / 1)
+BUNDLE_KEYS = (BUNDLE_KEY, ALLOW_OTHER_KEY)
+BUNDLE_SOURCE_KEY = "ADVICE_PIN_BUNDLE_SOURCE"
+ALLOWED_KEYS = (ENV_KEY, SENS_KEY) + PIN_KEYS + MODEL_PIN_KEYS + BUNDLE_KEYS
 SOURCES = ("file", "env", "default")
 DEFAULT_MODE = "legacy"
 LOCAL_FILE_REL = "config/advice.local.env"
@@ -304,6 +321,12 @@ def check_pin_value(key: str, raw: Optional[str], where: str) -> Optional[str]:
         return v.lower()
     if key in (MODEL_RL_KEY, MODEL_SEL_KEY):
         return v
+    if key == BUNDLE_KEY:
+        return v
+    if key == ALLOW_OTHER_KEY:
+        if v not in ("0", "1"):
+            raise AdviceModeError(f"{where}: {key}={raw!r} は 0 / 1 のどちらかで書く")
+        return "1" if v == "1" else None
     raise AdviceModeError(f"{where}: {key} はデータの固定の鍵でない")
 
 
@@ -351,6 +374,45 @@ def resolve_model_pin(file_text: Optional[str], env: Optional[dict], label: str 
     used = [s for s in ("file", "env") if s in sources.values()]
     return {"values": values, "sources": sources, "source": "+".join(used) if used else "default",
             "pinned": any(v is not None for v in values.values())}
+
+
+def resolve_bundle_pin(file_text: Optional[str], env: Optional[dict], label: str = LOCAL_FILE_REL) -> dict:
+    """実機の起動時の版の固定の bundle を決める (純粋。規則は resolve_data_pin と同じ: 鍵ごとにファイル → 環境変数 → 無ければ未設定)。
+    {"values": {ADVICE_PIN_BUNDLE, ADVICE_PIN_ALLOW_OTHER_TEAM ("1" or None)}, "sources", "source", "pinned" (bundle があるか)}。
+    不正値・ファイルと環境変数の矛盾・bundle の無い ADVICE_PIN_ALLOW_OTHER_TEAM=1 は AdviceModeError"""
+    e = env or {}
+    fvals = parse_local_env(file_text, label) if file_text is not None else {}
+    values, sources = {}, {}
+    for k in BUNDLE_KEYS:
+        fv = check_pin_value(k, fvals.get(k), label)
+        ev = check_pin_value(k, e.get(k), f"環境変数 {k}")
+        if fv is not None and ev is not None and fv != ev:
+            raise AdviceModeError(f"{label} の {k}={fv} と環境変数 {k}={ev} が矛盾している "
+                                  f"(どちらかに揃えるか、環境変数を外して起動し直す)")
+        values[k] = fv if fv is not None else ev
+        sources[k] = "file" if fv is not None else "env" if ev is not None else None
+    if values[ALLOW_OTHER_KEY] and not values[BUNDLE_KEY]:
+        raise AdviceModeError(f"{ALLOW_OTHER_KEY}=1 だけが書かれている ({BUNDLE_KEY} (版の固定の bundle) と一緒に使う)")
+    used = [s for s in ("file", "env") if s in sources.values()]
+    return {"values": values, "sources": sources, "source": "+".join(used) if used else "default",
+            "pinned": bool(values[BUNDLE_KEY])}
+
+
+def bundle_values_text(values: Optional[dict]) -> str:
+    """版の固定の bundle の値の文言 (純粋)"""
+    if not values or not values.get(BUNDLE_KEY):
+        return "なし (個別の固定の鍵だけ。無ければ従来どおり)"
+    return (f"bundle {values[BUNDLE_KEY]}" +
+            (" / 構築専用モデルの別構築への適用 (汎化試験) 許可" if values.get(ALLOW_OTHER_KEY) else ""))
+
+
+def bundle_file_view(text: Optional[str], label: str = LOCAL_FILE_REL) -> dict:
+    """表示用の版の固定の bundle の設定値 (純粋。例外を投げない)"""
+    try:
+        r = resolve_bundle_pin(text, {}, label)
+        return {"path": label, "exists": text is not None, "values": r["values"], "pinned": r["pinned"], "error": None}
+    except AdviceModeError as err:
+        return {"path": label, "exists": text is not None, "values": None, "pinned": None, "error": str(err)}
 
 
 def model_pin_values_text(values: Optional[dict]) -> str:
@@ -513,6 +575,8 @@ def data_pin_startup_check(env: Optional[dict] = None, path: Path = LOCAL_FILE) 
     (ev_infer は 2026-10-30 から。ここで確かめる DB・snapshot と同じものを読むので、フレームごとの InputsPinError は起きない)"""
     from advisor import data_pin as DP
     e = os.environ if env is None else env
+    if (e.get(BUNDLE_KEY) or "").strip():
+        return _bundle_part_line("データの固定", e, path)
     try:
         vals = {k: check_pin_value(k, e.get(k), f"環境変数 {k}") for k in PIN_KEYS}
         if vals[PIN_SHA_KEY] is not None and vals[PIN_BANK_KEY] is None:
@@ -547,6 +611,8 @@ def model_pin_startup_check(env: Optional[dict] = None, path: Path = LOCAL_FILE)
     渡す)。値が不正・ファイルが無い・sha16 が違う → SystemExit (別のファイルへ退避しない)"""
     from advisor import data_pin as DP
     e = os.environ if env is None else env
+    if (e.get(BUNDLE_KEY) or "").strip():
+        return _bundle_part_line("モデルの固定", e, path)
     try:
         vals = resolve_model_pin(None, e)["values"]
         verified = None
@@ -569,6 +635,88 @@ def model_pin_startup_check(env: Optional[dict] = None, path: Path = LOCAL_FILE)
     line = f"モデルの固定: 実効値 {eff} / 設定元 {src or '記録なし'} / 設定値 {conf}"
     if not view.get("error") and view.get("values") is not None:
         norm = lambda d: {k: (d.get(k) or "").lower() if k in MODEL_SHA_OF else (d.get(k) or "") for k in MODEL_PIN_KEYS}
+        if norm(view["values"]) != norm(vals):
+            line += " ⚠ 設定値と実効値が食い違う (advice_env.sh を通さずに起動したか、設定を変えて再起動していない)"
+    return line
+
+
+def _bundle_env_spec(e: dict) -> dict:
+    """環境変数 → advisor.data_pin.verify_spec の spec (bundle と個別の鍵。使用率 DB は ADVICE_USAGE_DB)"""
+    from champions_agent.config import USAGE_DB_ENV
+    from advisor import data_pin as DP
+    spec = dict(DP.spec_from_env(e))
+    spec.update(DP.model_spec_from_env(e))
+    spec["usage_db"] = (e.get(USAGE_DB_ENV) or "").strip() or None
+    spec["bundle"] = (e.get(BUNDLE_KEY) or "").strip() or None
+    return spec
+
+
+def _bundle_part_line(name: str, e: dict, path: Path) -> str:
+    """bundle を使うときのデータの固定・モデルの固定の起動ログの 1 行 (検査は bundle_startup_check がまとめて行う。値は manifest から)"""
+    from advisor import data_pin as DP
+    from advisor import pin_bundle as PB
+    try:
+        vals = PB.effective_spec(e)
+    except DP.InputsPinError as err:
+        raise SystemExit(f"[server] 起動を中止 ({name}): {err}")
+    if name == "データの固定":
+        eff = f"snapshot {vals['usage_snapshot']} (bundle の抽出 DB) / バンク {vals['bank_path']} (sha16 {vals['bank_sha16']})"
+    else:
+        eff = (f"RL 方策 {vals['rl_policy']} (sha16 {vals['rl_policy_sha16']}) / 選出モデル {vals['selection_model']} "
+               f"(sha16 {vals['selection_model_sha16']})")
+    return f"{name}: 実効値 {eff} [bundle {e.get(BUNDLE_KEY)} から。照合は版の固定 (bundle) の行]"
+
+
+def precheck_bundle_pin(values: dict, root: Path, data_values: Optional[dict] = None, model_values: Optional[dict] = None,
+                        env: Optional[dict] = None) -> Optional[dict]:
+    """bundle 全体を起動の前に確かめる (副作用: 読み取り)。values = resolve_bundle_pin の values、data_values / model_values =
+    resolve_data_pin / resolve_model_pin の values (個別の鍵。bundle と一致しなければエラー)。相対パスは root から。
+    bundle が無ければ None。不足・sha 不一致・矛盾は AdviceModeError"""
+    from advisor import data_pin as DP
+    from champions_agent.config import USAGE_DB_ENV
+    if not values.get(BUNDLE_KEY):
+        return None
+    e = os.environ if env is None else env
+    dv, mv = data_values or {}, model_values or {}
+    snap = dv.get(PIN_SNAPSHOT_KEY)
+    spec = {"bundle": values[BUNDLE_KEY], "usage_db": (e.get(USAGE_DB_ENV) or "").strip() or None,
+            "usage_snapshot": int(snap) if snap else None, "bank_path": dv.get(PIN_BANK_KEY), "bank_sha16": dv.get(PIN_SHA_KEY)}
+    spec.update(model_spec_of(mv))
+    try:
+        return DP.verify_spec(spec, default_db=Path(root) / DP.DEFAULT_USAGE_DB.relative_to(DP.REPO),
+                              live_bank=Path(root) / REAL_BANK_PATH, cwd=Path(root))
+    except DP.InputsPinError as err:
+        raise AdviceModeError(str(err))
+
+
+def bundle_startup_check(env: Optional[dict] = None, path: Path = LOCAL_FILE) -> str:
+    """server.py の起動時の版の固定の bundle の検査と起動ログの 1 行 (2026-10-31)。bundle 全体 (manifest の形、全ファイルの sha256、
+    個別の鍵との整合、特徴量の版、登録) を確かめ、合わなければ SystemExit (配備先へ退避しない)。bundle が無ければ「なし」"""
+    from advisor import data_pin as DP
+    from advisor import pin_bundle as PB
+    e = os.environ if env is None else env
+    try:
+        vals = resolve_bundle_pin(None, e)["values"]
+        summary = None
+        if vals[BUNDLE_KEY]:
+            summary = DP.verify_spec(_bundle_env_spec(e), live_bank=DP.REPO / REAL_BANK_PATH)["bundle"]
+            PB.allow_other_team(e)
+    except (AdviceModeError, DP.InputsPinError) as err:
+        raise SystemExit(f"[server] 起動を中止 (版の固定の bundle): {err}")
+    try:
+        view = bundle_file_view(read_local_text(path))
+    except OSError as err:
+        view = {"path": str(path), "exists": True, "values": None, "pinned": None, "error": str(err)}
+    src = (e.get(BUNDLE_SOURCE_KEY) or "").strip() or ("env" if vals[BUNDLE_KEY] else None)
+    eff = bundle_values_text(vals)
+    if summary:
+        eff = "bundle " + PB.describe(summary) + (" / 汎化試験の適用 許可" if vals[ALLOW_OTHER_KEY] else "")
+    conf = (f"読めない ({view['error']})" if view.get("error") else
+            f"{bundle_values_text(view['values'])} ({view['path']})" if view.get("pinned") else
+            f"未設定 ({view['path']} {'に鍵なし' if view.get('exists') else 'なし'})")
+    line = f"版の固定 (bundle): 実効値 {eff} / 設定元 {src or '記録なし'} / 設定値 {conf}"
+    if not view.get("error") and view.get("values") is not None:
+        norm = lambda d: {k: (d.get(k) or "") for k in BUNDLE_KEYS}
         if norm(view["values"]) != norm(vals):
             line += " ⚠ 設定値と実効値が食い違う (advice_env.sh を通さずに起動したか、設定を変えて再起動していない)"
     return line
@@ -656,6 +804,190 @@ def freeze_data(out_root: Path, usage_db: Path, bank: Path, stamp: Optional[str]
             "dir": str(d), "lines": [f"{PIN_SNAPSHOT_KEY}={snap}", f"{PIN_BANK_KEY}={path_s}", f"{PIN_SHA_KEY}={sha16}"]}
 
 
+def _git_info(root: Path) -> dict:
+    """コードの版 (副作用: git の読み取り): commit と、追跡ファイルの未コミットの変更があるか"""
+    import subprocess
+    from tools.team_build.manifest import git_commit
+    dirty = None
+    try:
+        r = subprocess.run(["git", "-C", str(root), "status", "--porcelain", "--untracked-files=no"], capture_output=True, text=True,
+                           timeout=20)
+        dirty = bool(r.stdout.strip()) if r.returncode == 0 else None
+    except Exception:
+        dirty = None
+    return {"git_commit": git_commit(root), "dirty": dirty}
+
+
+def _showdown_info(sd: Path) -> dict:
+    """Showdown のローカル clone の版 (副作用: git の読み取り)。無ければ commit None と理由"""
+    import subprocess
+    sd = Path(sd)
+    if not sd.exists():
+        return {"path": str(sd), "commit": None, "error": "ディレクトリが無い"}
+    try:
+        r = subprocess.run(["git", "-C", str(sd), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=20)
+        return {"path": str(sd), "commit": r.stdout.strip() or None if r.returncode == 0 else None,
+                "error": None if r.returncode == 0 else (r.stderr.strip()[:200] or "rev-parse 失敗")}
+    except Exception as err:
+        return {"path": str(sd), "commit": None, "error": repr(err)[:200]}
+
+
+def selection_profile(model: Path, source_id: Optional[str], kind: Optional[str] = None, team: Optional[list] = None,
+                      sets_text: Optional[str] = None, sets_source: Optional[str] = None) -> dict:
+    """bundle の manifest の selection (副作用: 由来の manifest・team.json・run の参照チームの読み取り)。
+    種別の既定: 試用 Package / 登録チーム向け (registered:<key>) = 構築専用 (6 体はその記録)、配布版・汎用モデル = 汎用。
+    kind / team を渡せばそれを使う (由来の記録と食い違っても渡した値)。学習時の型の前提: sets_text (Showdown 本文) を渡せばそれ、
+    無ければ Package の team.json の text、登録チーム向けは記録の run の reference_team.txt。どれも無ければ fixed None (不明 = 照合しない)"""
+    import json as _json
+    from champions_agent.agent import selection_dispatch as SD
+    from champions_agent.config import TRAINING_BATTLE_FORMAT
+    src_manifest, auto_kind, auto_team, auto_text, auto_text_src = None, "general", None, None, None
+    sid = str(source_id or "")
+    try:
+        if sid.startswith(SD.REGISTERED_PREFIX):
+            mp = Path(model).parent / "manifest.json"
+            src_manifest = _json.loads(mp.read_text(encoding="utf-8")) if mp.exists() else None
+            auto_kind, auto_team = "team", sorted((src_manifest or {}).get("species") or [])
+            run_id = (src_manifest or {}).get("run_id")
+            if run_id:
+                ref = REPO / "logs" / "build_search" / "runs" / str(run_id) / "reference_team.txt"
+                if ref.exists():
+                    auto_text, auto_text_src = ref.read_text(encoding="utf-8"), str(ref)
+        elif sid and sid != SD.PINNED_SOURCE and not sid.startswith("explicit:"):
+            pdir = SD.PACKAGES_DIR / sid
+            tj = pdir / "team.json"
+            team_doc = _json.loads(tj.read_text(encoding="utf-8")) if tj.exists() else {}
+            mp = pdir / "manifest.json"
+            src_manifest = _json.loads(mp.read_text(encoding="utf-8")) if mp.exists() else None
+            auto_kind, auto_team = "team", sorted(team_doc.get("species") or [])
+            if team_doc.get("text"):
+                auto_text, auto_text_src = team_doc["text"], str(tj)
+    except (OSError, ValueError):
+        pass
+    k = kind or auto_kind
+    t = sorted({str(x).strip().lower() for x in (team if team is not None else (auto_team or [])) if str(x).strip()}) or None
+    text, tsrc = (sets_text, sets_source) if sets_text else (auto_text, auto_text_src)
+    premise = {"fixed": None, "source": None, "sets": None}
+    if k == "team" and text:
+        from tools.party_improvements import parse_showdown_sets
+        sets = {s_id: row for s_id, row in parse_showdown_sets(text).items() if not t or s_id in t}
+        premise = {"fixed": True, "source": tsrc, "sets": sets}
+    from champions_agent.agent.selection_dispatch import features_version
+    return {"kind": k, "team": t if k == "team" else None, "sets_premise": premise, "source_id": source_id,
+            "source_path": str(Path(model).resolve()), "source_manifest": src_manifest, "features": features_version(),
+            "regulation": (src_manifest or {}).get("regulation") or TRAINING_BATTLE_FORMAT}
+
+
+def default_bundle_sources() -> dict:
+    """--freeze-bundle の既定の写し元 (副作用: ファイルの有無・登録の読み取り)。default_model_sources に加えて、選出の推論が読む
+    埋め込み (特徴量の版のピン)、同じ dir の meta、条件付きモデル、登録 (config/my_team.json)"""
+    from advisor.my_team import CONFIG_PATH
+    from champions_agent.agent import selection_model as SM
+    from champions_agent.agent.selection_dispatch import features_version
+    out = default_model_sources()
+    if features_version() == "v3":
+        from champions_agent.agent.selection_features_v3 import V3_EMB_PIN_PATH
+        out["selection_emb"] = V3_EMB_PIN_PATH
+    else:
+        out["selection_emb"] = SM.EMB_PIN_PATH
+    out["selection_cond"] = SM.COND_MODEL_PATH if SM.COND_MODEL_PATH.exists() else None
+    out["registry"] = CONFIG_PATH
+    return out
+
+
+def freeze_bundle(out_root: Path, *, rl_policy: Path, selection_model: Path, selection_emb: Path, selection_meta: Optional[Path],
+                  selection_cond: Optional[Path], registry: Path, selection: dict, usage_db: Path, bank: Path,
+                  usage_snapshot: Optional[int] = None, stamp: Optional[str] = None, showdown_dir: Optional[Path] = None) -> dict:
+    """版の固定の bundle を out_root/<時刻>/ に作る (副作用: 書き込み。設定ファイルは書き換えない。tools.inputs_pin.make_pin_bundle)。
+    戻り値 {"dir", "manifest", "lines" (advice.local.env に書く 1 行)}"""
+    import time as _time
+    from champions_agent.config import TRAINING_BATTLE_FORMAT
+    from champions_agent.agent.selection_dispatch import features_version
+    from tools.inputs_pin import make_pin_bundle
+    stamp = stamp or _time.strftime("%Y%m%d_%H%M%S")
+    d = Path(out_root) / stamp
+    local = LOCAL_FILE
+    cfg = {"selection_features": features_version(), "battle_format": TRAINING_BATTLE_FORMAT,
+           "rl_advice_style": os.environ.get("RL_ADVICE_STYLE", "balance"), "rl_policy_source": os.environ.get("RL_POLICY_SOURCE", "ema"),
+           "config_py_sha16": _sha16_file(REPO / "champions_agent" / "config.py"),
+           "advice_local_env": {"path": str(local), "sha16": _sha16_file(local)}}
+    man = make_pin_bundle(d, rl_policy=Path(rl_policy), selection_model=Path(selection_model), selection_emb=Path(selection_emb),
+                          selection_meta=Path(selection_meta) if selection_meta else None,
+                          selection_cond=Path(selection_cond) if selection_cond else None, registry=Path(registry),
+                          selection=selection, src_db=Path(usage_db), bank=Path(bank), snapshot_id=usage_snapshot,
+                          code=_git_info(REPO), config=cfg,
+                          showdown=_showdown_info(Path(showdown_dir) if showdown_dir else REPO / "pokemon-showdown"),
+                          regulation=TRAINING_BATTLE_FORMAT)
+    return {"dir": str(d.resolve()), "manifest": man, "lines": [f"{BUNDLE_KEY}={d.resolve()}"]}
+
+
+def _sha16_file(p: Path) -> Optional[str]:
+    import hashlib
+    try:
+        return hashlib.sha256(Path(p).read_bytes()).hexdigest()[:16]
+    except OSError:
+        return None
+
+
+def _main_freeze_bundle(a) -> int:
+    from advisor import pin_bundle as PB
+    from advisor.data_pin import DEFAULT_USAGE_DB
+    try:
+        if a.selection_model and not a.selection_kind:
+            raise ValueError("--selection-model を指定したら --selection-kind (general / team) も指定する (種別を推測しない)")
+        if a.selection_kind == "team" and a.selection_model and not a.selection_team:
+            raise ValueError("--selection-kind team には --selection-team (6 体の種族 id をカンマ区切り) も指定する")
+        srcs = default_bundle_sources() if not (a.rl_policy and a.selection_model and a.selection_emb and a.registry) else {}
+        sel_model = Path(a.selection_model) if a.selection_model else Path(srcs["selection_model"])
+        source_id = None if a.selection_model else srcs.get("selection_source")
+        if a.selection_model:
+            source_id = "explicit:" + str(sel_model.resolve())
+        team = [x for x in (a.selection_team or "").split(",") if x.strip()] or None
+        sets_text = Path(a.selection_sets).read_text(encoding="utf-8") if a.selection_sets else None
+        selection = selection_profile(sel_model, source_id, a.selection_kind, team, sets_text,
+                                      str(Path(a.selection_sets).resolve()) if a.selection_sets else None)
+        if selection["kind"] == "team" and len(selection.get("team") or []) != 6:
+            raise ValueError(f"構築専用の選出モデルの 6 体が決まらない ({selection.get('team')})。--selection-team で 6 体を指定する")
+        meta = Path(a.selection_meta) if a.selection_meta else (sel_model.parent / "selection_model_meta.json")
+        cond = Path(a.selection_cond) if a.selection_cond else srcs.get("selection_cond")
+        r = freeze_bundle(Path(a.out_dir) if a.out_dir else REPO / PIN_FREEZE_DIR_REL,
+                          rl_policy=Path(a.rl_policy) if a.rl_policy else srcs["rl_policy"], selection_model=sel_model,
+                          selection_emb=Path(a.selection_emb) if a.selection_emb else srcs["selection_emb"],
+                          selection_meta=meta if meta.exists() else None, selection_cond=cond,
+                          registry=Path(a.registry) if a.registry else srcs["registry"], selection=selection,
+                          usage_db=Path(a.usage_db) if a.usage_db else DEFAULT_USAGE_DB,
+                          bank=Path(a.bank) if a.bank else REPO / REAL_BANK_PATH,
+                          usage_snapshot=a.usage_snapshot, showdown_dir=Path(a.showdown_dir) if a.showdown_dir else None)
+        summary = PB.verify_bundle(r["dir"], explicit={})
+    except (OSError, RuntimeError, ValueError, KeyError) as err:
+        print(f"[freeze-bundle] 失敗: {err}", file=sys.stderr)
+        return 2
+    except Exception as err:            # InputsPinError (作った bundle の照合) も止める
+        print(f"[freeze-bundle] 失敗: {err}", file=sys.stderr)
+        return 2
+    man = r["manifest"]
+    f = man["files"]
+    print(f"# 版の固定の bundle: {PB.describe(summary)}")
+    for k in PB.REQUIRED_FILES + PB.OPTIONAL_FILES:
+        e = f.get(k)
+        print(f"#   {k}: " + (f"{e.get('source') or e.get('source_db')} → {PB.FILES[k]} (sha16 {e['sha16']})" if e
+                                 else "なし (記録 None)"))
+    ub = f["usage_db"]
+    print(f"#   使用率: snapshot {ub['snapshot_id']} (元の最新 {ub.get('latest_at_pin')}) の抽出、表 {len(ub['tables'])} 個")
+    print(f"#   コード: {man['code'].get('git_commit')} (未コミットの変更 {man['code'].get('dirty')}) / Showdown: "
+          f"{man['showdown'].get('commit') or ('不明: ' + str(man['showdown'].get('error')))} / 規制 {man.get('regulation')}")
+    sp = (man["selection"].get("sets_premise") or {})
+    if man["selection"].get("kind") == "team" and not sp.get("fixed"):
+        print("#   注意: 構築専用モデルの学習時の型の前提が分からない (型は照合しない。分かれば --selection-sets で渡す)")
+    if summary.get("set_diffs"):
+        print(f"#   注意: 学習時の型と登録の型が違う ({len(summary['set_diffs'])} 件)。この構築では選出モデルを使わない: "
+              + "; ".join(summary["set_diffs"][:4]))
+    print(f"# 次の 1 行を {LOCAL_FILE_REL} に追加する (個別の固定の 7 行は書かない。書くなら値を bundle と揃える。正式群が終わったら消す):")
+    for ln in r["lines"]:
+        print(ln)
+    return 0
+
+
 def main(argv: Optional[list] = None) -> int:
     ap = argparse.ArgumentParser(description="実機の採点方式の設定 (config/advice.local.env)")
     g = ap.add_mutually_exclusive_group(required=True)
@@ -663,6 +995,9 @@ def main(argv: Optional[list] = None) -> int:
     g.add_argument("--show", action="store_true", help="設定値を人が読む形で出す")
     g.add_argument("--freeze-data", action="store_true",
                    help="正式群の開始時: 使用率の最新 snapshot id とバンクの写しを作り、advice.local.env に書く 3 行を出す (ファイルは書き換えない)")
+    g.add_argument("--freeze-bundle", action="store_true",
+                   help="版の固定の bundle (RL 方策・選出モデル + 埋め込み + meta・使用率 DB の抽出・バンク・登録・manifest) を作り、"
+                        "advice.local.env に書く 1 行を出す (ファイルは書き換えない)")
     ap.add_argument("--file", default=str(LOCAL_FILE), help="設定ファイル (既定 config/advice.local.env)")
     ap.add_argument("--sensitivity", action="store_true",
                     help="--resolve で TRANSITION_SENSITIVITY と設定元も出す (実機の既定 0。advice_env.sh が使う)")
@@ -681,8 +1016,24 @@ def main(argv: Optional[list] = None) -> int:
                     help="--freeze-data で RL 方策と選出モデルも写し、書く 4 行を足して出す")
     ap.add_argument("--rl-policy", default=None, help="--with-models で写す RL 方策 (既定 今の読み込み順で読まれるはずのファイル)")
     ap.add_argument("--selection-model", default=None,
-                    help="--with-models で写す選出モデル (既定 登録チームに使われるはずのファイル)")
+                    help="--with-models / --freeze-bundle で写す選出モデル (既定 登録チームに使われるはずのファイル)")
+    ap.add_argument("--bundle-pin", action="store_true",
+                    help="--resolve で版の固定の bundle (ADVICE_PIN_BUNDLE / ADVICE_PIN_ALLOW_OTHER_TEAM) と設定元も出し、bundle 全体を確かめる"
+                         " (advice_env.sh が使う)")
+    ap.add_argument("--selection-kind", choices=("general", "team"), default=None,
+                    help="--freeze-bundle: 選出モデルの種別 (--selection-model を指定したときは必須。既定は由来から: 試用 Package / "
+                         "登録チーム向け = team、配布版 = general)")
+    ap.add_argument("--selection-team", default=None, help="--freeze-bundle: 構築専用モデルの 6 体 (種族 id のカンマ区切り)")
+    ap.add_argument("--selection-sets", default=None, help="--freeze-bundle: 構築専用モデルの学習時の型 (Showdown 本文のファイル)")
+    ap.add_argument("--selection-emb", default=None, help="--freeze-bundle: 埋め込み (既定 今の特徴量の版のピン)")
+    ap.add_argument("--selection-meta", default=None, help="--freeze-bundle: 選出モデルの meta (既定 モデルと同じ dir の meta、無ければなし)")
+    ap.add_argument("--selection-cond", default=None, help="--freeze-bundle: 条件付きモデル (既定 配備先の条件付きモデル、無ければなし)")
+    ap.add_argument("--registry", default=None, help="--freeze-bundle: 登録 (既定 config/my_team.json)")
+    ap.add_argument("--usage-snapshot", type=int, default=None, help="--freeze-bundle: 抽出する snapshot id (既定 DB の最新)")
+    ap.add_argument("--showdown-dir", default=None, help="--freeze-bundle: 版を記録する Showdown の clone (既定 pokemon-showdown)")
     a = ap.parse_args(argv)
+    if a.freeze_bundle:
+        return _main_freeze_bundle(a)
     if a.freeze_data:
         from advisor.data_pin import DEFAULT_USAGE_DB
         try:
@@ -706,6 +1057,7 @@ def main(argv: Optional[list] = None) -> int:
             print(f"# RL 方策: {mr['rl_policy_src']} → {mr['rl_policy']} (sha16 {mr['rl_policy_sha16']})")
             print(f"# 選出モデル: {mr['selection_model_src']} → {mr['selection_model']} (sha16 {mr['selection_model_sha16']})")
         n = len(r["lines"]) + (len(mr["lines"]) if mr else 0)
+        print("# 注意: この写しは選出の埋め込み・meta と使用率 DB の中身を固定しない。正式比較は --freeze-bundle を使う")
         print(f"# 次の {n} 行を {LOCAL_FILE_REL} に追加する (方式の切替のときも残し、正式群が終わったら消す):")
         for ln in r["lines"] + (mr["lines"] if mr else []):
             print(ln)
@@ -725,6 +1077,17 @@ def main(argv: Optional[list] = None) -> int:
         print(f"データの固定の設定値: {('読めない (' + pv['error'] + ')') if pv['error'] else pin_values_text(pv['values'])}")
         mv = model_pin_file_view(text, label)
         print(f"モデルの固定の設定値: {('読めない (' + mv['error'] + ')') if mv['error'] else model_pin_values_text(mv['values'])}")
+        bv = bundle_file_view(text, label)
+        print(f"版の固定 (bundle) の設定値: {('読めない (' + bv['error'] + ')') if bv['error'] else bundle_values_text(bv['values'])}")
+        if bv.get("pinned"):
+            from advisor import data_pin as DP
+            try:
+                summ = precheck_bundle_pin(bv["values"], REPO, (pin_file_view(text, label).get("values") or {}),
+                                           (mv.get("values") or {}), env={})
+                from advisor import pin_bundle as PB
+                print(f"  bundle の照合: 一致 ({PB.describe(summ['bundle'])})")
+            except (AdviceModeError, DP.InputsPinError) as err:
+                print(f"  bundle の照合: ⚠ 使えない ({err})")
         return 0
     try:
         r = resolve(text, os.environ.get(ENV_KEY), label)
@@ -732,11 +1095,23 @@ def main(argv: Optional[list] = None) -> int:
         rp = None
         if a.data_pin:
             rp = resolve_data_pin(text, dict(os.environ), label)
-            precheck_data_pin(rp["values"], Path(a.root) if a.root else Path.cwd())
         rm = None
         if a.model_pin:
             rm = resolve_model_pin(text, dict(os.environ), label)
-            precheck_model_pin(rm["values"], Path(a.root) if a.root else Path.cwd())
+        rb = None
+        if a.bundle_pin:
+            rb = resolve_bundle_pin(text, dict(os.environ), label)
+        root = Path(a.root) if a.root else Path.cwd()
+        if rb is not None and rb["pinned"]:
+            # bundle があれば bundle 全体を確かめる (個別の鍵は bundle の値と一致すること。個別の検査は bundle の検査に含まれる)
+            dv = rp["values"] if rp is not None else resolve_data_pin(text, dict(os.environ), label)["values"]
+            mv = rm["values"] if rm is not None else resolve_model_pin(text, dict(os.environ), label)["values"]
+            precheck_bundle_pin(rb["values"], root, dv, mv)
+        else:
+            if rp is not None:
+                precheck_data_pin(rp["values"], root)
+            if rm is not None:
+                precheck_model_pin(rm["values"], root)
     except AdviceModeError as err:
         print(f"[advice_env] 起動を中止: {err}", file=sys.stderr)
         return 2
@@ -753,6 +1128,10 @@ def main(argv: Optional[list] = None) -> int:
         for k in MODEL_PIN_KEYS:
             print(f"{k}={rm['values'][k] or ''}")
         print(f"{MODEL_PIN_SOURCE_KEY}={rm['source']}")
+    if rb is not None:
+        for k in BUNDLE_KEYS:
+            print(f"{k}={rb['values'][k] or ''}")
+        print(f"{BUNDLE_SOURCE_KEY}={rb['source']}")
     return 0
 
 

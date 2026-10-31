@@ -694,6 +694,13 @@ RL_POLICY_PIN_ENV = "ADVICE_RL_POLICY"                    # RL 方策 (MaskableP
 RL_POLICY_SHA_ENV = "ADVICE_RL_POLICY_SHA16"              # その期待 sha16 (任意)
 SELECTION_MODEL_PIN_ENV = "ADVICE_SELECTION_MODEL"        # 助言の選出モデル (.pt) のパス
 SELECTION_MODEL_SHA_ENV = "ADVICE_SELECTION_MODEL_SHA16"  # その期待 sha16 (任意)
+# 版の固定の bundle (2026-10-31 追加レビュー判断 2・4、advisor/pin_bundle.py): 設定されていれば、RL 方策・選出モデル (と埋め込み・meta・
+# 条件付きモデル)・使用率 DB (必要な snapshot を抽出した sqlite)・実戦バンク・登録 (my_team) をすべてその dir (manifest.json) から読む。
+# 上の個別の鍵と一緒に書いたときは値が bundle と一致しなければ InputsPinError。不足・sha 不一致・読み込み不可も InputsPinError
+# (配備先へ黙って退避しない)。作るのは tools.inputs_pin.make_pin_bundle (CLI は --freeze-bundle)
+PIN_BUNDLE_ENV = "ADVICE_PIN_BUNDLE"
+# 構築専用の選出モデルを別構築に適用する汎化試験の明示 (値 1。既定は止める)。適用したことは version 行の runtime と選出の助言に残す
+PIN_ALLOW_OTHER_TEAM_ENV = "ADVICE_PIN_ALLOW_OTHER_TEAM"
 # 固定入力の異常の伝え方 (2026-10-31 レビュー E-inputs-3: engine が InputsPinError を握りつぶして第一候補を返していた)。
 # 助言エンジン (advisor.engine.evaluate / evaluate_common) は InputsPinError を {"ok": False, "reason": INPUTS_PIN_REASON,
 # "error": ...} で返す (通常の「推定なし」と分ける)。server はその結果を表示せず (INPUTS_PIN_STOP_TEXT の 1 行と error)、キャッシュ・

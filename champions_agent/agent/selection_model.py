@@ -46,11 +46,26 @@ EMB_PIN_PATH = MODELS_DIR / "selection_model_emb.json"
 
 _emb_cache: dict = {}
 _pinned_store: dict | None = None
+# 版の固定の bundle (2026-10-31 追加レビュー判断 2、advisor/pin_bundle.py) の埋め込みのベクトルのキャッシュ (bundle の emb の dict ごと)
+_bundle_emb_cache: dict = {"store": None, "cache": {}}
+
+
+def _bundle_store():
+    """bundle が有効ならその埋め込みの辞書 (sha256 照合済み。無い・違えば InputsPinError、生きた埋め込みへ退避しない)、無効なら None"""
+    import os
+    from champions_agent.config import PIN_BUNDLE_ENV
+    if not (os.environ.get(PIN_BUNDLE_ENV) or "").strip():
+        return None
+    from advisor.pin_bundle import selection_emb_store
+    return selection_emb_store("v1")
 
 
 def _functional_store() -> dict:
-    """機能埋め込みの辞書 (ピン優先)"""
+    """機能埋め込みの辞書 (bundle があれば bundle、無ければピン優先)"""
     global _pinned_store
+    b = _bundle_store()
+    if b is not None:
+        return b
     if _pinned_store is None:
         store = {}
         try:
@@ -72,6 +87,15 @@ def _functional_store() -> dict:
 def _emb(species) -> np.ndarray:
     """種族の機能埋め込み (未収録はゼロ)"""
     sid = _to_id(species)
+    b = _bundle_store()
+    if b is not None:
+        if _bundle_emb_cache["store"] is not b:          # 参照を持つので別の dict が同じ id になることはない
+            _bundle_emb_cache.update(store=b, cache={})
+        c = _bundle_emb_cache["cache"]
+        if sid not in c:
+            v = b.get(sid)
+            c[sid] = np.array(v, dtype=np.float32) if v else np.zeros(EMB_DIM, dtype=np.float32)
+        return c[sid]
     if sid not in _emb_cache:
         v = _functional_store().get(sid)
         _emb_cache[sid] = (np.array(v, dtype=np.float32) if v
@@ -133,8 +157,13 @@ def load_model(path: Path = MODEL_PATH):
 
 
 def trained_teams() -> list:
-    """学習に使ったチーム (種族idのソート済みタプル) の一覧"""
+    """学習に使ったチーム (種族idのソート済みタプル) の一覧。版の固定の bundle があれば同じ bundle の meta (無ければ [])"""
     import json
+    import os
+    from champions_agent.config import PIN_BUNDLE_ENV
+    if (os.environ.get(PIN_BUNDLE_ENV) or "").strip():
+        from advisor.pin_bundle import selection_meta_teams
+        return selection_meta_teams()
     try:
         d = json.loads(META_PATH.read_text(encoding="utf-8"))
         return [tuple(sorted(t)) for t in d.get("teams", [])]

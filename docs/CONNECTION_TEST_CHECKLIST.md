@@ -729,6 +729,8 @@ transition の感度 (楽観側の HP・スカーフ / タスキの有無を入�
 
 ### 正式群 (L → T → T → L) の使用率・実戦バンクの固定 (2026-10-23、計画書 §8.49)
 
+> **2026-10-31: 正式比較はこの手順ではなく、下の「版の固定の bundle」を使う** (この 3 行は使用率 DB の中身・選出モデルの埋め込み・meta・登録を固定しない。docs/INHERITANCE_B0_REVIEW_20261031.md §3 の 2)。以下は互換のための記録。
+
 実機は既定で使用率 DB の最新 snapshot (毎朝 06:30 の usage-update で増える) と `logs/real_opponents/bank.json` (対戦ごとに更新)
 を読む。正式群では、群の間ずっと開始時の写しを読ませる (方式の切替の再起動の後も同じ snapshot・同じバンク)。同じ
 `config/advice.local.env` に 3 つの鍵を書き、`scripts/advice_env.sh` が uvicorn にだけ渡す (学習・測定の子プロセスには渡さない):
@@ -753,6 +755,45 @@ transition の感度 (楽観側の HP・スカーフ / タスキの有無を入�
       `rules.real_bank` = `{"path": 写し, "sha16": ..., "pinned": true}` を確かめる
 - [ ] **方式の切替 (L ↔ T) で `ADVICE_SCORING_MODE` を書き換えるときも、3 行は残す** (消すと最新に戻る)
 - [ ] 群が終わったら 3 行を削除して再起動し、パネルで「なし」を確かめる (写しのディレクトリは記録として残してよい)
+
+### 正式比較の版の固定 (bundle、2026-10-31 追加レビュー判断 2・4)
+
+正式比較では、助言が読む入力を **1 つの bundle** (`logs/pinned_data/<時刻>/`) に一組で固定する: RL 方策・選出モデル + 埋め込み +
+meta + 条件付きモデル・使用率 DB から必要な snapshot を抽出した sqlite・実戦バンク・登録 (my_team) の写しと `manifest.json`
+(各ファイルの sha256・出所、コード commit、設定、Showdown の clone の commit、規制、選出モデルの種別と対応する構築)。
+`config/advice.local.env` には `ADVICE_PIN_BUNDLE=<dir>` の **1 行だけ** を書く (個別の 7 行 `ADVICE_USAGE_SNAPSHOT` ほかは
+manifest から埋まる。書くなら値を bundle と揃える。違えば起動しない)。アドバイザーは bundle の写しだけを読み、bundle のファイルが
+無い・sha256 が違う・読めなければ **起動しない / 助言を止める** (配備先へ黙って退避しない)。比較を始める直前に作り、必要なら起動し直す。
+
+手順 (再起動は開発者が行う):
+
+- [ ] 学習・測定の run が動いていないことを `scripts/status.sh` と `pgrep -fl "check_advisor_player|usefulness_p1|team_build"` で確かめる
+- [ ] bundle を作る: `.venv/bin/python -m tools.advice_mode --freeze-bundle`
+      (今読まれるはずの RL 方策と、登録チームに使われるはずの選出モデルを写す。表示の `#` 行で次を確かめる:
+      選出モデルの種別 (`汎用` / `構築専用 対応 6 体 [...]`)、構築専用なら 6 体が今の登録チームと同じか、`型の前提` (一致 / 不明 / 不一致)、
+      コードの commit と `未コミットの変更 False`、Showdown の commit、使用率の snapshot。設定ファイルは書き換えない)。
+      選出モデルを指定するときは `--selection-model PT --selection-kind general|team [--selection-team id,... --selection-sets TEAM.txt]`
+- [ ] 表示された 1 行 `ADVICE_PIN_BUNDLE=...` を `config/advice.local.env` に書く。以前の固定の行 (`ADVICE_USAGE_SNAPSHOT` /
+      `ADVICE_REAL_BANK(_SHA16)` / `ADVICE_RL_POLICY(_SHA16)` / `ADVICE_SELECTION_MODEL(_SHA16)`) は消す (残すなら bundle と同じ値)
+- [ ] `.venv/bin/python -m tools.advice_mode --show` で `版の固定 (bundle) の設定値: bundle <dir>` と `bundle の照合: 一致` を確かめる
+- [ ] advice_env.sh を通して再起動する (操作パネルの「接続テスト開始」/「更新の反映」、または `bash scripts/start_connection_test.sh`)。
+      起動スクリプトの出力に `版の固定 (bundle): <dir> (...照合済み)` が出る。bundle が壊れていれば何も止めずに中止する
+- [ ] 起動ログ (`logs/server_nohup.log`) で
+      `[server] 版の固定 (bundle): 実効値 bundle <dir> (manifest sha16 ..., 使用率 snapshot N, 選出モデル ...) / 設定元 file / 設定値 bundle <dir> (...)`
+      (⚠ が無いこと)、`データの固定:` / `モデルの固定:` の行が `bundle ... から` であることを確かめる
+- [ ] 1 戦目の対戦ログの version 行で `runtime.pin_bundle.manifest_sha16` (起動ログと同じ)、`rules.usage_snapshot` = N、
+      `selection_model.sha256` / `action_policy.sha256` / `rules.embedding_sha256` / `team.registry_sha256` / `rules.real_bank.sha16` が
+      manifest の各 sha16 (`files.*.sha16`、登録は `files.registry.registry_sha16`) と同じことを確かめる
+- [ ] 選出画面: 構築専用モデルは自分の 6 体が読めるまで `🤖 選出モデル: 確認待ち`。`⛔ 選出モデルを使わない` が出たら、登録・
+      パーティが bundle の構築と違う (または学習時の型と違う)。その対戦は比較に数えず、bundle と登録を確かめる
+      (理由は対戦ログの advice 行の `model_pick_scope` に残る)
+- [ ] **方式の切替 (L ↔ T) で `ADVICE_SCORING_MODE` を書き換えるときも `ADVICE_PIN_BUNDLE` の行は残す**
+- [ ] bundle を使っている間は登録 (my_team) も bundle の写しを読む: パーティ編集の保存は `config/my_team.json` に書かれるが助言には
+      効かない (効かせるなら bundle を作り直して再起動する)
+- [ ] 群が終わったら行を削除して再起動し、`--show` / 起動ログで `版の固定 (bundle): 実効値 なし` を確かめる (bundle の dir は記録として残す)
+- 汎化試験 (構築専用モデルを意図して別の構築に適用する) は別の実験として、対象と条件を先に決めてから
+  `ADVICE_PIN_ALLOW_OTHER_TEAM=1` を足す (通常運用には使わない)。version 行の `runtime.pin_bundle.allow_other_team` と
+  advice 行の `model_pick_scope.state = "override"` に残る
 
 ## 1. 追従テスト (今回のメイン): 全操作をアドバイス通りに行う
 

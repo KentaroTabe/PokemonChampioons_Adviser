@@ -26,6 +26,10 @@
 # ADVICE_SELECTION_MODEL_SHA16 (助言の選出モデル) も同じ規則で決める (--model-pin)。値のある鍵だけを uvicorn のサブシェルに export し、
 # 設定元は ADVICE_MODEL_PIN_SOURCE。どれも無ければ何も足さない (従来どおりの読み込み順。退避は version 行の runtime に残る)。
 # ファイルが無い・sha16 が違うときは、何も起動・停止しないうちに止める。写しは --freeze-data --with-models で作る。
+# 2026-10-31 版の固定の bundle (追加レビュー判断 2・4): ADVICE_PIN_BUNDLE (bundle の dir) と ADVICE_PIN_ALLOW_OTHER_TEAM (構築専用の
+# 選出モデルを別構築に適用する汎化試験、1 のときだけ) も同じ規則で決める (--bundle-pin)。bundle があれば bundle 全体 (全ファイルの
+# sha256、個別の鍵との整合) を何も起動・停止しないうちに確かめ、値のある鍵だけを uvicorn のサブシェルに export する (設定元は
+# ADVICE_PIN_BUNDLE_SOURCE)。bundle は python -m tools.advice_mode --freeze-bundle で作る (表示された 1 行を書く)。
 
 # 判定に使う python (launchd は PATH だけなので venv を直接指す。ADVICE_ENV_PYTHON で差し替え可 = テスト用)
 _advice_env_python() {
@@ -41,9 +45,10 @@ advice_env_resolve() {
   ADVICE_ENV_MODE=""; ADVICE_ENV_SOURCE=""; ADVICE_ENV_SENS=""; ADVICE_ENV_SENS_SOURCE=""
   ADVICE_ENV_PIN_SNAP=""; ADVICE_ENV_PIN_BANK=""; ADVICE_ENV_PIN_SHA=""; ADVICE_ENV_PIN_SOURCE=""
   ADVICE_ENV_RL=""; ADVICE_ENV_RL_SHA=""; ADVICE_ENV_SEL=""; ADVICE_ENV_SEL_SHA=""; ADVICE_ENV_MODEL_SOURCE=""
+  ADVICE_ENV_BUNDLE=""; ADVICE_ENV_ALLOW_OTHER=""; ADVICE_ENV_BUNDLE_SOURCE=""
   # ファイルはこのリポジトリのルート (source する側が cd 済み) からの相対で渡す
-  if ! out="$("$py" -m tools.advice_mode --resolve --sensitivity --data-pin --model-pin --file config/advice.local.env)"; then
-    echo "採点方式・データの固定・モデルの固定の設定が不正なので起動しません (config/advice.local.env / 環境変数 ADVICE_SCORING_MODE・TRANSITION_SENSITIVITY・ADVICE_USAGE_SNAPSHOT・ADVICE_REAL_BANK・ADVICE_REAL_BANK_SHA16・ADVICE_RL_POLICY・ADVICE_SELECTION_MODEL (と各 _SHA16) を確認)" >&2
+  if ! out="$("$py" -m tools.advice_mode --resolve --sensitivity --data-pin --model-pin --bundle-pin --file config/advice.local.env)"; then
+    echo "採点方式・データの固定・モデルの固定・版の固定 (bundle) の設定が不正なので起動しません (config/advice.local.env / 環境変数 ADVICE_SCORING_MODE・TRANSITION_SENSITIVITY・ADVICE_USAGE_SNAPSHOT・ADVICE_REAL_BANK・ADVICE_REAL_BANK_SHA16・ADVICE_RL_POLICY・ADVICE_SELECTION_MODEL (と各 _SHA16)・ADVICE_PIN_BUNDLE・ADVICE_PIN_ALLOW_OTHER_TEAM を確認)" >&2
     return 1
   fi
   while IFS= read -r line; do
@@ -61,10 +66,13 @@ advice_env_resolve() {
       ADVICE_SELECTION_MODEL=*) ADVICE_ENV_SEL="${line#ADVICE_SELECTION_MODEL=}";;
       ADVICE_SELECTION_MODEL_SHA16=*) ADVICE_ENV_SEL_SHA="${line#ADVICE_SELECTION_MODEL_SHA16=}";;
       ADVICE_MODEL_PIN_SOURCE=*) ADVICE_ENV_MODEL_SOURCE="${line#ADVICE_MODEL_PIN_SOURCE=}";;
+      ADVICE_PIN_BUNDLE=*) ADVICE_ENV_BUNDLE="${line#ADVICE_PIN_BUNDLE=}";;
+      ADVICE_PIN_ALLOW_OTHER_TEAM=*) ADVICE_ENV_ALLOW_OTHER="${line#ADVICE_PIN_ALLOW_OTHER_TEAM=}";;
+      ADVICE_PIN_BUNDLE_SOURCE=*) ADVICE_ENV_BUNDLE_SOURCE="${line#ADVICE_PIN_BUNDLE_SOURCE=}";;
     esac
   done <<< "$out"
   if [ -z "$ADVICE_ENV_MODE" ] || [ -z "$ADVICE_ENV_SOURCE" ] || [ -z "$ADVICE_ENV_SENS" ] || [ -z "$ADVICE_ENV_SENS_SOURCE" ] \
-     || [ -z "$ADVICE_ENV_PIN_SOURCE" ] || [ -z "$ADVICE_ENV_MODEL_SOURCE" ]; then
+     || [ -z "$ADVICE_ENV_PIN_SOURCE" ] || [ -z "$ADVICE_ENV_MODEL_SOURCE" ] || [ -z "$ADVICE_ENV_BUNDLE_SOURCE" ]; then
     echo "採点方式を決められませんでした (tools.advice_mode --resolve の出力: $out)" >&2
     return 1
   fi
@@ -79,6 +87,9 @@ advice_env_resolve() {
     echo "モデルの固定: なし (RL 方策は読み込み順、選出モデルは 試用 Package → 登録チーム向け → 配布版)"
   else
     echo "モデルの固定: RL 方策 ${ADVICE_ENV_RL:-固定なし}${ADVICE_ENV_RL_SHA:+ (sha16 $ADVICE_ENV_RL_SHA)} / 選出モデル ${ADVICE_ENV_SEL:-固定なし}${ADVICE_ENV_SEL_SHA:+ (sha16 $ADVICE_ENV_SEL_SHA)} (設定元 $ADVICE_ENV_MODEL_SOURCE)"
+  fi
+  if [ -n "$ADVICE_ENV_BUNDLE" ]; then
+    echo "版の固定 (bundle): $ADVICE_ENV_BUNDLE (RL 方策・選出モデル・埋め込み・meta・使用率 DB・バンク・登録をすべて bundle から読む。照合済み)${ADVICE_ENV_ALLOW_OTHER:+ / 構築専用モデルの別構築への適用 (汎化試験) 許可} (設定元 $ADVICE_ENV_BUNDLE_SOURCE)"
   fi
 }
 
@@ -103,6 +114,10 @@ advice_env_export() {
   [ -n "${ADVICE_ENV_SEL:-}" ] && export ADVICE_SELECTION_MODEL="$ADVICE_ENV_SEL"
   [ -n "${ADVICE_ENV_SEL_SHA:-}" ] && export ADVICE_SELECTION_MODEL_SHA16="$ADVICE_ENV_SEL_SHA"
   export ADVICE_MODEL_PIN_SOURCE="${ADVICE_ENV_MODEL_SOURCE:-default}"
+  # 版の固定の bundle (2026-10-31): 値のある鍵だけ
+  [ -n "${ADVICE_ENV_BUNDLE:-}" ] && export ADVICE_PIN_BUNDLE="$ADVICE_ENV_BUNDLE"
+  [ -n "${ADVICE_ENV_ALLOW_OTHER:-}" ] && export ADVICE_PIN_ALLOW_OTHER_TEAM="$ADVICE_ENV_ALLOW_OTHER"
+  export ADVICE_PIN_BUNDLE_SOURCE="${ADVICE_ENV_BUNDLE_SOURCE:-default}"
   return 0
 }
 

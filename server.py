@@ -56,7 +56,8 @@ def should_advise_selection(state: dict) -> bool:
             and not state.get("battle_active"))
 from advisor.service import Advisor
 from battle_logger import BattleLogger, ev_infer_of
-from tools.advice_mode import data_pin_startup_check, model_pin_startup_check, sens_startup_check, server_startup_check
+from tools.advice_mode import (bundle_startup_check, data_pin_startup_check, model_pin_startup_check, sens_startup_check,
+                               server_startup_check)
 
 # 採点方式の検査 (2026-10-16 方式 C)。環境変数 ADVICE_SCORING_MODE が使えない値なら重い初期化の前に止める
 # (config は警告して legacy にするが、実機では黙って legacy で動かさない)。実効値は環境変数だけで決まり、
@@ -71,6 +72,9 @@ _DATA_PIN_STARTUP_LINE = data_pin_startup_check()
 # モデルの実体の固定 (2026-10-31 KNOWN_ISSUES E-inh-4): ADVICE_RL_POLICY / ADVICE_SELECTION_MODEL (と各 _SHA16) を重い初期化の前に検査する
 # (ファイルが無い・sha16 が違えば起動しない)。助言側 (advisor.rl_bridge / selection_dispatch.advisor_model_path) は固定したファイルだけを読む
 _MODEL_PIN_STARTUP_LINE = model_pin_startup_check()
+# 版の固定の bundle (2026-10-31 追加レビュー判断 2・4): ADVICE_PIN_BUNDLE があれば bundle 全体 (全ファイルの sha256・個別の鍵との整合・
+# 特徴量の版・登録) を重い初期化の前に検査する (不正なら起動しない)。助言側は RL・選出モデル・埋め込み・meta・使用率 DB・バンク・登録を bundle から読む
+_BUNDLE_STARTUP_LINE = bundle_startup_check()
 
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
 app = FastAPI()
@@ -165,6 +169,7 @@ print(f"[server] {_SCORING_STARTUP_LINE}")
 print(f"[server] {_SENS_STARTUP_LINE}")
 print(f"[server] {_DATA_PIN_STARTUP_LINE}")
 print(f"[server] {_MODEL_PIN_STARTUP_LINE}")
+print(f"[server] {_BUNDLE_STARTUP_LINE}")
 _busy = False
 _pending_frame = None      # 処理中に届いた最新フレーム (sid, data)
 _last_state_json = ""

@@ -114,7 +114,12 @@ def _load_model():
     _model_path = _model_sha = _model_fallback = None
     _model_pinned, _model_pin_error = False, None
     from advisor.data_pin import InputsPinError, check_model_file, model_source, sha16_bytes
-    src = model_source("rl_policy")
+    try:
+        src = model_source("rl_policy")
+    except InputsPinError as e:
+        # 版の固定の bundle が不正・個別の鍵と矛盾 (2026-10-31): 呼ばれるたびに止める (黙って RL なしにしない)
+        _model, _model_pinned, _model_pin_error = None, True, e
+        raise
     if src["pinned"]:
         # 版を明示したとき (2026-10-31 E-inh-4): そのファイルだけを読む。無い・sha16 が違う・読み込めなければ InputsPinError
         # (ema → best → 無印 へ退避しない。RL 提案を黙って無効にもしない)
