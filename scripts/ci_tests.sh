@@ -17,6 +17,10 @@
 #   CI で回る部分 (server.py の構文木での確認・録画再生の経路・記録 → 再生) は test_replay_path に分けて CI に残した
 # - test_inputs_pin_propagation_server: 同じく server._handle_one_frame で固定入力の異常の停止・記録を確かめる (2026-10-31)。
 #   CI で回る部分 (engine・advice_key の判断・real_accept・advice_replay) は test_inputs_pin_propagation
+# - poke_env / sb3_contrib (sim・RL) 依存のテストは local (2026-10-31、docs/KNOWN_ISSUES.md E-ci-1。この job は 10/5〜10/31 これで
+#   失敗していた)。依存する関数だけを tests/<元の名前>_local に分けて LOCAL_ONLY_TESTS に置き、残りはここに残した:
+#   test_advice_m2d / test_advisor_team_validate / test_inputs_pin_propagation / test_sim_legal_inputs / test_sim_mega_form /
+#   test_sim_revive_select。import を握りつぶして skip にしない (環境の欠如で黙って緑にしない)
 # - test_inh_fixes (2026-10-31): Showdown の validate-team (node + pokemon-showdown) と本物の RL 方策 (sb3) を使う部分は、
 #   無い環境 (CI) では点数の単体検査と固定の止まる側だけを確かめる (どちらも同じテストの中で分岐する)
 # test_battle_prune は検証する関数を champions_agent/env/showdown_env_pure.py に分けて CI に残した (showdown_env は

@@ -240,6 +240,7 @@ docs/CONNECTION_TEST_CHECKLIST.md と docs/incidents/ を参照。
   👁 長時間ジョブは nohup/launchd 側に寄せる余地 (要求が再発したら対応)
 - CIはコミット済みデータで閉じる — ローカル緑≠CI緑 (9/2に2テストの隠れDB依存で失敗)。
   `scripts/ci_local.sh` でクローン検証してから push する運用 — ✅
+- E-ci-1 GitHub CI の tests job が 10/5〜10/31 失敗していた (依存の無い環境 = requirements-ci.txt だけで、poke_env が要る sim のテスト 6 本を回していた。run 41174305720)。poke_env / sb3_contrib 依存の関数を tests/test_*_local (scripts/run_test.sh local) に分離して復旧、残りは CI に残した (期待値は不変)。ローカルの全緑と GitHub の緑は別の証拠 — ✅ (10/31 feat/ci-tests-deps。GitHub 上の実行は未確認)
 - 外部プロセス (Showdown / claude CLI / node) を待つ subprocess の timeout — 日次定点の評価が
   9/18 から 5 日間ハングし定点が 6 日欠測 (launchd の calendar ジョブは前回が生きていると発火しない。
   docs/incidents/reports/2026-09-18-track-progress-hang-no-timeout.md)。9/24 に定点は timeout 化 ✅、

@@ -8,7 +8,8 @@ docs/incidents/reports/2026-09-04-sim-unpicked-members-in-evaluation.md §9 の�
 arc_remeasure_summary) を確かめる。
 
 poke-env の Battle はダックタイピングの偽オブジェクト (tests/test_sim_picked_roster と同じ作り)。使用率 DB・RL・Showdown には
-依存しない。
+依存しない。make_advisor_player (poke-env の Player) を通す test_player_counts_accept_and_records は tests/test_sim_legal_inputs_local
+(ローカル専用、CI の最小依存に poke-env が無いため。2026-10-31)。
 
     python -m tests.test_sim_legal_inputs
 """
@@ -332,33 +333,6 @@ def test_decision_flags():
     print("test_decision_flags OK")
 
 
-def test_player_counts_accept_and_records(tmp=None):
-    """make_advisor_player の choose_move を偽 Battle で直接呼び、stats と対戦記録に受入監査が残ることを確かめる
-    (選出不明は picked_unknown と決定の印、合法手 1 つは forced_single、通常の決定は印なし)"""
-    from tools.team_build.battle_log import BattleRecorder
-    with tempfile.TemporaryDirectory() as d, _Team(), _Hint():
-        rec = BattleRecorder(Path(d) / "b.jsonl", "c", "p")
-        stats: dict = {}
-        player = AP.make_advisor_player(team_source=NS(last_text=_team_text()), stats=stats, recorder=rec,
-                                        start_listening=False, battle_format="gen9championsbssregmc")
-        player.create_order = lambda x, mega=False: ("order", getattr(x, "id", None) or getattr(x, "species", None))
-        player.choose_random_move = lambda b: ("random",)
-        b = _battle()
-        assert player.choose_move(b)[0] == "order"
-        nb = _battle(request=False)                         # 選出が分からない (要求なし)
-        player.choose_move(nb)
-        one = _battle(avail_moves=["struggle"], req_moves=[("struggle", False)], trapped=True)
-        player.choose_move(one)
-        assert stats["picked_unknown"] == 1 and stats["accept:picked_unknown"] == 1 and stats["accept:decisions"] == 3
-        assert stats.get("accept:best_illegal", 0) == 0 and stats.get("accept:unpicked_candidate", 0) == 0
-        assert stats.get("accept:skip_unexplained", 0) == 0 and stats.get("accept:random_fallback", 0) == 0, stats
-        turns = rec._turns["battle-legal-1"]
-        assert "accept" not in turns[0] and turns[1]["accept"]["picked_unknown"] is True
-        acc = SA.summary_from_stats(stats)
-        assert SA.accept_violations(acc) and any("選出が分からない" in x for x in SA.accept_violations(acc))
-    print("test_player_counts_accept_and_records OK")
-
-
 def _rec(i, acc=None, sha="s1"):
     r = {"won": bool(i % 2), "opponent_team_id": f"t{i % 33}", "own_team_sha16": sha,
          "ref_check": {"n": 3, "mismatch": 0, "unbuilt": 0}}
@@ -499,7 +473,6 @@ if __name__ == "__main__":
     test_sim_legality_and_opp_acted()
     test_only_legal_action()
     test_decision_flags()
-    test_player_counts_accept_and_records()
     test_verdict_accept_invalid()
     test_p1_conditions_require_accept()
     test_racing_withholds_and_warns()
