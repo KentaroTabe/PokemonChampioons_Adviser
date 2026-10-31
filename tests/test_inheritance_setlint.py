@@ -2,7 +2,12 @@
 
 境界例 (tests/fixtures/inheritance/set_edge_cases.jsonl) を旧 lint (tools/team_build/set_lint) と自動修理に当てる。
 期待値は「今の挙動の記録」ではなく計画書の要件で書く:
-  R1 ルール上不合法な型を通さない (0 件)。合法性は fixture の expected_legal (validate-team で確かめて記入) を参照
+  R1 ルール上不合法な型を通さない (0 件)。合法性は fixture の expected_legal (validate-team で確かめて記入) を参照。
+     2026-10-31 レビュー判断 5 (docs/INHERITANCE_PHASE_A_REVIEW_20261031.md) で、試験の対象を旧 lint 単体から構築の実経路
+     (legal_item → 門 (lint_gate) → チーム文 (to_showdown_text) → validate_team_text) に替えた。旧 lint は合法性の検証器ではなく、
+     lint 単体で不合法 9 件中 8 件を通す測定値 (I-05) は assert せず出力に残す (report_lint_only_r1)。
+     validate-team (ローカル Showdown の CLI) が無い環境 (CI: pokemon-showdown/ はコミットしない) では、検証の段は理由つきの SKIP
+     (合法とは扱わない。環境の欠如で、期待値の緩和ではない)。CLI があるのに起動できなければ fail
   R2 指定した型を黙って変えない (0 件)。修理の変更は理由 (repairs) と注記 (lint_repair) で説明され、指定の型 (custom) は触らない
   R3 修理で形態・制約 (種・性別形態・メガ石) を壊さない
 要件を満たさない境界例は xfail にせず fail として数える (2026-10-31 開発者指示。結果は I-05 の report.md に書く)。
@@ -12,14 +17,27 @@
 """
 from __future__ import annotations
 
+import shutil
 import sys
+from pathlib import Path
 
+from champions_agent.config import INH_SETLINT_WORKERS, TRAINING_BATTLE_FORMAT
 from tools.inheritance_eval import setlint_audit as A
 from tools.team_build import set_lint as L
 from tools.team_build import sets as S
 
 REQUIRED_KINDS = ("prio_phys_on_special", "choice_status", "av_status", "mega_form_item_mismatch", "three_moves",
                   "duplicate_move", "adamant_special_only", "trick_choice", "eviolite_final")
+# R1 の検証の形式 = 構築の既定の規制 (tools/team_build/spec.py の BuildSpec.regulation の既定値)
+R1_FORMAT = TRAINING_BATTLE_FORMAT
+# 実経路は 6 体のチーム文を検証するので、残り 5 枠を fixture の合法例から埋める (検査する型と種・持ち物が重ならないものを先頭から)
+R1_FILLER_CASE_IDS = ("E01_prio_phys_on_special", "E16_field_dup", "E19_chesto_no_rest", "E04_choice_trick_status",
+                      "E18_mega_acrobatics", "E10_adamant_special_only", "E20_type_item_no_move", "E25_mega_ability_in_team")
+R1_TEAM_SIZE = 6
+
+
+class SkipTest(Exception):
+    """環境に無いもの (ローカル Showdown の CLI 等) が要る検査を、理由つきで飛ばす (合格にも不合格にも数えない)"""
 
 
 def _cases() -> list:
@@ -108,24 +126,141 @@ def test_fixture_shape() -> None:
 
 
 # ------------------------------------------------------------------ 要件 (計画書 §5 I-05)
-def test_r1_illegal_not_passed() -> None:
-    """R1: 不合法な型 (expected_legal False) を門が通さない。誤りなし = 通す。修理した出力に不合法の原因が残る = 通す"""
-    bad = []
-    for c in _cases():
-        if c["expected_legal"]:
+# ------------------------------------------------------------------ R1: 構築の実経路
+def showdown_dir_for_r1():
+    """validate-team に使う pokemon-showdown の dir (sets.SHOWDOWN_DIR。ワークツリーには無いので本体の作業ツリーの dir)。
+    使えなければ (None, 理由)。dist が無いと CLI が build (書き込み) を始めるので使えない扱い"""
+    if not shutil.which("node"):
+        return None, "node が PATH に無い"
+    for d in (S.SHOWDOWN_DIR, A.main_repo_root() / "pokemon-showdown"):
+        d = Path(d)
+        if (d / "pokemon-showdown").exists():
+            if not (d / "dist").exists():
+                return None, f"{d}/dist が無い (CLI が build を始めるため使わない)"
+            return d, ""
+    return None, "pokemon-showdown/ が無い (コミットしないデータ。CI では検証の段を実行しない)"
+
+
+def r1_route(case: dict, route: str):
+    """境界例の型を構築の実経路の門に通す。戻り値 (門を通った型 or None, 段の記録)。
+    route "custom"   : 指定の型 (source custom)。門 (sets.lint_gate) は触らずに通す → 検証だけが合法性を見る
+    route "generated": 代表型・生成型。joint_stage.rep_entry と同じ順に set_sanity / legal_item で落とし、
+                       sets.lint_gate (直せれば直し、直せなければ gate_rejects で落とす) に通す"""
+    s = case["set"]
+    um = list(case.get("usage_moves") or [])
+    if route == "custom":
+        cand = A.candidate_of(s, "custom")
+    else:
+        cand = A.candidate_of(s, "representative")
+        sanity = S.set_sanity(cand)
+        if sanity:
+            return None, f"set_sanity で落ちた {sanity}"
+        if not S.legal_item(cand.item):
+            return None, f"legal_item で落ちた ({cand.item})"
+    gated = S.lint_gate([cand], source="inh_r1", usage_moves=um)
+    if not gated:
+        return None, "lint_gate で落ちた"
+    out = gated[0]
+    return out, ("門を素通り" if out is cand else "門で修理 " + ";".join(_repairs_of(out)))
+
+
+def r1_team(cand, fillers: list) -> list:
+    """門を通った型 + 種・持ち物が重ならない合法例 5 体 → 6 体 (アイテムクローズ・種族の重複で落ちないように)"""
+    team, species, items = [cand], {cand.species_id}, {cand.item} - {None}
+    for f in fillers:
+        if len(team) >= R1_TEAM_SIZE:
+            break
+        if f.species_id in species or (f.item and f.item in items):
             continue
+        team.append(f)
+        species.add(f.species_id)
+        items.add(f.item)
+    assert len(team) == R1_TEAM_SIZE, f"{cand.species_id}: 埋める合法例が足りない"
+    return team
+
+
+def _r1_fillers() -> list:
+    by_id = {c["case_id"]: c for c in _cases()}
+    out = []
+    for cid in R1_FILLER_CASE_IDS:
+        assert by_id[cid]["expected_legal"], f"{cid}: 埋める型は合法例だけ"
+        out.append(A.candidate_of(by_id[cid]["set"], "custom"))
+    return out
+
+
+def r1_plan() -> list:
+    """全境界例 × 2 経路の門の結果と、検証するチーム文。[{case_id, route, legal, stage, text or None}]"""
+    fillers = _r1_fillers()
+    rows = []
+    for c in _cases():
+        for route in ("custom", "generated"):
+            out, stage = r1_route(c, route)
+            text = S.to_showdown_text(r1_team(out, fillers)) if out is not None else None
+            rows.append({"case_id": c["case_id"], "route": route, "legal": c["expected_legal"], "stage": stage, "text": text})
+    return rows
+
+
+def test_r1_gate_stage() -> None:
+    """R1 の前半 (検証の前の段、CI でも回る): 経路と 6 体のチーム文が組めること。どの不合法例が検証の段まで届くかを出力する。
+    検証の前に落ちた不合法例は「通さない」側。届いたものの合否は test_r1_real_path_with_showdown が決める"""
+    rows = r1_plan()
+    illegal = [r for r in rows if not r["legal"]]
+    assert len({r["case_id"] for r in illegal}) == sum(1 for c in _cases() if not c["expected_legal"])
+    for r in rows:
+        if r["text"] is not None:
+            assert len(S.team_blocks(r["text"])) == R1_TEAM_SIZE, r["case_id"]
+    # 指定の型は門を素通りする (合法性を見るのは validate_team_text だけ)
+    assert all(r["stage"] == "門を素通り" for r in rows if r["route"] == "custom"), \
+        [r for r in rows if r["route"] == "custom" and r["stage"] != "門を素通り"]
+    reach = [r for r in illegal if r["text"] is not None]
+    print(f"test_r1_gate_stage OK (不合法 {len(illegal)} 行 (9 件 × 2 経路) のうち検証の段に届く {len(reach)} 行)")
+    for r in illegal:
+        print(f"  {r['case_id']} [{r['route']}]: {r['stage']}{' → validate_team_text へ' if r['text'] is not None else ''}")
+
+
+def test_r1_real_path_with_showdown() -> None:
+    """R1: 不合法な境界例 (expected_legal False) が、構築の実経路 (門 → チーム文 → validate_team_text) を 2 経路とも通らない。
+    validate-team が要る (ローカル Showdown の CLI。無ければ理由つきで SKIP)。
+    前提の確認として、合法な境界例を同じ 6 体のチーム文で検証すると通ること (形式の取り違えや埋める型の不具合で
+    全部が落ちて R1 が空振りに合格するのを防ぐ) も見る"""
+    sd, why = showdown_dir_for_r1()
+    if sd is None:
+        raise SkipTest(f"validate-team を実行できない: {why}。検証の前の段は test_r1_gate_stage")
+    rows = [r for r in r1_plan() if r["text"] is not None]
+    results = S.validate_team_texts([r["text"] for r in rows], R1_FORMAT, workers=INH_SETLINT_WORKERS, showdown_dir=sd)
+    run_failed = [f"{r['case_id']} [{r['route']}]: {errs[:1]}" for r, (ok, errs) in zip(rows, results)
+                  if errs and str(errs[0]).startswith(S.VALIDATE_RUN_FAILED)]
+    assert not run_failed, "validate-team が起動できない (合法とは扱わない):\n  " + "\n  ".join(run_failed)
+    control = [f"{r['case_id']} [{r['route']}]: {errs[:3]}" for r, (ok, errs) in zip(rows, results)
+               if r["legal"] and r["route"] == "custom" and not ok]
+    assert not control, "合法な境界例が同じ組み方のチーム文で検証を通らない (R1 の前提が崩れている):\n  " + "\n  ".join(control)
+    bad = [f"{r['case_id']} [{r['route']}]: {r['stage']} → validate_team_text が通した" for r, (ok, _e) in zip(rows, results)
+           if not r["legal"] and ok]
+    assert not bad, "不合法な型を実経路が通した境界例 %d 件:\n  " % len(bad) + "\n  ".join(bad)
+    n_illegal = sum(1 for r in rows if not r["legal"])
+    print(f"test_r1_real_path_with_showdown OK ({R1_FORMAT}, {sd}: 検証に届いた不合法 {n_illegal} 行はすべて拒否、"
+          f"合法 {sum(1 for r in rows if r['legal'] and r['route'] == 'custom')} 件は通過)")
+    for r, (ok, errs) in zip(rows, results):
+        if not r["legal"]:
+            print(f"  {r['case_id']} [{r['route']}]: {errs[:2]}")
+
+
+def report_lint_only_r1() -> None:
+    """測定 (assert しない): 旧 lint 単体 (lint_set + 修理) が不合法な境界例を何件通すか。I-05 の 8/9 の再現。
+    「lint だけでは合法性を保証できない」証拠として残す (docs/KNOWN_ISSUES.md)"""
+    passed, illegal = [], [c for c in _cases() if not c["expected_legal"]]
+    for c in illegal:
         s = c["set"]
         res = L.lint_set(s["species"], s.get("ability"), s.get("item"), s.get("nature"), list(s["moves"]))
         if not res["errors"]:
-            bad.append(f"{c['case_id']}: 旧 lint の誤りなし ({'; '.join(c.get('validator_messages') or [])})")
+            passed.append(f"{c['case_id']}: 旧 lint の誤りなし ({'; '.join(c.get('validator_messages') or [])})")
             continue
         fixed = _repair(c)
         if fixed is not None:
             left = A.remaining_illegal_elements(A.set_of(fixed), c["illegal_elements"])
             if left:
-                bad.append(f"{c['case_id']}: 修理した出力に不合法の原因が残る {left}")
-    assert not bad, "不合法な型を通した境界例 %d 件:\n  " % len(bad) + "\n  ".join(bad)
-    print("test_r1_illegal_not_passed OK")
+                passed.append(f"{c['case_id']}: 修理した出力に不合法の原因が残る {left}")
+    print(f"測定 (assert しない): 旧 lint 単体は不合法な境界例 {len(passed)}/{len(illegal)} 件を通す\n  " + "\n  ".join(passed))
 
 
 def test_r2_no_silent_change() -> None:
@@ -181,19 +316,23 @@ def report_legal_tactical() -> None:
 
 def main() -> None:
     tests = [test_pure_helpers, test_registered_and_chaos_conversion, test_fixture_shape,
-             test_r1_illegal_not_passed, test_r2_no_silent_change, test_r3_repair_keeps_form]
-    failed = []
+             test_r1_gate_stage, test_r1_real_path_with_showdown, test_r2_no_silent_change, test_r3_repair_keeps_form]
+    failed, skipped = [], []
     for t in tests:
         try:
             t()
+        except SkipTest as e:
+            skipped.append(t.__name__)
+            print(f"{t.__name__} SKIP: {e}")
         except AssertionError as e:
             failed.append(t.__name__)
             print(f"{t.__name__} FAILED: {e}")
+    report_lint_only_r1()
     report_legal_tactical()
     if failed:
         print(f"FAILED {len(failed)}/{len(tests)}: {', '.join(failed)}")
         sys.exit(1)
-    print("ALL OK")
+    print("ALL OK" + (f" (SKIP {len(skipped)}: {', '.join(skipped)})" if skipped else ""))
 
 
 if __name__ == "__main__":

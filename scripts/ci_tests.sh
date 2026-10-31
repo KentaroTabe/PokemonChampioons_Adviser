@@ -21,6 +21,9 @@
 # poke-env を先頭で読み、poke-env 0.10 は numpy>=2.0.2 を要求して CI の numpy<2 と両立しない)。
 # Showdown のデータ (pokemon-showdown/、未コミット) の読み手は、コミット済みのキャッシュを先に読むので CI でも同じ結果になる
 # (champions_agent/data/sim_cache.py、作り直しは scripts/refresh_sim_caches.sh)。
+# 引き継ぎ評価 段階 A の 5 本 (test_inheritance_*、2026-10-31 レビュー判断 5): 合成データと一時ファイルだけで閉じる。
+# test_inheritance_setlint の test_r1_real_path_with_showdown はローカル Showdown の validate-team が要り、CI には
+# pokemon-showdown/ が無いので理由つきで SKIP と出る (合法とは扱わない。検証の前の段は test_r1_gate_stage が CI で回る)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -191,6 +194,11 @@ TESTS=(
   test_ev_infer_item_pin
   test_ev_infer_reeval
   test_inputs_pin_propagation
+  test_inheritance_inventory
+  test_inheritance_conversion
+  test_inheritance_setlint
+  test_inheritance_record
+  test_inheritance_fsample
 )
 
 fail=0
