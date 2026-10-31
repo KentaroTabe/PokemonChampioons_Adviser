@@ -1710,6 +1710,20 @@ INH_SETLINT_IGNORED_ERRORS = ("You must bring at least",)
 INH_SETLINT_SMOGON_TOP = None
 INH_SETLINT_WORKERS = 4
 INH_SETLINT_TIME_BUDGET_SEC = 1500
+# I-05 R1 の実経路 (validate_team_text) を GitHub CI で実行する job (.github/workflows/ci.yml の showdown-validator、
+# tools/ci/showdown_prepare.sh、ローカルの模擬は tools/ci/showdown_job_local.sh。2026-10-31 追加レビュー判断 3)
+# INH_R1_REQUIRE_SHOWDOWN_ENV: この環境変数が "1" なら厳格モード。test_r1_real_path_with_showdown は validate-team を
+#   使えないとき理由つき SKIP ではなく fail にする (CI の job が SKIP を合格の代わりにしないため)
+# INH_R1_SHOWDOWN_DIR_ENV: pokemon-showdown の dir を指す環境変数 (名前は sets.SHOWDOWN_DIR と同じ)。立っていればその dir だけを使う
+#   (本体の作業ツリーの dir へ黙って退避しない)。立っていなければ従来どおり sets.SHOWDOWN_DIR → 本体の作業ツリーの dir
+# INH_R1_SHOWDOWN_REPO / INH_R1_SHOWDOWN_COMMIT: CI で取得する Showdown (ローカル clone の HEAD = upstream master の
+#   2026-09-09 の commit。[Gen 9 Champions] BSS Reg M-C を含む)
+# INH_R1_NODE_MAJOR: CI とローカルの Node の系列 (ローカルの node v26.12.1。workflow の setup-node の node-version と揃える)
+INH_R1_REQUIRE_SHOWDOWN_ENV = "INH_R1_REQUIRE_SHOWDOWN"
+INH_R1_SHOWDOWN_DIR_ENV = "SHOWDOWN_DIR"
+INH_R1_SHOWDOWN_REPO = "https://github.com/smogon/pokemon-showdown.git"
+INH_R1_SHOWDOWN_COMMIT = "d849b220082e113d8a17303509fb44d420c543d5"
+INH_R1_NODE_MAJOR = 26
 
 
 # 引き継ぎ評価 I-10 (ログ・版固定・再生・実験管理の記録契約。2026-10-31 段階 A、docs/INHERITANCE_EVALUATION_PLAN_20261031.md §5 I-10。

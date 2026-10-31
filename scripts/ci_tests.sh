@@ -26,6 +26,8 @@
 # 引き継ぎ評価 段階 A の 5 本 (test_inheritance_*、2026-10-31 レビュー判断 5): 合成データと一時ファイルだけで閉じる。
 # test_inheritance_setlint の test_r1_real_path_with_showdown はローカル Showdown の validate-team が要り、CI には
 # pokemon-showdown/ が無いので理由つきで SKIP と出る (合法とは扱わない。検証の前の段は test_r1_gate_stage が CI で回る)
+# この job では SKIP のまま。実経路は別の job showdown-validator (.github/workflows/ci.yml) が固定 commit の Showdown を
+# build して厳格モード (SKIP を fail にする) で実行する (2026-10-31 追加レビュー判断 3)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

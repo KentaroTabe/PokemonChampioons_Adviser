@@ -7,21 +7,28 @@
      (legal_item → 門 (lint_gate) → チーム文 (to_showdown_text) → validate_team_text) に替えた。旧 lint は合法性の検証器ではなく、
      lint 単体で不合法 9 件中 8 件を通す測定値 (I-05) は assert せず出力に残す (report_lint_only_r1)。
      validate-team (ローカル Showdown の CLI) が無い環境 (CI: pokemon-showdown/ はコミットしない) では、検証の段は理由つきの SKIP
-     (合法とは扱わない。環境の欠如で、期待値の緩和ではない)。CLI があるのに起動できなければ fail
+     (合法とは扱わない。環境の欠如で、期待値の緩和ではない)。CLI があるのに起動できなければ fail。
+     厳格モード (環境変数 INH_R1_REQUIRE_SHOWDOWN=1、名前は config の INH_R1_REQUIRE_SHOWDOWN_ENV) では SKIP せず fail にする。
+     GitHub CI の job showdown-validator は検証対象の commit の Showdown を取得・build し、その dir を環境変数 SHOWDOWN_DIR
+     (INH_R1_SHOWDOWN_DIR_ENV) で渡して厳格モードで実行する (2026-10-31 追加レビュー判断 3)
   R2 指定した型を黙って変えない (0 件)。修理の変更は理由 (repairs) と注記 (lint_repair) で説明され、指定の型 (custom) は触らない
   R3 修理で形態・制約 (種・性別形態・メガ石) を壊さない
 要件を満たさない境界例は xfail にせず fail として数える (2026-10-31 開発者指示。結果は I-05 の report.md に書く)。
 合法だが旧 lint が誤りにする型 (戦術的な拒否・修理) は要件違反ではなく「警告止まりの候補」として一覧を出すだけ。
 
     python -m tests.test_inheritance_setlint
+    INH_R1_REQUIRE_SHOWDOWN=1 SHOWDOWN_DIR=<pokemon-showdown の dir> python -m tests.test_inheritance_setlint   # 厳格モード
 """
 from __future__ import annotations
 
+import os
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
-from champions_agent.config import INH_SETLINT_WORKERS, TRAINING_BATTLE_FORMAT
+from champions_agent.config import (INH_R1_REQUIRE_SHOWDOWN_ENV, INH_R1_SHOWDOWN_DIR_ENV, INH_SETLINT_WORKERS,
+                                    TRAINING_BATTLE_FORMAT)
 from tools.inheritance_eval import setlint_audit as A
 from tools.team_build import set_lint as L
 from tools.team_build import sets as S
@@ -127,18 +134,61 @@ def test_fixture_shape() -> None:
 
 # ------------------------------------------------------------------ 要件 (計画書 §5 I-05)
 # ------------------------------------------------------------------ R1: 構築の実経路
-def showdown_dir_for_r1():
-    """validate-team に使う pokemon-showdown の dir (sets.SHOWDOWN_DIR。ワークツリーには無いので本体の作業ツリーの dir)。
-    使えなければ (None, 理由)。dist が無いと CLI が build (書き込み) を始めるので使えない扱い"""
+def r1_strict(env=None) -> bool:
+    """厳格モード (環境変数 INH_R1_REQUIRE_SHOWDOWN_ENV が "1")。validate-team を使えないときに SKIP せず fail にする"""
+    return (os.environ if env is None else env).get(INH_R1_REQUIRE_SHOWDOWN_ENV, "") == "1"
+
+
+def r1_unavailable(why: str, strict: bool) -> Exception:
+    """validate-team を使えないときに送る例外。厳格モードは AssertionError (fail)、通常は SkipTest (理由つき SKIP)"""
+    msg = f"validate-team を実行できない: {why}。検証の前の段は test_r1_gate_stage"
+    if strict:
+        return AssertionError(f"{msg} (厳格モード {INH_R1_REQUIRE_SHOWDOWN_ENV}=1 のため SKIP にしない)")
+    return SkipTest(msg)
+
+
+def showdown_dir_for_r1(env=None):
+    """validate-team に使う pokemon-showdown の dir。使えなければ (None, 理由)。
+    環境変数 INH_R1_SHOWDOWN_DIR_ENV (SHOWDOWN_DIR) が立っていればその dir だけを見る (CI の clone 先。黙って他へ退避しない)。
+    立っていなければ sets.SHOWDOWN_DIR → 本体の作業ツリーの dir (ワークツリーには無いため)。
+    dist が無いと CLI が build (書き込み) を始めるので使えない扱い"""
+    env = os.environ if env is None else env
     if not shutil.which("node"):
         return None, "node が PATH に無い"
-    for d in (S.SHOWDOWN_DIR, A.main_repo_root() / "pokemon-showdown"):
-        d = Path(d)
+    explicit = env.get(INH_R1_SHOWDOWN_DIR_ENV, "")
+    dirs = [Path(explicit)] if explicit else [Path(S.SHOWDOWN_DIR), A.main_repo_root() / "pokemon-showdown"]
+    for d in dirs:
         if (d / "pokemon-showdown").exists():
             if not (d / "dist").exists():
                 return None, f"{d}/dist が無い (CLI が build を始めるため使わない)"
             return d, ""
+    if explicit:
+        return None, f"{INH_R1_SHOWDOWN_DIR_ENV}={explicit} に pokemon-showdown の CLI が無い"
     return None, "pokemon-showdown/ が無い (コミットしないデータ。CI では検証の段を実行しない)"
+
+
+def test_r1_showdown_selection() -> None:
+    """厳格モードと Showdown の dir の選び方 (純粋。validate-team は呼ばない)"""
+    assert r1_strict({INH_R1_REQUIRE_SHOWDOWN_ENV: "1"}) is True
+    assert r1_strict({}) is False and r1_strict({INH_R1_REQUIRE_SHOWDOWN_ENV: "0"}) is False
+    assert isinstance(r1_unavailable("x", strict=True), AssertionError)
+    assert isinstance(r1_unavailable("x", strict=False), SkipTest)
+    with tempfile.TemporaryDirectory() as tmp:
+        missing = str(Path(tmp) / "nothing")
+        sd, why = showdown_dir_for_r1({INH_R1_SHOWDOWN_DIR_ENV: missing})
+        if shutil.which("node"):
+            # 明示した dir に CLI が無ければ、本体の作業ツリーの Showdown があってもそこへ退避しない
+            assert sd is None and INH_R1_SHOWDOWN_DIR_ENV in why and missing in why, (sd, why)
+            d = Path(tmp) / "ps"
+            d.mkdir()
+            (d / "pokemon-showdown").write_text("")
+            sd, why = showdown_dir_for_r1({INH_R1_SHOWDOWN_DIR_ENV: str(d)})
+            assert sd is None and "dist が無い" in why, (sd, why)
+            (d / "dist").mkdir()
+            assert showdown_dir_for_r1({INH_R1_SHOWDOWN_DIR_ENV: str(d)}) == (d, "")
+        else:
+            assert sd is None and "node" in why
+    print("test_r1_showdown_selection OK")
 
 
 def r1_route(case: dict, route: str):
@@ -220,12 +270,12 @@ def test_r1_gate_stage() -> None:
 
 def test_r1_real_path_with_showdown() -> None:
     """R1: 不合法な境界例 (expected_legal False) が、構築の実経路 (門 → チーム文 → validate_team_text) を 2 経路とも通らない。
-    validate-team が要る (ローカル Showdown の CLI。無ければ理由つきで SKIP)。
+    validate-team が要る (ローカル Showdown の CLI。無ければ理由つきで SKIP、厳格モードでは fail)。
     前提の確認として、合法な境界例を同じ 6 体のチーム文で検証すると通ること (形式の取り違えや埋める型の不具合で
     全部が落ちて R1 が空振りに合格するのを防ぐ) も見る"""
     sd, why = showdown_dir_for_r1()
     if sd is None:
-        raise SkipTest(f"validate-team を実行できない: {why}。検証の前の段は test_r1_gate_stage")
+        raise r1_unavailable(why, r1_strict())
     rows = [r for r in r1_plan() if r["text"] is not None]
     results = S.validate_team_texts([r["text"] for r in rows], R1_FORMAT, workers=INH_SETLINT_WORKERS, showdown_dir=sd)
     run_failed = [f"{r['case_id']} [{r['route']}]: {errs[:1]}" for r, (ok, errs) in zip(rows, results)
@@ -316,7 +366,7 @@ def report_legal_tactical() -> None:
 
 def main() -> None:
     tests = [test_pure_helpers, test_registered_and_chaos_conversion, test_fixture_shape,
-             test_r1_gate_stage, test_r1_real_path_with_showdown, test_r2_no_silent_change, test_r3_repair_keeps_form]
+             test_r1_showdown_selection, test_r1_gate_stage, test_r1_real_path_with_showdown, test_r2_no_silent_change, test_r3_repair_keeps_form]
     failed, skipped = [], []
     for t in tests:
         try:
