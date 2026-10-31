@@ -22,6 +22,10 @@
 # どれも無ければ何も足さない (従来どおり DB の最新 snapshot・logs/real_opponents/bank.json)。不正値・矛盾に加え、指定 snapshot が
 # DB に無い・写しが無い・sha16 が違う・元のバンクそのものを指すときも、何も起動・停止しないうちに止める。写しは
 # python -m tools.advice_mode --freeze-data で作る (表示された 3 行を config/advice.local.env に書く)。
+# 2026-10-31 モデルの実体の固定 (KNOWN_ISSUES E-inh-4): ADVICE_RL_POLICY / ADVICE_RL_POLICY_SHA16 (RL 方策) と ADVICE_SELECTION_MODEL /
+# ADVICE_SELECTION_MODEL_SHA16 (助言の選出モデル) も同じ規則で決める (--model-pin)。値のある鍵だけを uvicorn のサブシェルに export し、
+# 設定元は ADVICE_MODEL_PIN_SOURCE。どれも無ければ何も足さない (従来どおりの読み込み順。退避は version 行の runtime に残る)。
+# ファイルが無い・sha16 が違うときは、何も起動・停止しないうちに止める。写しは --freeze-data --with-models で作る。
 
 # 判定に使う python (launchd は PATH だけなので venv を直接指す。ADVICE_ENV_PYTHON で差し替え可 = テスト用)
 _advice_env_python() {
@@ -36,9 +40,10 @@ advice_env_resolve() {
   py="$(_advice_env_python)"
   ADVICE_ENV_MODE=""; ADVICE_ENV_SOURCE=""; ADVICE_ENV_SENS=""; ADVICE_ENV_SENS_SOURCE=""
   ADVICE_ENV_PIN_SNAP=""; ADVICE_ENV_PIN_BANK=""; ADVICE_ENV_PIN_SHA=""; ADVICE_ENV_PIN_SOURCE=""
+  ADVICE_ENV_RL=""; ADVICE_ENV_RL_SHA=""; ADVICE_ENV_SEL=""; ADVICE_ENV_SEL_SHA=""; ADVICE_ENV_MODEL_SOURCE=""
   # ファイルはこのリポジトリのルート (source する側が cd 済み) からの相対で渡す
-  if ! out="$("$py" -m tools.advice_mode --resolve --sensitivity --data-pin --file config/advice.local.env)"; then
-    echo "採点方式・データの固定の設定が不正なので起動しません (config/advice.local.env / 環境変数 ADVICE_SCORING_MODE・TRANSITION_SENSITIVITY・ADVICE_USAGE_SNAPSHOT・ADVICE_REAL_BANK・ADVICE_REAL_BANK_SHA16 を確認)" >&2
+  if ! out="$("$py" -m tools.advice_mode --resolve --sensitivity --data-pin --model-pin --file config/advice.local.env)"; then
+    echo "採点方式・データの固定・モデルの固定の設定が不正なので起動しません (config/advice.local.env / 環境変数 ADVICE_SCORING_MODE・TRANSITION_SENSITIVITY・ADVICE_USAGE_SNAPSHOT・ADVICE_REAL_BANK・ADVICE_REAL_BANK_SHA16・ADVICE_RL_POLICY・ADVICE_SELECTION_MODEL (と各 _SHA16) を確認)" >&2
     return 1
   fi
   while IFS= read -r line; do
@@ -51,10 +56,15 @@ advice_env_resolve() {
       ADVICE_REAL_BANK=*) ADVICE_ENV_PIN_BANK="${line#ADVICE_REAL_BANK=}";;
       ADVICE_REAL_BANK_SHA16=*) ADVICE_ENV_PIN_SHA="${line#ADVICE_REAL_BANK_SHA16=}";;
       ADVICE_DATA_PIN_SOURCE=*) ADVICE_ENV_PIN_SOURCE="${line#ADVICE_DATA_PIN_SOURCE=}";;
+      ADVICE_RL_POLICY=*) ADVICE_ENV_RL="${line#ADVICE_RL_POLICY=}";;
+      ADVICE_RL_POLICY_SHA16=*) ADVICE_ENV_RL_SHA="${line#ADVICE_RL_POLICY_SHA16=}";;
+      ADVICE_SELECTION_MODEL=*) ADVICE_ENV_SEL="${line#ADVICE_SELECTION_MODEL=}";;
+      ADVICE_SELECTION_MODEL_SHA16=*) ADVICE_ENV_SEL_SHA="${line#ADVICE_SELECTION_MODEL_SHA16=}";;
+      ADVICE_MODEL_PIN_SOURCE=*) ADVICE_ENV_MODEL_SOURCE="${line#ADVICE_MODEL_PIN_SOURCE=}";;
     esac
   done <<< "$out"
   if [ -z "$ADVICE_ENV_MODE" ] || [ -z "$ADVICE_ENV_SOURCE" ] || [ -z "$ADVICE_ENV_SENS" ] || [ -z "$ADVICE_ENV_SENS_SOURCE" ] \
-     || [ -z "$ADVICE_ENV_PIN_SOURCE" ]; then
+     || [ -z "$ADVICE_ENV_PIN_SOURCE" ] || [ -z "$ADVICE_ENV_MODEL_SOURCE" ]; then
     echo "採点方式を決められませんでした (tools.advice_mode --resolve の出力: $out)" >&2
     return 1
   fi
@@ -64,6 +74,11 @@ advice_env_resolve() {
     echo "データの固定: なし (使用率は DB の最新 snapshot、実戦バンクは logs/real_opponents/bank.json)"
   else
     echo "データの固定: snapshot ${ADVICE_ENV_PIN_SNAP:-最新} / バンク ${ADVICE_ENV_PIN_BANK:-logs/real_opponents/bank.json}${ADVICE_ENV_PIN_SHA:+ (sha16 $ADVICE_ENV_PIN_SHA)} (設定元 $ADVICE_ENV_PIN_SOURCE)"
+  fi
+  if [ "$ADVICE_ENV_MODEL_SOURCE" = default ]; then
+    echo "モデルの固定: なし (RL 方策は読み込み順、選出モデルは 試用 Package → 登録チーム向け → 配布版)"
+  else
+    echo "モデルの固定: RL 方策 ${ADVICE_ENV_RL:-固定なし}${ADVICE_ENV_RL_SHA:+ (sha16 $ADVICE_ENV_RL_SHA)} / 選出モデル ${ADVICE_ENV_SEL:-固定なし}${ADVICE_ENV_SEL_SHA:+ (sha16 $ADVICE_ENV_SEL_SHA)} (設定元 $ADVICE_ENV_MODEL_SOURCE)"
   fi
 }
 
@@ -82,6 +97,12 @@ advice_env_export() {
   [ -n "${ADVICE_ENV_PIN_BANK:-}" ] && export ADVICE_REAL_BANK="$ADVICE_ENV_PIN_BANK"
   [ -n "${ADVICE_ENV_PIN_SHA:-}" ] && export ADVICE_REAL_BANK_SHA16="$ADVICE_ENV_PIN_SHA"
   export ADVICE_DATA_PIN_SOURCE="${ADVICE_ENV_PIN_SOURCE:-default}"
+  # モデルの固定 (2026-10-31): 値のある鍵だけ (無い鍵は足さない = 従来どおりの読み込み順)
+  [ -n "${ADVICE_ENV_RL:-}" ] && export ADVICE_RL_POLICY="$ADVICE_ENV_RL"
+  [ -n "${ADVICE_ENV_RL_SHA:-}" ] && export ADVICE_RL_POLICY_SHA16="$ADVICE_ENV_RL_SHA"
+  [ -n "${ADVICE_ENV_SEL:-}" ] && export ADVICE_SELECTION_MODEL="$ADVICE_ENV_SEL"
+  [ -n "${ADVICE_ENV_SEL_SHA:-}" ] && export ADVICE_SELECTION_MODEL_SHA16="$ADVICE_ENV_SEL_SHA"
+  export ADVICE_MODEL_PIN_SOURCE="${ADVICE_ENV_MODEL_SOURCE:-default}"
   return 0
 }
 

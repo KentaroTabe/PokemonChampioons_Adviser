@@ -2012,13 +2012,15 @@ def state_schema_counts(rows: list) -> dict:
 
 
 def load_records(path: Path) -> list:
-    out = []
-    for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
-        try:
-            out.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return out
+    """対戦ログの記録の列 (壊れた行・dict でない行は除く)。飛ばした行も要るときは load_records_report"""
+    return load_records_report(path)[0]
+
+
+def load_records_report(path: Path) -> tuple:
+    """(記録の列, 壊れた行 [{"line", "head"}]) (副作用: 読み取り。2026-10-31 E-inh-4: 壊れた行を黙って飛ばしていた。
+    _load_logs が件数をログごとの bad_lines と conditions.bad_lines に出す)"""
+    from tools.jsonl_lines import read_jsonl
+    return read_jsonl(path)
 
 
 def _code_info() -> dict:
@@ -2415,7 +2417,7 @@ def _load_logs(paths: list, gap_sec: float) -> list:
     """対象のログを読み、決定点に間引く (副作用: 読み込み・表示)"""
     logs = []
     for p in paths:
-        recs = load_records(p)
+        recs, bad = load_records_report(p)
         rows = battle_advice_rows(recs)
         dec = thin_by_gap(rows, gap_sec)
         modes_used: dict = {}
@@ -2431,7 +2433,9 @@ def _load_logs(paths: list, gap_sec: float) -> list:
                      "versions": log_versions(recs), "ident": version_identity(recs),
                      "decision_versions": versions_by_row(recs, dec),
                      "fallback_decisions": decision_fallback_rows(recs), "advice_counts": advice_row_counts(recs),
-                     "inputs_pin": inputs_pin_rows(recs)})
+                     "inputs_pin": inputs_pin_rows(recs),
+                     # 読めなかった行 (2026-10-31 E-inh-4。集計から除いた行の件数と行番号 (先頭 20))
+                     "bad_lines": len(bad), "bad_line_numbers": [b["line"] for b in bad[:20]]})
     n_dec = sum(lg["n_decisions"] for lg in logs)
     print(f"ログ {len(logs)} 本、advice 行 {sum(lg['n_advice_rows'] for lg in logs)} → 決定点 {n_dec} (間引き {gap_sec} 秒)")
     for lg in logs:
@@ -2440,7 +2444,17 @@ def _load_logs(paths: list, gap_sec: float) -> list:
               f"state の版 {lg['state_schemas']}")
         if lg["inputs_pin"]["n"]:
             print(f"  ⚠ {lg['name']}: 不成立 ({inputs_pin_text(lg['inputs_pin'])})")
+    bl = bad_lines_of(logs)
+    if bl["n"]:
+        from tools.jsonl_lines import bad_lines_text
+        print(f"  ⚠ {bad_lines_text(bl)}")
     return logs
+
+
+def bad_lines_of(logs: list) -> dict:
+    """ログの列の読めなかった行の集計 {"n", "files": {ログ: 件数}} (純粋。2026-10-31 E-inh-4)"""
+    files = {lg["name"]: int(lg.get("bad_lines") or 0) for lg in logs if lg.get("bad_lines")}
+    return {"n": sum(files.values()), "files": files}
 
 
 def run(paths: list, out_dir: Optional[Path], gap_sec: float = DECISION_GAP_SEC, dry_run: bool = False,
@@ -2574,6 +2588,7 @@ def run(paths: list, out_dir: Optional[Path], gap_sec: float = DECISION_GAP_SEC,
                        "gap_sec": gap_sec, "stale_hp_sec": REAL_ACCEPT_STALE_HP_SEC,
                        "display_deadline_sec": REAL_ACCEPT_DISPLAY_DEADLINE_SEC,
                        "n_advice_rows": sum(lg["n_advice_rows"] for lg in logs),
+                       "bad_lines": bad_lines_of(logs),
                        "inputs_pin": {lg["name"]: lg["inputs_pin"] for lg in logs},
                        "target": {"fixed": target_fixed, "by_mode": by_mode, "delta": group["delta"]},
                        "logs": [{k: v for k, v in lg.items() if k not in LOG_INTERNAL_KEYS}
@@ -2588,6 +2603,9 @@ def run(paths: list, out_dir: Optional[Path], gap_sec: float = DECISION_GAP_SEC,
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
     md = render_markdown(result) + data_versions_markdown(data_versions)
+    from tools.jsonl_lines import bad_lines_text
+    if bad_lines_of(logs)["n"]:
+        md += f"\n⚠ {bad_lines_text(bad_lines_of(logs))}\n"
     (out_dir / "report.md").write_text(md, encoding="utf-8")
     print(md)
     print(f"保存: {out_dir}")

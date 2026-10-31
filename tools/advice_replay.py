@@ -438,13 +438,15 @@ def _best_margin(advice: dict) -> float:
 
 
 def _read_records(path: Path) -> list:
-    out = []
-    for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
-        try:
-            out.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return out
+    """対戦ログの記録の列 (壊れた行・dict でない行は除く)。飛ばした行も要るときは _read_records_report"""
+    return _read_records_report(path)[0]
+
+
+def _read_records_report(path: Path) -> tuple:
+    """(記録の列, 壊れた行 [{"line", "head"}]) (副作用: 読み取り。2026-10-31 E-inh-4: 壊れた行を黙って飛ばしていた。
+    run が件数を結果の bad_lines に出す)"""
+    from tools.jsonl_lines import read_jsonl
+    return read_jsonl(path)
 
 
 def _pin_error_of(adv) -> Optional[str]:
@@ -463,12 +465,17 @@ def run(paths: list, out_path: Path, data_mode: str = "restore") -> dict:
     resolver = NameResolver()
     ds = DataSwitch(data_mode)
 
+    from tools.jsonl_lines import bad_lines_summary, bad_lines_text
     decisions = []
     records = {}
+    bad_by_file = {}
     for p in paths:
         decisions += extract_decisions(p)
-        records[p.name] = _read_records(p)
+        records[p.name], bad_by_file[p.name] = _read_records_report(p)
+    bad_lines = bad_lines_summary(bad_by_file)
     print(f"決定点 {len(decisions)}件 ({len(paths)}ログ)")
+    if bad_lines["n"]:
+        print(f"⚠ {bad_lines_text(bad_lines)}")
 
     stats = {name: {"applicable": 0, "flips": 0, "big_margin_flips": 0,
                     "examples": []}
@@ -558,6 +565,7 @@ def run(paths: list, out_path: Path, data_mode: str = "restore") -> dict:
               "replay_inputs": replay_input_counts(infos),
               "data_mode": data_mode, "data_versions": data_versions,
               "stats": stats, "inputs_pin_failures": pin_failures,
+              "bad_lines": bad_lines,      # 読めなかった行 {"n", "files": {ログ: 件数}} (2026-10-31 E-inh-4)
               "logs": [p.name for p in paths]}
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(result, ensure_ascii=False, indent=1),

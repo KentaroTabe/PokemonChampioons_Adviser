@@ -280,7 +280,11 @@ def make_rl_leaf_fn(leaf_ctx: Optional[dict]):
         from advisor.rl_bridge import value_of_sim, _load_model
         if _load_model() is None:
             return None
-    except Exception:
+    except Exception as e:
+        # 明示した RL 方策を読めない (advisor.data_pin.InputsPinError、2026-10-31 E-inh-4) は RL なしとして握りつぶさない
+        from advisor.data_pin import InputsPinError
+        if isinstance(e, InputsPinError):
+            raise
         return None
     my_moves = leaf_ctx.get("my_moves") or []
     fieldv = leaf_ctx.get("field")

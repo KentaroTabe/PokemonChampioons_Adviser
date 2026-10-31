@@ -355,37 +355,69 @@ def mutate(team_text: str, pool_rows: list, rng: random.Random,
 # 引く。実際に使われている型の範囲なので一貫性も保たれる。
 
 _usage_cache: dict | None = None
+# (版, 作った dict) = ここで _usage_cache を作ったときの advisor.data_pin の版 (db / snapshot / pinned) とその dict。
+# 外から入れた _usage_cache (テストの stub 等。dict が違う) は版を問わずそのまま使う (従来どおり)
+_usage_cache_key: tuple | None = None
+
+
+def _usage_rows_to_alts(conn, snap) -> dict:
+    """snapshot の move / item / spread の行 → 種族id -> {"moves", "items", "spreads"} (conn は row_factory = sqlite3.Row)"""
+    out: dict = {}
+    for r in conn.execute(
+            """SELECT pokemon_name, move_name, usage_percent
+               FROM move_usage WHERE snapshot_id = ?""", (snap,)):
+        out.setdefault(_to_id(r["pokemon_name"]),
+                       {"moves": [], "items": [], "spreads": []})[
+            "moves"].append((r["move_name"], r["usage_percent"]))
+    for r in conn.execute(
+            """SELECT pokemon_name, item_name, usage_percent
+               FROM item_usage WHERE snapshot_id = ?""", (snap,)):
+        out.setdefault(_to_id(r["pokemon_name"]),
+                       {"moves": [], "items": [], "spreads": []})[
+            "items"].append((r["item_name"], r["usage_percent"]))
+    for r in conn.execute(
+            """SELECT pokemon_name, nature, evs, usage_percent
+               FROM spread_usage WHERE snapshot_id = ?""", (snap,)):
+        out.setdefault(_to_id(r["pokemon_name"]),
+                       {"moves": [], "items": [], "spreads": []})[
+            "spreads"].append(
+                (r["nature"], r["evs"], r["usage_percent"]))
+    return out
 
 
 def _usage_alternatives() -> dict:
     """種族id -> {"moves": [(技, %)], "items": [(持ち物, %)],
-    "spreads": [(性格, EV文字列, %)]} (最新スナップショット)"""
-    global _usage_cache
-    if _usage_cache is None:
-        out: dict = {}
-        with db.get_connection() as conn:
-            snap = db.latest_snapshot_id(conn, fmt=USAGE_TARGET_FORMAT)
-            if snap:
-                for r in conn.execute(
-                        """SELECT pokemon_name, move_name, usage_percent
-                           FROM move_usage WHERE snapshot_id = ?""", (snap,)):
-                    out.setdefault(_to_id(r["pokemon_name"]),
-                                   {"moves": [], "items": [], "spreads": []})[
-                        "moves"].append((r["move_name"], r["usage_percent"]))
-                for r in conn.execute(
-                        """SELECT pokemon_name, item_name, usage_percent
-                           FROM item_usage WHERE snapshot_id = ?""", (snap,)):
-                    out.setdefault(_to_id(r["pokemon_name"]),
-                                   {"moves": [], "items": [], "spreads": []})[
-                        "items"].append((r["item_name"], r["usage_percent"]))
-                for r in conn.execute(
-                        """SELECT pokemon_name, nature, evs, usage_percent
-                           FROM spread_usage WHERE snapshot_id = ?""", (snap,)):
-                    out.setdefault(_to_id(r["pokemon_name"]),
-                                   {"moves": [], "items": [], "spreads": []})[
-                        "spreads"].append(
-                            (r["nature"], r["evs"], r["usage_percent"]))
-        _usage_cache = out
+    "spreads": [(性格, EV文字列, %)]} (最新スナップショット)。
+    読む版は advisor.data_pin (2026-10-31 E-inh-4: 登録の本文の配分・性格の補完が、版を指定しても最新を読んでいた):
+      - 版を明示したとき: その DB を読み取り専用で開き、明示した snapshot (無ければその DB の最新) だけを読む。
+        DB・snapshot が無い・読めなければ InputsPinError (最新へ退避しない)
+      - 明示が無いとき: 従来どおり (既定の DB の USAGE_TARGET_FORMAT の最新)
+    結果は版ごとに 1 回だけ作る (版が変われば作り直す。_usage_cache = None でも作り直す。外から入れた _usage_cache はそのまま使う)"""
+    global _usage_cache, _usage_cache_key
+    from advisor.data_pin import usage_source
+    src = usage_source()
+    key = (str(src["db"]), src["snapshot_id"], True) if src["pinned"] else (None, None, False)
+    built_here = _usage_cache_key is not None and _usage_cache_key[1] is _usage_cache
+    if _usage_cache is None or (built_here and _usage_cache_key[0] != key):
+        if src["pinned"]:
+            import sqlite3
+            from advisor.data_pin import InputsPinError, connect_usage, resolve_snapshot
+            conn = connect_usage(src["db"], True)
+            try:
+                conn.row_factory = sqlite3.Row
+                snap = resolve_snapshot(conn, src["snapshot_id"], True)
+                out = _usage_rows_to_alts(conn, snap)
+            except sqlite3.Error as e:
+                raise InputsPinError(f"明示した使用率 DB {src['db']} の型の使用率を読めない: {e}") from e
+            finally:
+                conn.close()
+        else:
+            out = {}
+            with db.get_connection() as conn:
+                snap = db.latest_snapshot_id(conn, fmt=USAGE_TARGET_FORMAT)
+                if snap:
+                    out = _usage_rows_to_alts(conn, snap)
+        _usage_cache, _usage_cache_key = out, (key, out)
     return _usage_cache
 
 

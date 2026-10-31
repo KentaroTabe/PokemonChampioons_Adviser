@@ -642,7 +642,7 @@ def attach_model_pick(advice: dict, my_party: list, opp_party: list) -> None:
             return
         # 試用中 Package (experiment ラベル) に同梱の選出モデルがあり、パーティがその 6 体なら、それを使う (2026-09-25)。
         # 次に登録チーム向けのモデル (registered:<6 体の鍵>、2026-10-06)、無ければ配布版 (以前の my_team に寄せた微調整済み)
-        from champions_agent.agent.selection_dispatch import advisor_model_path, model_label
+        from champions_agent.agent.selection_dispatch import PINNED_SOURCE, advisor_model_path, model_label
         model_path, package_id = advisor_model_path(mine)
         best = predict_best(
             mine, [p.get("species_id") for p in opp_party if p.get("species_id")], path=model_path)
@@ -659,8 +659,9 @@ def attach_model_pick(advice: dict, my_party: list, opp_party: list) -> None:
         assignee = rule_assign if rule_assign in holders else (holders[0] if holders else None)
         advice["model_pick"] = {
             "names": names, "win_prob": round(prob, 3), "indices": indices,
-            # Package / 登録チーム向けのモデルはそのパーティで適応済み。配布版は学習分布に入っているかで参考値かどうかを示す
-            "trained": True if package_id else is_in_distribution(mine),
+            # Package / 登録チーム向けのモデルはそのパーティで適応済み。配布版は学習分布に入っているかで参考値かどうかを示す。
+            # 固定した選出モデルで中身がどれとも違うもの (pinned、2026-10-31) は学習の有無が分からないので配布版と同じ扱い
+            "trained": True if (package_id and package_id != PINNED_SOURCE) else is_in_distribution(mine),
             "model": model_label(package_id),
             "recommend": [{"index": k, "name": names[j], "lead": j == 0, "mega_holder": k in holders, "mega_assign": k == assignee}
                           for j, k in enumerate(indices)],
@@ -686,8 +687,12 @@ def attach_model_pick(advice: dict, my_party: list, opp_party: list) -> None:
                     }
         except Exception:
             pass
-    except Exception:
-        pass
+    except Exception as e:
+        # 固定した選出モデルが無い・sha16 が違う (advisor.data_pin.InputsPinError、2026-10-31 E-inh-4) は握りつぶさない
+        # (配布版や規則の推奨へ黙って退避しない。advisor.service が固定入力の異常の結果にする)
+        from advisor.data_pin import InputsPinError
+        if isinstance(e, InputsPinError):
+            raise
 
 
 def choose_primary(advice: dict, prefer_model: Optional[bool] = None, allow_untrained: Optional[bool] = None) -> dict:
@@ -732,7 +737,12 @@ def choose_primary(advice: dict, prefer_model: Optional[bool] = None, allow_untr
 
 
 def format_selection_advice(advice: dict) -> str:
-    if not advice.get("ok"):
+    from advisor.data_pin import is_pin_error_result
+    if is_pin_error_result(advice):
+        # 固定入力の異常 (2026-10-31 E-inh-4: 固定した選出モデル・使用率の版が無い等)。推奨を出さない
+        from champions_agent.config import INPUTS_PIN_STOP_TEXT
+        base = f"[選出評価不可] {INPUTS_PIN_STOP_TEXT}: {advice.get('error')}"
+    elif not advice.get("ok"):
         base = f"[選出評価不可] {advice.get('reason')}"
     elif advice.get("primary") == "model":
         rec = advice["recommend"]

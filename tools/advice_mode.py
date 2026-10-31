@@ -38,6 +38,18 @@ ADVICE_REAL_BANK (実戦バンクの写しのパス)・ADVICE_REAL_BANK_SHA16 (�
 
     python -m tools.advice_mode --resolve --sensitivity --data-pin [--file PATH] [--root DIR]   # advice_env.sh が使う (8 行)
     python -m tools.advice_mode --freeze-data [--out-dir DIR] [--usage-db DB] [--bank BANK]     # 写しを作り、書く 3 行を出す
+
+2026-10-31 モデルの実体の固定 (KNOWN_ISSUES E-inh-4、レビュー 2026-10-31 判断 4): 同じファイルに ADVICE_RL_POLICY (RL 方策の .zip の
+パス)・ADVICE_RL_POLICY_SHA16 (任意)・ADVICE_SELECTION_MODEL (助言の選出モデルの .pt のパス)・ADVICE_SELECTION_MODEL_SHA16 (任意) も書ける。
+規則はデータの固定と同じ (ファイル → 環境変数、矛盾・不正値はエラー、パスの無い sha16 はエラー)。書けば助言はそのファイルだけを読み、
+無い・sha16 が違えば止める (advisor.data_pin.InputsPinError。ema → best → 無印 の順送り、登録チーム向け → 配布版 の退避をしない)。
+書かなければ従来どおり (退避したことは version 行の runtime に残る)。advice_env.sh は --model-pin の結果のうち値のある鍵だけを
+uvicorn のサブシェルに export し、設定元を ADVICE_MODEL_PIN_SOURCE に渡す。--model-pin はファイルがあること・sha16 の一致も起動の前に
+確かめる。server も起動時に同じ検査をする (model_pin_startup_check)。写しは --freeze-data --with-models で作る (今読まれるはずの
+RL 方策と、登録チームに使われるはずの選出モデルを写し、書く 4 行を足して出す):
+
+    python -m tools.advice_mode --resolve --sensitivity --data-pin --model-pin [--file PATH] [--root DIR]   # advice_env.sh (13 行)
+    python -m tools.advice_mode --freeze-data --with-models [--rl-policy ZIP] [--selection-model PT]       # 3 行 + 4 行
 """
 from __future__ import annotations
 
@@ -48,7 +60,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from champions_agent.config import (ADVICE_SCORING_MODES, REAL_BANK_ENV, REAL_BANK_PATH, REAL_BANK_SHA_ENV,
+from champions_agent.config import (ADVICE_SCORING_MODES, REAL_BANK_ENV, REAL_BANK_PATH, REAL_BANK_SHA_ENV, RL_POLICY_PIN_ENV,
+                                    RL_POLICY_SHA_ENV, SELECTION_MODEL_PIN_ENV, SELECTION_MODEL_SHA_ENV,
                                     TRANSITION_SENSITIVITY_ENV, USAGE_SNAPSHOT_ENV)
 
 REPO = Path(__file__).resolve().parent.parent
@@ -65,7 +78,15 @@ PIN_SHA_KEY = REAL_BANK_SHA_ENV                 # "ADVICE_REAL_BANK_SHA16" (任�
 PIN_KEYS = (PIN_SNAPSHOT_KEY, PIN_BANK_KEY, PIN_SHA_KEY)
 PIN_SOURCE_KEY = "ADVICE_DATA_PIN_SOURCE"
 PIN_FREEZE_DIR_REL = "logs/pinned_data"         # --freeze-data の既定の書き出し先 (時刻のディレクトリを作る)
-ALLOWED_KEYS = (ENV_KEY, SENS_KEY) + PIN_KEYS
+# 2026-10-31 モデルの実体の固定 (E-inh-4): RL 方策と助言の選出モデルのファイル (パスと任意の sha16)
+MODEL_RL_KEY = RL_POLICY_PIN_ENV                # "ADVICE_RL_POLICY"
+MODEL_RL_SHA_KEY = RL_POLICY_SHA_ENV            # "ADVICE_RL_POLICY_SHA16"
+MODEL_SEL_KEY = SELECTION_MODEL_PIN_ENV         # "ADVICE_SELECTION_MODEL"
+MODEL_SEL_SHA_KEY = SELECTION_MODEL_SHA_ENV     # "ADVICE_SELECTION_MODEL_SHA16"
+MODEL_PIN_KEYS = (MODEL_RL_KEY, MODEL_RL_SHA_KEY, MODEL_SEL_KEY, MODEL_SEL_SHA_KEY)
+MODEL_SHA_OF = {MODEL_RL_SHA_KEY: MODEL_RL_KEY, MODEL_SEL_SHA_KEY: MODEL_SEL_KEY}   # sha16 の鍵 → そのパスの鍵
+MODEL_PIN_SOURCE_KEY = "ADVICE_MODEL_PIN_SOURCE"
+ALLOWED_KEYS = (ENV_KEY, SENS_KEY) + PIN_KEYS + MODEL_PIN_KEYS
 SOURCES = ("file", "env", "default")
 DEFAULT_MODE = "legacy"
 LOCAL_FILE_REL = "config/advice.local.env"
@@ -277,6 +298,12 @@ def check_pin_value(key: str, raw: Optional[str], where: str) -> Optional[str]:
         return v.lower()
     if key == PIN_BANK_KEY:
         return v
+    if key in MODEL_SHA_OF:
+        if not _SHA16_RE.match(v.lower()):
+            raise AdviceModeError(f"{where}: {key}={raw!r} は sha256 の先頭 16 桁 (16 進 16 文字) でない")
+        return v.lower()
+    if key in (MODEL_RL_KEY, MODEL_SEL_KEY):
+        return v
     raise AdviceModeError(f"{where}: {key} はデータの固定の鍵でない")
 
 
@@ -301,6 +328,57 @@ def resolve_data_pin(file_text: Optional[str], env: Optional[dict], label: str =
     used = [s for s in ("file", "env") if s in sources.values()]
     return {"values": values, "sources": sources, "source": "+".join(used) if used else "default",
             "pinned": any(v is not None for v in values.values())}
+
+
+def resolve_model_pin(file_text: Optional[str], env: Optional[dict], label: str = LOCAL_FILE_REL) -> dict:
+    """実機の起動時のモデルの固定を決める (純粋。規則は resolve_data_pin と同じ: 鍵ごとにファイル → 環境変数 → 無ければ未設定 = 従来どおり)。
+    {"values": {鍵: 値 or None}, "sources": {鍵: file / env / None}, "source": file / env / file+env / default, "pinned"}。
+    不正値・ファイルと環境変数の矛盾・パスの無い sha16 は AdviceModeError"""
+    e = env or {}
+    fvals = parse_local_env(file_text, label) if file_text is not None else {}
+    values, sources = {}, {}
+    for k in MODEL_PIN_KEYS:
+        fv = check_pin_value(k, fvals.get(k), label)
+        ev = check_pin_value(k, e.get(k), f"環境変数 {k}")
+        if fv is not None and ev is not None and fv != ev:
+            raise AdviceModeError(f"{label} の {k}={fv} と環境変数 {k}={ev} が矛盾している "
+                                  f"(どちらかに揃えるか、環境変数を外して起動し直す)")
+        values[k] = fv if fv is not None else ev
+        sources[k] = "file" if fv is not None else "env" if ev is not None else None
+    for sha_key, path_key in MODEL_SHA_OF.items():
+        if values[sha_key] is not None and values[path_key] is None:
+            raise AdviceModeError(f"{sha_key} だけが書かれている ({path_key} (ファイルのパス) と一緒に書く)")
+    used = [s for s in ("file", "env") if s in sources.values()]
+    return {"values": values, "sources": sources, "source": "+".join(used) if used else "default",
+            "pinned": any(v is not None for v in values.values())}
+
+
+def model_pin_values_text(values: Optional[dict]) -> str:
+    """モデルの固定の値の文言 (純粋)"""
+    if not values or not any(values.values()):
+        return "なし (RL 方策は読み込み順 ema → best → 無印、選出モデルは 試用 Package → 登録チーム向け → 配布版)"
+    parts = []
+    for name, pk, sk in (("RL 方策", MODEL_RL_KEY, MODEL_RL_SHA_KEY), ("選出モデル", MODEL_SEL_KEY, MODEL_SEL_SHA_KEY)):
+        if values.get(pk):
+            parts.append(f"{name} {values[pk]}" + (f" (sha16 {values[sk]})" if values.get(sk) else ""))
+        else:
+            parts.append(f"{name} 固定なし")
+    return " / ".join(parts)
+
+
+def model_pin_file_view(text: Optional[str], label: str = LOCAL_FILE_REL) -> dict:
+    """表示用のモデルの固定の設定値 (純粋。例外を投げない)。{"path", "exists", "values", "pinned", "error"}"""
+    try:
+        r = resolve_model_pin(text, {}, label)
+        return {"path": label, "exists": text is not None, "values": r["values"], "pinned": r["pinned"], "error": None}
+    except AdviceModeError as err:
+        return {"path": label, "exists": text is not None, "values": None, "pinned": None, "error": str(err)}
+
+
+def model_spec_of(values: dict) -> dict:
+    """モデルの固定の値 → advisor.data_pin.model_spec_from_env の形 (純粋)"""
+    return {"rl_policy": values.get(MODEL_RL_KEY), "rl_policy_sha16": values.get(MODEL_RL_SHA_KEY),
+            "selection_model": values.get(MODEL_SEL_KEY), "selection_model_sha16": values.get(MODEL_SEL_SHA_KEY)}
 
 
 def pin_file_view(text: Optional[str], label: str = LOCAL_FILE_REL) -> dict:
@@ -452,6 +530,94 @@ def data_pin_startup_check(env: Optional[dict] = None, path: Path = LOCAL_FILE) 
     return pin_startup_line(pin_env_values(e), pin_source_of_env(e), view, verified)
 
 
+def precheck_model_pin(values: dict, root: Path) -> Optional[dict]:
+    """固定したモデルのファイルが読めることを起動の前に確かめる (副作用: 読み取り)。相対パスは root から。固定が無ければ None。
+    ファイルが無い・sha16 が違う → AdviceModeError"""
+    from advisor import data_pin as DP
+    if not any(values.get(k) for k in MODEL_PIN_KEYS):
+        return None
+    try:
+        return DP.verify_model_spec(model_spec_of(values), cwd=Path(root))
+    except DP.InputsPinError as err:
+        raise AdviceModeError(str(err))
+
+
+def model_pin_startup_check(env: Optional[dict] = None, path: Path = LOCAL_FILE) -> str:
+    """server.py の起動時のモデルの固定の検査と起動ログの 1 行 (2026-10-31 E-inh-4)。実効値は環境変数 (advice_env.sh が uvicorn にだけ
+    渡す)。値が不正・ファイルが無い・sha16 が違う → SystemExit (別のファイルへ退避しない)"""
+    from advisor import data_pin as DP
+    e = os.environ if env is None else env
+    try:
+        vals = resolve_model_pin(None, e)["values"]
+        verified = None
+        if any(vals.values()):
+            verified = DP.verify_model_spec(model_spec_of(vals))
+    except (AdviceModeError, DP.InputsPinError) as err:
+        raise SystemExit(f"[server] 起動を中止 (モデルの固定): {err}")
+    try:
+        view = model_pin_file_view(read_local_text(path))
+    except OSError as err:
+        view = {"path": str(path), "exists": True, "values": None, "pinned": None, "error": str(err)}
+    src = (e.get(MODEL_PIN_SOURCE_KEY) or "").strip() or ("env" if any(vals.values()) else None)
+    eff = model_pin_values_text(vals)
+    if verified:
+        got = [f"{k} sha16 {verified[k + '_sha16']}" for k in ("rl_policy", "selection_model") if k in verified]
+        eff += f" [{', '.join(got)}]"
+    conf = (f"読めない ({view['error']})" if view.get("error") else
+            f"{model_pin_values_text(view['values'])} ({view['path']})" if view.get("pinned") else
+            f"未設定 ({view['path']} {'に鍵なし' if view.get('exists') else 'なし'})")
+    line = f"モデルの固定: 実効値 {eff} / 設定元 {src or '記録なし'} / 設定値 {conf}"
+    if not view.get("error") and view.get("values") is not None:
+        norm = lambda d: {k: (d.get(k) or "").lower() if k in MODEL_SHA_OF else (d.get(k) or "") for k in MODEL_PIN_KEYS}
+        if norm(view["values"]) != norm(vals):
+            line += " ⚠ 設定値と実効値が食い違う (advice_env.sh を通さずに起動したか、設定を変えて再起動していない)"
+    return line
+
+
+def default_model_sources() -> dict:
+    """--freeze-data --with-models の既定の写し元 (副作用: ファイルの有無・登録の読み取り): RL 方策は advisor.rl_bridge の読み込み順
+    (固定しないとき) で読まれるはずのファイル、選出モデルは登録チーム (直近の選出ロスター) に使われるはずのファイル
+    (selection_dispatch.advisor_model_choice、固定しないとき)。{"rl_policy": Path, "selection_model": Path, "selection_source": id}"""
+    from advisor import rl_bridge as RB
+    from advisor.versions import _registered_team
+    from champions_agent.agent.selection_dispatch import _model_chain
+    order = RB._policy_candidates(os.environ.get("RL_ADVICE_STYLE", "balance"), os.environ.get("RL_POLICY_SOURCE", "ema"))
+    name, _fb = RB.policy_choice(order, lambda n: (RB.CKPT_DIR / n).exists())
+    _sha, species = _registered_team()
+    sel, src, _why = _model_chain(species or None, None, None)
+    return {"rl_policy": RB.CKPT_DIR / name, "selection_model": Path(sel), "selection_source": src}
+
+
+def freeze_models(out_dir: Path, rl_policy: Path, selection_model: Path) -> dict:
+    """モデルの写しを作る (副作用: out_dir/rl_policy.zip・selection_model.pt を書く。設定ファイルは書き換えない)。
+    複製の前後で元の sha256 が変わらず写しと一致することを確かめる (書き換え中なら RuntimeError)。out_dir は freeze_data の時刻の
+    ディレクトリ (無ければ作る)。戻り値 {"rl_policy", "rl_policy_sha16", "selection_model", "selection_model_sha16", "lines" (4 行)}"""
+    import hashlib
+    import shutil
+    d = Path(out_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    sha = lambda p: hashlib.sha256(Path(p).read_bytes()).hexdigest()
+    out = {}
+    for kind, src, name in (("rl_policy", Path(rl_policy), "rl_policy.zip"),
+                            ("selection_model", Path(selection_model), "selection_model.pt")):
+        if not src.exists():
+            raise FileNotFoundError(f"{kind} の写し元 {src} が無い")
+        dst = d / name
+        if dst.exists():
+            raise FileExistsError(f"{dst} が既にある (上書きしない)")
+        before = sha(src)
+        shutil.copy2(src, dst)
+        after, copied = sha(src), sha(dst)
+        if not (before == after == copied):
+            raise RuntimeError(f"{src} の複製の前後で sha256 が揃わない (書き換え中の可能性。もう一度実行する)")
+        out[kind + "_src"] = str(src)
+        out[kind] = str(dst.resolve())
+        out[kind + "_sha16"] = copied[:16]
+    out["lines"] = [f"{MODEL_RL_KEY}={out['rl_policy']}", f"{MODEL_RL_SHA_KEY}={out['rl_policy_sha16']}",
+                    f"{MODEL_SEL_KEY}={out['selection_model']}", f"{MODEL_SEL_SHA_KEY}={out['selection_model_sha16']}"]
+    return out
+
+
 def freeze_data(out_root: Path, usage_db: Path, bank: Path, stamp: Optional[str] = None) -> dict:
     """正式群の開始時のデータの写しを作る (副作用: out_root/<時刻>/bank.json を書く。設定ファイルは書き換えない)。
     使用率は DB の最新 snapshot id を読むだけ (DB は読み取り専用で開く。snapshot 以下の行は DB に残るので写さない)。
@@ -508,6 +674,14 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--out-dir", default=None, help=f"--freeze-data の書き出し先 (既定 {PIN_FREEZE_DIR_REL})")
     ap.add_argument("--usage-db", default=None, help="--freeze-data で snapshot id を読む使用率 DB (既定 このリポジトリの DB)")
     ap.add_argument("--bank", default=None, help=f"--freeze-data で写す実戦バンク (既定 このリポジトリの {REAL_BANK_PATH})")
+    ap.add_argument("--model-pin", action="store_true",
+                    help="--resolve でモデルの固定 (ADVICE_RL_POLICY / _SHA16、ADVICE_SELECTION_MODEL / _SHA16) と設定元も出し、"
+                         "ファイルがあること・sha16 の一致を確かめる (advice_env.sh が使う)")
+    ap.add_argument("--with-models", action="store_true",
+                    help="--freeze-data で RL 方策と選出モデルも写し、書く 4 行を足して出す")
+    ap.add_argument("--rl-policy", default=None, help="--with-models で写す RL 方策 (既定 今の読み込み順で読まれるはずのファイル)")
+    ap.add_argument("--selection-model", default=None,
+                    help="--with-models で写す選出モデル (既定 登録チームに使われるはずのファイル)")
     a = ap.parse_args(argv)
     if a.freeze_data:
         from advisor.data_pin import DEFAULT_USAGE_DB
@@ -520,8 +694,20 @@ def main(argv: Optional[list] = None) -> int:
             return 2
         print(f"# 使用率: {r['usage_db']} の最新 snapshot {r['usage_snapshot']}")
         print(f"# 実戦バンク: {r['bank_src']} → {r['bank_path']} (sha16 {r['bank_sha16']})")
-        print(f"# 次の 3 行を {LOCAL_FILE_REL} に追加する (方式の切替のときも残し、正式群が終わったら消す):")
-        for ln in r["lines"]:
+        mr = None
+        if a.with_models:
+            try:
+                srcs = {} if (a.rl_policy and a.selection_model) else default_model_sources()
+                mr = freeze_models(Path(r["dir"]), Path(a.rl_policy) if a.rl_policy else srcs["rl_policy"],
+                                   Path(a.selection_model) if a.selection_model else srcs["selection_model"])
+            except (OSError, RuntimeError, ValueError) as err:
+                print(f"[freeze-data] モデルの写しに失敗: {err} (データの写し {r['dir']} は作成済み)", file=sys.stderr)
+                return 2
+            print(f"# RL 方策: {mr['rl_policy_src']} → {mr['rl_policy']} (sha16 {mr['rl_policy_sha16']})")
+            print(f"# 選出モデル: {mr['selection_model_src']} → {mr['selection_model']} (sha16 {mr['selection_model_sha16']})")
+        n = len(r["lines"]) + (len(mr["lines"]) if mr else 0)
+        print(f"# 次の {n} 行を {LOCAL_FILE_REL} に追加する (方式の切替のときも残し、正式群が終わったら消す):")
+        for ln in r["lines"] + (mr["lines"] if mr else []):
             print(ln)
         return 0
     path = Path(a.file)
@@ -537,6 +723,8 @@ def main(argv: Optional[list] = None) -> int:
         print(f"感度の設定値: {sv['error'] and ('読めない (' + sv['error'] + ')') or sv['configured']}")
         pv = pin_file_view(text, label)
         print(f"データの固定の設定値: {('読めない (' + pv['error'] + ')') if pv['error'] else pin_values_text(pv['values'])}")
+        mv = model_pin_file_view(text, label)
+        print(f"モデルの固定の設定値: {('読めない (' + mv['error'] + ')') if mv['error'] else model_pin_values_text(mv['values'])}")
         return 0
     try:
         r = resolve(text, os.environ.get(ENV_KEY), label)
@@ -545,6 +733,10 @@ def main(argv: Optional[list] = None) -> int:
         if a.data_pin:
             rp = resolve_data_pin(text, dict(os.environ), label)
             precheck_data_pin(rp["values"], Path(a.root) if a.root else Path.cwd())
+        rm = None
+        if a.model_pin:
+            rm = resolve_model_pin(text, dict(os.environ), label)
+            precheck_model_pin(rm["values"], Path(a.root) if a.root else Path.cwd())
     except AdviceModeError as err:
         print(f"[advice_env] 起動を中止: {err}", file=sys.stderr)
         return 2
@@ -557,6 +749,10 @@ def main(argv: Optional[list] = None) -> int:
         for k in PIN_KEYS:
             print(f"{k}={rp['values'][k] or ''}")
         print(f"{PIN_SOURCE_KEY}={rp['source']}")
+    if rm is not None:
+        for k in MODEL_PIN_KEYS:
+            print(f"{k}={rm['values'][k] or ''}")
+        print(f"{MODEL_PIN_SOURCE_KEY}={rm['source']}")
     return 0
 
 

@@ -140,24 +140,86 @@ def registered_team_model(my_species: Optional[list], registered_dir: Optional[P
     return {"key": key, "path": model, "species": list(manifest.get("species") or sorted(set(my_species))), "manifest": manifest}
 
 
+PINNED_SOURCE = "pinned"          # 固定した選出モデルが 試用 Package / 登録チーム向け / 配布版 のどれとも中身が違うときの source_id
+
+
+def _model_chain(my_species: Optional[list], version: Optional[str], registered_dir: Optional[Path]) -> tuple:
+    """試用 Package → 登録チーム向け → 配布版 の順に引いた (path, source_id, 退避の理由の列) (副作用: ファイルの有無を見る)。
+    退避の理由 (2026-10-31 E-inh-4。version 行の selection_model.fallback_reason / runtime に残す):
+      - "registered_model_missing": 6 体がそろっているのに、その鍵の登録チーム向けモデルが無い (配布版を使う)
+      - "registered_features_mismatch": 登録チーム向けモデルはあるが特徴量の版が違う (配布版を使う)
+    試用 Package を使わなかった理由は advisor.versions.summarize_versions がラベルから決める (ここでは足さない)"""
+    pkg = experiment_package_model()
+    if pkg and (my_species is None or (pkg["species"] and set(my_species) <= set(pkg["species"]))):
+        return Path(pkg["path"]), pkg["package_id"], []
+    reg = registered_team_model(my_species, registered_dir, version)
+    if reg:
+        return Path(reg["path"]), REGISTERED_PREFIX + reg["key"], []
+    reasons = []
+    if my_species and len(set(my_species)) == 6:
+        rdir = Path(registered_dir) if registered_dir is not None else REGISTERED_DIR
+        if (rdir / team_key(my_species) / "selection_model.pt").exists():
+            reasons.append("registered_features_mismatch")
+        else:
+            reasons.append("registered_model_missing")
+    return deployed_model_path(version), None, reasons
+
+
+def advisor_model_choice(my_species: Optional[list] = None, version: Optional[str] = None,
+                         registered_dir: Optional[Path] = None) -> dict:
+    """助言サーバーの選出モデルの決定 (例外を出さない。version 行の記録用)。
+    {"path", "source_id", "fallback": [退避の理由], "pinned": 固定したか, "sha16": 固定したときの実際の sha16, "pin_error": 固定の異常 or None}。
+    固定 (advisor.data_pin.model_source("selection_model")、2026-10-31 E-inh-4) したときは、そのファイルだけを使う: path = 固定のパス、
+    source_id = 中身 (sha16) が同じなら 試用 Package / 登録チーム向け / 配布版 の id、どれとも違えば PINNED_SOURCE。ファイルが無い・
+    sha16 が違えば pin_error (advisor_model_path は InputsPinError で止める。別のファイルへ退避しない)"""
+    from advisor.data_pin import InputsPinError, check_model_file, model_source, sha16_bytes
+    chain_path, chain_src, reasons = _model_chain(my_species, version, registered_dir)
+    src = model_source("selection_model")
+    if not src["pinned"]:
+        return {"path": chain_path, "source_id": chain_src, "fallback": reasons, "pinned": False, "sha16": None,
+                "pin_error": None}
+    try:
+        sha = check_model_file("selection_model", src["path"], src["sha16"])
+    except InputsPinError as e:
+        return {"path": src["path"], "source_id": PINNED_SOURCE, "fallback": [], "pinned": True, "sha16": None,
+                "pin_error": str(e)}
+    source_id = PINNED_SOURCE
+    cands = []
+    pkg = experiment_package_model()
+    if pkg:
+        cands.append((Path(pkg["path"]), pkg["package_id"]))
+    reg = registered_team_model(my_species, registered_dir, version)
+    if reg:
+        cands.append((Path(reg["path"]), REGISTERED_PREFIX + reg["key"]))
+    cands.append((deployed_model_path(version), None))
+    for cp, cid in cands:
+        try:
+            if sha16_bytes(Path(cp).read_bytes()) == sha:
+                source_id = cid
+                break
+        except OSError:
+            continue
+    return {"path": Path(src["path"]), "source_id": source_id, "fallback": [], "pinned": True, "sha16": sha, "pin_error": None}
+
+
 def advisor_model_path(my_species: Optional[list] = None, version: Optional[str] = None,
                        registered_dir: Optional[Path] = None) -> tuple:
     """助言サーバーの選出モデル → (path, source_id or None)。source_id は 試用 Package の id、登録チーム向けなら
     "registered:<key>"、配布版なら None。試用中 Package のモデルは、my_species (登録パーティの id) が Package の 6 体に含まれるときだけ
-    使う。my_species を渡さなければ Package のモデルをそのまま返す。登録チーム向けは my_species の 6 体の鍵が一致するときだけ"""
-    pkg = experiment_package_model()
-    if pkg and (my_species is None or (pkg["species"] and set(my_species) <= set(pkg["species"]))):
-        return Path(pkg["path"]), pkg["package_id"]
-    reg = registered_team_model(my_species, registered_dir, version)
-    if reg:
-        return Path(reg["path"]), REGISTERED_PREFIX + reg["key"]
-    return deployed_model_path(version), None
+    使う。my_species を渡さなければ Package のモデルをそのまま返す。登録チーム向けは my_species の 6 体の鍵が一致するときだけ。
+    2026-10-31 E-inh-4: 選出モデルを固定 (advisor.data_pin) したときはそのファイルだけを返し (source_id は advisor_model_choice)、
+    無い・sha16 が違えば InputsPinError (登録チーム向け → 配布版 の退避をしない)"""
+    ch = advisor_model_choice(my_species, version, registered_dir)
+    if ch["pin_error"]:
+        from advisor.data_pin import InputsPinError
+        raise InputsPinError(ch["pin_error"])
+    return Path(ch["path"]), ch["source_id"]
 
 
 def model_label(source_id: Optional[str]) -> str:
-    """選出モデルの経路の表示名: experiment:<Package id> / registered:<key> / deployed"""
+    """選出モデルの経路の表示名: experiment:<Package id> / registered:<key> / deployed / pinned (固定したモデル、2026-10-31)"""
     if not source_id:
         return "deployed"
-    if str(source_id).startswith(REGISTERED_PREFIX):
+    if str(source_id).startswith(REGISTERED_PREFIX) or source_id == PINNED_SOURCE:
         return str(source_id)
     return f"experiment:{source_id}"

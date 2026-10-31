@@ -36,6 +36,15 @@
   (旧ログの version_id は書き換えない)。
   データの固定 (advisor.data_pin、実機は advice_env.sh が渡す環境変数): 使用率は rules.usage_snapshot と runtime の
   usage_snapshot_source "pinned"、実戦バンクは rules.real_bank ({"path", "sha16", "pinned"}) に残す (識別には入れない)。
+
+2026-10-31 (KNOWN_ISSUES E-inh-4、レビュー 2026-10-31 判断 4): モデルの実体
+  - action_policy の path / sha256 は、読み込み済みなら実際に読み込んだファイル (advisor.rl_bridge が読み込んだときに記録した値)、
+    まだなら読み込むはずのファイル。固定 (advisor.data_pin.model_source) したかを action_policy.pinned、読み込み順の退避 (ema が無く
+    best を読む等) を action_policy.fallback_reason に残す。固定したファイルが無い・sha16 が違えば action_policy.error に
+    "inputs_pin: ..." (読み込みの失敗として real_accept の実行状態の照合が不成立にする)
+  - selection_model は固定したかを pinned、固定の異常を pin_error に残し、登録チーム向けモデルが無く配布版を使ったこと
+    (registered_model_missing / registered_features_mismatch) も fallback_reason に足す
+  - runtime に rl_fallback_reason / rl_pinned / selection_pinned / selection_pin_error を足す (欄の追加だけ。識別には入れない)
 """
 from __future__ import annotations
 
@@ -134,7 +143,10 @@ def runtime_of(doc: Optional[dict]) -> dict:
     return {"rl_loaded": ap.get("loaded"), "rl_error": ap.get("error"), "selection_fallback_reason": sel.get("fallback_reason"),
             "selection_source": sel.get("source"), "selection_package": sel.get("package"),
             "designated_package": d.get("designated_package"), "usage_snapshot_source": None,
-            "team_sha256": team.get("sha256"), "team_species": sorted(str(x) for x in (team.get("species") or []))}
+            "team_sha256": team.get("sha256"), "team_species": sorted(str(x) for x in (team.get("species") or [])),
+            # 2026-10-31 E-inh-4: モデルの固定と読み込み順の退避 (旧い行には無い欄 = None)
+            "rl_fallback_reason": ap.get("fallback_reason"), "rl_pinned": ap.get("pinned"),
+            "selection_pinned": sel.get("pinned"), "selection_pin_error": sel.get("pin_error")}
 
 
 def runtime_change(runtime: Optional[dict], rl_loaded: Optional[bool]) -> Optional[dict]:
@@ -163,7 +175,9 @@ def summarize_versions(designated_package: Optional[str], selection_path: Option
                        features: Optional[str], *, embedding_sha: Optional[str] = None, usage_snapshot=None,
                        usage_snapshot_source: Optional[str] = None, scoring: Optional[dict] = None,
                        team_registry: Optional[dict] = None, registry_required: bool = False,
-                       real_bank: Optional[dict] = None) -> dict:
+                       real_bank: Optional[dict] = None, rl_fallback_reason: Optional[str] = None,
+                       rl_pinned: Optional[bool] = None, selection_chain_fallback: Optional[list] = None,
+                       selection_pinned: Optional[bool] = None, selection_pin_error: Optional[str] = None) -> dict:
     """版の要約 (純粋)。退避の理由 (fallback_reason) をここで決める:
       - ラベルが無い → None (退避ではない。配布版が本来の経路)
       - ラベルはあるが Package のモデルが使われていない → "package_model_missing" (モデルのファイルが無い) か
@@ -179,7 +193,10 @@ def summarize_versions(designated_package: Optional[str], selection_path: Option
     species は runtime に移す (version_id の値が変わる)。registry_required=True (runtime_versions) なら、登録を読めなかったときも
     team.registry / registry_sha256 を None で書く (新形式のまま識別不能にする。ロスター由来の sha へ黙って戻さない)。
     real_bank = 実戦バンクの版 ({"path", "sha16", "pinned"}、advisor.real_prior.bank_version から) を rules.real_bank に足す
-    (識別には入れない)"""
+    (識別には入れない)。
+    2026-10-31 E-inh-4: rl_fallback_reason (RL 方策の読み込み順の退避) / rl_pinned を action_policy に、selection_chain_fallback
+    (selection_dispatch.advisor_model_choice の退避の理由の列。fallback_reason に "+" でつなぐ) / selection_pinned /
+    selection_pin_error を selection_model に足す。固定した選出モデル (selection_package = "pinned") の source は pinned"""
     fallback = None
     if designated_package and selection_package != designated_package:
         if package_species and my_species and not set(my_species) <= set(package_species):
@@ -188,16 +205,20 @@ def summarize_versions(designated_package: Optional[str], selection_path: Option
             fallback = "package_model_missing"
     if selection_path and selection_sha is None:
         fallback = (fallback + "+" if fallback else "") + "selection_model_missing"
+    for why in selection_chain_fallback or []:
+        fallback = (fallback + "+" if fallback else "") + str(why)
     source = None
     if selection_path:
-        source = ("registered" if str(selection_package or "").startswith("registered:") else "package" if selection_package
-                  else "deployed")
+        source = ("registered" if str(selection_package or "").startswith("registered:") else
+                  "pinned" if selection_package == "pinned" else "package" if selection_package else "deployed")
     doc = {
         "designated_package": designated_package,
         # package: 試用 Package の id / registered:<6 体の鍵> (登録チーム向け、2026-10-06) / None (配布版)。source はその区分
         "selection_model": {"package": selection_package, "path": selection_path, "sha256": selection_sha,
-                            "fallback_reason": fallback, "source": source},
-        "action_policy": {"path": rl_path, "sha256": rl_sha, "loaded": rl_loaded, "error": rl_error},
+                            "fallback_reason": fallback, "source": source, "pinned": selection_pinned,
+                            "pin_error": selection_pin_error},
+        "action_policy": {"path": rl_path, "sha256": rl_sha, "loaded": rl_loaded, "error": rl_error,
+                          "fallback_reason": rl_fallback_reason, "pinned": rl_pinned},
         "team": {"sha256": team_sha, "species": sorted(str(s) for s in (my_species or []))},
         "rules": {"git_commit": git, "dex_sha256": dex_sha, "effects_sha256": effects_sha, "selection_features": features,
                   "embedding_sha256": embedding_sha, "usage_snapshot": usage_snapshot},
@@ -236,18 +257,40 @@ def _registered_team() -> tuple:
 
 
 def _rl_info() -> tuple:
-    """行動方策: 読み込み順の先頭に存在する zip、その sha、読み込めたか (まだ試していなければ None)、失敗の理由"""
+    """行動方策: (パス, sha, 読み込めたか (まだ試していなければ None), 失敗の理由)。
+    2026-10-31 E-inh-4: 読み込み済みなら実際に読み込んだファイル (rl_bridge が読み込んだときに記録したパスと sha16)。まだなら、
+    固定していれば固定のファイル (無い・sha16 が違えば理由 "inputs_pin: ...")、固定していなければ読み込み順の先頭に存在する zip"""
+    return _rl_detail()[:4]
+
+
+def _rl_detail() -> tuple:
+    """_rl_info の 4 つ + (読み込み順の退避の理由, 固定したか)"""
     try:
         from advisor import rl_bridge as RB
+        from advisor.data_pin import InputsPinError, check_model_file, model_source
+        loaded = None if not RB._model_tried else (RB._model is not None)
+        err = None if loaded in (None, True) else "load_failed (sb3_contrib / torch / file)"
+        src = model_source("rl_policy")
+        if RB._model_tried and getattr(RB, "_model_pin_error", None) is not None:
+            return (str(src["path"]) if src["path"] else None), None, False, f"inputs_pin: {RB._model_pin_error}", None, True
+        if RB._model_tried and getattr(RB, "_model_path", None):
+            return RB._model_path, RB._model_sha, loaded, err, RB._model_fallback, bool(RB._model_pinned)
+        if src["pinned"]:
+            try:
+                sha = check_model_file("rl_policy", src["path"], src["sha16"])
+            except InputsPinError as e:
+                return (str(src["path"]) if src["path"] else None), None, loaded, f"inputs_pin: {e}", None, True
+            return str(src["path"]), sha, loaded, err, None, True
         style = os.environ.get("RL_ADVICE_STYLE", "balance")
         source = os.environ.get("RL_POLICY_SOURCE", "ema")
         order = RB._policy_candidates(style, source)
-        path = next((RB.CKPT_DIR / n for n in order if (RB.CKPT_DIR / n).exists()), None)
-        loaded = None if not RB._model_tried else (RB._model is not None)
-        err = None if loaded in (None, True) else "load_failed (sb3_contrib / torch / file)"
-        return (str(path) if path else None), (sha256_file(path) if path else None), loaded, err
+        name, fb = RB.policy_choice(order, lambda n: (RB.CKPT_DIR / n).exists())
+        if RB._model_tried:
+            fb = RB._model_fallback
+        path = RB.CKPT_DIR / name if (RB.CKPT_DIR / name).exists() else None
+        return (str(path) if path else None), (sha256_file(path) if path else None), loaded, err, fb, False
     except Exception as e:
-        return None, None, None, repr(e)
+        return None, None, None, repr(e), None, None
 
 
 def runtime_versions(refresh: bool = False) -> dict:
@@ -267,16 +310,20 @@ def runtime_versions(refresh: bool = False) -> dict:
         designated = None
     team_sha, my_species = _registered_team()
     sel_path, sel_pkg, pkg_species = None, None, None
+    sel_chain, sel_pinned, sel_pin_error, sel_sha = None, None, None, None
     try:
-        from champions_agent.agent.selection_dispatch import advisor_model_path, experiment_package_model, features_version
-        p, pkg = advisor_model_path(my_species or None)
-        sel_path, sel_pkg = str(p), pkg
+        from champions_agent.agent.selection_dispatch import advisor_model_choice, experiment_package_model, features_version
+        # 2026-10-31 E-inh-4: 固定・退避の理由も残す (例外を出さない advisor_model_choice。固定の異常は pin_error に)
+        ch = advisor_model_choice(my_species or None)
+        sel_path, sel_pkg = str(ch["path"]), ch["source_id"]
+        sel_chain, sel_pinned, sel_pin_error = ch["fallback"], ch["pinned"], ch["pin_error"]
+        sel_sha = ch["sha16"] if ch["pinned"] else sha256_file(sel_path)
         ep = experiment_package_model()
         pkg_species = list(ep["species"]) if ep else None
         features = features_version()
     except Exception:
         features = None
-    rl_path, rl_sha, rl_loaded, rl_err = _rl_info()
+    rl_path, rl_sha, rl_loaded, rl_err, rl_fb, rl_pinned = _rl_detail()
     git = None
     try:
         from tools.team_build.manifest import git_commit
@@ -284,12 +331,13 @@ def runtime_versions(refresh: bool = False) -> dict:
     except Exception:
         pass
     snap, snap_src = usage_snapshot_info()
-    doc = summarize_versions(designated, sel_path, sha256_file(sel_path) if sel_path else None, sel_pkg, pkg_species, my_species,
+    doc = summarize_versions(designated, sel_path, sel_sha if sel_path else None, sel_pkg, pkg_species, my_species,
                              rl_path, rl_sha, rl_loaded, rl_err, team_sha, git,
                              sha256_file(REPO / "advisor" / "data" / "dex.json"), sha256_file(REPO / "advisor" / "data" / "move_effects.json"),
                              features, embedding_sha=sha256_file(EMBEDDING_PATH), usage_snapshot=snap,
                              usage_snapshot_source=snap_src, scoring=scoring_identity(), team_registry=_team_registry(),
-                             registry_required=True, real_bank=real_bank_info())
+                             registry_required=True, real_bank=real_bank_info(), rl_fallback_reason=rl_fb, rl_pinned=rl_pinned,
+                             selection_chain_fallback=sel_chain, selection_pinned=sel_pinned, selection_pin_error=sel_pin_error)
     doc["collected_at"] = round(now, 2)
     _CACHE.update(key=key, value=doc, t=now)
     return doc

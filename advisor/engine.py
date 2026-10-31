@@ -1261,8 +1261,8 @@ def _evaluate_common(state: dict, resolver=None, scoring_mode: Optional[str] = N
             from advisor.infer import species_ja_name
             parts = ", ".join(f"{species_ja_name(k)} {v:.0%}" for k, v in sorted(opp_forms.items(), key=lambda kv: -kv[1]))
             mega_note = (mega_note + " / " if mega_note else "") + f"相手もメガシンカ未使用: {parts} の見込み"
-    except Exception:
-        pass
+    except Exception as e:
+        _reraise_pin(e)            # 石の使用率の固定入力の異常 (2026-10-31 E-inh-4) は握りつぶさない
 
     # 詰み筋・勝ち筋判定 (残存メンバーの1v1マッチアップ行列)。
     # 探索より先に計算し、勝ち筋の温存を探索の葉評価へ渡す (定説H3)
@@ -1313,8 +1313,8 @@ def _evaluate_common(state: dict, resolver=None, scoring_mode: Optional[str] = N
         # こだわり・ちょうはつ・初手限定等) に確率を配らない (rl_input_state の legal=False)
         rl_state = rl_input_state(state, legality)
         rl_hint = policy_hint(rl_state, my_spe_actual=_es2(my_view, my_field))
-    except Exception:
-        pass
+    except Exception as e:
+        _reraise_pin(e)            # 明示した RL 方策を読めない (2026-10-31 E-inh-4) は RL なしの助言として握りつぶさない
 
     # 採点方式 (2026-10-09 M2b): transition なら同じ入力から遷移 + 局面評価で採点する。作れない・未対応・予算超過は legacy に退避
     scoring_mode = resolve_scoring_mode(scoring_mode)
@@ -1623,7 +1623,8 @@ def _opp_mega_forms(opp_p: dict, state: dict) -> dict:
             item_id = None
         return expected_mega(opp_p.get("species_id") or "", item_id, bool(opp_p.get("is_mega")),
                              bool((state.get("mega_used") or {}).get("opponent")))
-    except Exception:
+    except Exception as e:
+        _reraise_pin(e)            # 明示した使用率の版が無い (2026-10-31 E-inh-4。advisor.gimmick._stone_usage) は握りつぶさない
         return {}
 
 

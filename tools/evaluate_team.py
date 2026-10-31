@@ -315,6 +315,20 @@ def nature_en_of(value) -> Optional[str]:
     return None
 
 
+# 登録の能力ポイントの鍵 → Showdown の EVs 欄の表記 (champions の EVs 欄は能力ポイントそのもの。努力値に換算しない)
+STAT_POINT_LABELS = {"h": "HP", "a": "Atk", "b": "Def", "c": "SpA", "d": "SpD", "s": "Spe",
+                     "hp": "HP", "atk": "Atk", "def": "Def", "spa": "SpA", "spd": "SpD", "spe": "Spe"}
+
+
+def stat_points_evs(points) -> str:
+    """登録の 能力ポイント ({"h": 32, "b": 20, ...}) → EVs 欄の本文 "32 HP / 20 Def" (純粋)。値は点数のまま書く
+    (champions の EVs 欄は能力ポイント。2026-10-31 E-inh-1: 人間対 AI の書き出しが ×8 で努力値に換算して検証で拒否されていた)。
+    知らない鍵は飛ばす。測定用 (build_myteam_text) と人間対 AI 用 (tools.export_my_team_showdown) で共通"""
+    return " / ".join(f"{v} {STAT_POINT_LABELS[str(k).lower()]}"
+                      for k, v in (points or {}).items()
+                      if str(k).lower() in STAT_POINT_LABELS)
+
+
 def build_myteam_text() -> str:
     """config/my_team.json の登録型 (性格/能力ポイント/持ち物/技/特性) で
     チームテキストを作る (meta_setsではなく実際の自分の型で評価する)"""
@@ -324,9 +338,6 @@ def build_myteam_text() -> str:
     team = current_team_entries()
     if not team:
         raise RuntimeError("config/my_team.json が未登録です")
-    ev_keys = {"h": "HP", "a": "Atk", "b": "Def", "c": "SpA", "d": "SpD",
-               "s": "Spe", "hp": "HP", "atk": "Atk", "def": "Def",
-               "spa": "SpA", "spd": "SpD", "spe": "Spe"}
     blocks, used_items = [], set()
     from advisor.my_team import registered_species_id
     for ja, entry in team.items():
@@ -385,10 +396,7 @@ def build_myteam_text() -> str:
             moves = [m for m, _ in (usage.get("moves") or [])[:4]]
             if not moves:
                 print(f"  ! {ja}: 技補完失敗 (使用率データなし)")
-        pts = entry.get("能力ポイント") or {}
-        evs = " / ".join(f"{v} {ev_keys[str(k).lower()]}"
-                         for k, v in pts.items()
-                         if str(k).lower() in ev_keys)
+        evs = stat_points_evs(entry.get("能力ポイント"))
         nat = nature_en_of(entry.get("性格"))
         if entry.get("性格") and not nat:
             print(f"  ! {ja}: 性格 {entry.get('性格')!r} を解決できないため性格行なし (無補正で評価される)")

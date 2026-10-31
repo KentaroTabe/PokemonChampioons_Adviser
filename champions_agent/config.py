@@ -686,6 +686,14 @@ USAGE_DB_ENV = "ADVICE_USAGE_DB"                 # 使用率 DB (またはピン
 USAGE_SNAPSHOT_ENV = "ADVICE_USAGE_SNAPSHOT"     # 使う snapshot id
 REAL_BANK_ENV = "ADVICE_REAL_BANK"               # 実戦バンクのパス
 REAL_BANK_SHA_ENV = "ADVICE_REAL_BANK_SHA16"     # 実戦バンクの期待 sha16 (sha256 の先頭 16 桁)
+# モデルの実体の固定 (2026-10-31 E-inh-4、レビュー 2026-10-31 判断 4): 設定されていれば、RL 方策 (advisor.rl_bridge) と助言の選出モデル
+# (champions_agent.agent.selection_dispatch.advisor_model_path) はそのファイルだけを読む。無い・sha16 が違う・読み込めなければ
+# InputsPinError (ema → best → 無印 の順送り、登録チーム向け → 配布版 の退避をしない)。未設定なら従来どおりで、退避したことは
+# version 行の runtime (rl_fallback_reason / selection_fallback_reason) に残す
+RL_POLICY_PIN_ENV = "ADVICE_RL_POLICY"                    # RL 方策 (MaskablePPO の .zip) のパス
+RL_POLICY_SHA_ENV = "ADVICE_RL_POLICY_SHA16"              # その期待 sha16 (任意)
+SELECTION_MODEL_PIN_ENV = "ADVICE_SELECTION_MODEL"        # 助言の選出モデル (.pt) のパス
+SELECTION_MODEL_SHA_ENV = "ADVICE_SELECTION_MODEL_SHA16"  # その期待 sha16 (任意)
 # 固定入力の異常の伝え方 (2026-10-31 レビュー E-inputs-3: engine が InputsPinError を握りつぶして第一候補を返していた)。
 # 助言エンジン (advisor.engine.evaluate / evaluate_common) は InputsPinError を {"ok": False, "reason": INPUTS_PIN_REASON,
 # "error": ...} で返す (通常の「推定なし」と分ける)。server はその結果を表示せず (INPUTS_PIN_STOP_TEXT の 1 行と error)、キャッシュ・

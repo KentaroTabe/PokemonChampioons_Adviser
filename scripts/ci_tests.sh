@@ -17,6 +17,8 @@
 #   CI で回る部分 (server.py の構文木での確認・録画再生の経路・記録 → 再生) は test_replay_path に分けて CI に残した
 # - test_inputs_pin_propagation_server: 同じく server._handle_one_frame で固定入力の異常の停止・記録を確かめる (2026-10-31)。
 #   CI で回る部分 (engine・advice_key の判断・real_accept・advice_replay) は test_inputs_pin_propagation
+# - test_inh_fixes (2026-10-31): Showdown の validate-team (node + pokemon-showdown) と本物の RL 方策 (sb3) を使う部分は、
+#   無い環境 (CI) では点数の単体検査と固定の止まる側だけを確かめる (どちらも同じテストの中で分岐する)
 # test_battle_prune は検証する関数を champions_agent/env/showdown_env_pure.py に分けて CI に残した (showdown_env は
 # poke-env を先頭で読み、poke-env 0.10 は numpy>=2.0.2 を要求して CI の numpy<2 と両立しない)。
 # Showdown のデータ (pokemon-showdown/、未コミット) の読み手は、コミット済みのキャッシュを先に読むので CI でも同じ結果になる
@@ -199,6 +201,7 @@ TESTS=(
   test_inheritance_setlint
   test_inheritance_record
   test_inheritance_fsample
+  test_inh_fixes
 )
 
 fail=0
