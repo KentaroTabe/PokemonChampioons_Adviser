@@ -60,6 +60,12 @@ _JA2EN_TYPES = {"ノーマル": "normal", "ほのお": "fire", "みず": "water"
 
 _model = None
 _model_tried = False
+# 実際に読み込んだファイル (2026-10-31 E-inh-4。version 行の action_policy に残す): パス・sha16・退避の理由・固定したか・固定の異常
+_model_path: Optional[str] = None
+_model_sha: Optional[str] = None
+_model_fallback: Optional[str] = None
+_model_pinned = False
+_model_pin_error = None          # 明示した方策を読めなかったときの InputsPinError (呼ばれるたびに送り直す)
 
 
 def _policy_candidates(style: str, source: str) -> list:
@@ -80,11 +86,53 @@ def _policy_candidates(style: str, source: str) -> list:
     return orders.get(source) or orders["best"]
 
 
+def policy_choice(order: list, exists) -> tuple:
+    """読み込み順 order と有無の判定 exists(name) → (読むファイル名, 退避の理由 or None) (純粋)。
+    先頭があれば理由 None。先頭が無く次以降にあれば「<先頭> なし → <読む名>」、どれも無ければ「方策ファイルなし (<先頭> ほか)」で
+    最後の名前を返す (従来どおり読み込みを試して失敗する)。2026-10-31 E-inh-4: 理由なしで best へ移っていた"""
+    for i, n in enumerate(order):
+        if exists(n):
+            return n, (None if i == 0 else f"{order[0]} なし → {n}")
+    return order[-1], f"方策ファイルなし ({order[0]} ほか {len(order) - 1} 件)"
+
+
+def reset_model() -> None:
+    """読み込み済みの方策と記録を捨てる (次の _load_model で今の固定・ファイルから読み直す)"""
+    global _model, _model_tried, _model_path, _model_sha, _model_fallback, _model_pinned, _model_pin_error
+    _model, _model_tried = None, False
+    _model_path = _model_sha = _model_fallback = None
+    _model_pinned, _model_pin_error = False, None
+
+
 def _load_model():
-    global _model, _model_tried
+    global _model, _model_tried, _model_path, _model_sha, _model_fallback, _model_pinned, _model_pin_error
     if _model_tried:
+        if _model_pin_error is not None:
+            raise _model_pin_error
         return _model
     _model_tried = True
+    _model_path = _model_sha = _model_fallback = None
+    _model_pinned, _model_pin_error = False, None
+    from advisor.data_pin import InputsPinError, check_model_file, model_source, sha16_bytes
+    src = model_source("rl_policy")
+    if src["pinned"]:
+        # 版を明示したとき (2026-10-31 E-inh-4): そのファイルだけを読む。無い・sha16 が違う・読み込めなければ InputsPinError
+        # (ema → best → 無印 へ退避しない。RL 提案を黙って無効にもしない)
+        _model_pinned = True
+        try:
+            sha = check_model_file("rl_policy", src["path"], src["sha16"])
+            from sb3_contrib import MaskablePPO
+            model = MaskablePPO.load(str(src["path"]), device="cpu")
+        except InputsPinError as e:
+            _model, _model_pin_error = None, e
+            raise
+        except Exception as e:
+            _model = None
+            _model_pin_error = InputsPinError(f"明示した RL 方策 {src['path']} を読み込めない: {e!r}"[:300])
+            raise _model_pin_error
+        _model, _model_path, _model_sha = model, str(src["path"]), sha
+        print(f"[rl_bridge] 学習済み方策をロード (固定): {src['path']} sha16 {sha}")
+        return _model
     style = os.environ.get("RL_ADVICE_STYLE", "balance")
     # 読み込み元の優先順は RL_POLICY_SOURCE で選ぶ。既定は "ema":
     # 2026-08-26 のP5事前登録判定で採用 (current/EMAを対に測る2ラウンド
@@ -93,11 +141,15 @@ def _load_model():
     # 性質そのもの)。"best"=従来の最良スナップショット優先に戻せる
     source = os.environ.get("RL_POLICY_SOURCE", "ema")
     order = _policy_candidates(style, source)
-    path = next((CKPT_DIR / n for n in order if (CKPT_DIR / n).exists()),
-                CKPT_DIR / order[-1])
+    name, _model_fallback = policy_choice(order, lambda n: (CKPT_DIR / n).exists())
+    path = CKPT_DIR / name
+    if _model_fallback:
+        print(f"[rl_bridge] 方策の退避: {_model_fallback}")
     try:
         from sb3_contrib import MaskablePPO
+        raw = path.read_bytes()
         _model = MaskablePPO.load(str(path), device="cpu")
+        _model_path, _model_sha = str(path), sha16_bytes(raw)
         print(f"[rl_bridge] 学習済み方策をロード: {path.name}")
     except Exception as e:
         print(f"[rl_bridge] 方策ロード不可 ({e}) — RL提案は無効")

@@ -102,24 +102,60 @@ def same_species_stones(item_a: Optional[str], item_b: Optional[str]) -> bool:
     return bool(a) and a == b
 
 
-@lru_cache(maxsize=4)
-def _stone_usage(snapshot_id: Optional[int]) -> dict:
-    """{基本種 id: {石 id: 使用率%}} (使用率 DB)。読めなければ空"""
-    from champions_agent.data import database as db
+def _stone_usage(snapshot_id: Optional[int] = None) -> dict:
+    """{基本種 id: {石 id: 使用率%}} (使用率 DB)。
+    読む版は advisor.data_pin (2026-10-31 E-inh-4: engine._opp_mega_forms が snapshot_id なしで呼び、再生で版を指定しても最新を読んでいた):
+      - 版を明示したとき (環境変数・set_override): その DB を読み取り専用で開き、snapshot_id (無ければ明示した snapshot、それも無ければ
+        その DB の最新) だけを読む。DB・snapshot が無い・読めなければ InputsPinError (握りつぶさない。最新へ退避しない)
+      - 明示が無いとき: 従来どおり (既定の DB、snapshot_id か USAGE_TARGET_FORMAT の最新。読めなければ空)"""
+    from advisor.data_pin import usage_source
+    src = usage_source()
+    if src["pinned"]:
+        want = snapshot_id if snapshot_id is not None else src["snapshot_id"]
+        return _stone_usage_pinned(str(src["db"]), want)
+    return _stone_usage_default(snapshot_id)
+
+
+def _stone_rows_to_table(rows) -> dict:
     stones = stone_table()
     out: dict = {}
+    for r in rows:
+        item = _toid(r[1])
+        if item in stones:
+            out.setdefault(_toid(r[0]), {})[item] = float(r[2] or 0.0)
+    return out
+
+
+@lru_cache(maxsize=4)
+def _stone_usage_default(snapshot_id: Optional[int]) -> dict:
+    """版を明示しないときの読み取り (2026-10-31 より前の _stone_usage と同じ処理)。読めなければ空"""
+    from champions_agent.data import database as db
     try:
         with db.get_connection() as conn:
             snap = snapshot_id or db.latest_snapshot_id(conn, fmt=USAGE_TARGET_FORMAT)
             rows = conn.execute("SELECT pokemon_name, item_name, usage_percent FROM item_usage WHERE snapshot_id=?",
                                 (snap,)).fetchall()
     except Exception:
-        return out
-    for r in rows:
-        item = _toid(r[1])
-        if item in stones:
-            out.setdefault(_toid(r[0]), {})[item] = float(r[2] or 0.0)
-    return out
+        return {}
+    return _stone_rows_to_table(rows)
+
+
+@lru_cache(maxsize=4)
+def _stone_usage_pinned(db_path: str, snapshot_id: Optional[int]) -> dict:
+    """版を明示したときの読み取り (advisor.data_pin.connect_usage / resolve_snapshot)。無い・読めなければ InputsPinError"""
+    import sqlite3
+    from pathlib import Path
+    from advisor.data_pin import InputsPinError, connect_usage, resolve_snapshot
+    conn = connect_usage(Path(db_path), True)
+    try:
+        sid = resolve_snapshot(conn, snapshot_id, True)
+        rows = conn.execute("SELECT pokemon_name, item_name, usage_percent FROM item_usage WHERE snapshot_id=?",
+                            (sid,)).fetchall()
+    except sqlite3.Error as e:
+        raise InputsPinError(f"明示した使用率 DB {db_path} の石の使用率を読めない: {e}") from e
+    finally:
+        conn.close()
+    return _stone_rows_to_table(rows)
 
 
 def stone_prior(species_id: str, snapshot_id: Optional[int] = None, usage: Optional[dict] = None,

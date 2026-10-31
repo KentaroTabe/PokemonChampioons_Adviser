@@ -154,9 +154,14 @@ class Advisor:
                               state_dict.get("opponent", {}).get("party", []))
             choose_primary(result)
         except Exception as e:
-            import traceback
-            traceback.print_exc()
-            result = {"ok": False, "reason": f"選出評価エラー: {e}"}
+            from advisor.data_pin import InputsPinError, pin_error_result
+            if isinstance(e, InputsPinError):
+                # 固定入力の異常 (2026-10-31 E-inh-4: 固定した選出モデルが無い・sha16 が違う ほか)。通常の評価エラーと分ける
+                result = pin_error_result(e)
+            else:
+                import traceback
+                traceback.print_exc()
+                result = {"ok": False, "reason": f"選出評価エラー: {e}"}
         result["kind"] = "selection"
         result["text"] = format_selection_advice(result)
         return result

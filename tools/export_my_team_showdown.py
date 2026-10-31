@@ -13,9 +13,6 @@ import argparse
 from advisor import my_team
 from vision.normalize import NameResolver
 
-_EV_LABELS = {"hp": "HP", "atk": "Atk", "def": "Def",
-              "spa": "SpA", "spd": "SpD", "spe": "Spe"}
-
 
 def _nature_en(nature_ja: str) -> str:
     """日本語性格名 -> 英語名 (上昇/下降ペアの一致で対応付ける)"""
@@ -29,7 +26,7 @@ def _nature_en(nature_ja: str) -> str:
 
 
 def export_team() -> str:
-    from tools.evaluate_team import current_team_entries
+    from tools.evaluate_team import current_team_entries, stat_points_evs
     resolver = NameResolver()
     sets, skipped = [], []
     for ja, entry in current_team_entries().items():
@@ -55,10 +52,11 @@ def export_team() -> str:
             if ab:
                 lines.append(f"Ability: {ab[1]}")
         lines.append("Level: 50")
-        ev = build.get("ev") or {}
-        ev_parts = [f"{v} {_EV_LABELS[k]}" for k, v in ev.items() if v]
-        if ev_parts:
-            lines.append("EVs: " + " / ".join(ev_parts))
+        # champions の EVs 欄は能力ポイント: 登録の点数をそのまま書く (測定用の build_myteam_text と同じ規則・同じ関数)。
+        # 2026-10-31 E-inh-1: get_my_build の努力値 (×8 の換算) を書いていたため、登録の完全な個体がすべて検証で拒否された
+        evs = stat_points_evs(entry.get("能力ポイント"))
+        if evs:
+            lines.append("EVs: " + evs)
         nat = entry.get("性格") or entry.get("nature")
         if nat:
             lines.append(f"{_nature_en(nat)} Nature")

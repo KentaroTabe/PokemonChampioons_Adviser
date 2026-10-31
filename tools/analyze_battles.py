@@ -13,6 +13,11 @@
     python -m tools.analyze_battles --last 30      # 直近30戦
     python -m tools.analyze_battles --days 7       # 直近7日
     python -m tools.analyze_battles --json         # 機械可読出力 (保存なし)
+
+2026-10-31 (KNOWN_ISSUES E-inh-4 / 引き継ぎ評価 I-10 t5・t8): 欠損・失敗を集計から黙って消さない。
+  - 対戦シーンが MIN_BATTLE_SCENES 未満で外した対戦は、件数・理由・その対戦の勝敗の記録を出力に残す (成績の分母には入れない旨も表示)
+  - 壊れた行 (JSON として読めない・dict でない) はファイルごとの件数を出す (tools.jsonl_lines)
+  - 勝敗の値が規定 (win / loss / unknown) の外なら「不明」として数え (勝ちにも負けにも入れない)、元の値を出す
 """
 from __future__ import annotations
 
@@ -34,8 +39,10 @@ MARKER = REPO / "logs" / ".connection_test_start"   # 接続テスト開始時�
 
 _BATTLE_SCENES = {"command", "move_select", "watch",
                   "field_check", "battle_hud", "field"}
-# 対戦シーンがこれ未満のログは断片 (対戦の合間の誤分類など) とみなして集計から外す
+# 対戦シーンがこれ未満のログは断片 (対戦の合間の誤分類など) とみなして集計から外す (外した件数と理由は出力に残す。2026-10-31)
 MIN_BATTLE_SCENES = 3
+# 勝敗の規定の値 (battle_logger の outcome 行)。これ以外は「不明」として数え、元の値を outcome_invalid に残す (2026-10-31)
+OUTCOME_VALUES = ("win", "loss", "unknown")
 
 
 def _parse_battle(path: str) -> dict:
@@ -49,11 +56,9 @@ def _parse_battle(path: str) -> dict:
     t0 = None
     t1 = None
     picks_row = None              # 選出ラベル 3 値 (opp_picks 行、2026-10-07 段 0)。無い古いログは従来の推定
-    for line in open(path):
-        try:
-            d = json.loads(line)
-        except ValueError:
-            continue
+    from tools.jsonl_lines import read_jsonl
+    records, bad = read_jsonl(path)    # 壊れた行は数えて bad_lines に残す (2026-10-31 E-inh-4: 黙って飛ばしていた)
+    for d in records:
         t0 = t0 or d.get("t")
         t1 = d.get("t") or t1
         typ = d.get("type")
@@ -93,6 +98,10 @@ def _parse_battle(path: str) -> dict:
     opp_species = {ja for ja in opp_species if ja in final or ja in opp_fielded}
     # 勝負の文言は最も強い根拠 (2026-09-29 第17回 15:53: 3 体目のひんしからの誤った「負け」の後に「勝負に勝った」)
     outcome, inferred, corrected = ot.result()
+    # 規定外の勝敗の値 ('won' 等) は「不明」として数える (成功数に入れない。元の値は outcome_invalid。2026-10-31 E-inh-4)
+    outcome_invalid = None
+    if outcome is not None and outcome not in OUTCOME_VALUES:
+        outcome_invalid, outcome, inferred = outcome, "unknown", False
     # 相手の「選出されなかった」: 選出ラベル 3 値があれば非選出確定だけ (選出されたが場に出なかった個体を選出外にしない)、
     # 無ければ従来の推定 (ロースター − 場に出た)
     status = status_by_ja(picks_row)
@@ -114,7 +123,9 @@ def _parse_battle(path: str) -> dict:
             "opp_pick_unknown": pick_unknown,    # 選出が分からない個体 (ラベルの無い古いログは None)
             "opp_picks_complete": complete,      # 選出 3 体がすべて判明 (ラベルの無い古いログは None → picks_complete が推定)
             "my_picked": sorted(my_picked),
-            "n_battle_scenes": n_battle_scenes}
+            "n_battle_scenes": n_battle_scenes,
+            "bad_lines": len(bad),               # 読めなかった行の数 (2026-10-31)
+            "outcome_invalid": outcome_invalid}  # 規定外の勝敗の値 (無ければ None。outcome は "unknown" にした)
 
 
 def session_start_ts() -> float | None:
@@ -127,7 +138,29 @@ def session_start_ts() -> float | None:
 
 def load_battles(days: float | None = None, last: int | None = None,
                  since_ts: float | None = None) -> list:
-    """対戦ログを新しい順に読み込む (対戦シーンが無いログは除外)"""
+    """対戦ログを新しい順に読み込む (対戦シーンが無いログは除外)。外した対戦・壊れた行の報告も要るときは load_battles_report"""
+    return load_battles_report(days=days, last=last, since_ts=since_ts)[0]
+
+
+def split_fragments(battles: list, min_scenes: int = MIN_BATTLE_SCENES) -> tuple:
+    """対戦の列 → (集計する対戦, 外した対戦 [{"file", "t0", "n_battle_scenes", "outcome", "reason", "bad_lines"}]) (純粋)。
+    対戦シーンが min_scenes 未満の対戦は断片として外す (2026-10-31 E-inh-4: 報告なしに外し、勝敗の記録のある負けが成績から消えた)"""
+    kept, excluded = [], []
+    for b in battles:
+        if b["n_battle_scenes"] >= min_scenes:
+            kept.append(b)
+        else:
+            excluded.append({"file": b["file"], "t0": b.get("t0"), "n_battle_scenes": b["n_battle_scenes"],
+                             "outcome": b.get("outcome"), "reason": f"対戦シーン {b['n_battle_scenes']} 行 < {min_scenes}",
+                             "bad_lines": int(b.get("bad_lines") or 0)})
+    return kept, excluded
+
+
+def load_battles_report(days: float | None = None, last: int | None = None,
+                        since_ts: float | None = None) -> tuple:
+    """(集計する対戦の列, 読み込みの報告) (副作用: 読み取り)。報告 = {"excluded": 外した対戦 (split_fragments)、
+    "bad_lines": {"n", "files": {ファイル: 件数}} (集計する対戦と外した対戦のファイルの読めなかった行)、"min_battle_scenes"}。
+    last を指定したときは、残した対戦の最古の t0 以降に外した対戦だけを報告に入れる (同じ窓)"""
     files = sorted(glob.glob(str(BATTLE_DIR / "*.jsonl")))
     if since_ts:
         files = [f for f in files if Path(f).stat().st_mtime >= since_ts]
@@ -135,13 +168,18 @@ def load_battles(days: float | None = None, last: int | None = None,
         cutoff = time.time() - days * 86400
         files = [f for f in files if Path(f).stat().st_mtime >= cutoff]
     battles = [_parse_battle(f) for f in files]
-    battles = [b for b in battles if b["n_battle_scenes"] >= MIN_BATTLE_SCENES]
+    battles, excluded = split_fragments(battles)
     # レートの読みの並びを対戦をまたいで解き、不明・推定の勝敗を埋める / 直す (2026-10-06 第18回: 推定の 1 戦が誤り、
     # 不明の 2 戦が勝ちだった。確定した勝敗は変えない。tools.battle_outcome.apply_rate_chain)
     apply_rate_chain(battles, RATE_CHAIN_GAP_SEC, RATE_INFER_MIN_DELTA, RATE_MAX_DELTA_PER_BATTLE)
     if last:
         battles = battles[-last:]
-    return battles
+        if battles:
+            lo = battles[0].get("t0") or 0.0
+            excluded = [e for e in excluded if (e.get("t0") or 0.0) >= lo]
+    bad = {b["file"]: int(b["bad_lines"]) for b in battles + excluded if b.get("bad_lines")}
+    return battles, {"excluded": excluded, "bad_lines": {"n": sum(bad.values()), "files": bad},
+                     "min_battle_scenes": MIN_BATTLE_SCENES}
 
 
 def rate_flags(battles: list, max_delta: float = RATE_MAX_DELTA_PER_BATTLE) -> list:
@@ -173,7 +211,9 @@ def rate_flags(battles: list, max_delta: float = RATE_MAX_DELTA_PER_BATTLE) -> l
     return out
 
 
-def summarize(battles: list) -> dict:
+def summarize(battles: list, load_report: dict | None = None) -> dict:
+    """集計 (純粋)。load_report (load_battles_report の報告) を渡せば、外した対戦と読めなかった行も結果に入れる。
+    勝敗が win / loss でない対戦 (未定・unknown・規定外の値) は「不明」として n_unknown に数え、勝ち・負けには入れない (2026-10-31)"""
     decided = [b for b in battles if b["outcome"] in ("win", "loss")]
     wins = sum(1 for b in decided if b["outcome"] == "win")
     rates = [(b["t0"], b["rate"]) for b in battles if b["rate"] is not None]
@@ -200,8 +240,22 @@ def summarize(battles: list) -> dict:
         for sp in b["opp_species"]:
             encounters[sp] += 1
 
+    rep = load_report or {}
+    excluded = list(rep.get("excluded") or [])
+    if rep.get("bad_lines") is not None:
+        bad_lines = rep["bad_lines"]
+    else:
+        files = {b["file"]: int(b.get("bad_lines") or 0) for b in battles if b.get("bad_lines")}
+        bad_lines = {"n": sum(files.values()), "files": files}
     return {"n": len(battles), "n_decided": len(decided), "wins": wins,
             "losses": len(decided) - wins,
+            # 不明 (勝敗が win / loss でない) の件数と、そのうち規定外の値 (2026-10-31 E-inh-4)
+            "n_unknown": len(battles) - len(decided),
+            "outcome_invalid": [(b["file"], b["outcome_invalid"]) for b in battles if b.get("outcome_invalid") is not None],
+            # 集計から外した対戦 (対戦シーン不足。成績の分母に入れない) と読めなかった行 (2026-10-31 E-inh-4)
+            "n_excluded": len(excluded), "excluded": excluded,
+            "excluded_outcomes": dict(Counter(str(e.get("outcome")) for e in excluded)),
+            "bad_lines": bad_lines,
             "win_rate": wins / len(decided) if decided else None,
             "rates": rates, "rate_flags": rate_flags(battles),
             "n_corrected": sum(1 for b in battles if b.get("corrected")),
@@ -234,6 +288,20 @@ def report(s: dict) -> str:
     if s["win_rate"] is not None:
         lines.append(f"勝敗: {s['wins']}勝{s['losses']}敗 "
                      f"(勝率 {s['win_rate']:.0%})")
+    # 欠損・失敗の件数 (2026-10-31 E-inh-4: 集計から黙って消さない)
+    if s.get("n_unknown"):
+        lines.append(f"勝敗不明: {s['n_unknown']}戦 (勝率の分母に入れない)")
+    for fname, val in s.get("outcome_invalid") or []:
+        lines.append(f"  ⚠ {fname}: 勝敗の値 {val!r} は規定外 (不明として数えた)")
+    if s.get("n_excluded"):
+        outs = s.get("excluded_outcomes") or {}
+        lines.append(f"集計から外した対戦: {s['n_excluded']}戦 (対戦シーンが {MIN_BATTLE_SCENES} 行未満の断片。成績・勝率の分母に入れない。"
+                     f"記録の勝敗 {', '.join(f'{k} {v}' for k, v in sorted(outs.items()))})")
+        for e in s.get("excluded") or []:
+            lines.append(f"  - {e['file']}: {e['reason']} (勝敗の記録 {e.get('outcome') or 'なし'})")
+    if (s.get("bad_lines") or {}).get("n"):
+        from tools.jsonl_lines import bad_lines_text
+        lines.append(f"⚠ {bad_lines_text(s['bad_lines'])}")
     if s["rates"]:
         vals = [r for _, r in s["rates"]]
         lines.append(f"レート: {vals[0]:.0f} → {vals[-1]:.0f} "
@@ -309,10 +377,13 @@ def run_report(days: float | None = None, last: int | None = None,
         if since_ts is not None:
             last, days = None, None
             scope = " (接続テストセッション全体)"
-    battles = load_battles(days=days, last=last, since_ts=since_ts)
+    battles, load_rep = load_battles_report(days=days, last=last, since_ts=since_ts)
     if not battles:
-        return "対象の対戦ログがありません", None
-    text = report(summarize(battles))
+        msg = "対象の対戦ログがありません"
+        if load_rep["excluded"]:
+            msg += f" (対戦シーン不足で外した対戦 {len(load_rep['excluded'])} 戦)"
+        return msg, None
+    text = report(summarize(battles, load_rep))
     out_dir = REPO / "logs" / "battle_analysis"
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"analysis_{time.strftime('%Y%m%d_%H%M')}.md"
@@ -333,11 +404,12 @@ def main() -> None:
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
     if args.json:
-        battles = load_battles(days=args.days, last=args.last)
+        battles, load_rep = load_battles_report(days=args.days, last=args.last)
         if not battles:
-            print("対象の対戦ログがありません")
+            print("対象の対戦ログがありません"
+                  + (f" (対戦シーン不足で外した対戦 {len(load_rep['excluded'])} 戦)" if load_rep["excluded"] else ""))
             return
-        s = dict(summarize(battles))
+        s = dict(summarize(battles, load_rep))
         s["trio_stats"] = {f"{'/'.join(k[0])}|{k[1]}": v
                            for k, v in s["trio_stats"].items()}
         s["encounters"] = dict(s["encounters"])

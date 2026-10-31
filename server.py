@@ -56,7 +56,7 @@ def should_advise_selection(state: dict) -> bool:
             and not state.get("battle_active"))
 from advisor.service import Advisor
 from battle_logger import BattleLogger, ev_infer_of
-from tools.advice_mode import data_pin_startup_check, sens_startup_check, server_startup_check
+from tools.advice_mode import data_pin_startup_check, model_pin_startup_check, sens_startup_check, server_startup_check
 
 # 採点方式の検査 (2026-10-16 方式 C)。環境変数 ADVICE_SCORING_MODE が使えない値なら重い初期化の前に止める
 # (config は警告して legacy にするが、実機では黙って legacy で動かさない)。実効値は環境変数だけで決まり、
@@ -68,6 +68,9 @@ _SENS_STARTUP_LINE = sens_startup_check()
 # ADVICE_REAL_BANK_SHA16 を重い初期化の前に検査する (指定 snapshot が DB に無い・写しが無い・sha16 が違えば起動しない)。
 # 助言側 (advisor.sets / infer / team_advice / real_prior) は advisor.data_pin で同じ環境変数を読むたびに参照する (import 時には読まない)
 _DATA_PIN_STARTUP_LINE = data_pin_startup_check()
+# モデルの実体の固定 (2026-10-31 KNOWN_ISSUES E-inh-4): ADVICE_RL_POLICY / ADVICE_SELECTION_MODEL (と各 _SHA16) を重い初期化の前に検査する
+# (ファイルが無い・sha16 が違えば起動しない)。助言側 (advisor.rl_bridge / selection_dispatch.advisor_model_path) は固定したファイルだけを読む
+_MODEL_PIN_STARTUP_LINE = model_pin_startup_check()
 
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
 app = FastAPI()
@@ -161,6 +164,7 @@ print(f"[server] 配信する index.html の版: {served_html_version(INDEX_HTML
 print(f"[server] {_SCORING_STARTUP_LINE}")
 print(f"[server] {_SENS_STARTUP_LINE}")
 print(f"[server] {_DATA_PIN_STARTUP_LINE}")
+print(f"[server] {_MODEL_PIN_STARTUP_LINE}")
 _busy = False
 _pending_frame = None      # 処理中に届いた最新フレーム (sid, data)
 _last_state_json = ""
