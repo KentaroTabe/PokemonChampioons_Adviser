@@ -174,7 +174,11 @@ def advisor_model_choice(my_species: Optional[list] = None, version: Optional[st
     sha16 が違えば pin_error (advisor_model_path は InputsPinError で止める。別のファイルへ退避しない)"""
     from advisor.data_pin import InputsPinError, check_model_file, model_source, sha16_bytes
     chain_path, chain_src, reasons = _model_chain(my_species, version, registered_dir)
-    src = model_source("selection_model")
+    try:
+        src = model_source("selection_model")
+    except InputsPinError as e:
+        # 版の固定の bundle が不正・個別の鍵と矛盾 (2026-10-31)
+        return {"path": None, "source_id": PINNED_SOURCE, "fallback": [], "pinned": True, "sha16": None, "pin_error": str(e)}
     if not src["pinned"]:
         return {"path": chain_path, "source_id": chain_src, "fallback": reasons, "pinned": False, "sha16": None,
                 "pin_error": None}
@@ -183,6 +187,17 @@ def advisor_model_choice(my_species: Optional[list] = None, version: Optional[st
     except InputsPinError as e:
         return {"path": src["path"], "source_id": PINNED_SOURCE, "fallback": [], "pinned": True, "sha16": None,
                 "pin_error": str(e)}
+    from advisor import pin_bundle as PB
+    if PB.active():
+        # 版の固定の bundle (2026-10-31 追加レビュー判断 4): 由来は固定時に manifest に残したもの (origin)。配備先のファイルとの一致は
+        # 探さない。source_id は表示だけの PINNED_SOURCE で、適用範囲は manifest の kind / team で決める (advisor.pin_bundle.selection_scope)
+        try:
+            sel = PB.selection_info() or {}
+        except InputsPinError as e:
+            return {"path": src["path"], "source_id": PINNED_SOURCE, "fallback": [], "pinned": True, "sha16": None,
+                    "pin_error": str(e)}
+        return {"path": Path(src["path"]), "source_id": PINNED_SOURCE, "fallback": [], "pinned": True, "sha16": sha,
+                "pin_error": None, "origin": sel.get("source_id"), "kind": sel.get("kind")}
     source_id = PINNED_SOURCE
     cands = []
     pkg = experiment_package_model()

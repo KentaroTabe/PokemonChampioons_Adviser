@@ -45,6 +45,12 @@
   - selection_model は固定したかを pinned、固定の異常を pin_error に残し、登録チーム向けモデルが無く配布版を使ったこと
     (registered_model_missing / registered_features_mismatch) も fallback_reason に足す
   - runtime に rl_fallback_reason / rl_pinned / selection_pinned / selection_pin_error を足す (欄の追加だけ。識別には入れない)
+
+2026-10-31 版の固定の bundle (追加レビュー判断 2・4、advisor/pin_bundle.py): bundle を使うときは、識別の embedding_sha256 を
+選出モデルが実際に読む bundle の埋め込みの sha16 にする (配備先の species_embedding.json の sha は使わない = 元を変えても version 行の
+sha は変わらない)。選出モデル・RL 方策・使用率 snapshot・登録・バンクは data_pin / my_team が bundle を読むので、そのまま bundle の値になる。
+runtime に "pin_bundle" ({dir, manifest_sha16, selection_kind, selection_team, selection_origin, allow_other_team, error}) を足す
+(bundle を使うときだけ。識別には入れない)
 """
 from __future__ import annotations
 
@@ -177,7 +183,8 @@ def summarize_versions(designated_package: Optional[str], selection_path: Option
                        team_registry: Optional[dict] = None, registry_required: bool = False,
                        real_bank: Optional[dict] = None, rl_fallback_reason: Optional[str] = None,
                        rl_pinned: Optional[bool] = None, selection_chain_fallback: Optional[list] = None,
-                       selection_pinned: Optional[bool] = None, selection_pin_error: Optional[str] = None) -> dict:
+                       selection_pinned: Optional[bool] = None, selection_pin_error: Optional[str] = None,
+                       pin_bundle: Optional[dict] = None) -> dict:
     """版の要約 (純粋)。退避の理由 (fallback_reason) をここで決める:
       - ラベルが無い → None (退避ではない。配布版が本来の経路)
       - ラベルはあるが Package のモデルが使われていない → "package_model_missing" (モデルのファイルが無い) か
@@ -234,6 +241,8 @@ def summarize_versions(designated_package: Optional[str], selection_path: Option
     if real_bank is not None:
         doc["rules"]["real_bank"] = dict(real_bank)
     doc["runtime"] = dict(runtime_of(doc), usage_snapshot_source=usage_snapshot_source)
+    if pin_bundle is not None:
+        doc["runtime"]["pin_bundle"] = dict(pin_bundle)
     doc["version_id"] = digest(doc)
     return doc
 
@@ -331,13 +340,24 @@ def runtime_versions(refresh: bool = False) -> dict:
     except Exception:
         pass
     snap, snap_src = usage_snapshot_info()
+    bundle, emb_sha = None, None
+    try:
+        from advisor import pin_bundle as PB
+        bundle = PB.runtime_summary()
+        if bundle is not None:
+            emb_sha = PB.selection_emb_sha16()
+    except Exception as e:
+        if bundle is not None:
+            bundle = dict(bundle, error=bundle.get("error") or str(e)[:300])
     doc = summarize_versions(designated, sel_path, sel_sha if sel_path else None, sel_pkg, pkg_species, my_species,
                              rl_path, rl_sha, rl_loaded, rl_err, team_sha, git,
                              sha256_file(REPO / "advisor" / "data" / "dex.json"), sha256_file(REPO / "advisor" / "data" / "move_effects.json"),
-                             features, embedding_sha=sha256_file(EMBEDDING_PATH), usage_snapshot=snap,
+                             features, embedding_sha=(emb_sha if bundle is not None else sha256_file(EMBEDDING_PATH)),
+                             usage_snapshot=snap,
                              usage_snapshot_source=snap_src, scoring=scoring_identity(), team_registry=_team_registry(),
                              registry_required=True, real_bank=real_bank_info(), rl_fallback_reason=rl_fb, rl_pinned=rl_pinned,
-                             selection_chain_fallback=sel_chain, selection_pinned=sel_pinned, selection_pin_error=sel_pin_error)
+                             selection_chain_fallback=sel_chain, selection_pinned=sel_pinned, selection_pin_error=sel_pin_error,
+                             pin_bundle=bundle)
     doc["collected_at"] = round(now, 2)
     _CACHE.update(key=key, value=doc, t=now)
     return doc

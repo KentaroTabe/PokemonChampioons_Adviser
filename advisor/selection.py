@@ -630,14 +630,28 @@ def attach_model_pick(advice: dict, my_party: list, opp_party: list) -> None:
     ヒューリスティクスの提案には「なぜ」の説明があり、モデルには実測の
     強さがある (2026-07-29の実戦比較: ランダム0.25 / 相性0.29 / モデル0.51)。
     片方に置き換えず併記して、判断材料を両方見せる。
+
+    版の固定の bundle (環境変数 ADVICE_PIN_BUNDLE、2026-10-31 追加レビュー判断 4): 選出モデルの適用範囲を manifest の種別で確かめ
+    (advisor.pin_bundle.selection_scope)、advice["model_pick_scope"] に残す。構築専用モデルは 6 体が確定するまで確認待ち、6 体 (種族 id の
+    集合) か学習時の型が違えば推論しない (model_pick を付けない。別のモデルへ退避しない。理由は表示と対戦ログの advice に残る)。
+    汎化試験の明示 (ADVICE_PIN_ALLOW_OTHER_TEAM=1) なら推論し、state "override" を残す。条件付きモデルも bundle の写しを読む (無ければ
+    実戦傾向の推しを出さない)。固定した選出モデル・条件付きモデルを読み込めなければ InputsPinError
     """
     try:
         from champions_agent.agent.selection_model import predict_best
+        from advisor import pin_bundle as PB
+        from advisor.data_pin import InputsPinError, model_source
         # perm は「species_idを持つ枠だけを並べた座標」を指す。元のパーティを
         # そのまま引くと欠け枠があるときにずれる (2026-08-05接続テストで
         # 名前がNoneになりjoinが落ちた)
         idx = [i for i, p in enumerate(my_party) if p.get("species_id")]
         mine = [my_party[i]["species_id"] for i in idx]
+        scope = None
+        if PB.active():
+            scope = PB.selection_scope(mine, len(mine) == 6 and len(set(mine)) == 6)
+            advice["model_pick_scope"] = scope
+            if not scope["infer"]:
+                return
         if len(mine) < 3:
             return
         # 試用中 Package (experiment ラベル) に同梱の選出モデルがあり、パーティがその 6 体なら、それを使う (2026-09-25)。
@@ -647,6 +661,11 @@ def attach_model_pick(advice: dict, my_party: list, opp_party: list) -> None:
         best = predict_best(
             mine, [p.get("species_id") for p in opp_party if p.get("species_id")], path=model_path)
         if best is None:
+            if model_source("selection_model")["pinned"]:
+                # 固定した選出モデルを読み込めない (2026-10-31): 規則の推奨へ黙って退避しない
+                from champions_agent.agent.selection_model import load_model
+                if load_model(model_path) is None:
+                    raise InputsPinError(f"固定した選出モデル {model_path} を読み込めない (別のモデル・規則へ黙って退避しない)")
             return
         perm, prob = best
         names = [my_party[idx[i]].get("species_ja")
@@ -657,25 +676,39 @@ def attach_model_pick(advice: dict, my_party: list, opp_party: list) -> None:
         # メガ枠: 規則の推奨が同じ個体を割り当てていればそれ、無ければ先頭の石持ち (モデルはメガ枠を決めない)
         rule_assign = next((r.get("index") for r in (advice.get("recommend") or []) if r.get("mega_assign")), None)
         assignee = rule_assign if rule_assign in holders else (holders[0] if holders else None)
+        if scope is not None:
+            # bundle: 構築専用モデルを対応する構築に使うときだけ学習済み。汎用は bundle の meta の学習チームに入っているか。
+            # 汎化試験 (override) は学習済みとしない
+            trained = (scope["state"] == "ok" and scope["kind"] == "team") or (scope["kind"] != "team" and is_in_distribution(mine))
+        else:
+            trained = True if (package_id and package_id != PINNED_SOURCE) else is_in_distribution(mine)
         advice["model_pick"] = {
             "names": names, "win_prob": round(prob, 3), "indices": indices,
             # Package / 登録チーム向けのモデルはそのパーティで適応済み。配布版は学習分布に入っているかで参考値かどうかを示す。
             # 固定した選出モデルで中身がどれとも違うもの (pinned、2026-10-31) は学習の有無が分からないので配布版と同じ扱い
-            "trained": True if (package_id and package_id != PINNED_SOURCE) else is_in_distribution(mine),
+            "trained": trained,
             "model": model_label(package_id),
             "recommend": [{"index": k, "name": names[j], "lead": j == 0, "mega_holder": k in holders, "mega_assign": k == assignee}
                           for j, k in enumerate(indices)],
         }
+        if scope is not None:
+            advice["model_pick"]["origin"] = scope.get("origin")
+            advice["model_pick"]["scope"] = scope["state"]
         # 実戦の選出傾向に条件づけた推し (条件付きモデル + バンクの選出率)。前提を満たさなければ出さない
         try:
             from advisor.real_prior import load_bank, species_pick_prior
-            from champions_agent.agent.selection_model import predict_with_prior
+            from champions_agent.agent.selection_model import COND_MODEL_PATH, load_model, predict_with_prior
+            cond_bundle, cond_path = PB.selection_cond_path()
+            if not cond_bundle:
+                cond_path = COND_MODEL_PATH
             bank = load_bank()
             opp_ids = [p.get("species_id") for p in opp_party if p.get("species_id")]
             prior = {sid: species_pick_prior(sid, bank) for sid in opp_ids}
             prior = {k: v for k, v in prior.items() if v is not None}
-            if bank and prior:
-                got = predict_with_prior(mine, opp_ids, prior)
+            if bank and prior and cond_path is not None:
+                got = predict_with_prior(mine, opp_ids, prior, path=cond_path)
+                if got is None and cond_bundle and load_model(cond_path) is None:
+                    raise InputsPinError(f"版の固定の bundle の条件付きモデル {cond_path} を読み込めない")
                 if got:
                     perm2, ev, marginal = got
                     advice["model_pick_real"] = {
@@ -685,8 +718,9 @@ def attach_model_pick(advice: dict, my_party: list, opp_party: list) -> None:
                         "opp_pick_marginal": {k: round(v, 2) for k, v in marginal.items()},
                         "n_prior": len(prior),
                     }
-        except Exception:
-            pass
+        except Exception as e:
+            if isinstance(e, InputsPinError):
+                raise
     except Exception as e:
         # 固定した選出モデルが無い・sha16 が違う (advisor.data_pin.InputsPinError、2026-10-31 E-inh-4) は握りつぶさない
         # (配布版や規則の推奨へ黙って退避しない。advisor.service が固定入力の異常の結果にする)
@@ -779,6 +813,13 @@ def format_selection_advice(advice: dict) -> str:
                   "snow": "雪"}.get(syn["weather"], syn["weather"])
             base += (f"\n  ☔ {wj}シナジー: {syn['setter']} → "
                      f"{'/'.join(syn['abusers'])}")
+    scope = advice.get("model_pick_scope") or {}
+    if scope.get("state") == "pending":
+        base += f"\n  🤖 選出モデル: 確認待ち ({scope.get('reason')})"
+    elif scope.get("state") == "mismatch":
+        base += f"\n  ⛔ 選出モデルを使わない: {scope.get('reason')}"
+    elif scope.get("state") == "override":
+        base += f"\n  ⚠ 選出モデルを別の構築に適用中 (汎化試験): {scope.get('reason')}"
     picked = advice.get("picked")
     if advice.get("done"):
         return f"✅ 選出完了 (3/3)\n{base}"

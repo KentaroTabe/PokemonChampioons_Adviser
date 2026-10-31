@@ -18,6 +18,12 @@
                   team.sha256 (registered_team() の本文の sha) を今の値と比べる
   current        = 今のデータ (DB の最新・今のバンク・今の登録) で過去の局面を評価し直す
 どちらも使ったデータの版を出す。純粋な部分 (bundle の規則・manifest の照合・ログの版の読み出し・復元の計画) は tests/test_inputs_pin.py。
+
+2026-10-31 版の固定の bundle (追加レビュー判断 2、advisor/pin_bundle.py): make_pin_bundle が実機の助言の入力一式 (RL 方策・選出モデル +
+埋め込み + meta + 条件付きモデル・使用率 DB の抽出・バンク・登録) を 1 つの dir に置き、manifest.json (各ファイルの sha256・出所、
+コード commit、設定、Showdown の版、選出モデルの種別と対応する構築、規制) を書く。使用率 DB は export_bundle(full_schema=True) で
+元と同じスキーマの全表を作り、BUNDLE_RULES の表は同じ規則、snapshot_id を持つほかの表は対象 snapshot の行だけ (eq)、snapshot に
+依らない表 (図鑑の表など) は全行を書き出す (読み手の ev_infer / evolve_teams / gimmick が spread_usage 等も読むため)。
 """
 from __future__ import annotations
 
@@ -368,8 +374,23 @@ def snapshot_ids(db: Path) -> list:
         conn.close()
 
 
-def export_bundle(src_db: Path, dst: Path, snapshot_id: Optional[int] = None) -> dict:
+def full_schema_rules(table_cols: dict) -> dict:
+    """全スキーマの書き出しの規則 (純粋)。table_cols = {表: [列名]}。BUNDLE_RULES の表はその規則、snapshot_id 列を持つほかの表は eq、
+    usage_snapshot 以外で snapshot_id を持たない表は all (snapshot に依らない表。全行)"""
+    out = {}
+    for t, cols in table_cols.items():
+        if t in BUNDLE_RULES:
+            out[t] = BUNDLE_RULES[t]
+        elif "snapshot_id" in cols:
+            out[t] = "eq"
+        else:
+            out[t] = "all"
+    return out
+
+
+def export_bundle(src_db: Path, dst: Path, snapshot_id: Optional[int] = None, full_schema: bool = False) -> dict:
     """使用率 DB から BUNDLE_RULES の行を別の sqlite (dst) に書き出す (元は読み取り専用で開く)。snapshot_id が None なら元の最新。
+    full_schema (2026-10-31 版の固定の bundle): 元の全表 (sqlite_ の内部表を除く) を同じスキーマで作り、full_schema_rules の規則で書き出す。
     戻り値 {"source_db", "file", "snapshot_id", "tables": {表: 行数}, "rules", "sha256", "size_bytes"}"""
     from advisor.team_advice import _champions_filter
     src_db, dst = Path(src_db), Path(dst)
@@ -381,18 +402,23 @@ def export_bundle(src_db: Path, dst: Path, snapshot_id: Optional[int] = None) ->
         if snap is None or src.execute("SELECT 1 FROM usage_snapshot WHERE id=?", (int(snap),)).fetchone() is None:
             raise ValueError(f"使用率の snapshot {snap} が {src_db} に無い")
         flt = _champions_filter(src, max_snapshot=int(snap))
+        if full_schema:
+            names = [n for (n,) in src.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
+        else:
+            names = list(BUNDLE_RULES)
         schema = {n: sql for n, sql in src.execute(
-            "SELECT name, sql FROM sqlite_master WHERE type='table' AND name IN (%s)" % ",".join("?" * len(BUNDLE_RULES)),
-            tuple(BUNDLE_RULES))}
+            "SELECT name, sql FROM sqlite_master WHERE type='table' AND name IN (%s)" % ",".join("?" * len(names)),
+            tuple(names))}
         indexes = [sql for (sql,) in src.execute(
             "SELECT sql FROM sqlite_master WHERE type='index' AND sql IS NOT NULL AND tbl_name IN (%s)"
-            % ",".join("?" * len(BUNDLE_RULES)), tuple(BUNDLE_RULES))]
+            % ",".join("?" * len(names)), tuple(names))]
         cols = {n: [r[1] for r in src.execute(f"PRAGMA table_info({n})")] for n in schema}
     finally:
         src.close()
     missing = [t for t in BUNDLE_RULES if t not in schema]
     if missing:
         raise ValueError(f"{src_db} に表 {missing} が無い")
+    rules = full_schema_rules(cols) if full_schema else dict(BUNDLE_RULES)
     dst.parent.mkdir(parents=True, exist_ok=True)
     out = sqlite3.connect(f"file:{dst}?mode=rwc", uri=True)     # URI で開く (ATTACH の元を読み取り専用の URI で開くため)
     counts = {}
@@ -400,9 +426,15 @@ def export_bundle(src_db: Path, dst: Path, snapshot_id: Optional[int] = None) ->
         out.execute("ATTACH DATABASE ? AS src", (f"file:{src_db}?mode=ro",))
         for t, sql in schema.items():
             out.execute(sql)
-        for t in BUNDLE_RULES:
-            where = bundle_where(t, int(snap), flt)
-            if BUNDLE_RULES[t] == "pairs":
+        for t in rules:
+            if rules[t] == "all":
+                c = ", ".join(cols[t])
+                out.execute(f"INSERT INTO main.{t} ({c}) SELECT {c} FROM src.{t}")
+                counts[t] = out.execute(f"SELECT COUNT(*) FROM main.{t}").fetchone()[0]
+                continue
+            where = (f"snapshot_id = {int(snap)}" if rules[t] == "eq" and t not in BUNDLE_RULES
+                     else bundle_where(t, int(snap), flt))
+            if rules[t] == "pairs":
                 out.execute(f"INSERT INTO main.{t} (snapshot_id, pokemon_name, teammate_name, usage_percent) "
                             f"SELECT MIN(snapshot_id), pokemon_name, teammate_name, MAX(usage_percent) FROM src.{t} "
                             f"WHERE {where} GROUP BY pokemon_name, teammate_name")
@@ -413,7 +445,7 @@ def export_bundle(src_db: Path, dst: Path, snapshot_id: Optional[int] = None) ->
         for sql in indexes:
             out.execute(sql)
         out.execute("CREATE TABLE bundle_meta (key TEXT PRIMARY KEY, value TEXT)")
-        meta = {"snapshot_id": int(snap), "source_db": str(src_db), "rules": BUNDLE_RULES, "champions_filter": flt,
+        meta = {"snapshot_id": int(snap), "source_db": str(src_db), "rules": rules, "champions_filter": flt,
                 "created_at": time.strftime("%Y-%m-%d %H:%M:%S")}
         out.executemany("INSERT INTO bundle_meta VALUES (?, ?)", [(k, json.dumps(v, ensure_ascii=False)) for k, v in meta.items()])
         out.commit()
@@ -421,7 +453,7 @@ def export_bundle(src_db: Path, dst: Path, snapshot_id: Optional[int] = None) ->
     finally:
         out.close()
     sha = sha256_file(dst)
-    return {"source_db": str(src_db), "file": dst.name, "snapshot_id": int(snap), "tables": counts, "rules": dict(BUNDLE_RULES),
+    return {"source_db": str(src_db), "file": dst.name, "snapshot_id": int(snap), "tables": counts, "rules": dict(rules),
             "sha256": sha, "sha16": sha[:16] if sha else None, "size_bytes": dst.stat().st_size}
 
 
@@ -466,6 +498,61 @@ def make_inputs_pin(pin_dir: Path, selection_model: Path, src_db: Optional[Path]
     else:
         man["real_bank"] = None
     (pin_dir / MANIFEST_FILE).write_text(json.dumps(man, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    return man
+
+
+def make_pin_bundle(out_dir: Path, *, rl_policy: Path, selection_model: Path, selection_emb: Path, selection_meta: Optional[Path],
+                    selection_cond: Optional[Path], registry: Path, selection: dict, src_db: Optional[Path] = None,
+                    bank: Optional[Path] = None, snapshot_id: Optional[int] = None, code: Optional[dict] = None,
+                    config: Optional[dict] = None, showdown: Optional[dict] = None, regulation: Optional[str] = None) -> dict:
+    """版の固定の bundle を out_dir (無いこと。上書きしない) に作り、manifest.json を書いて返す (2026-10-31 追加レビュー判断 2)。
+    各ファイルは _copy_checked (複製の前後で元の sha256 が変わらず写しと一致)、使用率 DB は export_bundle(full_schema=True)。
+    selection = 選出モデルの種別と適用範囲 ({"kind": general / team, "team": 6 体 or None, "sets_premise", "source_id", "source_path",
+    "source_manifest", "features", "regulation"})。emb_sha16 はここで埋める。selection_meta / selection_cond は無ければ None (記録 None)。
+    作った後に advisor.pin_bundle.check_bundle_manifest で照合し、合わなければ RuntimeError (作りかけの dir は残す。消さない)"""
+    from advisor import pin_bundle as PB
+    from advisor.my_team import registry_sha
+    out_dir = Path(out_dir)
+    if out_dir.exists():
+        raise FileExistsError(f"{out_dir} が既にある (上書きしない)")
+    src_db = Path(src_db) if src_db is not None else SRC_USAGE_DB
+    bank = Path(bank) if bank is not None else SRC_BANK
+    srcs = {"rl_policy": rl_policy, "selection_model": selection_model, "selection_emb": selection_emb,
+            "selection_meta": selection_meta, "selection_cond": selection_cond, "real_bank": bank, "registry": registry}
+    for k in ("rl_policy", "selection_model", "selection_emb", "real_bank", "registry"):
+        if srcs[k] is None or not Path(srcs[k]).exists():
+            raise FileNotFoundError(f"{k} の写し元 {srcs[k]} が無い")
+    if not src_db.exists():
+        raise FileNotFoundError(f"使用率 DB {src_db} が無い")
+    out_dir.mkdir(parents=True)
+    files: dict = {}
+    for k, src in srcs.items():
+        if src is None or not Path(src).exists():
+            files[k] = None
+            continue
+        src = Path(src)
+        files[k] = file_entry(str(src.resolve()), PB.FILES[k], _copy_checked(src, out_dir / PB.FILES[k]))
+    try:
+        doc = json.loads((out_dir / PB.FILES["real_bank"]).read_text(encoding="utf-8"))
+        files["real_bank"].update(built_at=doc.get("built_at"), n_battles=doc.get("n_battles"), data_until=doc.get("data_until"))
+    except (ValueError, AttributeError):
+        pass
+    reg = json.loads((out_dir / PB.FILES["registry"]).read_text(encoding="utf-8"))
+    files["registry"]["registry_sha16"] = registry_sha(reg)
+    ub = export_bundle(src_db, out_dir / PB.FILES["usage_db"], snapshot_id, full_schema=True)
+    ub["source_db"] = str(src_db.resolve())
+    ub["latest_at_pin"] = latest_snapshot_id(src_db)
+    files["usage_db"] = ub
+    sel = dict(selection or {})
+    sel["emb_sha16"] = files["selection_emb"]["sha16"]
+    man = {"kind": PB.BUNDLE_KIND, "version": PB.BUNDLE_VERSION, "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+           "dir": str(out_dir.resolve()), "files": files, "selection": sel, "code": code or {}, "config": config or {},
+           "showdown": showdown or {}, "regulation": regulation}
+    (out_dir / PB.MANIFEST_FILE).write_text(json.dumps(man, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    actual = {e["file"]: sha256_file(out_dir / e["file"]) for e in files.values() if e}
+    reasons = PB.check_bundle_manifest(man, actual)
+    if reasons:
+        raise RuntimeError(f"作った bundle {out_dir} が manifest と合わない: " + " / ".join(reasons))
     return man
 
 

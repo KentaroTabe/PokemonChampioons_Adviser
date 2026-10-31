@@ -39,8 +39,13 @@ _emb_cache: dict = {}
 
 
 def _functional_store() -> dict:
-    """機能埋め込み (v3 のピン優先、無ければ生きた埋め込み)"""
+    """機能埋め込み (版の固定の bundle があれば bundle の埋め込み (2026-10-31)、無ければ v3 のピン優先、無ければ生きた埋め込み)"""
     global _store
+    import os
+    from champions_agent.config import PIN_BUNDLE_ENV
+    if (os.environ.get(PIN_BUNDLE_ENV) or "").strip():
+        from advisor.pin_bundle import selection_emb_store
+        return selection_emb_store("v3")
     if _store is None:
         store = {}
         try:
@@ -66,6 +71,11 @@ def reset_cache() -> None:
 
 def _emb(species) -> np.ndarray:
     sid = _to_id(species)
+    import os
+    from champions_agent.config import PIN_BUNDLE_ENV
+    if (os.environ.get(PIN_BUNDLE_ENV) or "").strip():
+        v = _functional_store().get(sid)
+        return np.array(v, dtype=np.float32) if v else np.zeros(EMB_DIM, dtype=np.float32)
     if sid not in _emb_cache:
         v = _functional_store().get(sid)
         _emb_cache[sid] = (np.array(v, dtype=np.float32) if v else np.zeros(EMB_DIM, dtype=np.float32))

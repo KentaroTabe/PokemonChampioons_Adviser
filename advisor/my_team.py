@@ -92,11 +92,18 @@ _REGISTRY_OVERRIDE: Optional[dict] = None
 def _load() -> dict:
     """登録の読み取り経路 (get_my_build / get_my_moves / has_build / registered_species_* / team_advice など) が読む登録。
     登録参照の無効化 (registration_disabled) 中は空 = 全種が未登録。書き込み (update_build / set_build) は _load_file を使う。
-    再生の差し替え (set_registry_override) 中はその登録 (記録した時点で無効化が効いていれば記録も空なので、無効化より優先する)"""
+    再生の差し替え (set_registry_override) 中はその登録 (記録した時点で無効化が効いていれば記録も空なので、無効化より優先する)。
+    版の固定の bundle (環境変数 ADVICE_PIN_BUNDLE、2026-10-31 追加レビュー判断 2) があれば bundle の写し (advisor.pin_bundle.registry、
+    registry_sha16 を照合済み) を読み、config/my_team.json は読まない (無い・違えば InputsPinError)"""
     if _REGISTRY_OVERRIDE is not None:
         return _REGISTRY_OVERRIDE
     if registration_disabled():
         return {}
+    import os
+    from champions_agent.config import PIN_BUNDLE_ENV
+    if (os.environ.get(PIN_BUNDLE_ENV) or "").strip():
+        from advisor.pin_bundle import registry as _bundle_registry
+        return _bundle_registry()
     return _load_file()
 
 

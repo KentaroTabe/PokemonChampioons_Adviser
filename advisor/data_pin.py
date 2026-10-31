@@ -28,6 +28,12 @@ check_runtime() は子プロセスの起動時の照合 (tools.check_advisor_pla
     (助言の選出モデル)、または set_model_override。明示したときはそのファイルだけを読み、無い・sha16 が違えば InputsPinError
     (model_source / check_model_file。読み手は advisor.rl_bridge と champions_agent.agent.selection_dispatch.advisor_model_path)。
     verify_spec / check_runtime は spec にモデルの欄があれば一緒に確かめる (実機の起動時は tools.advice_mode.model_pin_startup_check)。
+
+2026-10-31 版の固定の bundle (追加レビュー判断 2・4、advisor/pin_bundle.py): 環境変数 config.PIN_BUNDLE_ENV (ADVICE_PIN_BUNDLE) があれば、
+使用率 DB・snapshot・バンク・RL 方策・選出モデルの版を bundle の manifest から埋める (_merged / model_source)。個別の鍵と一緒に
+書いたときは値が一致しなければ InputsPinError。使用率 DB は bundle の sha256 を照合してから読む (usage_source)。set_override /
+set_model_override (同じプロセスの中の再生・テスト) は bundle より優先する。check_runtime / verify_spec (spec の "bundle") は
+bundle 全体 (全ファイルの sha256・特徴量の版・登録) を確かめる。
 """
 from __future__ import annotations
 
@@ -92,8 +98,20 @@ def env_for(usage_db=None, usage_snapshot=None, bank_path=None, bank_sha16=None)
     return out
 
 
+def _bundle_spec() -> Optional[dict]:
+    """bundle から埋めた版 (advisor.pin_bundle.effective_spec)。bundle が無ければ None。矛盾・不正は InputsPinError"""
+    from advisor import pin_bundle as PB
+    if not PB.active():
+        return None
+    return PB.effective_spec()
+
+
 def _merged() -> dict:
     spec = spec_from_env()
+    b = _bundle_spec()
+    if b is not None:
+        spec.update({k: b[k] for k in ("usage_db", "usage_snapshot", "bank_path", "bank_sha16")})
+    spec["_bundle"] = b is not None
     for k in ("usage_db", "usage_snapshot", "bank_path", "bank_sha16"):
         if _override.get(k) is not None:
             spec[k] = _override[k]
@@ -105,6 +123,10 @@ def usage_source() -> dict:
     """使用率の読み先: {"db": Path, "snapshot_id": 明示した id or None (最新), "pinned": 版を明示したか}。
     DB だけ明示して snapshot を明示しない場合も pinned (その DB の最新を使う。bundle は 1 つの snapshot しか持たない)"""
     s = _merged()
+    if s.get("_bundle") and _override.get("usage_db") is None:
+        # bundle の使用率 DB は sha256 を照合してから読む (stat が変わらなければ計算し直さない)
+        from advisor import pin_bundle as PB
+        PB.file_path("usage_db")
     db = Path(s["usage_db"]) if s["usage_db"] else DEFAULT_USAGE_DB
     return {"db": db, "snapshot_id": s["usage_snapshot"], "pinned": bool(s["usage_db"] or s["usage_snapshot"] is not None)}
 
@@ -212,6 +234,11 @@ def reset_caches() -> None:
     except Exception:
         pass
     try:
+        from advisor import pin_bundle as PB
+        PB.reset()
+    except Exception:
+        pass
+    try:
         # 型推定のトラッカーの推定器 (版ごとの仮説。2026-10-30)。読み込まれていなければ持っている値も無い
         import sys
         E = sys.modules.get("advisor.ev_infer")
@@ -243,6 +270,20 @@ def verify_spec(spec: dict, default_db: Path = DEFAULT_USAGE_DB, live_bank: Opti
     戻り値 {"usage_db", "usage_snapshot", "bank_path", "bank_sha16"} (明示していない欄は None。bank_sha16 は実際の sha16)"""
     base = Path(cwd) if cwd is not None else Path.cwd()
     out = {"usage_db": None, "usage_snapshot": None, "bank_path": None, "bank_sha16": None}
+    bundle = None
+    if spec.get("bundle"):
+        # 版の固定の bundle (2026-10-31): bundle 全体を確かめ (個別の欄との整合を含む)、個別の欄を bundle の値で埋めてから下の検査を通す
+        from advisor import pin_bundle as PB
+        bd = Path(spec["bundle"])
+        if not bd.is_absolute():
+            bd = base / bd
+        explicit = {k: spec.get(k) for k in PB.SPEC_KEYS}
+        for k in ("usage_db", "bank_path") + tuple(MODEL_KINDS):
+            if explicit.get(k) and not Path(explicit[k]).is_absolute():
+                explicit[k] = str(base / explicit[k])
+        bundle = PB.verify_bundle(bd, explicit=explicit)
+        spec = dict(spec)
+        spec.update(bundle["values"])
     if spec.get("usage_db") or spec.get("usage_snapshot") is not None:
         db = Path(spec["usage_db"]) if spec.get("usage_db") else Path(default_db)
         if not db.is_absolute():
@@ -263,17 +304,23 @@ def verify_spec(spec: dict, default_db: Path = DEFAULT_USAGE_DB, live_bank: Opti
     if any(spec.get(k) for k in MODEL_SPEC_KEYS):
         # モデルの実体の固定 (2026-10-31)。spec にモデルの欄があるときだけ確かめ、戻り値にも足す
         out.update(verify_model_spec(spec, cwd=base))
+    if bundle is not None:
+        out["bundle"] = {k: bundle[k] for k in ("dir", "manifest_sha16", "files", "usage_snapshot", "selection", "set_diffs")}
     return out
 
 
 def check_runtime() -> Optional[dict]:
     """版を明示していれば、その版が読めることを確かめる (子プロセスの起動時)。明示が無ければ None。
     戻り値 {"usage_db", "usage_snapshot", "bank_path", "bank_sha16"} (実際に確かめた値)。合わなければ InputsPinError"""
+    from advisor import pin_bundle as PB
+    bundle = PB.verify_bundle() if PB.active() else None      # bundle 全体 (2026-10-31): 全ファイルの sha256・個別の鍵との整合
     us, bs = usage_source(), bank_source()
     ms = {k: model_source(k) for k in MODEL_KINDS}
     if not us["pinned"] and not bs["pinned"] and not any(m["pinned"] for m in ms.values()):
         return None
     out = {"usage_db": None, "usage_snapshot": None, "bank_path": None, "bank_sha16": None}
+    if bundle is not None:
+        out["bundle"] = {k: bundle[k] for k in ("dir", "manifest_sha16", "files", "usage_snapshot", "selection", "set_diffs")}
     if us["pinned"]:
         conn = connect_usage(us["db"], True)
         try:
@@ -352,6 +399,9 @@ def model_source(kind: str) -> dict:
     if kind not in MODEL_KINDS:
         raise ValueError(f"モデルの種類 {kind} を知らない")
     spec = model_spec_from_env()
+    b = _bundle_spec()
+    if b is not None:
+        spec.update({kind: b[kind], kind + "_sha16": b[kind + "_sha16"]})
     for k in (kind, kind + "_sha16"):
         if _model_override.get(k) is not None:
             spec[k] = _model_override[k]
