@@ -6,6 +6,7 @@
 #   config/my_team.json / debug_frames) に依存
 # - 実対戦を伴うテストはローカルShowdown (8100) と長い実行時間が必要
 # - 一部テストは RL モデルのライブラリ (torch) が要る (scripts/run_test.sh local。理由は scripts/ci_tests.sh の冒頭)
+# - poke_env / sb3_contrib (sim・RL) 依存のテストは local (tests/test_*_local、scripts/run_test.sh local。2026-10-31 E-ci-1)
 # CIで回すのは「モックとコミット済みデータで閉じるテスト」のみ
 # (対象は scripts/ci_tests.sh に列挙)。
 name: ci

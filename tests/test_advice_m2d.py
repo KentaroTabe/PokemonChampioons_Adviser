@@ -8,6 +8,8 @@
 段 6 対応の確認 (送った自チームの本文の sha16 と、助言が参照した型の一致。verdict の invalid)
 
 使用率 DB・登録ファイル (config/my_team.json)・Showdown の対戦には依存しない (登録は合成、相手の技は固定)。
+poke-env の Teambuilder が要る段 2 の --own-pool の対応 (test_own_pool_teambuilder_correspondence) は
+tests/test_advice_m2d_local (ローカル専用、CI の最小依存に poke-env が無いため。2026-10-31)。
 
     python -m tests.test_advice_m2d
 """
@@ -17,7 +19,6 @@ import copy
 import io
 import json
 import os
-import random
 import tempfile
 from contextlib import redirect_stdout
 from dataclasses import replace
@@ -597,20 +598,6 @@ def test_pool_doc_and_check():
     print("test_pool_doc_and_check OK")
 
 
-def test_own_pool_teambuilder_correspondence():
-    """--own-pool: Random(相手 seed + 1) で対戦ごとに引く。同じ seed の 2 条件で自チームの列 (本文) が一致する"""
-    from tools.check_advisor_player import _PoolSource, _remembering_teambuilder
-    texts = [_TEAM_A, _TEAM_B, _TEAM_A.replace("Earthquake", "Outrage")]
-    tb1 = _remembering_teambuilder(_PoolSource(texts, random.Random(20261009 + 1)))
-    tb2 = _remembering_teambuilder(_PoolSource(texts, random.Random(20261009 + 1)))
-    for _ in range(10):
-        tb1.yield_team()
-        tb2.yield_team()
-    assert tb1.texts == tb2.texts and len(set(tb1.texts)) > 1
-    assert [tb1.text_for_battle(k) for k in range(10)] == tb1.texts
-    print("test_own_pool_teambuilder_correspondence OK")
-
-
 def test_usefulness_p1_pool_and_pinned():
     """usefulness_p1: --team general はプールを --own-pool で渡し、条件表にパスと sha16、起動前検査でプールの sha16 と件数を確かめる。
     --team general-pinned は旧固定プール (条件表に「旧固定プール上の比較」)。採点方式の比較は子プロセスで感度を切り、own_check を書く"""
@@ -756,7 +743,6 @@ def main():
     test_reference_set_pure()
     test_verdict_own_correspondence()
     test_pool_doc_and_check()
-    test_own_pool_teambuilder_correspondence()
     # config で P1_SCORING_POOL_SHA16 を固定 (2026-10-09、c7a32f8897d71375) したので、模擬のプールの検査は「期待が未固定」の
     # 条件で行う (このテストはその分岐を確かめている)。固定時の挙動は test_pool_expected_sha16_fixed で確かめる
     _old_sha = P1.P1_SCORING_POOL_SHA16

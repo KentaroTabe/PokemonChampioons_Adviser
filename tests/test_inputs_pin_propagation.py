@@ -11,7 +11,8 @@ E-inputs-3: engine が InputsPinError を握りつぶして ok=True と第一候
 - (d) advice_replay の入口: 再生中の異常で対戦の再生を止め、main は終了コード 1
 - (e) 2026-10-31 追加の判断: engine の他の固定入力の読み手 (へんしん 中の get_predictor・タイプからの候補 get_inference) の注入も
   ok=False・reason=inputs_pin。シミュレータの測定 (advisor_player) は inputs_pin の結果を例外として stats["error"] に数え
-  (以前の例外の経路と同じ振る舞い、採点の集計・助言どおりの決定には数えない)。real_accept の --compare-search /
+  (以前の例外の経路と同じ振る舞い、採点の集計・助言どおりの決定には数えない。make_advisor_player が poke-env の Player を
+  読むので tests/test_inputs_pin_propagation_local、ローカル専用)。real_accept の --compare-search /
   --compare-sensitivity は on / off のどちらか一方でも inputs_pin なら一致にせず照合できない決定に数える
 
     python -m tests.test_inputs_pin_propagation
@@ -391,47 +392,6 @@ def test_engine_other_pinned_readers():
     print("test_engine_other_pinned_readers OK")
 
 
-def test_advisor_player_counts_pin_error_as_error():
-    """シミュレータの測定: inputs_pin の結果は例外として stats["error"] に数える。以前の経路 (evaluate が InputsPinError を
-    外へ出したとき) と stats が同じ (last_error の文以外)。採点の集計 (scoring_*)・助言どおりの決定 (decide) には数えない"""
-    from types import SimpleNamespace as NS
-    from champions_agent.env import advisor_player as AP
-    from tests.test_sim_legal_inputs import _Team, _battle
-    from tests.test_sim_picked_roster import _team_text
-
-    def run(fake_eval):
-        stats: dict = {}
-        with _Team(), _Hint(), patch.object(ENG, "evaluate", fake_eval):
-            player = AP.make_advisor_player(team_source=NS(last_text=_team_text()), stats=stats, start_listening=False,
-                                            battle_format="gen9championsbssregmc")
-            player.create_order = lambda x, mega=False: ("order", getattr(x, "id", None) or getattr(x, "species", None))
-            player.choose_random_move = lambda b: ("random",)
-            out = player.choose_move(_battle())
-        return out, stats
-
-    def pin_result(state, resolver=None, **kw):
-        return DP.pin_error_result(DP.InputsPinError(PIN_MSG))
-
-    def pin_raise(state, resolver=None, **kw):
-        raise DP.InputsPinError(PIN_MSG)
-    out_new, st_new = run(pin_result)
-    out_old, st_old = run(pin_raise)
-    assert st_new["error"] == 1 and "InputsPinError" in st_new["last_error"] and PIN_MSG in st_new["last_error"], st_new
-    assert out_new == out_old and {k: v for k, v in st_new.items() if k != "last_error"} == \
-        {k: v for k, v in st_old.items() if k != "last_error"}, (st_new, st_old)
-    assert not any(str(k).startswith("scoring") for k in st_new) and "decide" not in st_new, st_new
-    # 純粋な部分: 通常の ok=False・ok=True・None は送り直さない
-    AP.raise_if_pin_error(None)
-    AP.raise_if_pin_error({"ok": False, "reason": "自分の場のポケモンが未特定です"})
-    AP.raise_if_pin_error({"ok": True, "best": {"kind": "move", "id": "surf"}})
-    try:
-        AP.raise_if_pin_error(pin_result(None))
-        raise AssertionError("送り直さない")
-    except DP.InputsPinError as e:
-        assert str(e) == PIN_MSG
-    print("test_advisor_player_counts_pin_error_as_error OK")
-
-
 def test_real_accept_compare_pin_unconfirmed():
     """--compare-search / --compare-sensitivity: on / off のどちらか一方でも inputs_pin なら一致にせず照合できない決定 (判定不能)"""
     from tools import real_accept as RA
@@ -497,7 +457,6 @@ def main():
     test_real_accept_replay_pin_is_unconfirmed()
     test_advice_replay_stops_on_pin_error()
     test_engine_other_pinned_readers()
-    test_advisor_player_counts_pin_error_as_error()
     test_real_accept_compare_pin_unconfirmed()
     print("ALL OK")
 
