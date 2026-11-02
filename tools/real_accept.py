@@ -879,6 +879,25 @@ def version_identity(records: list, ignore: Iterable = REAL_ACCEPT_VERSION_IGNOR
             "identity_problems": problems, "inputs_pin": inputs_pin_rows(records)}
 
 
+BUNDLE_FORMAL_PREFIX = "正式比較には使えない (診断)"
+
+
+def bundle_formal_problem(runtime: dict) -> Optional[str]:
+    """1 本のログの版の固定の bundle が正式比較に使えない理由 (純粋。2026-11-02 レビュー判断 1・2)。runtime = version_identity の
+    "runtime" ({"runtime.pin_bundle.formal_ok": [値], ...})。bundle を使っていなければ None。formal_ok が False の記録、または
+    pin_bundle の欄があるのに formal_ok の記録が無い (種別を名前で決めた 2026-11-02 より前の bundle) なら理由の文"""
+    keys = [k for k in (runtime or {}) if k.startswith("runtime.pin_bundle.")]
+    if not keys:
+        return None
+    vals = (runtime or {}).get("runtime.pin_bundle.formal_ok")
+    reasons = [x for x in ((runtime or {}).get("runtime.pin_bundle.formal_reason") or []) if x]
+    if vals is None:
+        return f"{BUNDLE_FORMAL_PREFIX}: 版の固定の bundle に formal_ok の記録が無い (選出モデルの種別を学習履歴で確かめていない旧い bundle)"
+    if any(v is not True for v in vals):
+        return f"{BUNDLE_FORMAL_PREFIX}: 版の固定の bundle の選出モデルが適用範囲未確認 ({' / '.join(str(r) for r in reasons) or '理由の記録なし'})"
+    return None
+
+
 def group_consistency(log_infos: list, exclude: Iterable = (),
                       required: Iterable = REAL_ACCEPT_VERSION_REQUIRED_FIELDS) -> dict:
     """対象群が同じ版・設定で、同じ実行状態 (読み込み成功) か (純粋。2026-10-20 レビュー)。log_infos = [{"name", "ident":
@@ -887,7 +906,11 @@ def group_consistency(log_infos: list, exclude: Iterable = (),
     全ログで同じ 1 つの値 (一部のログにだけある欄も不一致)、かつ全ログで実行状態が読み込み成功。version_id は比べない
     (実行状態を含む digest。違えば差のある実行状態の欄を注記する)。
     戻り値 {"ok", "notes", "values": {欄: [値]}, "basis": [{"field", "value"}] (一致した欄と値)、"runtime": {ログ: 根拠の文}、
-    "version_id": [値]} (acceptance の版・設定の照合と同じ形 ok / notes を持つ)"""
+    "version_id": [値], "inputs_pin": {ログ: 固定入力の異常の文}, "bundle_formal": {ログ: 正式比較に使えない理由}}
+    (acceptance の版・設定の照合と同じ形 ok / notes を持つ)。
+    2026-11-02 (レビュー判断 1・2): 版の固定の bundle の formal_ok が False (選出モデルの種別・型の前提が適用範囲未確認) の対戦、
+    formal_ok の記録が無い旧い bundle の対戦を含めば、固定入力の異常と同じく一致にしない (bundle_formal_problem。満たす / PARTIAL は
+    判定不能になる)"""
     exclude = tuple(exclude)
     notes, values, basis = [], {}, []
     ok = bool(log_infos)
@@ -934,6 +957,13 @@ def group_consistency(log_infos: list, exclude: Iterable = (),
             ok = False
             pin[li["name"]] = inputs_pin_text(info)
             notes.append(f"不成立: {li['name']} に{pin[li['name']]}")
+    formal = {}
+    for li in log_infos:
+        why = bundle_formal_problem(li["ident"].get("runtime") or {})
+        if why:
+            ok = False
+            formal[li["name"]] = why
+            notes.append(f"不成立: {li['name']} は{why}")
     runtime = {}
     for li in log_infos:
         idt = li["ident"]
@@ -955,7 +985,8 @@ def group_consistency(log_infos: list, exclude: Iterable = (),
                 rt_diff.append(f"{k}: {' / '.join(str(x) for x in xs)}")
         notes.append(f"version_id は {len(vids)} 種類 ({' / '.join(vids[:4])})。版の識別の欄で照合した (version_id は比べない)"
                      + (f"。実行状態の欄の差: {', '.join(rt_diff)}" if rt_diff else ""))
-    return {"ok": ok, "notes": notes, "values": values, "basis": basis, "runtime": runtime, "version_id": vids, "inputs_pin": pin}
+    return {"ok": ok, "notes": notes, "values": values, "basis": basis, "runtime": runtime, "version_id": vids, "inputs_pin": pin,
+            "bundle_formal": formal}
 
 
 # ------------------------------------------------------------------ 純粋: 再生の設定 (2026-10-20 レビュー: 実機の設定に揃える)

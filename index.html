@@ -43,6 +43,8 @@
         </div>
         <div id="right">
             <div class="panel" id="advice"><h3>アドバイス</h3>
+                <!-- 版の固定の bundle を使っているとき常時出す (server の 'pin_status'、2026-11-02) -->
+                <div id="pin-status" style="display:none;background:#2a3550;color:#dfe8ff;border:1px solid #4a6aa0;border-radius:6px;padding:6px 10px;margin-bottom:6px;font-size:12px;white-space:pre-wrap"></div>
                 <div id="advice-headline" style="color:#7fa;font-weight:bold;font-size:15px;white-space:pre-wrap">(選出画面・コマンド選択画面で表示されます)</div>
                 <details id="advice-details" style="margin-top:6px">
                     <summary style="cursor:pointer;font-size:12px;color:#89a">詳細を表示</summary>
@@ -124,6 +126,7 @@
             </div>
             <div class="panel" id="team-editor" style="display:none">
                 <h3>パーティ編集 (保存で即反映)</h3>
+                <div id="team-editor-pin-note" style="display:none;color:#fa6;font-size:12px;margin-bottom:6px"></div>
                 <div id="team-editor-rows"></div>
                 <button onclick="saveTeam()" style="margin-top:8px;background:#3567c9;color:#fff;border:none;border-radius:6px;padding:8px 16px;cursor:pointer">保存</button>
                 <button onclick="document.getElementById('team-editor').style.display='none'" style="margin-left:8px;background:#444;color:#ccc;border:none;border-radius:6px;padding:8px 12px;cursor:pointer">閉じる</button>
@@ -151,8 +154,8 @@
         // ページの版と、この HTML が実装している機能 (2026-10-07: ブラウザがキャッシュの古い index.html を使った疑いを確かめる)。
         // 接続時に client_hello で送り、サーバーはディスクの index.html の CLIENT_HTML_VERSION と照合して対戦ログの client 行に残す。
         // ⚠ この HTML を変えたら CLIENT_HTML_VERSION を更新する (サーバーは正規表現でこの行を読む。形式を変えない)
-        const CLIENT_HTML_VERSION = "2026-10-09c";
-        const CLIENT_FEATURES = ['client_hello', 'page_visibility', 'advice_shown_hidden', 'server_warning'];
+        const CLIENT_HTML_VERSION = "2026-11-02a";
+        const CLIENT_FEATURES = ['client_hello', 'page_visibility', 'advice_shown_hidden', 'server_warning', 'pin_status'];
         const emitHello = () => socket.emit('client_hello', {
             html_version: CLIENT_HTML_VERSION, features: CLIENT_FEATURES, visibility: document.visibilityState,
             user_agent: navigator.userAgent, href: location.href,
@@ -174,6 +177,22 @@
             warnBand.textContent = '⚠ ' + ((w && w.text) || 'サーバーからの警告');
             warnBand.style.display = 'block';
         });
+        // 版の固定の bundle (2026-11-02): 使用中は「固定した登録を使用中 (bundle <dir 名>、manifest sha16 …)」を助言欄の上部に常時出す。
+        // 正式比較に使えない bundle (formal_ok false) は「適用範囲未確認 (診断)」が併記される。登録の編集画面には反映されない旨を出す
+        let pinStatus = null;
+        function applyPinStatus(p) {
+            if (!p) return;
+            pinStatus = p;
+            const band = document.getElementById('pin-status');
+            band.textContent = p.active ? ('📌 ' + p.text) : '';
+            band.style.display = p.active ? 'block' : 'none';
+            band.style.background = (p.active && p.formal_ok === false) ? '#5a3a1a' : '#2a3550';
+            const note = document.getElementById('team-editor-pin-note');
+            note.textContent = p.active ? ('⚠ ' + p.edit_note) : '';
+            note.style.display = p.active ? 'block' : 'none';
+            if (typeof renderMyDetail === 'function') renderMyDetail();
+        }
+        socket.on('pin_status', applyPinStatus);
         socket.on('disconnect', () => {
             connLabel.textContent = 'バックエンド: 切断';
             connLabel.style.background = '#a33';
@@ -276,6 +295,7 @@
             document.getElementById('team-editor').style.display = 'block';
         }
         socket.on('my_team_data', (d) => {
+            applyPinStatus(d.pin_status);
             for (const [cat, id] of [["species","tl-species"],["natures","tl-natures"],
                                      ["items","tl-items"],["abilities","tl-abilities"],["moves","tl-moves"]])
                 document.getElementById(id).innerHTML =
@@ -522,7 +542,7 @@
             if (myDetailTarget) socket.emit('get_my_team_detail', {});
             renderMyDetail();
         }
-        socket.on('my_team_detail', (d) => { myTeamDetail = d; renderMyDetail(); });
+        socket.on('my_team_detail', (d) => { myTeamDetail = d; if (d && d.pin_status) applyPinStatus(d.pin_status); renderMyDetail(); });
         // 詳細パネル = その場で編集できる登録フォーム (2026-09-16 ユーザー要望: 値を直接変更、性格・特性はプルダウン)。
         // 保存は 1 体ぶんの部分更新 (save_my_build)。未登録の種 (今の対戦のロスター) もここから登録できる
         function renderMyDetail() {
@@ -554,7 +574,9 @@
             const ptVal = (k) => pts[k] ?? pts[{h:'hp',a:'atk',b:'def',c:'spa',d:'spd',s:'spe'}[k]] ?? '';
             const mv = (e && e['技']) || [];
             const row = (k, v) => `<tr><td style="color:#89a;padding-right:10px;white-space:nowrap">${k}</td><td>${v}</td></tr>`;
-            el.innerHTML =
+            const pinNote = (pinStatus && pinStatus.active)
+                ? `<div style="color:#fa6;margin-bottom:4px">⚠ ${esc(pinStatus.edit_note)}</div>` : '';
+            el.innerHTML = pinNote +
                 `<b>${esc(ja)}</b> ${head}` +
                 `<button onclick="toggleMyDetail('${esc(ja)}')" style="float:right;margin-left:6px;font-size:11px;background:#533;color:#cde;border:1px solid #755;border-radius:4px;cursor:pointer">閉じる</button>` +
                 `<button onclick="socket.emit('get_my_team_detail', {})" style="float:right;font-size:11px;background:#356;color:#cde;border:1px solid #467;border-radius:4px;cursor:pointer">更新</button>` +

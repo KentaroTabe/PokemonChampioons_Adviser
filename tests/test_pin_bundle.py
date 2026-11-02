@@ -274,11 +274,19 @@ def test_bundle_creation_and_manifest():
                 str(src["rl_policy"]), "--selection-model", str(src["selection_model"]), "--selection-emb", str(src["selection_emb"]),
                 "--registry", str(src["registry"]), "--usage-db", str(src["usage_db"]), "--bank", str(src["bank"]),
                 "--showdown-dir", str(d / "no_showdown"), "--file", str(f)]
-        bad = subprocess.run(base, cwd=str(REPO), env=env, capture_output=True, text=True, timeout=180)
-        assert bad.returncode == 2 and "--selection-kind" in bad.stderr, bad
+        # 2026-11-02 レビュー判断 1 の仕様変更に伴う期待値の更新: --selection-model だけなら種別は学習履歴の meta で決まる
+        # (合成の meta は provenance なし → 不明、formal_ok False)。同じ秒の stamp の衝突を避けるため別の --out-dir に作る
+        meta_only = [x if x != str(d / "cli") else str(d / "cli_meta") for x in base]
+        unk = subprocess.run(meta_only, cwd=str(REPO), env=env, capture_output=True, text=True, timeout=180)
+        assert unk.returncode == 0 and "選出モデル 不明" in unk.stdout and "(formal_ok False)" in unk.stdout, unk
         bad = subprocess.run(base + ["--selection-kind", "team"], cwd=str(REPO), env=env, capture_output=True, text=True, timeout=180)
         assert bad.returncode == 2 and "--selection-team" in bad.stderr, bad
-        out = subprocess.run(base + ["--selection-kind", "team", "--selection-team", ",".join(TEAM)], cwd=str(REPO), env=env,
+        # 2026-11-02 レビュー判断 1 の仕様変更に伴う期待値の更新: 種別の明示は根拠 (--selection-kind-basis) が必須
+        bad = subprocess.run(base + ["--selection-kind", "team", "--selection-team", ",".join(TEAM)], cwd=str(REPO), env=env,
+                             capture_output=True, text=True, timeout=180)
+        assert bad.returncode == 2 and "--selection-kind-basis" in bad.stderr, bad
+        out = subprocess.run(base + ["--selection-kind", "team", "--selection-team", ",".join(TEAM),
+                                     "--selection-kind-basis", "テスト用の合成モデル (この 6 体として扱う)"], cwd=str(REPO), env=env,
                              capture_output=True, text=True, timeout=180)
         lines = [ln for ln in out.stdout.splitlines() if not ln.startswith("#")]
         assert out.returncode == 0 and len(lines) == 1 and lines[0].startswith("ADVICE_PIN_BUNDLE="), out

@@ -170,6 +170,15 @@ print(f"[server] {_SENS_STARTUP_LINE}")
 print(f"[server] {_DATA_PIN_STARTUP_LINE}")
 print(f"[server] {_MODEL_PIN_STARTUP_LINE}")
 print(f"[server] {_BUNDLE_STARTUP_LINE}")
+# 2026-11-02 (レビュー判断 2): bundle 使用中の固定対象の除外 (advisor.team_advice は配備先の DB を読む) と、画面に出す固定の状態
+from advisor import pin_bundle as _PB
+if _PB.startup_exclusion_line():
+    print(f"[server] {_PB.startup_exclusion_line()}")
+
+
+def _pin_status() -> dict:
+    """画面の「固定した登録を使用中」の表示 (advisor.pin_bundle.pin_status。例外を出さない)"""
+    return _PB.pin_status()
 _busy = False
 _pending_frame = None      # 処理中に届いた最新フレーム (sid, data)
 _last_state_json = ""
@@ -262,6 +271,8 @@ async def connect(sid, environ):
     _clients.on_connect(sid, time.time())
     asyncio.get_event_loop().create_task(_check_hello(sid))
     await sio.emit('state_update', pipeline.state.to_dict(), room=sid)
+    # 版の固定の bundle を使っているか (助言欄の上部に常時出す。2026-11-02)
+    await sio.emit('pin_status', _pin_status(), room=sid)
     # 構築提案の実行中にページを開き直しても「作成中」表示が復元されるように
     # (2026-08-25 第9回: 実行中である旨の表示が無いという指摘。進捗配信は
     # 発行元のsid宛てだったため、リロード後の画面には何も出なかった)
@@ -784,7 +795,7 @@ async def get_my_team(sid, data=None):
                  for cat in ("species", "moves", "items", "abilities")}
         from advisor.my_team import _NATURES
         names["natures"] = [n for n in _NATURES if not n.isascii()]
-        await sio.emit('my_team_data', {"team": team, "names": names}, room=sid)
+        await sio.emit('my_team_data', {"team": team, "names": names, "pin_status": _pin_status()}, room=sid)
     except Exception as e:
         print(f"[server] get_my_teamエラー: {e}")
 
@@ -948,7 +959,8 @@ async def get_my_team_detail(sid, data):
         import advisor.my_team as mt
         from tools.team_proposal import registration_gaps
         entries = mt._load() or {}
-        return {"entries": entries, "gaps": registration_gaps(entries), **_my_team_edit_options(entries)}
+        return {"entries": entries, "gaps": registration_gaps(entries), **_my_team_edit_options(entries),
+                "pin_status": _pin_status()}
 
     try:
         payload = await asyncio.get_event_loop().run_in_executor(None, _work)

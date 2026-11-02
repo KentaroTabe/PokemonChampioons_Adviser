@@ -507,8 +507,11 @@ def make_pin_bundle(out_dir: Path, *, rl_policy: Path, selection_model: Path, se
                     config: Optional[dict] = None, showdown: Optional[dict] = None, regulation: Optional[str] = None) -> dict:
     """版の固定の bundle を out_dir (無いこと。上書きしない) に作り、manifest.json を書いて返す (2026-10-31 追加レビュー判断 2)。
     各ファイルは _copy_checked (複製の前後で元の sha256 が変わらず写しと一致)、使用率 DB は export_bundle(full_schema=True)。
-    selection = 選出モデルの種別と適用範囲 ({"kind": general / team, "team": 6 体 or None, "sets_premise", "source_id", "source_path",
-    "source_manifest", "features", "regulation"})。emb_sha16 はここで埋める。selection_meta / selection_cond は無ければ None (記録 None)。
+    selection = 選出モデルの由来と、明示するときの種別 ({"kind": general / team (明示するときだけ。無ければ meta で決める),
+    "kind_basis" (明示の根拠), "team", "sets_premise", "source_id", "source_path", "source_manifest", "features", "regulation"})。
+    種別・6 体・型の前提は advisor.pin_bundle.finalize_selection が写した meta の provenance (model_sha16 の一致) で決め、
+    kind_source / kind_basis / meta_classification / formal_ok / formal_reason を足す (2026-11-02)。
+    emb_sha16 はここで埋める。selection_meta / selection_cond は無ければ None (記録 None)。
     作った後に advisor.pin_bundle.check_bundle_manifest で照合し、合わなければ RuntimeError (作りかけの dir は残す。消さない)"""
     from advisor import pin_bundle as PB
     from advisor.my_team import registry_sha
@@ -543,7 +546,16 @@ def make_pin_bundle(out_dir: Path, *, rl_policy: Path, selection_model: Path, se
     ub["source_db"] = str(src_db.resolve())
     ub["latest_at_pin"] = latest_snapshot_id(src_db)
     files["usage_db"] = ub
-    sel = dict(selection or {})
+    # 種別はモデルと結び付いた学習履歴 (写した meta の provenance と model_sha16) で決める。明示 (selection の kind) は
+    # kind_source explicit と根拠 (kind_basis) を残す。名前 (selection_model.pt / Package / registered) では決めない (2026-11-02)
+    meta_doc = None
+    if files.get("selection_meta"):
+        try:
+            meta_doc = json.loads((out_dir / PB.FILES["selection_meta"]).read_text(encoding="utf-8"))
+        except ValueError:
+            meta_doc = None
+    meta_name = Path(selection_meta).name if selection_meta is not None else PB.FILES["selection_meta"]
+    sel = PB.finalize_selection(selection, PB.classify_from_meta(meta_doc, files["selection_model"]["sha256"], meta_name))
     sel["emb_sha16"] = files["selection_emb"]["sha16"]
     man = {"kind": PB.BUNDLE_KIND, "version": PB.BUNDLE_VERSION, "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
            "dir": str(out_dir.resolve()), "files": files, "selection": sel, "code": code or {}, "config": config or {},

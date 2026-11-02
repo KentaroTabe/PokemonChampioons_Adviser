@@ -59,8 +59,13 @@ manifest.json)。設定ファイルには ADVICE_PIN_BUNDLE=<dir> の 1 行だ�
 advice_env.sh は --bundle-pin で両方を解決・検査して uvicorn にだけ export する。server は起動時に bundle 全体を検査する
 (bundle_startup_check。不正なら起動しない)。
 
-    python -m tools.advice_mode --freeze-bundle [--out-dir DIR] [--rl-policy ZIP] [--selection-model PT --selection-kind general|team
-        [--selection-team ID,...] [--selection-sets TEAM.txt]] [--usage-db DB] [--usage-snapshot N] [--bank BANK] [--registry JSON]
+    python -m tools.advice_mode --freeze-bundle [--out-dir DIR] [--rl-policy ZIP] [--selection-model PT [--selection-kind general|team
+        --selection-kind-basis "根拠" [--selection-team ID,...] [--selection-sets TEAM.txt]]] [--usage-db DB] [--usage-snapshot N]
+        [--bank BANK] [--registry JSON]
+
+2026-11-02 (レビュー判断 1・2): 選出モデルの種別は学習履歴 (モデルと同じ dir の <stem>_meta.json の provenance。meta の model_sha16 が
+モデルと一致するときだけ) で決める。無ければ「不明」(formal_ok False = 正式比較に使わない、適用範囲未確認の診断)。明示は根拠が必須。
+# 行に種別・根拠・型の前提 (fixed / none / unknown)・正式比較の可否が出る。
     python -m tools.advice_mode --resolve ... --bundle-pin [--file PATH] [--root DIR]   # advice_env.sh (末尾に 3 行)
 """
 from __future__ import annotations
@@ -833,49 +838,40 @@ def _showdown_info(sd: Path) -> dict:
 
 
 def selection_profile(model: Path, source_id: Optional[str], kind: Optional[str] = None, team: Optional[list] = None,
-                      sets_text: Optional[str] = None, sets_source: Optional[str] = None) -> dict:
-    """bundle の manifest の selection (副作用: 由来の manifest・team.json・run の参照チームの読み取り)。
-    種別の既定: 試用 Package / 登録チーム向け (registered:<key>) = 構築専用 (6 体はその記録)、配布版・汎用モデル = 汎用。
-    kind / team を渡せばそれを使う (由来の記録と食い違っても渡した値)。学習時の型の前提: sets_text (Showdown 本文) を渡せばそれ、
-    無ければ Package の team.json の text、登録チーム向けは記録の run の reference_team.txt。どれも無ければ fixed None (不明 = 照合しない)"""
+                      sets_text: Optional[str] = None, sets_source: Optional[str] = None,
+                      kind_basis: Optional[str] = None) -> dict:
+    """bundle の manifest の selection の素 (副作用: 由来の manifest の読み取り)。2026-11-02 (レビュー判断 1): 種別・6 体・型の前提は
+    ここでは決めない (kind を渡さなければ None)。tools.inputs_pin.make_pin_bundle が写した meta の provenance (model_sha16 の一致) で
+    決める (advisor.pin_bundle.finalize_selection)。名前 (試用 Package / 登録チーム向け / 配布版) からは決めない。
+    kind を渡すのは明示 (--selection-kind) のときだけで、kind_basis (根拠の文) と一緒に残す。明示の team の型の前提は sets_text
+    (Showdown 本文) を渡せば fixed、無ければ unknown。由来の manifest (登録チーム向け・試用 Package) は記録 (source_manifest・規制) にだけ使う"""
     import json as _json
     from champions_agent.agent import selection_dispatch as SD
     from champions_agent.config import TRAINING_BATTLE_FORMAT
-    src_manifest, auto_kind, auto_team, auto_text, auto_text_src = None, "general", None, None, None
+    src_manifest = None
     sid = str(source_id or "")
     try:
         if sid.startswith(SD.REGISTERED_PREFIX):
             mp = Path(model).parent / "manifest.json"
             src_manifest = _json.loads(mp.read_text(encoding="utf-8")) if mp.exists() else None
-            auto_kind, auto_team = "team", sorted((src_manifest or {}).get("species") or [])
-            run_id = (src_manifest or {}).get("run_id")
-            if run_id:
-                ref = REPO / "logs" / "build_search" / "runs" / str(run_id) / "reference_team.txt"
-                if ref.exists():
-                    auto_text, auto_text_src = ref.read_text(encoding="utf-8"), str(ref)
         elif sid and sid != SD.PINNED_SOURCE and not sid.startswith("explicit:"):
-            pdir = SD.PACKAGES_DIR / sid
-            tj = pdir / "team.json"
-            team_doc = _json.loads(tj.read_text(encoding="utf-8")) if tj.exists() else {}
-            mp = pdir / "manifest.json"
+            mp = SD.PACKAGES_DIR / sid / "manifest.json"
             src_manifest = _json.loads(mp.read_text(encoding="utf-8")) if mp.exists() else None
-            auto_kind, auto_team = "team", sorted(team_doc.get("species") or [])
-            if team_doc.get("text"):
-                auto_text, auto_text_src = team_doc["text"], str(tj)
     except (OSError, ValueError):
         pass
-    k = kind or auto_kind
-    t = sorted({str(x).strip().lower() for x in (team if team is not None else (auto_team or [])) if str(x).strip()}) or None
-    text, tsrc = (sets_text, sets_source) if sets_text else (auto_text, auto_text_src)
-    premise = {"fixed": None, "source": None, "sets": None}
-    if k == "team" and text:
+    t = sorted({str(x).strip().lower() for x in (team or []) if str(x).strip()}) or None
+    premise, psets, psrc = "unknown", None, None
+    if kind == "team" and sets_text:
         from tools.party_improvements import parse_showdown_sets
-        sets = {s_id: row for s_id, row in parse_showdown_sets(text).items() if not t or s_id in t}
-        premise = {"fixed": True, "source": tsrc, "sets": sets}
+        psets = {s_id: row for s_id, row in parse_showdown_sets(sets_text).items() if not t or s_id in t}
+        premise, psrc = ("fixed", sets_source) if psets else ("unknown", None)
     from champions_agent.agent.selection_dispatch import features_version
-    return {"kind": k, "team": t if k == "team" else None, "sets_premise": premise, "source_id": source_id,
-            "source_path": str(Path(model).resolve()), "source_manifest": src_manifest, "features": features_version(),
-            "regulation": (src_manifest or {}).get("regulation") or TRAINING_BATTLE_FORMAT}
+    out = {"kind": kind, "team": t if kind == "team" else None, "sets_premise": premise, "premise_sets": psets if premise == "fixed" else None,
+           "premise_source": psrc, "source_id": source_id, "source_path": str(Path(model).resolve()), "source_manifest": src_manifest,
+           "features": features_version(), "regulation": (src_manifest or {}).get("regulation") or TRAINING_BATTLE_FORMAT}
+    if kind is not None:
+        out["kind_basis"] = (kind_basis or "").strip() or None
+    return out
 
 
 def default_bundle_sources() -> dict:
@@ -929,14 +925,41 @@ def _sha16_file(p: Path) -> Optional[str]:
         return None
 
 
+def selection_kind_lines(sel: dict) -> list:
+    """--freeze-bundle の # 行: 選出モデルの種別とその根拠、型の前提、正式比較の可否 (純粋。2026-11-02)"""
+    from advisor import pin_bundle as PB
+    kind = sel.get("kind")
+    premise = PB.premise_of(sel)[0]
+    st = PB.formal_status(sel)
+    out = [f"#   選出モデルの種別: {PB.KIND_LABEL.get(kind, kind)}"
+           + (f" 対応 6 体 {sel.get('team')}" if kind == "team" else "")
+           + f" / 根拠 {sel.get('kind_source')}: {sel.get('kind_basis') or 'なし'}"
+           + f" / 型の前提 {premise} ({PB.PREMISE_LABEL.get(premise, premise)})",
+           "#   正式比較: " + ("可 (formal_ok True)" if st["ok"] else f"使わない — {PB.UNVERIFIED_LABEL} (formal_ok False): {st['reason']}")]
+    mc = sel.get("meta_classification") or {}
+    if sel.get("kind_source") == "explicit" and (mc.get("kind"), mc.get("team")) != (kind, sel.get("team")):
+        out.append(f"#   注意: 明示した種別 {PB.KIND_LABEL.get(kind, kind)} が学習履歴の判定 {PB.KIND_LABEL.get(mc.get('kind'), mc.get('kind'))}"
+                   f" ({mc.get('kind_basis')}) と違う")
+    if kind == "team" and premise == "unknown":
+        out.append("#   注意: 構築専用モデルの学習時の型の前提が分からない (型は照合しない。正式比較には使えない)")
+    return out
+
+
 def _main_freeze_bundle(a) -> int:
     from advisor import pin_bundle as PB
     from advisor.data_pin import DEFAULT_USAGE_DB
     try:
-        if a.selection_model and not a.selection_kind:
-            raise ValueError("--selection-model を指定したら --selection-kind (general / team) も指定する (種別を推測しない)")
-        if a.selection_kind == "team" and a.selection_model and not a.selection_team:
+        # 種別は既定でモデルの学習履歴 (同じ dir の <stem>_meta.json の provenance と model_sha16) で決める。明示は根拠が必須 (2026-11-02)
+        if a.selection_kind == "team" and not a.selection_team:
             raise ValueError("--selection-kind team には --selection-team (6 体の種族 id をカンマ区切り) も指定する")
+        if a.selection_kind and not (a.selection_kind_basis or "").strip():
+            raise ValueError("--selection-kind を明示するときは --selection-kind-basis \"<根拠の文>\" も指定する (種別の根拠を manifest に残す。"
+                             "省くと学習履歴の meta で決め、無ければ「不明」)")
+        if not a.selection_kind and (a.selection_team or a.selection_sets or a.selection_kind_basis):
+            raise ValueError("--selection-team / --selection-sets / --selection-kind-basis は --selection-kind と一緒に指定する "
+                             "(省いたときの種別・6 体・型の前提は学習履歴の meta で決める)")
+        if a.selection_kind != "team" and a.selection_sets:
+            raise ValueError("--selection-sets は --selection-kind team と一緒に指定する")
         srcs = default_bundle_sources() if not (a.rl_policy and a.selection_model and a.selection_emb and a.registry) else {}
         sel_model = Path(a.selection_model) if a.selection_model else Path(srcs["selection_model"])
         source_id = None if a.selection_model else srcs.get("selection_source")
@@ -945,10 +968,12 @@ def _main_freeze_bundle(a) -> int:
         team = [x for x in (a.selection_team or "").split(",") if x.strip()] or None
         sets_text = Path(a.selection_sets).read_text(encoding="utf-8") if a.selection_sets else None
         selection = selection_profile(sel_model, source_id, a.selection_kind, team, sets_text,
-                                      str(Path(a.selection_sets).resolve()) if a.selection_sets else None)
+                                      str(Path(a.selection_sets).resolve()) if a.selection_sets else None,
+                                      kind_basis=a.selection_kind_basis)
         if selection["kind"] == "team" and len(selection.get("team") or []) != 6:
             raise ValueError(f"構築専用の選出モデルの 6 体が決まらない ({selection.get('team')})。--selection-team で 6 体を指定する")
-        meta = Path(a.selection_meta) if a.selection_meta else (sel_model.parent / "selection_model_meta.json")
+        from champions_agent.agent.selection_model import provenance_meta_path
+        meta = Path(a.selection_meta) if a.selection_meta else provenance_meta_path(sel_model)
         cond = Path(a.selection_cond) if a.selection_cond else srcs.get("selection_cond")
         r = freeze_bundle(Path(a.out_dir) if a.out_dir else REPO / PIN_FREEZE_DIR_REL,
                           rl_policy=Path(a.rl_policy) if a.rl_policy else srcs["rl_policy"], selection_model=sel_model,
@@ -976,9 +1001,8 @@ def _main_freeze_bundle(a) -> int:
     print(f"#   使用率: snapshot {ub['snapshot_id']} (元の最新 {ub.get('latest_at_pin')}) の抽出、表 {len(ub['tables'])} 個")
     print(f"#   コード: {man['code'].get('git_commit')} (未コミットの変更 {man['code'].get('dirty')}) / Showdown: "
           f"{man['showdown'].get('commit') or ('不明: ' + str(man['showdown'].get('error')))} / 規制 {man.get('regulation')}")
-    sp = (man["selection"].get("sets_premise") or {})
-    if man["selection"].get("kind") == "team" and not sp.get("fixed"):
-        print("#   注意: 構築専用モデルの学習時の型の前提が分からない (型は照合しない。分かれば --selection-sets で渡す)")
+    for ln in selection_kind_lines(man["selection"]):
+        print(ln)
     if summary.get("set_diffs"):
         print(f"#   注意: 学習時の型と登録の型が違う ({len(summary['set_diffs'])} 件)。この構築では選出モデルを使わない: "
               + "; ".join(summary["set_diffs"][:4]))
@@ -1021,8 +1045,10 @@ def main(argv: Optional[list] = None) -> int:
                     help="--resolve で版の固定の bundle (ADVICE_PIN_BUNDLE / ADVICE_PIN_ALLOW_OTHER_TEAM) と設定元も出し、bundle 全体を確かめる"
                          " (advice_env.sh が使う)")
     ap.add_argument("--selection-kind", choices=("general", "team"), default=None,
-                    help="--freeze-bundle: 選出モデルの種別 (--selection-model を指定したときは必須。既定は由来から: 試用 Package / "
-                         "登録チーム向け = team、配布版 = general)")
+                    help="--freeze-bundle: 選出モデルの種別を明示する (--selection-kind-basis が必須)。省くとモデルと同じ dir の "
+                         "<stem>_meta.json の学習履歴 (provenance、model_sha16 の一致) で決め、無ければ「不明」。名前では決めない")
+    ap.add_argument("--selection-kind-basis", default=None,
+                    help="--freeze-bundle: --selection-kind を明示するときの根拠の文 (必須。manifest の selection.kind_basis に残る)")
     ap.add_argument("--selection-team", default=None, help="--freeze-bundle: 構築専用モデルの 6 体 (種族 id のカンマ区切り)")
     ap.add_argument("--selection-sets", default=None, help="--freeze-bundle: 構築専用モデルの学習時の型 (Showdown 本文のファイル)")
     ap.add_argument("--selection-emb", default=None, help="--freeze-bundle: 埋め込み (既定 今の特徴量の版のピン)")

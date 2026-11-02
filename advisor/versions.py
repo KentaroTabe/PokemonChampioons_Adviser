@@ -49,8 +49,9 @@
 2026-10-31 版の固定の bundle (追加レビュー判断 2・4、advisor/pin_bundle.py): bundle を使うときは、識別の embedding_sha256 を
 選出モデルが実際に読む bundle の埋め込みの sha16 にする (配備先の species_embedding.json の sha は使わない = 元を変えても version 行の
 sha は変わらない)。選出モデル・RL 方策・使用率 snapshot・登録・バンクは data_pin / my_team が bundle を読むので、そのまま bundle の値になる。
-runtime に "pin_bundle" ({dir, manifest_sha16, selection_kind, selection_team, selection_origin, allow_other_team, error}) を足す
-(bundle を使うときだけ。識別には入れない)
+runtime に "pin_bundle" ({dir, manifest_sha16, selection_kind, selection_team, selection_origin, selection_kind_source,
+selection_sets_premise, formal_ok, formal_reason, allow_other_team, error}) を足す (bundle を使うときだけ。識別には入れない)。
+formal_ok False = 選出モデルの種別・型の前提が学習履歴で確かめられない (適用範囲未確認の診断。2026-11-02、tools.real_accept は判定不能にする)
 """
 from __future__ import annotations
 

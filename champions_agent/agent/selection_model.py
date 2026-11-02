@@ -31,6 +31,14 @@ EMB_DIM = 20        # 機能埋め込みの次元 (メタ上位N体)
 FEATURE_DIM = EMB_DIM * 6   # 選出3体(順序込み) + 控え平均 + 相手平均/最大
 
 
+def provenance_meta_path(model_path) -> Path:
+    """選出モデルの .pt と結び付く meta (学習履歴 provenance と model_sha16 を持つ) のパス: 同じ dir の <stem>_meta.json
+    (selection_model.pt → selection_model_meta.json = META_PATH、selection_model_general.pt → selection_model_general_meta.json。
+    2026-11-02 レビュー判断 1: 種別はこの meta で決め、ファイルの名前では決めない)"""
+    p = Path(model_path)
+    return p.with_name(p.stem + "_meta.json")
+
+
 def _to_id(name) -> str:
     return re.sub(r"[^a-z0-9]", "", str(name).lower())
 
