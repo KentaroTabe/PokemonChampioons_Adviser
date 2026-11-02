@@ -780,6 +780,8 @@ manifest から埋まる。書くなら値を bundle と揃える。違えば起
       real_accept の群の照合は判定不能になる)。種別はモデルと同じ dir の `<stem>_meta.json` の学習履歴 (provenance、model_sha16 の一致)
       で決まり、ファイルの名前 (selection_model.pt / Package / registered) では決まらない。2026-11-02 より前に学習したモデルは記録が無いので
       不明になる (正式比較に使うなら train_selection で学習し直すか、根拠を書いて `--selection-kind` で明示する)
+      記録から復元した provenance (`tools/inheritance_eval/reconstruct_provenance.py`、source reconstructed) は根拠 `reconstructed` と出る。
+      formal_ok は証拠の強さで決まる (training_log、または参照先自身に training_log か学習コードが書いた trained の meta がある hash_identity があれば可。mtime・run の manifest・参照先が不明の hash_identity だけなら種別は不明のまま) (2026-11-02)
 - [ ] 固定対象の除外: `advisor.team_advice` (試合後のパーティ診断の meta_top・補完候補) は配備先の使用率 DB を読む。操作・選出の試験の
       経路ではないので今回の固定対象から除外する (構築・修理の比較で使う段階で固定対象に入れる)。起動ログに
       `[server] 版の固定 (bundle) の対象外: advisor.team_advice …` が出る

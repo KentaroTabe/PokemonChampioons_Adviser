@@ -67,7 +67,10 @@ def test_training_provenance():
     assert provenance_meta_path(GENERAL_MODEL_PATH).name == "selection_model_general_meta.json"
     p = _prov("team_finetuned", list(reversed(TEAM)), "fixed", {"mimikyu": {"item": "lifeorb"}})
     assert p["kind"] == "team_finetuned" and p["finetune_team"] == sorted(TEAM) and p["sets_premise"] == "fixed" and p["sets"]
-    assert set(p) == {"kind", "finetune_team", "sets_premise", "sets", "general_model_sha16", "trained_at", "data_path", "code_commit"}
+    # 2026-11-02 source 鍵の追加に伴う期待値の更新 (承認済み)
+    assert set(p) == {"kind", "finetune_team", "sets_premise", "sets", "general_model_sha16", "trained_at", "data_path", "code_commit",
+                      "source"}
+    assert p["source"] == "trained"
     g = _prov()
     assert g["finetune_team"] is None and g["sets"] is None and g["sets_premise"] == "none"
     for bad in (dict(kind="x"), dict(kind="team_finetuned", team=TEAM[:5]), dict(kind="general", team=TEAM),
@@ -88,7 +91,8 @@ def test_training_provenance():
         mp = _write_meta(m, g, {"teams": [["a"]], "n_samples": 3, "val": {"mse": 0.2}})
         doc = json.loads(mp.read_text(encoding="utf-8"))
         assert mp.name == "selection_model_general_meta.json" and doc["teams"] == [["a"]] and doc["val"] == {"mse": 0.2}
-        assert doc["model_sha16"] == TS._sha16(m) and doc["provenance"] == g
+        # 2026-11-02 source 鍵の追加に伴う期待値の更新 (承認済み)
+        assert doc["model_sha16"] == TS._sha16(m) and doc["provenance"] == dict(g, source="trained")
         assert TS.write_model_meta(m, g, None, meta_path=Path(td) / "x.json").name == "x.json"
     # 微調整を見送ったら None (配布版は general と記録される)
     if _has_torch():

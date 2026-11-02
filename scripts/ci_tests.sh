@@ -26,6 +26,8 @@
 # - test_pin_bundle (2026-10-31 版の固定の bundle): torch が無い環境 (CI) では選出モデルの推論の値の比較を省き、固定したモデルを
 #   読み込めないときに止まることを確かめる (同じテストの中で分岐する。合成のファイルだけで閉じる)
 # - test_model_kind (2026-11-02 選出モデルの種別を学習履歴で決める): 同じく torch が無ければ推論・微調整の見送りの確認を省く
+# - test_model_provenance (2026-11-02 既存の選出モデルの学習履歴の復元、tools/inheritance_eval/reconstruct_provenance.py): 合成の
+#   ツリー・記録・モデルだけで閉じる (本体のモデル・記録は読まない)
 # test_battle_prune は検証する関数を champions_agent/env/showdown_env_pure.py に分けて CI に残した (showdown_env は
 # poke-env を先頭で読み、poke-env 0.10 は numpy>=2.0.2 を要求して CI の numpy<2 と両立しない)。
 # Showdown のデータ (pokemon-showdown/、未コミット) の読み手は、コミット済みのキャッシュを先に読むので CI でも同じ結果になる
@@ -213,6 +215,7 @@ TESTS=(
   test_inh_fixes
   test_pin_bundle
   test_model_kind
+  test_model_provenance
 )
 
 fail=0

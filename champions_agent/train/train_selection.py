@@ -30,7 +30,9 @@ tools/collect_selection_data.py が集めた実対戦データ
 (selection_model.provenance_meta_path。配布版は META_PATH = selection_model_meta.json) に model_sha16 (そのモデルの
 sha256 の先頭 16 桁) と provenance を書く:
   {"kind": "general" | "team_finetuned", "finetune_team": [6 体の種族 id] or None, "sets_premise": "fixed" | "none",
-   "sets": 固定型なら {species_id: 型} or None, "general_model_sha16", "trained_at", "data_path", "code_commit"}
+   "sets": 固定型なら {species_id: 型} or None, "general_model_sha16", "trained_at", "data_path", "code_commit",
+   "source": "trained" (学習時に書いた記録。記録から後で復元したものは "reconstructed"、tools/inheritance_eval/reconstruct_provenance.py。
+   鍵が無い記録も読み手は trained とみなす)}
 配布版 (MODEL_PATH) は finetune で実際に微調整したときだけ team_finetuned (型は my_team の登録 = 微調整データの収集
 (collect_selection_data --teams myteam) が使う build_myteam_text の型。学習時点の登録を記録する)。微調整を見送った・
 --no-finetune なら general。汎用モデル (GENERAL_MODEL_PATH / v2 / v3)・条件付きモデル (COND_MODEL_PATH) は general、
@@ -78,7 +80,7 @@ def build_provenance(kind: str, finetune_team: Optional[list], sets_premise: str
     return {"kind": kind, "finetune_team": team, "sets_premise": sets_premise,
             "sets": (dict(sets) if sets_premise == "fixed" and sets else None),
             "general_model_sha16": general_model_sha16, "trained_at": trained_at or time.strftime("%Y-%m-%d %H:%M:%S"),
-            "data_path": str(data_path) if data_path is not None else None, "code_commit": code_commit}
+            "data_path": str(data_path) if data_path is not None else None, "code_commit": code_commit, "source": "trained"}
 
 
 def model_meta_doc(model_sha16: str, provenance: dict, base: Optional[dict] = None) -> dict:
