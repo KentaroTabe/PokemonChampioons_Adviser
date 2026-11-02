@@ -701,6 +701,10 @@ SELECTION_MODEL_SHA_ENV = "ADVICE_SELECTION_MODEL_SHA16"  # その期待 sha16 (
 PIN_BUNDLE_ENV = "ADVICE_PIN_BUNDLE"
 # 構築専用の選出モデルを別構築に適用する汎化試験の明示 (値 1。既定は止める)。適用したことは version 行の runtime と選出の助言に残す
 PIN_ALLOW_OTHER_TEAM_ENV = "ADVICE_PIN_ALLOW_OTHER_TEAM"
+# 既存の選出モデルの学習履歴の復元 (2026-11-02 開発者判断 4、tools/inheritance_eval/reconstruct_provenance.py): 学習の記録の保存行の
+# 直後の時刻とモデルの mtime の差がこの秒数以内 (かつ mtime が保存行の直前の時刻以後) なら、その保存行がこのモデルを書いたとみなす
+# (証拠 training_log)。記録の時刻は秒単位で、保存から次の時刻の行まで _report_top の表示などで数秒かかる
+PROVENANCE_LOG_MTIME_TOLERANCE_S = 120
 # 固定入力の異常の伝え方 (2026-10-31 レビュー E-inputs-3: engine が InputsPinError を握りつぶして第一候補を返していた)。
 # 助言エンジン (advisor.engine.evaluate / evaluate_common) は InputsPinError を {"ok": False, "reason": INPUTS_PIN_REASON,
 # "error": ...} で返す (通常の「推定なし」と分ける)。server はその結果を表示せず (INPUTS_PIN_STOP_TEXT の 1 行と error)、キャッシュ・

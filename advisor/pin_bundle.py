@@ -44,8 +44,21 @@ source_id の "pinned" は由来の表示で、適用範囲の判定には使わ
   - advisor.team_advice (meta_top・補完候補) は配備先の DB を読む。操作・選出の試験の経路ではないので今回の固定対象から除外
     (TEAM_ADVICE_EXCLUSION。構築・修理の比較で使う段階で固定対象に入れる)
 
+2026-11-02 復元した学習履歴 (開発者判断 4「まず根拠の復元。再学習は後」、tools/inheritance_eval/reconstruct_provenance.py):
+  - provenance.source は "trained" (train_selection が学習時に書いた。鍵が無い旧い記録も trained とみなす) / "reconstructed"
+    (学習の記録・ファイルの sha・mtime から後で復元した)。復元は evidence ([{"kind", "detail", "path"}])・reconstructed_at・
+    reconstructed_by を持つ
+  - 証拠の強さ (reconstructed_evidence_status): training_log (学習の記録の保存行のパスがモデルと同じで、その直後の時刻とモデルの
+    mtime が一致) か、参照先のモデル自身に強い由来 (training_log の一致、または学習コードが書いた source trained の meta) がある
+    hash_identity (ファイルの sha256 がその参照先と同一) があれば
+    「強い」。参照先に強い証拠が無い hash_identity・置き場の実体が自分自身と同一であること・mtime だけ・run の manifest
+    (run_manifest) の記述だけは「弱い」(コードの経路からの推定は由来の確認にしない。2026-11-02 判断)
+  - classify_from_meta: 復元で証拠が強ければ種別を採り kind_source "reconstructed"、弱ければ種別は「不明」のまま (kind_source
+    "unknown"、kind_basis に理由)。formal_status は reconstructed を meta と同じに扱う (種別・型の前提の条件は同じ。構築専用で
+    型の前提が unknown なら formal_ok False)
+
 純粋な部分 (bundle_values / check_bundle_manifest / reconcile / normalize_set / sets_differences / scope_decision /
-classify_from_meta / premise_of / formal_status / pin_status_payload) は tests/test_pin_bundle.py と tests/test_model_kind.py で確かめる。
+classify_from_meta / reconstructed_evidence_status / premise_of / formal_status / pin_status_payload) は tests/test_pin_bundle.py と tests/test_model_kind.py で確かめる。
 """
 from __future__ import annotations
 
@@ -75,7 +88,18 @@ REQUIRED_FILES = ("rl_policy", "selection_model", "selection_emb", "usage_db", "
 OPTIONAL_FILES = ("selection_meta", "selection_cond")
 MODEL_KINDS = ("general", "team", "unknown")
 KIND_LABEL = {"general": "汎用", "team": "構築専用", "unknown": "不明"}
-KIND_SOURCES = ("meta", "explicit", "unknown")
+KIND_SOURCES = ("meta", "reconstructed", "explicit", "unknown")
+# 学習履歴から種別を決めた根拠 (meta の provenance。explicit / unknown 以外)
+HISTORY_KIND_SOURCES = ("meta", "reconstructed")
+# provenance.source: 学習時に書いた (trained、鍵が無い旧い記録も同じ) / 記録から後で復元した (reconstructed、2026-11-02)
+PROVENANCE_SOURCES = ("trained", "reconstructed")
+# 復元の証拠の種類と、それだけで種別を決めてよい「強い」証拠 (advisor.pin_bundle.reconstructed_evidence_status)
+EVIDENCE_KINDS = ("hash_identity", "training_log", "run_manifest", "mtime")
+STRONG_EVIDENCE_KINDS = ("hash_identity", "training_log")
+# hash_identity が強い証拠になるのは、参照先のモデル自身の証拠 (要素の ref_evidence) にこれがあるときだけ (2026-11-02 判断):
+#   training_log = 参照先の保存行と mtime が一致 / trained_meta = 参照先に学習コードが書いた meta (source trained、model_sha16 が
+#   参照先と一致、kind_source meta)。学習コードが書いた記録は学習ログと同じ強さとする。記録から復元した弱い meta は含めない
+REF_STRONG_EVIDENCE_KINDS = ("training_log", "trained_meta")
 SETS_PREMISES = ("fixed", "none", "unknown")
 PREMISE_LABEL = {"fixed": "固定型", "none": "前提なし (型に条件づけない)", "unknown": "不明"}
 # 学習履歴 (champions_agent.train.train_selection.build_provenance) の kind → manifest の種別
@@ -249,11 +273,54 @@ def premise_of(sel: Optional[dict]) -> tuple:
     return premise, (dict(sets) if premise == "fixed" else None)
 
 
+def reconstructed_evidence_status(prov: Optional[dict]) -> dict:
+    """復元した provenance (source "reconstructed") の証拠の強さ (純粋。2026-11-02 開発者判断 4)。
+    {"ok": 種別を決めてよいか, "kinds": 証拠の種類の list (記録の順、重複なし), "strong": 強い証拠の種類の list, "reason": 決めない理由 or None}。
+    強い証拠 (STRONG_EVIDENCE_KINDS):
+      - training_log: 学習の記録の保存行のパスがモデルと同じで、保存行の直後の時刻とモデルの mtime が一致 (許容は
+        config.PROVENANCE_LOG_MTIME_TOLERANCE_S)
+      - hash_identity: モデルのファイルの sha256 が参照先のモデル (汎用モデル) と同一で、かつ参照先のモデル自身に強い証拠
+        (要素の ref_evidence に REF_STRONG_EVIDENCE_KINDS = training_log か trained_meta) があるときだけ。参照先が不明 (ref_evidence に
+        それが無い・鍵が無い。参照先の meta が記録から復元した弱いもの) なら弱い。置き場の実体が自分自身と同一であることは証拠にしない (コードの経路からの推定は
+        由来の確認ではない。2026-11-02 判断)
+    弱い証拠: mtime (ファイルの時刻だけ)・run_manifest (構築 run の manifest・Package の記述だけ)・参照先が不明の hash_identity。
+    弱い証拠だけなら種別は決めない (「不明」のまま)。
+    evidence の各要素は {"kind": EVIDENCE_KINDS のどれか, "detail", "path"} (hash_identity は "ref_evidence": 参照先自身の証拠の種類の
+    list も持つ)。知らない kind の要素は数えない"""
+    p = prov or {}
+    ev = p.get("evidence")
+    if not isinstance(ev, list) or not ev:
+        return {"ok": False, "kinds": [], "strong": [], "reason": "復元の証拠 (evidence) が無い"}
+    kinds, strong, weak_hash = [], [], False
+    for e in ev:
+        k = e.get("kind") if isinstance(e, dict) else None
+        if k not in EVIDENCE_KINDS:
+            continue
+        if k not in kinds:
+            kinds.append(k)
+        if k == "hash_identity":
+            ref = e.get("ref_evidence")
+            ok = isinstance(ref, list) and any(r in REF_STRONG_EVIDENCE_KINDS for r in ref)
+            weak_hash = weak_hash or not ok
+        else:
+            ok = k in STRONG_EVIDENCE_KINDS
+        if ok and k not in strong:
+            strong.append(k)
+    if not strong:
+        return {"ok": False, "kinds": kinds, "strong": [],
+                "reason": (f"復元の証拠が弱い ({', '.join(kinds) or '読める証拠なし'} だけ。training_log が無い"
+                           + ("。hash_identity の参照先のモデル自身に training_log の一致が無い (参照先が不明)" if weak_hash else "")
+                           + ")")}
+    return {"ok": True, "kinds": kinds, "strong": strong, "reason": None}
+
+
 def classify_from_meta(meta: Optional[dict], model_sha256: Optional[str], meta_name: Optional[str] = None) -> dict:
     """選出モデルの種別をモデルの実体と結び付いた学習履歴で決める (純粋。2026-11-02 レビュー判断 1)。
     meta = モデルと同じ dir の <stem>_meta.json の中身 (無ければ None)、model_sha256 = モデルのファイルの sha256。
     meta の model_sha16 がモデルの sha256 の先頭 16 桁と一致し、provenance の形が正しいときだけ採用 (kind_source "meta")。
     それ以外は種別 "unknown" (kind_source "unknown")。ファイルの名前は見ない。
+    provenance.source が "reconstructed" (記録から復元。2026-11-02) なら reconstructed_evidence_status で証拠が強いときだけ採用し
+    kind_source "reconstructed"、弱ければ "unknown" (理由は kind_basis)。source が無ければ trained とみなす。
     戻り値 {"kind", "team", "sets_premise", "premise_sets", "premise_source", "kind_source", "kind_basis", "provenance"}"""
     where = meta_name or "meta"
     unk = lambda why: {"kind": "unknown", "team": None, "sets_premise": "unknown", "premise_sets": None, "premise_source": None,
@@ -269,6 +336,12 @@ def classify_from_meta(meta: Optional[dict], model_sha256: Optional[str], meta_n
         return unk(f"{where} に model_sha16 が無い (モデルの実体と結び付かない)")
     if not got or want != got:
         return unk(f"{where} の model_sha16 {want} がモデルの sha16 {got or '不明'} と違う (別のモデルの記録)")
+    source = prov.get("source") or "trained"
+    if source not in PROVENANCE_SOURCES:
+        return unk(f"{where} の provenance.source {source!r} を読めない ({PROVENANCE_SOURCES} のどれでもない)")
+    ev_st = reconstructed_evidence_status(prov) if source == "reconstructed" else None
+    if ev_st is not None and not ev_st["ok"]:
+        return unk(f"{where} の provenance は記録からの復元 (reconstructed) だが種別を決めない: {ev_st['reason']}")
     kind = PROVENANCE_KIND_MAP.get(prov.get("kind"))
     if kind is None:
         return unk(f"{where} の provenance.kind {prov.get('kind')!r} を読めない ({tuple(PROVENANCE_KIND_MAP)} のどれでもない)")
@@ -282,19 +355,28 @@ def classify_from_meta(meta: Optional[dict], model_sha256: Optional[str], meta_n
         premise, sets = "none", None
     else:
         premise, sets = "unknown", None
-    basis = (f"{where} の provenance (kind {prov.get('kind')}、学習 {prov.get('trained_at')}、code {str(prov.get('code_commit') or '?')[:12]}、"
-             f"model_sha16 {want} 一致)")
+    if ev_st is None:
+        basis = (f"{where} の provenance (kind {prov.get('kind')}、学習 {prov.get('trained_at')}、code {str(prov.get('code_commit') or '?')[:12]}、"
+                 f"model_sha16 {want} 一致)")
+    else:
+        basis = (f"{where} の provenance (記録からの復元 reconstructed、kind {prov.get('kind')}、証拠 {', '.join(ev_st['kinds'])} "
+                 f"(強い証拠 {', '.join(ev_st['strong'])})、復元 {prov.get('reconstructed_at')}、model_sha16 {want} 一致)")
     keep = {k: prov.get(k) for k in ("kind", "finetune_team", "sets_premise", "general_model_sha16", "trained_at", "data_path",
                                      "code_commit")}
+    keep["source"] = source
+    if ev_st is not None:
+        keep.update(evidence_kinds=ev_st["kinds"], reconstructed_at=prov.get("reconstructed_at"),
+                    reconstructed_by=prov.get("reconstructed_by"))
     return {"kind": kind, "team": team if kind == "team" else None, "sets_premise": premise, "premise_sets": sets,
-            "premise_source": f"{where} の provenance" if premise == "fixed" else None, "kind_source": "meta",
-            "kind_basis": basis, "provenance": keep}
+            "premise_source": f"{where} の provenance" if premise == "fixed" else None,
+            "kind_source": "meta" if ev_st is None else "reconstructed", "kind_basis": basis, "provenance": keep}
 
 
 def formal_status(sel: Optional[dict]) -> dict:
     """正式比較に使えるか (純粋)。{"ok": bool, "reason": 使えない理由 or None}。
-    種別が meta から決まる (kind_source "meta") か明示 + 根拠 (kind_source "explicit" かつ kind_basis あり)、種別が不明でない、
-    構築専用なら型の前提が unknown でない、のときだけ ok"""
+    種別が meta から決まる (kind_source "meta"、または記録から復元して証拠が強い "reconstructed") か明示 + 根拠 (kind_source
+    "explicit" かつ kind_basis あり)、種別が不明でない、構築専用なら型の前提が unknown でない、のときだけ ok。
+    reconstructed の証拠の強さは classify_from_meta が判定済み (弱ければ種別が unknown になる)"""
     s = sel or {}
     kind, ks = s.get("kind"), s.get("kind_source")
     if kind not in ("general", "team"):
@@ -303,7 +385,7 @@ def formal_status(sel: Optional[dict]) -> dict:
     if ks == "explicit":
         if not str(s.get("kind_basis") or "").strip():
             return {"ok": False, "reason": "種別を明示したが根拠 (kind_basis) が無い"}
-    elif ks != "meta":
+    elif ks not in HISTORY_KIND_SOURCES:
         return {"ok": False, "reason": "種別の根拠 (kind_source) の記録が無い (学習履歴で決めていない旧い bundle)"}
     if kind == "team" and premise_of(s)[0] == "unknown":
         return {"ok": False, "reason": "構築専用モデルの学習時の型の前提が不明 (型まで一致したことを確かめられない)"}
@@ -313,12 +395,12 @@ def formal_status(sel: Optional[dict]) -> dict:
 def finalize_selection(sel: Optional[dict], meta_cls: dict) -> dict:
     """make_pin_bundle が manifest に書く selection (純粋)。sel = 呼び出し側の値 (tools.advice_mode.selection_profile)、
     meta_cls = classify_from_meta の結果 (bundle に写すモデルと meta から)。
-    sel に kind が無い・kind_source が meta / unknown なら meta の判定を採る。kind があれば明示 (kind_source explicit、
+    sel に kind が無い・kind_source が meta / reconstructed / unknown なら meta の判定を採る。kind があれば明示 (kind_source explicit、
     kind_basis は sel の値。無ければ None = formal_ok False)。型の前提は 3 値 (sets_premise) + 型 (premise_sets) に直す。
     meta_classification (meta の判定の要約)・formal_ok・formal_reason を足す"""
     out = dict(sel or {})
     m = dict(meta_cls or {})
-    explicit = out.get("kind") is not None and out.get("kind_source") not in ("meta", "unknown")
+    explicit = out.get("kind") is not None and out.get("kind_source") not in HISTORY_KIND_SOURCES + ("unknown",)
     if explicit:
         premise, sets = premise_of(out)
         old = out.get("sets_premise")
@@ -710,9 +792,9 @@ def verify_bundle(d=None, explicit: Optional[dict] = None, environ: Optional[dic
 
 
 def meta_kind_consistency(sel: dict, d, model_sha256: Optional[str]) -> list:
-    """種別を meta で決めた bundle (kind_source "meta") で、bundle の meta の写しとモデルから決め直した種別・6 体・型の前提が
+    """種別を meta で決めた bundle (kind_source "meta" / 復元の "reconstructed") で、bundle の meta の写しとモデルから決め直した種別・6 体・型の前提が
     manifest と同じか (副作用: bundle の meta の読み取り)。違う理由の list (manifest の書き換え・別のモデルの meta を防ぐ)"""
-    if (sel or {}).get("kind_source") != "meta":
+    if (sel or {}).get("kind_source") not in HISTORY_KIND_SOURCES:
         return []
     p = Path(d) / FILES["selection_meta"]
     try:
