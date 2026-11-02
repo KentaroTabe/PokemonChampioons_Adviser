@@ -770,9 +770,19 @@ manifest から埋まる。書くなら値を bundle と揃える。違えば起
 - [ ] 学習・測定の run が動いていないことを `scripts/status.sh` と `pgrep -fl "check_advisor_player|usefulness_p1|team_build"` で確かめる
 - [ ] bundle を作る: `.venv/bin/python -m tools.advice_mode --freeze-bundle`
       (今読まれるはずの RL 方策と、登録チームに使われるはずの選出モデルを写す。表示の `#` 行で次を確かめる:
-      選出モデルの種別 (`汎用` / `構築専用 対応 6 体 [...]`)、構築専用なら 6 体が今の登録チームと同じか、`型の前提` (一致 / 不明 / 不一致)、
+      選出モデルの種別 (`汎用` / `構築専用 対応 6 体 [...]` / `不明`)、構築専用なら 6 体が今の登録チームと同じか、`型の前提` (一致 / 不明 / 不一致)、
       コードの commit と `未コミットの変更 False`、Showdown の commit、使用率の snapshot。設定ファイルは書き換えない)。
-      選出モデルを指定するときは `--selection-model PT --selection-kind general|team [--selection-team id,... --selection-sets TEAM.txt]`
+      選出モデルを指定するときは `--selection-model PT` (種別はそのモデルの学習履歴の meta で決まる)。種別を明示するときだけ
+      `--selection-kind general|team --selection-kind-basis "<根拠の文>" [--selection-team id,... --selection-sets TEAM.txt]`
+- [ ] **bundle の `#` 行で種別と formal_ok を確かめる** (2026-11-02 レビュー判断 1・2): `#   選出モデルの種別: … / 根拠 meta|explicit|unknown: …
+      / 型の前提 fixed|none|unknown` と `#   正式比較: 可 (formal_ok True)` / `使わない — 適用範囲未確認 (診断) (formal_ok False): <理由>`。
+      **種別が不明 (根拠 unknown)、または構築専用で型の前提が unknown なら正式比較に使わない** (起動・助言はできるが診断扱い。
+      real_accept の群の照合は判定不能になる)。種別はモデルと同じ dir の `<stem>_meta.json` の学習履歴 (provenance、model_sha16 の一致)
+      で決まり、ファイルの名前 (selection_model.pt / Package / registered) では決まらない。2026-11-02 より前に学習したモデルは記録が無いので
+      不明になる (正式比較に使うなら train_selection で学習し直すか、根拠を書いて `--selection-kind` で明示する)
+- [ ] 固定対象の除外: `advisor.team_advice` (試合後のパーティ診断の meta_top・補完候補) は配備先の使用率 DB を読む。操作・選出の試験の
+      経路ではないので今回の固定対象から除外する (構築・修理の比較で使う段階で固定対象に入れる)。起動ログに
+      `[server] 版の固定 (bundle) の対象外: advisor.team_advice …` が出る
 - [ ] 表示された 1 行 `ADVICE_PIN_BUNDLE=...` を `config/advice.local.env` に書く。以前の固定の行 (`ADVICE_USAGE_SNAPSHOT` /
       `ADVICE_REAL_BANK(_SHA16)` / `ADVICE_RL_POLICY(_SHA16)` / `ADVICE_SELECTION_MODEL(_SHA16)`) は消す (残すなら bundle と同じ値)
 - [ ] `.venv/bin/python -m tools.advice_mode --show` で `版の固定 (bundle) の設定値: bundle <dir>` と `bundle の照合: 一致` を確かめる
@@ -780,10 +790,14 @@ manifest から埋まる。書くなら値を bundle と揃える。違えば起
       起動スクリプトの出力に `版の固定 (bundle): <dir> (...照合済み)` が出る。bundle が壊れていれば何も止めずに中止する
 - [ ] 起動ログ (`logs/server_nohup.log`) で
       `[server] 版の固定 (bundle): 実効値 bundle <dir> (manifest sha16 ..., 使用率 snapshot N, 選出モデル ...) / 設定元 file / 設定値 bundle <dir> (...)`
-      (⚠ が無いこと)、`データの固定:` / `モデルの固定:` の行が `bundle ... から` であることを確かめる
+      (⚠ が無いこと)、`データの固定:` / `モデルの固定:` の行が `bundle ... から` であることを確かめる。同じ行の末尾が `正式比較 可` か
+      `適用範囲未確認 (診断): <理由>` か (`#` 行と同じ) を確かめる
+- [ ] 助言画面: 助言欄の上部に `📌 固定した登録を使用中 (bundle <dir 名>、manifest sha16 …)` が常時出る (formal_ok False なら
+      ` / 適用範囲未確認 (診断): <理由>` が併記され、背景が茶色)。パーティ編集・登録の詳細には「bundle 使用中は登録の編集が助言に反映されない」が出る
 - [ ] 1 戦目の対戦ログの version 行で `runtime.pin_bundle.manifest_sha16` (起動ログと同じ)、`rules.usage_snapshot` = N、
       `selection_model.sha256` / `action_policy.sha256` / `rules.embedding_sha256` / `team.registry_sha256` / `rules.real_bank.sha16` が
-      manifest の各 sha16 (`files.*.sha16`、登録は `files.registry.registry_sha16`) と同じことを確かめる
+      manifest の各 sha16 (`files.*.sha16`、登録は `files.registry.registry_sha16`) と同じことを確かめる。
+      `runtime.pin_bundle.formal_ok` が true であること (false なら正式比較に数えない)
 - [ ] 選出画面: 構築専用モデルは自分の 6 体が読めるまで `🤖 選出モデル: 確認待ち`。`⛔ 選出モデルを使わない` が出たら、登録・
       パーティが bundle の構築と違う (または学習時の型と違う)。その対戦は比較に数えず、bundle と登録を確かめる
       (理由は対戦ログの advice 行の `model_pick_scope` に残る)

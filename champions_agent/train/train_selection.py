@@ -25,21 +25,114 @@ tools/collect_selection_data.py が集めた実対戦データ
     (0.52→0.44)。全体で学習したあと my_team で微調整して寄せ直す。
   - my_team を変えたら scripts/collect_selection.sh 2 2500 myteam を回して
     学習し直すこと (微調整のデータが無いと自動で見送られる)。
+
+2026-11-02 学習履歴の記録 (レビュー 11/2 判断 1): 保存したモデルごとに、同じ dir の <stem>_meta.json
+(selection_model.provenance_meta_path。配布版は META_PATH = selection_model_meta.json) に model_sha16 (そのモデルの
+sha256 の先頭 16 桁) と provenance を書く:
+  {"kind": "general" | "team_finetuned", "finetune_team": [6 体の種族 id] or None, "sets_premise": "fixed" | "none",
+   "sets": 固定型なら {species_id: 型} or None, "general_model_sha16", "trained_at", "data_path", "code_commit"}
+配布版 (MODEL_PATH) は finetune で実際に微調整したときだけ team_finetuned (型は my_team の登録 = 微調整データの収集
+(collect_selection_data --teams myteam) が使う build_myteam_text の型。学習時点の登録を記録する)。微調整を見送った・
+--no-finetune なら general。汎用モデル (GENERAL_MODEL_PATH / v2 / v3)・条件付きモデル (COND_MODEL_PATH) は general、
+sets_premise "none" (型に条件づけていない)。版の固定の bundle (advisor.pin_bundle.classify_from_meta) はこの記録と
+model_sha16 の一致だけで種別を決める (ファイルの名前では決めない)。
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+import time
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
 from champions_agent.agent.selection_model import (
-    GENERAL_MODEL_PATH, META_PATH, MODEL_PATH, build_features, make_net,
+    GENERAL_MODEL_PATH, META_PATH, MODEL_PATH, build_features, make_net, provenance_meta_path,
 )
 from champions_agent.agent.spaces import SELECTION_PERMUTATIONS
 from champions_agent.config import MODELS_DIR, RANDOM_SEED
 
 DATA_PATH = Path(__file__).resolve().parent / "logs" / "selection_data.npz"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+PROVENANCE_KINDS = ("general", "team_finetuned")
+PROVENANCE_PREMISES = ("fixed", "none")
+
+
+# ------------------------------------------------------------------ 学習履歴 (provenance)
+def build_provenance(kind: str, finetune_team: Optional[list], sets_premise: str, sets: Optional[dict],
+                     general_model_sha16: Optional[str], data_path, code_commit: Optional[str],
+                     trained_at: Optional[str] = None) -> dict:
+    """学習履歴の記録 (純粋)。kind = general / team_finetuned、sets_premise = fixed (学習データが型を固定) / none (型に条件づけない)。
+    team_finetuned は 6 体、fixed は型 (sets) を持つ。形が合わなければ ValueError (読み手が「不明」にする記録を書かない)"""
+    if kind not in PROVENANCE_KINDS:
+        raise ValueError(f"provenance の kind {kind!r} は {PROVENANCE_KINDS} のどれか")
+    if sets_premise not in PROVENANCE_PREMISES:
+        raise ValueError(f"provenance の sets_premise {sets_premise!r} は {PROVENANCE_PREMISES} のどれか")
+    team = sorted({str(s) for s in finetune_team or []}) or None
+    if kind == "team_finetuned" and (team is None or len(team) != 6):
+        raise ValueError(f"team_finetuned には 6 体の finetune_team が要る ({finetune_team!r})")
+    if kind == "general" and team is not None:
+        raise ValueError("general に finetune_team は書かない")
+    return {"kind": kind, "finetune_team": team, "sets_premise": sets_premise,
+            "sets": (dict(sets) if sets_premise == "fixed" and sets else None),
+            "general_model_sha16": general_model_sha16, "trained_at": trained_at or time.strftime("%Y-%m-%d %H:%M:%S"),
+            "data_path": str(data_path) if data_path is not None else None, "code_commit": code_commit}
+
+
+def model_meta_doc(model_sha16: str, provenance: dict, base: Optional[dict] = None) -> dict:
+    """meta の中身 (純粋): base (teams・n_samples・val など) に model_sha16 と provenance を足す"""
+    out = dict(base or {})
+    out["model_sha16"] = model_sha16
+    out["provenance"] = dict(provenance)
+    return out
+
+
+def distributed_provenance(ft_team: Optional[list], sets: Optional[dict], general_model_sha16: Optional[str], data_path,
+                           code_commit: Optional[str], trained_at: Optional[str] = None) -> dict:
+    """配布版 (MODEL_PATH) の provenance (純粋): 実際に微調整した 6 体 (ft_team) があれば team_finetuned (型の前提 fixed、
+    sets = 微調整データの型。読めなければ None)、見送った・--no-finetune なら general (型の前提 none)"""
+    if ft_team:
+        return build_provenance("team_finetuned", ft_team, "fixed", sets, general_model_sha16, data_path, code_commit, trained_at)
+    return build_provenance("general", None, "none", None, general_model_sha16, data_path, code_commit, trained_at)
+
+
+def _sha16(path: Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:16]
+
+
+def _code_commit() -> Optional[str]:
+    """学習したコードの commit (副作用: git の読み取り。取れなければ None)"""
+    import subprocess
+    try:
+        r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() or None if r.returncode == 0 else None
+    except Exception:
+        return None
+
+
+def write_model_meta(model_path: Path, provenance: dict, base: Optional[dict] = None,
+                     meta_path: Optional[Path] = None) -> Path:
+    """保存済みのモデルの meta を書く (副作用: モデルの読み取りと meta の書き込み)。meta_path の既定は同じ dir の <stem>_meta.json"""
+    mp = Path(meta_path) if meta_path is not None else provenance_meta_path(model_path)
+    mp.write_text(json.dumps(model_meta_doc(_sha16(model_path), provenance, base), ensure_ascii=False), encoding="utf-8")
+    return mp
+
+
+def _myteam_sets(team: list) -> Optional[dict]:
+    """微調整データの型 (副作用: 登録の読み取り): build_myteam_text (collect_selection_data --teams myteam が使う本文) を
+    {species_id: 型} にして 6 体に絞る。読めなければ None (読み手は型の前提を「不明」にする)"""
+    try:
+        from tools.evaluate_team import build_myteam_text
+        from tools.party_improvements import parse_showdown_sets
+        sets = parse_showdown_sets(build_myteam_text())
+    except Exception as e:
+        print(f"  ⚠ 微調整の型 (my_team) を読めない: {e} (meta の sets は None)")
+        return None
+    want = {str(s) for s in team}
+    out = {k: v for k, v in sets.items() if _norm_species(k) in want}
+    return out if len(out) == len(want) else None
 
 
 def load_dataset(path: Path = DATA_PATH, opp_col: str = "team",
@@ -146,12 +239,14 @@ def _myteam_species() -> set:
     return out
 
 
-def _finetune_on_myteam(net, X, y, meta, lr: float, epochs: int = 200) -> None:
+def _finetune_on_myteam(net, X, y, meta, lr: float, epochs: int = 200) -> Optional[list]:
     """全体で学習したあと、実際に使うチームのデータだけで微調整する。
 
     構築プールを60→272に広げると未知チームへの汎化は上がるが、その分
     my_team への密着が落ちる (実測: 未知チーム検証 +4.7%→+7.3% の一方で
     my_team実戦 0.52→0.44)。汎化を土台にしてから使うチームに寄せ直す。
+
+    戻り値: 微調整した 6 体 (種族 id のソート済み list)。見送ったら None (2026-11-02: meta の provenance に使う)
     """
     import torch
     from torch.optim import Adam
@@ -159,13 +254,13 @@ def _finetune_on_myteam(net, X, y, meta, lr: float, epochs: int = 200) -> None:
         mine = _myteam_species()
     except Exception as e:
         print(f"  微調整をとばします (my_teamを読めない: {e})")
-        return
+        return None
     idx = [i for i, k in enumerate(meta["team_key"])
            if {_norm_species(s) for s in k.split("|")} == mine]
     if len(idx) < 500:
         print(f"  微調整をとばします (my_teamのデータが{len(idx)}件と少ない。"
               "bash scripts/collect_selection.sh 2 2500 myteam で収集する)")
-        return
+        return None
 
     rng = np.random.default_rng(RANDOM_SEED)
     idx = np.array(idx)
@@ -203,6 +298,7 @@ def _finetune_on_myteam(net, X, y, meta, lr: float, epochs: int = 200) -> None:
     net.load_state_dict(best_state)
     print(f"  my_teamで微調整: {len(tr)}件 / 保持{len(va)}件 "
           f"MSE {before:.4f} → {best:.4f}")
+    return sorted(mine)
 
 
 def train(epochs: int = 300, lr: float = 1e-3, holdout: float = 0.2,
@@ -350,53 +446,56 @@ def train(epochs: int = 300, lr: float = 1e-3, holdout: float = 0.2,
             print(f"[train_selection] 埋め込みをピン止め: {EMB_PIN_PATH}")
     except Exception as e:
         print(f"  ⚠ 埋め込みのピン止めに失敗: {e}")
+    # 学習履歴 (2026-11-02): どの保存先にも、同じ dir の <stem>_meta.json に model_sha16 と provenance を書く
+    d = np.load(DATA_PATH)
+    teams = sorted({tuple(sorted(str(s).lower() for s in t))
+                    for t in d["team"]})
+    # 学習に使ったチームを記録する。未学習のチームでは予測が外挿になるため、
+    # アドバイザー側で「参考値」と断って表示するのに使う。
+    # val は未知チーム検証の実測 (構築提案の運用ゲート tools/team_proposal が
+    # 「モデルの構成汎化が測定済みか」を機械判定するのに使う)
+    base_meta = {"teams": [list(t) for t in teams], "n_samples": int(meta["n"]),
+                 "val": {"mse": round(best_val, 5), "baseline_mse": round(base, 5),
+                         "gain_pct": round(gain, 2), "split": split_kind,
+                         "at": time.strftime("%Y-%m-%d %H:%M")}}
+    commit = _code_commit()
+
+    def _save_general(path: Path, label: str) -> str:
+        torch.save(net.state_dict(), path)
+        sha = _sha16(path)
+        write_model_meta(path, build_provenance("general", None, "none", None, sha, DATA_PATH, commit), base_meta)
+        print(f"[train_selection] {label}保存: {path} (meta {provenance_meta_path(path).name}: general)")
+        return sha
     if features == "v3":
         from champions_agent.agent.selection_features_v3 import V3_GENERAL_MODEL_PATH
-        torch.save(net.state_dict(), V3_GENERAL_MODEL_PATH)
-        print(f"[train_selection] v3 汎用モデル保存: {V3_GENERAL_MODEL_PATH}")
+        _save_general(V3_GENERAL_MODEL_PATH, "v3 汎用モデル")
         return
     if features == "v2":
         # v2は比較実験中の候補。v1の配布/汎用/微調整には触れない
         from champions_agent.agent.selection_features_v2 import (
             V2_GENERAL_MODEL_PATH,
         )
-        torch.save(net.state_dict(), V2_GENERAL_MODEL_PATH)
-        print(f"[train_selection] v2汎用モデル保存: {V2_GENERAL_MODEL_PATH}")
+        _save_general(V2_GENERAL_MODEL_PATH, "v2汎用モデル")
         return
     if cond_sel:
         # 条件付きモデルは利得行列 (payoff_matrix) 専用の別ファイル。
         # 配布版/汎用モデル (相手6体に条件付け) とは入力の意味が違うため
         # 上書きしてはいけない
         from champions_agent.agent.selection_model import COND_MODEL_PATH
-        torch.save(net.state_dict(), COND_MODEL_PATH)
-        print(f"[train_selection] 条件付きモデル保存: {COND_MODEL_PATH}")
+        _save_general(COND_MODEL_PATH, "条件付きモデル")
         _report_top(net, X, y)
         return
     # 微調整前の汎用モデルを別に残す。my_team に寄せた配布版では
     # 「毎戦チームが変わる」ベンチマークの測定に使えない
-    torch.save(net.state_dict(), GENERAL_MODEL_PATH)
-    print(f"[train_selection] 汎用モデル保存: {GENERAL_MODEL_PATH}")
+    general_sha = _save_general(GENERAL_MODEL_PATH, "汎用モデル")
 
-    if finetune:
-        _finetune_on_myteam(net, X, y, meta, lr / 10)
+    ft_team = _finetune_on_myteam(net, X, y, meta, lr / 10) if finetune else None
 
     torch.save(net.state_dict(), MODEL_PATH)
-    # 学習に使ったチームを記録する。未学習のチームでは予測が外挿になるため、
-    # アドバイザー側で「参考値」と断って表示するのに使う。
-    # val は未知チーム検証の実測 (構築提案の運用ゲート tools/team_proposal が
-    # 「モデルの構成汎化が測定済みか」を機械判定するのに使う)
-    import json
-    import time as _time
-    d = np.load(DATA_PATH)
-    teams = sorted({tuple(sorted(str(s).lower() for s in t))
-                    for t in d["team"]})
-    META_PATH.write_text(json.dumps(
-        {"teams": [list(t) for t in teams], "n_samples": int(meta["n"]),
-         "val": {"mse": round(best_val, 5), "baseline_mse": round(base, 5),
-                 "gain_pct": round(gain, 2), "split": split_kind,
-                 "at": _time.strftime("%Y-%m-%d %H:%M")}},
-        ensure_ascii=False), encoding="utf-8")
-    print(f"[train_selection] 保存: {MODEL_PATH}")
+    prov = distributed_provenance(ft_team, _myteam_sets(ft_team) if ft_team else None, general_sha, DATA_PATH, commit)
+    write_model_meta(MODEL_PATH, prov, base_meta, meta_path=META_PATH)
+    print(f"[train_selection] 保存: {MODEL_PATH} (meta {META_PATH.name}: {prov['kind']}"
+          + (f" {prov['finetune_team']} 型 {'あり' if prov['sets'] else '読めない'}" if ft_team else "") + ")")
 
     _report_top(net, X, y)
 

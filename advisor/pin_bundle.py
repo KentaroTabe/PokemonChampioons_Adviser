@@ -27,8 +27,25 @@ selection.team と同じときだけ推論する。6 体が確定していなけ
 汎化試験として別構築へ適用するのは config.PIN_ALLOW_OTHER_TEAM_ENV = 1 のときだけ (version 行の runtime と助言に残す)。
 source_id の "pinned" は由来の表示で、適用範囲の判定には使わない (manifest の kind と team だけで決める)。
 
-純粋な部分 (bundle_values / check_bundle_manifest / reconcile / normalize_set / sets_differences / scope_decision) は
-tests/test_pin_bundle.py で確かめる。
+2026-11-02 種別の根拠と正式比較の可否 (レビュー 11/2 判断 1・2):
+  - 種別 (selection.kind: general / team / unknown) はモデルの実体と結び付いた学習履歴で決める (classify_from_meta): モデルと
+    同じ dir の <stem>_meta.json の provenance を、meta に記録された model_sha16 がモデルの sha256 と一致するときだけ採用
+    (kind_source "meta")。meta が無い・provenance が無い・sha が違えば "unknown" (kind_source "unknown")。ファイルの名前
+    (selection_model.pt / Package / registered) では決めない。明示 (--selection-kind) は根拠の文 (kind_basis) を必須にし
+    kind_source "explicit" (CLI。API で根拠なしの明示は formal_ok=False)。meta の判定は selection.meta_classification に残す
+  - 型の前提 (selection.sets_premise) は "fixed" (学習データが型を固定。premise_sets に型) / "none" (型に条件づけない) /
+    "unknown" (分からない) の 3 値。旧い形 ({"fixed": True / None, "sets"}) も読む (True → fixed、それ以外 → unknown)
+  - 適用範囲: 構築専用 + fixed → 6 体と型の内容まで照合、構築専用 + none → 6 体だけ、構築専用 + unknown → 6 体は照合するが
+    正式比較には使えない、不明の種別 → 照合できず正式比較には使えない
+  - 正式比較の可否 formal_ok (formal_status): 種別が meta から決まる (または明示 + 根拠)、構築専用なら前提が unknown でない、
+    のときだけ True。False でも起動・推論はできるが、起動ログ・画面・version 行の runtime に「適用範囲未確認 (診断)」を出し、
+    tools.real_accept の群の照合で判定不能にする
+  - 画面: bundle 使用中は「固定した登録を使用中 (bundle <dir 名>、manifest sha16 …)」を助言欄の上部に常時出す (pin_status)
+  - advisor.team_advice (meta_top・補完候補) は配備先の DB を読む。操作・選出の試験の経路ではないので今回の固定対象から除外
+    (TEAM_ADVICE_EXCLUSION。構築・修理の比較で使う段階で固定対象に入れる)
+
+純粋な部分 (bundle_values / check_bundle_manifest / reconcile / normalize_set / sets_differences / scope_decision /
+classify_from_meta / premise_of / formal_status / pin_status_payload) は tests/test_pin_bundle.py と tests/test_model_kind.py で確かめる。
 """
 from __future__ import annotations
 
@@ -56,8 +73,18 @@ FILES = {
 }
 REQUIRED_FILES = ("rl_policy", "selection_model", "selection_emb", "usage_db", "real_bank", "registry")
 OPTIONAL_FILES = ("selection_meta", "selection_cond")
-MODEL_KINDS = ("general", "team")
-KIND_LABEL = {"general": "汎用", "team": "構築専用"}
+MODEL_KINDS = ("general", "team", "unknown")
+KIND_LABEL = {"general": "汎用", "team": "構築専用", "unknown": "不明"}
+KIND_SOURCES = ("meta", "explicit", "unknown")
+SETS_PREMISES = ("fixed", "none", "unknown")
+PREMISE_LABEL = {"fixed": "固定型", "none": "前提なし (型に条件づけない)", "unknown": "不明"}
+# 学習履歴 (champions_agent.train.train_selection.build_provenance) の kind → manifest の種別
+PROVENANCE_KIND_MAP = {"general": "general", "team_finetuned": "team"}
+UNVERIFIED_LABEL = "適用範囲未確認 (診断)"
+PINNED_REGISTRY_LABEL = "固定した登録を使用中"
+EDIT_NOTE = "bundle 使用中は登録の編集が助言に反映されない (助言は bundle の登録の写しを読む。反映するなら bundle を作り直して再起動する)"
+TEAM_ADVICE_EXCLUSION = ("advisor.team_advice (meta_top・補完候補) は配備先の DB を読む。操作・選出の試験の経路ではないので今回の"
+                         "固定対象から除外 (構築・修理の比較で使う段階で固定対象に入れる)")
 # bundle から埋める版の欄 (advisor.data_pin の spec と model spec の鍵)
 DATA_SPEC_KEYS = ("usage_db", "usage_snapshot", "bank_path", "bank_sha16")
 MODEL_SPEC_KEYS = ("rl_policy", "rl_policy_sha16", "selection_model", "selection_model_sha16")
@@ -134,6 +161,16 @@ def check_bundle_manifest(man: Optional[dict], actual: Optional[dict] = None, fe
         team = sel.get("team")
         if not isinstance(team, list) or len({str(x) for x in team}) != 6:
             reasons.append(f"構築専用の選出モデルの対応する 6 体が manifest に無い ({team!r})")
+    sp = sel.get("sets_premise")
+    if isinstance(sp, str) and sp not in SETS_PREMISES:
+        reasons.append(f"型の前提 {sp!r} が {SETS_PREMISES} のどれでもない")
+    ks = sel.get("kind_source")
+    if ks is not None and ks not in KIND_SOURCES:
+        reasons.append(f"種別の根拠 kind_source {ks!r} が {KIND_SOURCES} のどれでもない")
+    if ks == "unknown" and sel.get("kind") != "unknown":
+        reasons.append(f"種別の根拠が無い (kind_source unknown) のに種別が {sel.get('kind')!r}")
+    if "formal_ok" in sel and bool(sel.get("formal_ok")) != formal_status(sel)["ok"]:
+        reasons.append(f"selection.formal_ok {sel.get('formal_ok')!r} が記録の内容 (種別・根拠・型の前提) から決まる値と違う")
     if not sel.get("features"):
         reasons.append("選出の特徴量の版が manifest に無い")
     emb = files.get("selection_emb") or {}
@@ -193,17 +230,128 @@ def sets_differences(premise: Optional[dict], actual: Optional[dict]) -> list:
     return out
 
 
+def premise_of(sel: Optional[dict]) -> tuple:
+    """manifest の selection の型の前提 (純粋) → (前提 "fixed" / "none" / "unknown", 型 {species_id: 型} or None)。
+    新しい形: sets_premise が文字列、型は premise_sets。旧い形: sets_premise = {"fixed": True / None, "sets"}。
+    fixed でも型が無ければ照合できないので unknown"""
+    s = sel or {}
+    sp = s.get("sets_premise")
+    if isinstance(sp, str):
+        premise = sp if sp in SETS_PREMISES else "unknown"
+        sets = s.get("premise_sets") if premise == "fixed" else None
+    elif isinstance(sp, dict):
+        premise = "fixed" if sp.get("fixed") is True else "unknown"
+        sets = sp.get("sets") if premise == "fixed" else None
+    else:
+        premise, sets = "unknown", None
+    if premise == "fixed" and not (isinstance(sets, dict) and sets):
+        return "unknown", None
+    return premise, (dict(sets) if premise == "fixed" else None)
+
+
+def classify_from_meta(meta: Optional[dict], model_sha256: Optional[str], meta_name: Optional[str] = None) -> dict:
+    """選出モデルの種別をモデルの実体と結び付いた学習履歴で決める (純粋。2026-11-02 レビュー判断 1)。
+    meta = モデルと同じ dir の <stem>_meta.json の中身 (無ければ None)、model_sha256 = モデルのファイルの sha256。
+    meta の model_sha16 がモデルの sha256 の先頭 16 桁と一致し、provenance の形が正しいときだけ採用 (kind_source "meta")。
+    それ以外は種別 "unknown" (kind_source "unknown")。ファイルの名前は見ない。
+    戻り値 {"kind", "team", "sets_premise", "premise_sets", "premise_source", "kind_source", "kind_basis", "provenance"}"""
+    where = meta_name or "meta"
+    unk = lambda why: {"kind": "unknown", "team": None, "sets_premise": "unknown", "premise_sets": None, "premise_source": None,
+                       "kind_source": "unknown", "kind_basis": why, "provenance": None}
+    if not isinstance(meta, dict):
+        return unk(f"モデルと同じ dir に学習履歴の {where} が無い (由来不明)")
+    prov = meta.get("provenance")
+    if not isinstance(prov, dict):
+        return unk(f"{where} に学習履歴 (provenance) が無い (由来不明。2026-11-02 より前の学習)")
+    want = str(meta.get("model_sha16") or "").lower()
+    got = str(model_sha256 or "")[:16].lower()
+    if not want:
+        return unk(f"{where} に model_sha16 が無い (モデルの実体と結び付かない)")
+    if not got or want != got:
+        return unk(f"{where} の model_sha16 {want} がモデルの sha16 {got or '不明'} と違う (別のモデルの記録)")
+    kind = PROVENANCE_KIND_MAP.get(prov.get("kind"))
+    if kind is None:
+        return unk(f"{where} の provenance.kind {prov.get('kind')!r} を読めない ({tuple(PROVENANCE_KIND_MAP)} のどれでもない)")
+    team = sorted({str(x) for x in (prov.get("finetune_team") or [])}) or None
+    if kind == "team" and (team is None or len(team) != 6):
+        return unk(f"{where} の provenance が team_finetuned なのに 6 体の finetune_team が無い ({prov.get('finetune_team')!r})")
+    sp = prov.get("sets_premise")
+    if sp == "fixed" and isinstance(prov.get("sets"), dict) and prov.get("sets"):
+        premise, sets = "fixed", dict(prov["sets"])
+    elif sp == "none":
+        premise, sets = "none", None
+    else:
+        premise, sets = "unknown", None
+    basis = (f"{where} の provenance (kind {prov.get('kind')}、学習 {prov.get('trained_at')}、code {str(prov.get('code_commit') or '?')[:12]}、"
+             f"model_sha16 {want} 一致)")
+    keep = {k: prov.get(k) for k in ("kind", "finetune_team", "sets_premise", "general_model_sha16", "trained_at", "data_path",
+                                     "code_commit")}
+    return {"kind": kind, "team": team if kind == "team" else None, "sets_premise": premise, "premise_sets": sets,
+            "premise_source": f"{where} の provenance" if premise == "fixed" else None, "kind_source": "meta",
+            "kind_basis": basis, "provenance": keep}
+
+
+def formal_status(sel: Optional[dict]) -> dict:
+    """正式比較に使えるか (純粋)。{"ok": bool, "reason": 使えない理由 or None}。
+    種別が meta から決まる (kind_source "meta") か明示 + 根拠 (kind_source "explicit" かつ kind_basis あり)、種別が不明でない、
+    構築専用なら型の前提が unknown でない、のときだけ ok"""
+    s = sel or {}
+    kind, ks = s.get("kind"), s.get("kind_source")
+    if kind not in ("general", "team"):
+        why = s.get("kind_basis") if ks == "unknown" else None
+        return {"ok": False, "reason": "選出モデルの種別が不明" + (f" ({why})" if why else "")}
+    if ks == "explicit":
+        if not str(s.get("kind_basis") or "").strip():
+            return {"ok": False, "reason": "種別を明示したが根拠 (kind_basis) が無い"}
+    elif ks != "meta":
+        return {"ok": False, "reason": "種別の根拠 (kind_source) の記録が無い (学習履歴で決めていない旧い bundle)"}
+    if kind == "team" and premise_of(s)[0] == "unknown":
+        return {"ok": False, "reason": "構築専用モデルの学習時の型の前提が不明 (型まで一致したことを確かめられない)"}
+    return {"ok": True, "reason": None}
+
+
+def finalize_selection(sel: Optional[dict], meta_cls: dict) -> dict:
+    """make_pin_bundle が manifest に書く selection (純粋)。sel = 呼び出し側の値 (tools.advice_mode.selection_profile)、
+    meta_cls = classify_from_meta の結果 (bundle に写すモデルと meta から)。
+    sel に kind が無い・kind_source が meta / unknown なら meta の判定を採る。kind があれば明示 (kind_source explicit、
+    kind_basis は sel の値。無ければ None = formal_ok False)。型の前提は 3 値 (sets_premise) + 型 (premise_sets) に直す。
+    meta_classification (meta の判定の要約)・formal_ok・formal_reason を足す"""
+    out = dict(sel or {})
+    m = dict(meta_cls or {})
+    explicit = out.get("kind") is not None and out.get("kind_source") not in ("meta", "unknown")
+    if explicit:
+        premise, sets = premise_of(out)
+        old = out.get("sets_premise")
+        src = out.get("premise_source") or (old.get("source") if isinstance(old, dict) else None)
+        out.update(kind_source="explicit", kind_basis=(str(out.get("kind_basis")).strip() or None) if out.get("kind_basis") else None,
+                   sets_premise=premise, premise_sets=sets, premise_source=src if premise == "fixed" else None)
+        if out.get("kind") != "team":
+            out["team"] = None
+    else:
+        out.update(kind=m.get("kind", "unknown"), team=m.get("team"), sets_premise=m.get("sets_premise", "unknown"),
+                   premise_sets=m.get("premise_sets"), premise_source=m.get("premise_source"),
+                   kind_source=m.get("kind_source", "unknown"), kind_basis=m.get("kind_basis"))
+    out["meta_classification"] = {k: m.get(k) for k in ("kind", "team", "sets_premise", "kind_source", "kind_basis", "provenance")}
+    st = formal_status(out)
+    out["formal_ok"], out["formal_reason"] = st["ok"], st["reason"]
+    return out
+
+
 def scope_decision(sel: Optional[dict], my_species, confirmed: bool, allow_other: bool = False,
                    set_diffs: Optional[list] = None) -> dict:
     """選出モデルの適用範囲の判定 (純粋)。sel = manifest の selection、my_species = 自分の種族 id の列、confirmed = 6 体が確定したか、
     allow_other = 汎化試験の明示、set_diffs = 型の照合の違い (前提が固定型でないときは None)。
-    戻り値 {"state" (ok / pending / mismatch / override), "infer" (推論するか), "kind", "team", "reason"}。
+    戻り値 {"state" (ok / pending / mismatch / override), "infer" (推論するか), "kind", "team", "reason", "formal_ok", "formal_reason"}。
     汎用は常に ok。構築専用は 6 体確定前は pending、種族 id の集合 (順番は問わない) か型が違えば mismatch
-    (allow_other なら override = 推論するが汎化試験として残す)"""
+    (allow_other なら override = 推論するが汎化試験として残す)。型の前提が none なら 6 体だけ、unknown なら 6 体は照合するが
+    formal_ok False。種別が不明なら照合できず ok (推論する) で formal_ok False (適用範囲未確認の診断。2026-11-02)"""
     s = sel or {}
     kind = s.get("kind")
     team = sorted({str(x) for x in (s.get("team") or [])})
-    base = {"kind": kind, "team": team or None}
+    st = formal_status(s)
+    base = {"kind": kind, "team": team or None, "formal_ok": st["ok"], "formal_reason": st["reason"]}
+    if kind == "unknown":
+        return dict(base, state="ok", infer=True, reason=f"{st['reason']}。{UNVERIFIED_LABEL}")
     if kind != "team":
         return dict(base, state="ok", infer=True, reason=None)
     mine = sorted({str(x) for x in (my_species or []) if x})
@@ -476,9 +624,9 @@ def registry_sets(reg: dict, species_ids) -> dict:
 
 
 def premise_sets(sel: dict) -> Optional[dict]:
-    """manifest の学習時の型の前提 ({species_id: 型})。固定型でない・不明なら None (純粋)"""
-    sp = (sel or {}).get("sets_premise") or {}
-    return sp.get("sets") if sp.get("fixed") and isinstance(sp.get("sets"), dict) else None
+    """manifest の学習時の型の前提 ({species_id: 型})。固定型でない (none)・不明 (unknown) なら None (純粋)"""
+    premise, sets = premise_of(sel)
+    return sets if premise == "fixed" else None
 
 
 def bundle_set_differences(environ: Optional[dict] = None) -> Optional[list]:
@@ -537,6 +685,7 @@ def verify_bundle(d=None, explicit: Optional[dict] = None, environ: Optional[dic
         except Exception:
             features_now = None
     reasons = check_bundle_manifest(man, actual, features_now)
+    reasons += meta_kind_consistency(man.get("selection") or {}, d, actual.get(FILES["selection_model"]))
     vals = bundle_values(man, d)
     if explicit is None:
         from advisor.data_pin import model_spec_from_env, spec_from_env
@@ -556,35 +705,97 @@ def verify_bundle(d=None, explicit: Optional[dict] = None, environ: Optional[dic
     return {"dir": str(d), "manifest_sha16": manifest_sha16(d),
             "files": {k: ((man["files"].get(k) or {}).get("sha16")) for k in REQUIRED_FILES + OPTIONAL_FILES},
             "usage_snapshot": vals["usage_snapshot"], "selection": sel, "set_diffs": diffs, "values": vals,
-            "code": man.get("code"), "showdown": man.get("showdown"), "regulation": man.get("regulation")}
+            "code": man.get("code"), "showdown": man.get("showdown"), "regulation": man.get("regulation"),
+            "formal": formal_status(sel)}
+
+
+def meta_kind_consistency(sel: dict, d, model_sha256: Optional[str]) -> list:
+    """種別を meta で決めた bundle (kind_source "meta") で、bundle の meta の写しとモデルから決め直した種別・6 体・型の前提が
+    manifest と同じか (副作用: bundle の meta の読み取り)。違う理由の list (manifest の書き換え・別のモデルの meta を防ぐ)"""
+    if (sel or {}).get("kind_source") != "meta":
+        return []
+    p = Path(d) / FILES["selection_meta"]
+    try:
+        meta = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return [f"種別を meta で決めた bundle なのに {FILES['selection_meta']} を読めない"]
+    c = classify_from_meta(meta, model_sha256, FILES["selection_meta"])
+    want = (sel.get("kind"), sorted(sel.get("team") or []) or None) + premise_of(sel)
+    got = (c["kind"], c["team"], c["sets_premise"], c["premise_sets"])
+    if want != got:
+        return [f"manifest の選出モデルの種別 {want[0]} / 6 体 {want[1]} / 型の前提 {want[2]} が bundle の meta の判定 "
+                f"{got[0]} / {got[1]} / {got[2]} と違う ({c['kind_basis']})"]
+    return []
 
 
 def runtime_summary(environ: Optional[dict] = None) -> Optional[dict]:
-    """version 行の runtime に残す bundle の要約 (例外を出さない)。bundle が無ければ None"""
+    """version 行の runtime に残す bundle の要約 (例外を出さない)。bundle が無ければ None。
+    formal_ok = 正式比較に使えるか (False は 適用範囲未確認 の診断。tools.real_accept の群の照合で判定不能にする)"""
     env = os.environ if environ is None else environ
     if not active(env):
         return None
     d = bundle_dir(env)
     try:
         sel = selection_info(env) or {}
+        st = formal_status(sel)
         return {"dir": str(d), "manifest_sha16": manifest_sha16(d), "selection_kind": sel.get("kind"),
                 "selection_team": sel.get("team"), "selection_origin": sel.get("source_id"),
+                "selection_kind_source": sel.get("kind_source"), "selection_sets_premise": premise_of(sel)[0],
+                "formal_ok": st["ok"], "formal_reason": st["reason"],
                 "allow_other_team": allow_other_team(env), "error": None}
     except Exception as e:
         return {"dir": str(d), "manifest_sha16": None, "selection_kind": None, "selection_team": None,
-                "selection_origin": None, "allow_other_team": None, "error": str(e)[:300]}
+                "selection_origin": None, "selection_kind_source": None, "selection_sets_premise": None,
+                "formal_ok": False, "formal_reason": "bundle を読めない", "allow_other_team": None, "error": str(e)[:300]}
 
 
 def describe(summary: dict) -> str:
     """起動ログ・--freeze-bundle の 1 行の説明 (純粋)"""
     sel = summary.get("selection") or {}
     kind = sel.get("kind")
+    premise = premise_of(sel)[0]
     txt = f"{summary.get('dir')} (manifest sha16 {summary.get('manifest_sha16')}, 使用率 snapshot {summary.get('usage_snapshot')}"
-    txt += f", 選出モデル {KIND_LABEL.get(kind, kind)}"
+    txt += f", 選出モデル {KIND_LABEL.get(kind, kind)} (根拠 {sel.get('kind_source') or '記録なし'})"
     if kind == "team":
         txt += f" 対応 6 体 {sel.get('team')}"
         diffs = summary.get("set_diffs")
-        txt += (", 型の前提 不明 (照合しない)" if diffs is None else ", 型の前提 一致" if not diffs
-                else f", 型の前提 不一致 {len(diffs)} 件 (この構築では推論しない)")
-    txt += f", 由来 {sel.get('source_id') or 'deployed'})"
-    return txt
+        if premise == "none":
+            txt += ", 型の前提 なし (6 体だけ照合)"
+        elif premise == "unknown" or diffs is None:
+            txt += ", 型の前提 不明 (照合しない)"
+        else:
+            txt += (", 型の前提 一致" if not diffs else f", 型の前提 不一致 {len(diffs)} 件 (この構築では推論しない)")
+    txt += f", 由来 {sel.get('source_id') or 'deployed'}"
+    st = formal_status(sel)
+    txt += ", 正式比較 可" if st["ok"] else f", {UNVERIFIED_LABEL}: {st['reason']}"
+    return txt + ")"
+
+
+def pin_status_payload(summary: Optional[dict], error: Optional[str] = None) -> dict:
+    """画面 (助言欄の上部・登録の編集) に出す bundle の状態 (純粋)。summary = runtime_summary の戻り値 (bundle が無ければ None)。
+    server は接続時に 'pin_status' で送り、登録の画面 (my_team_data / my_team_detail) にも添える。
+    {"active", "dir_name", "manifest_sha16", "formal_ok", "formal_reason", "kind", "text", "edit_note"}"""
+    if not summary:
+        return {"active": False, "dir_name": None, "manifest_sha16": None, "formal_ok": None, "formal_reason": None,
+                "kind": None, "text": None, "edit_note": None}
+    name = Path(str(summary.get("dir") or "")).name or str(summary.get("dir"))
+    err = error or summary.get("error")
+    ok = bool(summary.get("formal_ok")) and not err
+    text = f"{PINNED_REGISTRY_LABEL} (bundle {name}、manifest sha16 {summary.get('manifest_sha16') or '不明'})"
+    if err:
+        text += f" ⚠ bundle を読めない: {err}"
+    if not ok:
+        text += f" / {UNVERIFIED_LABEL}: {summary.get('formal_reason') or '不明'}"
+    return {"active": True, "dir_name": name, "manifest_sha16": summary.get("manifest_sha16"), "formal_ok": ok,
+            "formal_reason": None if ok else (summary.get("formal_reason") or err), "kind": summary.get("selection_kind"),
+            "text": text, "edit_note": EDIT_NOTE}
+
+
+def pin_status(environ: Optional[dict] = None) -> dict:
+    """今の bundle の画面表示 (副作用: manifest の読み取り。例外を出さない)"""
+    return pin_status_payload(runtime_summary(environ))
+
+
+def startup_exclusion_line(environ: Optional[dict] = None) -> Optional[str]:
+    """server の起動ログの固定対象の除外の 1 行 (bundle を使うときだけ。無ければ None)"""
+    return f"版の固定 (bundle) の対象外: {TEAM_ADVICE_EXCLUSION}" if active(environ) else None

@@ -635,7 +635,8 @@ def attach_model_pick(advice: dict, my_party: list, opp_party: list) -> None:
     (advisor.pin_bundle.selection_scope)、advice["model_pick_scope"] に残す。構築専用モデルは 6 体が確定するまで確認待ち、6 体 (種族 id の
     集合) か学習時の型が違えば推論しない (model_pick を付けない。別のモデルへ退避しない。理由は表示と対戦ログの advice に残る)。
     汎化試験の明示 (ADVICE_PIN_ALLOW_OTHER_TEAM=1) なら推論し、state "override" を残す。条件付きモデルも bundle の写しを読む (無ければ
-    実戦傾向の推しを出さない)。固定した選出モデル・条件付きモデルを読み込めなければ InputsPinError
+    実戦傾向の推しを出さない)。固定した選出モデル・条件付きモデルを読み込めなければ InputsPinError。
+    種別が不明・構築専用で型の前提が不明 (2026-11-02) なら model_pick_scope の formal_ok が False (推論はする。表示に「適用範囲未確認 (診断)」)
     """
     try:
         from champions_agent.agent.selection_model import predict_best
@@ -820,6 +821,9 @@ def format_selection_advice(advice: dict) -> str:
         base += f"\n  ⛔ 選出モデルを使わない: {scope.get('reason')}"
     elif scope.get("state") == "override":
         base += f"\n  ⚠ 選出モデルを別の構築に適用中 (汎化試験): {scope.get('reason')}"
+    if scope and scope.get("formal_ok") is False and scope.get("infer"):
+        # 2026-11-02 (レビュー判断 1・2): 種別・型の前提が学習履歴で確かめられない固定モデル。推論はするが正式比較には使わない
+        base += f"\n  ⚠ 選出モデルの適用範囲未確認 (診断): {scope.get('formal_reason')}"
     picked = advice.get("picked")
     if advice.get("done"):
         return f"✅ 選出完了 (3/3)\n{base}"
