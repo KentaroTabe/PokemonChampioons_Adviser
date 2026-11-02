@@ -6,3 +6,4 @@
 - `phaseA_20261031/`: I-00 (資産台帳、補完)、I-05 (型検査、補完)、I-01 (変換契約、完全版。§8〜§11 が logs 側に無い)。F-R と I-10 の report.md は logs 側にある。
 - `phaseB_20261031/`: B0-check (操作の外部基準 B0 の第一候補 Foul Play + poke-engine の適合性・速度) と B0-prep (動的確認の準備: 外部データの固定の試行、ローカル専用ログイン、Reg M-C のチーム、計測の手順。測定の出力は権限の拒否でリポジトリ外 `../PokemonChampioons_Adviser-worktrees/external/logs/...` にある)。どちらも委託先の報告の付録を配置。
 - `phaseB_20261102/`: B0-dynamic (動的照合の実行基盤と Showdown 側の正解 25 ケース・31 シナリオ。cargo 無しのため試験側は未実施。一時サーバーの起動時の外向き通信を発見。委託先の報告の付録を配置)。
+- `phaseB_20261102/B0-run_report.md`: poke-engine (bss) の build と試験側の初回実行 (46 チェックポイント: 一致 22 / 観測後だけ対応 2 / 欠落 14 / レビュー待ち 8。MCTS の揺れは小さい。対戦・速度は外部データ未配置で未実施)。
