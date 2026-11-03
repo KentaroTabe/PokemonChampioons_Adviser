@@ -12,3 +12,4 @@
 - `phaseB_20261103/`: LOCAL_SETUP_report (Codex: 外部データの取得と常駐 8100 の適用)、B0-battles_report (データ構成 regmc_smogon_only_2026-09、3 戦完走、判断 p50 0.56 / 1.33 / 3.40 秒、RSS 最大 483 MB、自分の持ち物 4 種が UNKNOWNITEM)。
 - `phaseB_20261103/B0-order1_report.md`: 修正版の順序 1 (技 13・メガ 5 の表、メガシンカ時の行動順、Foul Play 側の名前・状態の検査、対応状況の表)。動的照合 一致 24 → 38、欠落 17 → 7、cargo test 全世代通過。コードは external の poke-engine regmc-fix と foul-play local-regmc (patches/ に差分と sha)。
 - `phaseB_20261103/B0-order2_report.md`: 修正版の順序 2 (持ち物 u16 + 22 件、auraguard、延長 8 ターン、レッドカード、Syrup Bomb の継続)。動的照合 47 / 1 / 2 (残りはへんしん)、cargo test 全世代通過、対戦 3/3 完走・自分の持ち物の UNKNOWNITEM 0、u16 の性能影響は反復/秒 0.97〜1.06・RSS +2〜5%。
+- `phaseB_20261103/B0-order3_report.md`: 修正版の順序 3 (Triple Axel の命中ごとの分岐、おやこあい、バトルスイッチ、キングシールドの防御)。照合 18 行で一致 17・近似 1 (満タン局面の seed 依存は未確認)、境界 3 局面の倒せる確率は区間内、cargo test 全世代通過、Triple Axel の局面で反復/秒 0.91〜0.94 倍。
