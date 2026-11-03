@@ -1,5 +1,7 @@
 # 常駐 Showdown (8100) を localhost 限定にし、外向き通信を止める手順 (2026-11-02、調査は読み取りのみ、適用は開発者)
 
+**2026-11-03 追記:** ユーザーから Codex への実行依頼を受け、下記 (a) と (b) を適用した。待受を `127.0.0.1:8100` に変更し、ローカル対戦と通信観測を実施。適用結果・バックアップ・検証記録は [適用報告](inheritance_eval/phaseB_20261103/LOCAL_SETUP_report.md) を参照。以下の調査結果は 11 月 2 日時点の履歴であり、現在の状態ではない。手順 3〜5 は実施時に用いた確認方法に合わせて補足した。
+
 レビュー (2026-11-02) の推奨「localhost 限定へ変更。稼働中の処理を確認してから計画的に適用し、一時サーバーと同様に外向き通信も確認する」に基づく。調査は読み取りのみ (Explore)。常駐は操作していない。
 
 ## 1. 確認した事実 (2026-11-02 14:47〜15:02)
@@ -45,9 +47,9 @@ node -e 'const c=require("./config/config.js"); console.log(c.noNetRequests, JSO
 ```
 
    出力が `true "" 127.0.0.1` になること。
-3. (b) も当てる場合: `git -C pokemon-showdown apply --check <diff>` で確かめてから `apply`。build は次の `start` で自動的に走る (手で走らせるなら `cd pokemon-showdown && node build`)。`grep -n updateTorRanges dist/server/ip-tools.js` で条件付きになっていることを見る。
-4. 再起動する: `pkill -f "pokemon-showdown start 8100"` で 1764 を止める (`scripts/stop_training.sh showdown` は train の launchctl disable 等の副作用があるので避ける)。`pgrep -fl pokemon-showdown` で子プロセスが残っていないか見て、残っていれば個別に止める。`bash scripts/ensure_showdown.sh 8100` で同じ仕組みで起動し直す。
-5. 再起動後に確かめる: `lsof -nP -iTCP:8100 -sTCP:LISTEN` が `127.0.0.1:8100`。外向きの観測は **11 分以上** 続ける (10 分ごとの送信があるため。`lsof -nP -i -a -p <pid 群>` を 0.5 秒ごとに読み LISTEN 以外が 0 本)。`logs/showdown_detached.log` に `Worker 1 now listening on 127.0.0.1:8100`。形式の配信とクライアントの接続を軽い poke-env の 1 戦で確かめる (最小限のコマンドは未選定)。
+3. 本体リポジトリのルートへ戻る。(b) も当てる場合: `git -C pokemon-showdown apply --check <diff>` で確かめてから `apply`。build は次の `start` で自動的に走る (手で走らせるなら `cd pokemon-showdown && node build`)。再起動後に本体ルートから `rg -n 'PS_FETCH_TOR_RANGES|updateTorRanges' pokemon-showdown/dist/server/ip-tools.js` で条件付きになっていることを見る。既に適用済みの場合は二重適用しない。
+4. 本体ルートで再起動する。8100 の待受 PID、コマンド、作業ディレクトリ、子プロセスの一覧を取り、対象の常駐であることを確認してから、その PID にだけ SIGTERM を送る (`kill -TERM <確認したPID>`)。過去の PID や広い `pkill -f` は使わない。残った子も直前に確認した当該サーバーの子だけを個別に止める。`scripts/stop_training.sh showdown` は train の launchctl disable 等の副作用があるので避ける。ポートが空いたことを確認し、`bash scripts/ensure_showdown.sh 8100` で同じ仕組みで起動し直す。
+5. 再起動後に確かめる: `lsof -nP -iTCP:8100 -sTCP:LISTEN` が `127.0.0.1:8100`。外向きの観測は **11 分以上** 続ける (10 分ごとの送信があるため)。新しい親と子を追跡し、`lsof -nP -i -a -p <pid 群>` を約 0.5 秒間隔で読み、**接続先がループバック以外の通信が 0 件**であることを見る。対戦中の localhost 接続は正常である。間欠観測なので観測間に終了する短い接続の不存在は証明できない。`logs/showdown_detached.log` に localhost 待受の起動記録があることを確認する。形式の配信とクライアントの接続は poke-env の 1 戦で確かめる (11 月 3 日に実施したスクリプトと結果は適用報告の証拠ディレクトリに保存)。
 
 ## 4. 未確認
 104.20.39.239 が play.pokemonshowdown.com か、:80 が `updateuserstats` か、:443 の発生元、子プロセスが親の停止に合わせて終わるか、`routes` を localhost にしたときの human_battle の動作、別の端末から 8100 を使った履歴、macOS のファイアウォールの設定、再起動時の `node build` の時間と dist とソースの一致 (ソースは無変更なので一致の見込み)。
