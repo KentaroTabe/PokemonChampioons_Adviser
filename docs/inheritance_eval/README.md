@@ -10,3 +10,4 @@
 - `phaseB_20261102/B0-eval-fix_report.md`: 比較処理の修正後の再評価 (Triple Axel は急所の条件を揃えて差 9.18% / 7.36% で閾値内だが命中回数の分布は区間外、レビュー待ち 7 件を確定、区分は 24 / 1 / 3 / 17 / 0 / 1、「一致」は許容差込み)。
 - `phaseB_20261102/B0-fixscope_report.md`: 修正版の範囲と費用の調査 (技 3 件は転記の誤り、メガ 5 件は取り込み漏れ、行動順は reverse の後の判定、持ち物の列挙 u8 254/256、へんしん系 300〜600 行の仮説。範囲 小 / 中 / 大 と見直しの条件)。
 - `phaseB_20261103/`: LOCAL_SETUP_report (Codex: 外部データの取得と常駐 8100 の適用)、B0-battles_report (データ構成 regmc_smogon_only_2026-09、3 戦完走、判断 p50 0.56 / 1.33 / 3.40 秒、RSS 最大 483 MB、自分の持ち物 4 種が UNKNOWNITEM)。
+- `phaseB_20261103/B0-order1_report.md`: 修正版の順序 1 (技 13・メガ 5 の表、メガシンカ時の行動順、Foul Play 側の名前・状態の検査、対応状況の表)。動的照合 一致 24 → 38、欠落 17 → 7、cargo test 全世代通過。コードは external の poke-engine regmc-fix と foul-play local-regmc (patches/ に差分と sha)。
