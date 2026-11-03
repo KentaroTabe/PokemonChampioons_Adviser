@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from advisor.engine import evaluate
+from advisor.engine import evaluate, evaluate_common, finish_evaluation
 
 # 推奨のヒステリシス: 同一ターン内の再計算で、新しい最善が前回の最善を
 # この点差以上上回らない限り、前回の推奨を先頭に据え置く。
@@ -59,29 +59,70 @@ def apply_advice_stability(result: dict, hist: Optional[dict], turn,
     return result, hist
 
 
+def pick_state_field(state_dict: dict) -> Optional[dict]:
+    """advice の欄 pick_state (純粋。2026-10-20): 自分の選出の判定 (advisor.party.pick_state) を種族 id の並びにしたもの
+    {"picked": [...], "unknown_count": n, "not_picked": [...]}。欄の追加だけで採点の値は変えない (evaluate の戻り値の鍵は
+    変えず、助言の入口のここで足す)。読めなければ None"""
+    from advisor.party import pick_state
+    try:
+        my = state_dict["player"]
+        return pick_state(my).to_advice(my.get("party") or [])
+    except Exception:
+        return None
+
+
+def is_legal_action(a: dict, illegal_keys=frozenset()) -> bool:
+    """行動が選べるか (純粋)。evaluate の illegal_actions に入った行動、legal=False、旧形式の −90 点以下は選べない"""
+    return a.get("legal", True) is not False and (a.get("score") or 0) > -90 \
+        and (a.get("kind"), a.get("id")) not in illegal_keys
+
+
+def legal_action_set(result: dict) -> frozenset:
+    """助言の結果の合法手の集合 {(kind, id)} (純粋)"""
+    illegal = frozenset((a.get("kind"), a.get("id")) for a in (result.get("illegal_actions") or []))
+    return frozenset((a.get("kind"), a.get("id")) for a in (result.get("actions") or []) if is_legal_action(a, illegal))
+
+
 def apply_advice_hysteresis(result: dict, last: Optional[dict],
                              turn, margin: float = HYSTERESIS_MARGIN):
     """前回bestの据え置き判定 (純粋関数)。
 
-    戻り値: (result, 新しい last)。last は {"turn", "kind", "id"}。
+    戻り値: (result, 新しい last)。last は {"turn", "kind", "id", "position", "legal", "scoring"}。
     据え置いた場合は actions を並べ替え best を差し替える。
+    2026-10-09 M1a: turn と点差 (margin) だけで判定していたため、同じターンの中で場の個体・形態・技の固定・ひんし・
+    合法手の集合が変わっても旧候補を据え置いていた。局面の鍵 (evaluate の position_key) か合法手の集合が前回と違えば
+    据え置かない。最終の第一候補にも合法性の検査を通す (選べない行動を best にしない)。点差の幅は変えない。
+    2026-10-09 M2b: 実際に使った採点方式 (scoring_used、無ければ scoring_mode、どちらも無ければ legacy) が前回と違えば据え置かない
+    (transition 方式の決定が legacy に退避した直後など。尺度の違う点差で旧候補を戻さない)。legacy だけで動く間は変わらない
     """
     actions = result.get("actions") or []
     if not result.get("ok") or not actions:
         return result, last
+    illegal = frozenset((a.get("kind"), a.get("id")) for a in (result.get("illegal_actions") or []))
     best = actions[0]
-    if last and last.get("turn") == turn:
+    if not is_legal_action(best, illegal):
+        first_legal = next((a for a in actions if is_legal_action(a, illegal)), None)
+        if first_legal is not None:
+            actions = [first_legal] + [a for a in actions if a is not first_legal]
+            result = dict(result, actions=actions, best=first_legal)
+            best = first_legal
+    position = result.get("position_key")
+    legal = legal_action_set(result)
+    scoring = result.get("scoring_used") or result.get("scoring_mode") or "legacy"
+    if last and last.get("turn") == turn and last.get("position") == position \
+            and last.get("legal", legal) == legal and last.get("scoring", scoring) == scoring:
         prev = next((a for a in actions
                      if (a["kind"], a.get("id")) == (last["kind"], last["id"])),
                     None)
-        if prev is not None and prev is not best and prev["score"] > -90 \
+        if prev is not None and prev is not best and is_legal_action(prev, illegal) \
                 and best["score"] - prev["score"] < margin:
             actions = [prev] + [a for a in actions if a is not prev]
             result = dict(result)
             result["actions"] = actions
             result["best"] = prev
             best = prev
-    new_last = {"turn": turn, "kind": best["kind"], "id": best.get("id")}
+    new_last = {"turn": turn, "kind": best["kind"], "id": best.get("id"),
+                "position": position, "legal": legal, "scoring": scoring}
     return result, new_last
 
 
@@ -91,6 +132,7 @@ class Advisor:
         self._resolver = resolver
         self._last_best: Optional[dict] = None
         self._stab_hist: Optional[dict] = None
+        self.last_common: Optional[dict] = None   # 直近の advise(keep_common=True) の採点の共通部分
 
     @property
     def resolver(self):
@@ -112,16 +154,33 @@ class Advisor:
                               state_dict.get("opponent", {}).get("party", []))
             choose_primary(result)
         except Exception as e:
-            import traceback
-            traceback.print_exc()
-            result = {"ok": False, "reason": f"選出評価エラー: {e}"}
+            from advisor.data_pin import InputsPinError, pin_error_result
+            if isinstance(e, InputsPinError):
+                # 固定入力の異常 (2026-10-31 E-inh-4: 固定した選出モデルが無い・sha16 が違う ほか)。通常の評価エラーと分ける
+                result = pin_error_result(e)
+            else:
+                import traceback
+                traceback.print_exc()
+                result = {"ok": False, "reason": f"選出評価エラー: {e}"}
         result["kind"] = "selection"
         result["text"] = format_selection_advice(result)
         return result
 
-    def advise(self, state_dict: dict) -> dict:
+    def advise(self, state_dict: dict, rl_blend_weight: Optional[float] = None,
+               keep_common: bool = False, scoring_mode: Optional[str] = None) -> dict:
+        """対戦の助言。rl_blend_weight は RL 加点の重み (None = 既定値)。
+        keep_common=True なら採点の共通部分 (advisor.engine.evaluate_common の戻り値) を self.last_common に残す
+        (影の計算 advisor.shadow の入力。False のときは保持しない = 追加処理なし)。
+        scoring_mode: 採点方式 (None = config.ADVICE_SCORING_MODE。2026-10-09 M2b)。据え置き・安定化ゲートは両方式に共通"""
+        self.last_common = None
         try:
-            result = evaluate(state_dict, self.resolver)
+            mode_kw = {} if scoring_mode is None else {"scoring_mode": scoring_mode}
+            if keep_common:
+                common = evaluate_common(state_dict, self.resolver, **mode_kw)
+                result = finish_evaluation(common, rl_blend_weight)
+                self.last_common = common
+            else:
+                result = evaluate(state_dict, self.resolver, rl_blend_weight=rl_blend_weight, **mode_kw)
             result, self._last_best = apply_advice_hysteresis(
                 result, self._last_best, state_dict.get("turn"))
             result, self._stab_hist = apply_advice_stability(
@@ -133,6 +192,10 @@ class Advisor:
         suggestion = self.suggest_check(state_dict)
         if suggestion:
             result["suggestion"] = suggestion
+        if result.get("ok"):
+            # へんしん の評価用入力を使ったか (2026-10-21、advisor.transform。欄の追加だけで採点の値は変えない)
+            from advisor.transform import transform_applied_of
+            result = dict(result, pick_state=pick_state_field(state_dict), transform_applied=transform_applied_of(state_dict))
         return result
 
     @staticmethod

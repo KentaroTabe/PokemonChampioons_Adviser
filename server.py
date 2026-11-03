@@ -29,8 +29,18 @@ from vision.pipeline import VisionPipeline
 from vision.scenes import SCENE_SELECTION, SCENE_STANDBY
 from vision.end_notice import battle_end_notice, outcome_revision_notice
 from vision.stale_notice import advice_target, stale_advice_notice
-from vision.state import apply_manual_species
-from champions_agent.config import MANUAL_SPECIES_RESOLVE_CUTOFF
+from vision.state import (HP_REJECT_COUNTS, MANUAL_REASON_OUT_OF_RANGE, apply_manual_species,
+                          apply_manual_species_unplaced, format_hp_reject_counts)
+from vision.frame_burst import BurstPlanner
+from champions_agent.config import (ADVICE_KEY_HP_AGE_GRAIN_SEC, ADVICE_KEY_VERSION, ADVICE_RECALC_FALLBACK_TTL_SEC,
+                                    ADVICE_RECALC_TTL_SEC, CLIENT_HELLO_WAIT_SEC, DISPLAY_HIDDEN_WARN_COUNT, FRAME_BURST_DIR,
+                                    INPUTS_PIN_STOP_TEXT, MANUAL_SPECIES_RESOLVE_CUTOFF, PARTY_SIZE, SELECTION_RECALC_SEC,
+                                    SHADOW_VARIANTS_ENABLED)
+from advice_key import (AdviceCache, DataVersions, InputsPinMonitor, forget_advice, frame_advice_step, inputs_pin_notice,
+                        inputs_pin_row)
+from advisor.data_pin import InputsPinError, is_pin_error_result, pin_error_result
+from client_state import (VIS_HIDDEN, VIS_VISIBLE, ClientRegistry, HiddenDisplayWatch, served_html_version, short_sid,
+                          stale_of)
 
 
 def should_advise_selection(state: dict) -> bool:
@@ -45,7 +55,26 @@ def should_advise_selection(state: dict) -> bool:
             and not state.get("outcome")
             and not state.get("battle_active"))
 from advisor.service import Advisor
-from battle_logger import BattleLogger
+from battle_logger import BattleLogger, ev_infer_of
+from tools.advice_mode import (bundle_startup_check, data_pin_startup_check, model_pin_startup_check, sens_startup_check,
+                               server_startup_check)
+
+# 採点方式の検査 (2026-10-16 方式 C)。環境変数 ADVICE_SCORING_MODE が使えない値なら重い初期化の前に止める
+# (config は警告して legacy にするが、実機では黙って legacy で動かさない)。実効値は環境変数だけで決まり、
+# config/advice.local.env は表示 (設定値との食い違いの警告) にだけ使う
+_SCORING_STARTUP_LINE = server_startup_check()
+# transition の感度 (2026-10-18): 実効値 (config.TRANSITION_SENSITIVITY_ENABLED = 環境変数) と設定元・設定値を起動ログに出す (表示だけ)
+_SENS_STARTUP_LINE = sens_startup_check()
+# データの固定 (2026-10-23 正式群の実機、計画書 §8.49): advice_env.sh が uvicorn にだけ渡す ADVICE_USAGE_SNAPSHOT / ADVICE_REAL_BANK /
+# ADVICE_REAL_BANK_SHA16 を重い初期化の前に検査する (指定 snapshot が DB に無い・写しが無い・sha16 が違えば起動しない)。
+# 助言側 (advisor.sets / infer / team_advice / real_prior) は advisor.data_pin で同じ環境変数を読むたびに参照する (import 時には読まない)
+_DATA_PIN_STARTUP_LINE = data_pin_startup_check()
+# モデルの実体の固定 (2026-10-31 KNOWN_ISSUES E-inh-4): ADVICE_RL_POLICY / ADVICE_SELECTION_MODEL (と各 _SHA16) を重い初期化の前に検査する
+# (ファイルが無い・sha16 が違えば起動しない)。助言側 (advisor.rl_bridge / selection_dispatch.advisor_model_path) は固定したファイルだけを読む
+_MODEL_PIN_STARTUP_LINE = model_pin_startup_check()
+# 版の固定の bundle (2026-10-31 追加レビュー判断 2・4): ADVICE_PIN_BUNDLE があれば bundle 全体 (全ファイルの sha256・個別の鍵との整合・
+# 特徴量の版・登録) を重い初期化の前に検査する (不正なら起動しない)。助言側は RL・選出モデル・埋め込み・meta・使用率 DB・バンク・登録を bundle から読む
+_BUNDLE_STARTUP_LINE = bundle_startup_check()
 
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
 app = FastAPI()
@@ -56,6 +85,35 @@ advisor = Advisor(resolver=pipeline.resolver)
 battle_log = BattleLogger()
 from advisor.ev_infer import get_tracker as _get_spread_tracker
 spread_tracker = _get_spread_tracker()
+
+# 影の計算 (advisor.shadow、advice_variant 行。計画 §2、判断 3 2026-10-07): config SHADOW_VARIANTS_ENABLED で ON のときだけ
+# ワーカー (スレッド 1 本) を作る。既定 OFF (OFF のときは共通部分の保持も仕事の投入もしない)。行の書き込みは
+# イベントループのスレッドへ回す (他の対戦ログの行の書き込みと同じスレッドにして競合させない)
+_shadow = None
+_shadow_loop = None
+if SHADOW_VARIANTS_ENABLED:
+    from advisor.shadow import ShadowWorker
+
+    def _shadow_sink(rec: dict) -> None:
+        if _shadow_loop is not None:
+            _shadow_loop.call_soon_threadsafe(battle_log.on_advice_variant, rec)
+
+    _shadow = ShadowWorker(sink=_shadow_sink)
+    print("[server] 影の計算 (advice_variant) を有効化しました")
+
+
+def _submit_shadow(loop, state: dict, advice: dict) -> None:
+    """表示した助言と同じ共通部分で影の計算を投入する (ON のときだけ呼ぶ。失敗しても助言は止めない)"""
+    global _shadow_loop
+    try:
+        from advisor.shadow import make_job
+        from battle_logger import _compact_state, state_digest
+        _shadow_loop = loop
+        job = make_job(advisor.last_common, advice.get("advice_id"), state_digest(_compact_state(state)),
+                       shown_best=advice.get("best"))
+        _shadow.submit(job)
+    except Exception as e:
+        print(f"[server] 影の計算の投入に失敗: {e}")
 
 # 起動 (更新反映) のタイミングで不要ログを掃除する
 # (断片対戦ログ / 古いデバッグフレーム。失敗してもサーバーは起動する)
@@ -94,11 +152,50 @@ except Exception as e:
 frame_counter = 0
 processed_counter = 0
 dropped_counter = 0
+# 受信フレームを送信元の接続の可視状態で数える (2026-10-07 段 0: 対戦ログの frames 行。隠れたページでは送信が 1〜2 fps に落ちる)。
+# 可視状態は接続 (sid) ごとに client_state.ClientRegistry が持つ (page_visibility / client_hello の通知)。通知の無い接続からの
+# フレームは unknown (以前は単一の bool が False で始まり、通知が無いと「隠れていない」に数えていた。2026-10-07 実機確認)
+hidden_counter = 0
+visible_counter = 0
+unknown_counter = 0
+_clients = ClientRegistry()
+_display_watch = HiddenDisplayWatch(DISPLAY_HIDDEN_WARN_COUNT)
+# 配信する index.html (tools/frontend_server がリポジトリのルートを配信する)。ページの CLIENT_HTML_VERSION と照合する
+INDEX_HTML = Path(__file__).resolve().parent / "index.html"
+print(f"[server] 配信する index.html の版: {served_html_version(INDEX_HTML)}")
+# 採点方式 (2026-10-16 実機の受入: 接続テストで使った方式を起動ログにも残す。対戦ログは version 行・advice 行)。
+# 1 行に 実効値・設定元 (file / env / default)・設定値 (config/advice.local.env) を出す (2026-10-16 方式 C)
+print(f"[server] {_SCORING_STARTUP_LINE}")
+print(f"[server] {_SENS_STARTUP_LINE}")
+print(f"[server] {_DATA_PIN_STARTUP_LINE}")
+print(f"[server] {_MODEL_PIN_STARTUP_LINE}")
+print(f"[server] {_BUNDLE_STARTUP_LINE}")
+# 2026-11-02 (レビュー判断 2): bundle 使用中の固定対象の除外 (advisor.team_advice は配備先の DB を読む) と、画面に出す固定の状態
+from advisor import pin_bundle as _PB
+if _PB.startup_exclusion_line():
+    print(f"[server] {_PB.startup_exclusion_line()}")
+
+
+def _pin_status() -> dict:
+    """画面の「固定した登録を使用中」の表示 (advisor.pin_bundle.pin_status。例外を出さない)"""
+    return _PB.pin_status()
 _busy = False
 _pending_frame = None      # 処理中に届いた最新フレーム (sid, data)
 _last_state_json = ""
 _last_advice_time = 0.0
 _last_advice_key = ""
+# 対戦の助言の採点結果のキャッシュと再計算の鍵の材料 (advice_key。2026-10-19): 鍵 (採点の入力) が変わるか有効期限を超えたら採点し直す。
+# 据え置き・安定化ゲート・表示・記録はキャッシュを使ったときも毎回通す
+_advice_cache = AdviceCache()
+_data_versions = DataVersions()
+_advice_recheck = False   # 確定前 (provisional) の助言を出した: 次フレームで鍵が同じでも安定化ゲートを通し直す
+# 固定入力の異常 (2026-10-31 E-inputs-3): 対戦ログへの記録の間引き (同じ異常は config.INPUTS_PIN_LOG_INTERVAL_SEC 秒に 1 回) と、
+# 助言欄に出している停止の表示 ((error, battle_seq)。同じ対戦の同じ error の停止を毎フレーム送らない。通常の助言を送ったら None に戻す)
+_pin_monitor = InputsPinMonitor()
+_pin_notice_shown = None
+print(f"[server] 助言の再計算の鍵: 版 {ADVICE_KEY_VERSION} (版 1 は場面・場の個体の種族/HP%/PP・場・能力変化だけ。版 2 は採点の入力全体: "
+      f"全個体の持ち物/特性/対応待ち/技の固定/HP の不確かさ/消費、採点の設定、データの版)、有効期限 {ADVICE_RECALC_TTL_SEC:g} 秒 "
+      f"(退避・評価エラーは {ADVICE_RECALC_FALLBACK_TTL_SEC:g} 秒)、場の HP の経過時間の粒度 {ADVICE_KEY_HP_AGE_GRAIN_SEC:g} 秒")
 _last_dump_time = 0.0
 _last_scene_log = 0.0
 _last_scene = "unknown"
@@ -122,6 +219,22 @@ def _pct(values, q: float) -> float:
 
 _last_frame_ts = 0.0
 
+
+def _frame_counts() -> dict:
+    """フレームの累積件数 (対戦ログの frames 行が対戦ごとの差を取る)"""
+    return {"received": frame_counter, "processed": processed_counter, "dropped": dropped_counter,
+            "hidden": hidden_counter, "visible": visible_counter, "unknown": unknown_counter,
+            "last_recv_ts": _last_frame_ts}
+
+
+battle_log.frame_source = _frame_counts
+# 対戦ファイルを開いたとき、接続中の全クライアントの client 行と最新の visibility 行を書く (served_version はそのときのディスクの値)
+battle_log.open_rows_source = lambda: _clients.open_rows(served_html_version(INDEX_HTML))
+
+# 連続フレームの保存 (DEBUG_DUMP_FRAMES=1 のときだけ。vision/frame_burst、2026-10-07 段 0)
+_burst = BurstPlanner()
+BURST_DIR = Path(FRAME_BURST_DIR)
+
 # デバッグフレームの保存は1枚あたり約46ms (1920x1080 PNG) かかり、
 # フレーム処理と同じ経路に置くとその間に届くフレームが捨てられる。
 # 専用スレッド1本に投げて処理を止めない (順序は保たれ、取りこぼし時も
@@ -140,26 +253,26 @@ def _dump_frame_async(img, prefix: str) -> None:
     _dump_pool.submit(_write, img.copy(), f"{prefix}_{int(time.time())}.png")
 
 
-def _advice_key(state: dict) -> str:
-    """アドバイス再計算が必要かどうかの判定キー"""
-    try:
-        me = state["player"]["party"][state["player"]["active_index"]]
-        opp_idx = state["opponent"]["active_index"]
-        opp = state["opponent"]["party"][opp_idx] if opp_idx is not None else {}
-        return json.dumps([
-            state["scene"], me.get("species_id"), me.get("hp_percent"),
-            [m.get("pp") for m in me.get("moves", [])],
-            opp.get("species_id"), opp.get("hp_percent"),
-            state["field"], me.get("boosts"), opp.get("boosts"),
-        ], ensure_ascii=False)
-    except Exception:
-        return ""
+def _dump_raw_async(data: str, burst_id: str, ts: float) -> None:
+    """連続保存: 受信した JPEG (data URL) をデコードせずそのまま書く (再圧縮なし。保存のスレッドで base64 を戻す)"""
+    def _write(d, path):
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(base64.b64decode(d.split(',', 1)[1]))
+        except Exception as e:
+            print(f"[server] 連続保存に失敗: {e}")
+
+    _dump_pool.submit(_write, data, BURST_DIR / burst_id / f"{int(ts * 1000)}.jpg")
 
 
 @sio.on('connect')
 async def connect(sid, environ):
     print(f"[server] フロントエンドが接続しました: {sid}")
+    _clients.on_connect(sid, time.time())
+    asyncio.get_event_loop().create_task(_check_hello(sid))
     await sio.emit('state_update', pipeline.state.to_dict(), room=sid)
+    # 版の固定の bundle を使っているか (助言欄の上部に常時出す。2026-11-02)
+    await sio.emit('pin_status', _pin_status(), room=sid)
     # 構築提案の実行中にページを開き直しても「作成中」表示が復元されるように
     # (2026-08-25 第9回: 実行中である旨の表示が無いという指摘。進捗配信は
     # 発行元のsid宛てだったため、リロード後の画面には何も出なかった)
@@ -169,15 +282,70 @@ async def connect(sid, environ):
                         "running": True}, room=sid)
 
 
+async def _check_hello(sid) -> None:
+    """接続から CLIENT_HELLO_WAIT_SEC 待っても client_hello が来なければ、古い版のページの疑いとして警告し、対戦ログに
+    hello=false の client 行を書く (client_hello は 2026-10-07 に足した。それより前の index.html は送らない)"""
+    await asyncio.sleep(CLIENT_HELLO_WAIT_SEC)
+    if sid not in _clients.clients or _clients.has_hello(sid):
+        return
+    print(f"[server] ⚠ 接続 {short_sid(sid)} から client_hello が {CLIENT_HELLO_WAIT_SEC:.0f} 秒届かない: "
+          "ブラウザがキャッシュの古い index.html を使っている疑い (助言ページを Cmd+Shift+R で再読み込み)")
+    battle_log.on_client_row(_clients.client_row(sid, served_html_version(INDEX_HTML)))
+
+
+@sio.on('disconnect')
+async def disconnect(sid):
+    _clients.on_disconnect(sid)
+
+
+@sio.on('client_hello')
+async def client_hello(sid, data):
+    """ページの版と対応機能 {html_version, features, visibility, user_agent, href, served_commit} (2026-10-07)。
+    ディスクの index.html の版と照合し、対戦中ならその対戦ログに client 行 (と hello が持つ可視状態の visibility 行) を書く"""
+    try:
+        now = time.time()
+        vis_row = _clients.on_hello(sid, data, now)
+        served = served_html_version(INDEX_HTML)
+        row = _clients.client_row(sid, served)
+        print(f"[server] client_hello {row['sid']}: 版 {row['html_version']} (ディスク {served}) 機能 {row['features']} "
+              f"可視 {row['visibility']} commit {row['served_commit']}")
+        if stale_of(row["html_version"], served):
+            print(f"[server] ⚠ ページの版 {row['html_version']} がディスクの index.html の版 {served} と違う: "
+                  "ブラウザがキャッシュの古いページを使っている疑い (助言ページを Cmd+Shift+R で再読み込み)")
+        battle_log.on_client_row(row)
+        battle_log.on_client_row(vis_row)
+    except Exception as e:
+        print(f"[server] client_hello の記録に失敗: {e}")
+
+
 @sio.on('advice_shown')
 async def advice_shown(sid, data):
     """ブラウザが助言を描画した時刻 (2026-10-05 ②: 生成時刻と表示時刻を分けて記録する)。
-    data = {advice_id, kind, t_shown (秒), hidden (タブが隠れていて描画されずに送った: 2026-10-06)}"""
+    data = {advice_id, kind, t_shown (秒), hidden (タブが隠れていて描画されずに送った: 2026-10-06)}。
+    hidden はフレームの可視状態の数字には使わない。同じ対戦で DISPLAY_HIDDEN_WARN_COUNT 件続いたら警告する (2026-10-07)"""
     try:
         d = data or {}
         battle_log.on_display(d.get("advice_id"), d.get("t_shown"), d.get("kind"), hidden=d.get("hidden"))
     except Exception as e:
         print(f"[server] 表示の記録に失敗: {e}")
+    try:
+        if _display_watch.on_display((data or {}).get("hidden"), pipeline.state.battle_seq):
+            text = _display_watch.warning_text()
+            print(f"[server] ⚠ {text}")
+            await sio.emit('server_warning', {"kind": "display_hidden", "text": text, "count": _display_watch.streak})
+    except Exception as e:
+        print(f"[server] 表示の警告に失敗: {e}")
+
+
+@sio.on('page_visibility')
+async def page_visibility(sid, data):
+    """フロントのページが隠れたか (document.hidden)。送信元の接続 (sid) の可視状態にして、その接続から届くフレームを数える
+    (表示は変えない)。可視状態の通知ごとに対戦ログへ visibility 行を書く (開いていなければ次に開いたファイルの先頭に最新を書く)"""
+    try:
+        row = _clients.on_visibility(sid, bool((data or {}).get("hidden")), time.time())
+        battle_log.on_client_row(row)
+    except Exception as e:
+        print(f"[server] 可視状態の記録に失敗: {e}")
 
 
 @sio.on('send_frame')
@@ -191,9 +359,21 @@ async def handle_frame(sid, data):
     確実に拾う (メッセージの見落とし削減)。
     """
     global frame_counter, dropped_counter, _busy, _pending_frame
-    global _last_frame_ts
+    global _last_frame_ts, hidden_counter, visible_counter, unknown_counter
     frame_counter += 1
     _last_frame_ts = time.time()
+    _vis = _clients.frame_state(sid)
+    if _vis == VIS_HIDDEN:
+        hidden_counter += 1
+    elif _vis == VIS_VISIBLE:
+        visible_counter += 1
+    else:
+        unknown_counter += 1
+    # 連続保存中は破棄されるフレームも含めて受信したものを全部保存する
+    if DUMP_FRAMES:
+        _bid = _burst.active(_last_frame_ts)
+        if _bid and isinstance(data, str):
+            _dump_raw_async(data, _bid, _last_frame_ts)
 
     if _busy:
         if _pending_frame is not None:
@@ -232,7 +412,7 @@ async def _handle_one_frame(sid, data):
     global processed_counter
     global _last_state_json, _last_advice_time, _last_advice_key
     global _last_dump_time, _last_scene_log
-    global _last_advice_target, _stale_notified, _end_notice_seq
+    global _last_advice_target, _stale_notified, _end_notice_seq, _advice_recheck, _pin_notice_shown
     try:
         encoded_data = data.split(',')[1]
         nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
@@ -250,8 +430,26 @@ async def _handle_one_frame(sid, data):
         state, fired = await loop.run_in_executor(None, pipeline.process, img)
         _proc_ms.append((time.time() - _t_proc) * 1000.0)
         processed_counter += 1
+        # 連続保存を始めなかった対戦は、対戦ファイルを閉じる前 (battle_log.on_frame が次の対戦へ切り替える前) に理由を書く
+        if DUMP_FRAMES and _burst.is_new_battle(state.get("battle_seq")):
+            _write_burst_skipped(time.time())
         battle_log.on_frame(state, fired)
-        spread_tracker.on_frame(state, fired)   # 相手の型推定 (先後/ダメージ観測)
+        # 相手の型推定 (先後/ダメージ観測)。固定入力の異常 (InputsPinError、2026-10-31) は認識処理を止めずに記録し、このフレームの
+        # 対戦の助言だけを止める (型推定が観測を取り込めていないので、その推定で助言しない)
+        tracker_pin = None
+        try:
+            spread_tracker.on_frame(state, fired)
+        except InputsPinError as e:
+            tracker_pin = pin_error_result(e)
+            _record_inputs_pin("tracker", tracker_pin, state, time.time())
+        if DUMP_FRAMES:
+            _b = _burst.on_processed(state.get("scene"), state.get("battle_seq"), time.time())
+            if _b:
+                print(f"[server] 連続保存を開始: {BURST_DIR / _b['id']} ({_burst.seconds:.0f} 秒、{_burst.started}/{_burst.count} 回目、"
+                      f"{_b['reason']})")
+                battle_log.on_frame_burst({"dir": str(BURST_DIR / _b["id"]), "t_start": _b["t_start"],
+                                           "seconds": _burst.seconds, "n": _burst.started, "reason": _b["reason"],
+                                           "battle_seq": _b["battle_seq"], "battle_index": _b["battle_index"]})
         # 勝敗を推定・不明で記録した後にレートが読めて推定が変わったら、助言欄に出す (2026-10-06 第18回)
         _rev = outcome_revision_notice(battle_log.pop_revision())
         if _rev:
@@ -280,7 +478,9 @@ async def _handle_one_frame(sid, data):
                   f"救出={rs['stashed']}/OCR{rs['ocr']}/発火{rs['events']} "
                   f"events={len(state['events'])} "
                   f"処理時間 p50={_pct(_proc_ms, 50):.0f}ms p95={_pct(_proc_ms, 95):.0f}ms "
-                  f"助言 p50={_pct(_advise_ms, 50):.0f}ms max={max(_advise_ms) if _advise_ms else 0:.0f}ms")
+                  f"助言 p50={_pct(_advise_ms, 50):.0f}ms max={max(_advise_ms) if _advise_ms else 0:.0f}ms "
+                  f"可視状態 隠れ={hidden_counter} 可視={visible_counter} 不明={unknown_counter} "
+                  f"{format_hp_reject_counts(HP_REJECT_COUNTS)}")
 
         if fired:
             for f in fired:
@@ -351,12 +551,15 @@ async def _handle_one_frame(sid, data):
                 [p.get("is_picked") for p in state["player"]["party"]],
             ], ensure_ascii=False)
             now = time.time()
-            if sel_key != _last_advice_key or now - _last_advice_time > 15.0:
+            if sel_key != _last_advice_key or now - _last_advice_time > SELECTION_RECALC_SEC:
                 _last_advice_key = sel_key
                 _last_advice_time = now
                 advice = await loop.run_in_executor(None, advisor.advise_selection, state)
-                battle_log.on_advice(advice, "selection", state)
+                aid = battle_log.on_advice(advice, "selection", state)
                 await sio.emit('advice_update', advice, room=sid)
+                # 記録だけの欄 (方式ごとの候補・相手の選出の予測の全分布、2026-10-07 段 0): 助言を送った後に別に計算して
+                # selection_record 行に書く (表示を遅らせない。フレーム処理も待たせない)
+                asyncio.ensure_future(_write_selection_record(aid, advice, state))
                 print("--- 選出アドバイス ---")
                 print(advice["text"])
 
@@ -364,28 +567,57 @@ async def _handle_one_frame(sid, data):
         # 3体目のひんしの確定) は出さない: リザルト画面が move_select に誤分類され、終わった対戦に助言が出ていた (第15回)
         if state["scene"] in ("command", "move_select", "watch") \
                 and not state.get("battle_ended") and not state.get("outcome"):
-            key = _advice_key(state)
             now = time.time()
-            if key and (key != _last_advice_key or now - _last_advice_time > 10.0):
-                _last_advice_key = key
+            _t_adv = time.time()
+            # フレームごとの判断は advice_key.frame_advice_step だけ (2026-10-21。録画再生 tools.shadow_load_check も同じ関数を呼ぶ):
+            # 評価時刻を state["now"] に渡し (advice 行の t_now と transition の HP 範囲の経過時間の基準。鍵の材料には含まれない)、
+            # 再計算の鍵 (版 2) が変わったか有効期限 (退避・評価エラーは短い) を超えたときだけ採点する。確定前の助言の次のフレームは
+            # 鍵が同じでも安定化ゲートを通し直す。採点を実際に行った時刻 (キャッシュなら元の時刻) と、採点の直前に取った型推定の写し
+            # (advice 行の ev_infer) も受け取る
+            if tracker_pin is not None:
+                forget_advice(advisor, _advice_cache)
+                step = {"advice": tracker_pin}
+            else:
+                step = await loop.run_in_executor(
+                    None, lambda: frame_advice_step(advisor, state, now, _advice_cache, _data_versions, _advice_recheck,
+                                                    keep_common=_shadow is not None,
+                                                    inputs_fn=lambda: ev_infer_of(state, spread_tracker.best_for)))
+            if is_pin_error_result(step["advice"]):
+                # 固定入力の異常 (2026-10-31 E-inputs-3): 助言を表示せず停止の 1 行と error を出す。advice 行・影の計算・キャッシュ・
+                # 据え置きには使わない (frame_advice_step がキャッシュと履歴を捨てた)。対戦ログには間引いて異常の行を書く
+                if tracker_pin is None:
+                    _record_inputs_pin("evaluate", step["advice"], state, now)
+                _advice_recheck = False
+                _last_advice_target = None
+                notice = inputs_pin_notice(step["advice"])
+                shown_key = (notice["error"], state.get("battle_seq"))
+                if _pin_notice_shown != shown_key:
+                    _pin_notice_shown = shown_key
+                    await sio.emit('advice_update', notice, room=sid)
+            elif step["advice"] is not None:
+                _pin_notice_shown = None
+                _last_advice_key = step["key"]
                 _last_advice_time = now
-                _t_adv = time.time()
-                advice = await loop.run_in_executor(None, advisor.advise, state)
-                _advise_ms.append((time.time() - _t_adv) * 1000.0)
+                advice, evaluated, t_eval, ev_snap = step["advice"], step["evaluated"], step["t_eval"], step["inputs"]
+                if evaluated:
+                    _advise_ms.append((time.time() - _t_adv) * 1000.0)
                 _last_advice_target = advice_target(state, advice)
                 _stale_notified = False
                 advice["text"] = advisor.format_advice(advice)
-                battle_log.on_advice(advice, "battle", state)
+                battle_log.on_advice(advice, "battle", state, evaluated=evaluated, t_eval=t_eval, ev_infer=ev_snap)
                 await sio.emit('advice_update', advice, room=sid)
-                if advice.get("provisional"):
-                    # 確定前: 次フレームで即再計算して安定を確認する
-                    # (キーを消さないと状態が動くまで10秒待ちになる)
-                    _last_advice_key = None
-                elif advice.get("ok"):
-                    print("--- アドバイス ---")
-                    print(advice["text"])
-                else:
-                    print(f"[server] アドバイス保留: {advice.get('reason')}")
+                if _shadow is not None:
+                    # 表示の後に投入する (表示を待たせない)。計算はワーカーのスレッドで行う
+                    _submit_shadow(loop, state, advice)
+                # 確定前 (provisional) なら次フレームで安定化ゲートを通し直して安定を確認する (鍵が同じならキャッシュの採点結果を
+                # 使う。通し直さないと状態が動くか有効期限を超えるまで確定しない)。値は frame_advice_step が決める
+                _advice_recheck = step["recheck"]
+                if not advice.get("provisional"):
+                    if advice.get("ok"):
+                        print("--- アドバイス ---")
+                        print(advice["text"])
+                    else:
+                        print(f"[server] アドバイス保留: {advice.get('reason')}")
 
         # 場のポケモンが助言の対象と変わったのに新しい決定画面を取れていない間 (処理落ちで command を取りこぼす等)、
         # 前の個体向けの助言が表示に残る (2026-09-29 第16回: こだわりスカーフのサザンドラに交代したあと、アシレーヌ向けの
@@ -403,7 +635,69 @@ async def _handle_one_frame(sid, data):
         print(f"[server] 画像処理エラー: {e}")
 
 
+def _record_inputs_pin(source: str, result: dict, state: dict, now: float) -> bool:
+    """固定入力の異常を対戦ログに 1 行書く (_pin_monitor が通した分だけ。2026-10-31)。書いたら True。書けなくても処理は止めない"""
+    n = _pin_monitor.check(source, result.get("error"), state.get("battle_seq"), now)
+    if n is None:
+        return False
+    try:
+        battle_log.on_inputs_pin(inputs_pin_row(source, result.get("error"), state, n))
+    except Exception as e:
+        print(f"[server] 固定入力の異常の記録に失敗: {e}")
+    print(f"[server] {INPUTS_PIN_STOP_TEXT} ({source}): {result.get('error')}"
+          + (f" (前の記録から {n} 件は記録していない)" if n else ""))
+    return True
+
+
 _end_notice_seq = None   # 対戦終了の通知 (vision.end_notice.battle_end_notice) を出した battle_seq (1 対戦 1 回)
+
+
+def _write_burst_skipped(now: float) -> None:
+    """いまの対戦で連続保存を始めなかったなら、理由つきの frame_burst 行 (skipped) を書く (DEBUG_DUMP_FRAMES=1 のときだけ呼ぶ)"""
+    try:
+        sk = _burst.on_battle_end(now)
+        if sk:
+            battle_log.on_frame_burst(sk)
+    except Exception as e:
+        print(f"[server] 連続保存の記録に失敗: {e}")
+
+
+async def _write_selection_record(advice_id: str, advice: dict, state: dict) -> None:
+    """選出の助言を送った後に、記録用の欄を executor で計算して selection_record 行に書く (失敗しても助言は止めない)"""
+    try:
+        rec = await asyncio.get_event_loop().run_in_executor(None, _selection_record_extra, advice, state)
+        battle_log.on_selection_record(advice_id, rec)
+    except Exception as e:
+        print(f"[server] 選出の記録に失敗: {e}")
+
+
+def _selection_record_extra(advice: dict, state: dict) -> dict:
+    """選出の selection_record 行の欄 {"candidates", "opp_pick_pred"} (advisor.selection_record)。失敗しても助言は止めない"""
+    out = {}
+    my_party = state.get("player", {}).get("party", [])
+    opp_party = state.get("opponent", {}).get("party", [])
+    try:
+        from advisor.selection_record import selection_candidates
+        out["candidates"] = selection_candidates(advice, my_party, opp_party)
+    except Exception as e:
+        out["candidates"] = {"error": repr(e)[:200]}
+    try:
+        from advisor.selection_record import opp_pick_pred_live
+        out["opp_pick_pred"] = opp_pick_pred_live(opp_party)
+    except Exception as e:
+        out["opp_pick_pred"] = {"error": repr(e)[:200]}
+    return out
+
+
+@app.on_event("shutdown")
+async def _on_shutdown():
+    """サーバー停止時に、開いている対戦の終わりの行 (frames / opp_picks / guess_confirm、連続保存の skipped) を書く (2026-10-07 段 0)"""
+    if DUMP_FRAMES and battle_log.file_open:
+        _write_burst_skipped(time.time())
+    try:
+        battle_log.close()
+    except Exception as e:
+        print(f"[server] 停止時の記録に失敗: {e}")
 
 
 def _attach_candidates(state: dict) -> None:
@@ -501,7 +795,7 @@ async def get_my_team(sid, data=None):
                  for cat in ("species", "moves", "items", "abilities")}
         from advisor.my_team import _NATURES
         names["natures"] = [n for n in _NATURES if not n.isascii()]
-        await sio.emit('my_team_data', {"team": team, "names": names}, room=sid)
+        await sio.emit('my_team_data', {"team": team, "names": names, "pin_status": _pin_status()}, room=sid)
     except Exception as e:
         print(f"[server] get_my_teamエラー: {e}")
 
@@ -665,7 +959,8 @@ async def get_my_team_detail(sid, data):
         import advisor.my_team as mt
         from tools.team_proposal import registration_gaps
         entries = mt._load() or {}
-        return {"entries": entries, "gaps": registration_gaps(entries), **_my_team_edit_options(entries)}
+        return {"entries": entries, "gaps": registration_gaps(entries), **_my_team_edit_options(entries),
+                "pin_status": _pin_status()}
 
     try:
         payload = await asyncio.get_event_loop().run_in_executor(None, _work)
@@ -1061,11 +1356,14 @@ async def set_state(sid, data):
                 side.spikes = max(0, min(3, int(value)))
             elif field_name == "toxic_spikes":
                 side.toxic_spikes = max(0, min(2, int(value)))
+        # side / index (2026-10-07 段 0): 訂正が後の推定で上書きされたかを対戦ログが追う (manual_fix_overwritten)
         pipeline.state.log_event(
             "manual", f"手動修正 {label}: {before} -> {value}",
             event_id="manual_fix",
             detail={"target": target, "field": field_name,
-                    "label": label, "before": before, "after": value})
+                    "label": label, "before": before, "after": value,
+                    "side": data.get("side") if target in ("mon", "hazards") else None,
+                    "index": int(data["index"]) if target == "mon" else None})
         print(f"[server] 手動修正: {label} {before} -> {value}")
         st = pipeline.state.to_dict()
         _attach_candidates(st)
@@ -1085,14 +1383,29 @@ async def set_species(sid, data):
         party = pipeline.state.opponent.party
 
         async def _skip(reason: str) -> None:
-            # 入れなかった理由をイベント欄とサーバーのログに出す
+            # 入れなかった理由をイベント欄とサーバーのログに出す。対戦ログの manual_fix 行に applied: false と理由を残す
+            # (2026-10-09 ④)
             pipeline.state.log_event("manual", f"手動確定を無視: {species_ja} ({reason})",
-                                     event_id="species_manual_skip")
+                                     event_id="species_manual_skip",
+                                     detail={"applied": False, "reason": reason, "index": idx,
+                                             "species_id": species_id})
             print(f"[server] 手動確定を無視: {species_ja} ({reason})")
             st = pipeline.state.to_dict()
             _attach_candidates(st)
             await sio.emit('state_update', st, room=sid)
 
+        if data.get("assign_to") is not None:
+            # 対応待ちの個体を、人が指定した枠に割り当てる (2026-10-09 段 2。index = 対応待ちの個体の番号、assign_to = 枠の
+            # 番号 (0 始まり))。タイプが 1 個だけ重なる枠は自動で統合せず候補として出し、ここで人が確定する
+            res = pipeline.state.assign_pending("opponent", idx, int(data["assign_to"]))
+            if not res["ok"]:
+                await _skip(res["reason"])
+                return
+            print(f"[server] 対応待ちの割り当て: party[{idx}] -> slot{res['record']['merged_to']}")
+            st = pipeline.state.to_dict()
+            _attach_candidates(st)
+            await sio.emit('state_update', st, room=sid)
+            return
         if not species_id:
             r = pipeline.resolver.resolve_species(str(species_ja or ""), cutoff=MANUAL_SPECIES_RESOLVE_CUTOFF)
             if not r:
@@ -1100,12 +1413,26 @@ async def set_species(sid, data):
                 return
             species_ja, species_id = r[0], r[1]
         res = apply_manual_species(party, idx, species_ja, species_id)
+        via = "slot"
+        if res["index"] is None and res["reason"] == MANUAL_REASON_OUT_OF_RANGE:
+            # 表示の枠とサーバーの枠がずれた: 無視せず、対応待ちの個体または種族名で一致する枠に入れる (2026-10-09 ④。
+            # 10/8 18:27 に「ガラルヤドキング」が範囲外で無視された)
+            res = apply_manual_species_unplaced(party, species_ja, species_id)
+            via = res.get("via")
         if res["index"] is None:
             await _skip(res["reason"])
             return
         if res["moved"]:
             print(f"[server] 手動確定: slot{idx} は確定済みのため slot{res['index']} へ付け替え")
+        requested_idx = idx
         idx = res["index"]
+        if party[idx].pending:
+            via = "pending" if via == "slot" else via
+        # 対応待ちの個体の種が決まった / 枠の種が決まった → 対応待ちの個体が枠に当たれば移す
+        for r in pipeline.state.resolve_pending("opponent"):
+            if r["merged_from"] == idx:
+                idx = r["merged_to"]
+        party = pipeline.state.opponent.party
         if 0 <= idx < len(party):
             # 直近の「HUD名不一致」で観測された別名をこの個体に紐づける
             # (試合中の個体名キャッシュ: 以後その名前のイベントが正しく帰属する)
@@ -1123,14 +1450,19 @@ async def set_species(sid, data):
                         party[idx].aliases.append(alias)
                         print(f"[server] 別名を紐づけ: {species_ja} <- {alias}")
             party[idx].aliases = party[idx].aliases[-6:]
+            # 文言の名前は枠の表示名 (形態違いの手動確定は表示名を保つ。対戦ログの manual_fix_key がこの名前で枠を引く)
             pipeline.state.log_event(
-                "manual", f"相手の{species_ja}を手動確定 (候補から選択)",
-                event_id="species_manual")
+                "manual", f"相手の{party[idx].species_ja or species_ja}を手動確定 (候補から選択)",
+                event_id="species_manual",
+                detail={"applied": True, "index": idx, "requested_index": requested_idx, "via": via,
+                        "pending": bool(party[idx].pending), "species_id": species_id})
             print(f"[server] 手動確定: 相手slot{idx} = {species_ja}")
             # 自己改善ループ: 確定した種族のアイコンを直近の選出フレームから
             # 収穫し、実キャプチャテンプレートとして保存する (次回から
             # 同タイプ複数候補でも視覚照合で自動確定できるようになる)
             try:
+                if idx >= PARTY_SIZE or party[idx].pending:
+                    raise ValueError("対応待ちの個体 (選出画面の枠が決まっていない)")
                 from vision.spriteid import harvest_from_frame
                 import glob as _glob
                 frames = sorted(_glob.glob(str(DUMP_DIR / "sel_*.png")),

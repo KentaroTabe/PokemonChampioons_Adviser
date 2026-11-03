@@ -41,6 +41,7 @@ class BattlePolicy:
         path = model_path or (
             best if best.exists()
             else MODELS_DIR / f"battle_policy_{play_style}.zip")
+        self.model_path = path   # 読んだ (読もうとした) ファイル。測定の結果に残す (2026-10-15 M3c)
         if path.exists():
             # MaskablePPO (現行) -> PPO (旧チェックポイント) の順で試す
             try:

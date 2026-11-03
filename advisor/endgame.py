@@ -7,12 +7,14 @@
 
 1v1の勝敗判定 (簡略モデル):
 - 双方が最大打点の技を撃ち続けると仮定し、撃破に必要なターン数を比較
+  (終盤評価の matchup_matrix は自滅技・HP の 1/2 を失う技を撃ち続けない: duel_judgement。2026-10-09 M2a)
 - 先手側はターン数が同じでも勝ち (行動順で1回多く殴れる)
 - foul playと同様、隠れ情報は使用率予測 (opponent_move_pool) で補完
 """
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 from typing import Optional
 
 from advisor.damage import MonView, calc_damage
@@ -118,16 +120,77 @@ def duel(a: MonView, a_hp: float, a_moves: list,
     return s > 0
 
 
+@lru_cache(maxsize=1)
+def _non_repeatable_kinds() -> frozenset:
+    """「繰り返し撃てる最大打点」にしない自分の損失の種類 (advisor.transition.self_cost_kind の値。
+    advisor/data/transition_effects.json の endgame_non_repeatable_kinds)"""
+    from advisor.transition import transition_effects
+    return frozenset(transition_effects().get("endgame_non_repeatable_kinds")
+                     or ("selfko", "half_hp", "half_hp_on_damage"))
+
+
+def split_self_cost_moves(moves: list) -> tuple:
+    """技を (繰り返し撃てる技, 外した技 [(move_id, kind)]) に分ける (純粋。2026-10-09 M2a)。
+    外すのは自滅 (だいばくはつ等) と HP の 1/2 を失う技 (てっていこうせん等)。反動技 (すてみタックル等) は外さない
+    (与ダメージに比例する損失で、繰り返し撃てる。反動の HP は 1 対 1 判定では従来どおり数えない)"""
+    from advisor.transition import self_cost_kind
+    kinds = _non_repeatable_kinds()
+    rep, excluded = [], []
+    for mid in moves or []:
+        k = self_cost_kind(mid)
+        if k in kinds:
+            excluded.append((mid, k))
+        else:
+            rep.append(mid)
+    return rep, excluded
+
+
+def duel_judgement(a: MonView, a_hp: float, a_moves: list,
+                   b: MonView, b_hp: float, b_moves: list) -> tuple:
+    """終盤評価 (matchup_matrix) の 1 対 1 判定: (aが勝つか True/False/None, 判定保留の印 [dict])。2026-10-09 M2a。
+
+    旧 duel は自滅技・HP の 1/2 を失う技も「最大打点を撃ち続ける」の候補にしていた (だいばくはつ 3 連発で勝ち等)。
+    ここでは次のとおり判定する (1 回の使用後の状態を共通遷移で解く方式は段 B の範囲なので採らない):
+      1. その技を外した判定 (繰り返し撃てる技だけ) と、外さない判定 (旧 duel) が一致すれば、その結果 (外した技が勝敗を左右しない)
+      2. 食い違い、外した技がすべて自滅で、どれも 1 回で相手を倒せないなら、外した判定 (撃てば使用者がひんしで負ける)
+      3. それ以外 (1 回で倒せる自滅 = 相打ち、HP の 1/2 を失う技の使いどころ) は判定保留 None と印
+         {"side": "a"/"b", "move_id", "kind", "lethal_once"} を返す"""
+    a_rep, a_ex = split_self_cost_moves(a_moves)
+    b_rep, b_ex = split_self_cost_moves(b_moves)
+    if not a_ex and not b_ex:
+        return duel(a, a_hp, a_moves, b, b_hp, b_moves), []
+    r_rep = duel(a, a_hp, a_rep, b, b_hp, b_rep)
+    r_all = duel(a, a_hp, a_moves, b, b_hp, b_moves)
+    if r_rep == r_all:
+        return r_rep, []
+    marks = []
+    for side, atk, dfd, dfd_hp, ex in (("a", a, b, b_hp, a_ex), ("b", b, a, a_hp, b_ex)):
+        for mid, kind in ex:
+            lethal = _best_dmg(atk, dfd, [mid]) >= dfd_hp * 100
+            marks.append({"side": side, "move_id": mid, "kind": kind, "lethal_once": bool(lethal)})
+    if all(m["kind"] == "selfko" and not m["lethal_once"] for m in marks):
+        return r_rep, []
+    return None, marks
+
+
 def matchup_matrix(my_mons: list, opp_mons: list) -> dict:
     """my_mons/opp_mons: [(name, MonView, hp_frac, move_ids)]
 
     戻り値 {"matrix": {(my, opp): bool|None},
-            "win_conditions": [my names], "lose_threats": [opp names]}
+            "win_conditions": [my names], "lose_threats": [opp names],
+            "unsupported": [{"my", "opp", "side": "my"/"opp", "move_id", "kind", "lethal_once"}]}
+    1 対 1 の判定は duel_judgement (自滅技・HP の 1/2 を失う技を繰り返し撃てる扱いにしない。2026-10-09 M2a)。
+    判定保留 (None) の組は unsupported に印を残す (勝ち筋・負け筋には数えない)
     """
     matrix = {}
+    unsupported = []
     for mn, mv, mhp, mmoves in my_mons:
         for on, ov, ohp, omoves in opp_mons:
-            matrix[(mn, on)] = duel(mv, mhp, mmoves, ov, ohp, omoves)
+            r, marks = duel_judgement(mv, mhp, mmoves, ov, ohp, omoves)
+            matrix[(mn, on)] = r
+            for m in marks:
+                unsupported.append({"my": mn, "opp": on, "side": "my" if m["side"] == "a" else "opp",
+                                    "move_id": m["move_id"], "kind": m["kind"], "lethal_once": m["lethal_once"]})
 
     win_conditions = []
     for mn, _, _, _ in my_mons:
@@ -140,7 +203,7 @@ def matchup_matrix(my_mons: list, opp_mons: list) -> dict:
         if results and all(r is False for r in results):
             lose_threats.append(on)
     return {"matrix": matrix, "win_conditions": win_conditions,
-            "lose_threats": lose_threats}
+            "lose_threats": lose_threats, "unsupported": unsupported}
 
 
 def endgame_note(result: dict, n_opp_unknown: int = 0) -> str:

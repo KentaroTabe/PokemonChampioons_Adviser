@@ -1,5 +1,11 @@
 # 接続テスト チェックリスト (2026-07-24 更新分)
 
+## 操作: 対応待ちの個体を枠に割り当てる (2026-10-09 fix/type-recognition)
+
+相手欄の「対応待ち」(点線の枠) に「候補: 枠 N (種)」が出たら (タイプが 1 個だけ重なる枠が 1 つだけ、または様子見画面の弱い読みがタイプと一致した枠。自動では統合しない)、目視で確かめて
+「枠に割り当て…」のプルダウンから枠を選ぶ (★ が候補)。HP・技はその枠に移り、対戦ログに basis manual の roster_change が残る。
+確定済みの別の種の枠には入らない (イベント欄に理由)。助言の注記 (opp_pending_note) にも同じ候補が出る。
+
 ## 2026-10-07 試験運転 (深夜、新版 a720a519 の初動作確認、2 戦) の結果
 
 01:20:03 に操作パネル (01:12 に入れ直した常駐) から開始、01:32:04 に終了 (一括監査あり)。測定 run `improve_20261007_0100` (01:00 起動、5 並列) の
@@ -660,6 +666,150 @@ churn 6→1-2件、選出picked一致、ヒステリシス動作。
       ※ ターミナルを使わない場合は操作パネル http://localhost:8010/ の「接続テスト開始」
       (2026-09-23 追加。登録は `bash scripts/control_panel_install.sh install`、docs/OPERATIONS.md)
 - [ ] ブラウザで表示されたURL (既定 3000。別プロセスが使っていれば起動スクリプトが次の空きポートへずらす) を開き「バックエンド: 接続中」表示
+- [ ] **対戦前に助言ページを強制再読み込みする (Cmd+Shift+R)** (2026-10-07 追加)。10/7 の試験運転ではブラウザがキャッシュの古い
+      index.html を使った疑いがあった。配信は `tools.frontend_server` (Cache-Control: no-store) に替えたが、替える前に
+      キャッシュされたページはそのまま残り得る。サーバーログに `client_hello ...: 版 <ページの版> (ディスク <同じ版>)` が出て、
+      `⚠ ページの版` / `⚠ ... client_hello が ... 届かない` の警告が出ていないことを確かめる
+- [ ] **ブラウザのウィンドウをゲーム画面に完全には覆われない位置に置く** (2026-10-07 追加)。macOS の Chrome は完全に覆われた窓を
+      hidden 扱いにし、送信が 1〜2 fps に落ちる (10/7 の試験運転は表示の報告が全部 hidden)。表示の報告が 3 件続けて hidden に
+      なると、助言ページの上部に警告バーが出る (見える状態で助言を表示すると消える)
+
+### 採点方式を変えて試験する (2026-10-16、方式 C: 追跡しないローカル設定ファイル)
+
+アドバイザーの採点方式 (`legacy` 既定 / `transition`) は `config/advice.local.env` (追跡しない。例は
+`config/advice.local.env.example`) で決める。読むのは起動スクリプトの共通の読み込み `scripts/advice_env.sh` だけで、
+`start_connection_test.sh` / `start_all_nohup.sh` / `start_servers.sh` / `deploy.sh` が uvicorn を起こす前に通す。
+操作パネルの「接続テスト開始」「更新の反映」と launchd の daily-deploy (毎朝 5:00 の `deploy.sh --force`) もこれを通るので、
+シェルの環境変数が渡らない経路でも同じ値で再起動される。規則は `tools/advice_mode.py`:
+
+- ファイルも環境変数 `ADVICE_SCORING_MODE` も無し → `legacy` (設定元 `default`)。ファイルだけ → 設定元 `file`。環境変数だけ → `env`
+- ファイルと環境変数が両方あって値が違う、使えない値、`ADVICE_SCORING_MODE` 以外の鍵 → **エラーで起動しない**
+  (deploy.sh はアドバイザーを止める前に中止するので、稼働中のプロセスはそのまま残る)
+- `champions_agent/config.py` と測定の子プロセス (usefulness_p1 の check_advisor_player、arc_remeasure、学習) はこのファイルを
+  読まない (条件ごとの環境変数で明示する)。ファイルを置いたまま測定を回しても測定の条件は変わらない
+
+正式な試験の手順:
+
+- [ ] `config/advice.local.env` に 1 行 `ADVICE_SCORING_MODE=transition` を書く
+      (`cp config/advice.local.env.example config/advice.local.env` して値を書き換えてもよい)
+- [ ] 再起動する: 操作パネルの「接続テスト開始」(アドバイザーが動いていれば中で deploy.sh が再起動する) か
+      `bash scripts/start_connection_test.sh`。テスト中でなければ「更新の反映」でもよい
+- [ ] 操作パネルの「採点方式 (アドバイザー)」で **設定値 = 実効値 = transition、設定元 file** を確かめる
+      (設定値と実効値が違うと警告バーと「設定値と実効値が違う (再起動していない)」が出る)
+- [ ] 起動ログ (`logs/server_nohup.log`) の
+      `[server] 採点方式: 実効値 transition / 設定元 file / 設定値 transition (config/advice.local.env)` を確かめる (⚠ が無いこと)
+- [ ] 1 戦目の対戦ログ (`logs/battles/*.jsonl`) の version 行で `"scoring_mode": "transition"`・`"scoring_mode_source": "file"`
+      を確かめる (advice 行の `scoring_mode` / `scoring_used` / `fallback_reason` も同じ方式で書かれる)
+- [ ] 終わったらファイルを `ADVICE_SCORING_MODE=legacy` に戻すか削除して、再起動 (「更新の反映」等) する。
+      **戻さないと翌朝の daily-deploy の再起動後も transition のまま動く**。パネルで 設定値 = 実効値 = legacy を確かめる
+
+### transition の感度 (2026-10-18、実機の既定 off)
+
+transition の感度 (楽観側の HP・スカーフ / タスキの有無を入れ替えた仮説での順位。**順位には使わない**) は、実機の起動経路では
+既定で計算しない (遅い局面の処理時間の約半分が感度だったため。計画書 §8.34)。同じ `config/advice.local.env` に
+`TRANSITION_SENSITIVITY` (値 `0` / `1`) を書いて決め、`scripts/advice_env.sh` が uvicorn にだけ
+`TRANSITION_SENSITIVITY` と設定元 `TRANSITION_SENSITIVITY_SOURCE` を渡す (規則は採点方式と同じ):
+
+- ファイルにも環境変数 `TRANSITION_SENSITIVITY` にも無し → `0` (設定元 `default` = 感度を計算しない)。
+  有効に戻すにはファイルに `TRANSITION_SENSITIVITY=1` と書いて再起動する
+- ファイルと環境変数の値が違う、`0` / `1` 以外の値 → **エラーで起動しない**
+- 感度を切っても本採点 (候補・得点・順位・HP の不確かさの悲観側の評価・合法性・退避) は変わらない
+  (`python -m tools.real_accept --compare-sensitivity --target <ログ>` で照合できる)。
+  `champions_agent/config.py` の既定 (計算する) は変えていないので、測定の子プロセス・診断ツールは従来どおり
+
+確かめ方:
+
+- [ ] 操作パネルの「transition の感度 (アドバイザー)」で 設定値・実効値・設定元 を見る (既定は off / off / default)。
+      違えば「設定値と実効値が違う (再起動していない)」と警告バーが出る
+- [ ] 起動ログの `[server] transition の感度: 実効値 off / 設定元 default / 設定値 未設定 = 0 (...)` (⚠ が無いこと)
+- [ ] 対戦ログの version 行の `"transition_sensitivity"` (実効値)・`"transition_sensitivity_source"`。advice 行 (transition のとき)
+      の `"sensitivity_status"` は、`disabled` = 計算していない / `computed` = 計算した / `partial` = 一部を予算で省略 /
+      `omitted` = 全部を予算で省略 / `failed` = 計算に失敗 / `none` = 該当する仮説が無い。`"sensitivity_changed"` は計算した
+      仮説で第一候補が変わったか (計算していなければ null。**disabled を「仮説を変えても同じ」とは読まない**)
+
+### 正式群 (L → T → T → L) の使用率・実戦バンクの固定 (2026-10-23、計画書 §8.49)
+
+> **2026-10-31: 正式比較はこの手順ではなく、下の「版の固定の bundle」を使う** (この 3 行は使用率 DB の中身・選出モデルの埋め込み・meta・登録を固定しない。docs/INHERITANCE_B0_REVIEW_20261031.md §3 の 2)。以下は互換のための記録。
+
+実機は既定で使用率 DB の最新 snapshot (毎朝 06:30 の usage-update で増える) と `logs/real_opponents/bank.json` (対戦ごとに更新)
+を読む。正式群では、群の間ずっと開始時の写しを読ませる (方式の切替の再起動の後も同じ snapshot・同じバンク)。同じ
+`config/advice.local.env` に 3 つの鍵を書き、`scripts/advice_env.sh` が uvicorn にだけ渡す (学習・測定の子プロセスには渡さない):
+
+- `ADVICE_USAGE_SNAPSHOT` = 使用率の snapshot id (型予測・タイプからの候補・チャンピオンズの種の判定はこの id (以下) を読む)
+- `ADVICE_REAL_BANK` = 実戦バンクの写しのパス (元の `logs/real_opponents/bank.json` を指すとエラー)
+- `ADVICE_REAL_BANK_SHA16` = 写しの sha16 (任意。あれば起動時に照合)
+- 指定 snapshot が DB に無い・写しが無い・sha16 が違う・値が不正・ファイルと環境変数の矛盾 → **エラーで起動しない**
+  (deploy.sh は止める前に中止。server も起動時に同じ検査をする)
+
+手順:
+
+- [ ] 群の開始前に写しを作る: `.venv/bin/python -m tools.advice_mode --freeze-data`
+      (`logs/pinned_data/<時刻>/bank.json` に写しを作り、今の最新 snapshot id と写しのパス・sha16 の 3 行を表示する。
+      設定ファイルは書き換えない)
+- [ ] 表示された 3 行 (`ADVICE_USAGE_SNAPSHOT=...` / `ADVICE_REAL_BANK=...` / `ADVICE_REAL_BANK_SHA16=...`) を
+      `config/advice.local.env` に追加し、再起動する (「接続テスト開始」か「更新の反映」)
+- [ ] 操作パネルの「データの固定 (アドバイザー)」で 設定値 = 実効値、設定元 file を確かめる。起動ログの
+      `[server] データの固定: 実効値 snapshot N / バンク ... [snapshot N は DB にある, バンクの sha16 ... (指定と一致)] / 設定元 file`
+      (⚠ が無いこと)
+- [ ] 1 戦目の対戦ログの version 行で `rules.usage_snapshot` = N、`runtime.usage_snapshot_source` = `"pinned"`、
+      `rules.real_bank` = `{"path": 写し, "sha16": ..., "pinned": true}` を確かめる
+- [ ] **方式の切替 (L ↔ T) で `ADVICE_SCORING_MODE` を書き換えるときも、3 行は残す** (消すと最新に戻る)
+- [ ] 群が終わったら 3 行を削除して再起動し、パネルで「なし」を確かめる (写しのディレクトリは記録として残してよい)
+
+### 正式比較の版の固定 (bundle、2026-10-31 追加レビュー判断 2・4)
+
+正式比較では、助言が読む入力を **1 つの bundle** (`logs/pinned_data/<時刻>/`) に一組で固定する: RL 方策・選出モデル + 埋め込み +
+meta + 条件付きモデル・使用率 DB から必要な snapshot を抽出した sqlite・実戦バンク・登録 (my_team) の写しと `manifest.json`
+(各ファイルの sha256・出所、コード commit、設定、Showdown の clone の commit、規制、選出モデルの種別と対応する構築)。
+`config/advice.local.env` には `ADVICE_PIN_BUNDLE=<dir>` の **1 行だけ** を書く (個別の 7 行 `ADVICE_USAGE_SNAPSHOT` ほかは
+manifest から埋まる。書くなら値を bundle と揃える。違えば起動しない)。アドバイザーは bundle の写しだけを読み、bundle のファイルが
+無い・sha256 が違う・読めなければ **起動しない / 助言を止める** (配備先へ黙って退避しない)。比較を始める直前に作り、必要なら起動し直す。
+
+手順 (再起動は開発者が行う):
+
+- [ ] 学習・測定の run が動いていないことを `scripts/status.sh` と `pgrep -fl "check_advisor_player|usefulness_p1|team_build"` で確かめる
+- [ ] bundle を作る: `.venv/bin/python -m tools.advice_mode --freeze-bundle`
+      (今読まれるはずの RL 方策と、登録チームに使われるはずの選出モデルを写す。表示の `#` 行で次を確かめる:
+      選出モデルの種別 (`汎用` / `構築専用 対応 6 体 [...]` / `不明`)、構築専用なら 6 体が今の登録チームと同じか、`型の前提` (一致 / 不明 / 不一致)、
+      コードの commit と `未コミットの変更 False`、Showdown の commit、使用率の snapshot。設定ファイルは書き換えない)。
+      選出モデルを指定するときは `--selection-model PT` (種別はそのモデルの学習履歴の meta で決まる)。種別を明示するときだけ
+      `--selection-kind general|team --selection-kind-basis "<根拠の文>" [--selection-team id,... --selection-sets TEAM.txt]`
+- [ ] **bundle の `#` 行で種別と formal_ok を確かめる** (2026-11-02 レビュー判断 1・2): `#   選出モデルの種別: … / 根拠 meta|explicit|unknown: …
+      / 型の前提 fixed|none|unknown` と `#   正式比較: 可 (formal_ok True)` / `使わない — 適用範囲未確認 (診断) (formal_ok False): <理由>`。
+      **種別が不明 (根拠 unknown)、または構築専用で型の前提が unknown なら正式比較に使わない** (起動・助言はできるが診断扱い。
+      real_accept の群の照合は判定不能になる)。種別はモデルと同じ dir の `<stem>_meta.json` の学習履歴 (provenance、model_sha16 の一致)
+      で決まり、ファイルの名前 (selection_model.pt / Package / registered) では決まらない。2026-11-02 より前に学習したモデルは記録が無いので
+      不明になる (正式比較に使うなら train_selection で学習し直すか、根拠を書いて `--selection-kind` で明示する)
+      記録から復元した provenance (`tools/inheritance_eval/reconstruct_provenance.py`、source reconstructed) は根拠 `reconstructed` と出る。
+      formal_ok は証拠の強さで決まる (training_log、または参照先自身に training_log か学習コードが書いた trained の meta がある hash_identity があれば可。mtime・run の manifest・参照先が不明の hash_identity だけなら種別は不明のまま) (2026-11-02)
+- [ ] 固定対象の除外: `advisor.team_advice` (試合後のパーティ診断の meta_top・補完候補) は配備先の使用率 DB を読む。操作・選出の試験の
+      経路ではないので今回の固定対象から除外する (構築・修理の比較で使う段階で固定対象に入れる)。起動ログに
+      `[server] 版の固定 (bundle) の対象外: advisor.team_advice …` が出る
+- [ ] 表示された 1 行 `ADVICE_PIN_BUNDLE=...` を `config/advice.local.env` に書く。以前の固定の行 (`ADVICE_USAGE_SNAPSHOT` /
+      `ADVICE_REAL_BANK(_SHA16)` / `ADVICE_RL_POLICY(_SHA16)` / `ADVICE_SELECTION_MODEL(_SHA16)`) は消す (残すなら bundle と同じ値)
+- [ ] `.venv/bin/python -m tools.advice_mode --show` で `版の固定 (bundle) の設定値: bundle <dir>` と `bundle の照合: 一致` を確かめる
+- [ ] advice_env.sh を通して再起動する (操作パネルの「接続テスト開始」/「更新の反映」、または `bash scripts/start_connection_test.sh`)。
+      起動スクリプトの出力に `版の固定 (bundle): <dir> (...照合済み)` が出る。bundle が壊れていれば何も止めずに中止する
+- [ ] 起動ログ (`logs/server_nohup.log`) で
+      `[server] 版の固定 (bundle): 実効値 bundle <dir> (manifest sha16 ..., 使用率 snapshot N, 選出モデル ...) / 設定元 file / 設定値 bundle <dir> (...)`
+      (⚠ が無いこと)、`データの固定:` / `モデルの固定:` の行が `bundle ... から` であることを確かめる。同じ行の末尾が `正式比較 可` か
+      `適用範囲未確認 (診断): <理由>` か (`#` 行と同じ) を確かめる
+- [ ] 助言画面: 助言欄の上部に `📌 固定した登録を使用中 (bundle <dir 名>、manifest sha16 …)` が常時出る (formal_ok False なら
+      ` / 適用範囲未確認 (診断): <理由>` が併記され、背景が茶色)。パーティ編集・登録の詳細には「bundle 使用中は登録の編集が助言に反映されない」が出る
+- [ ] 1 戦目の対戦ログの version 行で `runtime.pin_bundle.manifest_sha16` (起動ログと同じ)、`rules.usage_snapshot` = N、
+      `selection_model.sha256` / `action_policy.sha256` / `rules.embedding_sha256` / `team.registry_sha256` / `rules.real_bank.sha16` が
+      manifest の各 sha16 (`files.*.sha16`、登録は `files.registry.registry_sha16`) と同じことを確かめる。
+      `runtime.pin_bundle.formal_ok` が true であること (false なら正式比較に数えない)
+- [ ] 選出画面: 構築専用モデルは自分の 6 体が読めるまで `🤖 選出モデル: 確認待ち`。`⛔ 選出モデルを使わない` が出たら、登録・
+      パーティが bundle の構築と違う (または学習時の型と違う)。その対戦は比較に数えず、bundle と登録を確かめる
+      (理由は対戦ログの advice 行の `model_pick_scope` に残る)
+- [ ] **方式の切替 (L ↔ T) で `ADVICE_SCORING_MODE` を書き換えるときも `ADVICE_PIN_BUNDLE` の行は残す**
+- [ ] bundle を使っている間は登録 (my_team) も bundle の写しを読む: パーティ編集の保存は `config/my_team.json` に書かれるが助言には
+      効かない (効かせるなら bundle を作り直して再起動する)
+- [ ] 群が終わったら行を削除して再起動し、`--show` / 起動ログで `版の固定 (bundle): 実効値 なし` を確かめる (bundle の dir は記録として残す)
+- 汎化試験 (構築専用モデルを意図して別の構築に適用する) は別の実験として、対象と条件を先に決めてから
+  `ADVICE_PIN_ALLOW_OTHER_TEAM=1` を足す (通常運用には使わない)。version 行の `runtime.pin_bundle.allow_other_team` と
+  advice 行の `model_pick_scope.state = "override"` に残る
 
 ## 1. 追従テスト (今回のメイン): 全操作をアドバイス通りに行う
 
@@ -758,6 +908,17 @@ churn 6→1-2件、選出picked一致、ヒステリシス動作。
       (`bash scripts/experiment_label.sh off` かパネルの OFF)
 - [ ] フレーム統計の取りこぼし率を確認する (改善前の基準は62%・3.8fps。
       これを下回っていれば取りこぼし対策が効いている)
+- [ ] **ページの版と可視状態の記録を確認する** (2026-10-07 追加。対戦ログ `logs/battles/*.jsonl` と改善案レポートの
+      「接続テストの記録」):
+      - client 行の `stale` が `false` (true = キャッシュの古いページ。`hello: false` = client_hello を送らない古い版のページ)
+      - visibility 行がある (無ければページが可視状態を知らせていない)
+      - frames 行の `unknown` が 0 (可視状態の通知の無い接続から受信したフレーム。レポートでは「不明 %」。100% なら
+        「可視状態の通知なし (ページの版が古い可能性)」と出る)
+      - frames 行の `recv_fps` が 5 以上 (隠れたウィンドウでは 1〜2 fps に落ちる)
+      - 表示通知の hidden の件数 (レポートの「表示通知の hidden: n/全件」) が 0 に近い
+      - (DEBUG_DUMP_FRAMES=1 のとき) frame_burst 行: 対象の対戦で保存が始まったか (`reason` = `scene:command` /
+        `scene:move_select` / `timeout`)、始まらなかった対戦は `skipped: true` と理由 (`no_start_scene` / `count_exhausted` /
+        `not_every` / `disabled`)
 - [ ] 表示されたサマリーに今回の対戦が反映されている
 - [ ] **実戦の相手バンク** (`tools.real_opponents --build`、2026-09-09 追加、終了処理で自動更新) が更新されている:
       相手の構成・実際の選出・先発・判明した型を `logs/real_opponents/bank.json` に集める。学習環境の相手

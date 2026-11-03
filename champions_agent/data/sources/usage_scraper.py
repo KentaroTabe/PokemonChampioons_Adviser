@@ -11,16 +11,22 @@
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import random
+import re
+import time
 from dataclasses import dataclass, field
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 import requests
 
 from champions_agent.config import (
     USAGE_STATS_SOURCES, USAGE_TARGET_FORMAT, USAGE_MIN_RATING,
-    USAGE_MIN_RANKED_TEAMS,
+    USAGE_MIN_RANKED_TEAMS, SMOGON_CHAMPIONS_FORMATS, SMOGON_USAGE_DIR,
+    SMOGON_FETCH_TIMEOUT_SEC, SMOGON_CONVERT_VERSION,
 )
 from champions_agent.data.sources.name_mapping import (
     to_pokeapi_slug, normalize_move_name, normalize_item_name, normalize_ability_name,
@@ -355,3 +361,137 @@ def fetch_usage_stats(fmt: str = USAGE_TARGET_FORMAT, use_dummy: bool = False,
                     f"{SMOGON_FALLBACK_FORMAT}-{rating}.json")
     meta.setdefault("note", "fallback: champions実データ取得不可のためgen9ou統計を使用")
     return entries, meta
+
+
+# ---------------------------------------------------------------------------
+# 月・形式・cutoff を明示する Smogon chaos の取得 (2026-10-30 レビュー、開発者承認)
+#
+# fetch_usage_stats(source="smogon", fmt=...) は fmt を無視して gen9ou (SMOGON_FALLBACK_FORMAT) を取る (既定の挙動なので変えない)。
+# Champions の統計を評価に使うときはこちらを使う: 形式が SMOGON_CHAMPIONS_FORMATS に無い・取れない・中身の形式や cutoff が
+# 違えば SmogonChaosError で止める (gen9ou や別の月に退避しない)。取得した元 JSON はそのまま保存し、sha256・取得時刻・サイズ・
+# 変換版を manifest に残す。保存済みなら取得しない (再取得しない。sha が manifest と違えば止める)。
+# ---------------------------------------------------------------------------
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+_MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+
+
+class SmogonChaosError(RuntimeError):
+    """指定した月・形式・cutoff の chaos JSON が取れない・中身が指定と違う (退避しないで止める)"""
+
+
+def smogon_chaos_url(month: str, fmt: str, cutoff: int) -> str:
+    """chaos JSON の URL (純粋)"""
+    return f"{SMOGON_STATS_BASE_URL}/{month}/chaos/{fmt}-{int(cutoff)}.json"
+
+
+def smogon_chaos_paths(month: str, fmt: str, cutoff: int, root: Path | None = None) -> tuple[Path, Path]:
+    """(元 JSON の保存先, manifest の保存先) (純粋)。root の既定はこのリポジトリ (作業ツリー) の SMOGON_USAGE_DIR"""
+    base = Path(root) if root is not None else REPO_ROOT / SMOGON_USAGE_DIR
+    d = base / month
+    stem = f"{fmt}-{int(cutoff)}"
+    return d / f"{stem}.json", d / f"{stem}.manifest.json"
+
+
+def check_chaos_request(month: str, fmt: str, cutoff, formats=SMOGON_CHAMPIONS_FORMATS) -> None:
+    """要求の検査 (純粋)。月は YYYY-MM、形式は formats の中、cutoff は整数。違えば SmogonChaosError"""
+    if not isinstance(month, str) or not _MONTH_RE.match(month):
+        raise SmogonChaosError(f"月 {month!r} が YYYY-MM でない")
+    if fmt not in formats:
+        raise SmogonChaosError(f"形式 {fmt!r} は対象外 (SMOGON_CHAMPIONS_FORMATS = {list(formats)})")
+    try:
+        if int(cutoff) != cutoff or int(cutoff) < 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        raise SmogonChaosError(f"cutoff {cutoff!r} が 0 以上の整数でない")
+
+
+def check_chaos_payload(payload, fmt: str, cutoff: int) -> dict:
+    """取得した chaos JSON の検査 (純粋)。info.metagame が fmt、info.cutoff が cutoff、data が空でない dict であること。
+    違えば SmogonChaosError。戻り値 = info"""
+    if not isinstance(payload, dict):
+        raise SmogonChaosError("chaos JSON の最上位が dict でない")
+    info = payload.get("info")
+    data = payload.get("data")
+    if not isinstance(info, dict) or not isinstance(data, dict) or not data:
+        raise SmogonChaosError("chaos JSON に info / data が無い (または data が空)")
+    meta = info.get("metagame")
+    if meta != fmt:
+        raise SmogonChaosError(f"中身の形式 {meta!r} が指定 {fmt!r} と違う (退避しない)")
+    got_cut = info.get("cutoff")
+    try:
+        same_cut = got_cut is not None and float(got_cut) == float(cutoff)
+    except (TypeError, ValueError):
+        same_cut = False
+    if not same_cut:
+        raise SmogonChaosError(f"中身の cutoff {got_cut!r} が指定 {cutoff!r} と違う")
+    return info
+
+
+def chaos_manifest(month: str, fmt: str, cutoff: int, raw: bytes, info: dict, fetched_at: float, url: str) -> dict:
+    """manifest の中身 (純粋)"""
+    return {
+        "source": "smogon",
+        "url": url,
+        "month": month,
+        "format": fmt,
+        "cutoff": int(cutoff),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "size": len(raw),
+        "fetched_at": fetched_at,
+        "fetched_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(fetched_at)),
+        "number_of_battles": info.get("number of battles"),
+        "info_metagame": info.get("metagame"),
+        "info_cutoff": info.get("cutoff"),
+        "convert_version": SMOGON_CONVERT_VERSION,
+    }
+
+
+def load_smogon_chaos_saved(month: str, fmt: str, cutoff: int, root: Path | None = None) -> tuple[dict, dict] | None:
+    """保存済みの元 JSON と manifest を読む。無ければ None。sha256 が manifest と違えば SmogonChaosError"""
+    raw_path, man_path = smogon_chaos_paths(month, fmt, cutoff, root)
+    if not raw_path.exists() or not man_path.exists():
+        return None
+    raw = raw_path.read_bytes()
+    manifest = json.loads(man_path.read_text(encoding="utf-8"))
+    sha = hashlib.sha256(raw).hexdigest()
+    if sha != manifest.get("sha256"):
+        raise SmogonChaosError(f"保存済みの {raw_path} の sha256 が manifest と違う ({sha[:16]} != {str(manifest.get('sha256'))[:16]})")
+    payload = json.loads(raw.decode("utf-8"))
+    check_chaos_payload(payload, fmt, cutoff)
+    return payload, manifest
+
+
+def fetch_smogon_chaos_exact(month: str, fmt: str, cutoff: int, root: Path | None = None,
+                             http_get=None, now=None) -> tuple[dict, dict]:
+    """月・形式・cutoff を明示して Smogon の chaos JSON を取る。戻り値 (元 JSON の dict, manifest)。
+
+    - 形式が SMOGON_CHAMPIONS_FORMATS に無い・HTTP が 200 でない・中身の形式や cutoff が違う → SmogonChaosError
+      (gen9ou・別の月・別の cutoff に退避しない)
+    - 保存済み (root/<month>/<fmt>-<cutoff>.json と manifest) があれば取得しないでそれを返す (再取得しない)
+    - http_get / now はテスト用の差し替え (既定は requests.get / time.time)
+    """
+    check_chaos_request(month, fmt, cutoff)
+    saved = load_smogon_chaos_saved(month, fmt, cutoff, root)
+    if saved is not None:
+        payload, manifest = saved
+        return payload, dict(manifest, reused=True)
+    url = smogon_chaos_url(month, fmt, cutoff)
+    getter = http_get or requests.get
+    resp = getter(url, timeout=SMOGON_FETCH_TIMEOUT_SEC)
+    status = getattr(resp, "status_code", None)
+    if status != 200:
+        raise SmogonChaosError(f"{url} が HTTP {status} (退避しない)")
+    raw = resp.content
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as e:
+        raise SmogonChaosError(f"{url} が JSON でない: {e}")
+    info = check_chaos_payload(payload, fmt, cutoff)
+    fetched_at = float(now()) if now else time.time()
+    manifest = chaos_manifest(month, fmt, cutoff, raw, info, fetched_at, url)
+    raw_path, man_path = smogon_chaos_paths(month, fmt, cutoff, root)
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_path.write_bytes(raw)
+    man_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
+    return payload, dict(manifest, reused=False)

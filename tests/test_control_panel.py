@@ -113,7 +113,7 @@ def test_status_from_files():
         root = make_root(Path(tmp))
         probe = FakeProbe(
             listeners={8000: {"pid": 11, "command": "python uvicorn server:app_asgi --host 0.0.0.0 --port 8000"},
-                       3001: {"pid": 12, "command": "python3 -m http.server 3001"},
+                       3001: {"pid": 12, "command": "python3 -m tools.frontend_server 3001"},
                        8100: {"pid": 13, "command": "node pokemon-showdown start 8100 --no-security"}},
             procs={CP.MEASURING_PATTERN: ["123 python -m tools.team_build.run --run-id x"]})
         st = CP.Panel(root, settings(), probe=probe).status()

@@ -11,7 +11,10 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 . scripts/lib/ports.sh
+. scripts/advice_env.sh
 source .venv/bin/activate
+# 採点方式 (config/advice.local.env → 環境変数 → legacy)。不正ならここで止める
+advice_env_resolve
 export PYTHONUNBUFFERED=1  # サーバーログを即時書き出す
 
 set -- $(choose_port "$ADVISOR_PORT_DEFAULT" "" "$ADVISOR_PATTERN")
@@ -31,7 +34,8 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-python3 -m http.server "$FRONTEND_PORT" >/dev/null 2>&1 &
+python3 -m "$FRONTEND_MODULE" "$FRONTEND_PORT" >/dev/null 2>&1 &
 echo "[start] フロントエンド: http://localhost:$FRONTEND_PORT"
-echo "[start] バックエンドを起動します (ポート $ADVISOR_PORT。準備完了の表示までお待ちください)"
+echo "[start] バックエンドを起動します (ポート ${ADVISOR_PORT}。準備完了の表示までお待ちください)"
+advice_env_export
 uvicorn server:app_asgi --host 0.0.0.0 --port "$ADVISOR_PORT"

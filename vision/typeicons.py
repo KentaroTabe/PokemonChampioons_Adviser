@@ -93,23 +93,29 @@ def _lab_of_color(bgr) -> np.ndarray:
 _TYPE_LABS = {name: _lab_of_color(c) for name, c in TYPE_COLORS.items()}
 
 
-def classify_type_icon(crop_img, hash_accept: int = _HASH_ACCEPT,
-                       color_cutoff: float = _COLOR_CUTOFF) -> Optional[str]:
-    """タイプアイコン画像からタイプ名 (日本語) を返す。判定不能なら None"""
-    if crop_img is None or crop_img.size == 0:
+def icon_std(crop_img) -> Optional[float]:
+    """欄の中央部の濃淡の標準偏差 (空の欄 ≒ 5、アイコン ≒ 40〜80)。切り出せなければ None"""
+    if crop_img is None or crop_img.size == 0 or crop_img.shape[0] < 10 or crop_img.shape[1] < 10:
         return None
-    if crop_img.shape[0] < 10 or crop_img.shape[1] < 10:
-        return None
+    return float(cv2.cvtColor(_core(crop_img), cv2.COLOR_BGR2GRAY).std())
 
+
+def classify_type_icon_detail(crop_img, hash_accept: int = _HASH_ACCEPT,
+                              color_cutoff: float = _COLOR_CUTOFF) -> dict:
+    """タイプアイコンの分類の詳細 (2026-10-09)。classify_type_icon と同じ判定で、採用の経路と距離も返す:
+    {"type": タイプ名 or None, "via": "shape" (ハミング距離 <= 60 か複合スコア) / "color" (色のフォールバック) / None,
+     "hash_dist": 最良テンプレートのハミング距離 (形状の照合をしたときだけ), "std": 濃淡の標準偏差 (切り出せなければ None)}"""
+    out = {"type": None, "via": None, "hash_dist": None, "std": icon_std(crop_img)}
+    if out["std"] is None:
+        return out
     core = _core(crop_img)
 
     # 空スロット (単タイプのポケモンはtype2側にのみアイコンが出る) の棄却。
     # アイコンは白い模様との高コントラストで分散が大きい (実測: 空≒5, アイコン≒70)
     # 空スロットに加え、画面遷移中の薄暗いフレームも棄却する
     # (実測: 空≒5, 遷移中≒23-30, 通常アイコン≒60-80)
-    gray_std = float(cv2.cvtColor(core, cv2.COLOR_BGR2GRAY).std())
-    if gray_std < 40.0:
-        return None
+    if out["std"] < 40.0:
+        return out
     qhash = _dhash(core)
     qlab = _mean_lab(core)
 
@@ -128,10 +134,12 @@ def classify_type_icon(crop_img, hash_accept: int = _HASH_ACCEPT,
     if scored:
         scored.sort()
         total0, h0, n0 = scored[0]
+        out["hash_dist"] = h0
         # 弱い一致 (ぼやけたフレーム等) は誤確定を避けて None を返し、
         # 次のフレームでの再試行に委ねる (選出画面は繰り返し抽出される)
         if h0 <= 60 or total0 <= 0.45:
-            return n0
+            out["type"], out["via"] = n0, "shape"
+            return out
 
     # 形状で決まらない場合: 色のみのフォールバック。
     # OBS経由は色味がシフトするため、静的な代表色より実キャプチャ由来の
@@ -147,5 +155,11 @@ def classify_type_icon(crop_img, hash_accept: int = _HASH_ACCEPT,
         # 色だけで当てずっぽうに選ばない。次フレームのグリフ照合に委ねる)
         margin = color_ranked[1][0] - dist if len(color_ranked) > 1 else 99.0
         if dist <= color_cutoff and margin >= 5.0:
-            return name
-    return None
+            out["type"], out["via"] = name, "color"
+    return out
+
+
+def classify_type_icon(crop_img, hash_accept: int = _HASH_ACCEPT,
+                       color_cutoff: float = _COLOR_CUTOFF) -> Optional[str]:
+    """タイプアイコン画像からタイプ名 (日本語) を返す。判定不能なら None"""
+    return classify_type_icon_detail(crop_img, hash_accept, color_cutoff)["type"]

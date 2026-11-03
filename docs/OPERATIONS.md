@@ -13,7 +13,7 @@ bash scripts/start_all_nohup.sh
 
 ポートは `config/ports.env` の既定 (アドバイザー 8000 / フロントエンド 3000)。**既定ポートを別のプロセス
 (他プロジェクトの開発サーバー等) が使っていれば、次の空きポート (+1 ずつ、最大 +20) へ自動でずらす。**
-「稼働中」と判定するのは、そのポートで待ち受けているのがこのリポジトリから起動した uvicorn / http.server の
+「稼働中」と判定するのは、そのポートで待ち受けているのがこのリポジトリから起動した uvicorn / tools.frontend_server の
 ときだけ (`scripts/lib/ports.sh`)。決めたポートは `logs/ports.env` と `config/ports.local.js` (フロントが
 アドバイザーのポートを読む) に書かれるので、**起動スクリプトが表示した URL を開く**。手動でアドバイザーの
 ポートを指定するときは URL に `?api=<port>` を付ける。
@@ -80,7 +80,7 @@ nohup bash -c 'source .venv/bin/activate && \
 ### 2. フロントエンド配信 (ポート3000)
 
 ```bash
-nohup python3 -m http.server 3000 > logs/frontend_nohup.log 2>&1 & disown
+nohup python3 -m tools.frontend_server 3000 > logs/frontend_nohup.log 2>&1 & disown   # Cache-Control: no-store を付ける配信 (2026-10-07)
 ```
 
 ブラウザで http://localhost:3000 を開く。
@@ -182,7 +182,7 @@ pgrep -fl train_forever            # 学習ループ
 
 ```bash
 pkill -f "uvicorn server:app_asgi"
-pkill -f "http.server 3000"
+pkill -f "tools.frontend_server 3000"
 bash scripts/stop_training.sh showdown   # 学習 + Showdown
 ```
 

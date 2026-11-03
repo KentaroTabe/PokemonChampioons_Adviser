@@ -124,7 +124,9 @@ def main() -> None:
         et._latest_selection_roster = orig_roster
     assert "pelipper @ damprock" in text, text
     assert "Ability: drizzle" in text, text
-    assert "EVs: 252 HP / 16 Def / 252 SpD" in text, text
+    # 2026-10-31 E-inh-1 (引き継ぎ評価 I-01、レビュー判断 4 で修正を承認): champions の EVs 欄は能力ポイントなので、書き出しは
+    # 点数 (0〜32) をそのまま書く (以前は ×8 の努力値 "252 HP / 16 Def / 252 SpD" を書き、Showdown の検証で拒否されていた)
+    assert "EVs: 32 HP / 2 Def / 32 SpD" in text, text
     assert "Calm Nature" in text, text
     assert "- hurricane" in text, text
     assert "swampert @ swampertite" in text, text

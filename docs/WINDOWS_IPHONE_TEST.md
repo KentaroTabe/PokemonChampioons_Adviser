@@ -53,7 +53,7 @@ uvicorn server:app_asgi --host 0.0.0.0 --port 8000
 
 ```powershell
 # ターミナル2: フロントエンド配信 (ポート3000)
-python -m http.server 3000
+python -m tools.frontend_server 3000   # リポジトリのルートで (Cache-Control: no-store を付ける http.server)
 ```
 
 起動ログに「準備完了」が出ればOK。`DEBUG_DUMP_FRAMES=1` を環境変数に

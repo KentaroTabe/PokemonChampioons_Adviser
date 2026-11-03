@@ -27,6 +27,9 @@ WEATHER_ALIASES = {"sand": "sandstorm", "sandstorm": "sandstorm", "sun": "sun", 
                    "raindance": "rain", "snow": "snow", "hail": "snow", "snowscape": "snow"}
 # 使えるかどうかを型・場・相手から判定できる条件 (ctx の鍵 → 成立の判定)
 HARD_CONDITIONS = ("terrain_required", "berry_eaten", "target_asleep", "user_asleep", "user_type_fire", "user_type_electric")
+# 場に出た最初の行動でしか選べない技 (であいがしら・ねこだまし) の condition の値。チャンピオンズの Showdown (mod champions) は
+# 場に出てから行動した後はこの技を選べなくする (disableMove)
+FIRST_TURN_CONDITION = "first_turn"
 
 
 # ------------------------------------------------------------------ 表の読み出し
@@ -158,6 +161,61 @@ def offense_multiplier(ability_id: Optional[str], ctx: dict) -> tuple:
     return mult, notes
 
 
+# 整数の計算 (advisor.damage の Showdown 準拠の切り捨て) で、特性の倍率を掛ける段階。表の hooks (Showdown のハンドラ名) から決める。
+# bp = 威力 (BasePower)、atk = 攻撃の実数値 (ModifyAtk / ModifySpA。防御側の SourceModifyAtk も攻撃側の値に掛かる)、
+# def = 防御の実数値 (ModifyDef / ModifySpD。表の倍率は被ダメ倍率なので逆数を掛ける)、stab = タイプ一致の倍率 (ModifySTAB)、
+# final = 最終ダメージ (ModifyDamage / SourceModifyDamage)。どれにも当たらなければ final
+_OFFENSE_STAGE_HOOKS = (("onModifySTAB", "stab"), ("onBasePower", "bp"), ("onAnyBasePower", "bp"), ("onAllyBasePower", "bp"),
+                        ("onModifyAtk", "atk"), ("onModifySpA", "atk"), ("onModifyDamage", "final"))
+_DEFENSE_STAGE_HOOKS = (("onSourceModifyDamage", "final"), ("onSourceModifyAtk", "atk"), ("onSourceModifySpA", "atk"),
+                        ("onSourceBasePower", "bp"), ("onModifyDef", "def"), ("onModifySpD", "def"))
+
+
+def _stage_of(ability_id: Optional[str], table) -> str:
+    hooks = set(ability_entry(ability_id).get("hooks") or ())
+    for hook, stage in table:
+        if hook in hooks:
+            return stage
+    return "final"
+
+
+def offense_modifiers(ability_id: Optional[str], ctx: dict) -> list:
+    """攻撃側の特性の倍率を段階つきで返す [(段階, 倍率, 理由)] (offense_multiplier と同じ条件の判定)。
+    段階は bp / atk / stab / final と、連続の追加 (おやこあい) の hits"""
+    out = []
+    stage = _stage_of(ability_id, _OFFENSE_STAGE_HOOKS)
+    for f in ability_formulas(ability_id):
+        kind = f.get("kind")
+        if kind == "offense_mult":
+            if "per_fainted_ally" in f:
+                n = min(int(ctx.get("fainted_allies", 0) or 0), int(f.get("max_allies", 5)))
+                if n > 0:
+                    m = 1.0 + float(f["per_fainted_ally"]) * n
+                    out.append((stage, m, f"{ability_id}×{m:g}"))
+            elif when_matches(f.get("when"), ctx):
+                m = float(f.get("mult", 1.0))
+                out.append((stage, m, f"{ability_id}×{m:g}"))
+        elif kind == "secondary_none" and when_matches(f.get("when"), ctx):
+            m = float(f.get("mult", 1.3))
+            out.append((stage, m, f"{ability_id}×{m:g}"))
+        elif kind == "extra_hit":
+            m = 1.0 + float(f.get("mult", 0.25))
+            out.append(("hits", m, f"{ability_id}×{m:g}"))
+    return out
+
+
+def defense_modifiers(ability_id: Optional[str], ctx: dict) -> list:
+    """防御側の特性の被ダメ倍率を段階つきで返す [(段階, 被ダメ倍率, 理由)] (defense_multiplier と同じ条件の判定)。
+    段階 def の倍率も被ダメ倍率のまま (防御の実数値に掛けるときは呼び出し側が逆数にする)"""
+    out = []
+    stage = _stage_of(ability_id, _DEFENSE_STAGE_HOOKS)
+    for f in ability_formulas(ability_id):
+        if f.get("kind") == "defense_mult" and when_matches(f.get("when"), ctx):
+            m = float(f.get("mult", 1.0))
+            out.append((stage, m, f"{ability_id}×{m:g}"))
+    return out
+
+
 def type_change(ability_id: Optional[str], move_type: Optional[str], move_flags=()) -> tuple:
     """タイプ付与・変更の特性 → (変化後のタイプ or None, 倍率)。from が "sound" なら音技が対象"""
     for f in ability_formulas(ability_id):
@@ -272,6 +330,11 @@ def expected_power(entry: dict, skill_link: bool = False, accuracy_mult: float =
     power = float(entry.get("power") or 0)
     crit = CRIT_MULT if entry.get("will_crit") else 1.0
     return power * hit_expectation(entry, entry.get("accuracy"), accuracy_mult, skill_link) * crit
+
+
+def first_turn_only(entry: dict) -> bool:
+    """場に出た最初の行動でしか選べない技か (技の効果表の condition が first_turn: であいがしら・ねこだまし)"""
+    return (entry or {}).get("condition") == FIRST_TURN_CONDITION
 
 
 def move_usable(entry: dict, ctx: dict) -> tuple:

@@ -6,6 +6,7 @@
 #   config/my_team.json / debug_frames) に依存
 # - 実対戦を伴うテストはローカルShowdown (8100) と長い実行時間が必要
 # - 一部テストは RL モデルのライブラリ (torch) が要る (scripts/run_test.sh local。理由は scripts/ci_tests.sh の冒頭)
+# - poke_env / sb3_contrib (sim・RL) 依存のテストは local (tests/test_*_local、scripts/run_test.sh local。2026-10-31 E-ci-1)
 # CIで回すのは「モックとコミット済みデータで閉じるテスト」のみ
 # (対象は scripts/ci_tests.sh に列挙)。
 name: ci
@@ -30,3 +31,50 @@ jobs:
         run: pip install -r requirements-ci.txt
       - name: Run logic test subset
         run: bash scripts/ci_tests.sh python
+
+  # I-05 R1 の実経路 (門 → チーム文 → validate_team_text) を、検証対象の commit の Showdown で実行する小さな統合試験
+  # (2026-10-31 追加レビュー判断 3、docs/INHERITANCE_B0_REVIEW_20261031.md §3 の 3)。上の tests job は変えない。
+  # - Showdown: smogon/pokemon-showdown の commit d849b220082e113d8a17303509fb44d420c543d5 (2026-09-09 master、
+  #   ローカル clone の HEAD と同じ。[Gen 9 Champions] BSS Reg M-C を含む)。値は config の INH_R1_SHOWDOWN_REPO /
+  #   INH_R1_SHOWDOWN_COMMIT から読む (ブランチの最新は使わない)
+  # - Node: 26 系列 (ローカルの v26.12.1。Showdown の build は 22 以上が必要)。config の INH_R1_NODE_MAJOR と
+  #   tools/ci/showdown_prepare.sh が照合する
+  # - build 条件: npm ci --omit=dev --ignore-scripts (package-lock.json どおり、native の optional 依存は入れない) → node build
+  #   (esbuild の transpile)。対象形式 gen9championsbssregmc が formats にあることを確かめる。理由は showdown_prepare.sh の冒頭
+  # - clone 先はリポジトリの外 ($RUNNER_TEMP)。リポジトリ直下の pokemon-showdown/ に置くと Showdown のデータの読み手
+  #   (sets のキャッシュ照合など) が他の試験と違う入力を見るため。dir は環境変数 SHOWDOWN_DIR で試験に渡す
+  # - 取得・build・形式の準備のどれかが失敗すればこの job は失敗。試験は厳格モード (INH_R1_REQUIRE_SHOWDOWN=1、
+  #   config の INH_R1_REQUIRE_SHOWDOWN_ENV) で、validate-team を使えなければ SKIP ではなく fail
+  # - 常駐サーバーや対戦は起動しない。ローカルの模擬は bash tools/ci/showdown_job_local.sh
+  showdown-validator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.9"
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+      - name: Install minimal deps
+        run: pip install -r requirements-ci.txt
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "26"
+      - name: Fetch pokemon-showdown at the pinned commit
+        run: |
+          set -euo pipefail
+          REPO=$(python -B -c "from champions_agent.config import INH_R1_SHOWDOWN_REPO as r; print(r)")
+          COMMIT=$(python -B -c "from champions_agent.config import INH_R1_SHOWDOWN_COMMIT as c; print(c)")
+          SD="$RUNNER_TEMP/pokemon-showdown"
+          git init -q "$SD"
+          git -C "$SD" remote add origin "$REPO"
+          git -C "$SD" fetch -q --depth 1 origin "$COMMIT"
+          git -C "$SD" checkout -q --detach FETCH_HEAD
+          echo "SHOWDOWN_DIR=$SD" >> "$GITHUB_ENV"
+      - name: Install Showdown deps, build, check the format
+        run: bash tools/ci/showdown_prepare.sh "$SHOWDOWN_DIR" python
+      - name: Run R1 on the real path (strict, no SKIP)
+        env:
+          INH_R1_REQUIRE_SHOWDOWN: "1"
+        run: python -B -m tests.test_inheritance_setlint

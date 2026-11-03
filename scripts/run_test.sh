@@ -13,6 +13,14 @@ source .venv/bin/activate
 # 外した理由は scripts/ci_tests.sh の冒頭 (2026-10-06)。関連する変更をしたらここで回す (all にも含まれる)
 LOCAL_ONLY_TESTS=(
   test_migrate_obs
+  test_replay_path_server
+  test_inputs_pin_propagation_server
+  test_advice_m2d_local
+  test_advisor_team_validate_local
+  test_inputs_pin_propagation_local
+  test_sim_legal_inputs_local
+  test_sim_mega_form_local
+  test_sim_revive_select_local
 )
 
 targets=("$@")

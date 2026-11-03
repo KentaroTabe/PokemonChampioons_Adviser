@@ -51,6 +51,8 @@ def test_since_ts_and_formatting():
         assert [r["file"] for r in RE.labeled_rows(Path(d), package_id="pkg", since_ts=now - 10)] == [new.name]
         txt = RE.format_summary(s_all, "全期間")
         assert "[全期間] 対戦ログ 2 / 勝敗確定 2 (勝 1 敗 1)" in txt and "勝率 50.0%" in txt and "experiment 2" in txt
+        # 実戦とシムを混ぜる重みは表示しない (2026-10-07 §7。JSON の weight は残す)
+        assert "重み" not in txt and "実戦のみ" in txt and "weight" in s_all, txt
         assert "まだ無い" in RE.format_summary(RE.real_summary(package_id="none", battles_dir=Path(d)), "x")
     assert "決定なし" in RE.format_audit({"n_battles": 1, "n_decisions": 0})
     assert "読み込めない" in RE.format_audit(None)

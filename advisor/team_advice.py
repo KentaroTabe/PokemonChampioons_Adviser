@@ -28,7 +28,7 @@ def _to_id(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", name.lower())
 
 
-def _champions_filter(db) -> str:
+def _champions_filter(db, max_snapshot=None) -> str:
     """チャンピオンズ実データのスナップショットに限定するWHERE句。
 
     SmogonのSV (gen9ou) データはフォールバック用で、チャンピオンズに
@@ -39,14 +39,20 @@ def _champions_filter(db) -> str:
     スナップショットも除外する。3構築だけのスナップショット (2026-08-05
     インシデントの残置) が MAX(usage_percent) 経由で「使用率66.7%の脅威」を
     診断に混入させていたため (2026-09-02 フォルム修復時に発覚)。
+
+    max_snapshot (2026-10-23、advisor.data_pin で版を明示したとき) があれば、その id 以下のスナップショットに限る
+    (チャンピオンズのスナップショットが無ければ snapshot_id <= max_snapshot だけ)。
     """
     from champions_agent.config import USAGE_MIN_RANKED_TEAMS
-    ids = [str(r[0]) for r in db.execute(
-        "SELECT id FROM usage_snapshot WHERE format LIKE 'champions%' "
-        "AND (number_of_battles IS NULL OR number_of_battles >= ?)",
-        (USAGE_MIN_RANKED_TEAMS,))]
+    sql = ("SELECT id FROM usage_snapshot WHERE format LIKE 'champions%' "
+           "AND (number_of_battles IS NULL OR number_of_battles >= ?)")
+    args: tuple = (USAGE_MIN_RANKED_TEAMS,)
+    if max_snapshot is not None:
+        sql += " AND id <= ?"
+        args += (int(max_snapshot),)
+    ids = [str(r[0]) for r in db.execute(sql, args)]
     if not ids:
-        return "1=1"
+        return "1=1" if max_snapshot is None else f"snapshot_id <= {int(max_snapshot)}"
     return f"snapshot_id IN ({','.join(ids)})"
 
 
@@ -57,11 +63,23 @@ def champions_usable(species_id: str) -> bool:
     """championsの使用率データに存在する種族か (SV専用ポケモンを除外)。
 
     championsのpokemon_usage/teammate_usageに一度でも現れた種族IDの集合で判定。
+    2026-10-23: advisor.data_pin で版を明示していれば、その DB の指定 snapshot id 以下だけを見る (無ければ InputsPinError)。
+    ピンの bundle の teammate_usage は名前の組ごとに 1 行に縮めてある (ここは名前の集合しか見ないので結果は同じ)。
     """
     global _CHAMPIONS_IDS
     if _CHAMPIONS_IDS is None:
-        db = sqlite3.connect(str(DB_PATH))
-        flt = _champions_filter(db)
+        from advisor.data_pin import connect_usage, resolve_snapshot, usage_source
+        src = usage_source()
+        if src["pinned"]:
+            db = connect_usage(src["db"], True)
+            try:
+                flt = _champions_filter(db, max_snapshot=resolve_snapshot(db, src["snapshot_id"], True))
+            except Exception:
+                db.close()
+                raise
+        else:
+            db = sqlite3.connect(str(DB_PATH))
+            flt = _champions_filter(db)
         ids = set()
         for table in ("pokemon_usage", "teammate_usage"):
             col = "pokemon_name"

@@ -125,11 +125,12 @@ class VisionPipeline:
 
     # ------------------------------------------------------------------
     def _tick_field_effects(self) -> None:
-        """新ターン確定時に天候/フィールド/トリックルームの残りターンを減算し、
+        """新ターン確定時に天候/フィールド/トリックルーム/壁 (両陣営) の残りターンを減算し、
         尽きたら消す。
 
         終了ダイアログはフレーム間引きで取り逃すことがある (実測: 天候終了の
-        見逃し)。残りターンは開始メッセージ (5に設定) と場の状況画面 (n/m) で
+        見逃し)。残りターンは開始メッセージ (advisor.dex.effect_duration: 基本 5、
+        設定者の延長の持ち物が分かれば 8) と場の状況画面 (n/m) で
         供給されるため、経過で自動失効させれば状態が古いまま残らない。
         終了メッセージを拾えた場合はそちらが先に消す (二重処理は無害)
         """
@@ -155,6 +156,12 @@ class VisionPipeline:
                     "system", "トリックルームがターン経過で終了と推定",
                     event_id="trickroom_expire")
                 f.trick_room, f.trick_room_turns = False, None
+        # 壁 (2026-10-31)。残りターンが None (旧ログ・読めなかった) の壁は減らさない
+        for side_name in ("player", "opponent"):
+            for key in self.state.side(side_name).tick_screens():
+                self.state.log_event(
+                    "system", f"壁({side_name}:{key})がターン経過で終了と推定",
+                    event_id=f"{key}_expire_{side_name}")
 
     # ------------------------------------------------------------------
     def rescue_scan(self, img) -> None:
@@ -281,6 +288,8 @@ class VisionPipeline:
         """1フレーム処理。戻り値: (state_dict, fired_events)"""
         if img is None:
             return self.state.to_dict(), []
+        # 対戦ログに出す自分の HP の読みの経過 (state.my_hp_trace_outbox) はフレームごと (2026-10-09 fix/hp-paths)
+        self.state.my_hp_trace_outbox = []
 
         result = scenes.classify(img)
         scene = result["scene"]
@@ -355,6 +364,8 @@ class VisionPipeline:
             # (無効化されて交代が発生しなかったケースのフラグ滞留を防ぐ)
             self.state.pending_pivot_switch = False
             self._tick_field_effects()
+            # アンコール・ちょうはつの残りターン (2026-10-09 M1a)
+            self.state.tick_move_locks()
 
         heavy = self._should_run_heavy(scene, force=single_shot)
 
@@ -464,6 +475,21 @@ class VisionPipeline:
         conf = self.parser.confirm_end_hint()
         if conf:
             fired.append(conf)
+
+        # 対戦の終わり (勝敗 / 終了の確定) を見たら、自分の HP の読みの経過を 1 回だけ対戦ログに出す (2026-10-09 fix/hp-paths)。
+        # 終わりを見ずに次の対戦の選出に入ったときは reset_battle が出す
+        if (self.state.outcome or self.state.battle_ended) and not self.state.my_hp_trace_end_done:
+            self.state.dump_my_hp_trace("battle_end")
+            self.state.my_hp_trace_end_done = True
+
+        # へんしん の観測 (2026-10-21、advisor.transform): このフレームの状態と発火したイベントから、相手の場の個体が こちらの
+        # 場の個体に へんしん したことを確かめたら transform を付ける。判定だけで、シーン判定・イベント辞書・HP の推定は変えない
+        # (対戦開始の HUD より前の初手の繰り出しの かわりもの も拾えるよう、battle_active では絞らない)
+        try:
+            from advisor.transform import observe_frame
+            observe_frame(self.state, fired, time.time(), self.resolver)
+        except Exception:
+            pass
 
         return self.state.to_dict(), fired
 

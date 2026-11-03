@@ -75,6 +75,58 @@ USAGE_MIN_RATING = 1500
 # ingest側の足切りと、ベンチ用チームプール (env/ranked_teams.py) の
 # 足切りで同じ値を使う。
 USAGE_MIN_RANKED_TEAMS = 100
+
+# --- Smogon の Champions 統計 (型の事前分布の候補として評価する道具だけ。2026-10-30 レビュー、開発者承認) ---
+# 助言・既定の方式・使用率 DB はこれを読まない (tools/usage_prior_eval.py の評価だけ)。
+# 取得は usage_scraper.fetch_smogon_chaos_exact (月・形式・cutoff を明示。形式が違えば止める、gen9ou に退避しない)。
+# 形式はシングルの BSS (6 体見せ 3 体選出) だけ。gen9championsou / uu (6 体全部) と vgc (ダブル) は対戦形式が違うので入れない
+SMOGON_CHAMPIONS_FORMATS = ("gen9championsbssregmb", "gen9championsbssregmc")
+SMOGON_USAGE_DIR = "logs/usage_smogon"          # 元 JSON (<month>/<fmt>-<cutoff>.json) と manifest (<month>/<fmt>-<cutoff>.manifest.json)
+SMOGON_FETCH_TIMEOUT_SEC = 60
+# 変換の版 (smogon_convert の定義を変えたら上げる。manifest と report に残す)
+# 2 (2026-10-30 レビュー): 技を使う確率 (保有 ÷ 4 の暫定) を出力から外した (行動の選択確率は作らない。保有確率だけ)
+SMOGON_CONVERT_VERSION = 2
+# 実戦記録での対応比較 (tools/usage_prior_eval.py)
+SMOGON_EVAL_PROB_FLOOR = 0.005       # 予測の一覧に無い技・持ち物・特性に置く確率 (両方の予測に同じ値。log(0) を避ける)
+# 型推定 (advisor/ev_infer.py) で表示により確定した持ち物が仮説に無いとき、足す仮説の事前の重み (DB の一覧に無い持ち物の下限。
+# SMOGON_EVAL_PROB_FLOOR と同じ考え方。2026-10-30)。一覧にあればその採用率を使う
+EV_INFER_ITEM_FLOOR = 0.005
+# 型推定の観測の記録 (2026-10-31、docs/KNOWN_ISSUES.md E-ev-2)。候補外の持ち物が初めて判明したとき、記録した観測 (先後・ダメージ・
+# こだわりの固定・持ち物) を 事前の配分 × 新しい持ち物 の仮説で評価し直す。記録はメモリ内だけ (対戦ログには残さない)。
+# 上限を超えた古い観測は評価し直さない (その観測の重みは新しい仮説へ流用しない)。1 個体の観測は通常 1 対戦で数十件以内
+EV_INFER_OBS_LOG_MAX = 64
+# False なら評価し直さず、事前の重みのまま (以前の仮説の重みは流用しない)
+EV_INFER_REEVAL_ON_REVEAL = True
+# 使用率 DB の usage_snapshot.fetched_at の時刻帯。列の既定は SQLite の datetime('now') (UTC) で、取り込みの INSERT は
+# fetched_at を渡さない (champions_agent/data/database.py)。usage-update の launchd は毎日 06:30 (ローカル) で、
+# fetched_at は 21:3x に並ぶ (= 06:3x JST の UTC 表記) ので UTC と解釈する。"utc" か "local"
+SMOGON_EVAL_DB_FETCHED_AT_TZ = "utc"
+SMOGON_EVAL_BOOTSTRAP_N = 2000       # 対戦単位のブートストラップの回数
+SMOGON_EVAL_BOOTSTRAP_SEED = 20261030
+SMOGON_EVAL_CI = 0.95                # 区間の水準
+SMOGON_EVAL_DB_SNAPSHOT = 75         # 比べる使用率 DB の snapshot (正式群の版。計画書 §8.48)
+SMOGON_EVAL_MEGA_VIEWS = ("pooled", "known")   # Smogon の名寄せ: pooled = 基本種 + メガを重みで合算 (DB と同じ条件)、known = メガが判明していればメガの項目
+SMOGON_EVAL_MEGA_VIEW = "pooled"     # 主の比較に使う見方 (もう一方は感度として report に出す)
+
+# --- 持ち物の手がかりの集計 (tools/item_cues。実戦ログを読むだけの集計の道具。2026-10-30 レビュー、開発者承認) ---
+# 助言・推定はこれを読まない。名前は docs/DESIGN_ITEM_INFERENCE_20261030.md §3.4 に合わせる。
+# 値を変えたら集計の数が変わる (各 CLI の出力の先頭の「再現の記録」に、使った値を全部残す)
+ITEM_CUE_MERGE_SEC = 15.0            # 天候・フィールド・壁の開始の信号 (文言・特性・技) がこの秒数以内なら 1 回の開始に束ねる (§1.2)
+# 続けて起きる観測 (違う技 2 つ・同じ技の連続) の、隣り合う 2 つの技の時刻の差の下限 (§3.4 の 4。同じ文言の再読みの重複を数えない)。
+# 根拠: 再発火の抑止窓 EVENT_DEDUP_SEC = 10 秒 (vision/events.py) より長く、正当な連続の最短 (1 ターン ≈ 実測 30 秒以上) より短い中間。
+# 集計の道具での暫定値 (推定の実装で使う値は較正で決める。cues の出力にも「集計用の暫定値」と出す)。turn の値は数え漏れがあるので使わない。
+# この値を使う否定の守りの条件 guard_partial は §3.4 の条件の一部だけを検査した数で、較正用の確定標本 (guard_full、今は未判定) ではない
+ITEM_CUE_MIN_SEP_SEC = 20.0
+# §3.4 の 3 (処理の空白 ITEM_CUE_MAX_GAP_SEC) は対戦ログにフレームごとの処理の時刻が無いので集計では測れない (置かない。推定の実装で決める)
+ITEM_CUE_LOCK_REPEAT = 3             # こだわりの固定の手がかり = 同じ技の連続の回数
+ITEM_CUE_FIELD_BASE_TURNS = 5        # 天候・フィールド・壁の延長なしの継続ターン (状態の残りがこれを超えた = 場の状況画面の n/m で m を読んだ印)
+ITEM_CUE_NOEND_REMAIN_TURNS = 5      # 終了の文言が無い開始を「開始から対戦の最後までこのターン数以上」で分ける (count_cues の区分)
+ITEM_CUE_OPPORTUNITY_TURNS = 6       # 開始後この数以上ターンが続いた = 延長なしの 5 を超えたかを見る機会があった
+ITEM_CUE_MUST_END_TURNS = 9          # 開始からこの数以上ターンが続いた = 延長 (8) があっても対戦中に終わったはず (終了の文言の再現率の母数)
+ITEM_CUE_RECALL_MIN_MOVES = 2        # たべのこし の表示の再現率の母数: 技をこの回数以上使った個体
+# 延長の持ち物 (自分側の登録で、開始した個体が持っていたかの分類に使う)
+ITEM_CUE_EXTENDER_ITEMS = {"weather": ("damprock", "heatrock", "smoothrock", "icyrock"), "terrain": ("terrainextender",),
+                           "screen": ("lightclay",)}
 # meta_sets が前スナップショットから「実質変化」(技集合/持ち物/特性/性格/配分の
 # いずれか) した種がこの数以上なら、日次更新ログに警告を出す。
 # 評価軸 (ベンチ・h2h のチーム中身) は meta_sets 経由で動くため、大量の
@@ -252,6 +304,11 @@ WIN_LOSE_TEXT_YELLOW_MAX_OTHER = 0.10  # 負けた側の文字の枠の黄色の
 # 視覚照合スコアがこの余裕以上高ければ既存を取り消して入れ替える (同種 2 体はルール上あり得ない)。小さいとフレーム間の
 # スコア揺れで入れ替わり続ける
 SELECTION_GUESS_REPLACE_MARGIN = 0.05
+# 交代の文言・HUD の名前が同じでも形態が違う種 (地方の姿): 名前が素の種 (例 slowking) に解決されたとき、図鑑に
+# 「素の id + この接尾辞」の id があれば形態の候補に加え、既定の形態に即確定しない (vision/state.same_name_forms)。
+# 2026-10-09 ④ (10/8 18:27): 「ヤドキング」がカントー形に解決され、ガラル形の [どく/エスパー] の枠ではなく別の推定の枠を上書きした
+SAME_NAME_FORM_SUFFIXES = ("galar", "alola", "hisui", "paldea", "paldeacombatbreed", "paldeablazebreed",
+                           "paldeaaquabreed")
 # 選出画面の相手枠: タイプからの候補の事前確率がこれ以上なら「候補が実質 1 体」として視覚照合なしで採る
 # (vision/spriteid.identify_species。2026-10-06 まで spriteid に 0.85 で直書き)。
 # 0.85 → 0.95 (2026-10-06): 第18回の選出画面の保存フレーム 347 枚 (15 戦、修正後の重み) で、第一候補の事前確率が 0.85〜0.95 の
@@ -263,6 +320,23 @@ SELECTION_PRIOR_AUTO_ACCEPT = 0.95
 # 第一候補の確率が 0.95 以上なら的中 55/55、0.85〜0.95 は 6/9 (オニシズクモ・エアームド・ポットデス が外れ)。
 # 0.85〜0.95 の帯は視覚照合なしで採られる (上の閾値) が、外れることがあるので候補は出す
 SELECTION_GUESS_SURE_PROB = 0.95
+# 相手枠のタイプアイコンの読み直し (vision/type_reading、2026-10-09 fix/type-recognition。KNOWN_ISSUES A3 の 10/9 の行)。
+# 同じ枠の読みが連続でこの回数一致したら、そのタイプを「安定して確定」とする。確定後も、違う読みがこの回数続いたら訂正する。
+# 1 回目の読みは仮に入れる (表示と視覚照合の候補用) が、事前確率だけの無照合採用 (SELECTION_PRIOR_AUTO_ACCEPT) は確定後に限る
+# (10/9: 1 つ目の欄のエスパーがノーマルと読まれた 3 フレーム (sel_1791502960/62/65) の後、sel_1791503024 では正しく読めていたが、
+# 一度入ったタイプは読み直されなかった)
+TYPE_READ_STABLE_FRAMES = 3
+# タイプアイコンの欄を「空」とみなす濃淡の標準偏差の上限。これ以上で分類できない欄は「読めない」(読み全体を保留) として、空の欄
+# (単タイプ) と区別する。実測 (2026-10-09): 選出画面の保存フレーム 119 枚 (10/7〜10/9) の空の欄 298 件は 15 未満が 254、残り (画面の切り替わり中など) は 15〜40。
+# 様子を見る画面の空の欄 20 件は 2.9〜5.3、アイコンは 36.5 以上 (カーソルの行の ひこう が 36.5 で、分類の 40 を下回る)
+TYPE_ICON_EMPTY_STD_MAX = 15.0
+# 様子を見る画面の相手の列のタイプアイコンは、形状の照合 (dHash のハミング距離) がこれ以下の読みだけを使う (色のフォールバック・
+# 複合スコアでの採用は使わない)。実測 (2026-10-09、1920x1080 の 9 枚 + 1334x750 の 3 枚、72 行): 既定の採用では 2 行が誤り
+# (じめん → ほのお 距離 75、カーソルの行の ひこう の取りこぼし)、60 以下の行に限ると 46 行で誤り 0。
+# 枠のタイプの訂正にはこの読みだけを使う。これを超える読み (カーソルの行の ノーマル は 78〜80) は訂正に使わず、対応待ちの個体の
+# タイプと一致したときに、その枠を候補 (pending_hint の source "watch_loose") として出すだけ (確定は人が枠を指定する。
+# type_reading.watch_loose_matches。対応待ちに合わせた裏づけは独立した根拠ではない: 2026-10-09 レビューの方針)
+WATCH_TYPE_STRICT_HASH = 60
 # 手入力の種族名 (相手の枠の ✏️ → 種族) を解決するときの類似度の下限 (my_team の保存時の種族名の解決と同じ値)
 MANUAL_SPECIES_RESOLVE_CUTOFF = 0.85
 # タイプからの種の推測 (advisor/infer.prior_weights) の重み: 使用率% の下限と、最新スナップショットに無い種に掛ける減衰
@@ -275,6 +349,178 @@ INFER_PAST_USAGE_DECAY = 0.25
 MY_ROSTER_MATCH_RATIO = 0.6
 MY_EXACT_RESOLVE_CUTOFF = 0.92
 MY_REGISTERED_MATCH_RATIO = 0.55
+
+# --- HP の読みの採否 (vision/extractors。2026-10-09 まで直書きだった値を移しただけで、値は変えていない) ---
+# 自分の HP: OCR の分数 (現在 / 最大) とバーの塗りの割合 (vision.zones の my_hp_bar_track) の差がこれを超える読みは捨てる
+# (イタリック数字の桁化け "111/162"→"16/162" 等の防御)
+HP_BAR_MATCH_TOL = 0.15
+# 相手の HP (field 経路): HUD の名前の OCR と、場の個体の既知の名前 (種族名・表示名・別名) の類似度の最大がこれ未満なら
+# 「別の表示の名前」とみなして HP を書かない (別個体への誤帰属の防御)
+OPP_HUD_NAME_MATCH_MIN = 0.5
+# 相手の HP (field 経路): 名前が読めないフレームでは、前の値からの変化がこれ (ポイント) を超える読みを書かない
+OPP_HP_UNVERIFIED_MAX_CHANGE = 15.0
+# 捨てた読みの名前が「別の種族名と読めた」かを調べるときの、図鑑の種族名への解決の閾値 (記録の分類にだけ使う。採否は変えない)
+HP_REJECT_SPECIES_CUTOFF = 0.8
+# 自分の HP のバー推定 (vision.my_hp_estimate、2026-10-09 ユーザー判断。KNOWN_ISSUES A1 の (3) 分母の OCR 落ち):
+# 分数が読めない (または照合で捨てた) フレームが続くとき、バーの割合 (my_hp_bar_track) が連続でこの枚数そろい、
+# その最大と最小の差が許容以内なら、既知の最大 HP とバーの割合から概算を入れる (推定の印つき。実測が来れば置き換える)
+HP_BAR_ESTIMATE_STABLE_FRAMES = 3
+HP_BAR_ESTIMATE_STABLE_TOL = 0.03
+# HUD の有無の判定 (vision/extractors.extract_field_hp。2026-10-09 fix/hp-paths で直書きから移しただけで、値は変えていない):
+# 相手バナー (zones の opp_banner) の赤の割合がこれ以上なら相手の HUD がある (相手側を読む)
+FIELD_HP_OPP_BANNER_MIN = 0.15
+# 自分の HP バー (zones の my_hp_bar) の色 (緑/黄/赤) の画素数がこれを超えれば自分の HUD がある (自分側を読む)
+MY_HUD_BAR_MIN_PIXELS = 30
+# 相手の HP: % の文字とバーの割合 (×100) の差がこれ (ポイント) を超えれば、文字の誤読とみなしてバーで代用する (値は従来どおり)
+OPP_HP_BAR_SUBSTITUTE_DIFF = 15.0
+# HP の確定の安定条件 (vision/extractors._set_hp → hp_settle_step。2026-10-09 fix/hp-paths で直書きから移しただけで、値は変えていない):
+# 前の読みとの差がこれ (ポイント) 以内なら同じ値の読みとして数える
+HP_SETTLE_SAME_TOL = 2.0
+# 同じ値の読みがこの秒数以上続いたら確定する (被弾・ひんしの演出中の遷移値を確定しない)
+HP_SETTLE_MIN_SEC = 0.6
+# この % 以下の読みは演出中の空バーの疑いが強い: 初回の読みは即反映せず、確定には HP_SETTLE_LOW_READS 回の同じ読みを要る
+HP_SETTLE_LOW_PCT = 3.0
+HP_SETTLE_LOW_READS = 3
+# 自分の HP の読みの経過の記録 (state.my_hp_trace、2026-10-09 fix/hp-paths。4/159 の取りこぼしの原因追跡用):
+# 直近この件数を状態に持つ (環状)
+MY_HP_TRACE_LEN = 40
+# 自分の HP の棄却 (確定も保留もしない読み) がこの回数続いたら、対戦ログに my_hp_trace の行を 1 行書く (対戦の終わりにも書く)
+MY_HP_TRACE_DUMP_STREAK = 20
+# 1 対戦で my_hp_trace の行を書く回数の上限
+MY_HP_TRACE_MAX_DUMPS = 5
+# 自分の HP の分数の文字の読み (vision.ocr.read_zone_text(fraction=True)、2026-10-09 fix/hp-ocr-watch。KNOWN_ISSUES A1 の
+# 「満タンのとき HUD の分数が最大 HP の数字だけに読まれる」): ゾーン全体の読みが 'a/b' の分数にならないとき、大きい現在値と
+# 小さい '/最大' に分けて読み直す (位置は vision.zones.MY_HP_TEXT_SPLIT)。
+# 白文字 (数字) の判定: 彩度 (0〜255) がこれ未満、かつ明度がこれを超える画素
+HP_TEXT_WHITE_SAT_MAX = 80
+HP_TEXT_WHITE_VAL_MIN = 160
+# 大きい数字の帯で「文字のある列」とみなす白画素の数の下限 (1 画素の粒を拾わない)
+HP_TEXT_SPLIT_COL_MIN_PIXELS = 2
+# 分母側の前処理: 彩度の高い画素 (HP バーの塗り) を暗くする。明度 × (1 - 強さ × max(0, 彩度 - 始点)) (彩度は 0〜1) のグレーにして白黒を反転
+HP_TEXT_DESAT_GAIN = 1.6
+HP_TEXT_DESAT_SAT0 = 0.25
+# 分母側の切り出しに足す余白 (画素、白) と、読むときの拡大率 (順に試し、3 桁が読めた時点で採用)
+HP_TEXT_DENOM_PAD = 16
+HP_TEXT_DENOM_SCALES = (3.0, 2.0)
+# 現在値の並べ読み (vision.ocr.read_current_tiled、2026-10-15。KNOWN_ISSUES A1「自分の HP が 1 桁のとき分数を誤読」):
+# Apple Vision は 1 桁の数字だけの切り出し ('7') を読めない (frame_1792026768 の 7/137 で空)。現在値の切り出しを横に
+# この枚数並べて読み、同じ並びの繰り返し ('77') なら 1 枚分を現在値とする。並べるあいだの白の幅 (画素)、上下左右の白の余白
+# (画素)、読む倍率 (順に試し、繰り返しが読めた時点で採用)
+HP_TEXT_CUR_TILE_COPIES = 2
+HP_TEXT_CUR_TILE_GAP = 12
+HP_TEXT_CUR_TILE_PAD = 16
+HP_TEXT_CUR_TILE_SCALES = (1.5, 2.0)
+# 'a/b' を分数として認める最大値 b の下限 (Lv50 の最大 HP は実質 50 以上。vision.ocr.parse_fraction の桁分割の下限と同じ値)
+HP_FRACTION_MAX_MIN = 50
+# 様子見画面の右列 (相手の HP%): 交代の文言の無い、この値 (ポイント) を超える増加は書かずに棄却として記録する
+# (2026-10-09 fix/hp-paths。10/7 18:30 マニューラ 39% → 100% の原因を切り分けるため。回復技の上限を超える増加は別個体の値の疑い)
+WATCH_OPP_BIG_INCREASE = 60.0
+# 様子見画面の右列: 元の HP が無い枠へ書く値が、別の枠の既知の HP% とこの差 (ポイント) 以内なら、別個体の値の疑いとして書かずに
+# 棄却 (watch_right_duplicate_value) として記録する (2026-10-15。10/15 10:16 試験: メガカイリューの 87% の行をミミロップ (選出外) と
+# 同定し、HP の無かったミミロップの枠に 87 を書いた)。右列の % は整数で読むので、0.5 は「同じ値」の意味
+WATCH_OPP_DUPLICATE_VALUE_TOL = 0.5
+
+# --- 行動助言の RL 加点と影の計算 (docs/USEFULNESS_VERIFICATION_PLAN_1007.md §2 advice_variant・§4、2026-10-07) ---
+# RL の行動確率の加点の重み (advisor.engine: score += 重み × 確率) の既定値。evaluate(rl_blend_weight=...) で渡さないときに使う。
+# 環境変数 RL_BLEND_WEIGHT があれば起動時に 1 回だけそれを既定値として読む (後方互換。評価のたびには読まない)
+RL_BLEND_WEIGHT_DEFAULT = 25.0
+# 影の計算 (advisor.shadow): 表示した助言と同じ共通部分から、RL 加点の重みだけ変えて加点以降を再計算し、
+# advice_variant 行に残す。判断 3 (2026-10-07): 隔離条件と受入確認 (前面 10 fps の遅延) が通るまで既定 OFF。
+# OFF のときはワーカーを作らず、共通部分も保持しない (追加処理なし)
+SHADOW_VARIANTS_ENABLED = False
+SHADOW_RL_BLEND_WEIGHTS = (0.0, 5.0, 25.0)   # 比較する重み (0 / ×5 / ×25 = 既定)
+SHADOW_TOP_N = 3                    # 行に残す上位の数 (点差は 1 位との差)
+SHADOW_QUEUE_MAX = 2                # 待ち行列の上限 (超えたら古い待機分を捨てる)
+# 期限 (秒): 助言の生成からこの時間を過ぎた仕事は、待機中なら捨て (dropped_pending)、実行中なら計算の区切りで止める
+# (aborted_running)。「次のフレームが来たら破棄」にはしない (10 fps では同じ状態でも捨ててしまう)
+SHADOW_DEADLINE_SEC = 3.0
+# 負荷確認 (tools/shadow_load_check) でフレームを流す間隔 (秒)。前面のページの通常の送信 (10 fps)
+SHADOW_LOAD_FRAME_INTERVAL_SEC = 0.1
+
+# --- 有用性検証 P1: RL 加点 0 / ×5 / ×25 の対応比較 (docs/USEFULNESS_VERIFICATION_PLAN_1007.md §0.5・§4、2026-10-09) ---
+# 起動は tools/usefulness_p1.py、採否の集計は tools/usefulness_verdict.py。シミュレータの状態から直接助言を計算する (OCR を通らない) ので、
+# 分かるのはシミュレーション条件下での RL 加点の効果 (実戦の有用性とは分けて評価する)
+P1_WEIGHTS = (0.0, 5.0, 25.0)       # 比べる重み (条件)
+P1_BASELINE_WEIGHT = 25.0           # 基準条件 (既定の ×25)。比較数 k = 重みの数 − 1
+P1_MDE = 0.05                       # 実用上意味のある最小差 (§0.5)
+P1_ALPHA = 0.05                     # 全体の水準。区間の水準は 1 − α / k (両側)
+P1_FINAL_BATTLES = 600              # 最終対戦数 / 条件 (事前に固定。採否はこの n で 1 回だけ)
+P1_INTERIM_BATTLES = 300            # 中間確認 (採否を出さない。費用と異常の確認だけ)
+P1_PRELIM_BATTLES = 50              # 予備測定 (秒/戦の見積もり)
+P1_TIME_LIMIT_SEC = 7200            # 1 実験の費用上限 (超えたら止めて未完了。採否は出さない)
+P1_ABORT_SEC_PER_BATTLE = 12.0      # 予備測定の秒/戦がこれを超えたら本番を始めない目安 (600 戦で 2 時間を超える)
+P1_PROGRESS_SEC = 60                # 進捗の表示間隔 (秒)
+P1_TERMINATE_GRACE_SEC = 15         # 時間上限で terminate してから kill するまでの猶予 (秒)
+P1_SEED = 20261009                  # 相手列の seed (10/7 の参照の腕 302410 とは別)
+P1_OPP_OFFSET = 0
+P1_SPLIT_FILE = "logs/build_search/runs/improve_20261007_1807/opponent_families.json"   # 0100 と同一の分割
+P1_SPLIT_SEALED_ID = "e80afbea9a925dc8"   # 上の分割の封印 id (違えば警告)
+P1_SPLIT_TIER = "search"            # fold は BUILD_FOLD_EVAL (= B、方式の比較用。§0.4)
+P1_OPP_PILOT = "rl"
+P1_OPP_PICK_POLICY = "rule"
+P1_PICK_POLICY = "advisor"
+P1_BELIEF_K = 0
+P1_SELECTION_MODEL = "champions_agent/train/checkpoints/selection_model.pt"   # 実機と同じ配備版を明示 (3 条件で共通)
+P1_TEAM_SHA16 = "9a02fe6e61788a5a"  # 登録チームの本文 (advisor.versions と同じ計算) の sha16。違えば起動しない
+P1_OUT_ROOT = "logs/usefulness"
+# 採点方式の対応比較 (2026-10-09 M2b 設計判断 11。tools/usefulness_p1 --compare scoring): 条件 scoring:legacy (基準) /
+# scoring:transition。両条件とも RL 加点の重みは既定の P1_BASELINE_WEIGHT (transition は加点を使わない)、方式は子プロセスの
+# 環境変数 ADVICE_SCORING_MODE で渡す。相手列・分割・ピン・登録チームは RL の比較と同じ
+P1_SCORING_MODES = ("legacy", "transition")
+P1_SCORING_BASELINE = "legacy"
+# 自チームの出所 (2026-10-09 ユーザー判断: 採点方式の比較は一般的なチームをベースに行う。登録チームを使うなら一番最近のもの)。
+# general = tools.check_advisor_player の既定の自チーム (--team-file なし: RankedTeambuilder、META_PIN の使用率スナップショットの
+# 上位構築を rng = Random(相手 seed + 1) で対戦ごとに引く) / registered = config/my_team.json (最新の登録) の本文。
+# 既定は --compare scoring → general、--compare rl → registered (P1 の記録どおり)
+# 2026-10-09 M2d (レビュー 2): general は実験専用の構築プール (tools/scoring_pool で最新の使用率スナップショットから合成し、現行規制
+# の validate-team で合法性を確かめたチームのファイル。check_advisor_player --own-pool) に変えた。7 月の固定プール (META_PIN / POOL_PIN)
+# で測る従来の general は general-pinned (条件表に「旧固定プール上の比較」と明記する。回帰確認用)
+P1_TEAM_SOURCES = ("general", "general-pinned", "registered")
+P1_TEAM_DEFAULT = {"rl": "registered", "scoring": "general"}
+# 実験専用の構築プール (--team general)。P1_SCORING_POOL_FILE = 既定のプールファイル (REPO からの相対 or 絶対。None なら --own-pool が要る)、
+# P1_SCORING_POOL_SHA16 = 期待する本文の sha16 (None なら照合せず注意だけ出す。プールを固定したらここに書く)。
+# 生成の既定: 件数 P1_SCORING_POOL_N (= 構築の相手プールと同じ BUILD_POOL_TOP_N 相当の 200、合法性の検査の前)、seed P1_SCORING_POOL_SEED
+# 2026-10-09 固定: tools/scoring_pool.py で使用率 snapshot 61 から 200 件を合成し M-C で validate (除外 0)。M2e の別名の表で未対応 0
+P1_SCORING_POOL_FILE = "logs/usefulness/pools/scoring_pool_61_20261009.json"
+P1_SCORING_POOL_SHA16 = "c7a32f8897d71375"
+P1_SCORING_POOL_N = 200
+P1_SCORING_POOL_SEED = 20261009
+# 採点方式の比較で --team registered のときの登録チームの本文の sha16 (2026-10-09 の登録)。違えば起動しない。
+# RL の比較の記録 (P1_TEAM_SHA16) とは別に持つ
+P1_SCORING_TEAM_SHA16 = "fae570ac86ab02fd"
+# 採点方式の比較 (--compare scoring) に限った時間上限と開始条件 (2026-10-09 M2e、レビューの推奨。RL の比較の P1_TIME_LIMIT_SEC /
+# P1_ABORT_SEC_PER_BATTLE は変えない)。P1_SCORING_TIME_LIMIT_SEC = 600 戦 (P1_FINAL_BATTLES) / 条件の全体の上限 (180 分。超えたら
+# 未完了で採否を出さない)。予備測定の後の本番の開始可否: 最も遅い条件の秒/戦 × P1_FINAL_BATTLES + P1_SCORING_START_MARGIN_SEC
+# ≤ P1_SCORING_TIME_LIMIT_SEC (余裕は上限の 10%。予備の 50 戦の秒/戦のばらつきと起動・終了の処理の分)。
+# --part k/n (2 夜分割) の各 part の上限は全体の上限を対戦数で按分した値 (P1_SCORING_TIME_LIMIT_SEC × part の対戦数 / P1_FINAL_BATTLES、
+# 切り上げ)。全 part の合計が全体の上限を超えない
+P1_SCORING_TIME_LIMIT_SEC = 10800
+P1_SCORING_START_MARGIN_SEC = 1080
+# 登録参照の無効化 (advisor.my_team.registration_disabled) の環境変数の名前。値が空・0・false・no 以外なら、登録 (config/my_team.json)
+# を読む経路 (get_my_build / get_my_moves ほか) が全種「未登録」を返す。一般的なチームの測定の子プロセス (両条件で共通) に立てる
+MY_TEAM_DISABLED_ENV = "ADVISOR_MY_TEAM_DISABLED"
+
+# --- 2026-09-04〜05 の信念つき探索アークの判定の再測定 (2026-10-09 ユーザー判断。シムの自チームの型の登録が 1 戦ずれていた不具合
+# docs/incidents/reports/2026-09-04-sim-team-registration-off-by-one.md の後始末)。起動は tools/arc_remeasure.py (scripts/arc_remeasure.sh)、
+# 集計は tools/arc_remeasure_summary.py。判定ごとの腕・seed・対戦数・当時の記録は tools/arc_remeasure.py の CATALOG に置く (過去の事実なので設定にしない)
+ARC_REMEASURE_OUT_PREFIX = "logs/arc_remeasure_"     # 出力先 = <prefix><YYYYMMDD_HHMM>/<判定>/<腕>.json|.log|.battles.jsonl
+ARC_REMEASURE_SEC_PER_BATTLE = 9.7   # 見積もりの秒/戦 (P1 の実測: 3 並列の各プロセスの経過 / 到達数)。並列が 3 未満なら過大側の見積もり
+ARC_REMEASURE_JOBS = 3               # 同時に回すプロセス数 (腕)。P1 と同じ 3 並列
+ARC_REMEASURE_DEADLINE = "06:30"     # この時刻までに終える (launchd の usage-update)。dry-run が終了見込みと比べる
+ARC_REMEASURE_FORMATS = {"mb": "gen9championsbssregmb", "mc": "gen9championsbssregmc"}   # 当時 (9/4〜05) は M-B
+ARC_REMEASURE_FORMAT_DEFAULT = "mb"
+ARC_REMEASURE_META_SNAPSHOT = 24     # 当時の META_PIN。起動前に現在の META_PIN と一致するか確かめる (違えば起動しない)
+# 起動前検査の上限 (2026-10-09 停滞の対応): 自チームのプール (RankedTeambuilder) のうち対戦フォーマットで不合法なチームの割合と、
+# 相手の列 (上位 60) で対戦数のうち不合法を飛ばす件数の割合。不合法は両側とも対戦ごとに飛ばす (check_advisor_player) が、
+# 割合が大きいのはフォーマットの取り違えか検査の故障なので起動しない。
+# 2026-10-09 の実測 (M-B): 自チーム 12/276 (4.3%)、相手 1/60 で 1500 戦中 22 件 (1.5%)。M-C は両方 0
+ARC_REMEASURE_MAX_INVALID_FRAC = 0.10
+
+# --- 助言エンジンの実戦診断 (tools/check_advisor_player) が黙って止まらないための仕組み (2026-10-09: アークの再測定が 3 腕とも
+# 7 戦目で停滞。Showdown がチームを拒否すると poke-env は popup を記録するだけで対戦の開始を待ち続ける) ---
+ADVISOR_PLAYER_STALL_SEC = 600            # 両方のクライアントがこの秒数 Showdown から何も受け取らなければ停滞とみなして異常終了する
+ADVISOR_PLAYER_EXIT_TEAM_REJECTED = 3     # チームの拒否 (popup) を受け取ったときの終了コード
+ADVISOR_PLAYER_EXIT_STALLED = 4           # 停滞 (ADVISOR_PLAYER_STALL_SEC) で止めたときの終了コード
 
 # --- パーティ構築システム (docs/TEAM_BUILDING_IMPLEMENTATION.md §9 の決定値、2026-09-06) ---
 # 対応差 (候補 − 参照) の判定: 実用差 ε の帯に CI が収まれば「実用上同等」
@@ -431,6 +677,43 @@ BUILD_SCHEMA_VERSION = "1"
 # 自己対戦の相手は使用率メタの代表型 + 相性ヒューリスティクスの選出で机上の分布になる。実戦で当たった相手の
 # 構成と選出傾向を混ぜて補正する (ユーザー決定 9/9)。学習に影響する変更は training_changes.json に記録
 REAL_BANK_PATH = "logs/real_opponents/bank.json"
+# --- 助言が読む外部データの版の明示 (2026-10-23、レビュー 2026-10-19 §2。advisor/data_pin.py) ---
+# 設定されていれば、型予測 (advisor.sets.SetPredictor)・タイプからの候補 (advisor.infer.TypeInference、参照範囲は指定 snapshot id 以下)・
+# チャンピオンズの種の判定 (advisor.team_advice.champions_usable)・実戦バンク (advisor.real_prior) がその版を読む。指定した版が無い・
+# sha16 が違えば止める (advisor.data_pin.InputsPinError。最新へ黙って退避しない)。未設定なら従来どおり (DB の最新・REAL_BANK_PATH)。
+# 正式比較 (tools/usefulness_p1) は子プロセスにピンの usage_bundle.sqlite3 / snapshot id / bank.json / その sha16 を渡す
+USAGE_DB_ENV = "ADVICE_USAGE_DB"                 # 使用率 DB (またはピンの bundle) のパス
+USAGE_SNAPSHOT_ENV = "ADVICE_USAGE_SNAPSHOT"     # 使う snapshot id
+REAL_BANK_ENV = "ADVICE_REAL_BANK"               # 実戦バンクのパス
+REAL_BANK_SHA_ENV = "ADVICE_REAL_BANK_SHA16"     # 実戦バンクの期待 sha16 (sha256 の先頭 16 桁)
+# モデルの実体の固定 (2026-10-31 E-inh-4、レビュー 2026-10-31 判断 4): 設定されていれば、RL 方策 (advisor.rl_bridge) と助言の選出モデル
+# (champions_agent.agent.selection_dispatch.advisor_model_path) はそのファイルだけを読む。無い・sha16 が違う・読み込めなければ
+# InputsPinError (ema → best → 無印 の順送り、登録チーム向け → 配布版 の退避をしない)。未設定なら従来どおりで、退避したことは
+# version 行の runtime (rl_fallback_reason / selection_fallback_reason) に残す
+RL_POLICY_PIN_ENV = "ADVICE_RL_POLICY"                    # RL 方策 (MaskablePPO の .zip) のパス
+RL_POLICY_SHA_ENV = "ADVICE_RL_POLICY_SHA16"              # その期待 sha16 (任意)
+SELECTION_MODEL_PIN_ENV = "ADVICE_SELECTION_MODEL"        # 助言の選出モデル (.pt) のパス
+SELECTION_MODEL_SHA_ENV = "ADVICE_SELECTION_MODEL_SHA16"  # その期待 sha16 (任意)
+# 版の固定の bundle (2026-10-31 追加レビュー判断 2・4、advisor/pin_bundle.py): 設定されていれば、RL 方策・選出モデル (と埋め込み・meta・
+# 条件付きモデル)・使用率 DB (必要な snapshot を抽出した sqlite)・実戦バンク・登録 (my_team) をすべてその dir (manifest.json) から読む。
+# 上の個別の鍵と一緒に書いたときは値が bundle と一致しなければ InputsPinError。不足・sha 不一致・読み込み不可も InputsPinError
+# (配備先へ黙って退避しない)。作るのは tools.inputs_pin.make_pin_bundle (CLI は --freeze-bundle)
+PIN_BUNDLE_ENV = "ADVICE_PIN_BUNDLE"
+# 構築専用の選出モデルを別構築に適用する汎化試験の明示 (値 1。既定は止める)。適用したことは version 行の runtime と選出の助言に残す
+PIN_ALLOW_OTHER_TEAM_ENV = "ADVICE_PIN_ALLOW_OTHER_TEAM"
+# 既存の選出モデルの学習履歴の復元 (2026-11-02 開発者判断 4、tools/inheritance_eval/reconstruct_provenance.py): 学習の記録の保存行の
+# 直後の時刻とモデルの mtime の差がこの秒数以内 (かつ mtime が保存行の直前の時刻以後) なら、その保存行がこのモデルを書いたとみなす
+# (証拠 training_log)。記録の時刻は秒単位で、保存から次の時刻の行まで _report_top の表示などで数秒かかる
+PROVENANCE_LOG_MTIME_TOLERANCE_S = 120
+# 固定入力の異常の伝え方 (2026-10-31 レビュー E-inputs-3: engine が InputsPinError を握りつぶして第一候補を返していた)。
+# 助言エンジン (advisor.engine.evaluate / evaluate_common) は InputsPinError を {"ok": False, "reason": INPUTS_PIN_REASON,
+# "error": ...} で返す (通常の「推定なし」と分ける)。server はその結果を表示せず (INPUTS_PIN_STOP_TEXT の 1 行と error)、キャッシュ・
+# 据え置きに使わず、対戦ログに type = INPUTS_PIN_LOG_TYPE の行を書く。同じ異常 (出どころ・文言・対戦) は
+# INPUTS_PIN_LOG_INTERVAL_SEC 秒に 1 回まで (間の件数は次の行の n_suppressed)。tools.real_accept はその行のある対戦を含む群を判定不能にする
+INPUTS_PIN_REASON = "inputs_pin"
+INPUTS_PIN_LOG_TYPE = "inputs_pin_error"
+INPUTS_PIN_STOP_TEXT = "助言停止: 固定入力の異常"
+INPUTS_PIN_LOG_INTERVAL_SEC = 300.0
 REAL_BANK_MIN_ROSTER = 4               # バンクに載せる相手ロースターの最小既知数 (6 体そろわない対戦もある)
 REAL_BANK_MIN_TEAMS = 5                # 自己対戦に混ぜるのに必要な (本文が合法な) チーム数
 REAL_BANK_MIN_PICK_OBS = 2             # 観測した選出をそのまま相手の選出分布に使う最小観測数 (未満はヒューリスティクス)
@@ -464,7 +747,46 @@ PARTY_IMPROVE_LOSS_WEIGHT = 1.0
 # セッションの相手は脅威重みに 1 + BOOST × (正規化した難易度) を掛けて近傍の選び方に反映する
 PARTY_IMPROVE_MEASURE_NEIGHBORS = 3
 PARTY_IMPROVE_MEASURE_PROFILE = "medium"
+# 接続テストの終了処理 (--measure) が測定 run を自動で起動するか (2026-10-07 判断 1: 確認制にする)。
+# False (既定): 起動せず、終了レポートに測定の目的・概算所要時間 (過去の改善 run の実測)・起動コマンドを出し、人が起動する。
+# True: 旧動作 (終了処理が起動する。「run が実行中なら起動しない」判定はどちらでも効く)。
+# 改善 run は 7 本連続で採用 0、二重起動 (10/7) と版の混在 (10/6) の事故があった (docs/USEFULNESS_VERIFICATION_PLAN_1007.md §9)
+PARTY_IMPROVE_AUTO_LAUNCH = False
+# 概算所要時間に使う過去の改善 run (logs/build_search/runs/improve_*、summary.json のある完了 run) の新しい方からの本数
+PARTY_IMPROVE_DURATION_SAMPLE = 5
 BUILD_SESSION_THREAT_BOOST = 2.0
+
+# --- 接続テストで残すログ (段 0、2026-10-07。docs/USEFULNESS_VERIFICATION_PLAN_1007.md §2) ---
+# どれも「表示する助言」を変えない (記録だけ)。
+# decision 行: 決定画面 (command / move_select) から解決側の場面 (battle_hud / field) へ移ってから、この数のフレーム続いたら
+# 「決定が画面で確認できた」とする (1 フレームの誤分類で決定扱いにしない)。時刻は移った最初のフレーム
+DECISION_CONFIRM_FRAMES = 2
+# decision 行: 決定のあと、プレイヤーの行動イベント (move_player_* / switch_player) を待つ上限 (秒)。過ぎたら行動不明で書く
+DECISION_ACTION_WAIT_SEC = 30.0
+# guess_confirm 行: 選出画面の推定の「確定」の閾値 (タイプからの候補の事前確率)。値は推定側の閾値をそのまま参照する
+# (SELECTION_PRIOR_AUTO_ACCEPT = 視覚照合なしで採る / SELECTION_GUESS_SURE_PROB = 画面で「ほぼ確定」と出す)
+# 連続フレームの保存 (DEBUG_DUMP_FRAMES=1 のときだけ): 約 10 秒おきの保存フレームとは別に、1 回の起動 (接続テスト) につき
+# FRAME_BURST_COUNT 回、FRAME_BURST_SECONDS 秒間の受信フレームを全部 (受信した JPEG のまま、再圧縮なし) 保存する。
+# 開始は FRAME_BURST_BATTLE_EVERY 戦ごとの対戦 (1 戦目, 1+EVERY 戦目, …) の、最初の決定画面 (command / move_select。場面の組は
+# vision/frame_burst.FRAME_BURST_START_SCENES、vision/scenes の定数で組む)。2026-10-07 実機確認: 3 戦目は command が 1 度も
+# 認識されず保存が始まらなかった (認識失敗を調べる標本が認識成功時にしか残らない) → 決定画面が来なくても、対戦の場面に入った
+# 最初のフレーム (選出・待機以外) から FRAME_BURST_FALLBACK_SEC 秒で始める。始めなかった対戦は理由つきで記録する (skipped)。
+# 容量の見積もり (2026-10-07): 1 回 30 秒 × 受信 10 fps = 300 枚。保存フレーム 40 枚を JPEG 品質 80 にした実測で 1 枚 0.20〜0.22 MB
+# (中央値 0.21) → 1 回 約 62 MB、1 テスト 3 回で約 190 MB、残す 9 回で約 560 MB。隠れたページ (1〜2 fps) ならその 1/5〜1/10
+FRAME_BURST_ENABLED = True
+FRAME_BURST_COUNT = 3
+FRAME_BURST_SECONDS = 30.0
+FRAME_BURST_BATTLE_EVERY = 2
+FRAME_BURST_FALLBACK_SEC = 60.0
+FRAME_BURST_DIR = "debug_frames/burst"     # 保存先 (保存フレームの debug_frames/ の下。burst_<開始時刻>/<ミリ秒>.jpg)
+FRAME_BURST_KEEP_DIRS = 9                  # サーバー起動時の掃除 (tools/cleanup_logs) で残す連続保存の回数 (新しい方から。3 テスト分)
+# 助言ページの接続ごとの状態 (client_state.py、2026-10-07 段 0 の実機確認)。
+# 表示通知 (advice_shown) の hidden=true が同じ対戦でこの件数続いたら、サーバーログに警告し全クライアントへ server_warning を送る
+# (hidden=true の表示通知はフレームの可視状態の数字には使わない)
+DISPLAY_HIDDEN_WARN_COUNT = 3
+# 接続してからこの秒数のうちに client_hello が届かなければ、ページの版が古い (client_hello より前の index.html) 疑いとして
+# サーバーログに警告し、対戦ログに hello=false の client 行を書く
+CLIENT_HELLO_WAIT_SEC = 5.0
 # 環境スナップショット (S1、tools/team_build/meta_snapshot.py): 上位種と脅威リスト。
 # 脅威は「pokedb 上位ランカー構築の使用率% 上位 BUILD_META_TOP_N」と「ゲーム内バトルデータの使用率順位
 # (championsbattledata の列位置 = DB の pokemon_usage.rank) 上位 BUILD_META_INGAME_N」の和集合から、重み
@@ -507,6 +829,17 @@ BUILD_ARTICLE_SEASON_REGULATION = {"M-1": "gen9championsbssregma", "M-2": "gen9c
                                    # 2026-10-05 判断 #9: M-1 = M-A (題名の表記 4 件)、M-2〜M-5 = M-B (M-5 は手順書)、M-6 = M-C (9/9 から)。MCS だけの行は unknown
 BUILD_ARTICLE_DOUBLE_WORDS = ("ダブル", "double", "vgc")   # 記事の題名にあればダブルの記事 (記事バンクから除く)。NFKC で見る (半角カナも当たる)
 BUILD_ARTICLE_DOUBLE_EXCLUDE_WORDS = ("ダブルエース",)      # ダブルバトルを意味しない複合語 (先に取り除く。10/6 の一覧更新: 「勝てるダブルエース構築」はシングル)
+# 構築記事の定期調査の同期 (tools/team_build/articles_sync、2026-10-30)。調査は別リポジトリの routine が毎週 push する一覧 (メタ情報だけ)。
+# 読むのは CSV と状態ファイルだけ (research/merged.json は第三者の文章の抜粋が入り得るので読まない)。本文の取得はしない
+ARTICLE_SURVEY_REPO = "KentaroTabe/PokemonChampions_seeker"
+ARTICLE_SURVEY_BRANCH = "claude/eager-volta-e7cy8q"
+ARTICLE_SURVEY_CSV_PATH = "research/blogs.csv"
+ARTICLE_SURVEY_STATE_PATH = "research/state.json"
+ARTICLE_SYNC_GH_BIN = "gh"                 # GitHub CLI (読み取りの gh api だけ使う)
+ARTICLE_SYNC_GH_TIMEOUT_S = 60             # gh api 1 回の待ち時間の上限 (秒)
+ARTICLE_SYNC_SHOW_MAX = 40                 # 差分の表で種類ごとに表示する行の上限 (件数は全部数える)
+ARTICLE_SYNC_LOG_NAME = "sync.jsonl"       # 同期の記録 (出力先のディレクトリに 1 行ずつ追記)
+ARTICLE_SYNC_BACKUP_SUFFIX = ".bak.%Y%m%d"  # 控えの名前 (blogs.csv / manifest.json の後ろに付ける。strftime)
 # 記事バンク (tools/team_build/article_parse + article_bank、docs/ARTICLE_BANK_DESIGN_1006.md)。2026-10-06 の初期案 (検証前の値)。
 # 本文は LLM に渡さない: 定型部分 (使用ポケモン) を決定的に解析し、解説は限定した規則で構造化する。LLM には構造化した結果だけ渡す
 BUILD_ARTICLE_MEMBER_SECTION_WORDS = ("使用ポケモン", "個体紹介", "個別解説", "構築紹介", "パーティ紹介", "採用理由")  # 個体の節の見出し語
@@ -1013,3 +1346,451 @@ BUILD_CONSUMABLE_ITEMS = ("whiteherb", "focussash", "sitrusberry", "lumberry", "
                           "shucaberry", "cobaberry", "payapaberry", "tangaberry", "chartiberry", "kasibberry",
                           "habanberry", "colburberry", "babiriberry", "roseliberry", "chilanberry")
 BUILD_PROTOCOL_VERSION = "1"
+
+# --- 段 0 の正しさの確認 (docs/USEFULNESS_VERIFICATION_PLAN_1007.md §10・§2、2026-10-07) ---
+# 決定監査 (tools/decision_audit): display の行の「サーバーの受信時刻 t − ブラウザの表示時刻 t_shown」の絶対値がこれを超えたら、
+# ブラウザとサーバーの時計がずれている (時計差) として、ブラウザの時計で測った表示までの遅れを判定不能にする。
+# 10/6〜10/7 の実測は −0.004〜+0.10 秒 (送信の遅れ込み)
+DECISION_AUDIT_CLOCK_SKEW_SEC = 1.0
+# 決定監査の閾値 (2026-10-07 判断 7・8 で tools/decision_audit のモジュール定数から移した。値は従来どおり):
+#   LATE_SEC     … 決定画面が開いてから助言が出るまでの許容秒数 = 「期限」。生成の遅延の判定と、有効な助言が期限内に表示されたかの両方に使う
+#   HEAVY_SWING  … 「大きな失点」として監査対象に挙げる HP 差分スイングの閾値 (%)
+#   PAIR_WINDOW_SEC … 助言と行動の紐付け上限秒 (review_battle と同じ値)。前の決定の助言を「流用」とみなす上限にも使う
+DECISION_AUDIT_LATE_SEC = 10.0
+DECISION_AUDIT_HEAVY_SWING = -25.0
+DECISION_AUDIT_PAIR_WINDOW_SEC = 60.0
+# 判断 7 (2026-10-07): 助言が「決定時の状態に有効」か (助言の state と、決定画面の最後の観測 (scene 行・助言の行) の state の比較)。
+#   USE_STATE_ID … 助言の state_id (battle_logger.state_digest) と観測の digest が同じなら有効
+#   POSITION_KEYS … state_id が違うときに比べる局面の項目。どれか 1 つでも両方読めていて食い違えば「無効」
+#                   (turn は行の turn、*_active は場の種 id、*_remaining は残り体数、*_active_hp は場の HP %)
+#   POSITION_REQUIRED … 食い違いが無く、これらが両方読めていれば「有効」。読めなければ判定不能
+#   POSITION_HP_TOL … 場の HP % の差がこれ以内なら同じ局面とみなす (読み取りの揺れ)
+DECISION_AUDIT_STATE_MATCH_USE_STATE_ID = True
+DECISION_AUDIT_POSITION_KEYS = ("turn", "player_active", "opponent_active", "player_remaining", "opponent_remaining",
+                                "player_active_hp", "opponent_active_hp")
+DECISION_AUDIT_POSITION_REQUIRED = ("player_active", "opponent_active")
+DECISION_AUDIT_POSITION_HP_TOL = 5.0
+# 判断 8・9 (2026-10-07): display の行が無い助言を「表示経路の欠陥」(画面に出なかった) と確認する条件。
+# その助言より後に生成された別の助言が、その助言の生成からこの秒数以内に、隠れていないページで表示された (サーバーの受信時刻) とき。
+# ページが見えていて通知も届いていたので、描画待ち (隠れたタブで requestAnimationFrame が止まる) では説明できない。
+# 確認できなければ「表示未確認」(display_unconfirmed) とし、欠陥にも成功にも数えない (decision_audit / scene_eval で共通)
+DISPLAY_DEFECT_CONFIRM_SEC = 30.0
+# 局面集 (tools/scene_eval.classify): 助言の前後この秒数に手動修正 (manual_fix) があれば hp_stuck (従来の値。モジュール内の定数から移した)
+SCENE_EVAL_MANUAL_FIX_WINDOW_SEC = 30.0
+# ダメージ照合 (tools/dmg_compare): ローカル Showdown の simulate-battle (乱数の seed 固定) で回す手数 (|move| の行の数)、
+# 実ダメージを乱数幅に入っているとみなす許容 (HP の整数への丸め。助言側は % を 0.1 刻みで返す)、
+# 乱数で選ぶ行動の確率 (自発の交代・メガシンカ)、両者のチームを取る層 (封印した holdout は使わない)
+DMG_COMPARE_MOVES = 200
+DMG_COMPARE_SEED = 20261007
+DMG_COMPARE_TOL_HP = 1
+DMG_COMPARE_ROUNDING_HP = 3               # 報告用: 幅の外がこれ以内の不一致は「整数の切り捨ての差の疑い」として件数を分けて出す (判定は変えない)
+DMG_COMPARE_SWITCH_PROB = 0.1
+DMG_COMPARE_MEGA_PROB = 0.5
+DMG_COMPARE_TEAM_TIER = "search"
+DMG_COMPARE_FORMAT = TRAINING_BATTLE_FORMAT
+DMG_COMPARE_BATTLE_TIMEOUT_SEC = 120      # simulate-battle の 1 回の応答待ちの上限 (超えたらその戦を打ち切る)
+DMG_COMPARE_MAX_TURNS = 60                # 1 戦の上限ターン (無限に続く対戦の打ち切り)
+DMG_COMPARE_ENGINE_WORKERS = 1            # 合法手の確認で助言エンジンを回すときの探索の並列数 (advisor.engine.SEARCH_WORKERS)
+# ダメージ計算 (advisor.damage.calc_damage) を Showdown と同じ整数の計算 (威力・実数値・最終補正の 4096 分率の倍率、各段階の切り捨て、
+# 乱数 85〜100 の 16 通り) にするか (2026-10-07 fix/engine-correctness、計画 §10 の F)。False は従来の小数の計算 (乱数幅 0.85〜1.00 を
+# 連続とみなし、切り捨てなし)。2026-10-07 判断 11 (ユーザー承認) で既定 True。test_effects の期待値は Showdown の計算順を再現した参照値に変更 (補正値は advisor/data/damage_modifiers.json)
+DAMAGE_INTEGER_ROUNDING = True     # 2026-10-07 判断 11: 既定 ON (照合 200 手で 91/91。連続技の 1 発ごとの威力変化などは期待値による近似が残る)
+# 局面の標本 (tools/scene_samples、§2 の 3 種): 1 回の接続テストから取る件数、時刻抽出の間隔、
+# 保存フレームと時刻の対応の許容 (保存は約 10 秒おき)、助言を「その時刻の画面の助言」とみなす最大の経過秒、
+# シーン判定に依存しない保存フレームの接頭辞 (server.py の frame_。sel_ / fc_ はシーン判定で保存される)
+SCENE_SAMPLES_SEED = 20261007
+SCENE_SAMPLES_N_FIXED_FAILURE = 3
+SCENE_SAMPLES_N_ADVICE_RANDOM = 10
+SCENE_SAMPLES_N_FRAME_RANDOM = 10
+SCENE_SAMPLES_FRAME_INTERVAL_SEC = 60.0
+SCENE_SAMPLES_FRAME_TOL_SEC = 6.0
+SCENE_SAMPLES_ADVICE_MAX_AGE_SEC = 60.0
+SCENE_SAMPLES_TIME_FRAME_PREFIXES = ("frame_",)
+SCENE_SAMPLES_ANY_FRAME_PREFIXES = ("frame_", "sel_", "fc_")
+# 操縦提案の精度改善 M1a (2026-10-09、docs/ADVICE_ACCURACY_PLAN_1009.md 段 A-2): 技の固定の残りターン。
+# 第 9 世代 (Showdown の duration 3) は、対象がそのターンに既に行動していれば +1 ターン (次の 3 回の行動選択が固定)、
+# まだ行動していなければそのターンの行動が固定され、次の 2 回の行動選択が固定される。値は「行動済み」のときの回数。
+# 解除の文言 (「アンコール状態が解けた」「挑発の効果が解けた」) と交代でも外れる。ターンの数え方は vision.pipeline の
+# ターンカウント (コマンド画面への復帰) に従うので、取りこぼすと長めに残る (選べない技を推すより安全側)
+MOVE_LOCK_ENCORE_TURNS = 3
+MOVE_LOCK_TAUNT_TURNS = 3
+
+# --- 操縦提案の精度改善 M2b (2026-10-09、docs/ADVICE_ACCURACY_PLAN_1009.md 段 B・§8.4。運用側の設計判断 1〜11) ---
+# 採点方式: "legacy" = 現行の採点 (既定) / "transition" = 共通の遷移 (advisor.transition) と局面評価 V (advisor.valuation) の
+# Q(a) = E[V(T(state, a, 相手の応手, 分岐))] (advisor.scoring_transition)。両方式は evaluate_common の入力 (MonView・合法手・
+# 補完した技・相手の型の仮定・控え) を共有し、採点だけを置き換える。採否は legacy を対照にした 600 戦の対応比較 (§4.3) で決めるので、
+# それまで既定は legacy。環境変数 ADVICE_SCORING_MODE で上書きできる (測定の子プロセス・advisor-as-player が引き継ぐ)。
+# 読めない値は警告して legacy にする
+ADVICE_SCORING_MODES = ("legacy", "transition")
+
+
+def _advice_scoring_mode_from_env() -> str:
+    raw = (os.environ.get("ADVICE_SCORING_MODE") or "").strip().lower()
+    if not raw:
+        return "legacy"
+    if raw not in ADVICE_SCORING_MODES:
+        print(f"[config] ADVICE_SCORING_MODE={raw!r} は {ADVICE_SCORING_MODES} に無いので legacy を使う")
+        return "legacy"
+    return raw
+
+
+ADVICE_SCORING_MODE = _advice_scoring_mode_from_env()
+# 探索の推奨値を行動スコアへ統合する重み (P9、事前登録 2026-09-04 20:30。advisor.engine.SEARCH_BLEND の初期値)。
+# score += 重み × (rec_a − max_rec)。0 で無効 (択評価は表示のみ)。2026-09-04 の判定で 0 に戻した値 (2026-10-16 に engine.py から移した。値は同じ)
+ADVICE_SEARCH_BLEND = 0.0
+# 表示用の探索 (2026-10-16 レビュー、docs/ADVICE_ACCURACY_PLAN_1009.md §8.29): advisor.engine._run_search (同時手番探索) は
+# 探索の重み 0 では順位に使われず、表示 (advisor.service の「🎲 択評価」と「起点注意 (setup_bait)」) だけに使われるが、実戦ログの再生で
+# evaluate の時間の 99% を占める。"on" = 従来どおり実行 / "off" = 省略 (既定。択評価・起点注意は出ない。advice の gtheory = None、
+# search_skipped = True)。環境変数 ADVICE_DISPLAY_SEARCH で上書きする。探索を採点に混ぜる設定 (探索の重み > 0) では省略を認めない
+# (resolve_display_search が警告を 1 回出して on として扱う)。読めない値は警告して既定 (off) にする
+ADVICE_DISPLAY_SEARCH_ENV = "ADVICE_DISPLAY_SEARCH"
+ADVICE_DISPLAY_SEARCH_VALUES = ("on", "off")
+ADVICE_DISPLAY_SEARCH_DEFAULT = "off"
+
+
+def _advice_display_search_from_env() -> str:
+    raw = (os.environ.get(ADVICE_DISPLAY_SEARCH_ENV) or "").strip().lower()
+    if not raw:
+        return ADVICE_DISPLAY_SEARCH_DEFAULT
+    if raw not in ADVICE_DISPLAY_SEARCH_VALUES:
+        print(f"[config] {ADVICE_DISPLAY_SEARCH_ENV}={raw!r} は {ADVICE_DISPLAY_SEARCH_VALUES} に無いので "
+              f"{ADVICE_DISPLAY_SEARCH_DEFAULT} を使う")
+        return ADVICE_DISPLAY_SEARCH_DEFAULT
+    return raw
+
+
+ADVICE_DISPLAY_SEARCH = _advice_display_search_from_env()
+
+
+def display_search_decision(setting: str, display_search, search_blend: float) -> tuple:
+    """表示用の探索を実行するか (純粋)。戻り値 (実行するか, 探索の重みのために強制したか)。
+    display_search: 呼び出し側の指定 (True / False、None なら setting = ADVICE_DISPLAY_SEARCH の "on" / "off" に従う)。
+    search_blend > 0 (探索を採点に混ぜる) なら指定にかかわらず実行する (省略を認めない)"""
+    want = (str(setting or "").strip().lower() == "on") if display_search is None else bool(display_search)
+    if not want and float(search_blend or 0.0) > 0:
+        return True, True
+    return want, False
+
+
+_DISPLAY_SEARCH_FORCED_WARNED = False
+
+
+def resolve_display_search(display_search=None, search_blend=None) -> bool:
+    """表示用の探索を実行するか (display_search_decision に今の設定を渡す)。search_blend が None なら ADVICE_SEARCH_BLEND
+    (advisor.engine は実行時の engine.SEARCH_BLEND を渡す)。探索の重み > 0 で省略を指定されたら、警告を 1 回だけ出して実行する"""
+    global _DISPLAY_SEARCH_FORCED_WARNED
+    blend = ADVICE_SEARCH_BLEND if search_blend is None else search_blend
+    run, forced = display_search_decision(ADVICE_DISPLAY_SEARCH, display_search, blend)
+    if forced and not _DISPLAY_SEARCH_FORCED_WARNED:
+        _DISPLAY_SEARCH_FORCED_WARNED = True
+        print(f"[config] 表示用の探索の省略 ({ADVICE_DISPLAY_SEARCH_ENV}=off または display_search=False) は、探索の重み "
+              f"{blend} > 0 (探索を採点に混ぜる) では認めないので、探索を実行する")
+    return run
+# 局面評価 V (advisor.valuation、値域 [-1, 1]。較正前なので「勝率」と呼ばない)。式は valuation.py の docstring:
+#   終了: 自分の選出が全滅 = -1、相手の選出 (判明分 + 未判明の残数) が全滅 = +1
+#   残存戦力 M = (Σ自分 v(個体) − Σ相手 v(個体)) / VALUATION_TEAM_SIZE、v = 生存 VALUATION_ALIVE_SHARE + (1 − 同) × HP
+#   後続の対面 C = (P(自分が先に倒す) × v(相手の場) − P(相手が先に倒す) × v(自分の場)) / VALUATION_TEAM_SIZE (場の個体の実技で 1 回の撃ち合い)
+#   V = clip(VALUATION_SCALE × (M + VALUATION_MATCHUP_WEIGHT × C), ±VALUATION_NONTERMINAL_MAX)
+# 値の根拠 (すべて暫定。600 戦の方式比較の前に較正しない):
+# - TEAM_SIZE = 選出数 BSS_PICK_COUNT (3。1 体の価値が M の 1/3)
+# - ALIVE_SHARE 0.5 = 「倒した・倒された」と「削った HP」を半々に見る。HP 1% を削る価値は 1 体を倒す価値の 1/200
+# - MATCHUP_WEIGHT 0.5 = 次の撃ち合いの見込みは相手の交代・型の誤りで外れるので、確定した残存戦力の半分の重み。1 未満なので
+#   V は HP について単調 (自分の HP が減ると M の減少が C の変化を必ず上回る)
+# - SCALE 0.9 / NONTERMINAL_MAX 0.99 = 終了していない局面を ±1 (勝敗の端) と区別する
+VALUATION_TEAM_SIZE = BSS_PICK_COUNT
+VALUATION_ALIVE_SHARE = 0.5
+VALUATION_MATCHUP_WEIGHT = 0.5
+VALUATION_SCALE = 0.9
+VALUATION_NONTERMINAL_MAX = 0.99
+# 相手の応手の最小モデル (計画書 段 B-5、設計判断 5)。判明技は「所持が確定した」だけで使用確率 100% ではない。
+# 行動確率は固定した簡易方策: 交代は OPP_SWITCH_PROB (判明している控えに等分、控えが判明していなければ 0 にして技へ配り直す)、
+# 技は 1 − OPP_SWITCH_PROB を「相手にとっての期待ダメージ (命中込み、自分の残り HP で頭打ち) の高い順」に OPP_MOVE_RANK_DECAY の
+# 等比で配り、所持の事前分布 (判明技 = 1、推定技 = 使用率) を掛けて正規化する。根拠 (暫定): OPP_SWITCH_PROB 0.1 は
+# tools/dmg_compare の相手の交代確率 (DMG_COMPARE_SWITCH_PROB) と同じ値 (探索の 0.15 は流用しない)。RANK_DECAY 0.5 は
+# 「最善の技を半分、残りを順に半分ずつ」の仮置き。期待値と最悪応手 (悲観側) を両方残し、順位は期待値 (混合比は方式比較で決める)
+OPP_SWITCH_PROB = 0.1
+OPP_MOVE_RANK_DECAY = 0.5
+# transition 方式の計算予算 (設計判断 10・作業の規約): 遷移の採点にかかった時間がこれを超えたら、その決定は legacy に退避する
+# (scoring_fallback = "budget")。legacy の evaluate は 1 回 50〜130 ms (M1b の計測)、上限は 300 ms (3 倍の目安と同じ桁)
+TRANSITION_BUDGET_MS = 300.0
+# ダメージ乱数 (2026-10-09 M2c で変更): calc_damage の rolls (整数の計算の実際の 16 通り) を 1 つずつ解決し、結果が同じ乱数だけを
+# 束ねる (倒せる乱数は 1 つ、倒せない乱数は値ごと。平均には潰さない)。TRANSITION_ROLL_POINTS は rolls を返さない damage_fn のときに
+# 最小〜最大を等間隔に置く点の数 (M2b までの近似)。連続技は 1 発ごとの平均ダメージで回数を分岐する (1 発ごとの乱数は分岐しない)
+TRANSITION_ROLL_POINTS = 16
+# 分岐の併合の粒度 (2026-10-09 M2c): 0 = 状態が完全に同じ分岐だけを併合する。正の値 = ターンの最後の行動の後だけ、HP をこの HP 量
+# (実数値) に丸めて併合する (HP は群の確率の重みつき平均、ひんしと生存は混ぜない。途中の行動の後は丸めない: HP の消費・反動・ひんしの
+# 閾値をまたいで平均に潰さないため)。実ログ 298 行の計測で予算 (TRANSITION_BUDGET_MS) に収まったので 0 (丸めない)
+TRANSITION_MERGE_HP_UNITS = 0
+# HP の不確かさ (2026-10-09 M2c、レビュー 1。transition 方式だけが使う。legacy の減点 UNCERTAIN_SWITCH_PENALTY は重ねない)。
+# 不確かな個体 (自分の控えの hp_uncertain、バー推定 hp_source="bar"、技イベント由来の推定 hp_estimated、場の個体の古い観測
+# hp_read_ts) の HP を範囲 [下限, 上限] で扱う: 下限 = 直近値 − 誤差 − 経過時間による低下、上限 = 直近値 + 誤差 (最大 HP 比、
+# 下限は 1 HP (相手は 1%) で止める)。順位は悲観側 (自分の個体 = 下限、相手の個体 = 上限) の仮説で決め、楽観側の仮説の順位は感度として
+# 残す。値はすべて暫定 (較正していない):
+# - ERR_BAR 0.05: バー推定の誤差。実測 (vision/my_hp_estimate の注記: frame_1791503228 で正解 2.5%、バー 4.4%) の差 1.9 pt と
+#   「バーの割合は実際の値と数 % ずれる」から、その 2 倍強を許す
+# - ERR_ESTIMATED 0.15: 技イベント由来の推定 (期待ダメージで減らした値)。乱数の幅 (85〜100%) と型の仮定の誤りの分
+# - ERR_UNCERTAIN 1.0: 交代の見逃し (出所なしの hp_uncertain)。実際は瀕死の可能性がある (2026-08-18 の事故) ので下限は 1 HP
+# - STALE_SEC 30 / STALE_DROP_PER_SEC 1/120: 場の個体の HP の観測が 30 秒 (およそ 1 ターン) より古ければ、超えた秒数 × 1/120
+#   (2 分で最大 HP の全部) だけ下限を下げる。控えは場に居ない間 HP が変わらないので経過時間では下げない
+HP_RANGE_ERR_BAR = 0.05
+HP_RANGE_ERR_ESTIMATED = 0.15
+HP_RANGE_ERR_UNCERTAIN = 1.0
+HP_RANGE_STALE_SEC = 30.0
+HP_RANGE_STALE_DROP_PER_SEC = 1.0 / 120.0
+# 持ち物の感度 (2026-10-09 M2c、レビュー 4): 相手の場の個体の持ち物が観測で確定していないとき、これらの有無を入れ替えた仮説でも
+# 順位を計算し、第一候補が変わるかを transition_stats.sensitivity に残す (順位には使わない。予算の残りで計算し、超えたら省略)
+TRANSITION_SENSITIVITY_ITEMS = (("scarf", "choicescarf"), ("sash", "focussash"))
+# 感度の計算の有無 (2026-10-09 M2d、レビュー 3)。感度 = 楽観側の HP の仮説 (HP_RANGE_*) と TRANSITION_SENSITIVITY_ITEMS の有無を
+# 入れ替えた仮説での順位 (順位には使わない)。本採点 (HP の悲観側を T と V に渡す処理を含む) はこの設定に関係なく行う。
+# 既定は計算する。方式比較の測定 (tools/usefulness_p1 --compare scoring) は子プロセスに環境変数 TRANSITION_SENSITIVITY_ENV=0 を立てて切る
+# (感度は本採点の残りの予算で計算し、超えたら省略するだけで退避は増やさないが、全処理時間を延ばす)
+TRANSITION_SENSITIVITY_ENV = "TRANSITION_SENSITIVITY"
+
+
+def transition_sensitivity_from_value(raw) -> bool:
+    """環境変数 TRANSITION_SENSITIVITY の生の値 → 感度を計算するか (純粋。未設定・空は計算する、0 / false / no / off は計算しない)。
+    操作パネル (稼働中のプロセスの環境変数の表示) も同じ規則で読む"""
+    v = (raw or "").strip().lower()
+    if not v:
+        return True
+    return v not in ("0", "false", "no", "off")
+
+
+def _transition_sensitivity_from_env() -> bool:
+    return transition_sensitivity_from_value(os.environ.get(TRANSITION_SENSITIVITY_ENV))
+
+
+TRANSITION_SENSITIVITY_ENABLED = _transition_sensitivity_from_env()
+# 診断用の記録 (2026-10-15、採点方式の比較の診断 段 3): advisor-as-player の対戦記録 (battles.jsonl の turns[].diag) に、決定ごとの
+# 採点入力 (state)・合法手・出力・退避理由・実行行動を残す。既定はオフ (1 にすると有効。make_advisor_player の diag_log 引数でも可)。
+# ADVICE_DIAG_BOTH_ENV=1 のときだけ、記録する条件の方式に加えてもう一方の採点方式も計算して残す (行動の選択には使わない)
+ADVICE_DIAG_LOG_ENV = "ADVICE_DIAG_LOG"
+ADVICE_DIAG_BOTH_ENV = "ADVICE_DIAG_BOTH"
+# シミュレータ (advisor-as-player) の入力の版と測定の受入監査 (2026-10-15 M3a)。
+# SIM_INPUTS_VERSION: 状態変換 (champions_agent.env.advisor_player.battle_to_state) の版。選出の印 (未選出の個体を評価に含めない、
+# 38142ad2) と、シミュレータの合法手 (交代技の後の繰り出し・技の固定・とらわれ) を入力に入れた版。check_advisor_player が結果 JSON の
+# inputs_version に書き、racing・usefulness_verdict・arc_remeasure_summary が版の違う結果を混ぜない・混ぜたら警告する。
+# picked-legal-mega-1015 (2026-10-15 M3c): メガ形態の判定を部分一致 ("mega" in 種族 id) から advisor.gimmick.is_mega_form に
+# (meganium / yanmega をメガ扱いしない)、mega_used を poke-env のメガの記録で決める (champions_agent.env.advisor_player.mega_used_of)
+# picked-legal-mega-revive-1016 (2026-10-16 E-holdout-1): さいきのいのり の蘇生先の選択 (要求の種類の区別、蘇生先は要求の合法な
+# ひんし個体から固定規則で選ぶ) で合法手の解釈と実行行動が変わった (レビュー 10/16 で版の更新を承認)
+SIM_INPUTS_VERSION = "picked-legal-mega-revive-1016"
+# 受入監査の上限 (決定ごとの軽い監査 accept の件数。全部 0 が既定。満たさなければ正式判定・順位判定を出さない):
+# best_illegal = 第一候補が poke-env の合法手に無い / unpicked_candidate = 候補に未選出の個体への交代 /
+# skip_unexplained = 第一候補を飛ばし、理由を説明できない (状態にシミュレータの合法手が入っていたのに飛ばした) /
+# random_fallback = ランダム行動への退避 / picked_unknown = 対戦中に選出が分からず全個体を選出扱いにした (入力不成立)
+SIM_ACCEPT_LIMITS = {"best_illegal": 0, "unpicked_candidate": 0, "skip_unexplained": 0, "random_fallback": 0,
+                     "picked_unknown": 0}
+# 40 局面の診断 (2026-10-15 M3b、tools/diag_scenes)。診断の読み方の閾値で、採点には使わない (すべて暫定):
+# - SEED: 区分内の無作為抽出の seed。QUOTAS: 区分ごとの件数 (A = 両方式の第一候補が異なる、B = transition が退避、C = 一致)
+# - BIG_BUDGET_MS: 再現性の再採点で transition の予算を事実上外す値 (予算超過の退避は時間依存なので順位の再現性と分ける)
+# - PROB: transition の分岐の確率 (先に倒される p_ko_before_act・交代先が倒される p_faint) を「起きる見込み」とみなす下限。
+#   legacy の前提 (×0.25 の割引の有無・「交代出しで倒される危険あり」) は二値なので、半分以上で起きる側に寄せる
+# - KO_GAP: legacy の倒せる見込み (0 / 0.5 / 1 × 命中) と transition の行動できた分岐の倒す確率 (p_ko / (1 − p_ko_before_act)) の
+#   差がこれ以上なら遷移の食い違い
+# - UNEVAL_MAIN: 第一候補どうしの未評価の質量 (応手の ε・分岐の未評価) がこれ以上なら主因を「退避・未評価」とする
+# - CLOSE_Q / CLOSE_LEGACY: 区分 C の 1 位と 2 位の差がこれ未満なら「僅差」(transition は Q、legacy は点数)
+# - ENDGAME_REMAINING: 区分 A の「終盤」= 自分と相手の残りがどちらもこの数以下
+# - TIE_Q: 区分 A で transition の Q(a_T) − Q(a_L) がこれ未満なら同点 (候補の並びの順で第一候補が決まる) として判断保留
+DIAG_SCENES_SEED = 20261015
+DIAG_SCENES_QUOTAS = {"A_attack_switch": 8, "A_status": 8, "A_sacrifice_endgame": 8,
+                      "B_budget": 3, "B_unevaluated": 3, "B_own_unsupported": 2, "C_agree": 8}
+DIAG_SCENES_BIG_BUDGET_MS = 1.0e7
+DIAG_SCENES_PROB = 0.5
+DIAG_SCENES_KO_GAP = 0.5
+DIAG_SCENES_UNEVAL_MAIN = 0.25
+DIAG_SCENES_CLOSE_Q = 0.02
+DIAG_SCENES_CLOSE_LEGACY = 5.0
+DIAG_SCENES_ENDGAME_REMAINING = 2
+DIAG_SCENES_TIE_Q = 0.001
+# 実機の受入 (2026-10-16、docs/ADVICE_ACCURACY_PLAN_1009.md §8.22 の受入条件 (運用上の基準)。tools/real_accept)。
+# 実戦ログの advice 行の局面を両方式 (legacy / transition) で再生し、正しさ・退避・evaluate の所要時間を測る。
+# 決定開始 → 有効な助言の表示の遅延は、実戦ログの decision 行・scene 行・display 行から「その接続テストで使った方式」について集計する
+# (再生の時間と混ぜない)。勝率の証明には使わない。値は §8.22 の初期案:
+# - VIOLATIONS_MAX 0: 不合法な第一候補・未選出への交代・個体や形態の取り違え
+# - LATENCY_P95_SEC 3.0: 決定開始 → 有効な助言の前面表示の p95。LATENCY_DELTA_SEC 0.5: legacy より増える分の上限
+#   (実戦ログに両方式が無ければ判定不能。再生の evaluate の所要時間の差は参考として同じ上限と並べる)
+# - DISPLAY_IN_TIME_MIN 0.95: 前面の全対象決定のうち、既存の期限 (DISPLAY_DEADLINE_SEC = 決定監査の期限 DECISION_AUDIT_LATE_SEC) 内に
+#   有効な助言が表示された割合の下限
+# - FALLBACK_BUDGET_MAX 0.03 / FALLBACK_ALL_MAX 0.20: transition の退避率 (予算超過 / 全理由) の上限 (超えたら原因確認し切替保留)
+# - STALE_HP_SEC: 助言時点で場の HP が最後に読めてからの秒数 (advice 行の hp_stale) がこれを超えたら「古い局面」として有効な助言に
+#   数えず別に集計する。HP の不確かさの扱い (HP_RANGE_STALE_SEC、およそ 1 ターン) と同じ値
+REAL_ACCEPT_VIOLATIONS_MAX = 0
+REAL_ACCEPT_LATENCY_P95_SEC = 3.0
+REAL_ACCEPT_LATENCY_DELTA_SEC = 0.5
+REAL_ACCEPT_DISPLAY_IN_TIME_MIN = 0.95
+REAL_ACCEPT_DISPLAY_DEADLINE_SEC = DECISION_AUDIT_LATE_SEC
+REAL_ACCEPT_FALLBACK_BUDGET_MAX = 0.03
+REAL_ACCEPT_FALLBACK_ALL_MAX = 0.20
+REAL_ACCEPT_STALE_HP_SEC = HP_RANGE_STALE_SEC
+# 遅延の判定規則 (2026-10-16 レビュー): 対象は事前に決めた接続テスト群 (tools.real_accept --target)。LATENCY_P95_SEC は各回 (ログごと)
+# と合算の両方に適用し、どれか 1 回でも超えたら合算で隠さず「未達 (原因確認まで保留)」。対象群は同じ版・設定 (version 行の
+# served_commit / version_id / scoring_mode) であることを検査し、揃わなければ判定不能 (超えた回があれば未達のまま)。
+# 表示は 表示時刻 ≤ min(決定開始 + DISPLAY_DEADLINE_SEC, 決定時刻) のとき期限内、決定の後の表示は「決定後の表示」として別に数える
+# (遅延の分布にも期限内にも入れない、分母には残す)。
+# PROFILE_TOP: --profile で evaluate の内訳 (cProfile の累積時間の上位) を出す行数
+REAL_ACCEPT_PROFILE_TOP = 30
+# 2026-10-20 レビュー (docs/REAL_ACCEPT_TRANSITION_20261020.md §6) で開始前に固定した規則:
+# - FALLBACK_DECISION_ADVICE: 退避の決定単位で「各決定のどの助言で退避を数えるか」。前から順に試し、最初に見つかった助言を使う。
+#   "decision_advice_id" = decision 行の advice_id の助言、"last_valid" = その決定の窓 (決定開始 〜 決定時刻、決定開始が取れなければ
+#   前の決定 〜 決定時刻) の最後の有効な助言 (確定・評価できた・候補あり・古い局面でない)。どちらも無い決定は分母に入れず件数を出す。
+#   上限 (FALLBACK_BUDGET_MAX / FALLBACK_ALL_MAX) は各回 (ログごと) と合算の両方に当て、1 回でも超えたら合算も未達
+# - VERSION_IGNORE_FIELDS: 版の照合で比べない version 行の欄 (記録の時刻と、版の識別と実行状態をまとめた digest の version_id)
+# - VERSION_RUNTIME_FIELDS: version 行のうち実行状態 (読み込み成功 / 失敗) の欄。版の識別とは別に照合し、実行状態は対象の全
+#   battle の advice 行の policy.rl_loaded (読み込み成功) を根拠にする。"runtime" は別の担当が足す予定の欄 (あれば実行状態として扱う)
+# - VERSION_REQUIRED_FIELDS: 対象群の全ログで記録が必要な版の識別の欄 (served_commit は version 行に無ければ client 行から取る)
+REAL_ACCEPT_FALLBACK_DECISION_ADVICE = ("decision_advice_id", "last_valid")
+REAL_ACCEPT_VERSION_IGNORE_FIELDS = ("type", "t", "collected_at", "version_id")
+REAL_ACCEPT_VERSION_RUNTIME_FIELDS = ("runtime", "action_policy.loaded", "action_policy.error", "selection_model.fallback_reason")
+REAL_ACCEPT_VERSION_REQUIRED_FIELDS = ("served_commit", "scoring_mode")
+
+# transition の処理時間の内訳の計測 (tools/transition_profile.py、2026-10-16 レビュー、計画書 §8.33)。
+# REPEAT: 決定ごと・感度 on / off ごとに evaluate を繰り返す回数 (中央値を使う)。TOP: 遅い局面として内訳を出す件数
+# (全処理時間 elapsed_total_ms の上位)。SENS_DOMINANT_SHARE: 遅い局面 (全処理時間が p95 以上の決定) の evaluate の時間のうち
+# 感度 (sens.elapsed_ms) が占める割合がこれ以上なら「感度が主因」と判定する (実機で感度を省略する案の前提)
+TRANSITION_PROFILE_REPEAT = 3
+TRANSITION_PROFILE_TOP = 10
+TRANSITION_PROFILE_SENS_DOMINANT_SHARE = 0.5
+
+# 対戦の助言の再計算 (server.py、advice_key.py。2026-10-19 レビュー: 再計算の鍵の不足)。
+# ADVICE_KEY_VERSION: 再計算の鍵の版 (起動ログに出す)。1 = 旧鍵 (場面・自分の場の個体の種族/HP%/PP・相手の場の個体の種族/HP%・
+#   場・両者の能力変化だけ)。2 = 採点の入力の鍵 (両者の全個体の種族・形態・HP の値と不確かさ・状態・持ち物 (確定/消費/喪失)・特性・
+#   技と PP・技の固定・対応待ち・選出の印、両陣営の設置/壁/おいかぜ/残数、場、メガ使用、ターン、直前の技、採点の設定、データの版)
+# ADVICE_RECALC_TTL_SEC: 鍵が同じでも前回の計算結果をこの秒数を超えて使わない (旧: server.py の 10.0 を定数化。値は同じ)
+# ADVICE_RECALC_FALLBACK_TTL_SEC: 退避 (scoring_fallback あり。予算超過など) した結果と評価エラーの有効期限。予算超過は処理の
+#   混み具合で変わるので、無期限 (鍵が変わるまで) に持たず短い間隔で計算し直す
+# ADVICE_KEY_HP_AGE_GRAIN_SEC: 場の個体の HP の観測からの経過時間を鍵に入れる粒度 (秒)。transition の HP の範囲は経過時間で
+#   下限が下がる (advisor.scoring_transition.hp_range_of、HP_RANGE_STALE_SEC 超)。経過時間がこの粒度を跨いだら計算し直す
+ADVICE_KEY_VERSION = 2
+ADVICE_RECALC_TTL_SEC = 10.0
+ADVICE_RECALC_FALLBACK_TTL_SEC = 2.0
+ADVICE_KEY_HP_AGE_GRAIN_SEC = 5.0
+# SELECTION_RECALC_SEC: 選出画面の選出提案 (advise_selection) を、選出の入力 (選出の進捗・両者のパーティ・選出の印) が同じでも
+#   この秒数を超えたら計算し直す (旧: server.py の 15.0 のハードコードを config に移した。値は同じ。2026-10-23)
+SELECTION_RECALC_SEC = 15.0
+
+# へんしん (メタモン・かわりもの) の入力修正 (2026-10-21 レビュー、docs/FALLBACK_DIAG_20261020.md・計画書 §8.43、advisor/transform.py)。
+# 相手の場の個体が こちらの場の個体に へんしん したことを「記録される観測」で確かめたときだけ、状態の個体に transform (コピー元・写し・
+# 観測根拠) を付け、評価の入力 (両方式共通) を写しにする。確かめられなければ付けない (= 従来どおり transition は退避)。
+# 根拠は 10/20 3 戦目 (battle_20261020_085941) の実データで記録されていた 2 種類だけ:
+#   TRANSFORM_EVENT_EVIDENCE: 発動そのものの観測 (イベント id)。ターン 9 の「メタモンのかわりもの」(249 行目) が
+#     ability_opponent_imposter で記録されていた。コピー元 = 相手のその個体が場に出たときのこちらの場の個体
+#   TRANSFORM_MOVE_EVIDENCE: TRANSFORM_SPECIES の個体が TRANSFORM_OWN_MOVES 以外の技を使った (= もう写している)。ターン 3 の
+#     「相手のメタモンのあくのはどう」(98 行目、move_opponent_darkpulse)。相手が場に出てからこちらの場の個体と能力ランクが
+#     変わっていない (コピー元が 1 つに決まる) ときで、その技がコピー元の技 (登録・判明) に入っているときだけ
+# TRANSFORM_EVENT_WINDOW_SEC: 発動のイベントと「相手の場の個体が TRANSFORM_SPECIES になった」観測の順序が前後してよい時間 (秒)
+# TRANSFORM_COPY_PP: へんしん 後の技の PP (ゲームの仕様で 5)
+TRANSFORM_SPECIES = ("ditto",)
+TRANSFORM_OWN_MOVES = ("transform",)
+TRANSFORM_EVENT_EVIDENCE = ("ability_opponent_imposter",)
+TRANSFORM_MOVE_EVIDENCE = True
+TRANSFORM_EVENT_WINDOW_SEC = 10.0
+TRANSFORM_COPY_PP = 5
+# 引き継ぎ評価 段階 A の検証セット F (事実確認) と R (既知の失敗) の標本 (tools/inheritance_eval/fsample、
+# docs/INHERITANCE_EVALUATION_PLAN_20261031.md §4・§7、2026-10-31)。目標の件数は計画書 §4 の初期規模。
+# セッション = 対戦ログの時間の幅の間が SESSION_GAP_SEC 以下で続く対戦 (接続テストの 1 回)。決定画面の窓は scene 行の連続
+# (command / move_select と selection を別の系統、情報確認の画面は窓を閉じない)。同じ系統・同じターンの窓が REOPEN_MERGE_SEC 以内に
+# 開き直したら同じ決定とみなす (認識の揺れ)。ターン 0 の selection は 1 対戦 1 決定にまとめる。1 決定に付ける保存フレームは最大 MAX_FRAMES_PER_CASE 枚。
+# R の根拠画像は記録の時刻から ±R_FRAME_TOL_SEC (保存フレームの間隔 約 10 秒) 以内の保存フレーム。
+# NEAR_FRAME_TOLS_SEC は「画像の無い決定」の窓の外 (前後) にある最も近い保存フレームの距離の集計の区切り (診断用。F には入れない)。
+# ラベル作成の所要は見積もり (未実測): 1 決定あたりの分 (選出 / ターン)、人の作業の予算 (計画書 §7 段階 A の 2 時間)
+INH_FSAMPLE_SEED = 20261031
+INH_FSAMPLE_TARGET_DECISIONS = 60
+INH_FSAMPLE_TARGET_BATTLES = 12
+INH_FSAMPLE_TARGET_SESSIONS = 3
+INH_FSAMPLE_SESSION_GAP_SEC = 1800.0
+INH_FSAMPLE_REOPEN_MERGE_SEC = 3.0
+INH_FSAMPLE_MAX_FRAMES_PER_CASE = 3
+INH_FSAMPLE_BURST_SUBDIR = "burst"
+INH_FSAMPLE_DATASET_KINDS = ("real",)
+INH_FSAMPLE_R_FRAME_TOL_SEC = 10.0
+INH_FSAMPLE_NEAR_FRAME_TOLS_SEC = (5.0, 10.0)
+INH_FSAMPLE_LABEL_MIN_SELECTION = 3.0
+INH_FSAMPLE_LABEL_MIN_TURN = 2.0
+INH_FSAMPLE_LABEL_BUDGET_MIN = 120.0
+INH_FSAMPLE_TIME_BUDGET_SEC = 1500.0
+
+
+# 引き継ぎ評価 段階 A の I-05 型検査 (tools/inheritance_eval/setlint_audit.py、docs/INHERITANCE_EVALUATION_PLAN_20261031.md §5 I-05。2026-10-31)。
+# INH_SETLINT_FORMAT: 合法性の参照に使うローカル Showdown の形式 id (config/formats.ts の [Gen 9 Champions] BSS Reg M-C)
+# INH_SETLINT_IGNORED_ERRORS: 1 体ずつ検査するときに捨てるチーム単位の誤りの先頭 (6 体未満。型そのものの合法性ではない)
+# INH_SETLINT_SMOGON_TOP: Smogon chaos から型を組む種の数 (使用率の上位。None = 全種。全 323 種でも validate-team 込みで約 1 分のため全種)
+# INH_SETLINT_WORKERS: validate-team の並列数 / INH_SETLINT_TIME_BUDGET_SEC: 担当あたりの計算時間の上限 (共通規約の 25 分)
+INH_SETLINT_FORMAT = "gen9championsbssregmc"
+INH_SETLINT_IGNORED_ERRORS = ("You must bring at least",)
+INH_SETLINT_SMOGON_TOP = None
+INH_SETLINT_WORKERS = 4
+INH_SETLINT_TIME_BUDGET_SEC = 1500
+# I-05 R1 の実経路 (validate_team_text) を GitHub CI で実行する job (.github/workflows/ci.yml の showdown-validator、
+# tools/ci/showdown_prepare.sh、ローカルの模擬は tools/ci/showdown_job_local.sh。2026-10-31 追加レビュー判断 3)
+# INH_R1_REQUIRE_SHOWDOWN_ENV: この環境変数が "1" なら厳格モード。test_r1_real_path_with_showdown は validate-team を
+#   使えないとき理由つき SKIP ではなく fail にする (CI の job が SKIP を合格の代わりにしないため)
+# INH_R1_SHOWDOWN_DIR_ENV: pokemon-showdown の dir を指す環境変数 (名前は sets.SHOWDOWN_DIR と同じ)。立っていればその dir だけを使う
+#   (本体の作業ツリーの dir へ黙って退避しない)。立っていなければ従来どおり sets.SHOWDOWN_DIR → 本体の作業ツリーの dir
+# INH_R1_SHOWDOWN_REPO / INH_R1_SHOWDOWN_COMMIT: CI で取得する Showdown (ローカル clone の HEAD = upstream master の
+#   2026-09-09 の commit。[Gen 9 Champions] BSS Reg M-C を含む)
+# INH_R1_NODE_MAJOR: CI とローカルの Node の系列 (ローカルの node v26.12.1。workflow の setup-node の node-version と揃える)
+INH_R1_REQUIRE_SHOWDOWN_ENV = "INH_R1_REQUIRE_SHOWDOWN"
+INH_R1_SHOWDOWN_DIR_ENV = "SHOWDOWN_DIR"
+INH_R1_SHOWDOWN_REPO = "https://github.com/smogon/pokemon-showdown.git"
+INH_R1_SHOWDOWN_COMMIT = "d849b220082e113d8a17303509fb44d420c543d5"
+INH_R1_NODE_MAJOR = 26
+
+
+# 引き継ぎ評価 I-10 (ログ・版固定・再生・実験管理の記録契約。2026-10-31 段階 A、docs/INHERITANCE_EVALUATION_PLAN_20261031.md §5 I-10。
+# tools/inheritance_eval/record_contract.py)。出力先は既定で REPO からの相対 (本体の logs/ へは --out で渡す)
+INH_I10_TEST_ID = "I-10"
+INH_I10_RUN_ID = "phaseA_20261031"
+INH_I10_CODE_COMMIT = "768bae44"            # 試験したコードの版 (指示書の基準)
+INH_I10_TIME_BUDGET_SEC = 1500.0            # 担当あたりの計算時間の上限 (25 分)。超えた試験は unexecuted
+INH_I10_OUT_SUBDIR = "logs/inheritance_eval/phaseA_20261031/I-10"
+INH_I10_SNAPSHOT_MISSING = 999999           # 試験 7: 存在しない使用率の snapshot id
+INH_I10_SHA_MISSING = "0000000000000000"    # 試験 4・7: 存在しない sha16
+INH_I10_COMMIT_MISSING = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"   # 試験 7: 存在しない git commit
+
+
+# 引き継ぎ評価 段階 A (docs/INHERITANCE_EVALUATION_PLAN_20261031.md §7・§9、2026-10-31 開発者指示)。
+# INH_RUN_ID: 段階 A の run_id (出力は logs/inheritance_eval/<INH_RUN_ID>/<test_id>/)
+# INH_CODE_COMMIT: 段階 A で固定したコードの commit (manifest.json に書く)
+# INH_TIME_BUDGET_SEC: 担当 (試験) あたりの自動処理の計算時間の上限 (25 分)。超える分は unexecuted / timeout で残す
+# INH_ASSET_CATEGORIES: 資産・測定の区分 (計画書 §5 I-00 の 5 区分 + 規則参照)
+INH_RUN_ID = "phaseA_20261031"
+INH_CODE_COMMIT = "768bae44"
+INH_TIME_BUDGET_SEC = 1500.0
+INH_ASSET_CATEGORIES = ("観測事実", "推定値", "生成物", "実対戦結果", "合成結果", "規則参照")
+# I-00 資産台帳 (tools/inheritance_eval/inventory.py)
+# INH_INV_FRAME_SLACK_SEC: 画像の時刻を対戦ログの期間 (最初の行〜最後の行) に対応づけるときの前後の余裕 (秒)
+# INH_INV_SAMPLE_HASH_BYTES: 抽出 hash (全件 hash の代わり) に使う先頭・末尾のバイト数
+# INH_INV_FULL_HASH_BUDGET_SEC: 全件 hash に使ってよい時間 (秒)。超えたら残りは抽出 hash (sample) で代える
+# INH_INV_MODEL_EXTS: モデルとして数える拡張子 (".zip.prev" のような退避名も拡張子の後ろに . が続けば数える)
+# INH_INV_EXCLUDE_DIRS: モデルの探索で入らないディレクトリ名 (fnmatch のパターン。依存物・外部の実装)
+# INH_INV_SELECTION_COMPANIONS: 選出モデル (.pt) と同じ dir に揃っている必要があるファイル (tools.inputs_pin の SELECTION_FILES と同じ組)
+INH_INV_FRAME_SLACK_SEC = 300.0
+INH_INV_SAMPLE_HASH_BYTES = 65536
+INH_INV_FULL_HASH_BUDGET_SEC = 600.0
+INH_INV_MODEL_EXTS = (".pt", ".pth", ".pkl", ".npz", ".npy", ".onnx", ".zip", ".joblib", ".safetensors", ".ckpt", ".h5")
+INH_INV_EXCLUDE_DIRS = (".venv*", "node_modules", "pokemon-showdown", ".git", "__pycache__")
+INH_INV_SELECTION_COMPANIONS = ("selection_model_emb.json", "selection_model_meta.json")
+
+
+# ------------------------------------------------------------------ 引き継ぎ評価 (docs/INHERITANCE_EVALUATION_PLAN_20261031.md、2026-10-31)
+# 段階 A の共通: run_id と出力先 (本体ツリーの logs/ 配下、相対パス)。試験ごとの道具は tools/inheritance_eval/
+# INH_TIME_BUDGET_SEC: 担当 1 つあたりの自動処理の計算時間の上限 (計画書 §7 段階 A 合計 2 時間の割り当て)。超えた分は unexecuted
+INH_RUN_ID = "phaseA_20261031"
+INH_OUT_DIR = "logs/inheritance_eval"
+INH_TIME_BUDGET_SEC = 25 * 60
+# I-01 日本語辞書・型登録・名前／単位／形式の変換 (tools/inheritance_eval/conversion.py)
+#   INH_CONV_FORMAT: 対象規制 (Showdown の形式 id、検証と実数値の計算に使う。TRAINING_BATTLE_FORMAT と同じ M-C)
+#   INH_CONV_SHOWDOWN_DIR: ローカル Showdown (data/text/ja を読み取り専用で解析し、dist の Teams / TeamValidator / Battle を node で呼ぶ)
+#   INH_CONV_SMOGON_FILE: 全走査に足す Smogon chaos (logs/usage_smogon/ の 2026-09)
+#   INH_CONV_REGISTRY_FILE: 登録構築 (読み取りのみ)
+#   INH_CONV_FIXTURE: S の fixture (上限 INH_CONV_FIXTURE_MAX 件、計画書 §4)
+#   INH_CONV_EV_MAX: 従来の努力値の 1 能力の上限 (能力ポイントの上限・合計は BUILD_GEN_EV_POINT_CAP / BUILD_GEN_POINT_BUDGET)
+INH_CONV_TEST_ID = "I-01"
+INH_CONV_FORMAT = TRAINING_BATTLE_FORMAT
+INH_CONV_SHOWDOWN_DIR = "pokemon-showdown"
+INH_CONV_SMOGON_FILE = "logs/usage_smogon/2026-09/gen9championsbssregmc-1500.json"
+INH_CONV_REGISTRY_FILE = "config/my_team.json"
+INH_CONV_FIXTURE = "tests/fixtures/inheritance/conversion_cases.jsonl"
+INH_CONV_FIXTURE_MAX = 80
+INH_CONV_EV_MAX = 252

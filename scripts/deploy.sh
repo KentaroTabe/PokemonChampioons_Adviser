@@ -11,6 +11,7 @@
 # 稼働中を判定する (別のプロセスが同じポートを使っていても稼働中と誤認しない)。
 cd "$(dirname "$0")/.." || exit 1
 . scripts/lib/ports.sh
+. scripts/advice_env.sh
 load_ports
 
 if [ "$1" != "--force" ]; then
@@ -34,13 +35,22 @@ if [ "$ADV_STATE" != "ours" ]; then
   exit 0
 fi
 
+# 採点方式 (config/advice.local.env → 環境変数 → legacy、scripts/advice_env.sh)。止める前に検査する
+# (不正な設定で止めると再起動できずにアドバイザーが落ちたままになる)。launchd (パネル・daily-deploy) からも同じ規則で渡る
+if ! advice_env_resolve; then
+  echo "採点方式の設定が不正なため、アドバイザーを止めずに中止しました (稼働中のプロセスはそのまま)"
+  exit 1
+fi
+
 pkill -f "uvicorn server:app_asgi" 2>/dev/null
 sleep 2
 mkdir -p logs
 # RL_ADVICE_STYLE=balance: 正直な再測定 (2026-07-26、評価凍結バグ修正後)
 # で balance が最強 (ベンチ0.70)。_best昇格も同測定に基づく
-nohup bash -c "source .venv/bin/activate && PYTHONUNBUFFERED=1 DEBUG_DUMP_FRAMES=1 RL_ADVICE_STYLE=balance uvicorn server:app_asgi --host 0.0.0.0 --port $ADVISOR_PORT" \
-  > logs/server_nohup.log 2>&1 & disown
+( advice_env_export
+  nohup bash -c "source .venv/bin/activate && PYTHONUNBUFFERED=1 DEBUG_DUMP_FRAMES=1 RL_ADVICE_STYLE=balance uvicorn server:app_asgi --host 0.0.0.0 --port $ADVISOR_PORT" \
+    > logs/server_nohup.log 2>&1 &
+  echo $! > logs/.advisor_launch_pid; disown )
 
 for _ in $(seq 1 30); do
   if [ "$(port_state "$ADVISOR_PORT" "$ADVISOR_PATTERN")" = ours ]; then
@@ -49,7 +59,7 @@ for _ in $(seq 1 30); do
     set -- $(choose_port "$FRONTEND_PORT_DEFAULT" "$FRONTEND_PORT" "$FRONTEND_PATTERN")
     FRONTEND_PORT="$1"; FRONT_STATE="$2"
     if [ "$FRONT_STATE" = "start" ]; then
-      nohup python3 -m http.server "$FRONTEND_PORT" > logs/frontend_nohup.log 2>&1 & disown
+      nohup python3 -m "$FRONTEND_MODULE" "$FRONTEND_PORT" > logs/frontend_nohup.log 2>&1 & disown
       echo "フロントエンド($FRONTEND_PORT) も起動しました"
     elif [ "$FRONT_STATE" = "none" ]; then
       echo "⚠ フロントエンドの空きポートが無い ($FRONTEND_PORT_DEFAULT 〜 +$PORT_SEARCH_RANGE)"

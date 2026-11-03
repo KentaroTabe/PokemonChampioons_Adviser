@@ -60,7 +60,7 @@ plist本体は `scripts/com.championsadviser.train.plist` (repo管理)。編集�
 #   /bin/bash -lc 'cd <repo> && source .venv/bin/activate && \
 #     PYTHONUNBUFFERED=1 uvicorn server:app_asgi --host 0.0.0.0 --port 8000'
 # 例: フロントエンド(3000)
-#   /bin/bash -lc 'cd <repo> && python3 -m http.server 3000'
+#   /bin/bash -lc 'cd <repo> && python3 -m tools.frontend_server 3000'
 # 例: Showdown(8100)
 #   /bin/bash -lc 'cd <repo> && node pokemon-showdown/pokemon-showdown start 8100 --no-security'
 # ラベル(Label)とログ出力先(Standard*Path)は plist ごとに一意にすること。
@@ -142,6 +142,7 @@ sonnetは疑い箇所の検証+少数サンプルの網羅に専念する (タ�
 | `python -m tools.team_build.promote --gate <package_id>` | 昇格条件の確認。PASS は同じ 6 体の **full run** (封印 holdout n ≥ BUILD_PROMOTE_MIN_HOLDOUT_N = 600、別の封印の分割ごとに 1 回) で数え、登録チームと同じ 6 体の Package は数えない (2026-10-05) |
 | `python -m tools.team_build.triggers [--run-id R] [--set-baseline] [--real-days 30]` | 再構築の引き金 (季節の切替 / 実戦 − シムの差が基準線より 0.2 以上悪化 / 相手プールの一致率は記録だけ)。実戦の勝率は登録チームと同じ 6 体の対戦記録を直接数える。閾値は基準線 (`--set-baseline` で保存した採用時の値) との差。基準線が無い項目は記録だけ |
 | `python -m tools.team_build.articles_ingest --csv logs/articles/blogs.csv [--include-unconfirmed] [--check-robots] [--out F]` | 記事バンクの前段: 上位プレイヤーのブログ一覧 (CSV) → 取得対象の一覧 logs/articles/manifest.json (URL の正規化と重複排除、ダブル / シングルの分類、シーズン → 規制、順位、robots.txt の可否)。本文の取得と LLM の抽出はしない (次の段) |
+| `bash scripts/articles_sync.sh [--apply] [--source-file F [--source-state S]] [--out-dir D]` (= `python -m tools.team_build.articles_sync`) | 構築記事の定期調査 (GitHub `ARTICLE_SURVEY_REPO` の `research/blogs.csv` と `state.json` を `gh api` で読む) と logs/articles/blogs.csv の差分 (鍵は正規化した根拠記事URL ごと、URL の無い行は著者 + 題名。新規 / 確度の変化 / シーズンの変化 / ローカルだけ)。既定は dry-run (何も書かない)。`--apply` で blogs.csv を調査の行と列に置き換え (ローカルだけの行は末尾に残す、控え .bak.YYYYMMDD)、manifest.json を作り直し (robots は前の manifest から URL ごとに引き継ぐ)、sync.jsonl に 1 行。本文は取得しない。定期実行の例 scripts/com.championsadviser.articles-sync.plist (木曜 09:00、dry-run、未 install) |
 | `python -m tools.advice_trace [--last N \| --battle F] [--json]` | 助言の追跡 (2026-10-05 ②): 対戦ログの version 行 (指定 Package / 実際に読んだ選出モデルの sha / 退避理由) と Package の manifest の一致、助言 ID ごとの生成時刻と表示時刻 (ブラウザが返す)、古い状態への表示、推奨がシステムの状態で選べたか、を 1 本で出す。docs/ADVICE_TRACE_1005.md |
 | `python -m tools.scene_eval extract --out logs/scenes/set1.jsonl [--consistent 20] [--failure 10]` / `evaluate --set F [--json]` | 正解つき局面 (③): 対戦中の助言から整合 20 + 既知の失敗 10 の雛形を切り出し (truth は人が埋める: 正しい状態・選べる行動・表示期限)、当時の推奨 / 復元した状態での推奨 / 正しい状態での推奨と、feasible_system / feasible_truth、期限内の表示を比べる。この局面集の誤り率は実戦全体の発生率ではない |
 | `python -m tools.team_build.register_selection --run-id R [--arm reference] [--force]` / `--package <id>` / `--status` / `--remove <key>` | 登録チーム向けの選出モデル (2026-10-06): run の参照 (= 登録の 6 体) の適応 (独立 fold の検証で選んだ checkpoint) を 6 体の鍵で `logs/registry/registered/<key>/` に置く。助言サーバーは 試用 Package → 登録チーム向け → 配布版 の順に引く (`selection_dispatch.advisor_model_path`)。軽い適応 (S8a cheap) は登録しない |
@@ -152,6 +153,14 @@ sonnetは疑い箇所の検証+少数サンプルの網羅に専念する (タ�
 2ヶ月分たまるまで自動無効) と `--archive-mix` (過去の優勝チーム=PSRO反復)
 を混ぜられる。`--update-archive` で今回の最優秀をアーカイブへ追加し、
 定期実行すると「対策の対策」まで見た頑健な構築へ収束していく。
+
+## 有用性検証 P1 (RL 加点 0 / ×5 / ×25 の対応比較、docs/USEFULNESS_VERIFICATION_PLAN_1007.md §0.5・§4)
+
+1. 開始前: `scripts/status.sh` と `pgrep -fl "tools.team_build.run|check_advisor_player|train_forever"` で構築 run・学習・測定が無いことを実測する (あれば止めるか別の夜にする)。launchd の track-progress (毎日 21:50、17〜34 分) の後に始め、06:30 の usage-update の前に終える。Showdown は `bash scripts/ensure_showdown.sh 8100`。
+2. `python -m tools.usefulness_p1 --prelim --dry-run` で条件表とコマンド列を確認 (登録チームの sha16 が `P1_TEAM_SHA16` と違えば起動しない)。
+3. 予備: `python -m tools.usefulness_p1 --prelim` (50 戦 / 条件)。秒/戦が `P1_ABORT_SEC_PER_BATTLE` (12) を超えたら本番を始めない目安 (判断は人)。
+4. 本番: `python -m tools.usefulness_p1` (600 戦 / 条件、3 プロセス並列、ピンは起動時に作る。2 時間を超えたら止めて incomplete)。
+5. 集計: `python -m tools.usefulness_verdict --out logs/usefulness/p1_<日時>` (verdict.json / verdict.md。n < 600 か未完了なら採否を出さず中間確認)。
 
 ## 振り返り・環境分析
 

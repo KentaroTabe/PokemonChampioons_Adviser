@@ -48,6 +48,7 @@ def build_bank(battles: list, resolve, min_roster: int = REAL_BANK_MIN_ROSTER) -
     species: dict = defaultdict(lambda: {"appear": 0, "picked": 0, "lead": 0, "moves": Counter(), "items": Counter(),
                                          "abilities": Counter(), "mega": 0})
     n_used = 0
+    used: list = []
     for b in battles:
         ids = []
         ja2id = {}
@@ -65,6 +66,7 @@ def build_bank(battles: list, resolve, min_roster: int = REAL_BANK_MIN_ROSTER) -
         if len(ids) < min_roster:
             continue
         n_used += 1
+        used.append(b)
         key = roster_key(ids)
         t = teams.setdefault(key, {"roster": sorted(ids), "n": 0, "picks": Counter(), "leads": Counter(),
                                    "revealed": defaultdict(lambda: {"moves": Counter(), "items": Counter(),
@@ -73,6 +75,13 @@ def build_bank(battles: list, resolve, min_roster: int = REAL_BANK_MIN_ROSTER) -
         t["n"] += 1
         t["results"][b.get("outcome") or "unknown"] += 1
         picked = {ja2id[ja] for ja in (b.get("opp_fielded") or []) if ja in ja2id}
+        # 選出ラベル 3 値 (2026-10-07 段 0、対戦ログの opp_picks 行): あれば選出確定だけを選出に数え、選出が分からない個体 (unknown) は
+        # 出現にも数えない (「場に出なかった = 選出外」だと、選出されたが出なかった個体の選出率を下げる)。無い古いログは従来どおり
+        status = b.get("opp_pick_status")
+        unknown_ids: set = set()
+        if status:
+            picked = {ja2id[ja] for ja, st in status.items() if st == "picked_confirmed" and ja in ja2id}
+            unknown_ids = {ja2id[ja] for ja, st in status.items() if st == "unknown" and ja in ja2id} - picked
         for sid in picked:
             t["picks"][sid] += 1
         lead = ja2id.get(b.get("opp_lead"))
@@ -94,6 +103,8 @@ def build_bank(battles: list, resolve, min_roster: int = REAL_BANK_MIN_ROSTER) -
                     t["revealed"][sid][key2][eid[len(prefix):]] += 1
                     species[sid][key2][eid[len(prefix):]] += 1
         for sid in ids:
+            if sid in unknown_ids:
+                continue
             species[sid]["appear"] += 1
             if sid in picked:
                 species[sid]["picked"] += 1
@@ -107,7 +118,10 @@ def build_bank(battles: list, resolve, min_roster: int = REAL_BANK_MIN_ROSTER) -
                                        for sid, r in t["revealed"].items()},
                           "results": dict(t["results"]), "full": len(t["roster"]) == 6})
     out_teams.sort(key=lambda t: (-t["n"], t["roster"]))
-    return {"version": BANK_VERSION, "built_at": time.strftime("%Y-%m-%d %H:%M"), "n_battles": n_used,
+    # 集計の締切時刻 (2026-10-07 段 0): 使った対戦の最後の記録の時刻。選出の advice 行 (opp_pick_pred) が「このデータまでを使った」を残す
+    data_until = max((float(b.get("t1") or 0.0) for b in used), default=0.0) or None
+    return {"version": BANK_VERSION, "built_at": time.strftime("%Y-%m-%d %H:%M"), "data_until": data_until,
+            "n_battles": n_used,
             "teams": out_teams,
             "species": {sid: {"appear": s["appear"], "picked": s["picked"], "lead": s["lead"], "mega": s["mega"],
                               "moves": dict(s["moves"]), "items": dict(s["items"]), "abilities": dict(s["abilities"])}

@@ -1,0 +1,50 @@
+{
+ "my_full_137of137.png": {
+  "frame_size": [
+   1920,
+   1080
+  ],
+  "offset": [
+   0,
+   918
+  ],
+  "source": "debug_frames/burst/burst_1791452234/1791452236848.jpg",
+  "memo": "イエッサン 137/137 (満タン、自分の番の黄緑の縁取りあり)、2026-10-08 18:37:16"
+ },
+ "my_mid_120of159.png": {
+  "frame_size": [
+   1920,
+   1080
+  ],
+  "offset": [
+   0,
+   918
+  ],
+  "source": "debug_frames/frame_1791452766.png",
+  "memo": "オオニューラ 120/159 (75%)、2026-10-08 18:46:06 (KNOWN_ISSUES A1 の正解フレーム)"
+ },
+ "my_low_14of161.png": {
+  "frame_size": [
+   1920,
+   1080
+  ],
+  "offset": [
+   0,
+   918
+  ],
+  "source": "debug_frames/frame_1791365276.png",
+  "memo": "グレンアルマ 14/161 (8.7%)、2026-10-07 (10/8 の試験には自分の瀕死付近のフレームが無い)"
+ },
+ "opp_nyorotono_42.png": {
+  "frame_size": [
+   1920,
+   1080
+  ],
+  "offset": [
+   1459,
+   32
+  ],
+  "source": "debug_frames/burst/burst_1791452234/1791452247767.jpg",
+  "memo": "相手 ニョロトノ 42%、名前の OCR が '/BEニ' になるフレーム、2026-10-08 18:37:27"
+ }
+}

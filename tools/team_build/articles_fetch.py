@@ -5,8 +5,14 @@
 
 規則 (2026-10-06 ユーザー判断):
 - ホストの方針 (logs/articles/host_policy.json) で fetch が allow、かつ allowed_urls があればその URL のときだけ取得する (host_allowed)。
+  allowed_urls が無く allowed_from = manifest なら、logs/articles/manifest.json の selected な記事 URL のときだけ (--manifest で差し替え)。
+  項目は完全一致を優先し、無ければ match = suffix の項目の最長の接尾辞で照合する (はてなブログ等のサブドメイン。2026-10-30 開発者承認)。
   方針に無いホスト・unknown は取得しない。巡回しない (与えられた URL だけ。ページ内のリンクを辿らない)
-- 並列取得をしない (1 本ずつ)。同じホストへの要求の間は方針の min_interval_s (無ければ BUILD_ARTICLE_FETCH_MIN_INTERVAL_S) 以上空ける
+- 取得履歴 (access.jsonl) と候補 (candidates/) に方針の版 (policy_sha16 = 方針の内容の sha16、policy_key = 照合した項目、
+  policy_decided_at = その項目の decided_at) を残す (2026-10-30)。--dry-run は URL をホスト群 (照合した項目) ごとに、方針で取得できる数と
+  できない数・理由 (deny / unknown / manifest 外 ほか) の表も出す (policy_url_table、ネットワークに出ない集計)
+- 並列取得をしない (1 本ずつ)。同じホスト群 (照合した方針の項目。項目が無ければホスト名) への要求の間は方針の min_interval_s
+  (無ければ BUILD_ARTICLE_FETCH_MIN_INTERVAL_S) 以上空ける (はてなの別サブドメインどうしでも待つ。2026-10-30 判断)
 - 再取得は必要な更新時だけ: 以前に取得した URL (state.jsonl か access.jsonl に url_hash がある。dry-run のアクセスも数える) は
   --refetch を付けたときだけ取り直す。照合のやり直しは --dry-run が書いた構造化した候補 (candidates/) で行い、保存は
   --from-candidates で再取得なしに行う (2026-10-06 ユーザー判断: 確認のたびの再取得を減らす)
@@ -36,7 +42,9 @@ from champions_agent.config import BUILD_ARTICLE_BANK_STATUSES, BUILD_ARTICLE_FE
 from tools.team_build.adapters import host_adapters
 from tools.team_build.article_aliases import DEFAULT_PATH as ALIASES_PATH
 from tools.team_build.article_aliases import DEFAULT_SITE_IDS_PATH, SiteIdStore, load_aliases, save_aliases
-from tools.team_build.article_bank import DEFAULT_BANK_DIR, extend_bank, host_allowed, host_policy_entry, load_bank, merge_cases
+from tools.team_build.article_bank import (DEFAULT_BANK_DIR, DEFAULT_MANIFEST_PATH, extend_bank, fetch_block_reason, host_allowed,
+                                           host_policy_key, load_bank, load_manifest, manifest_selected_urls, merge_cases,
+                                           policy_stamp, policy_version)
 from tools.team_build.article_parse import canonical_host, default_dictionary
 from tools.team_build.article_units import decode_html, units_for, url_hash
 from tools.team_build.articles_ingest import USER_AGENT
@@ -47,7 +55,9 @@ DEFAULT_POLICY_PATH = REPO / "logs" / "articles" / "host_policy.json"
 DEFAULT_ACCESS_PATH = REPO / "logs" / "articles" / "access.jsonl"          # 取得履歴 (dry-run を含む全部のアクセス。本文なし)
 DEFAULT_CANDIDATES_DIR = REPO / "logs" / "articles" / "candidates"         # 取得から作った構造化した候補 (照合用。本文なし)
 Fetcher = Callable[[str], tuple]          # url -> (body: bytes, content_type: str | None)
-ACCESS_ROW_KEYS = ("at", "url", "url_hash", "host", "mode", "status", "body_hash", "body_chars", "n_units", "count")
+# policy_sha16 / policy_key / policy_decided_at: 取得の時点の方針の版 (2026-10-30 追加。それより前の行には無い)
+ACCESS_ROW_KEYS = ("at", "url", "url_hash", "host", "mode", "status", "body_hash", "body_chars", "n_units", "count",
+                   "policy_sha16", "policy_key", "policy_decided_at")
 
 
 def load_policy(path: Path = DEFAULT_POLICY_PATH) -> dict:
@@ -114,8 +124,9 @@ def default_fetcher(timeout: int = BUILD_ARTICLE_FETCH_TIMEOUT_S) -> Fetcher:
     return fetch
 
 
-def plan_urls(urls: list, policy: dict, fetched: set, refetch: bool = False) -> list:
-    """URL の列 → [{"url", "host", "url_hash", "action": fetch | skip, "reason"}] (純粋)。方針に通らない URL と、取り直さない URL を skip"""
+def plan_urls(urls: list, policy: dict, fetched: set, refetch: bool = False, manifest: Optional[dict] = None) -> list:
+    """URL の列 → [{"url", "host", "url_hash", "action": fetch | skip, "reason"}] (純粋。manifest は allowed_from = manifest の照合用、
+    None = 既定の manifest.json)。方針に通らない URL と、取り直さない URL を skip"""
     out = []
     seen = set()
     for u in urls:
@@ -127,7 +138,7 @@ def plan_urls(urls: list, policy: dict, fetched: set, refetch: bool = False) -> 
         row = {"url": u, "host": host, "url_hash": uh}
         if uh in seen:
             row.update(action="skip", reason="duplicate")
-        elif not host_allowed(policy, host, "fetch", url=u):
+        elif not host_allowed(policy, host, "fetch", url=u, manifest=manifest):
             row.update(action="skip", reason="host_or_url_not_allowed")
         elif uh in fetched and not refetch:
             row.update(action="skip", reason="already_fetched")
@@ -138,9 +149,54 @@ def plan_urls(urls: list, policy: dict, fetched: set, refetch: bool = False) -> 
     return out
 
 
+def policy_url_table(urls: list, policy: dict, manifest: Optional[dict] = None) -> list:
+    """URL の列 → ホスト群 (照合した方針の項目の鍵。項目が無ければホスト名) ごとの、方針で取得できる URL 数 / できない URL 数と理由
+    (純粋。ネットワークに出ない。取得履歴は見ない)。同じ URL (articles_ingest.normalize_url で正規化) は 1 回だけ数える。
+    → [{"group", "matched" (方針の項目に当たったか), "n_urls", "n_allowed", "n_blocked", "reasons": {理由: 数}}] (group の順)。
+    理由は article_bank.FETCH_BLOCK_REASONS (deny / unknown / not_in_manifest / no_policy ほか)。manifest = None は既定の manifest.json"""
+    from tools.team_build.articles_ingest import normalize_url
+    if manifest is not None:
+        manifest = manifest_selected_urls(manifest)            # 正規化済みの集合にして渡す (URL ごとに manifest を正規化し直さない)
+    rows: dict = {}
+    seen = set()
+    for u in urls:
+        u = (u or "").strip()
+        n = normalize_url(u)
+        if not n or n in seen:
+            continue
+        seen.add(n)
+        host = canonical_host(urlparse(u).netloc)
+        key = host_policy_key(policy, host)
+        group = key if key is not None else (host or "(no host)")
+        row = rows.setdefault(group, {"group": group, "matched": key is not None, "n_urls": 0, "n_allowed": 0, "n_blocked": 0, "reasons": {}})
+        row["n_urls"] += 1
+        reason = fetch_block_reason(policy, host, u, manifest)
+        if reason is None:
+            row["n_allowed"] += 1
+        else:
+            row["n_blocked"] += 1
+            row["reasons"][reason] = row["reasons"].get(reason, 0) + 1
+    return [rows[g] for g in sorted(rows)]
+
+
+def policy_table_lines(table: list) -> list:
+    """policy_url_table の結果の表示 (取得できる数の多い順。末尾に合計)"""
+    if not table:
+        return []
+    lines = ["方針の集計 (取得できる / できない URL 数と理由。ネットワークに出ない):",
+             f"  {'ホスト群':<28} {'URL':>5} {'可':>5} {'不可':>5}  理由"]
+    for r in sorted(table, key=lambda r: (-r["n_allowed"], -r["n_urls"], r["group"])):
+        reasons = ", ".join(f"{k} {v}" for k, v in sorted(r["reasons"].items()))
+        lines.append(f"  {r['group'] + ('' if r['matched'] else ' (方針なし)'):<28} {r['n_urls']:>5} {r['n_allowed']:>5} {r['n_blocked']:>5}  {reasons}")
+    total = {k: sum(r[k] for r in table) for k in ("n_urls", "n_allowed", "n_blocked")}
+    lines.append(f"  {'合計':<28} {total['n_urls']:>5} {total['n_allowed']:>5} {total['n_blocked']:>5}")
+    return lines
+
+
 def fetch_units(plan: list, policy: dict, fetcher: Optional[Fetcher] = None, sleeper: Callable[[float], None] = time.sleep,
                 today: Optional[str] = None, adapters: Optional[dict] = None) -> tuple:
-    """計画の fetch 行を 1 本ずつ取得して unit に直す。同じホストへの要求の間は min_interval_s 以上空ける。
+    """計画の fetch 行を 1 本ずつ取得して unit に直す。同じホスト群への要求の間は min_interval_s 以上空ける (ホスト群 = 照合した方針の
+    項目の鍵。match = suffix の項目ははてなの別サブドメインどうしでも待つ。項目が無ければホスト名ごと。2026-10-30 判断)。
     → (unit の列, 取得の結果の行 [{"url_hash", "host", "status", "n_units", "body_chars"}])。本文は unit の中だけ (戻り値に生の HTML を入れない)"""
     fetcher = fetcher or default_fetcher()
     adapters = host_adapters() if adapters is None else adapters
@@ -152,19 +208,21 @@ def fetch_units(plan: list, policy: dict, fetcher: Optional[Fetcher] = None, sle
         if row["action"] != "fetch":
             continue
         host = row["host"]
-        entry = host_policy_entry(policy, host)
+        key = host_policy_key(policy, host)
+        group = key if key is not None else host                 # 待ち時間の単位 (ホスト群)
+        entry = policy[key] if key is not None else {}
         interval = float(entry.get("min_interval_s", BUILD_ARTICLE_FETCH_MIN_INTERVAL_S))
-        if host in last_at:
-            wait = interval - (time.monotonic() - last_at[host])
+        if group in last_at:
+            wait = interval - (time.monotonic() - last_at[group])
             if wait > 0:
                 sleeper(wait)
         try:
             body, ctype = fetcher(row["url"])
         except Exception as e:                                  # 取得の失敗: 本文も URL の中身も文言に入れない
             results.append({"url_hash": row["url_hash"], "host": host, "status": f"fetch_error:{type(e).__name__}", "n_units": 0, "body_chars": 0})
-            last_at[host] = time.monotonic()
+            last_at[group] = time.monotonic()
             continue
-        last_at[host] = time.monotonic()
+        last_at[group] = time.monotonic()
         html_text = decode_html(body, ctype)
         body_hash = hashlib.sha256(html_text.encode("utf-8")).hexdigest()[:16]
         source = {"url": row["url"], "host": host, "url_hash": row["url_hash"], "body_hash": body_hash, "fetched_at": today}
@@ -178,27 +236,32 @@ def run(urls: list, policy: dict, fetcher: Optional[Fetcher] = None, state_path:
         base_version: Optional[str] = None, aliases_path: Path = ALIASES_PATH, site_ids_path: Path = DEFAULT_SITE_IDS_PATH,
         dry_run: bool = False, refetch: bool = False, sleeper: Callable[[float], None] = time.sleep, today: Optional[str] = None,
         adapters: Optional[dict] = None, access_path: Path = DEFAULT_ACCESS_PATH, candidates_dir: Path = DEFAULT_CANDIDATES_DIR,
-        now: Optional[str] = None) -> dict:
+        now: Optional[str] = None, manifest: Optional[dict] = None) -> dict:
     """取得 → unit → process_batch → 保存。dry_run でもアクセスは取得履歴 (access.jsonl) に残し、構造化した候補 (candidates/) を書く
     (本文は書かない。2026-10-06 ユーザー判断: 確認のたびの再取得を減らす)。バンク・state・別名・観測は dry_run でなければ書く。
     バンクへは extend_bank (base_version の版に併合: 同じ系列の同一内容は足さない、更新は旧版と結ぶ、conflict / failed は入れない)。
     dry_run で base_version があれば併合の見込み (merge_cases、保存しない) を bank_merge に入れる (preview = True)。
+    取得履歴の行と候補には方針の版 (policy_stamp: policy_sha16 / policy_key / policy_decided_at) を入れる。manifest は allowed_from =
+    manifest の照合用 (None = 既定の manifest.json)。
     → {"plan", "fetch_results", "batch_counts", "records" (処理した記録の全部。バンクに入ったかは bank_merge.outcomes), "saved_to",
-       "bank_merge" (merge_cases の結果から cases を除いたもの。記録が無ければ None), "state_rows", "candidates_paths", ...}"""
+       "bank_merge" (merge_cases の結果から cases を除いたもの。記録が無ければ None), "state_rows", "candidates_paths",
+       "policy_table" (dry_run のときだけ: policy_url_table), ...}"""
     today = today or datetime.date.today().isoformat()
     now = now or datetime.datetime.now().isoformat(timespec="seconds")
-    plan = plan_urls(urls, policy, fetched_url_hashes(state_path, access_path), refetch)
+    plan = plan_urls(urls, policy, fetched_url_hashes(state_path, access_path), refetch, manifest)
+    psha = policy_version(policy)
     units, fetch_results = fetch_units(plan, policy, fetcher, sleeper, today, adapters)
     dic = default_dictionary()
     aliases = load_aliases(aliases_path)
     store = SiteIdStore.load(site_ids_path)
-    res = process_batch(units, dic, aliases, store, llm_resolver=None, policy=policy, today=today)
+    res = process_batch(units, dic, aliases, store, llm_resolver=None, policy=policy, today=today, manifest=manifest)
     # 取得履歴 (dry-run も含む)。本文なし
     url_of = {p["url_hash"]: p["url"] for p in plan}
     body_hash_of = {(u.get("source") or {}).get("url_hash"): (u.get("source") or {}).get("body_hash") for u in units}
-    append_access([{"at": now, "url": url_of.get(r["url_hash"]), "url_hash": r["url_hash"], "host": r["host"],
-                    "mode": "dry_run" if dry_run else "save", "status": r["status"], "body_hash": body_hash_of.get(r["url_hash"]),
-                    "body_chars": r["body_chars"], "n_units": r["n_units"], "count": 1} for r in fetch_results], access_path)
+    append_access([dict({"at": now, "url": url_of.get(r["url_hash"]), "url_hash": r["url_hash"], "host": r["host"],
+                         "mode": "dry_run" if dry_run else "save", "status": r["status"], "body_hash": body_hash_of.get(r["url_hash"]),
+                         "body_chars": r["body_chars"], "n_units": r["n_units"], "count": 1}, **policy_stamp(policy, r["host"], psha))
+                    for r in fetch_results], access_path)
     # 構造化した候補 (照合用。--from-candidates で再取得なしに保存できる)
     candidates_paths = []
     for r in fetch_results:
@@ -208,7 +271,8 @@ def run(urls: list, policy: dict, fetcher: Optional[Fetcher] = None, state_path:
         rows = [row for row in res["state_rows"] if row and row.get("url_hash") == r["url_hash"]]
         payload = {"fetched_at": today, "at": now, "url": url_of.get(r["url_hash"]), "url_hash": r["url_hash"], "host": r["host"],
                    "body_hash": body_hash_of.get(r["url_hash"]), "records": recs, "state_rows": rows,
-                   "counts": {k: v for k, v in res["counts"].items() if not str(k).startswith("llm_")}, "saved": not dry_run}
+                   "counts": {k: v for k, v in res["counts"].items() if not str(k).startswith("llm_")}, "saved": not dry_run,
+                   **policy_stamp(policy, r["host"], psha)}
         candidates_paths.append(str(save_candidates(r["url_hash"], payload, candidates_dir)))
     saved_to = None
     bank_merge = None
@@ -225,9 +289,12 @@ def run(urls: list, policy: dict, fetcher: Optional[Fetcher] = None, state_path:
         preview = merge_cases(load_bank(base_version, bank_dir, latest_only=False), res["records"])   # 見込みだけ (保存しない)
         bank_merge = dict({k: v for k, v in preview.items() if k != "cases"}, preview=True)
     units.clear()                                               # 本文の破棄
-    return {"plan": plan, "fetch_results": fetch_results, "batch_counts": res["counts"], "records": res["records"],
-            "saved_to": str(saved_to) if saved_to else None, "bank_merge": bank_merge, "state_rows": [r for r in res["state_rows"] if r],
-            "unresolved_names": res["unresolved_names"], "alias_entries": res["alias_entries"], "candidates_paths": candidates_paths}
+    out = {"plan": plan, "fetch_results": fetch_results, "batch_counts": res["counts"], "records": res["records"],
+           "saved_to": str(saved_to) if saved_to else None, "bank_merge": bank_merge, "state_rows": [r for r in res["state_rows"] if r],
+           "unresolved_names": res["unresolved_names"], "alias_entries": res["alias_entries"], "candidates_paths": candidates_paths}
+    if dry_run:
+        out["policy_table"] = policy_url_table(urls, policy, manifest)
+    return out
 
 
 def save_from_candidates(paths: list, bank_dir: Path = DEFAULT_BANK_DIR, base_version: Optional[str] = None,
@@ -324,6 +391,7 @@ def _summary_lines(out: dict, ja: bool = False) -> list:
     for p in out.get("candidates_paths") or []:
         lines.append(f"候補: {p}")
     lines.extend(_merge_lines(out.get("bank_merge")))
+    lines.extend(policy_table_lines(out.get("policy_table") or []))
     lines.append(f"保存: {out['saved_to'] or '(なし)'}")
     return lines
 
@@ -334,6 +402,7 @@ def main(argv: Optional[list] = None) -> int:
     g.add_argument("--url", action="append", help="取得する URL (複数可)。方針で許可された URL だけが取得される")
     g.add_argument("--from-candidates", nargs="+", metavar="FILE", help="dry-run で保存した構造化した候補をバンクに入れる (再取得しない)")
     ap.add_argument("--policy", default=str(DEFAULT_POLICY_PATH))
+    ap.add_argument("--manifest", default=str(DEFAULT_MANIFEST_PATH), help="方針の allowed_from = manifest で照合する取得対象の一覧")
     ap.add_argument("--state", default=str(DEFAULT_STATE_PATH))
     ap.add_argument("--access", default=str(DEFAULT_ACCESS_PATH), help="取得履歴 (dry-run を含む。本文なし)")
     ap.add_argument("--candidates-dir", default=str(DEFAULT_CANDIDATES_DIR), help="構造化した候補の保存先 (照合用。本文なし)")
@@ -355,7 +424,7 @@ def main(argv: Optional[list] = None) -> int:
     policy = load_policy(Path(args.policy))
     out = run(args.url, policy, state_path=Path(args.state), bank_dir=Path(args.bank_dir), base_version=args.base_version,
               aliases_path=Path(args.aliases), site_ids_path=Path(args.site_ids), dry_run=args.dry_run, refetch=args.refetch,
-              access_path=Path(args.access), candidates_dir=Path(args.candidates_dir))
+              access_path=Path(args.access), candidates_dir=Path(args.candidates_dir), manifest=load_manifest(Path(args.manifest)))
     for ln in _summary_lines(out, ja=args.ja):
         print(ln)
     return 0 if any(p["action"] == "fetch" for p in out["plan"]) else 1

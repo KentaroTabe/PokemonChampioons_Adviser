@@ -672,18 +672,32 @@ def splice_registered_sets(text: str, registered_text: str) -> tuple:
     return "\n\n".join(blocks) + "\n", replaced
 
 
-def validate_team_text(text: str, fmt: str, timeout: int = 60) -> tuple:
-    """Showdown の validate-team で合法性を検査する。(ok, errors)"""
+# validate-team そのものが動かなかったときの errors の先頭 (不合法と区別する: 2026-10-09 check_advisor_player.TeamLegality)
+VALIDATE_RUN_FAILED = "validate-team 実行失敗"
+
+
+def validate_team_text(text: str, fmt: str, timeout: int = 60, showdown_dir=None) -> tuple:
+    """Showdown の validate-team で合法性を検査する。(ok, errors)。showdown_dir (既定 SHOWDOWN_DIR) は pokemon-showdown の dir。
+    node が起動できない等で検査そのものが動かなければ errors の先頭が VALIDATE_RUN_FAILED で始まる"""
     try:
         res = subprocess.run(["node", "pokemon-showdown", "validate-team", fmt],
                              input=text, capture_output=True, text=True,
-                             cwd=str(SHOWDOWN_DIR), timeout=timeout)
+                             cwd=str(showdown_dir or SHOWDOWN_DIR), timeout=timeout)
     except Exception as e:
-        return False, [f"validate-team 実行失敗: {e!r}"]
+        return False, [f"{VALIDATE_RUN_FAILED}: {e!r}"]
     if res.returncode == 0:
         return True, []
     errs = [l for l in (res.stderr or res.stdout).splitlines() if l.strip()]
     return False, errs
+
+
+def validate_team_texts(texts, fmt: str, workers: int = 4, showdown_dir=None) -> list:
+    """本文の列を validate_team_text で並列に検査する。返り値は texts と同じ順の [(ok, errors)]。
+    1 件 0.27 秒 (node の起動) なので、プール全件 (276 件) は 4 並列で約 21 秒 (2026-10-09 実測)"""
+    from concurrent.futures import ThreadPoolExecutor
+    texts = list(texts)
+    with ThreadPoolExecutor(max_workers=max(1, int(workers))) as ex:
+        return list(ex.map(lambda t: validate_team_text(t, fmt, showdown_dir=showdown_dir), texts))
 
 
 def coverage_score(rows: dict) -> float:

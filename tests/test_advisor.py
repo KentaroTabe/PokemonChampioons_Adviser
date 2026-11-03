@@ -19,6 +19,13 @@ from advisor.damage import MonView, FieldView, calc_damage
 from advisor.engine import evaluate
 
 
+def _illegal(adv, mid):
+    """選択自体ができない技 (illegal_actions) を引く。2026-10-09 M1a (docs/ADVICE_ACCURACY_PLAN_1009.md 段 A-2) で、選べない技を
+    −99 点で actions に残す方式から、候補 (actions) から外して illegal_actions に理由を残す方式に変えた。actions に無いことも確かめる"""
+    assert all(a["id"] != mid for a in adv["actions"]), [a["id"] for a in adv["actions"]]
+    return next(a for a in adv["illegal_actions"] if a["id"] == mid)
+
+
 def approx(a, b, tol):
     assert abs(a - b) <= tol, f"{a} != {b} (+-{tol})"
 
@@ -162,15 +169,15 @@ def test_evaluate_end_to_end():
     sealed = copy.deepcopy(state)
     sealed["player"]["party"][0]["volatiles"] = ["taunt"]
     adv2 = evaluate(sealed)
-    protect = next(a for a in adv2["actions"] if a["id"] == "protect")
-    assert protect["score"] <= -90, protect
+    protect = _illegal(adv2, "protect")     # 旧: actions に score <= -90 で残っていた (M1a で候補から外す)
+    assert protect["legal"] is False, protect
     assert "ちょうはつ" in protect["reason"], protect
     # かなしばり: 封じられた技のみ除外される
     sealed["player"]["party"][0]["volatiles"] = ["disable",
                                                  "disable_dragonpulse"]
     adv3 = evaluate(sealed)
-    dp = next(a for a in adv3["actions"] if a["id"] == "dragonpulse")
-    assert dp["score"] <= -90, dp
+    dp = _illegal(adv3, "dragonpulse")      # 旧: actions に score <= -90
+    assert "かなしばり" in dp["reason"], dp
     es = next(a for a in adv3["actions"] if a["id"] == "electroshot")
     assert es["score"] > 0, es
     print("test_move_seal_filter OK")
@@ -180,8 +187,7 @@ def test_evaluate_end_to_end():
     sealed["player"]["party"][0]["volatiles"] = ["encore"]
     sealed["last_move"] = {"player": "dragonpulse"}
     adv4 = evaluate(sealed)
-    es4 = next(a for a in adv4["actions"] if a["id"] == "electroshot")
-    assert es4["score"] <= -90, es4
+    es4 = _illegal(adv4, "electroshot")     # 旧: actions に score <= -90
     assert "アンコール" in es4["reason"], es4
     dp4 = next(a for a in adv4["actions"] if a["id"] == "dragonpulse")
     assert dp4["score"] > 0, dp4
@@ -554,15 +560,8 @@ def test_ko_margin_prefers_overkill():
            "hp_current": None, "hp_max": None, "status": None, "boosts": {},
            "ability_id": None, "item_id": None, "moves": [],
            "revealed_moves": []}
-    prev = os.environ.get("RL_BLEND_WEIGHT")
-    os.environ["RL_BLEND_WEIGHT"] = "0"
-    try:
-        adv = evaluate(_mini_state(my, opp), resolver)
-    finally:
-        if prev is None:
-            os.environ.pop("RL_BLEND_WEIGHT", None)
-        else:
-            os.environ["RL_BLEND_WEIGHT"] = prev
+    # RL 加点 0 は引数で渡す (2026-10-07: 環境変数は起動時の既定値にしか効かなくなった。以前の書き換えと同じ意図)
+    adv = evaluate(_mini_state(my, opp), resolver, rl_blend_weight=0)
     ep = next(a for a in adv["actions"] if a["id"] == "earthpower")
     eb = next(a for a in adv["actions"] if a["id"] == "energyball")
     assert "抜群" in ep["reason"], ep
@@ -620,18 +619,11 @@ def test_noguard_makes_low_accuracy_moves_reliable():
            "hp_current": None, "hp_max": None, "status": None, "boosts": {},
            "ability_id": None, "item_id": None, "moves": [],
            "revealed_moves": []}
-    import os
-    prev = os.environ.get("RL_BLEND_WEIGHT")
-    os.environ["RL_BLEND_WEIGHT"] = "0"
-    try:
-        adv_ng = evaluate(_mini_state(_raichu("noguard"), dict(opp)), resolver)
-        adv_lr = evaluate(_mini_state(_raichu("lightningrod"), dict(opp)),
-                          resolver)
-    finally:
-        if prev is None:
-            os.environ.pop("RL_BLEND_WEIGHT", None)
-        else:
-            os.environ["RL_BLEND_WEIGHT"] = prev
+    # RL 加点 0 は引数で渡す (2026-10-07: 以前の環境変数の書き換えと同じ意図)
+    adv_ng = evaluate(_mini_state(_raichu("noguard"), dict(opp)), resolver,
+                      rl_blend_weight=0)
+    adv_lr = evaluate(_mini_state(_raichu("lightningrod"), dict(opp)),
+                      resolver, rl_blend_weight=0)
     zc_ng = next(a for a in adv_ng["actions"] if a["id"] == "zapcannon")
     zc_lr = next(a for a in adv_lr["actions"] if a["id"] == "zapcannon")
     assert "命中50" not in zc_ng["reason"], zc_ng
@@ -663,30 +655,23 @@ def test_taunt_context_bonus():
             "hp_current": None, "hp_max": None, "status": None, "boosts": {},
             "ability_id": None, "item_id": None, "moves": [],
             "revealed_moves": ["つきのひかり", "どくどく", "まもる"]}
-    prev = os.environ.get("RL_BLEND_WEIGHT")
-    os.environ["RL_BLEND_WEIGHT"] = "0"
-    try:
-        adv = evaluate(_mini_state(my, wall), resolver)
-        tnt = next(a for a in adv["actions"] if a["id"] == "taunt")
-        assert "変化技主体" in tnt["reason"], tnt
-        assert tnt["score"] >= 30, tnt
+    # RL 加点 0 は引数で渡す (2026-10-07: 以前の環境変数の書き換えと同じ意図)
+    adv = evaluate(_mini_state(my, wall), resolver, rl_blend_weight=0)
+    tnt = next(a for a in adv["actions"] if a["id"] == "taunt")
+    assert "変化技主体" in tnt["reason"], tnt
+    assert tnt["score"] >= 30, tnt
 
-        # 攻撃主体 (判明技が攻撃3): 加点なし
-        sweeper = {"species_id": "garchomp", "species_ja": "ガブリアス",
-                   "types": ["ドラゴン", "じめん"], "hp_percent": 100.0,
-                   "hp_current": None, "hp_max": None, "status": None,
-                   "boosts": {}, "ability_id": None, "item_id": None,
-                   "moves": [], "revealed_moves":
-                       ["じしん", "げきりん", "ストーンエッジ"]}
-        adv2 = evaluate(_mini_state(dict(my), sweeper), resolver)
-        tnt2 = next(a for a in adv2["actions"] if a["id"] == "taunt")
-        assert "変化技主体" not in tnt2["reason"], tnt2
-        assert tnt2["score"] < 30, tnt2
-    finally:
-        if prev is None:
-            os.environ.pop("RL_BLEND_WEIGHT", None)
-        else:
-            os.environ["RL_BLEND_WEIGHT"] = prev
+    # 攻撃主体 (判明技が攻撃3): 加点なし
+    sweeper = {"species_id": "garchomp", "species_ja": "ガブリアス",
+               "types": ["ドラゴン", "じめん"], "hp_percent": 100.0,
+               "hp_current": None, "hp_max": None, "status": None,
+               "boosts": {}, "ability_id": None, "item_id": None,
+               "moves": [], "revealed_moves":
+                   ["じしん", "げきりん", "ストーンエッジ"]}
+    adv2 = evaluate(_mini_state(dict(my), sweeper), resolver, rl_blend_weight=0)
+    tnt2 = next(a for a in adv2["actions"] if a["id"] == "taunt")
+    assert "変化技主体" not in tnt2["reason"], tnt2
+    assert tnt2["score"] < 30, tnt2
     print("test_taunt_context_bonus OK")
 
 
@@ -711,24 +696,17 @@ def test_redundant_setup_discount():
            "hp_current": None, "hp_max": None, "status": None, "boosts": {},
            "ability_id": None, "item_id": None, "moves": [],
            "revealed_moves": []}
-    prev = os.environ.get("RL_BLEND_WEIGHT")
-    os.environ["RL_BLEND_WEIGHT"] = "0"
-    try:
-        st = _mini_state(my, opp)
-        st["opponent"]["hazards"]["sticky_web"] = True
-        adv = evaluate(st, resolver)
-        web = next(a for a in adv["actions"] if a["id"] == "stickyweb")
-        assert web["score"] <= 5.0 and "設置済み" in web["reason"], web
-        # 未設置なら通常評価 (設置技ボーナスが付く)
-        st2 = _mini_state(dict(my), dict(opp))
-        adv2 = evaluate(st2, resolver)
-        web2 = next(a for a in adv2["actions"] if a["id"] == "stickyweb")
-        assert web2["score"] > 5.0, web2
-    finally:
-        if prev is None:
-            os.environ.pop("RL_BLEND_WEIGHT", None)
-        else:
-            os.environ["RL_BLEND_WEIGHT"] = prev
+    # RL 加点 0 は引数で渡す (2026-10-07: 以前の環境変数の書き換えと同じ意図)
+    st = _mini_state(my, opp)
+    st["opponent"]["hazards"]["sticky_web"] = True
+    adv = evaluate(st, resolver, rl_blend_weight=0)
+    web = next(a for a in adv["actions"] if a["id"] == "stickyweb")
+    assert web["score"] <= 5.0 and "設置済み" in web["reason"], web
+    # 未設置なら通常評価 (設置技ボーナスが付く)
+    st2 = _mini_state(dict(my), dict(opp))
+    adv2 = evaluate(st2, resolver, rl_blend_weight=0)
+    web2 = next(a for a in adv2["actions"] if a["id"] == "stickyweb")
+    assert web2["score"] > 5.0, web2
     print("test_redundant_setup_discount OK")
 
 
@@ -754,8 +732,8 @@ def test_choice_lock():
     state = _mini_state(my, opp)
     state["last_move"] = {"player": "bravebird", "opponent": None}
     adv = evaluate(state, resolver)
-    qa = next(a for a in adv["actions"] if a["id"] == "quickattack")
-    assert qa["score"] == -99.0 and "こだわり" in qa["reason"], qa
+    qa = _illegal(adv, "quickattack")       # 旧: actions に score == -99.0
+    assert "こだわり" in qa["reason"], qa
     bb = next(a for a in adv["actions"] if a["id"] == "bravebird")
     assert bb["score"] > -90, bb
     assert "こだわり中" in adv["speed_note"], adv["speed_note"]
@@ -766,6 +744,87 @@ def test_choice_lock():
     qa2 = next(a for a in adv2["actions"] if a["id"] == "quickattack")
     assert qa2["score"] > -90, qa2
     print("test_choice_lock OK")
+
+
+def test_first_turn_only_moves():
+    """であいがしら・ねこだまし は場に出た最初の行動でしか選べない (2026-10-07 ダメージ照合: 合法手 122/124 で
+    2 ターン目以降も であいがしら を第一候補にしていた)。場に出てから技を使った (last_move が今の個体の技) ときだけ
+    選べなくし、分からないとき (last_move なし / 今の個体の技でない) は制限しない"""
+    from advisor import effects as E
+    from advisor.engine import has_acted_since_entry
+    from vision.normalize import NameResolver
+    assert E.first_turn_only(E.move_entry("firstimpression")) and E.first_turn_only(E.move_entry("fakeout"))
+    assert not E.first_turn_only(E.move_entry("suckerpunch"))
+    assert has_acted_since_entry("ironhead", ["firstimpression", "ironhead"])
+    assert not has_acted_since_entry(None, ["firstimpression", "ironhead"])
+    assert not has_acted_since_entry("bravebird", ["firstimpression", "ironhead"])   # 前の個体の技 = 分からない
+    resolver = NameResolver()
+    my = {"species_id": "golisopod", "species_ja": "グソクムシャ",
+          "types": ["むし", "みず"], "hp_percent": 100.0,
+          "hp_current": 182, "hp_max": 182, "status": None, "boosts": {},
+          "ability_id": None, "item_id": None,
+          "moves": [
+              {"name_ja": "であいがしら", "move_id": "firstimpression",
+               "pp": 10, "max_pp": 10, "effectiveness": "super"},
+              {"name_ja": "アイアンヘッド", "move_id": "ironhead",
+               "pp": 15, "max_pp": 15, "effectiveness": "neutral"},
+          ], "revealed_moves": []}
+    opp = {"species_id": "meowscarada", "species_ja": "マスカーニャ",
+           "types": ["くさ", "あく"], "hp_percent": 100.0,
+           "hp_current": None, "hp_max": None, "status": None, "boosts": {},
+           "ability_id": None, "item_id": None, "moves": [],
+           "revealed_moves": []}
+    # 場に出た最初のターン (last_move なし): であいがしら を選べる
+    adv0 = evaluate(_mini_state(dict(my), dict(opp)), resolver, rl_blend_weight=0)
+    fi0 = next(a for a in adv0["actions"] if a["id"] == "firstimpression")
+    assert fi0["score"] > -90, fi0
+    # 場に出てから アイアンヘッド を使った後: であいがしら は選べない
+    st = _mini_state(dict(my), dict(opp))
+    st["last_move"] = {"player": "ironhead", "opponent": None}
+    adv = evaluate(st, resolver, rl_blend_weight=0)
+    fi = _illegal(adv, "firstimpression")   # 旧: actions に score == -99.0
+    assert "最初のターン" in fi["reason"], fi
+    assert adv["best"]["id"] != "firstimpression", adv["best"]
+    # last_move が今の個体の技でない (交代の取り逃し等で分からない) なら制限しない
+    st2 = _mini_state(dict(my), dict(opp))
+    st2["last_move"] = {"player": "bravebird", "opponent": None}
+    fi2 = next(a for a in evaluate(st2, resolver, rl_blend_weight=0)["actions"] if a["id"] == "firstimpression")
+    assert fi2["score"] > -90, fi2
+    print("test_first_turn_only_moves OK")
+
+
+def test_fainted_allies_context():
+    """エンジンは味方のひんしの数を calc_damage に渡す (2026-10-07 ダメージ照合: 渡していなかったため そうりょうのつかさ・
+    おはかまいり が過小)。自分の場の個体を除いた、その側の party の status == fainted を数える"""
+    from advisor.engine import fainted_allies_of
+    from vision.normalize import NameResolver
+    side = {"party": [{"status": "fainted"}, {"status": None}, {"status": "fainted"}, {}]}
+    assert fainted_allies_of(side, 1) == 2 and fainted_allies_of(side, 0) == 1 and fainted_allies_of({}, 0) == 0
+    resolver = NameResolver()
+    king = {"species_id": "kingambit", "species_ja": "ドドゲザン",
+            "types": ["あく", "はがね"], "hp_percent": 100.0,
+            "hp_current": 175, "hp_max": 175, "status": None, "boosts": {},
+            "ability_id": "supremeoverlord", "item_id": None,
+            "moves": [{"name_ja": "ドゲザン", "move_id": "kowtowcleave",
+                       "pp": 10, "max_pp": 10, "effectiveness": "neutral"}],
+            "revealed_moves": []}
+    opp = {"species_id": "garchomp", "species_ja": "ガブリアス",
+           "types": ["ドラゴン", "じめん"], "hp_percent": 100.0,
+           "hp_current": None, "hp_max": None, "status": None, "boosts": {},
+           "ability_id": None, "item_id": None, "moves": [],
+           "revealed_moves": []}
+    down = {"species_id": "corviknight", "species_ja": "アーマーガア", "types": ["ひこう", "はがね"],
+            "hp_percent": 0.0, "status": "fainted", "boosts": {}, "moves": [], "revealed_moves": []}
+
+    def cleave(n_fainted):
+        st = _mini_state(dict(king), dict(opp))
+        st["player"]["party"] = [dict(king)] + [dict(down) for _ in range(n_fainted)]
+        return next(a for a in evaluate(st, resolver, rl_blend_weight=0)["actions"] if a["id"] == "kowtowcleave")
+
+    c0, c2 = cleave(0), cleave(2)
+    assert "supremeoverlord" not in c0["reason"], c0
+    assert "supremeoverlord×1.2" in c2["reason"] and c2["score"] > c0["score"], (c0, c2)
+    print("test_fainted_allies_context OK")
 
 
 def test_registered_moves_fallback():
@@ -887,6 +946,8 @@ if __name__ == "__main__":
     test_noguard_makes_low_accuracy_moves_reliable()
     test_redundant_setup_discount()
     test_choice_lock()
+    test_first_turn_only_moves()
+    test_fainted_allies_context()
     test_registered_moves_fallback()
     test_rl_sees_registered_move_fallback()
     test_uncertain_bench_switch_penalty()

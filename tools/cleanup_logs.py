@@ -3,6 +3,7 @@
 - logs/battles/: 断片ログ (対戦シーンを含まない/レコードが少なく勝敗もない)
   を削除。書き込み中ファイルを消さないよう、更新から10分以上経過したもののみ
 - debug_frames/: 直近 KEEP_FRAMES 枚のみ残す (1枚≒3MBで無制限に増えるため)
+- debug_frames/burst/: 連続フレームの保存は新しい方から FRAME_BURST_KEEP_DIRS 回ぶんだけ残す (2026-10-07)
 - debug_frames_720_old/: 720p時代の旧デバッグ出力。存在すれば丸ごと削除
 
 使い方:
@@ -62,13 +63,39 @@ def cleanup(dry_run: bool = False) -> None:
                 f.unlink()
             removed_frames += 1
 
+    # 連続フレームの保存 (2026-10-07 段 0、vision/frame_burst): 新しい方から FRAME_BURST_KEEP_DIRS 回ぶんだけ残す
+    # (1 回 約 62 MB。保存フレームと同じく無制限に増えるため)
+    removed_bursts = 0
+    try:
+        from champions_agent.config import FRAME_BURST_DIR, FRAME_BURST_KEEP_DIRS
+        bdir = ROOT / FRAME_BURST_DIR
+        if bdir.exists():
+            for d in old_burst_dirs(sorted(bdir.glob("burst_*")), FRAME_BURST_KEEP_DIRS):
+                if not dry_run:
+                    shutil.rmtree(d, ignore_errors=True)
+                removed_bursts += 1
+    except Exception as e:
+        print(f"[cleanup] 連続保存の掃除をスキップ: {e}")
+
     if LEGACY_FRAME_DIR.exists():
         print(f"[cleanup] 旧デバッグ出力削除: {LEGACY_FRAME_DIR.name}/")
         if not dry_run:
             shutil.rmtree(LEGACY_FRAME_DIR)
 
     print(f"[cleanup] 断片ログ {removed_logs}件 / 古いフレーム {removed_frames}枚"
-          f"{' (dry-run)' if dry_run else ''}")
+          + (f" / 古い連続保存 {removed_bursts}回" if removed_bursts else "")
+          + f"{' (dry-run)' if dry_run else ''}")
+
+
+def old_burst_dirs(dirs: list, keep: int) -> list:
+    """連続保存のディレクトリ (burst_<開始の unix 秒>) のうち、新しい方から keep 個を除いた古いもの (純粋。名前の時刻で並べる)"""
+    def ts(p) -> int:
+        try:
+            return int(Path(p).name.split("_", 1)[1])
+        except (IndexError, ValueError):
+            return 0
+    ordered = sorted(dirs, key=ts)
+    return ordered[:-keep] if keep > 0 else list(ordered)
 
 
 if __name__ == "__main__":

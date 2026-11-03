@@ -89,6 +89,12 @@ def species_ja_name(species_id: str) -> str:
             _ID2JA.setdefault(v["id"], ja)
     if species_id in _ID2JA:
         return _ID2JA[species_id]
+    # シミュレータの id と図鑑の id が別名のもの (indeedeef → indeedeefemale 等、advisor.dex.canonical_species_id) は
+    # 図鑑の id の名前にする (2026-10-09 M2e: 送った本文の登録と場の個体が同じ名前になる)
+    from advisor.dex import species_aliases
+    alias = species_aliases().get(species_id or "")
+    if alias and alias != species_id:
+        return species_ja_name(alias)
     if species_id in _FORM_EXPLICIT:
         return _FORM_EXPLICIT[species_id]
     for suf, fmt in _FORM_SUFFIXES:
@@ -150,36 +156,62 @@ def prior_weights(latest_rows: list, past_rows: list) -> dict:
 
 
 class TypeInference:
-    """タイプ構成 -> 種族候補 (確率付き) の推測器"""
+    """タイプ構成 -> 種族候補 (確率付き) の推測器
 
-    def __init__(self):
+    2026-10-23 (レビュー 2026-10-19 §2): 読む DB と snapshot は advisor.data_pin で明示できる。明示したときは参照範囲を
+    「指定 snapshot id 以下」に固定し (全履歴から候補を作るので id だけでなく範囲も固定する)、無い snapshot なら
+    InputsPinError で止める。明示が無ければ従来どおり DB の最新を「最新」、それ以外の全行を「過去」にする"""
+
+    def __init__(self, db_path=None, snapshot_id: Optional[int] = None):
         self._index: dict[frozenset, list] = {}
-        self._build()
+        self.snapshot_id: Optional[int] = None
+        self._build(db_path, snapshot_id)
 
-    def _build(self) -> None:
-        if not DB_PATH.exists():
-            return
+    def _build(self, db_path=None, snapshot_id: Optional[int] = None) -> None:
+        from advisor.data_pin import connect_usage, resolve_snapshot, usage_source
+        src = usage_source()
+        pinned = bool(src["pinned"] or snapshot_id is not None)
+        db = db_path if db_path is not None else (src["db"] if src["pinned"] else DB_PATH)
+        want = snapshot_id if snapshot_id is not None else src["snapshot_id"]
+        if pinned:
+            # 版を明示したとき: DB・snapshot が無ければ InputsPinError (握りつぶさない)
+            conn = connect_usage(db, True)
+            try:
+                latest_id = resolve_snapshot(conn, want, True)
+            except Exception:
+                conn.close()
+                raise
+        else:
+            if not db.exists():
+                return
+            conn = None
         dex = get_dex()
         try:
-            conn = sqlite3.connect(str(DB_PATH))
+            if conn is None:
+                conn = sqlite3.connect(str(db))
             conn.row_factory = sqlite3.Row
-            snap = conn.execute(
-                "SELECT id FROM usage_snapshot ORDER BY id DESC LIMIT 1").fetchone()
-            if snap is None:
-                return
+            if not pinned:
+                snap = conn.execute(
+                    "SELECT id FROM usage_snapshot ORDER BY id DESC LIMIT 1").fetchone()
+                if snap is None:
+                    conn.close()
+                    return
+                latest_id = snap["id"]
             # 全スナップショットを読む: 最新だけだと約半数の種族が候補から
             # 消える (実測: 最新235種/全期間491種。むし/ひこう構成の
-            # ストライク等が推測不能だった)
+            # ストライク等が推測不能だった)。版を明示したときは指定 snapshot id 以下だけ
             cols = {r["name"] for r in conn.execute("PRAGMA table_info(pokemon_usage)")}
             rank_col = "rank" if "rank" in cols else "NULL"     # 順位の列が無い古い DB でも読めるように
-            rows = conn.execute(
-                f"SELECT pokemon_name, usage_percent, snapshot_id, {rank_col} AS rank "
-                "FROM pokemon_usage").fetchall()
+            sql = f"SELECT pokemon_name, usage_percent, snapshot_id, {rank_col} AS rank FROM pokemon_usage"
+            rows = (conn.execute(sql + " WHERE snapshot_id <= ?", (int(latest_id),)).fetchall() if pinned
+                    else conn.execute(sql).fetchall())
             conn.close()
         except Exception:
+            if pinned:
+                raise
             return
+        self.snapshot_id = int(latest_id)
 
-        latest_id = snap["id"]
         usage = prior_weights(
             [(r["pokemon_name"], r["usage_percent"], r["rank"]) for r in rows if r["snapshot_id"] == latest_id],
             [(r["pokemon_name"], r["usage_percent"]) for r in rows if r["snapshot_id"] != latest_id])

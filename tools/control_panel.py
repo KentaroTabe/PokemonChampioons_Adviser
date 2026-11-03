@@ -35,7 +35,9 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
-from champions_agent.config import BUILD_SMOKE_CANARY_BATTLES
+from champions_agent.config import ADVICE_SCORING_MODES, BUILD_SMOKE_CANARY_BATTLES, transition_sensitivity_from_value
+from tools.advice_mode import (LOCAL_FILE_REL, PIN_KEYS, PIN_SOURCE_KEY, SOURCES, file_view, mismatch, pin_file_view,
+                               pin_mismatch, read_local_text, sens_file_view, sens_onoff)
 from tools.analyze_battles import MIN_BATTLE_SCENES, _parse_battle
 
 REPO = Path(__file__).resolve().parent.parent
@@ -44,7 +46,37 @@ FRAME_STAT_RE = re.compile(r"受信=(\d+) 処理=(\d+) 破棄=(\d+)")
 POST_HEADER = "X-Control-Panel"        # fetch だけが付けられるヘッダ。別サイトのフォーム送信からの実行を弾く
 LOG_NAME_SEP = "__"                    # logs/control_panel/<時刻><SEP><操作>.log
 ADVISOR_PATTERN = "uvicorn server:app_asgi"      # scripts/lib/ports.sh と同じ「自分たち」の判定
-FRONTEND_PATTERN = "http.server"
+PORTS_LIB = REPO / "scripts" / "lib" / "ports.sh"
+_SHELL_ASSIGN_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)="([^"]*)"\s*(?:#.*)?$')
+_SHELL_VAR_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
+_SCORING_ENV_RE = re.compile(r"(?:^|\s)ADVICE_SCORING_MODE=(\S*)")
+_SCORING_SOURCE_RE = re.compile(r"(?:^|\s)ADVICE_SCORING_MODE_SOURCE=(\S*)")
+_SENS_ENV_RE = re.compile(r"(?:^|\s)TRANSITION_SENSITIVITY=(\S*)")
+_SENS_SOURCE_RE = re.compile(r"(?:^|\s)TRANSITION_SENSITIVITY_SOURCE=(\S*)")
+# データの固定 (2026-10-23)。パスに空白を含む値は読めない (--freeze-data の写しは logs/pinned_data/<時刻>/bank.json)
+_PIN_ENV_RES = {k: re.compile(r"(?:^|\s)" + k + r"=(\S*)") for k in PIN_KEYS}
+_PIN_SOURCE_RE = re.compile(r"(?:^|\s)" + PIN_SOURCE_KEY + r"=(\S*)")
+
+
+def shell_assignments(text: str) -> dict:
+    """bash の行頭の `NAME="値"` を上から読む (純粋)。値の中の $NAME / ${NAME} は先に読んだ値で置き換える (無ければ空)"""
+    out: dict = {}
+    for line in text.splitlines():
+        m = _SHELL_ASSIGN_RE.match(line)
+        if m:
+            out[m.group(1)] = _SHELL_VAR_RE.sub(lambda v: out.get(v.group(1), ""), m.group(2))
+    return out
+
+
+def ports_lib_value(name: str, path: Path = PORTS_LIB) -> str:
+    """scripts/lib/ports.sh の変数の値 (フロントの判定のパターンはそこだけで定義する。2026-10-07)"""
+    v = shell_assignments(Path(path).read_text(encoding="utf-8")).get(name)
+    if not v:
+        raise RuntimeError(f"{path} に {name} の定義が無い")
+    return v
+
+
+FRONTEND_PATTERN = ports_lib_value("FRONTEND_PATTERN")   # tools.frontend_server (2026-10-07 までは http.server)
 SHOWDOWN_PATTERN = "pokemon-showdown"
 TRAINING_PATTERN = "train_forever"
 MEASURING_PATTERN = "tools.team_build.run|check_advisor_player"   # 構築の測定。接続テストとの同時実行は不可 (第14回)
@@ -147,6 +179,10 @@ class Probe:
     def lan_ip(self) -> str:
         return _run(["ipconfig", "getifaddr", "en0"]).strip() or "localhost"
 
+    def process_env(self, pid: int) -> str:
+        """プロセスのコマンドと環境変数 (ps eww。自分のユーザーのプロセスだけ読める)"""
+        return _run(["ps", "eww", "-o", "command=", "-p", str(int(pid))])
+
 
 def service_state(probe: Probe, last_port: int, default_port: int, pattern: str) -> dict:
     """前回使ったポート → 既定ポートの順に「自分たちのコマンドが待ち受けているか」を見る (scripts/lib/ports.sh の choose_port と同じ順)。
@@ -157,6 +193,123 @@ def service_state(probe: Probe, last_port: int, default_port: int, pattern: str)
             return {"state": "ours", "port": p, "pid": ln["pid"]}
     ln = probe.listener(default_port)
     return {"state": "foreign" if ln else "free", "port": default_port, "pid": (ln or {}).get("pid")}
+
+
+def scoring_mode_from_ps(text: str, modes: tuple = ADVICE_SCORING_MODES) -> Optional[dict]:
+    """ps eww の出力 (コマンド + 環境変数) から、アドバイザーが使う採点方式 (純粋。2026-10-16 実機の受入)。
+    {"mode", "env" (環境変数の生の値 or None), "source": env / default (変数なし = 既定 legacy) / invalid (読めない値 → legacy)}。
+    出力が空 (プロセスが読めない) なら None。判定の規則は champions_agent.config._advice_scoring_mode_from_env と同じ"""
+    if not (text or "").strip():
+        return None
+    m = _SCORING_ENV_RE.search(text)
+    raw = m.group(1) if m else None
+    v = (raw or "").strip().lower()
+    if not v:
+        return {"mode": "legacy", "env": raw, "source": "default"}
+    if v not in modes:
+        return {"mode": "legacy", "env": raw, "source": "invalid"}
+    return {"mode": v, "env": raw, "source": "env"}
+
+
+def scoring_config_view(file_text: Optional[str], ps_text: str, running: Optional[dict],
+                        file_error: Optional[str] = None) -> dict:
+    """採点方式の設定値・実効値・設定元 (純粋。2026-10-16 方式 C)。file_text = config/advice.local.env の内容 (無ければ None)、
+    ps_text = アドバイザーの ps eww の出力 (停止中・読めなければ空)、running = scoring_mode_from_ps の戻り値。
+    {"file": tools.advice_mode.file_view, "running_source": advice_env.sh が渡した設定元 (file / env / default。
+    advice_env.sh を通さない起動・停止中は None), "mismatch": 設定値と稼働中の実効値が違う (再起動していない等)}。
+    file_error = ファイルを開けなかったときの理由 (読めない設定として扱う)"""
+    view = file_view(file_text)
+    if file_error:
+        view = {**view, "exists": True, "mode": None, "configured": None, "error": file_error}
+    m = _SCORING_SOURCE_RE.search(ps_text or "")
+    src = m.group(1) if m else None
+    return {"file": view, "running_source": src if src in SOURCES else None,
+            "mismatch": mismatch(view, (running or {}).get("mode"))}
+
+
+def sensitivity_from_ps(text: str) -> Optional[dict]:
+    """ps eww の出力から、アドバイザーの transition の感度の実効値と設定元 (純粋。2026-10-18)。{"enabled" (bool),
+    "env" (環境変数 TRANSITION_SENSITIVITY の生の値 or None), "source" (advice_env.sh が渡した file / env / default。通さない起動は
+    環境変数があれば env、無ければ None = config の既定 (計算する))}。出力が空 (プロセスが読めない) なら None。
+    実効値の規則は champions_agent.config.transition_sensitivity_from_value と同じ"""
+    if not (text or "").strip():
+        return None
+    m = _SENS_ENV_RE.search(text)
+    raw = m.group(1) if m else None
+    ms = _SENS_SOURCE_RE.search(text)
+    src = ms.group(1) if ms else None
+    if src not in SOURCES:
+        src = "env" if (raw or "").strip() else None
+    return {"enabled": transition_sensitivity_from_value(raw), "env": raw, "source": src}
+
+
+def sensitivity_config_view(file_text: Optional[str], ps_text: str, file_error: Optional[str] = None) -> dict:
+    """transition の感度の設定値 (ファイル)・実効値 (稼働中)・設定元 (純粋。2026-10-18)。{"file": tools.advice_mode.sens_file_view,
+    "running": sensitivity_from_ps の戻り値 (停止中・読めなければ None), "mismatch": 設定値 (advice_env.sh を通したときの値) と
+    稼働中の実効値が違う}"""
+    view = sens_file_view(file_text)
+    if file_error:
+        view = {**view, "exists": True, "value": None, "configured": None, "error": file_error}
+    run = sensitivity_from_ps(ps_text)
+    mis = bool(run) and view.get("configured") is not None and sens_onoff(view["configured"]) != sens_onoff(run["enabled"])
+    return {"file": view, "running": run, "mismatch": mis}
+
+
+def sensitivity_config_warnings(cfg: dict) -> list:
+    """transition の感度の設定の警告 (純粋。設定ファイルが読めないときは採点方式の警告に出るので重ねない)"""
+    f = cfg["file"]
+    if not f.get("error") and cfg.get("mismatch"):
+        return [f"transition の感度の設定値 ({sens_onoff(f['configured'])}) と稼働中のアドバイザーの実効値が違います。"
+                "反映するには「更新の反映」か「接続テスト開始」で再起動してください"]
+    return []
+
+
+def data_pin_from_ps(text: str) -> Optional[dict]:
+    """ps eww の出力から、アドバイザーのデータの固定の実効値と設定元 (純粋。2026-10-23)。{"values": {鍵: 値 or None},
+    "source": advice_env.sh が渡した設定元 (file / env / file+env / default。通さない起動は鍵があれば env、無ければ None)}。
+    出力が空 (プロセスが読めない) なら None"""
+    if not (text or "").strip():
+        return None
+    vals = {}
+    for k, rx in _PIN_ENV_RES.items():
+        m = rx.search(text)
+        vals[k] = (m.group(1) if m else "") or None
+    ms = _PIN_SOURCE_RE.search(text)
+    src = ms.group(1) if ms else None
+    if src not in ("file", "env", "file+env", "default"):
+        src = "env" if any(vals.values()) else None
+    return {"values": vals, "source": src}
+
+
+def data_pin_config_view(file_text: Optional[str], ps_text: str, file_error: Optional[str] = None) -> dict:
+    """データの固定の設定値 (ファイル)・実効値 (稼働中)・設定元 (純粋。2026-10-23)。{"file": tools.advice_mode.pin_file_view,
+    "running": data_pin_from_ps の戻り値 (停止中・読めなければ None), "mismatch": 設定値と稼働中の実効値が違う}"""
+    view = pin_file_view(file_text)
+    if file_error:
+        view = {**view, "exists": True, "values": None, "pinned": None, "error": file_error}
+    run = data_pin_from_ps(ps_text)
+    return {"file": view, "running": run, "mismatch": pin_mismatch(view, (run or {}).get("values") if run else None)}
+
+
+def data_pin_config_warnings(cfg: dict) -> list:
+    """データの固定の警告 (純粋。設定ファイルが読めないときは採点方式の警告に出るので重ねない)"""
+    f = cfg["file"]
+    if not f.get("error") and cfg.get("mismatch"):
+        return ["データの固定 (使用率の snapshot・実戦バンクの写し) の設定値と稼働中のアドバイザーの実効値が違います。"
+                "反映するには「更新の反映」か「接続テスト開始」で再起動してください"]
+    return []
+
+
+def scoring_config_warnings(cfg: dict) -> list:
+    """採点方式の設定の警告 (純粋)"""
+    out = []
+    f = cfg["file"]
+    if f.get("error"):
+        out.append(f"採点方式の設定ファイルが読めません: {f['error']} (このままでは接続テスト開始・更新の反映がエラーで止まります)")
+    elif cfg.get("mismatch"):
+        out.append(f"採点方式の設定値 ({f['configured']}) と稼働中のアドバイザーの実効値が違います。"
+                   "反映するには「更新の反映」か「接続テスト開始」で再起動してください")
+    return out
 
 
 # ------------------------------------------------------------------ 実測 (ファイル)
@@ -369,10 +522,35 @@ class Panel:
         if marker is not None and advisor["state"] != "ours":
             warnings.append("接続テストの開始マーカーがあるのにアドバイザーが動いていません (終了処理を実行するか、開始し直してください)")
         ip = probe.lan_ip()
+        # アドバイザーが使っている採点方式 (2026-10-16 実機の受入。プロセスの環境変数を実測。読めなければ None)
+        scoring = None
+        ps_text = ""
+        penv = getattr(probe, "process_env", None)
+        if advisor["state"] == "ours" and advisor.get("pid") and penv is not None:
+            ps_text = penv(advisor["pid"])
+            scoring = scoring_mode_from_ps(ps_text)
+        # 設定値 (config/advice.local.env) と設定元 (2026-10-16 方式 C)。食い違いは警告にも出す
+        file_text, file_error = None, None
+        try:
+            file_text = read_local_text(root / LOCAL_FILE_REL)
+        except OSError as e:
+            file_error = f"{LOCAL_FILE_REL}: {e}"
+        scoring_config = scoring_config_view(file_text, ps_text, scoring, file_error)
+        warnings += scoring_config_warnings(scoring_config)
+        # transition の感度 (2026-10-18): 設定値・実効値・設定元
+        sensitivity_config = sensitivity_config_view(file_text, ps_text, file_error)
+        warnings += sensitivity_config_warnings(sensitivity_config)
+        # データの固定 (2026-10-23): 設定値・実効値・設定元
+        data_pin_config = data_pin_config_view(file_text, ps_text, file_error)
+        warnings += data_pin_config_warnings(data_pin_config)
         return {
             "now": time.time(),
             "processes": {"advisor": advisor, "frontend": frontend, "showdown": showdown,
                           "training": training, "measuring": measuring},
+            "scoring": scoring,
+            "scoring_config": scoring_config,
+            "sensitivity_config": sensitivity_config,
+            "data_pin_config": data_pin_config,
             # フロントの URL は自分たちが待ち受けているときだけ (停止中に既定ポートを出すと別のプロセスを指してしまう)
             "urls": {"frontend": (f"http://{ip}:{frontend['port']}" if frontend["state"] == "ours" else None),
                      "frontend_local": (f"http://localhost:{frontend['port']}" if frontend["state"] == "ours" else None)},
@@ -446,13 +624,72 @@ function svc(name, s) {
   const txt = s.state === 'ours' ? `稼働中 (${s.port}, pid ${s.pid})` : s.state === 'foreign' ? `別のプロセスが ${s.port} を使用中` : `停止 (${s.port})`;
   return `<div class="row"><span>${name}</span>${badge(s.state === 'ours', txt, txt, s.state === 'foreign' ? 'warn' : 'off')}</div>`;
 }
+function scoringText(sc, adv) {
+  if (adv.state !== 'ours') return '- (停止中)';
+  if (!sc) return '不明 (プロセスの環境変数を読めない)';
+  const src = sc.source === 'env' ? '環境変数' : sc.source === 'invalid' ? `環境変数の値 ${esc(sc.env)} は無効 → 既定` : '既定';
+  return `${esc(sc.mode)} (${src})`;
+}
+const SOURCE_JA = {file: 'file (設定ファイル)', env: 'env (起動時の環境変数)', default: 'default (どちらも無し = legacy)'};
+function scoringRows(sc, cfg, adv) {
+  const f = (cfg || {}).file || {};
+  const conf = f.error ? `<span class="badge warn">読めない</span> ${esc(f.error)}`
+    : f.mode ? `${esc(f.mode)} (${esc(f.path)})` : `未設定 = legacy (${esc(f.path)} ${f.exists ? 'に鍵なし' : 'なし'})`;
+  const run = scoringText(sc, adv);
+  const srcTxt = adv.state !== 'ours' ? '-' : (cfg && cfg.running_source) ? esc(SOURCE_JA[cfg.running_source] || cfg.running_source)
+    : sc ? '記録なし (advice_env.sh を通さない起動)' : '不明';
+  const mis = cfg && cfg.mismatch;
+  return `<div class="row"><span>採点方式 (アドバイザー)</span>${mis ? '<span class="badge warn">設定値と実効値が違う (再起動していない)</span>' : '<span></span>'}</div>`
+    + `<div class="row"><span>　設定値 (ファイル)</span><span>${conf}</span></div>`
+    + `<div class="row"><span>　実効値 (稼働中)</span>${mis ? `<span class="badge warn">${run}</span>` : `<span>${run}</span>`}</div>`
+    + `<div class="row"><span>　設定元</span><span>${srcTxt}</span></div>`;
+}
+const SENS_SOURCE_JA = {file: 'file (設定ファイル)', env: 'env (起動時の環境変数)', default: 'default (どちらも無し = off)'};
+function sensRows(cfg, adv) {
+  const f = (cfg || {}).file || {};
+  const onoff = (v) => (v === '1' || v === true) ? 'on' : 'off';
+  const conf = f.error ? `<span class="badge warn">読めない</span>`
+    : f.value ? `${onoff(f.value)} (${esc(f.path)})` : `未設定 = off (${esc(f.path)} ${f.exists ? 'に鍵なし' : 'なし'})`;
+  const r = (cfg || {}).running;
+  const run = adv.state !== 'ours' ? '- (停止中)' : !r ? '不明 (プロセスの環境変数を読めない)'
+    : `${onoff(r.enabled)}${r.env != null ? ` (TRANSITION_SENSITIVITY=${esc(r.env)})` : ' (環境変数なし = config の既定)'}`;
+  const srcTxt = adv.state !== 'ours' ? '-' : !r ? '不明' : r.source ? esc(SENS_SOURCE_JA[r.source] || r.source)
+    : '記録なし (advice_env.sh を通さない起動)';
+  const mis = cfg && cfg.mismatch;
+  return `<div class="row"><span>transition の感度 (アドバイザー)</span>${mis ? '<span class="badge warn">設定値と実効値が違う (再起動していない)</span>' : '<span></span>'}</div>`
+    + `<div class="row"><span>　設定値 (ファイル)</span><span>${conf}</span></div>`
+    + `<div class="row"><span>　実効値 (稼働中)</span>${mis ? `<span class="badge warn">${run}</span>` : `<span>${run}</span>`}</div>`
+    + `<div class="row"><span>　設定元</span><span>${srcTxt}</span></div>`;
+}
+const PIN_KEYS = ['ADVICE_USAGE_SNAPSHOT', 'ADVICE_REAL_BANK', 'ADVICE_REAL_BANK_SHA16'];
+function pinText(v) {
+  if (!v || !PIN_KEYS.some((k) => v[k])) return 'なし (最新の snapshot・logs/real_opponents/bank.json)';
+  return `snapshot ${esc(v.ADVICE_USAGE_SNAPSHOT || '最新')} / バンク ${esc(v.ADVICE_REAL_BANK || 'logs/real_opponents/bank.json')}`
+    + (v.ADVICE_REAL_BANK_SHA16 ? ` (sha16 ${esc(v.ADVICE_REAL_BANK_SHA16)})` : '');
+}
+function pinRows(cfg, adv) {
+  const f = (cfg || {}).file || {};
+  const conf = f.error ? `<span class="badge warn">読めない</span>`
+    : f.pinned ? `${pinText(f.values)} (${esc(f.path)})` : `未設定 = 最新 (${esc(f.path)} ${f.exists ? 'に鍵なし' : 'なし'})`;
+  const r = (cfg || {}).running;
+  const run = adv.state !== 'ours' ? '- (停止中)' : !r ? '不明 (プロセスの環境変数を読めない)' : pinText(r.values);
+  const srcTxt = adv.state !== 'ours' ? '-' : !r ? '不明' : r.source ? esc(r.source) : '記録なし (advice_env.sh を通さない起動)';
+  const mis = cfg && cfg.mismatch;
+  return `<div class="row"><span>データの固定 (アドバイザー)</span>${mis ? '<span class="badge warn">設定値と実効値が違う (再起動していない)</span>' : '<span></span>'}</div>`
+    + `<div class="row"><span>　設定値 (ファイル)</span><span>${conf}</span></div>`
+    + `<div class="row"><span>　実効値 (稼働中)</span>${mis ? `<span class="badge warn">${run}</span>` : `<span>${run}</span>`}</div>`
+    + `<div class="row"><span>　設定元</span><span>${srcTxt}</span></div>`;
+}
 function render(st) {
   $('clock').textContent = new Date(st.now * 1000).toLocaleTimeString('ja-JP');
   $('warnings').innerHTML = (st.warnings || []).map((w) => `<div class="warnbox">⚠ ${esc(w)}</div>`).join('');
   const p = st.processes;
   $('procs').innerHTML = svc('アドバイザー', p.advisor) + svc('フロントエンド', p.frontend) + svc('Showdown', p.showdown)
     + `<div class="row"><span>学習ループ</span>${badge(p.training, '稼働中', '停止中')}</div>`
-    + `<div class="row"><span>構築の測定 run</span>${badge(!p.measuring, 'なし', '実行中', 'warn')}</div>`;
+    + `<div class="row"><span>構築の測定 run</span>${badge(!p.measuring, 'なし', '実行中', 'warn')}</div>`
+    + scoringRows(st.scoring, st.scoring_config, p.advisor)
+    + sensRows(st.sensitivity_config, p.advisor)
+    + pinRows(st.data_pin_config, p.advisor);
   $('urls').innerHTML = st.urls.frontend
     ? `フロントエンド: <a href="${st.urls.frontend}" target="_blank">${st.urls.frontend}</a> `
       + `(このMac: <a href="${st.urls.frontend_local}" target="_blank">${st.urls.frontend_local}</a>)`

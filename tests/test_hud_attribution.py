@@ -381,7 +381,8 @@ def test_watch_opp_zero_needs_corroboration():
         return "0%" if "%" in allow else ""
 
     ocr.read_zone_text = fake_read
-    spriteid.identify_species_color = lambda crop_img, cands: (0.9, "ガブリアス")
+    # detail= (照合の材料の記録、2026-10-09 fix/hp-ocr-watch で様子見の右列から渡す) も受け取る
+    spriteid.identify_species_color = lambda crop_img, cands, **kw: (0.9, "ガブリアス")
     try:
         img = np.zeros((720, 1280, 3), dtype=np.uint8)
         extractors.extract_watch_side_columns(img, st, NameResolver())

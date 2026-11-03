@@ -60,6 +60,12 @@ _JA2EN_TYPES = {"ノーマル": "normal", "ほのお": "fire", "みず": "water"
 
 _model = None
 _model_tried = False
+# 実際に読み込んだファイル (2026-10-31 E-inh-4。version 行の action_policy に残す): パス・sha16・退避の理由・固定したか・固定の異常
+_model_path: Optional[str] = None
+_model_sha: Optional[str] = None
+_model_fallback: Optional[str] = None
+_model_pinned = False
+_model_pin_error = None          # 明示した方策を読めなかったときの InputsPinError (呼ばれるたびに送り直す)
 
 
 def _policy_candidates(style: str, source: str) -> list:
@@ -80,11 +86,58 @@ def _policy_candidates(style: str, source: str) -> list:
     return orders.get(source) or orders["best"]
 
 
+def policy_choice(order: list, exists) -> tuple:
+    """読み込み順 order と有無の判定 exists(name) → (読むファイル名, 退避の理由 or None) (純粋)。
+    先頭があれば理由 None。先頭が無く次以降にあれば「<先頭> なし → <読む名>」、どれも無ければ「方策ファイルなし (<先頭> ほか)」で
+    最後の名前を返す (従来どおり読み込みを試して失敗する)。2026-10-31 E-inh-4: 理由なしで best へ移っていた"""
+    for i, n in enumerate(order):
+        if exists(n):
+            return n, (None if i == 0 else f"{order[0]} なし → {n}")
+    return order[-1], f"方策ファイルなし ({order[0]} ほか {len(order) - 1} 件)"
+
+
+def reset_model() -> None:
+    """読み込み済みの方策と記録を捨てる (次の _load_model で今の固定・ファイルから読み直す)"""
+    global _model, _model_tried, _model_path, _model_sha, _model_fallback, _model_pinned, _model_pin_error
+    _model, _model_tried = None, False
+    _model_path = _model_sha = _model_fallback = None
+    _model_pinned, _model_pin_error = False, None
+
+
 def _load_model():
-    global _model, _model_tried
+    global _model, _model_tried, _model_path, _model_sha, _model_fallback, _model_pinned, _model_pin_error
     if _model_tried:
+        if _model_pin_error is not None:
+            raise _model_pin_error
         return _model
     _model_tried = True
+    _model_path = _model_sha = _model_fallback = None
+    _model_pinned, _model_pin_error = False, None
+    from advisor.data_pin import InputsPinError, check_model_file, model_source, sha16_bytes
+    try:
+        src = model_source("rl_policy")
+    except InputsPinError as e:
+        # 版の固定の bundle が不正・個別の鍵と矛盾 (2026-10-31): 呼ばれるたびに止める (黙って RL なしにしない)
+        _model, _model_pinned, _model_pin_error = None, True, e
+        raise
+    if src["pinned"]:
+        # 版を明示したとき (2026-10-31 E-inh-4): そのファイルだけを読む。無い・sha16 が違う・読み込めなければ InputsPinError
+        # (ema → best → 無印 へ退避しない。RL 提案を黙って無効にもしない)
+        _model_pinned = True
+        try:
+            sha = check_model_file("rl_policy", src["path"], src["sha16"])
+            from sb3_contrib import MaskablePPO
+            model = MaskablePPO.load(str(src["path"]), device="cpu")
+        except InputsPinError as e:
+            _model, _model_pin_error = None, e
+            raise
+        except Exception as e:
+            _model = None
+            _model_pin_error = InputsPinError(f"明示した RL 方策 {src['path']} を読み込めない: {e!r}"[:300])
+            raise _model_pin_error
+        _model, _model_path, _model_sha = model, str(src["path"]), sha
+        print(f"[rl_bridge] 学習済み方策をロード (固定): {src['path']} sha16 {sha}")
+        return _model
     style = os.environ.get("RL_ADVICE_STYLE", "balance")
     # 読み込み元の優先順は RL_POLICY_SOURCE で選ぶ。既定は "ema":
     # 2026-08-26 のP5事前登録判定で採用 (current/EMAを対に測る2ラウンド
@@ -93,11 +146,15 @@ def _load_model():
     # 性質そのもの)。"best"=従来の最良スナップショット優先に戻せる
     source = os.environ.get("RL_POLICY_SOURCE", "ema")
     order = _policy_candidates(style, source)
-    path = next((CKPT_DIR / n for n in order if (CKPT_DIR / n).exists()),
-                CKPT_DIR / order[-1])
+    name, _model_fallback = policy_choice(order, lambda n: (CKPT_DIR / n).exists())
+    path = CKPT_DIR / name
+    if _model_fallback:
+        print(f"[rl_bridge] 方策の退避: {_model_fallback}")
     try:
         from sb3_contrib import MaskablePPO
+        raw = path.read_bytes()
         _model = MaskablePPO.load(str(path), device="cpu")
+        _model_path, _model_sha = str(path), sha16_bytes(raw)
         print(f"[rl_bridge] 学習済み方策をロード: {path.name}")
     except Exception as e:
         print(f"[rl_bridge] 方策ロード不可 ({e}) — RL提案は無効")
@@ -519,8 +576,23 @@ def _is_mega_stone(p: Optional[dict]) -> bool:
     return iid.endswith(("ite", "itex", "itey")) and iid != "eviolite"
 
 
+def resolve_state_forms(state: dict) -> dict:
+    """状態辞書の複製の両陣営の個体に、解決した形態 (advisor.gimmick.with_resolved_form: species_id = 現在形態、
+    types = 評価に使うタイプ) を入れる (純粋。入力は書き換えない)。RL の入力の種族値・タイプ・特性を、助言エンジンの
+    ダメージ・行動順と同じ形態にする (2026-10-09 M1a: メガ後の個体が通常形態の species_id のまま観測に入っていた)"""
+    from advisor.gimmick import with_resolved_form
+    out = dict(state)
+    for side in ("player", "opponent"):
+        sd = state.get(side)
+        if not isinstance(sd, dict) or not sd.get("party"):
+            continue
+        out[side] = dict(sd, party=[with_resolved_form(p) if isinstance(p, dict) else p for p in sd["party"]])
+    return out
+
+
 def encode_state(state: dict, my_spe_actual: Optional[float] = None) -> Optional[np.ndarray]:
     """状態辞書 -> encode_battle と同義・同並びの観測 (OBS_DIM次元)"""
+    state = resolve_state_forms(state)
     my = state.get("player") or {}
     op = state.get("opponent") or {}
     mi, oi = my.get("active_index"), op.get("active_index")
@@ -557,7 +629,10 @@ def encode_state(state: dict, my_spe_actual: Optional[float] = None) -> Optional
         opp_extra = np.zeros(2, dtype=np.float32)
 
     own_bench = [p for j, p in enumerate(my.get("party", [])) if j != mi][:2]
-    opp_bench = [p for j, p in enumerate(op.get("party", []))
+    # 相手の控え・残り・選出の数は vision.state.roster_slots (先頭 6 枠、対応待ちを除く。2026-10-09 ④)
+    from vision.state import roster_slots
+    opp_roster = [p for _j, p in roster_slots(op.get("party"))]
+    opp_bench = [p for j, p in roster_slots(op.get("party"))
                  if j != oi and (p.get("species_id") or p.get("types"))][:2]
     own_bench_vecs = [_bench_vec(own_bench[i] if i < len(own_bench) else None, False)
                       for i in range(2)]
@@ -565,7 +640,7 @@ def encode_state(state: dict, my_spe_actual: Optional[float] = None) -> Optional
                       for i in range(2)]
     opp_remaining = op.get("remaining")
     if opp_remaining is None:
-        known = [p for p in op.get("party", []) if p.get("species_id") or p.get("types")]
+        known = [p for p in opp_roster if p.get("species_id") or p.get("types")]
         opp_remaining = max(1, sum(1 for p in known if p.get("status") != "fainted")) \
             if known else 3
     opp_count = np.array([min(opp_remaining, 3) / 3.0], dtype=np.float32)
@@ -757,7 +832,7 @@ def encode_state(state: dict, my_spe_actual: Optional[float] = None) -> Optional
     race_vec = np.zeros(6, dtype=np.float32)
     try:
         my_hp_total = sum(_hp_frac(p) for p in picked[:3])
-        opp_seen = [p for p in op.get("party", [])
+        opp_seen = [p for p in opp_roster
                     if p.get("species_id") and p.get("hp_percent") is not None]
         opp_hp_total = sum(_hp_frac(p) for p in opp_seen) \
             + max(0, 3 - len(opp_seen))
@@ -801,19 +876,35 @@ def encode_state(state: dict, my_spe_actual: Optional[float] = None) -> Optional
 
 
 def _legal_actions(state: dict) -> list:
-    """[(action_index, label, kind)] 合法手のみ"""
+    """[(action_index, label, kind)] 合法手のみ。
+
+    技の枠に legal=False (advisor.engine.rl_input_state: アンコール・こだわり・ちょうはつ・かなしばり・初手限定で選べない技。
+    2026-10-09 M2a) があればその技を除く。除いた結果、合法手が 0 になるときは従来の扱い (PP 0 だけを除く) に戻す"""
+    out = _legal_actions_impl(state, use_legal_flag=True)
+    if not out:
+        out = _legal_actions_impl(state, use_legal_flag=False)
+    return out
+
+
+def _legal_actions_impl(state: dict, use_legal_flag: bool) -> list:
     my = state.get("player") or {}
     mi = my.get("active_index")
     party = my.get("party", [])
     own = party[mi] if mi is not None and mi < len(party) else None
     out = []
-    # 交代は選出済みの3体に限る (未選出への交代提案の防止)
-    from advisor.party import battle_party_indices
-    allowed = battle_party_indices(my)
+    # 交代は選出済みの3体に限る (未選出への交代提案の防止。2026-10-20: 選出が未判明の個体にも確率を配らない =
+    # advisor.party.usable_indices)
+    from advisor.party import usable_indices
+    allowed = usable_indices(my)
+    # 実行環境の「今交代できる個体」(2026-10-15 M3a、シミュレータだけ。とらわれ等で交代できなければ確率を配らない)
+    from advisor.engine import legal_switch_filter
+    switchable = legal_switch_filter(my)
     for j, p in enumerate(party[:6]):
         if j == mi or not p.get("species_id") or p.get("status") == "fainted":
             continue
         if allowed is not None and j not in allowed:
+            continue
+        if switchable is not None and j not in switchable:
             continue
         out.append((j, f"交代:{p.get('species_ja') or p['species_id']}", "switch"))
     if own:
@@ -824,6 +915,8 @@ def _legal_actions(state: dict) -> list:
             if not m.get("move_id"):
                 continue
             if m.get("pp") is not None and m["pp"] <= 0:
+                continue
+            if use_legal_flag and m.get("legal") is False:
                 continue
             name = m.get("name_ja") or m["move_id"]
             out.append((6 + i, name, "move"))

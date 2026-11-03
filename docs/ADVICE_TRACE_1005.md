@@ -24,8 +24,12 @@
 ## 2. 正解つき局面 (③)
 
 `python -m tools.scene_eval extract --out logs/scenes/set1.jsonl --consistent 20 --failure 10` が、直近の対戦ログの対戦中の助言から
-整合 20 + 既知の失敗 10 の雛形を切り出す。分類は記録から機械的に: 手動修正が ±30 秒にあれば hp_stuck、表示が無ければ advice_stop、
-表示が遅ければ late、古い状態への表示なら stale、それ以外は consistent。
+整合 20 + 既知の失敗 10 の雛形を切り出す。分類は記録から機械的に: 手動修正が ±30 秒にあれば hp_stuck、表示が遅ければ late、
+古い状態への表示なら stale、それ以外は consistent。表示の行が無い助言は、2026-10-07 (判断 9) から tools.decision_audit と同じ規則で分ける:
+display の行が 1 つも無いログ (表示記録に未対応) は display_unknown、隠れたタブは display_hidden、行が欠けているだけの助言は
+display_unconfirmed (画面に出なかったのか通知の記録が欠けたのか区別できない)。advice_stop は表示経路の欠陥と確認できたとき
+(display_defect: 後に生成された別の助言が DISPLAY_DEFECT_CONFIRM_SEC (30 秒) 以内に隠れていないページで表示された) だけ。
+display_* は判定不能で、失敗の候補にしない。
 
 ラベル (truth) は人が埋める。最善手は要らない:
 - `state`: 正しい簡約状態 (system_state を直したもの。HP、ひんし、場の個体、技欄)

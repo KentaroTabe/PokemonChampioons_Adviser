@@ -17,9 +17,10 @@ import re
 import time
 from typing import Optional
 
-from champions_agent.config import BATTLE_END_FAINT_CONFIRM_SEC, BSS_PICK_COUNT
+from champions_agent.config import (BATTLE_END_FAINT_CONFIRM_SEC, BSS_PICK_COUNT, MOVE_LOCK_ENCORE_TURNS,
+                                    MOVE_LOCK_TAUNT_TURNS)
 from vision.normalize import loose_key, normalize
-from vision.state import BattleStateV2
+from vision.state import SCREEN_KEYS, BattleStateV2, lock_turns_left
 
 # 同一イベントIDの再発火を抑止する窓 (秒)。メッセージは表示中にフレーム
 # 間隔で繰り返し読まれ、OCR揺れで別テキストとして 3〜7 秒後に再解析される
@@ -147,8 +148,14 @@ SIMPLE_EVENTS = [
      "action": "volatile", "key": "taunt", "value": True},
     {"id": "taunt_off", "keywords": [["挑発", "ちようはつ"], ["とけた", "解けた"]],
      "action": "volatile", "key": "taunt", "value": False},
-    {"id": "encore_on", "keywords": [["アンコール", "あんこる"]],
+    # アンコール: 対象の名前が付く「<対象>は アンコールを 受けた!」だけを開始とする。技の使用文「<使用者>の アンコール」は
+    # 使用者側に誤って付き (2026-10-09 M1a: battle_20261009_084212 で相手のアンコールが相手自身に付き、自分の技の固定が
+    # 取れなかった)、技の説明文「相手を アンコール状態に する」は場の個体に誤って付いていた。使用文からの開始は
+    # EventParser._infer_encore_from_move (対象 = 反対側の場の個体) が扱う
+    {"id": "encore_on", "keywords": [["アンコール", "あんこる"], ["受け", "うけ"]],
      "action": "volatile", "key": "encore", "value": True},
+    {"id": "encore_off", "keywords": [["アンコール", "あんこる"], ["とけた", "解けた"]],
+     "action": "volatile", "key": "encore", "value": False},
     # かなしばり: 解除を先に判定する (両方「かなしばり」を含むため)
     {"id": "disable_off", "keywords": [["かなしばり", "金縛り"],
                                        ["とけた", "解けた"]],
@@ -169,7 +176,12 @@ SIMPLE_EVENTS = [
      "action": "volatile", "key": "perishsong", "value": True},
 
     # --- メガシンカ ---
-    {"id": "mega_evolve", "keywords": [["メガシンカ", "めかしんか"]], "action": "mega"},
+    # 成立の文言「<個体>は メガ<種族>に メガシンカした!」の「メガシンカした」だけで発火する。2026-10-09 M2a: 以前は語
+    # 「メガシンカ」だけで発火し、command / move_select の「メガシンカ」ボタンの文字 (「ックス0622メガシンカ」= 名前の末尾 +
+    # HP + ボタン) で is_mega / mega_used が立っていた (battle_202610*.jsonl の発火 64 件中 18 件がボタンの文字で、
+    # 場面は command 6 / move_select 5 / field 5 / battle_hud 2: 場面の誤分類があるので場面ではなく文言の形で判定する)。
+    # OCR の「シン力した」は loose_key で「しんかした」になる
+    {"id": "mega_evolve", "keywords": [["メガシンカした", "めかしんかした"]], "action": "mega"},
     # --- ねばねばネットの被弾 (2026-08-31 第11回: 「〜はねばねばネットに
     #     ひっかかった!」が技使用 move_*_stickyweb として誤発火し、設置側の
     #     状態を乱した)。被弾側の陣営にネットが存在する確認として扱う ---
@@ -209,6 +221,35 @@ SIMPLE_EVENTS = [
     {"id": "missed", "keywords": [["攻撃", "こうけき"], ["当たらな", "あたらな"]], "action": "noop"},
     {"id": "critical", "keywords": [["急所", "きゆうしよ", "キュウショ"]], "action": "noop"},
 ]
+
+# 天候・フィールドの開始の文言の id ((action, value) → SIMPLE_EVENTS の id)。技の使用より先に開始の文言を読んだとき、
+# 技の側で「直前の開始」と判定して設定者の持ち物で残りターンを直すのに使う
+_FIELD_START_EVENT = {(ev["action"], ev["value"]): ev["id"] for ev in SIMPLE_EVENTS
+                      if ev["action"] in ("weather", "terrain") and ev["value"]}
+
+# 壁の技 → 陣営の欄名 (vision.state.SCREEN_KEYS)。技の使用者を壁の残りターンの設定者にする (2026-10-31)
+_SCREEN_MOVES = {"reflect": "reflect", "lightscreen": "light_screen", "auroraveil": "aurora_veil"}
+_SCREEN_MOVE_OF = {key: move_id for move_id, key in _SCREEN_MOVES.items()}
+
+# 場を張る特性 (ポップアップの表示で設定者の個体が分かる開始)。オリジン系の特性 (ひひいろのこどう・ハドロンエンジン) は
+# advisor/data/field_effects.json の sources (ダメージ計算・型生成の表) に無いのでここに持つ
+_FIELD_ABILITIES = {
+    "drought": ("weather", "sun"), "drizzle": ("weather", "rain"),
+    "sandstream": ("weather", "sandstorm"), "snowwarning": ("weather", "snow"),
+    "orichalcumpulse": ("weather", "sun"),
+    "electricsurge": ("terrain", "electric"), "grassysurge": ("terrain", "grassy"),
+    "psychicsurge": ("terrain", "psychic"), "mistysurge": ("terrain", "misty"),
+    "hadronengine": ("terrain", "electric"),
+}
+
+
+def _field_move_source(move_id: Optional[str]) -> Optional[tuple]:
+    """場を張る技 → (kind, value) (表は advisor/data/field_effects.json の sources.moves)。該当なしは None"""
+    if not move_id:
+        return None
+    from advisor.dex import field_effects
+    src = ((field_effects().get("sources") or {}).get("moves") or {}).get(move_id)
+    return tuple(src) if src else None
 
 # ランク変化: (loose_keyパターン, 変化量)。長いパターンから順に判定する
 RANK_CHANGES = [
@@ -495,7 +536,9 @@ class EventParser:
         is_contact_msg = ("ひつかか" in norm or "ひっかか" in cleaned
                           or "引っかか" in cleaned
                           or "足下" in cleaned or "足元" in cleaned or "周りに" in cleaned)
-        if not is_contact_msg and \
+        # 「<対象>は アンコールを 受けた」「<対象>の アンコール状態が 解けた」も技の使用文ではない (対象側の技として記録され、
+        # 相手の技の固定が「アンコール」になっていた。2026-10-09 M1a)
+        if not is_contact_msg and "encore_on" not in fired and "encore_off" not in fired and \
                 not any(f.startswith("switch") or f.endswith("_end")
                         for f in fired):
             mu = self._parse_move_or_ability(cleaned, norm, source,
@@ -522,6 +565,8 @@ class EventParser:
         # 同じ側が他の技を使ったら0にリセット
         _PROTECT_IDS = ("protect", "detect", "banefulbunker", "spikyshield",
                         "kingsshield", "silktrap", "burningbulwark", "obstruct")
+        # アンコールの使用文からの推定は、下で last_move を更新する前に行う (固定する技はこのメッセージより前の直前の技)
+        fired.extend(self._infer_encore_from_move(fired))
         for side in ("player", "opponent"):
             # 交代・ひんしで直前技をクリア (アンコールの技固定も同時に切れる)
             if any(f == f"switch_{side}" or f == "faint" and
@@ -532,6 +577,7 @@ class EventParser:
             if not moves_fired:
                 continue
             self.state.last_move[side] = moves_fired[-1].split("_", 2)[2]
+            self.state.moved_turn[side] = self.state.turn
             if any(f.split("_", 2)[2] in _PROTECT_IDS for f in moves_fired):
                 self.state.protect_streak[side] = \
                     self.state.protect_streak.get(side, 0) + 1
@@ -653,6 +699,43 @@ class EventParser:
         st.log_event("system", "リザルト画面を検出 (対戦終了)", event_id="battle_end_result")
         return "battle_end_result"
 
+    def _moved_this_turn(self, side_name: str) -> bool:
+        """その側の場の個体が今のターンに既に技を使ったか (技の固定の残りターンの判定、2026-10-09 M1a)"""
+        return self.state.moved_turn.get(side_name) == self.state.turn
+
+    def _apply_encore(self, side_name: str, mon, confirmed: bool) -> bool:
+        """アンコールの開始を mon (side_name 側の場の個体) に入れる。固定する技は対象の直前の技 (state.last_move、交代・ひんしで
+        消える)。confirmed=False (技の使用文からの推定) で直前の技が分からなければ入れない (場に出てから技を使っていない個体への
+        アンコールは失敗する)。既にアンコール中なら固定の技・残りを変えない。戻り値: 入れたか (2026-10-09 M1a)"""
+        locked = self.state.last_move.get(side_name)
+        if not confirmed and not locked:
+            return False
+        if "encore" in mon.volatiles:
+            if locked and not mon.encore_move:
+                mon.encore_move = locked
+            return False
+        mon.volatiles.append("encore")
+        mon.encore_move = locked or None
+        mon.volatile_turns["encore"] = lock_turns_left(MOVE_LOCK_ENCORE_TURNS, self._moved_this_turn(side_name))
+        return True
+
+    def _infer_encore_from_move(self, fired: list) -> list:
+        """技の使用文「<使用者>の アンコール」から、反対側の場の個体のアンコールの開始を推定する (2026-10-09 M1a。
+        battle_20261009_084212 では対象側の「アンコールを受けた」が読めず、使用文だけが残っていた)。戻り値: 足したイベント id"""
+        out = []
+        if "encore_on" in fired:
+            return out
+        for user in ("player", "opponent"):
+            if f"move_{user}_encore" not in fired:
+                continue
+            target = "opponent" if user == "player" else "player"
+            mon = self.state.side(target).active()
+            if mon is None or mon.status == "fainted":
+                continue
+            if self._apply_encore(target, mon, confirmed=False):
+                out.append(f"encore_inferred_{target}")
+        return out
+
     def _parse_switch(self, cleaned: str, norm: str, fired: list) -> bool:
         if not any(k in norm for k in ("繰り出", "くりたし", "くりた", "ゆけつ")):
             return False
@@ -693,6 +776,10 @@ class EventParser:
         mon = side.switch_to_species(jp, sid)
         from vision.extractors import link_active_to_party
         link_active_to_party(self.state, side_name)
+        # 場に出たターン (であいがしら・ねこだまし の初手限定の判定。2026-10-09 M1a)
+        entered = side.active()
+        if entered is not None:
+            entered.entry_turn = self.state.turn
         # 確定特性の着地効果 (いかく等): 「〜のいかく!」「こうげきがさがった」
         # のメッセージは演出中で取り逃しやすい (第9回: 捕捉0件) ため、
         # 交代イベント時点で確定的に適用する。特性が確定している個体のみ
@@ -849,9 +936,14 @@ class EventParser:
                 and r[0] not in mon.revealed_moves:
             mon.revealed_moves.append(r[0])
             self._maybe_correct_form(mon, r[1])
+        # 開始の文言が先に読めていた天候・フィールドの技 (連結文を含む) は、技の使用者の持ち物で残りターンを直す。
+        # 値の設定はしない (二重適用にならない) ので apply_effects に関係なく行う
+        self._apply_move_field_duration(r[1], side_name, mon)
+        # 壁も同じ (開始の文言が先に読めていたら使用者の持ち物で残りターンを直す。値の設定はしない)
+        self._apply_move_screen_duration(r[1], side_name, mon)
         if apply_effects:
             # 他イベントが既に発火している場合は場への効果を二重適用しない
-            self._apply_move_side_effect(r[1], side_name)
+            self._apply_move_side_effect(r[1], side_name, mon)
             self._apply_move_boosts(r[1], side_name, mon)
             self._apply_move_item_recoil(r[1], mon)
             self._apply_expected_damage(r[1], side_name)
@@ -939,6 +1031,9 @@ class EventParser:
             return
         old = mon.species_id
         mon.species_id = form
+        # 形態が決まった (交代の文言の名前が複数の形態に当たって保留していた候補を消す。対応待ちの個体なら、次の
+        # link_active_to_party がこの形態のタイプで枠を決める。2026-10-09 ④)
+        mon.species_candidates = []
         from vision.state import _dex_types_ja_of
         t = _dex_types_ja_of(form)
         if t:
@@ -1214,6 +1309,10 @@ class EventParser:
             mon.volatiles = [v for v in mon.volatiles
                              if v not in ("taunt", "encore")
                              and not v.startswith("disable")]
+            # 技の固定の付帯情報も一緒に外す (2026-10-09 M1a)
+            mon.volatile_turns.pop("taunt", None)
+            mon.volatile_turns.pop("encore", None)
+            mon.encore_move = None
         elif cv:
             mon.volatiles = [v for v in mon.volatiles if v != cv]
         if eff.get("consume"):
@@ -1239,20 +1338,113 @@ class EventParser:
                              event_id=f"item_{side_name}_whiteherb_auto")
 
     # --------------------------------------------------------------
+    def _setter_item(self, side_name: str, mon) -> Optional[str]:
+        """場の効果の設定者の持ち物 (延長の判定用)。消費・喪失済みなら None (延長しない)。
+        自分側で state に持ち物が無ければ登録 (advisor.my_team) で補う (backfill_player_static と同じ解決)。
+        相手側の不明は None (基本のターン。持ち物の推定は別の単位)"""
+        if mon is None or getattr(mon, "item_consumed", False) or getattr(mon, "item_removed", False):
+            return None
+        if mon.item_id:
+            return mon.item_id
+        if side_name != "player":
+            return None
+        try:
+            from advisor.my_team import get_my_build
+            item_ja = (get_my_build(mon.species_ja) or {}).get("item_ja")
+            r = self.resolver.resolve(item_ja, "items", cutoff=0.9) if item_ja else None
+        except Exception:
+            return None
+        return r[1] if r else None
+
+    def _set_field_effect(self, kind: str, value: str, setter: Optional[tuple] = None) -> None:
+        """天候 (kind="weather")・フィールド (kind="terrain") の開始: 値と残りターンを入れる。
+        setter = (side_name, mon) が分かれば、その個体の持ち物で延長後のターンにする (表は field_effects.json の duration)"""
+        from advisor.dex import effect_duration
+        item = self._setter_item(*setter) if setter else None
+        f = self.state.field
+        setattr(f, kind, value)
+        setattr(f, f"{kind}_turns", effect_duration(value, item))
+
+    def _recent_field_starter(self, kind: str, value: str) -> Optional[tuple]:
+        """直近 (EVENT_DEDUP_SEC) にこの天候・フィールドを張る特性の表示か技の使用を観測していれば (side_name, "ability"|"move")。
+        両方の側に当たれば設定者を決められないので None。記録は既存の重複排除の時刻 (_recent_fired) を参照するだけ"""
+        from advisor.dex import field_effects
+        moves = ((field_effects().get("sources") or {}).get("moves") or {})
+        hits = {}
+        for side in ("player", "opponent"):
+            if any(src == (kind, value) and self._recently(f"ability_{side}_{ab}", EVENT_DEDUP_SEC)
+                   for ab, src in _FIELD_ABILITIES.items()):
+                hits[side] = "ability"
+                continue
+            if any(tuple(src) == (kind, value) and self._recently(f"move_{side}_{mv}", EVENT_DEDUP_SEC)
+                   for mv, src in moves.items()):
+                hits[side] = "move"
+        if len(hits) != 1:
+            return None
+        return next(iter(hits.items()))
+
+    def _start_field_from_message(self, kind: str, value: str) -> None:
+        """開始の文言 (設定者が書かれていない) からの開始。直前に設定者の分かる開始 (特性の表示・技の使用) があれば
+        その設定者の持ち物で延長する。特性の表示で開始済みの同じ効果は戻さない (表示 → 文言の順で 5 に戻っていた)"""
+        f = self.state.field
+        starter = self._recent_field_starter(kind, value)
+        if starter and starter[1] == "ability" and getattr(f, kind) == value \
+                and getattr(f, f"{kind}_turns") is not None:
+            return
+        setter = (starter[0], self.state.side(starter[0]).active()) if starter else None
+        self._set_field_effect(kind, value, setter)
+
+    def _apply_move_field_duration(self, move_id: str, side_name: str, mon) -> None:
+        """技の使用より先に開始の文言を読んでいた (連結文・読みの順の入れ替わり) とき、技の使用者の持ち物で残りターンを直す。
+        開始の文言が直前に無い (既に同じ天候 = 技は失敗、または文言がこれから来る) なら何もしない"""
+        src = _field_move_source(move_id)
+        if not src:
+            return
+        kind, value = src
+        start_id = _FIELD_START_EVENT.get((kind, value))
+        if getattr(self.state.field, kind) != value or not start_id or \
+                not self._recently(start_id, EVENT_DEDUP_SEC):
+            return
+        self._set_field_effect(kind, value, (side_name, mon))
+
+    def _set_screen(self, side_name: str, key: str, setter_mon=None) -> None:
+        """壁の開始: 欄と残りターンを入れる。setter_mon (技の使用者) の持ち物で延長後のターンにする
+        (表は field_effects.json の duration、持ち物の解決は _setter_item)。設定者が不明 (None) なら基本のターン"""
+        from advisor.dex import effect_duration
+        side = self.state.side(side_name)
+        item = self._setter_item(side_name, setter_mon) if setter_mon is not None else None
+        setattr(side, key, True)
+        setattr(side, f"{key}_turns", effect_duration(key, item))
+
+    def _apply_screen_message(self, side_name: str, key: str, value: bool) -> None:
+        """壁の開始・終了の文言。終了は欄と残りターンを消す。開始は直前 (EVENT_DEDUP_SEC) にその陣営の壁の技の使用を
+        観測していればその場の個体の持ち物で、無ければ基本のターンで入れる (設定者の書かれていない文言だけの開始。
+        窓内の再読みは呼び出し側の重複排除で来ない。天候の _start_field_from_message と同じ考え方)"""
+        side = self.state.side(side_name)
+        if not value:
+            setattr(side, key, False)
+            setattr(side, f"{key}_turns", None)
+            return
+        moved = self._recently(f"move_{side_name}_{_SCREEN_MOVE_OF[key]}", EVENT_DEDUP_SEC)
+        self._set_screen(side_name, key, side.active() if moved else None)
+        # 開始の文言を陣営つきで記録 (技の使用が後から来たとき、使用者の持ち物で直すかの判定に使う)
+        self._recent_fired[f"screen_msg_{side_name}_{key}"] = time.time()
+
+    def _apply_move_screen_duration(self, move_id: str, side_name: str, mon) -> None:
+        """技の使用より先にその陣営の壁の開始の文言を読んでいた (連結文・読みの順の入れ替わり) とき、技の使用者の持ち物で
+        残りターンを直す。開始の文言が直前に無い (既に張ってある壁の張り直し = 技は失敗) なら何もしない"""
+        key = _SCREEN_MOVES.get(move_id)
+        if not key or not getattr(self.state.side(side_name), key) or \
+                not self._recently(f"screen_msg_{side_name}_{key}", EVENT_DEDUP_SEC):
+            return
+        self._set_screen(side_name, key, mon)
+
     def _apply_ability_effect(self, ability_id: str, side_name: str,
                               mon=None):
-        weather_map = {"drought": "sun", "drizzle": "rain",
-                       "sandstream": "sandstorm", "snowwarning": "snow",
-                       "orichalcumpulse": "sun"}
-        terrain_map = {"electricsurge": "electric", "grassysurge": "grassy",
-                       "psychicsurge": "psychic", "mistysurge": "misty",
-                       "hadronengine": "electric"}
-        if ability_id in weather_map:
-            self.state.field.weather = weather_map[ability_id]
-            self.state.field.weather_turns = 5
-        elif ability_id in terrain_map:
-            self.state.field.terrain = terrain_map[ability_id]
-            self.state.field.terrain_turns = 5
+        if ability_id in _FIELD_ABILITIES:
+            kind, value = _FIELD_ABILITIES[ability_id]
+            setter_mon = mon if mon is not None else self.state.side(side_name).active()
+            self._set_field_effect(kind, value, (side_name, setter_mon))
         elif ability_id == "intimidate":
             other = "opponent" if side_name == "player" else "player"
             self.state.side(other).ensure_active().set_boost("atk", -1)
@@ -1269,7 +1461,7 @@ class EventParser:
                     target.hp_current = max(
                         0, target.hp_current - round(target.hp_max / 8))
 
-    def _apply_move_side_effect(self, move_id: str, user_side: str):
+    def _apply_move_side_effect(self, move_id: str, user_side: str, mon=None):
         target = "opponent" if user_side == "player" else "player"
         tside = self.state.side(target)
         uside = self.state.side(user_side)
@@ -1281,17 +1473,19 @@ class EventParser:
             tside.toxic_spikes = min(2, tside.toxic_spikes + 1)
         elif move_id == "stickyweb":
             tside.sticky_web = True
-        elif move_id == "reflect":
-            uside.reflect = True
-        elif move_id == "lightscreen":
-            uside.light_screen = True
-        elif move_id == "auroraveil":
-            uside.aurora_veil = True
+        elif move_id in _SCREEN_MOVES:
+            # 壁: 使用者 (mon) の持ち物で残りターンを入れる。既に張ってある壁の張り直しはゲームでは失敗するので
+            # 残りターンを戻さない (2026-10-31)
+            key = _SCREEN_MOVES[move_id]
+            if not getattr(uside, key):
+                self._set_screen(user_side, key, mon)
         elif move_id == "tailwind":
             uside.tailwind = True
         elif move_id == "trickroom":
+            from advisor.dex import effect_duration
             self.state.field.trick_room = not self.state.field.trick_room
-            self.state.field.trick_room_turns = 5 if self.state.field.trick_room else None
+            self.state.field.trick_room_turns = \
+                effect_duration("trick_room") if self.state.field.trick_room else None
         elif move_id == "rapidspin":
             uside.clear_hazards()
         elif move_id == "defog":
@@ -1310,20 +1504,25 @@ class EventParser:
             self.state.battle_ended = True
             self.state.end_hint = None
             return
-        if action == "weather":
-            f.weather = ev["value"]
-            f.weather_turns = 5 if ev["value"] else None
-        elif action == "terrain":
-            f.terrain = ev["value"]
-            f.terrain_turns = 5 if ev["value"] else None
+        if action in ("weather", "terrain"):
+            if ev["value"]:
+                self._start_field_from_message(action, ev["value"])
+            else:
+                setattr(f, action, None)
+                setattr(f, f"{action}_turns", None)
         elif action == "trickroom":
+            from advisor.dex import effect_duration
             f.trick_room = ev["value"]
-            f.trick_room_turns = 5 if ev["value"] else None
+            f.trick_room_turns = effect_duration("trick_room") if ev["value"] else None
         elif action == "gravity":
             f.gravity = ev["value"]
         elif action == "side_flag":
-            _, side, _ = self._target_mon(cleaned, source)
-            setattr(side, ev["key"], ev["value"])
+            side_name_f, side, _ = self._target_mon(cleaned, source)
+            if ev["key"] in SCREEN_KEYS:
+                # 壁は残りターンも入れる・消す (2026-10-31)
+                self._apply_screen_message(side_name_f, ev["key"], ev["value"])
+            else:
+                setattr(side, ev["key"], ev["value"])
         elif action == "hazard":
             _, side, _ = self._target_mon(cleaned, source)
             setattr(side, ev["key"], ev["value"])
@@ -1343,11 +1542,21 @@ class EventParser:
             if side.remaining:
                 side.remaining = max(0, side.remaining - 1)
         elif action == "volatile":
-            _, _, mon = self._target_mon(cleaned, source)
-            if ev["value"] and ev["key"] not in mon.volatiles:
+            side_name_v, _, mon = self._target_mon(cleaned, source)
+            if ev["key"] == "encore" and ev["value"]:
+                # 固定する技 (受けた時点の対象の直前の技) と残りターンも入れる (2026-10-09 M1a)
+                self._apply_encore(side_name_v, mon, confirmed=True)
+            elif ev["value"] and ev["key"] not in mon.volatiles:
                 mon.volatiles.append(ev["key"])
+                if ev["key"] == "taunt":
+                    mon.volatile_turns["taunt"] = lock_turns_left(MOVE_LOCK_TAUNT_TURNS,
+                                                                  self._moved_this_turn(side_name_v))
             elif not ev["value"] and ev["key"] in mon.volatiles:
                 mon.volatiles.remove(ev["key"])
+            if not ev["value"]:
+                mon.volatile_turns.pop(ev["key"], None)
+                if ev["key"] == "encore":
+                    mon.encore_move = None
             if ev["key"] == "disable":
                 if ev["value"]:
                     # 「◯◯の △△を かなしばりにした!」から封じられた技を特定

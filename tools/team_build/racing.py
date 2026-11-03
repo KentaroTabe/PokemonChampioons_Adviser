@@ -6,6 +6,10 @@
   上限は既定 BUILD_RACE_DEFAULT_MAX (uncertain 終了可)。重要候補は max_battles で延長できる
 - 「best である可能性が残る候補」= 現在の best に対して degraded でない候補
 - n_candidates_seen を記録し、探索時の最高値を期待勝率として報告しない (Winner's curse)
+- 受入 (2026-10-15 M3a): 測定 JSON の accept (champions_agent.env.sim_accept: 第一候補の合法性・未選出の候補・説明できない飛ばし・
+  ランダム退避・選出不明) が上限を超えた round があれば、順位判定を出さない (結果に ranking_withheld と理由を書いて
+  RacingAcceptError を投げる。contenders は空)。測定 JSON の inputs_version (config.SIM_INPUTS_VERSION) を history に残し、
+  今の版でない結果 (修正前の測定済み JSON を再開で使った等) や違う版の結果が混ざれば警告を結果 (warnings) と log に残す
 """
 from __future__ import annotations
 
@@ -20,7 +24,8 @@ from pathlib import Path
 from typing import Optional
 
 from champions_agent.config import (BUILD_EQUIV_EPS, BUILD_MEASURE_THREADS, BUILD_OPP_PICK_POLICY, BUILD_OPP_PILOT,
-                                    BUILD_RACE_DEFAULT_MAX, BUILD_RACE_MIN_TERMINAL_N, BUILD_RACE_STEPS)
+                                    BUILD_RACE_DEFAULT_MAX, BUILD_RACE_MIN_TERMINAL_N, BUILD_RACE_STEPS, SIM_INPUTS_VERSION)
+from champions_agent.env.sim_accept import accept_violations, version_warnings
 from tools.team_build.verdict import (DEGRADED, EQUIVALENT, IMPROVED, UNCERTAIN, look_z, n_looks, next_step,
                                       verdict4)
 
@@ -102,8 +107,13 @@ def _run_one(cmd: list, log_path: Path, timeout: int) -> int:
 SEC_PER_BATTLE = 40         # subprocess timeout の見積もり (実測 5 並列で約 6 秒/戦 + 起動)
 
 
+class RacingAcceptError(RuntimeError):
+    """測定の受入 (sim_accept) を満たさない round があった: 順位判定を出さない (結果 JSON には理由を書いてある)"""
+
+
 def _load_measured(out_json: Path, n: int) -> Optional[dict]:
-    """測定済み JSON (outcomes が n 件そろっているもの) を読む。無ければ None"""
+    """測定済み JSON (outcomes が n 件そろっているもの) を読む。無ければ None。入力の版 (inputs_version) は見ない
+    (呼び出し側が history に残し、race が版の混在を警告する)"""
     if not out_json.exists():
         return None
     try:
@@ -115,6 +125,28 @@ def _load_measured(out_json: Path, n: int) -> Optional[dict]:
         return None
     d["outcomes"] = outs
     return d
+
+
+def round_accept_problems(arms: list, offset: int, n: int) -> tuple:
+    """round (offset, n) の測定の受入の検査 (純粋)。各 arm の history のその round の行の accept (測定 JSON の欄) を見る。
+    戻り値 (理由の list, 受入監査の欄が無かった arm の list)。欄が無い行 (スタブ・失敗) は検査できないものとして別に返す"""
+    problems, missing = [], []
+    for arm in arms:
+        rows = [h for h in arm.history if h.get("offset") == offset and h.get("n") == n and "error" not in h]
+        for h in rows:
+            if "accept" not in h:
+                continue
+            if h.get("accept") is None:
+                missing.append(arm.arm_id)
+                continue
+            problems += accept_violations(h["accept"], label=f"{arm.arm_id}@{offset}+{n}")
+    return problems, missing
+
+
+def history_versions(arms: list) -> dict:
+    """arm の history の測定ごとの inputs_version (欄があるものだけ。純粋)"""
+    return {f"{a.arm_id}@{h.get('offset')}+{h.get('n')}": h.get("inputs_version")
+            for a in arms for h in a.history if "inputs_version" in h}
 
 
 def measure_round(arms: list, n: int, offset: int, seed: int, split_file: Path, tier: str, fold: Optional[int],
@@ -133,7 +165,8 @@ def measure_round(arms: list, n: int, offset: int, seed: int, split_file: Path, 
             arm.outcomes.extend(prev["outcomes"])
             arm.n_done = len(arm.outcomes)
             arm.history.append({"offset": offset, "n": n, "win_rate": prev.get("win_rate"), "reused": True,
-                                "latency_p50_ms": prev.get("latency_p50_ms"), "stats": prev.get("stats")})
+                                "latency_p50_ms": prev.get("latency_p50_ms"), "stats": prev.get("stats"),
+                                "inputs_version": prev.get("inputs_version"), "accept": prev.get("accept")})
             continue
         cmd = measure_cmd(arm, n, offset, seed, split_file, tier, fold, out_json,
                           out_dir / "battles" / f"{stage}_{arm.arm_id}.jsonl", pick_policy)
@@ -151,7 +184,8 @@ def measure_round(arms: list, n: int, offset: int, seed: int, split_file: Path, 
             arm.outcomes.extend(int(x) for x in d.get("outcomes") or [])
             arm.n_done = len(arm.outcomes)
             arm.history.append({"offset": offset, "n": n, "win_rate": d.get("win_rate"),
-                                "latency_p50_ms": d.get("latency_p50_ms"), "stats": d.get("stats")})
+                                "latency_p50_ms": d.get("latency_p50_ms"), "stats": d.get("stats"),
+                                "inputs_version": d.get("inputs_version"), "accept": d.get("accept")})
 
 
 def race(candidates: list, reference: Arm, split_file: Path, tier: str, seed: int, out_dir: Path,
@@ -172,6 +206,7 @@ def race(candidates: list, reference: Arm, split_file: Path, tier: str, seed: in
     k_looks = n_looks(steps, cap=max_battles)
     z = look_z(k_looks)
     log(f"[racing:{stage}] looks={k_looks} z={z:.3f} eps={eps}")
+    withheld, accept_problems, accept_missing, warnings = False, [], [], []
     while active:
         target = next_step(offset, steps, cap=max_battles)
         if target is None:
@@ -180,6 +215,14 @@ def race(candidates: list, reference: Arm, split_file: Path, tier: str, seed: in
         log(f"[racing:{stage}] round offset={offset} n={n} arms={len(active)}+ref")
         measure_round(active + [reference], n, offset, seed, split_file, tier, fold, out_dir, stage,
                       parallel=parallel, pick_policy=pick_policy)
+        # 受入 (2026-10-15 M3a): この round の測定が受入を満たさなければ、順位判定も途中打ち切りもしない
+        probs, miss = round_accept_problems(active + [reference], offset, n)
+        accept_missing += [f"{a}@{offset}+{n}" for a in miss]
+        if probs:
+            accept_problems += probs
+            withheld = True
+            log(f"[racing:{stage}] 受入を満たさない測定があるため順位判定を出さない: " + " / ".join(probs))
+            break
         offset = target
         # 参照との対応差
         for arm in active:
@@ -209,7 +252,14 @@ def race(candidates: list, reference: Arm, split_file: Path, tier: str, seed: in
                   or (a.state in (IMPROVED, EQUIVALENT) and offset < min_terminal_n)]
         log(f"[racing:{stage}] after {offset}: " +
             ", ".join(f"{a.arm_id}={a.state}({(a.result or {}).get('mean') or 0:+.3f})" for a in arms))
+    hv = history_versions(arms + [reference])
+    warnings = version_warnings(hv) if hv else []
+    for w in warnings:
+        log(f"[racing:{stage}] 警告: {w}")
     result = {
+        "inputs_version": SIM_INPUTS_VERSION,
+        "accept": {"ok": not withheld, "problems": accept_problems, "missing": accept_missing},
+        "ranking_withheld": withheld, "warnings": warnings,
         "stage": stage, "tier": tier, "fold": fold, "seed": seed, "eps": eps, "steps": list(steps),
         "pick_policy": pick_policy, "opp_pilot": OPP_PILOT, "opp_pick_policy": OPP_PICK_POLICY,
         "n_looks": k_looks, "z": z, "min_terminal_n": min_terminal_n, "run_to_max": run_to_max,
@@ -219,9 +269,14 @@ def race(candidates: list, reference: Arm, split_file: Path, tier: str, seed: in
     }
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / f"{stage}.json").write_text(json.dumps(result, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    if withheld:
+        raise RacingAcceptError(f"[racing:{stage}] 測定の受入を満たさない (順位判定なし): " + " / ".join(accept_problems))
     return result
 
 
 def contenders(result: dict) -> list:
-    """racing 結果から「best である可能性が残る候補」(脱落していない候補) の arm_id を返す"""
+    """racing 結果から「best である可能性が残る候補」(脱落していない候補) の arm_id を返す。順位判定を出さなかった結果
+    (ranking_withheld、2026-10-15 M3a) なら空"""
+    if result.get("ranking_withheld"):
+        return []
     return [a["arm_id"] for a in result["arms"] if a.get("eliminated_at") is None and a["state"] != DEGRADED]

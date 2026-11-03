@@ -132,7 +132,10 @@ def test_advice_hysteresis():
     r4["best"] = r4["actions"][0]
     out4, last = apply_advice_hysteresis(r4, last, turn=2)
     assert out4["best"]["id"] == "bravebird"
-    assert last == {"turn": 2, "kind": "move", "id": "bravebird"}, last
+    # 2026-10-09 M1a: last に局面の鍵 (position、evaluate の position_key。ここでは結果に無いので None) と合法手の集合
+    # (legal) を足した。据え置きは turn・局面の鍵・合法手の集合が前回と同じときだけ (docs/ADVICE_ACCURACY_PLAN_1009.md 段 A-4)
+    assert {k: last[k] for k in ("turn", "kind", "id")} == {"turn": 2, "kind": "move", "id": "bravebird"}, last
+    assert last["position"] is None and last["legal"] == frozenset({("move", "bravebird"), ("move", "doubleedge")}), last
     print("test_advice_hysteresis OK")
 
 

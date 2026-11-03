@@ -24,7 +24,7 @@ echo "=== 接続テスト終了処理 ==="
 # アドバイザー/フロントエンド停止 (ポートは起動時に決めたもの: logs/ports.env)
 pkill -f "uvicorn server:app_asgi" 2>/dev/null && echo "アドバイザー($ADVISOR_PORT): 停止" \
   || echo "アドバイザー($ADVISOR_PORT): 未起動"
-pkill -f "http.server $FRONTEND_PORT" 2>/dev/null && echo "フロントエンド($FRONTEND_PORT): 停止" \
+pkill -f "$FRONTEND_PATTERN $FRONTEND_PORT" 2>/dev/null && echo "フロントエンド($FRONTEND_PORT): 停止" \
   || echo "フロントエンド($FRONTEND_PORT): 未起動"
 
 # 学習ループの確認。TRAINING_MODE=continuous のときだけ止まっていれば再開する
@@ -77,10 +77,12 @@ echo "=== 実戦の相手バンクを更新 ==="
 python -m tools.real_opponents --build 2>/dev/null \
   || echo "(バンクの更新に失敗。手動実行: python -m tools.real_opponents --build)"
 
-# 自パーティ改善案: 動きづらかった相手・相手の良い動き (概念) を出し、現行 + 近傍の測定 run を起動する
+# 自パーティ改善案: 動きづらかった相手・相手の良い動き (概念) と接続テストの記録 (受信 fps・可視状態の比率 (隠れ / 可視 / 不明)・表示通知の hidden 件数・ページの版・勝敗の根拠・
+# 選出候補と実際) を出す。現行 + 近傍の測定 run は既定では起動せず、目的・概算所要時間・起動コマンドを出す (確認制、2026-10-07 判断 1。
+# 旧動作に戻すなら champions_agent/config.py の PARTY_IMPROVE_AUTO_LAUNCH = True)。
 # (未測定の案は載せない。測定結果は python -m tools.party_improvements --report <run_id>)
 echo ""
-echo "=== 自パーティ改善案 (セッションの相手パーティから。測定を起動) ==="
+echo "=== 自パーティ改善案 (セッションの相手パーティから。測定は確認制) ==="
 python -m tools.party_improvements --session --measure 2>/dev/null \
   || echo "(改善案の生成に失敗。手動実行: python -m tools.party_improvements --session --measure)"
 

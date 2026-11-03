@@ -19,6 +19,16 @@ S2 は 相手プール (使用率のスナップショットから合成、mixed
     python -m tools.team_build.season_pin --show
     python -m tools.team_build.season_pin --check
     python -m tools.team_build.season_pin --repin gen9championsbssregmb [--snapshot 61] [--seed 20260906]
+    python -m tools.team_build.season_pin --check-splits [--runs-dir logs/build_search/runs] [--pins logs/registry/season_pins.json]
+
+分割の独立性 (--check-splits、2026-10-07 docs/USEFULNESS_VERIFICATION_PLAN_1007.md §7・§10): 固定 (season_pin) を使った run の
+opponent_families.json から、(1) 同じ構築・同じ系統が search / selection / holdout をまたいでいないか、(2) search の fold A / B / V が
+重ならず search と一致するか、(3) 層をまたいで似た構築 (種族集合の Jaccard が系統の閾値以上) が無いか (メガ軸が違う・系統化の
+貪欲な割当で別系統になったもの)、(4) 同じ固定を使う run どうしで同じ構築が別の層に入っていないか、を数える。
+読むのは構築の id と種族の集合だけで、holdout の結果は読まない (件数だけを出す)。
+判断 10 (2026-10-07): 分割の固定は変えず、別メガ軸の似た組 (層をまたぐ / fold をまたぐ) を 1 組ずつ、構築 id・評価上の重み
+(測定の対戦の割合と代理評価の系統の重みの割合)・型の共通性 (共通する種・技・持ち物・特性の一致数) で出す (similar_pair_details)。
+勝敗は読まない。holdout の構築も id と集計値だけ (種・型の名前は出さない)。
 """
 from __future__ import annotations
 
@@ -28,10 +38,12 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from champions_agent.config import BUILD_POOL_FRESHNESS_TOP_N, BUILD_POOL_FRESHNESS_WARN, BUILD_SEASON_PIN
+from champions_agent.config import (
+    BUILD_FAMILY_JACCARD, BUILD_POOL_FRESHNESS_TOP_N, BUILD_POOL_FRESHNESS_WARN, BUILD_SEASON_PIN)
 
 REPO = Path(__file__).resolve().parent.parent.parent
 PINS_PATH = REPO / "logs" / "registry" / "season_pins.json"
+RUNS_DIR = REPO / "logs" / "build_search" / "runs"
 PIN_KEYS = ("seed", "pool_snapshot_id", "roster_until")
 
 
@@ -192,6 +204,286 @@ def check(path: Optional[Path] = None, top_n: int = BUILD_POOL_FRESHNESS_TOP_N, 
     return {"regulations": out, "any_warn": any(r.get("warn") for r in out.values())}
 
 
+# ------------------------------------------------------------------ 分割の独立性 (純粋)
+def _tier_of_team(doc: dict) -> dict:
+    """team_id → [層] (層の id 列から。同じ構築が複数の層にあれば複数)"""
+    from tools.team_build.families import TIERS
+    out: dict = {}
+    for tier in TIERS:
+        for tid in (doc.get("tiers") or {}).get(tier) or []:
+            out.setdefault(tid, []).append(tier)
+    return out
+
+
+def split_independence(doc: dict, min_jaccard: Optional[float] = None) -> dict:
+    """1 run の opponent_families.json の分割の独立性 (純粋)。数えるのは件数だけ (holdout の構築の中身は出さない)。
+      team_multi_tier       : 2 つ以上の層に入っている構築の数
+      team_dup_in_tier      : 同じ層の id 列に重複して入っている構築の数
+      family_cross_tier     : 構築が 2 つ以上の層に散っている系統の数 (families の tier と、層の id 列の両方で見る)
+      family_tier_mismatch  : families の tier と、その系統の構築が入っている層が食い違う系統の数
+      similar_cross_tier    : 層をまたぐ構築の組で、種族集合の Jaccard ≥ min_jaccard のもの (same_mega / other_mega に分ける)
+      identical_cross_tier  : 層をまたぐ構築の組で、種族集合が完全に同じもの
+      folds                 : fold の数・大きさ、fold どうしの重なり、fold の和と search 層の差、fold をまたぐ系統、fold をまたぐ似た組
+      sealed_ok             : sealed_id が holdout の id 列から作り直した値と一致するか (sealed_id が無ければ None)
+      ok                    : 重なり (team_multi_tier / family_cross_tier / fold の重なり・差 / fold をまたぐ系統) が全部 0
+    似た組 (similar_*) は系統の定義 (同じメガ軸の単連結) の外で起きるので ok には含めず、件数を別に出す"""
+    from tools.team_build.families import TIERS, jaccard, sealed_id
+    # 既定は run が系統化に使った閾値 (無ければ config の BUILD_FAMILY_JACCARD)
+    thr = float(min_jaccard if min_jaccard is not None else (doc.get("min_jaccard") or BUILD_FAMILY_JACCARD))
+    tiers = doc.get("tiers") or {}
+    tier_of = _tier_of_team(doc)
+    teams = doc.get("teams") or {}
+    multi = sorted(t for t, ts in tier_of.items() if len(set(ts)) > 1)
+    dup_in_tier = sum(1 for t, ts in tier_of.items() if len(ts) != len(set(ts)))
+    fam_cross, fam_mismatch = 0, 0
+    fam_of: dict = {}
+    for f in doc.get("families") or []:
+        member_tiers = {x for tid in f.get("teams") or [] for x in tier_of.get(tid, [])}
+        for tid in f.get("teams") or []:
+            fam_of[tid] = f.get("family_id")
+        if len(member_tiers) > 1:
+            fam_cross += 1
+        if f.get("tier") is not None and member_tiers and member_tiers != {f.get("tier")}:
+            fam_mismatch += 1
+
+    def _pairs(groups: dict) -> dict:
+        """groups: 名前 → team_id 列。違う群の構築の組で、似ている (≥ thr) / 完全に同じ 種族集合 の組を数える"""
+        names = list(groups)
+        sim_same, sim_other, ident = 0, 0, 0
+        for i, a in enumerate(names):
+            for b in names[i + 1:]:
+                for ta in groups[a]:
+                    sa = set((teams.get(ta) or {}).get("species") or [])
+                    if not sa:
+                        continue
+                    ma = (teams.get(ta) or {}).get("mega")
+                    for tb in groups[b]:
+                        sb = set((teams.get(tb) or {}).get("species") or [])
+                        if not sb:
+                            continue
+                        if sa == sb:
+                            ident += 1
+                        if jaccard(sa, sb) >= thr:
+                            if ma == (teams.get(tb) or {}).get("mega"):
+                                sim_same += 1
+                            else:
+                                sim_other += 1
+        return {"same_mega": sim_same, "other_mega": sim_other, "identical": ident}
+
+    cross = _pairs({t: list(tiers.get(t) or []) for t in TIERS})
+    folds = [list(f) for f in (doc.get("search_folds") or [])]
+    fold_sets = [set(f) for f in folds]
+    fold_overlap = sum(len(fold_sets[i] & fold_sets[j]) for i in range(len(folds)) for j in range(i + 1, len(folds)))
+    union = set().union(*fold_sets) if fold_sets else set()
+    search = set(tiers.get("search") or [])
+    fold_of: dict = {}
+    for i, f in enumerate(folds):
+        for tid in f:
+            fold_of.setdefault(tid, set()).add(i)
+    by_fam: dict = {}
+    for tid, idx in fold_of.items():
+        by_fam.setdefault(fam_of.get(tid, tid), set()).update(idx)
+    fam_cross_fold = sum(1 for v in by_fam.values() if len(v) > 1)
+    fold_pairs = _pairs({f"fold{i}": f for i, f in enumerate(folds)}) if folds else {"same_mega": 0, "other_mega": 0, "identical": 0}
+    fold_info = {"n_folds": len(folds), "sizes": [len(f) for f in folds], "overlap": fold_overlap,
+                 "missing_from_folds": len(search - union) if folds else None, "not_in_search": len(union - search),
+                 "family_cross_fold": fam_cross_fold, "similar_cross_fold": fold_pairs}
+    sealed_ok = None
+    if doc.get("sealed_id"):
+        sealed_ok = sealed_id(tiers.get("holdout") or []) == doc["sealed_id"]
+    n_fams = {t: len({fam_of.get(tid, tid) for tid in tiers.get(t) or []}) for t in TIERS}
+    ok = (not multi and fam_cross == 0 and fam_mismatch == 0 and fold_overlap == 0
+          and (not folds or (fold_info["missing_from_folds"] == 0 and fold_info["not_in_search"] == 0)) and fam_cross_fold == 0)
+    return {"run_id": doc.get("run_id"), "seed": doc.get("seed"), "pool_source": doc.get("pool_source"),
+            "pool_snapshot": doc.get("pool_snapshot"), "min_jaccard": thr,
+            "n_teams": {t: len(tiers.get(t) or []) for t in TIERS}, "n_families": n_fams,
+            "team_multi_tier": len(multi), "team_dup_in_tier": dup_in_tier,
+            "family_cross_tier": fam_cross, "family_tier_mismatch": fam_mismatch,
+            "similar_cross_tier": {"same_mega": cross["same_mega"], "other_mega": cross["other_mega"]},
+            "identical_cross_tier": cross["identical"], "folds": fold_info, "sealed_id": doc.get("sealed_id"),
+            "sealed_ok": sealed_ok, "ok": ok}
+
+
+def type_overlap(text_a: Optional[str], text_b: Optional[str]) -> dict:
+    """2 構築の型本文 (Showdown 形式) の共通性 (純粋)。中身 (種・技・持ち物の名前) は返さず件数だけ:
+    common_species (共通する種の数) / common_moves (共通する種ごとの、両方の技欄にある技の数の和) /
+    moves_compared (共通する種ごとの min(技の数) の和 = common_moves の上限) / same_item / same_ability (共通する種のうち持ち物・特性が同じ数)。
+    本文が無ければ common_species だけ None"""
+    from tools.team_build.sets import parse_set_text
+    if not text_a or not text_b:
+        return {"common_species": None, "common_moves": None, "moves_compared": None, "same_item": None, "same_ability": None}
+    sa, sb = parse_set_text(text_a), parse_set_text(text_b)
+    common = sorted(set(sa) & set(sb))
+    out = {"common_species": len(common), "common_moves": 0, "moves_compared": 0, "same_item": 0, "same_ability": 0}
+    for sid in common:
+        a, b = sa[sid], sb[sid]
+        ma, mb = set(a.moves or []), set(b.moves or [])
+        out["common_moves"] += len(ma & mb)
+        out["moves_compared"] += min(len(ma), len(mb))
+        out["same_item"] += int(bool(a.item) and a.item == b.item)
+        out["same_ability"] += int(bool(a.ability) and a.ability == b.ability)
+    return out
+
+
+def similar_pair_details(doc: dict, min_jaccard: Optional[float] = None, scope: str = "tier", other_mega_only: bool = True) -> list:
+    """似た組 (種族集合の Jaccard ≥ min_jaccard、既定は別メガ軸だけ) の 1 組ごとの集計 (純粋、判断 10。勝敗は読まない)。
+    scope: "tier" (層をまたぐ組) / "fold" (search の fold をまたぐ組)。holdout の構築は id と集計値だけを出す (種・型の名前は出さない)。
+    1 組の行: {"a": 側の情報, "b": 側の情報, "jaccard", "same_mega", "type": type_overlap}。
+    側の情報: {"team_id", "group" (層 / fold), "family_id", "family_size" (系統の構築数),
+               "measure_share" (測定の対戦の割合 = 1 / 群の構築数。check_advisor_player の相手列は群の全構築を seed で並べて均等に回す),
+               "family_share" (代理評価の系統の重みの割合 = 系統の構築数 / 群の構築数。joint_stage.family_weight の既定 (セッションの指定なし))}"""
+    from tools.team_build.families import TIERS, jaccard
+    thr = float(min_jaccard if min_jaccard is not None else (doc.get("min_jaccard") or BUILD_FAMILY_JACCARD))
+    teams = doc.get("teams") or {}
+    texts = doc.get("texts") or {}
+    fam_of, fam_size = {}, {}
+    for f in doc.get("families") or []:
+        for tid in f.get("teams") or []:
+            fam_of[tid] = f.get("family_id")
+        fam_size[f.get("family_id")] = len(f.get("teams") or [])
+    if scope == "fold":
+        groups = {f"fold{i}": list(f) for i, f in enumerate(doc.get("search_folds") or [])}
+    else:
+        groups = {t: list((doc.get("tiers") or {}).get(t) or []) for t in TIERS}
+
+    def side(tid: str, group: str) -> dict:
+        n = len(groups[group]) or 1
+        fid = fam_of.get(tid)
+        fs = fam_size.get(fid, 1)
+        return {"team_id": tid, "group": group, "family_id": fid, "family_size": fs,
+                "measure_share": round(1.0 / n, 5), "family_share": round(fs / n, 5)}
+
+    out = []
+    names = list(groups)
+    for i, ga in enumerate(names):
+        for gb in names[i + 1:]:
+            for ta in groups[ga]:
+                sa = set((teams.get(ta) or {}).get("species") or [])
+                if not sa:
+                    continue
+                for tb in groups[gb]:
+                    sb = set((teams.get(tb) or {}).get("species") or [])
+                    if not sb:
+                        continue
+                    j = jaccard(sa, sb)
+                    if j < thr:
+                        continue
+                    same_mega = (teams.get(ta) or {}).get("mega") == (teams.get(tb) or {}).get("mega")
+                    if other_mega_only and same_mega:
+                        continue
+                    out.append({"a": side(ta, ga), "b": side(tb, gb), "jaccard": round(j, 4), "same_mega": same_mega,
+                                "type": type_overlap(texts.get(ta), texts.get(tb))})
+    return out
+
+
+def format_similar_pairs(pairs: list, title: str) -> str:
+    """似た組の表 (構築 id と集計値だけ)"""
+    lines = [f"  {title}: {len(pairs)} 組 (列: 構築 a [群 系統 系統の大きさ 測定の割合 代理の系統の割合] / 構築 b [同] / Jaccard / "
+             "共通する種 / 共通の技 (比べた技) / 持ち物が同じ / 特性が同じ)"]
+    for p in pairs:
+        a, b, ty = p["a"], p["b"], p["type"]
+
+        def s(x):
+            return f"{x['team_id']} [{x['group']} {x['family_id']} {x['family_size']} {x['measure_share']:.4f} {x['family_share']:.4f}]"
+        lines.append(f"    {s(a)} / {s(b)} / {p['jaccard']:.3f} / {ty['common_species']} / {ty['common_moves']} ({ty['moves_compared']})"
+                     f" / {ty['same_item']} / {ty['same_ability']}")
+    return "\n".join(lines)
+
+
+def cross_run_consistency(docs: dict) -> dict:
+    """同じ固定 (seed・プールの元・スナップショット・構築数) を使う run どうしで、同じ構築が別の層・別の fold に入っていないか (純粋)。
+    docs: run_id → opponent_families.json。{"groups": [{"key", "runs", "teams_conflict_tier", "teams_conflict_fold", "sealed_ids"}], "ok"}"""
+    groups: dict = {}
+    for rid, doc in sorted(docs.items()):
+        key = (doc.get("seed"), doc.get("pool_source"), doc.get("pool_snapshot"), doc.get("top_n"))
+        groups.setdefault(key, []).append((rid, doc))
+    out = []
+    for key, members in groups.items():
+        tier_seen: dict = {}
+        fold_seen: dict = {}
+        for _rid, doc in members:
+            for tid, ts in _tier_of_team(doc).items():
+                tier_seen.setdefault(tid, set()).update(ts)
+            for i, f in enumerate(doc.get("search_folds") or []):
+                for tid in f:
+                    fold_seen.setdefault(tid, set()).add(i)
+        out.append({"key": {"seed": key[0], "pool_source": key[1], "pool_snapshot": key[2], "top_n": key[3]},
+                    "runs": [rid for rid, _ in members],
+                    "teams_conflict_tier": sum(1 for v in tier_seen.values() if len(v) > 1),
+                    "teams_conflict_fold": sum(1 for v in fold_seen.values() if len(v) > 1),
+                    "sealed_ids": sorted({str(doc.get("sealed_id")) for _rid, doc in members})})
+    return {"groups": out, "ok": all(g["teams_conflict_tier"] == 0 and g["teams_conflict_fold"] == 0 and len(g["sealed_ids"]) == 1
+                                     for g in out)}
+
+
+def select_pinned_runs(manifests: dict, table: dict) -> dict:
+    """run_id → manifest から、固定 (season_pins.json の規制の seed) を使った run を選ぶ (純粋)。
+    条件: manifest の season_pin の由来が fixed で始まり、seed が表の規制の seed と同じ。→ {run_id: 規制}"""
+    out = {}
+    for rid, man in manifests.items():
+        sp = (man or {}).get("season_pin") or {}
+        src = str(sp.get("source") or (man or {}).get("split_seed_source") or "")
+        if not src.startswith("fixed"):
+            continue
+        reg = _key((man or {}).get("regulation"))
+        entry = table.get(reg) or {}
+        if entry.get("seed") is not None and sp.get("seed") is not None and int(sp["seed"]) == int(entry["seed"]):
+            out[rid] = reg
+    return out
+
+
+def check_splits(runs_dir: Optional[Path] = None, pins_path: Optional[Path] = None, min_jaccard: Optional[float] = None) -> dict:
+    """固定を使った run の分割を検査する (読み取りのみ)。{"pins", "runs": {run_id: split_independence}, "cross_run", "ok"}"""
+    runs_dir = Path(runs_dir) if runs_dir is not None else RUNS_DIR
+    table = load_table(pins_path)
+    manifests, docs = {}, {}
+    for d in sorted(runs_dir.glob("*")):
+        man_p, split_p = d / "manifest.json", d / "opponent_families.json"
+        if not (man_p.exists() and split_p.exists()):
+            continue
+        try:
+            manifests[d.name] = json.loads(man_p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+    picked = select_pinned_runs(manifests, table)
+    for rid in sorted(picked):
+        try:
+            docs[rid] = json.loads((runs_dir / rid / "opponent_families.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+    per_run = {rid: dict(split_independence(doc, min_jaccard), regulation=picked[rid],
+                         # 判断 10 (2026-10-07): 別メガ軸の似た組の 1 組ごとの集計 (構築 id・重み・型の共通性。勝敗は読まない)
+                         similar_pairs={"cross_tier": similar_pair_details(doc, min_jaccard, scope="tier"),
+                                        "cross_fold": similar_pair_details(doc, min_jaccard, scope="fold")})
+               for rid, doc in docs.items()}
+    cross = cross_run_consistency(docs)
+    return {"pins": table, "runs": per_run, "cross_run": cross,
+            "ok": bool(per_run) and all(r["ok"] for r in per_run.values()) and cross["ok"]}
+
+
+def format_check_splits(res: dict) -> str:
+    lines = [f"分割の独立性: 固定を使った run {len(res['runs'])} 本 → {'重なり 0' if res['ok'] else '要確認'}"]
+    for rid, r in res["runs"].items():
+        f = r["folds"]
+        lines.append(f"  [{rid}] 規制 {r['regulation']} seed {r['seed']} プール {r['pool_source']}:{r['pool_snapshot']} "
+                     f"構築 {r['n_teams']} 系統 {r['n_families']}")
+        lines.append(f"    層をまたぐ: 構築 {r['team_multi_tier']} / 系統 {r['family_cross_tier']} (tier 記録の食い違い {r['family_tier_mismatch']}) / "
+                     f"似た組 (Jaccard ≥ {r['min_jaccard']}) 同じメガ軸 {r['similar_cross_tier']['same_mega']} 別のメガ軸 "
+                     f"{r['similar_cross_tier']['other_mega']} / 種族が完全に同じ組 {r['identical_cross_tier']} / 封印 id の一致 {r['sealed_ok']}")
+        lines.append(f"    fold {f['n_folds']} ({f['sizes']}): 重なり {f['overlap']} / search との差 (fold に無い {f['missing_from_folds']}・"
+                     f"search 外 {f['not_in_search']}) / fold をまたぐ系統 {f['family_cross_fold']} / fold をまたぐ似た組 "
+                     f"同じメガ軸 {f['similar_cross_fold']['same_mega']} 別のメガ軸 {f['similar_cross_fold']['other_mega']}")
+        sp = r.get("similar_pairs") or {}
+        if sp.get("cross_tier"):
+            lines.append(format_similar_pairs(sp["cross_tier"], "層をまたぐ別メガ軸の似た組"))
+        if sp.get("cross_fold"):
+            lines.append(format_similar_pairs(sp["cross_fold"], "fold をまたぐ別メガ軸の似た組"))
+    for g in res["cross_run"]["groups"]:
+        lines.append(f"  同じ固定の run {g['runs']}: 別の層に入った構築 {g['teams_conflict_tier']} / 別の fold {g['teams_conflict_fold']} / "
+                     f"封印 id {g['sealed_ids']}")
+    return "\n".join(lines)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="季節 (規制) ごとの固定: 分割の seed・使用率スナップショット・実在の構築の区切り")
     ap.add_argument("--show", action="store_true", help="表を表示する")
@@ -199,7 +491,16 @@ def main() -> None:
     ap.add_argument("--repin", default=None, metavar="REGULATION", help="この規制を固定し直す (新シーズンのデータが出たとき)")
     ap.add_argument("--snapshot", type=int, default=None, help="--repin で使うスナップショット id (省略時は最新)")
     ap.add_argument("--seed", type=int, default=None, help="--repin で使う分割の seed (省略時は今の seed)")
+    ap.add_argument("--check-splits", action="store_true",
+                    help="固定を使った run の分割 (opponent_families.json) の独立性を数える (読み取りのみ)")
+    ap.add_argument("--runs-dir", default=None, help="--check-splits で読む run の置き場 (既定 logs/build_search/runs)")
+    ap.add_argument("--pins", default=None, help="--check-splits で読む固定の表 (既定 logs/registry/season_pins.json)")
+    ap.add_argument("--json", action="store_true", help="--check-splits の結果を JSON で出す")
     args = ap.parse_args()
+    if args.check_splits:
+        res = check_splits(Path(args.runs_dir) if args.runs_dir else None, Path(args.pins) if args.pins else None)
+        print(json.dumps(res, ensure_ascii=False, indent=1) if args.json else format_check_splits(res))
+        return
     if args.repin:
         entry = repin(args.repin, args.snapshot, args.seed)
         print(json.dumps({args.repin: entry}, ensure_ascii=False, indent=1))

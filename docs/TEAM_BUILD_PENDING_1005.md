@@ -871,5 +871,7 @@ P4 の局面の正解の記入 (`logs/scenes/newteam_1006.jsonl`、整合 20 + �
 | 自動起動の経路 | 測定 run を自動で起こすのは `scripts/end_connection_test.sh` (操作パネルの「終了」も同じスクリプト) の `party_improvements --session --measure` だけ。pgrep では煙試験の間も後も run は 1 本 |
 | 測定の取り直し `improve_20261007_0100` (01:00:06 起動、pid 99419) | 終了処理と同じ経路 `python -m tools.party_improvements --last 11 --measure` (印は終了処理で消えているので --session でなく --last 11)。訂正後の 11 戦 (5 勝 6 敗) から重みを作り直し、上位 3 は ガオガエン / ギャラドス / ゲンガー、ガブリアス / カメックス、グソクムシャ / セグレイブ / ガブリアス (7 戦目のミミロップ軸は入らない)。重み: garchomp 1.0 / incineroar 0.5874 / blastoise 0.5478 / gengar 0.5169 / gyarados 0.4228 / golisopod 0.3288 / baxcalibur 0.3288。seed 302410、現行 + 近傍 3、medium、5 並列、commit c29bca4c |
 
-run の実行中はメインの作業ツリーで checkout / merge をしない (10/6 の事故の再発防止)。結果は `python -m tools.party_improvements --report improve_20261007_0100`。
+| **結果** (12:56:52 終了、約 11 時間 57 分、プロセスは親・子とも残っていないことを 13:09 に pgrep で確認) | **not_reproducible (採用なし)**。S8a (300 戦): 近傍 3 並び × 2 腕とも参照に届かず (Δ −0.07〜−0.32)。S9 (修理、300 戦): 3 変種とも届かず (最良 L01_INC-R1B1 汎用 −0.08)。S8b (600 戦): 15 腕中 14 腕が脱落、残り L02_INC 汎用 −0.072。S10 (600 戦、selection): L02_INC −0.027 (uncertain)。再現性の門: 両分割で非負でないため holdout に進まず終了 (`repro_gate.ok=false`)。参照 (現行チーム) の選出方策の勝率 (search、300 戦): 規則 0.473 / 汎用 0.603 / production 0.533 / fresh 0.317。**現行チームが最良、登録の変更は不要**。改善 run の採用は引き続き 0 (計画 §9 の 6 run + 本 run。§13-1 の確認制の提案の材料)。詳細: `python -m tools.party_improvements --report improve_20261007_0100`、`logs/build_search/runs/improve_20261007_0100/evaluation/summary.json` |
+
+run の実行中はメインの作業ツリーで checkout / merge をしない (10/6 の事故の再発防止)。
 残り (運用側): `register_selection --run-id …` (改善 run の終了後)、P1 の測定、P4 の局面の正解の記入、GameWith の send_llm の判断 (送信は無効のまま)。

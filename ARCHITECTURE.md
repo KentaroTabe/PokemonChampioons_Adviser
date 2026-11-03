@@ -88,7 +88,7 @@ launchctl load ~/Library/LaunchAgents/com.championsadviser.usage-update.plist
 ```bash
 source .venv/bin/activate
 
-# サーバー起動 (フロントエンドは index.html を http.server 等で開く)
+# サーバー起動 (フロントエンドは index.html を python3 -m tools.frontend_server 3000 で配信する)
 uvicorn server:app_asgi --host 0.0.0.0 --port 8000
 
 # 静止画/ディレクトリでの検証

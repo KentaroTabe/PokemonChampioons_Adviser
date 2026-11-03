@@ -158,7 +158,8 @@ def test_scene_eval():
     recs = _records()
     cands = S.extract_candidates("battle_1.jsonl", recs)
     assert len(cands) == 1 and cands[0]["category"] == "consistent" and cands[0]["labels_status"] == "unlabeled"
-    assert S.extract_candidates("b", _records(display=False))[0]["category"] == "advice_stop"
+    # display の行が 1 つも無いログ (表示記録に未対応) → 判定不能 (判断 9、2026-10-07。旧: advice_stop)
+    assert S.extract_candidates("b", _records(display=False))[0]["category"] == "display_unknown"
     assert S.extract_candidates("b", _records(stale_turn=True))[0]["category"] == "stale"
     assert S.extract_candidates("b", _records(latency=12.0))[0]["category"] == "late"
     fixed = _records() + [{"t": 1003.0, "type": "manual_fix", "turn": 1, "text": "hp"}]
@@ -194,12 +195,98 @@ def test_scene_eval():
     print("test_scene_eval OK")
 
 
+def _later_advice(t, aid, shown_at=None, hidden=False):
+    """x-0001 の後に生成された別の助言 (と、その表示の行)"""
+    c1 = _compact()
+    rows = [{"t": t, "type": "advice", "kind": "battle", "advice_id": aid, "version_id": "v1", "turn": 1, "state": c1,
+             "advice": {"ok": True, "t_gen": t, "best": {"kind": "move", "id": "uturn"}, "actions": [{"kind": "move", "id": "uturn"}]}}]
+    if shown_at is not None:
+        rows.append({"t": shown_at + 0.05, "type": "display", "advice_id": aid, "t_shown": shown_at, "kind": "battle", "hidden": hidden})
+    return rows
+
+
+def test_scene_eval_display_regression():
+    """scene_eval.classify の表示の判定 (判断 9) の回帰: 旧ログ (display の行なし) / 正常表示 / 通知欠落 の 3 系統。
+    通知欠落は decision_audit と同じ規則で、表示経路の欠陥と確認できたときだけ advice_stop、それ以外は表示未確認"""
+    def cat(recs):
+        return {c["source"]["advice_id"]: c["category"] for c in S.extract_candidates("b", recs)}
+    # 旧ログ: display の行が 1 つも無い → 全部 display_unknown (advice_stop にしない)
+    old = _records(display=False) + _later_advice(1005.0, "x-0003")
+    assert set(cat(old).values()) == {"display_unknown"}, cat(old)
+    # 正常表示: 表示された助言は consistent (表示の遅れ・古い状態の判定は従来どおり)
+    assert cat(_records())["x-0001"] == "consistent"
+    # 通知欠落 (a): 後に生成された助言が 30 秒以内に見えるページで表示された → この助言は表示経路の欠陥と確認 → advice_stop
+    lost = _records(display=False) + _later_advice(1005.0, "x-0003", shown_at=1005.2)
+    c = cat(lost)
+    assert c["x-0001"] == "advice_stop" and c["x-0003"] == "consistent", c
+    # 通知欠落 (b): 後の表示が遠い (確認できない) → display_unconfirmed (失敗に数えない)
+    far = _records(display=False) + _later_advice(1005.0, "x-0003", shown_at=1100.0)
+    assert cat(far)["x-0001"] == "display_unconfirmed", cat(far)
+    # 通知欠落 (c): 後の表示が隠れたタブ → 描画待ちで説明できるので確認できない → display_unconfirmed。隠れたタブの助言は display_hidden
+    hid = _records(display=False) + _later_advice(1005.0, "x-0003", shown_at=1005.2, hidden=True)
+    ch = cat(hid)
+    assert ch["x-0001"] == "display_unconfirmed" and ch["x-0003"] == "display_hidden", ch
+    # 判定不能の分類は失敗として選ばない (固定失敗集に入らない)
+    assert "display_unconfirmed" not in S.FAILURE_CATEGORIES and "display_unknown" not in S.FAILURE_CATEGORIES
+    assert all(k in S.CATEGORIES for k in ("display_unknown", "display_unconfirmed", "display_hidden"))
+    print("test_scene_eval_display_regression OK")
+
+
+def test_decision_and_hp_stale_summary():
+    """2026-10-07 段 0: decision 行 (表示から決定まで・第一候補との一致) と hp_stale 欄の要約。無い古いログは 0 件"""
+    recs = [{"type": "advice", "kind": "battle", "advice_id": "a1", "advice": {"ok": True}, "hp_stale": {"player": 2.0, "opponent": None}},
+            {"type": "advice", "kind": "battle", "advice_id": "a2", "advice": {"ok": True}, "hp_stale": {"player": 6.0, "opponent": 1.0}},
+            {"type": "advice", "kind": "battle", "advice_id": "a3", "advice": {"provisional": True}, "hp_stale": {"player": 99.0}},
+            {"type": "display", "advice_id": "a1", "t_shown": 100.0},
+            {"type": "decision", "advice_id": "a1", "t_shown": None, "t_decided": 104.5, "match": True},
+            {"type": "decision", "advice_id": "a2", "t_shown": 200.0, "t_decided": 201.0, "match": None}]
+    rows = T.decision_rows(recs)
+    assert [r["shown_to_decided"] for r in rows] == [4.5, 1.0]          # 行に表示時刻が無ければ display の行から
+    s = T.summarize(recs)
+    assert s["decision"] == {"n": 2, "n_match": 1, "n_mismatch": 0, "n_unknown": 1, "shown_to_decided_p50": 4.5}
+    assert s["hp_stale"]["n"] == 2 and s["hp_stale"]["player_max"] == 6.0 and s["hp_stale"]["opponent_unread"] == 1
+    old = T.summarize(_records())
+    assert old["decision"]["n"] == 0 and old["hp_stale"]["n"] == 0
+    assert "決定: 2" in T.format_chain("x", recs)
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "b.jsonl"
+        p.write_text("\n".join(json.dumps(r) for r in recs) + "\n", encoding="utf-8")
+        agg = T.summarize_paths([p])
+        assert agg["decision"]["n"] == 2 and agg["hp_stale"]["n"] == 2
+    print("test_decision_and_hp_stale_summary OK")
+
+
+def test_selection_record_join():
+    """選出の候補・相手の選出の予測は selection_record 行にあり、advice_id で選出の advice 行に結ぶ (行が無い古いログは結べない)"""
+    recs = [{"type": "advice", "kind": "selection", "advice_id": "s1", "advice": {"ok": True}},
+            {"type": "advice", "kind": "selection", "advice_id": "s2", "advice": {"ok": True}},
+            {"type": "advice", "kind": "selection", "advice_id": "s3", "advice": {"ok": False}},
+            {"type": "selection_record", "advice_id": "s2",
+             "candidates": {"rule": {"names": ["A"]}, "registered": None, "reasons": {}, "primary": "rule"},
+             "opp_pick_pred": {"combos": [{"p": 1.0}] * 20, "incomplete": False}},
+            {"type": "selection_record", "advice_id": "zz", "candidates": {}}]
+    rows = T.selection_rows(recs)
+    assert [(r["advice_id"], r["has_record"]) for r in rows] == [("s1", False), ("s2", True)]
+    assert rows[1]["n_combos"] == 20 and rows[1]["methods"] == ["rule"]
+    assert T.summarize(recs)["selection"] == {"n_advice": 2, "n_record": 1, "n_full_distribution": 1}
+    assert "selection_record と結べた 1" in T.format_chain("x", recs)
+    assert T.summarize(_records())["selection"]["n_record"] == 0
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "b.jsonl"
+        p.write_text("\n".join(json.dumps(r) for r in recs) + "\n", encoding="utf-8")
+        assert T.summarize_paths([p])["selection"]["n_record"] == 1
+    print("test_selection_record_join OK")
+
+
 def main() -> None:
     test_display_hidden()
     test_versions()
     test_logger_records()
     test_trace_functions()
     test_scene_eval()
+    test_scene_eval_display_regression()
+    test_decision_and_hp_stale_summary()
+    test_selection_record_join()
     print("ALL OK")
 
 
